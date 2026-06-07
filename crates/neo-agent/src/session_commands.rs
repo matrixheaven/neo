@@ -31,6 +31,9 @@ pub fn list(config: &AppConfig) -> anyhow::Result<String> {
                 if let Some(parent_id) = &session.parent_id {
                     parts.push(format!("parent={parent_id}"));
                 }
+                if let Some(summary) = &session.summary {
+                    parts.push(format!("summary={summary}"));
+                }
                 if !session.children.is_empty() {
                     parts.push(format!("children={}", session.children.join(",")));
                 }
@@ -81,6 +84,14 @@ pub async fn transcript(session_id: &str, config: &AppConfig) -> anyhow::Result<
     if let Some(summary) = context.compaction_summary() {
         lines.push(format!("compaction: {}", summary.summary));
     }
+    if let Some(summary) = metadata_store(config).list().ok().and_then(|sessions| {
+        sessions
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .and_then(|session| session.summary)
+    }) {
+        lines.push(format!("branch summary: {summary}"));
+    }
     lines.extend(
         context
             .messages()
@@ -99,6 +110,21 @@ pub async fn transcript(session_id: &str, config: &AppConfig) -> anyhow::Result<
     } else {
         Ok(format!("{lines}\n"))
     }
+}
+
+pub async fn summarize(session_id: &str, config: &AppConfig) -> anyhow::Result<String> {
+    let messages = JsonlSessionReader::replay_messages(session_path(session_id, config)?)
+        .await
+        .with_context(|| format!("failed to replay session {session_id}"))?;
+    let summary = summarize_messages(&messages);
+    let session = metadata_store(config)
+        .summarize(session_id, summary.clone())
+        .with_context(|| format!("failed to store summary for session {session_id}"))?;
+    Ok(format!(
+        "summarized {}: {}\n",
+        session.id,
+        session.summary.unwrap_or(summary)
+    ))
 }
 
 pub async fn compact(
@@ -150,6 +176,34 @@ fn format_message(message: &AgentMessage) -> String {
     format!("{role}: {}", message_text(message))
 }
 
+fn summarize_messages(messages: &[AgentMessage]) -> String {
+    if messages.is_empty() {
+        return "Local branch summary: empty session".to_owned();
+    }
+
+    let lines = messages
+        .iter()
+        .take(6)
+        .map(|message| {
+            format!(
+                "{}: {}",
+                message_role(message),
+                one_line_message_text(message)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let suffix = if messages.len() > 6 {
+        format!(" | ... {} more messages", messages.len() - 6)
+    } else {
+        String::new()
+    };
+    format!(
+        "Local branch summary ({} messages): {lines}{suffix}",
+        messages.len()
+    )
+}
+
 fn message_role(message: &AgentMessage) -> &'static str {
     match message {
         AgentMessage::System { .. } => "system",
@@ -167,6 +221,13 @@ fn message_text(message: &AgentMessage) -> String {
         | AgentMessage::ToolResult { content, .. } => content,
     };
     text_content(content)
+}
+
+fn one_line_message_text(message: &AgentMessage) -> String {
+    message_text(message)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn text_content(content: &[Content]) -> String {

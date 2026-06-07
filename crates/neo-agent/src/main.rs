@@ -43,6 +43,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
             SessionCommand::Fork { session_id, name } => {
                 session_commands::fork(&session_id, name.as_deref(), &config)
             }
+            SessionCommand::Summarize { session_id } => {
+                session_commands::summarize(&session_id, &config).await
+            }
             SessionCommand::Compact {
                 session_id,
                 keep_recent,

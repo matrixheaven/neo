@@ -78,6 +78,9 @@ pub enum SessionCommand {
         #[arg(long)]
         name: Option<String>,
     },
+    Summarize {
+        session_id: String,
+    },
     Compact {
         session_id: String,
         #[arg(long, default_value_t = 20)]

@@ -218,6 +218,7 @@ pub async fn compact_jsonl_session(
 pub struct SessionRecord {
     pub id: String,
     pub name: Option<String>,
+    pub summary: Option<String>,
     pub parent_id: Option<String>,
     #[serde(default)]
     pub children: Vec<String>,
@@ -238,6 +239,8 @@ struct SessionMetadataFile {
 struct StoredSessionMetadata {
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
     #[serde(default)]
     parent_id: Option<String>,
 }
@@ -275,6 +278,29 @@ impl SessionMetadataStore {
             .expect("renamed session should be listable"))
     }
 
+    pub fn summarize(
+        &self,
+        session_id: &str,
+        summary: String,
+    ) -> Result<SessionRecord, SessionError> {
+        validate_session_id(session_id)?;
+        self.ensure_session_exists(session_id)?;
+
+        let mut metadata = self.read_metadata()?;
+        metadata
+            .sessions
+            .entry(session_id.to_owned())
+            .or_default()
+            .summary = Some(summary);
+        self.write_metadata(&metadata)?;
+
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .expect("summarized session should be listable"))
+    }
+
     pub fn fork(
         &self,
         parent_id: &str,
@@ -293,6 +319,7 @@ impl SessionMetadataStore {
             child_id.clone(),
             StoredSessionMetadata {
                 name,
+                summary: None,
                 parent_id: Some(parent_id.to_owned()),
             },
         );
@@ -392,6 +419,7 @@ fn records_from_metadata(
                 children: children_by_parent.remove(&id).unwrap_or_default(),
                 id,
                 name: stored.and_then(|record| record.name.clone()),
+                summary: stored.and_then(|record| record.summary.clone()),
                 parent_id: stored.and_then(|record| record.parent_id.clone()),
             }
         })

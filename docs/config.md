@@ -147,6 +147,7 @@ neo extensions status <extension-id> --root <root>
 neo extensions enable <extension-id> --root <root>
 neo extensions disable <extension-id> --root <root>
 neo extensions call <extension-id> <method> [params] --root <root>
+neo sessions summarize <session-id>
 ```
 
 Supported `config set` keys are:

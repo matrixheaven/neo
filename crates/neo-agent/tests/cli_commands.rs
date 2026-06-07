@@ -357,6 +357,41 @@ fn sessions_rename_and_fork_surface_tree_metadata() {
 }
 
 #[test]
+fn sessions_summarize_stores_local_branch_summary() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    fs::create_dir_all(&sessions).expect("create sessions");
+    fs::write(
+        sessions.join("alpha.jsonl"),
+        concat!(
+            "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"investigate parser panic\"}}]}}}}\n",
+            "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"panic comes from token split\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
+        ),
+    )
+    .expect("write session");
+
+    let mut summarize = neo();
+    summarize
+        .current_dir(temp.path())
+        .args(["sessions", "summarize", "alpha"]);
+    let summarize_stdout = run(summarize);
+
+    assert!(summarize_stdout.contains("summarized alpha"));
+    assert!(summarize_stdout.contains("user: investigate parser panic"));
+    assert!(summarize_stdout.contains("assistant: panic comes from token split"));
+
+    let mut list = neo();
+    list.current_dir(temp.path()).args(["sessions", "list"]);
+    let list_stdout = run(list);
+    assert!(list_stdout.contains("summary=Local branch summary"));
+
+    let mut resume = neo();
+    resume.current_dir(temp.path()).args(["resume", "alpha"]);
+    let resume_stdout = run(resume);
+    assert!(resume_stdout.contains("branch summary: Local branch summary"));
+}
+
+#[test]
 fn print_with_missing_credentials_does_not_persist_assistant_response() {
     let temp = TempDir::new().expect("tempdir");
     let mut command = neo();
@@ -1310,7 +1345,7 @@ fn mcp_json_response(id: u64, result: &Value) -> String {
     })
     .to_string();
     format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
         body.len(),
         body
     )
@@ -1339,7 +1374,7 @@ fn sse_response(events: &[Value]) -> String {
         write!(&mut body, "data: {event}\n\n").expect("write SSE event");
     }
     format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
         body.len(),
         body
     )

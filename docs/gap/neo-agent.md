@@ -24,8 +24,8 @@
   paths such as `sessions_dir`.
 - Session commands read project session files from `sessions_dir`, store local
   tree/name metadata next to JSONL records, compact sessions with a local
-  deterministic transcript summary event, and can export replayed messages to
-  standalone HTML.
+  deterministic transcript summary event, store deterministic local branch
+  summaries, and can export replayed messages to standalone HTML.
 - `skills show` loads TOML-frontmatter skill files through `neo-sdk`.
 - `extensions install` copies a local extension directory or clones an explicit
   git URL into `.neo/extensions/<id>`, records its source in
@@ -71,8 +71,8 @@ and platform-specific guidance.
 - Do not document `/login`, `/tree`, hosted sharing, hosted extension
   marketplace catalog/search/install flows, or themes as available Neo features
   yet.
-- Add richer session tree UI, branch summaries, and hosted share only when real
-  local or hosted backing behavior exists.
+- Add richer session tree UI and hosted share only when real local or hosted
+  backing behavior exists.
 - Keep MCP runtime config limited to tools and explicit resource reads until
   subscriptions, hosted server lifecycle, and OAuth/trust flows are
   implemented.

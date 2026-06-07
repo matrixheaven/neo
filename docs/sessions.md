@@ -19,6 +19,7 @@ resumable from local JSONL history.
 - `SessionMetadataStore::list()`
 - `SessionMetadataStore::fork(parent_id, name)`
 - `SessionMetadataStore::rename(session_id, name)`
+- `SessionMetadataStore::summarize(session_id, summary)`
 
 New JSONL files start with a `session_metadata` record containing the
 `neo.session.jsonl` format name, schema version, and creation timestamp.
@@ -28,7 +29,9 @@ record during replay, and existing event-only JSONL files remain readable.
 `AgentEvent::MessageAppended` entries.
 Session tree metadata is stored next to JSONL records in
 `sessions.metadata.json`. Fork and rename entries decorate real `.jsonl`
-session files; they do not create hosted or remote share records.
+session files. Local branch summaries are stored in the same metadata file and
+can be regenerated from replayed JSONL messages with `sessions summarize`.
+These records do not create hosted or remote share records.
 
 `compact_jsonl_session` replays the JSONL file into an `AgentContext`, builds a
 deterministic extractive transcript summary from messages that will no longer be
@@ -60,8 +63,7 @@ The current constraints are:
 Still missing from pi parity:
 
 - Hosted share targets beyond local HTML export.
-- Branch summaries beyond local fork tree metadata and extractive compaction
-  records.
+- Hosted or model-generated branch summaries beyond local metadata summaries.
 - Model-generated compaction summaries; current compaction is deterministic
   local transcript extraction only.
 
@@ -74,6 +76,7 @@ neo sessions list
 neo sessions show <session-id>
 neo sessions rename <session-id> <name>
 neo sessions fork <session-id> --name <name>
+neo sessions summarize <session-id>
 neo sessions compact <session-id> --keep-recent 20
 neo sessions export-html <session-id>
 neo resume <session-id>
@@ -85,6 +88,8 @@ Session directory defaults to `.neo/sessions` and can be changed with
 `export-html` replays `MessageAppended` events and renders a standalone HTML
 conversation with `neo-sdk`'s safe Markdown renderer.
 
+`sessions summarize` stores a deterministic local branch summary in
+`sessions.metadata.json` and surfaces it in `sessions list` and `resume`.
 `sessions compact` appends a `CompactionApplied` event to the session JSONL.
 `resume` and transcript rendering replay compacted context honestly: compacted
 messages are omitted from the active message list, while the stored algorithmic
