@@ -3,7 +3,7 @@ use std::{
     fmt,
 };
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEvent {
@@ -16,11 +16,24 @@ pub enum InputEvent {
     MoveEnd,
     Submit,
     NewLine,
+    Resize { columns: u16, rows: u16 },
     Cancel,
     Interrupt,
 }
 
 impl InputEvent {
+    #[must_use]
+    pub fn from_crossterm_event(event: &Event) -> Option<Self> {
+        match event {
+            Event::Key(key_event) => Self::from_key_event(*key_event),
+            Event::Resize(columns, rows) => Some(Self::Resize {
+                columns: *columns,
+                rows: *rows,
+            }),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub fn from_key_event(event: KeyEvent) -> Option<Self> {
         if event.kind != KeyEventKind::Press {

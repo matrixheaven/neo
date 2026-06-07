@@ -8,8 +8,7 @@ use std::{
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event},
-    execute,
+    event, execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use neo_agent_core::AgentEvent;
@@ -139,6 +138,7 @@ where
                     self.app.apply_agent_event(event);
                 }
             }
+            InputEvent::Resize { .. } => {}
             InputEvent::Cancel | InputEvent::Interrupt => return Ok(true),
         }
 
@@ -166,11 +166,11 @@ struct CrosstermEvents;
 impl TerminalEvents for CrosstermEvents {
     fn next_input_event(&mut self) -> Result<InputEvent> {
         loop {
-            if event::poll(Duration::from_millis(250))?
-                && let Event::Key(key_event) = event::read()?
-                && let Some(input) = InputEvent::from_key_event(key_event)
-            {
-                return Ok(input);
+            if event::poll(Duration::from_millis(250))? {
+                let event = event::read()?;
+                if let Some(input) = InputEvent::from_crossterm_event(&event) {
+                    return Ok(input);
+                }
             }
         }
     }
@@ -384,5 +384,57 @@ mod tests {
                 .expect("final render")
                 .contains("hello from controller")
         );
+    }
+
+    #[tokio::test]
+    async fn event_loop_renders_after_terminal_resize_without_submitting_prompt() {
+        struct FakeEvents {
+            events: std::vec::IntoIter<InputEvent>,
+        }
+
+        impl TerminalEvents for FakeEvents {
+            fn next_input_event(&mut self) -> Result<InputEvent> {
+                self.events
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("expected test event"))
+            }
+        }
+
+        let mut rendered = Vec::new();
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_prompt| async move {
+                panic!("resize should not submit a turn");
+                #[allow(unreachable_code)]
+                Ok(Vec::<AgentEvent>::new())
+            },
+        );
+
+        controller
+            .run_terminal_loop(
+                |app| {
+                    rendered.push(render_terminal_fallback(app));
+                    Ok(())
+                },
+                FakeEvents {
+                    events: vec![
+                        InputEvent::Insert('h'),
+                        InputEvent::Resize {
+                            columns: 100,
+                            rows: 30,
+                        },
+                        InputEvent::Cancel,
+                    ]
+                    .into_iter(),
+                },
+            )
+            .await
+            .expect("event loop succeeds");
+
+        assert_eq!(rendered.len(), 3);
+        assert!(rendered[1].contains("> h"));
+        assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
     }
 }

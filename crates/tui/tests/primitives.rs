@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use neo_tui::{
     ApprovalChoice, ApprovalModal, ApprovalOption, ChatTranscript, InputEvent, KeyId,
     KeybindingAction, KeybindingsManager, PromptEdit, PromptState, PromptWidget, SelectItem,
@@ -50,6 +50,17 @@ fn input_event_maps_printable_submit_escape_and_ctrl_c() {
         Some(InputEvent::Interrupt)
     );
     assert_eq!(InputEvent::from_key_event(release), None);
+}
+
+#[test]
+fn input_event_maps_terminal_resize_events() {
+    assert_eq!(
+        InputEvent::from_crossterm_event(&Event::Resize(100, 30)),
+        Some(InputEvent::Resize {
+            columns: 100,
+            rows: 30,
+        })
+    );
 }
 
 #[test]

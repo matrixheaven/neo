@@ -13,7 +13,7 @@ Target: `crates/tui`.
 - Rendering tests cover prompt, transcript, status, modal, select-list, truncation, wrapping, and keybinding behavior.
 - `neo-agent` now owns a crossterm/raw-mode interactive loop slice that renders
   `NeoTuiApp` in a real terminal and uses `neo-tui` input events for text input,
-  Enter submit, and Esc/Ctrl-C exit.
+  Enter submit, terminal resize redraws, and Esc/Ctrl-C exit.
 
 ## Remaining lower-priority gaps
 
