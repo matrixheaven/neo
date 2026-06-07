@@ -31,6 +31,7 @@ Session tree metadata is stored next to JSONL records in
 `sessions.metadata.json`. Fork and rename entries decorate real `.jsonl`
 session files. Local branch summaries are stored in the same metadata file and
 can be regenerated from replayed JSONL messages with `sessions summarize`.
+`sessions tree` renders the local parent/child metadata as an indented tree.
 These records do not create hosted or remote share records.
 
 `compact_jsonl_session` replays the JSONL file into an `AgentContext`, builds a
@@ -82,6 +83,7 @@ The `neo-agent` binary exposes:
 
 ```bash
 neo sessions list
+neo sessions tree
 neo sessions show <session-id>
 neo sessions rename <session-id> <name>
 neo sessions fork <session-id> --name <name>

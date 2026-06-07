@@ -5,7 +5,7 @@
 - Global flags: `--model`/`NEO_MODEL`, `--provider`/`NEO_PROVIDER`,
   `--api-base`/`NEO_API_BASE`, and `--config`/`NEO_CONFIG`.
 - Commands: `print`, `run`, `resume`, `sessions list`, `sessions show`,
-  `sessions rename`, `sessions fork`, `sessions compact`,
+  `sessions tree`, `sessions rename`, `sessions fork`, `sessions compact`,
   `sessions export-html`, `skills show`, `extensions list`,
   `extensions install`, `extensions update`, `extensions uninstall`,
   `extensions status`, `extensions enable`, `extensions disable`,
@@ -26,7 +26,8 @@
 - Session commands read project session files from `sessions_dir`, store local
   tree/name metadata next to JSONL records, compact sessions with a local
   deterministic transcript summary event, store deterministic local branch
-  summaries, and can export replayed messages to standalone HTML.
+  summaries, render a local parent/child tree, and can export replayed messages
+  to standalone HTML.
 - `skills show` loads TOML-frontmatter skill files through `neo-sdk`.
 - `extensions install` copies a local extension directory or clones an explicit
   git URL into `.neo/extensions/<id>`, records its source in
@@ -57,10 +58,11 @@
   scrolls the transcript viewport with Up/Down/PageUp/PageDown in editing mode,
   exits on Esc/Ctrl-C, and keeps the no-tty snapshot fallback for command tests
   and redirected stdout. `ctrl+r` opens a local session picker backed by
-  `sessions_dir` metadata and JSONL files; selecting a session replays its
-  compacted context into the TUI, and subsequent prompts use that context while
-  appending new events to the selected JSONL session. With the session picker
-  focused, `ctrl+n` forks the selected session through
+  `sessions_dir` metadata and JSONL files; the picker uses local tree ordering
+  and indents child sessions. Selecting a session replays its compacted context
+  into the TUI, and subsequent prompts use that context while appending new
+  events to the selected JSONL session. With the session picker focused,
+  `ctrl+n` forks the selected session through
   `SessionMetadataStore::fork()`, loads the child transcript, and routes later
   prompts to the child JSONL session. `ctrl+o` opens a model picker backed by
   the resolved `ModelRegistry`; selecting a model updates the TUI header and
@@ -82,8 +84,8 @@ and platform-specific guidance.
 - Do not document `/login`, `/tree`, hosted sharing, hosted extension
   marketplace catalog/search/install flows, or themes as available Neo features
   yet.
-- Add richer session tree navigation UI and hosted share only when real local
-  or hosted backing behavior exists.
+- Add hosted session tree navigation/share only when real hosted backing
+  behavior exists.
 - Keep MCP runtime config limited to tools and explicit stdio resource
   subscription/watch flows until remote resource streams, hosted server
   lifecycle, and OAuth/trust flows are implemented.

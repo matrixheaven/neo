@@ -1,9 +1,13 @@
-use std::{fs, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::PathBuf,
+};
 
 use anyhow::Context;
 use neo_agent_core::session::{
-    JsonlSessionReader, SessionCompactionOptions, SessionMetadataStore, compact_jsonl_session,
-    validate_session_id,
+    JsonlSessionReader, SessionCompactionOptions, SessionMetadataStore, SessionRecord,
+    compact_jsonl_session, validate_session_id,
 };
 use neo_agent_core::{AgentMessage, Content};
 use neo_sdk::{ExportConversation, ExportMessage, HtmlExportOptions, export_html as render_html};
@@ -43,6 +47,26 @@ pub fn list(config: &AppConfig) -> anyhow::Result<String> {
             .join("\n");
         Ok(format!("{lines}\n"))
     }
+}
+
+pub fn tree(config: &AppConfig) -> anyhow::Result<String> {
+    let sessions = metadata_store(config).list().with_context(|| {
+        format!(
+            "failed to read sessions directory {}",
+            config.sessions_dir.display()
+        )
+    })?;
+
+    if sessions.is_empty() {
+        return Ok("no sessions\n".to_owned());
+    }
+
+    let lines = tree_order_sessions(&sessions)
+        .iter()
+        .map(format_tree_record)
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(format!("{lines}\n"))
 }
 
 pub fn rename(session_id: &str, name: &str, config: &AppConfig) -> anyhow::Result<String> {
@@ -166,8 +190,74 @@ pub fn session_path(session_id: &str, config: &AppConfig) -> anyhow::Result<Path
     Ok(config.sessions_dir.join(format!("{session_id}.jsonl")))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionTreeRecord {
+    pub record: SessionRecord,
+    pub depth: usize,
+}
+
+pub(crate) fn tree_order_sessions(sessions: &[SessionRecord]) -> Vec<SessionTreeRecord> {
+    let by_id = sessions
+        .iter()
+        .cloned()
+        .map(|session| (session.id.clone(), session))
+        .collect::<BTreeMap<_, _>>();
+    let mut visited = BTreeSet::new();
+    let mut ordered = Vec::new();
+
+    for session in sessions.iter().filter(|session| {
+        session
+            .parent_id
+            .as_ref()
+            .is_none_or(|parent_id| !by_id.contains_key(parent_id))
+    }) {
+        append_tree_record(&session.id, 0, &by_id, &mut visited, &mut ordered);
+    }
+
+    for session in sessions {
+        append_tree_record(&session.id, 0, &by_id, &mut visited, &mut ordered);
+    }
+
+    ordered
+}
+
 fn metadata_store(config: &AppConfig) -> SessionMetadataStore {
     SessionMetadataStore::new(&config.sessions_dir)
+}
+
+fn append_tree_record(
+    session_id: &str,
+    depth: usize,
+    by_id: &BTreeMap<String, SessionRecord>,
+    visited: &mut BTreeSet<String>,
+    ordered: &mut Vec<SessionTreeRecord>,
+) {
+    if !visited.insert(session_id.to_owned()) {
+        return;
+    }
+    let Some(record) = by_id.get(session_id).cloned() else {
+        return;
+    };
+    let children = record.children.clone();
+    ordered.push(SessionTreeRecord { record, depth });
+    for child_id in children {
+        append_tree_record(&child_id, depth + 1, by_id, visited, ordered);
+    }
+}
+
+fn format_tree_record(tree_record: &SessionTreeRecord) -> String {
+    let mut parts = vec![format!(
+        "{}{}",
+        "  ".repeat(tree_record.depth),
+        tree_record.record.id
+    )];
+    if let Some(name) = &tree_record.record.name {
+        parts.push(name.clone());
+    }
+    if let Some(summary) = &tree_record.record.summary {
+        parts.push(format!("summary={summary}"));
+    }
+    parts.join("\t")
 }
 
 fn format_message(message: &AgentMessage) -> String {

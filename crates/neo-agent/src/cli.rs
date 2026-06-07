@@ -66,6 +66,7 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum SessionCommand {
     List,
+    Tree,
     Show {
         session_id: String,
     },

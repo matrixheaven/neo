@@ -36,6 +36,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
         Some(Command::Resume { session_id }) => modes::run::resume(&session_id, &config).await,
         Some(Command::Sessions { command }) => match command {
             SessionCommand::List => session_commands::list(&config),
+            SessionCommand::Tree => session_commands::tree(&config),
             SessionCommand::Show { session_id } => session_commands::show(&session_id, &config),
             SessionCommand::Rename { session_id, name } => {
                 session_commands::rename(&session_id, &name, &config)

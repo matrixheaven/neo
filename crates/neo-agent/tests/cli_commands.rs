@@ -354,6 +354,17 @@ fn sessions_rename_and_fork_surface_tree_metadata() {
     assert!(list_stdout.contains(&child_id));
     assert!(list_stdout.contains("Parser branch"));
     assert!(list_stdout.contains("parent=alpha"));
+
+    let mut tree = neo();
+    tree.current_dir(temp.path()).args(["sessions", "tree"]);
+    let tree_stdout = run(tree);
+    let parent_position = tree_stdout.find("alpha").expect("tree includes parent");
+    let child_position = tree_stdout
+        .find(&format!("  {child_id}"))
+        .expect("tree indents child");
+    assert!(parent_position < child_position);
+    assert!(tree_stdout.contains("Main thread"));
+    assert!(tree_stdout.contains("Parser branch"));
 }
 
 #[test]

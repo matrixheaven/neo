@@ -13,7 +13,7 @@ use crossterm::{
 };
 use neo_agent_core::{
     AgentEvent, AgentMessage,
-    session::{JsonlSessionReader, SessionMetadataStore, SessionRecord},
+    session::{JsonlSessionReader, SessionMetadataStore},
 };
 use neo_tui::{
     InputEvent, KeyId, KeybindingAction, KeybindingsManager, NeoTuiApp, PickerItem, PromptEdit,
@@ -746,7 +746,7 @@ fn picker_catalogs_for_config(config: &AppConfig) -> PickerCatalogs {
 fn session_catalog_for_config(config: &AppConfig) -> SessionCatalog {
     match SessionMetadataStore::new(&config.sessions_dir).list() {
         Ok(records) => SessionCatalog {
-            items: records
+            items: crate::session_commands::tree_order_sessions(&records)
                 .into_iter()
                 .map(session_record_to_picker_item)
                 .collect(),
@@ -777,8 +777,12 @@ fn model_to_picker_item(model: &neo_ai::ModelSpec) -> PickerItem {
     PickerItem::new(value.clone(), value, Some(format!("{:?}", model.api)))
 }
 
-fn session_record_to_picker_item(record: SessionRecord) -> PickerItem {
+fn session_record_to_picker_item(
+    tree_record: crate::session_commands::SessionTreeRecord,
+) -> PickerItem {
+    let record = tree_record.record;
     let label = record.name.clone().unwrap_or_else(|| record.id.clone());
+    let label = format!("{}{}", "  ".repeat(tree_record.depth), label);
     let mut details = vec![record.id.clone()];
     if let Some(parent_id) = &record.parent_id {
         details.push(format!("parent={parent_id}"));
@@ -1541,11 +1545,14 @@ mod tests {
         store
             .summarize("alpha", "Local branch summary".to_owned())
             .expect("summarize session");
+        let child = store
+            .fork("alpha", Some("Parser branch".to_owned()))
+            .expect("fork session");
 
         let config = test_config(temp.path(), sessions_dir);
         let catalog = session_catalog_for_config(&config);
         assert_eq!(catalog.error, None);
-        assert_eq!(catalog.items.len(), 1);
+        assert_eq!(catalog.items.len(), 2);
         assert_eq!(catalog.items[0].value, "alpha");
         assert_eq!(catalog.items[0].label, "Alpha Session");
         assert!(
@@ -1555,6 +1562,14 @@ mod tests {
                 .is_some_and(|description| {
                     description.contains("alpha") && description.contains("Local branch summary")
                 })
+        );
+        assert_eq!(catalog.items[1].value, child.id);
+        assert_eq!(catalog.items[1].label, "  Parser branch");
+        assert!(
+            catalog.items[1]
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("parent=alpha"))
         );
 
         let loaded = load_session_transcript("alpha".to_owned(), &config)
