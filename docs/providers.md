@@ -18,12 +18,13 @@ test client.
 - `ModelRegistry` stores available `ModelSpec` values and exposes the first
   registered model as the default unless replaced by configuration.
 - `ProviderRegistry::production()` registers the provider catalog used by
-  production resolution: OpenAI, Anthropic, OpenRouter, and Amazon Bedrock
-  credential hints.
+  production resolution: OpenAI, Anthropic, Google Generative AI, OpenRouter,
+  and Amazon Bedrock credential hints.
 - `ProviderResolver` turns a registered `ModelSpec` plus environment credentials
   into a `ModelClient`. It constructs `OpenAiResponsesClient`,
-  `AnthropicMessagesClient`, or `OpenAiCompatibleClient` for supported APIs and
-  rejects test-only/local providers in production resolution.
+  `AnthropicMessagesClient`, `GoogleGenerativeAiClient`, or
+  `OpenAiCompatibleClient` for supported APIs and rejects test-only/local
+  providers in production resolution.
 
 ## Stream Contract
 
@@ -48,7 +49,8 @@ know a small environment-key map for common provider ids such as `anthropic`,
 
 Neo does not have pi-style auth-file login flows yet. Keep provider secrets in
 environment variables or external secret managers. Anthropic can use
-`ANTHROPIC_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`; OpenAI uses `OPENAI_API_KEY`.
+`ANTHROPIC_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`; OpenAI uses `OPENAI_API_KEY`;
+Google Generative AI uses `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
 `ProviderCredentialStatus` reports configured environment variable names,
 ambient auth labels, and explicit missing-key reasons without including secret
 values. If a provider needs a browser or external backend for login, Neo should
@@ -62,6 +64,8 @@ succeeded.
 - `OpenAiResponsesClient` for OpenAI Responses models such as `openai/gpt-4.1`.
 - `AnthropicMessagesClient` for Anthropic Messages models such as
   `anthropic/claude-sonnet-4-5`.
+- `GoogleGenerativeAiClient` for Google Generative AI models such as
+  `google/gemini-2.5-pro`.
 - `OpenAiCompatibleClient` for OpenAI-compatible Chat Completions providers
   such as OpenRouter.
 

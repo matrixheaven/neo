@@ -54,6 +54,7 @@ pub enum Command {
         #[command(subcommand)]
         command: McpCommand,
     },
+    Rpc,
 }
 
 #[derive(Debug, Subcommand)]

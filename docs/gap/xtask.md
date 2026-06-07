@@ -8,6 +8,7 @@
 - `cargo run -p xtask -- check --docs` runs the docs/examples parity gate:
   local Markdown link validation for `README.md`, `docs/**/*.md`, and
   `examples/**/*.md`; production fake/local/placeholder guidance scans; and
+  stale gap-claim scans for implemented MCP/session/extension surfaces; and
   TOML/JSON validation for the documented example artifacts.
 - `cargo run -p xtask -- parity` runs the docs/examples parity gate without the
   fmt, clippy, and test steps.
@@ -26,6 +27,14 @@ fixture modules must be preceded by an inline comment:
 
 Keep the reason specific. This hook is ignored in production source and should
 not be used for production or deployment guidance.
+
+The stale gap-claim scan is intentionally symbol-driven. It rejects statements
+such as "no MCP adapter is wired" once `McpToolAdapter`/`McpToolProvider`
+exist, "extension lifecycle unavailable" once status/enable/disable commands
+exist, and "session branching and naming are future work" once
+`SessionMetadataStore::fork`/`rename` exist. It still allows honest gaps for
+long-lived MCP sessions, HTTP/SSE MCP transports, hosted share, OAuth login,
+raw TUI loops, and other surfaces that are not implemented.
 
 ## Pi Parity Pressure
 

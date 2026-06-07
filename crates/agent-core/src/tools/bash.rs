@@ -1,9 +1,21 @@
-use std::{process::Stdio, time::Duration};
+use std::{
+    collections::HashMap,
+    process::Stdio,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::{io::AsyncReadExt, process::Command, time::timeout};
+use tokio::{
+    io::AsyncReadExt,
+    process::{Child, Command},
+    sync::Mutex,
+    task::JoinHandle,
+    time::timeout,
+};
+use uuid::Uuid;
 
 use super::{
     Tool, ToolContext, ToolError, ToolFuture, ToolResult, cap_output, parse_input, schema,
@@ -12,9 +24,19 @@ use super::{
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct BashInput {
-    command: String,
+    mode: Option<BashMode>,
+    command: Option<String>,
+    handle: Option<String>,
     timeout_ms: Option<u64>,
     max_output_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum BashMode {
+    Foreground,
+    Start,
+    Poll,
 }
 
 pub struct BashTool;
@@ -25,7 +47,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &'static str {
-        "Run a foreground shell command in the workspace."
+        "Run a shell command in the workspace, or start/poll a compact background command."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -36,37 +58,70 @@ impl Tool for BashTool {
         Box::pin(async move {
             ctx.ensure_shell_allowed()?;
             let input: BashInput = parse_input(self.name(), input)?;
-            let timeout_ms = input
-                .timeout_ms
-                .unwrap_or_else(|| u64::try_from(ctx.bash_timeout.as_millis()).unwrap_or(u64::MAX));
             let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
-            let output =
-                run_command(ctx, &input.command, Duration::from_millis(timeout_ms)).await?;
-            let (stdout_capped, stdout_truncated) = cap_output(&output.stdout, max_output_bytes);
-            let (stderr_capped, stderr_truncated) = cap_output(&output.stderr, max_output_bytes);
-            let truncated = stdout_truncated || stderr_truncated;
-            let combined = format!(
-                "exit_code: {:?}\nstdout:\n{}\nstderr:\n{}",
-                output.exit_code, stdout_capped, stderr_capped
-            );
-            Ok(
-                ToolResult::ok(format!("{combined}\ntruncated: {truncated}")).with_details(json!({
-                    "exit_code": output.exit_code,
-                    "stdout": output.stdout,
-                    "stderr": output.stderr,
-                    "stdout_truncated": stdout_truncated,
-                    "stderr_truncated": stderr_truncated,
-                    "truncated": truncated,
-                })),
-            )
+            match input.mode.unwrap_or(BashMode::Foreground) {
+                BashMode::Foreground => {
+                    let command = required_field(self.name(), input.command, "command")?;
+                    let timeout_ms = input.timeout_ms.unwrap_or_else(|| {
+                        u64::try_from(ctx.bash_timeout.as_millis()).unwrap_or(u64::MAX)
+                    });
+                    let output =
+                        run_command(ctx, &command, Duration::from_millis(timeout_ms)).await?;
+                    Ok(command_result(&output, max_output_bytes))
+                }
+                BashMode::Start => {
+                    let command = required_field(self.name(), input.command, "command")?;
+                    start_background_command(ctx, &command, max_output_bytes).await
+                }
+                BashMode::Poll => {
+                    let handle = required_field(self.name(), input.handle, "handle")?;
+                    poll_background_command(self.name(), &handle, max_output_bytes).await
+                }
+            }
         })
     }
+}
+
+static BACKGROUND_COMMANDS: LazyLock<Mutex<HashMap<String, BackgroundCommand>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct BackgroundCommand {
+    child: Child,
+    stdout: Arc<Mutex<Vec<u8>>>,
+    stderr: Arc<Mutex<Vec<u8>>>,
+    stdout_task: JoinHandle<()>,
+    stderr_task: JoinHandle<()>,
 }
 
 struct CommandOutput {
     exit_code: Option<i32>,
     stdout: String,
     stderr: String,
+}
+
+fn required_field<T>(tool: &str, value: Option<T>, field: &'static str) -> Result<T, ToolError> {
+    value.ok_or_else(|| ToolError::InvalidInput {
+        tool: tool.to_owned(),
+        message: format!("missing required field `{field}`"),
+    })
+}
+
+fn command_result(output: &CommandOutput, max_output_bytes: usize) -> ToolResult {
+    let (stdout_capped, stdout_truncated) = cap_output(&output.stdout, max_output_bytes);
+    let (stderr_capped, stderr_truncated) = cap_output(&output.stderr, max_output_bytes);
+    let truncated = stdout_truncated || stderr_truncated;
+    let combined = format!(
+        "exit_code: {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.exit_code, stdout_capped, stderr_capped
+    );
+    ToolResult::ok(format!("{combined}\ntruncated: {truncated}")).with_details(json!({
+        "exit_code": output.exit_code,
+        "stdout": output.stdout,
+        "stderr": output.stderr,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+        "truncated": truncated,
+    }))
 }
 
 async fn run_command(
@@ -113,4 +168,160 @@ async fn run_command(
         stdout,
         stderr,
     })
+}
+
+async fn start_background_command(
+    ctx: &ToolContext,
+    command: &str,
+    max_output_bytes: usize,
+) -> Result<ToolResult, ToolError> {
+    let mut child = Command::new("bash")
+        .arg("-lc")
+        .arg(command)
+        .current_dir(&ctx.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stdout_task = spawn_output_reader(
+        child.stdout.take().expect("stdout was piped"),
+        stdout.clone(),
+    );
+    let stderr_task = spawn_output_reader(
+        child.stderr.take().expect("stderr was piped"),
+        stderr.clone(),
+    );
+
+    let handle = Uuid::new_v4().to_string();
+    BACKGROUND_COMMANDS.lock().await.insert(
+        handle.clone(),
+        BackgroundCommand {
+            child,
+            stdout,
+            stderr,
+            stdout_task,
+            stderr_task,
+        },
+    );
+
+    Ok(
+        ToolResult::ok(format!("started background command: {handle}")).with_details(json!({
+            "handle": handle,
+            "status": "running",
+            "stdout": "",
+            "stderr": "",
+            "stdout_truncated": false,
+            "stderr_truncated": false,
+            "truncated": false,
+            "max_output_bytes": max_output_bytes,
+        })),
+    )
+}
+
+fn spawn_output_reader<R>(mut reader: R, buffer: Arc<Mutex<Vec<u8>>>) -> JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut local = [0_u8; 8192];
+        loop {
+            match reader.read(&mut local).await {
+                Ok(0) | Err(_) => break,
+                Ok(bytes_read) => buffer.lock().await.extend_from_slice(&local[..bytes_read]),
+            }
+        }
+    })
+}
+
+async fn poll_background_command(
+    tool: &str,
+    handle: &str,
+    max_output_bytes: usize,
+) -> Result<ToolResult, ToolError> {
+    let mut commands = BACKGROUND_COMMANDS.lock().await;
+    let command = commands
+        .get_mut(handle)
+        .ok_or_else(|| ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: format!("unknown background handle `{handle}`"),
+        })?;
+
+    let status = command.child.try_wait()?;
+    if let Some(status) = status {
+        let command = commands.remove(handle).expect("command existed");
+        drop(commands);
+        let _ = command.stdout_task.await;
+        let _ = command.stderr_task.await;
+        let output = output_from_buffers(status.code(), command.stdout, command.stderr).await;
+        return Ok(background_command_result(
+            handle,
+            true,
+            &output,
+            max_output_bytes,
+        ));
+    }
+
+    let stdout = command.stdout.clone();
+    let stderr = command.stderr.clone();
+    drop(commands);
+    let stdout = stdout.lock_owned().await;
+    let stderr = stderr.lock_owned().await;
+    let output = output_from_locked_buffers(None, &stdout, &stderr);
+    Ok(background_command_result(
+        handle,
+        false,
+        &output,
+        max_output_bytes,
+    ))
+}
+
+async fn output_from_buffers(
+    exit_code: Option<i32>,
+    stdout: Arc<Mutex<Vec<u8>>>,
+    stderr: Arc<Mutex<Vec<u8>>>,
+) -> CommandOutput {
+    let stdout = stdout.lock_owned().await;
+    let stderr = stderr.lock_owned().await;
+    output_from_locked_buffers(exit_code, &stdout, &stderr)
+}
+
+fn output_from_locked_buffers(
+    exit_code: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> CommandOutput {
+    CommandOutput {
+        exit_code,
+        stdout: String::from_utf8_lossy(stdout).into_owned(),
+        stderr: String::from_utf8_lossy(stderr).into_owned(),
+    }
+}
+
+fn background_command_result(
+    handle: &str,
+    exited: bool,
+    output: &CommandOutput,
+    max_output_bytes: usize,
+) -> ToolResult {
+    let (stdout_capped, stdout_truncated) = cap_output(&output.stdout, max_output_bytes);
+    let (stderr_capped, stderr_truncated) = cap_output(&output.stderr, max_output_bytes);
+    let truncated = stdout_truncated || stderr_truncated;
+    let status = if exited { "exited" } else { "running" };
+    let content = format!(
+        "handle: {handle}\nstatus: {status}\nexit_code: {:?}\nstdout:\n{}\nstderr:\n{}\ntruncated: {truncated}",
+        output.exit_code, stdout_capped, stderr_capped
+    );
+    ToolResult::ok(content).with_details(json!({
+        "handle": handle,
+        "status": status,
+        "exit_code": output.exit_code,
+        "stdout": output.stdout,
+        "stderr": output.stderr,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+        "truncated": truncated,
+    }))
 }

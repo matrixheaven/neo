@@ -109,6 +109,7 @@ fn provider_resolver_builds_real_clients_by_model_api() {
     let env = BTreeMap::from([
         ("OPENAI_API_KEY".to_owned(), "openai-key".to_owned()),
         ("ANTHROPIC_API_KEY".to_owned(), "anthropic-key".to_owned()),
+        ("GEMINI_API_KEY".to_owned(), "google-key".to_owned()),
     ]);
     let resolver = registry.resolver_from(env);
 
@@ -129,6 +130,38 @@ fn provider_resolver_builds_real_clients_by_model_api() {
             ApiKind::AnthropicMessages,
         ))
         .expect("anthropic messages client should resolve");
+    resolver
+        .resolve(&model("google", "gemini-test", ApiKind::GoogleGenerativeAi))
+        .expect("google generative ai client should resolve");
+}
+
+#[test]
+fn production_registry_includes_google_generative_ai_credentials() {
+    let registry = ProviderRegistry::production();
+    let google = registry
+        .get("google")
+        .expect("google provider should exist");
+
+    assert_eq!(google.display_name, "Google Generative AI");
+    assert_eq!(google.api, ApiKind::GoogleGenerativeAi);
+    assert_eq!(
+        google.base_url.as_deref(),
+        Some("https://generativelanguage.googleapis.com/v1beta")
+    );
+    assert_eq!(
+        google.api_key_env_vars,
+        vec!["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+    );
+
+    let configured = registry
+        .credential_status_from(
+            "google",
+            &BTreeMap::from([("GOOGLE_API_KEY".to_owned(), "secret".to_owned())]),
+        )
+        .expect("google provider should exist");
+    assert!(configured.configured);
+    assert_eq!(configured.env_keys, vec!["GOOGLE_API_KEY"]);
+    assert!(!format!("{configured:?}").contains("secret"));
 }
 
 #[test]

@@ -1,7 +1,7 @@
 # Sessions
 
 Sessions are the durable event record that make agent work inspectable and
-eventually resumable.
+resumable from local JSONL history.
 
 ## Implemented Storage
 
@@ -21,8 +21,8 @@ eventually resumable.
 Each line is a serialized `AgentEvent`. `replay_messages` reconstructs
 conversation history from `AgentEvent::MessageAppended` entries.
 Session tree metadata is stored next to JSONL records in
-`sessions.metadata.json`; metadata decorates real `.jsonl` session files and
-does not create hosted or remote share records.
+`sessions.metadata.json`. Fork and rename entries decorate real `.jsonl`
+session files; they do not create hosted or remote share records.
 
 ## Resume Flow
 

@@ -1,5 +1,14 @@
-use std::{fs, process::Command};
+use std::{
+    collections::BTreeMap,
+    fmt::Write as _,
+    fs,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    process::Command,
+    sync::{Arc, Mutex},
+};
 
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 fn neo() -> Command {
@@ -661,3 +670,232 @@ RUST_LOG = "info"
     assert!(stdout.contains("stdio"));
     assert!(stdout.contains("npx"));
 }
+
+#[test]
+fn print_registers_enabled_stdio_mcp_tools_from_project_config() {
+    let temp = TempDir::new().expect("tempdir");
+    let provider = MockSseServer::start(vec![openai_response_sse("resp-mcp", "mcp tools listed")]);
+    let mcp_fixture = temp.path().join("mcp-fixture.py");
+    fs::write(&mcp_fixture, MCP_STDIO_FIXTURE).expect("write MCP fixture");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        format!(
+            r#"
+api_base = "{}"
+
+[[mcp.servers]]
+id = "docs-server"
+enabled = true
+transport = "stdio"
+command = "python3"
+args = ["-u", "{}"]
+"#,
+            provider.url,
+            mcp_fixture.display()
+        ),
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .args(["print", "show", "tools"]);
+    let stdout = run(command);
+
+    assert_eq!(stdout, "mcp tools listed\n");
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/responses");
+    assert_eq!(
+        requests[0].headers.get("authorization").map(String::as_str),
+        Some("Bearer test-key")
+    );
+    let tool_names = requests[0].body["tools"]
+        .as_array()
+        .expect("model request tools")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect::<Vec<_>>();
+    assert!(
+        tool_names.contains(&"mcp__docs_server__docs_search"),
+        "model tools should include configured MCP stdio tools: {tool_names:?}"
+    );
+}
+
+#[derive(Debug, Clone)]
+struct RecordedRequest {
+    method: String,
+    path: String,
+    headers: BTreeMap<String, String>,
+    body: Value,
+}
+
+struct MockSseServer {
+    url: String,
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
+}
+
+impl MockSseServer {
+    fn start(responses: Vec<String>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock provider");
+        let url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured_requests = Arc::clone(&requests);
+
+        std::thread::spawn(move || {
+            for response in responses {
+                let (mut socket, _) = listener.accept().expect("accept provider request");
+                let request = read_http_request(&mut socket);
+                captured_requests
+                    .lock()
+                    .expect("lock requests")
+                    .push(request);
+                socket
+                    .write_all(response.as_bytes())
+                    .expect("write provider response");
+            }
+        });
+
+        Self { url, requests }
+    }
+
+    fn requests(&self) -> Vec<RecordedRequest> {
+        self.requests.lock().expect("lock requests").clone()
+    }
+}
+
+fn openai_response_sse(id: &str, text: &str) -> String {
+    sse_response(&[
+        json!({ "type": "response.created", "response": { "id": id } }),
+        json!({ "type": "response.output_text.delta", "delta": text }),
+        json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "usage": { "input_tokens": 7, "output_tokens": 3 }
+            }
+        }),
+    ])
+}
+
+fn sse_response(events: &[Value]) -> String {
+    let mut body = String::new();
+    for event in events {
+        write!(&mut body, "data: {event}\n\n").expect("write SSE event");
+    }
+    format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
+fn read_http_request(socket: &mut TcpStream) -> RecordedRequest {
+    let mut buffer = Vec::new();
+    let mut temp = [0_u8; 1024];
+    let header_end;
+
+    loop {
+        let read = socket.read(&mut temp).expect("read request");
+        assert_ne!(read, 0, "client closed before sending headers");
+        buffer.extend_from_slice(&temp[..read]);
+        if let Some(index) = find_header_end(&buffer) {
+            header_end = index;
+            break;
+        }
+    }
+
+    let headers_raw = String::from_utf8(buffer[..header_end].to_vec()).expect("utf8 headers");
+    let mut lines = headers_raw.split("\r\n");
+    let request_line = lines.next().expect("request line");
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().expect("method").to_owned();
+    let path = request_parts.next().expect("path").to_owned();
+    let headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(key, value)| (key.to_ascii_lowercase(), value.trim().to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let body_start = header_end + 4;
+    while buffer.len() < body_start + content_length {
+        let read = socket.read(&mut temp).expect("read body");
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&temp[..read]);
+    }
+    let body_bytes = &buffer[body_start..body_start + content_length];
+    let body = serde_json::from_slice(body_bytes).expect("json body");
+
+    RecordedRequest {
+        method,
+        path,
+        headers,
+        body,
+    }
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+const MCP_STDIO_FIXTURE: &str = r#"
+import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request["method"]
+    if method == "initialize":
+        response = {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "fixture", "version": "0.1.0"},
+                "capabilities": {"tools": {}},
+            },
+        }
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        response = {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {
+                "tools": [
+                    {
+                        "name": "docs-search",
+                        "description": "Search project docs",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                        },
+                    }
+                ]
+            },
+        }
+    elif method == "tools/call":
+        response = {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {
+                "content": [{"type": "text", "text": "ok"}],
+                "isError": False,
+            },
+        }
+    else:
+        response = {
+            "jsonrpc": "2.0",
+            "id": request.get("id"),
+            "error": {"code": -32601, "message": f"unknown method {method}"},
+        }
+    print(json.dumps(response), flush=True)
+"#;

@@ -15,8 +15,9 @@
 - `ProviderRegistry::production()` stores built-in production provider metadata.
 - `ProviderResolver` resolves registered models to production clients when
   credentials and base URLs are available.
-- `OpenAiResponsesClient`, `AnthropicMessagesClient`, and
-  `OpenAiCompatibleClient` implement network provider adapters.
+- `OpenAiResponsesClient`, `AnthropicMessagesClient`,
+  `GoogleGenerativeAiClient`, and `OpenAiCompatibleClient` implement network
+  provider adapters.
 - `schema_for<T>()` and `ToolSpec::from_schema<T>()` generate JSON Schema from
   Rust input types.
 - `providers::fake::FakeModelClient` supports tests.

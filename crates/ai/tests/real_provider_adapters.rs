@@ -8,7 +8,10 @@ use futures::StreamExt;
 use neo_ai::{
     AiStreamEvent, ApiKind, ChatMessage, ChatRequest, ContentPart, ModelCapabilities, ModelClient,
     ModelSpec, ProviderId, RequestOptions, StopReason, ToolSpec,
-    providers::{anthropic::AnthropicMessagesClient, openai_responses::OpenAiResponsesClient},
+    providers::{
+        anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
+        openai_responses::OpenAiResponsesClient,
+    },
 };
 use serde_json::{Value, json};
 
@@ -311,4 +314,94 @@ async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
     assert_eq!(sent.body["max_tokens"], 64);
     assert_eq!(sent.body["tools"][0]["name"], "read_file");
     assert_eq!(sent.body["messages"][0]["role"], "user");
+}
+
+#[tokio::test]
+async fn google_generative_ai_client_posts_generate_content_payload_and_streams_events() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{ "text": "hi " }]
+                }
+            }]
+        }),
+        json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {
+                            "name": "read_file",
+                            "args": { "path": "Cargo.toml" }
+                        }
+                    }]
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 9,
+                "candidatesTokenCount": 4
+            }
+        }),
+    ])]);
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::GoogleGenerativeAi))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "google-generative-ai".to_owned()
+            },
+            AiStreamEvent::TextDelta {
+                text: "hi ".to_owned()
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "read_file".to_owned(),
+                name: "read_file".to_owned()
+            },
+            AiStreamEvent::ToolCallArgsDelta {
+                id: "read_file".to_owned(),
+                json_fragment: "{\"path\":\"Cargo.toml\"}".to_owned()
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "read_file".to_owned(),
+                arguments: json!({ "path": "Cargo.toml" })
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+                usage: Some(neo_ai::TokenUsage {
+                    input_tokens: 9,
+                    output_tokens: 4,
+                })
+            },
+        ]
+    );
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.method, "POST");
+    assert_eq!(
+        sent.path,
+        "/models/model-test:streamGenerateContent?alt=sse&key=test-key"
+    );
+    assert_eq!(sent.body["contents"][0]["role"], "user");
+    assert_eq!(sent.body["contents"][0]["parts"][0]["text"], "hello");
+    assert_eq!(
+        sent.body["tools"][0]["functionDeclarations"][0]["name"],
+        "read_file"
+    );
+    assert_eq!(
+        sent.body["tools"][0]["functionDeclarations"][0]["parameters"]["properties"]["path"]["type"],
+        "string"
+    );
+    assert_eq!(sent.body["generationConfig"]["maxOutputTokens"], 64);
 }

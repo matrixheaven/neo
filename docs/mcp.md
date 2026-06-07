@@ -29,9 +29,10 @@ the remote MCP tool by its original unprefixed name. Non-alphanumeric
 characters in server and tool ids are converted to `_` so model provider
 function-name validators can accept the advertised tools.
 
-Transport configuration is intentionally outside this core slice. A stdio or
-other JSON-RPC client should implement `McpToolAdapter` without adding local
-fallback behavior.
+`McpStdioToolAdapter` is the production stdio JSON-RPC adapter. It starts the
+configured command with arguments and environment, performs the MCP
+`initialize` handshake, calls `tools/list`, and invokes remote tools with
+`tools/call`. It does not provide local fallback behavior.
 
 ## Runtime Placement
 
@@ -57,6 +58,12 @@ The model should only see normal `ToolSpec` values. It should not know whether a
 
 ## Current Status
 
-`neo-agent-core` has the MCP tool adapter abstraction, discovery-to-`ToolSpec`
-bridge, namespaced `ToolRegistry` registration, and async call delegation. It
-does not yet spawn external MCP server processes or load MCP CLI config.
+`neo-agent-core` has the MCP tool adapter abstraction, stdio JSON-RPC process
+adapter, discovery-to-`ToolSpec` bridge, namespaced `ToolRegistry`
+registration, and async call delegation. `neo-agent print` and `neo-agent run`
+load enabled `transport = "stdio"` servers from project config and advertise
+their tools to the configured model.
+
+Current limitation: the stdio adapter opens a fresh MCP process for discovery
+and for each tool call. It is real process JSON-RPC, but it does not yet keep a
+long-lived pooled MCP session.

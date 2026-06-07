@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod extension_commands;
 mod modes;
+mod rpc_mode;
 mod session_commands;
 mod skill_commands;
 
@@ -77,6 +78,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
         Some(Command::Mcp { command }) => match command {
             McpCommand::List => Ok(modes::run::list_mcp_servers(&config)),
         },
+        Some(Command::Rpc) => rpc_mode::execute(&config).await,
         None => Ok(modes::interactive::execute(&config)),
     }
 }

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use crate::{
     AiError, ApiKind, ModelCapabilities, ModelClient, ModelSpec, ProviderId,
     providers::{
-        anthropic::AnthropicMessagesClient, openai_compatible::OpenAiCompatibleClient,
-        openai_responses::OpenAiResponsesClient,
+        anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
+        openai_compatible::OpenAiCompatibleClient, openai_responses::OpenAiResponsesClient,
     },
 };
 
@@ -214,7 +214,10 @@ impl ProviderResolver {
             ApiKind::OpenAiCompatible | ApiKind::OpenAiChatCompletions => {
                 Ok(Arc::new(OpenAiCompatibleClient::new(base_url, api_key)))
             }
-            ApiKind::GoogleGenerativeAi | ApiKind::Local => Err(AiError::Configuration(format!(
+            ApiKind::GoogleGenerativeAi => {
+                Ok(Arc::new(GoogleGenerativeAiClient::new(base_url, api_key)))
+            }
+            ApiKind::Local => Err(AiError::Configuration(format!(
                 "provider {} model API {:?} is not supported by production resolver",
                 provider.id, model.api
             ))),
@@ -332,6 +335,14 @@ fn builtin_providers() -> Vec<ProviderSpec> {
             ApiKind::AnthropicMessages,
             Some("https://api.anthropic.com/v1"),
             &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            &[],
+        ),
+        provider(
+            "google",
+            "Google Generative AI",
+            ApiKind::GoogleGenerativeAi,
+            Some("https://generativelanguage.googleapis.com/v1beta"),
+            &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
             &[],
         ),
         provider(

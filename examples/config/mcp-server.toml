@@ -1,5 +1,5 @@
-# Example MCP server configuration. This is documentation for the intended
-# config shape; runtime loading is not implemented in this slice.
+# Example MCP server configuration. `neo mcp list`, `neo print`, and `neo run`
+# read this shape for stdio MCP tool discovery and calls.
 
 [[mcp.servers]]
 id = "filesystem"

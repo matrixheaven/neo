@@ -1,12 +1,18 @@
-use std::{fmt::Write as _, sync::Arc};
+use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
 
 use anyhow::Context;
 use futures::StreamExt;
 use neo_agent_core::session::JsonlSessionWriter;
-use neo_agent_core::{AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, Content};
+use neo_agent_core::{
+    AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, Content, McpStdioConfig,
+    McpStdioToolAdapter, McpToolProvider, ToolRegistry,
+};
 use neo_ai::{ModelClient, ModelRegistry, ModelSpec, ProviderRegistry};
 
-use crate::{config::AppConfig, session_commands};
+use crate::{
+    config::{AppConfig, McpServerConfig},
+    session_commands,
+};
 
 pub async fn execute(prompt: &[String], config: &AppConfig) -> anyhow::Result<String> {
     let turn = run_prompt(prompt, config).await?;
@@ -116,9 +122,11 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
 
     let model = resolve_model(config)?;
     let client = resolve_model_client(config, &model)?;
-    let runtime = AgentRuntime::new(
+    let tools = tool_registry_for_config(config).await?;
+    let runtime = AgentRuntime::with_tools(
         AgentConfig::for_model(model).with_tool_permission_policy(config.permissions.clone()),
         client,
+        tools,
     );
     let mut context = AgentContext::new();
     let mut events = vec![user_event];
@@ -153,6 +161,42 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
         events,
         assistant_text,
     })
+}
+
+async fn tool_registry_for_config(config: &AppConfig) -> anyhow::Result<ToolRegistry> {
+    let mut registry = ToolRegistry::with_builtin_tools();
+    for server in config.mcp.servers.iter().filter(|server| server.enabled) {
+        register_mcp_server(&mut registry, server).await?;
+    }
+    Ok(registry)
+}
+
+async fn register_mcp_server(
+    registry: &mut ToolRegistry,
+    server: &McpServerConfig,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        server.transport == "stdio",
+        "unsupported MCP transport for {}: {}",
+        server.id,
+        server.transport
+    );
+    let adapter = Arc::new(McpStdioToolAdapter::new(McpStdioConfig {
+        command: server.command.clone(),
+        args: server.args.clone(),
+        env: server
+            .env
+            .iter()
+            .fold(BTreeMap::new(), |mut env, (key, value)| {
+                env.insert(key.clone(), value.clone());
+                env
+            }),
+    }));
+    let provider = McpToolProvider::discover(&server.id, adapter)
+        .await
+        .with_context(|| format!("failed to discover MCP tools from {}", server.id))?;
+    provider.register_into(registry);
+    Ok(())
 }
 
 async fn create_session_path(config: &AppConfig) -> anyhow::Result<std::path::PathBuf> {

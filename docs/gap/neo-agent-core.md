@@ -17,8 +17,12 @@
 - `McpToolAdapter` and `McpToolProvider` can discover configured MCP tools as
   namespaced `ToolSpec` values and execute them through an async adapter
   registered in `ToolRegistry`.
+- `McpStdioToolAdapter` starts configured stdio MCP commands and speaks
+  JSON-RPC for `initialize`, `tools/list`, and `tools/call` without local
+  fallback behavior.
 - `ToolContext` resolves paths inside the workspace and carries shell timeout
-  and output cap settings.
+  and output cap settings; `bash` also supports compact non-PTY background
+  start/poll handles backed by real child processes.
 - `session::JsonlSessionWriter`, `session::JsonlSessionReader`, and
   `session::replay_messages` persist and replay `AgentEvent::MessageAppended`
   history.
@@ -36,10 +40,10 @@ interactive behavior.
   treating broad workspace checks as green.
 - Add docs and tests for `Ask` permission behavior once there is a CLI/TUI
   approval path. Today tools only execute on `Allow`.
-- Add a real stdio JSON-RPC MCP process adapter and CLI config plumbing on top
-  of the agent-core adapter boundary.
+- Add persistent stdio MCP session reuse if process startup becomes too costly;
+  the current adapter is real JSON-RPC but process-per-operation.
 - Add hook/steering docs only when the runtime exposes those APIs.
-- Define whether `bash` remains foreground-only or grows a background/PTY
-  sibling; keep the model-facing schema compact either way.
+- Decide whether Neo needs full PTY/interactivity later. Current `bash`
+  background support is intentionally compact start/poll process management.
 - Decide whether JSONL event persistence remains the durable session format or
   becomes a compatibility layer over a richer store.

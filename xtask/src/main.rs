@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Component, Path, PathBuf},
     process::Command,
@@ -172,6 +173,7 @@ fn validate_docs_links(root: &Path) -> Result<Vec<String>> {
 
 fn validate_docs_parity(root: &Path) -> Result<Vec<String>> {
     let mut errors = Vec::new();
+    let code_truth = ParityCodeTruth::load(root)?;
     for file in parity_scan_files(root)? {
         let source = fs::read_to_string(&file)?;
         let relative_file = relative_path(root, &file);
@@ -200,7 +202,8 @@ fn validate_docs_parity(root: &Path) -> Result<Vec<String>> {
                 continue;
             }
 
-            if let Some(reason) = parity_line_violation(trimmed, explicit_fixture_path) {
+            if let Some(reason) = parity_line_violation(trimmed, explicit_fixture_path, &code_truth)
+            {
                 errors.push(format!(
                     "{}:{line_number} contains {reason}: {trimmed}",
                     relative_file.display()
@@ -245,6 +248,84 @@ fn production_scan_files(root: &Path) -> Result<Vec<PathBuf>> {
 
     out.sort();
     Ok(out)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ImplementedSurface {
+    McpToolAdapterBoundary,
+    StdioMcpProcessAdapter,
+    ExtensionLifecycleCommands,
+    SessionMetadataBranching,
+}
+
+#[derive(Debug, Clone)]
+struct ParityCodeTruth {
+    implemented: BTreeSet<ImplementedSurface>,
+}
+
+impl ParityCodeTruth {
+    fn load(root: &Path) -> Result<Self> {
+        let mut implemented = BTreeSet::new();
+        let mcp_source = read_optional_source(
+            &root
+                .join("crates")
+                .join("agent-core")
+                .join("src")
+                .join("tools")
+                .join("mcp.rs"),
+        )?;
+        let cli_source = read_optional_source(
+            &root
+                .join("crates")
+                .join("neo-agent")
+                .join("src")
+                .join("cli.rs"),
+        )?;
+        let session_source = read_optional_source(
+            &root
+                .join("crates")
+                .join("agent-core")
+                .join("src")
+                .join("session")
+                .join("mod.rs"),
+        )?;
+
+        if mcp_source.contains("trait McpToolAdapter") && mcp_source.contains("McpToolProvider") {
+            implemented.insert(ImplementedSurface::McpToolAdapterBoundary);
+        }
+        if mcp_source.contains("McpStdioToolAdapter")
+            && mcp_source.contains("tools/list")
+            && mcp_source.contains("tools/call")
+        {
+            implemented.insert(ImplementedSurface::StdioMcpProcessAdapter);
+        }
+        if cli_source.contains("Status")
+            && cli_source.contains("Enable")
+            && cli_source.contains("Disable")
+            && cli_source.contains("ExtensionCommand")
+        {
+            implemented.insert(ImplementedSurface::ExtensionLifecycleCommands);
+        }
+        if session_source.contains("SessionMetadataStore")
+            && session_source.contains("pub fn fork")
+            && session_source.contains("pub fn rename")
+        {
+            implemented.insert(ImplementedSurface::SessionMetadataBranching);
+        }
+
+        Ok(Self { implemented })
+    }
+
+    fn has(&self, surface: ImplementedSurface) -> bool {
+        self.implemented.contains(&surface)
+    }
+}
+
+fn read_optional_source(path: &Path) -> Result<String> {
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    Ok(fs::read_to_string(path)?)
 }
 
 fn collect_files_with_extensions(
@@ -310,6 +391,14 @@ fn is_gap_or_checker_description(line: &str) -> bool {
         || normalized.contains("fake/local/placeholder production guidance")
         || normalized.contains("that point at fake or placeholder provider paths")
         || normalized.contains("compile time rust stub should only be added")
+        || normalized.contains("rejects stale text")
+        || normalized.contains("once symbols exist")
+        || normalized.contains("once `mcptooladapter`")
+        || normalized.contains("once status/enable/disable commands")
+        || normalized.contains("session branching and naming are future work\" once")
+        || normalized.contains("once `sessionmetadatastore::fork`")
+        || normalized.contains("once lifecycle commands exist")
+        || normalized.contains("once fork exists")
         || normalized.contains("parity gate")
 }
 
@@ -337,7 +426,11 @@ fn parity_line_is_fixture_safe(line: &str) -> bool {
         || normalized.contains("localhost")
 }
 
-fn parity_line_violation(line: &str, explicit_fixture_path: bool) -> Option<&'static str> {
+fn parity_line_violation(
+    line: &str,
+    explicit_fixture_path: bool,
+    code_truth: &ParityCodeTruth,
+) -> Option<&'static str> {
     let lower = line.to_lowercase();
     let normalized = lower.replace(['-', '_'], " ");
     if is_gap_or_checker_description(line) {
@@ -378,6 +471,10 @@ fn parity_line_violation(line: &str, explicit_fixture_path: bool) -> Option<&'st
         return None;
     }
 
+    if let Some(reason) = stale_gap_claim_violation(&normalized, code_truth) {
+        return Some(reason);
+    }
+
     if production_context && fake_context {
         return Some("production fake/default guidance");
     }
@@ -403,6 +500,56 @@ fn parity_line_violation(line: &str, explicit_fixture_path: bool) -> Option<&'st
 
     if normalized.contains("local deterministic") || normalized.contains("deterministic guidance") {
         return Some("local deterministic guidance");
+    }
+
+    None
+}
+
+fn stale_gap_claim_violation(
+    normalized: &str,
+    code_truth: &ParityCodeTruth,
+) -> Option<&'static str> {
+    if code_truth.has(ImplementedSurface::McpToolAdapterBoundary)
+        && normalized.contains("mcp")
+        && normalized.contains("adapter")
+        && (normalized.contains("not wired")
+            || normalized.contains("no mcp")
+            || normalized.contains("future work"))
+    {
+        return Some("stale MCP adapter gap claim");
+    }
+
+    if code_truth.has(ImplementedSurface::StdioMcpProcessAdapter)
+        && normalized.contains("mcp")
+        && normalized.contains("process")
+        && (normalized.contains("does not yet spawn")
+            || normalized.contains("not yet spawn")
+            || normalized.contains("not implemented")
+            || normalized.contains("future work"))
+    {
+        return Some("stale MCP process adapter gap claim");
+    }
+
+    if code_truth.has(ImplementedSurface::ExtensionLifecycleCommands)
+        && normalized.contains("extension lifecycle")
+        && (normalized.contains("do not document")
+            || normalized.contains("not available")
+            || normalized.contains("unavailable")
+            || normalized.contains("not implemented")
+            || normalized.contains("future work"))
+    {
+        return Some("stale extension lifecycle gap claim");
+    }
+
+    if code_truth.has(ImplementedSurface::SessionMetadataBranching)
+        && (normalized.contains("branching") || normalized.contains("fork"))
+        && normalized.contains("naming")
+        && (normalized.contains("future work")
+            || normalized.contains("remain")
+            || normalized.contains("missing")
+            || normalized.contains("not implemented"))
+    {
+        return Some("stale session branching gap claim");
     }
 
     None
@@ -937,6 +1084,37 @@ mod tests {
     #[test]
     fn parity_validation_allows_gap_and_checker_descriptions() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let mcp_source = dir
+            .path()
+            .join("crates")
+            .join("agent-core")
+            .join("src")
+            .join("tools");
+        let session_source = dir
+            .path()
+            .join("crates")
+            .join("agent-core")
+            .join("src")
+            .join("session");
+        let agent_source = dir.path().join("crates").join("neo-agent").join("src");
+        std::fs::create_dir_all(&mcp_source).expect("mcp source dir");
+        std::fs::create_dir_all(&session_source).expect("session source dir");
+        std::fs::create_dir_all(&agent_source).expect("agent source dir");
+        std::fs::write(
+            mcp_source.join("mcp.rs"),
+            "pub trait McpToolAdapter {}\npub struct McpToolProvider;\n",
+        )
+        .expect("write mcp source");
+        std::fs::write(
+            session_source.join("mod.rs"),
+            "impl SessionMetadataStore { pub fn fork(&self) {} pub fn rename(&self) {} }\n",
+        )
+        .expect("write session source");
+        std::fs::write(
+            agent_source.join("cli.rs"),
+            "pub enum ExtensionCommand { Status, Enable, Disable }\n",
+        )
+        .expect("write cli source");
         std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
         std::fs::write(
             dir.path().join("docs").join("gap").join("neo-agent.md"),
@@ -949,6 +1127,9 @@ mod tests {
                 "`--docs` scans for production docs\n",
                 "that point at fake or placeholder provider paths.\n",
                 "It also scans for fake/local/placeholder production guidance.\n",
+                "It rejects stale text such as \"no MCP adapter is wired\" once symbols exist.\n",
+                "It rejects \"extension lifecycle unavailable\" once lifecycle commands exist.\n",
+                "It rejects \"session branching and naming are future work\" once fork exists.\n",
             ),
         )
         .expect("write quickstart");
@@ -961,5 +1142,133 @@ mod tests {
         let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
 
         assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_mcp_adapter_gap_after_adapter_symbol_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_dir = dir
+            .path()
+            .join("crates")
+            .join("agent-core")
+            .join("src")
+            .join("tools");
+        std::fs::create_dir_all(&source_dir).expect("mcp source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            source_dir.join("mcp.rs"),
+            "pub trait McpToolAdapter {}\npub struct McpToolProvider;\n",
+        )
+        .expect("write mcp source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("INDEX.md"),
+            "No MCP client adapter is wired into neo-agent-core yet.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/INDEX.md:1 contains stale MCP adapter gap claim: No MCP client adapter is wired into neo-agent-core yet.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_mcp_process_gap_after_stdio_adapter_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_dir = dir
+            .path()
+            .join("crates")
+            .join("agent-core")
+            .join("src")
+            .join("tools");
+        std::fs::create_dir_all(&source_dir).expect("mcp source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            source_dir.join("mcp.rs"),
+            concat!(
+                "pub trait McpToolAdapter {}\n",
+                "pub struct McpToolProvider;\n",
+                "pub struct McpStdioToolAdapter;\n",
+                "const METHODS: &[&str] = &[\"tools/list\", \"tools/call\"];\n",
+            ),
+        )
+        .expect("write mcp source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("INDEX.md"),
+            "Neo still does not yet spawn external MCP server processes.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/INDEX.md:1 contains stale MCP process adapter gap claim: Neo still does not yet spawn external MCP server processes.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_extension_lifecycle_gap_after_commands_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_dir = dir.path().join("crates").join("neo-agent").join("src");
+        std::fs::create_dir_all(&source_dir).expect("agent source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            source_dir.join("cli.rs"),
+            "pub enum ExtensionCommand { Status, Enable, Disable }\n",
+        )
+        .expect("write cli source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("neo-agent.md"),
+            "Do not document extension lifecycle management as available Neo features yet.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/neo-agent.md:1 contains stale extension lifecycle gap claim: Do not document extension lifecycle management as available Neo features yet.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_session_branching_gap_after_fork_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_dir = dir
+            .path()
+            .join("crates")
+            .join("agent-core")
+            .join("src")
+            .join("session");
+        std::fs::create_dir_all(&source_dir).expect("session source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            source_dir.join("mod.rs"),
+            "impl SessionMetadataStore { pub fn fork(&self) {} pub fn rename(&self) {} }\n",
+        )
+        .expect("write session source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("INDEX.md"),
+            "Session tree branching and naming remain pi-inspired future work.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/INDEX.md:1 contains stale session branching gap claim: Session tree branching and naming remain pi-inspired future work.".to_string()
+            ]
+        );
     }
 }

@@ -33,10 +33,15 @@ Use `neo_ai::tool_schema::schema_for<T>()` to generate JSON Schema from small se
 | `find` | `{ "pattern": "config", "path": ".", "limit": 20 }` | file read |
 | `write` | `{ "path": "tmp.txt", "content": "hello" }` | file write |
 | `edit` | `{ "path": "tmp.txt", "old": "hello", "new": "hi", "replace_all": false }` | file write |
-| `bash` | `{ "command": "cargo test -p xtask", "timeout_ms": 30000, "max_output_bytes": 65536 }` | shell |
+| `bash` | `{ "command": "cargo test -p xtask", "timeout_ms": 30000, "max_output_bytes": 65536 }` or `{ "mode": "start", "command": "cargo test -p xtask" }` then `{ "mode": "poll", "handle": "..." }` | shell |
 
 All file paths are resolved inside `ToolContext::workspace_root()`. Attempts to
 escape the workspace fail before execution.
+
+`bash` defaults to foreground mode for compatibility. Background mode is compact:
+`start` launches a real child process and returns a handle; `poll` returns the
+current status, exit code when finished, and captured stdout/stderr. It is not a
+PTY and does not support interactive stdin.
 
 ## Runtime Boundary
 

@@ -1,11 +1,132 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeMap,
+    fs,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use neo_agent_core::{
-    McpError, McpToolAdapter, McpToolCall, McpToolDefinition, McpToolProvider, McpToolResponse,
-    PermissionPolicy, ToolContext, ToolRegistry,
+    McpError, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter, McpToolCall, McpToolDefinition,
+    McpToolProvider, McpToolResponse, PermissionPolicy, ToolContext, ToolRegistry,
 };
 use serde_json::json;
+
+const MCP_STDIO_FIXTURE: &str = r#"
+import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request["method"]
+    if method == "initialize":
+        response = {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "fixture", "version": "0.1.0"},
+                "capabilities": {"tools": {}},
+            },
+        }
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        response = {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {
+                "tools": [
+                    {
+                        "name": "docs-search",
+                        "description": "Search project docs",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                        },
+                    }
+                ]
+            },
+        }
+    elif method == "tools/call":
+        assert request["params"]["name"] == "docs-search"
+        query = request["params"]["arguments"]["query"]
+        response = {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {
+                "content": [{"type": "text", "text": f"found {query}"}],
+                "isError": False,
+            },
+        }
+    else:
+        response = {
+            "jsonrpc": "2.0",
+            "id": request.get("id"),
+            "error": {"code": -32601, "message": f"unknown method {method}"},
+        }
+    print(json.dumps(response), flush=True)
+"#;
+
+#[tokio::test]
+async fn mcp_stdio_adapter_discovers_and_calls_json_rpc_tools() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let fixture_path = workspace.path().join("mcp-fixture.py");
+    fs::write(&fixture_path, MCP_STDIO_FIXTURE).expect("write MCP fixture");
+    let adapter = Arc::new(McpStdioToolAdapter::new(McpStdioConfig {
+        command: "python3".to_owned(),
+        args: vec!["-u".to_owned(), fixture_path.display().to_string()],
+        env: BTreeMap::new(),
+    }));
+
+    let provider = McpToolProvider::discover("docs-server", Arc::clone(&adapter))
+        .await
+        .expect("discover provider over stdio");
+    let specs = provider.specs();
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].name, "mcp__docs_server__docs_search");
+    assert_eq!(specs[0].description, "Search project docs");
+    assert_eq!(
+        specs[0].input_schema,
+        json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" }
+            },
+            "required": ["query"]
+        })
+    );
+
+    let mut registry = ToolRegistry::new();
+    provider.register_into(&mut registry);
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let result = registry
+        .run(
+            "mcp__docs_server__docs_search",
+            &context,
+            json!({ "query": "runtime tools" }),
+        )
+        .await
+        .expect("run mcp tool over stdio");
+
+    assert_eq!(result.content, "found runtime tools");
+    assert!(!result.is_error);
+    assert_eq!(
+        result.details,
+        Some(json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": "found runtime tools"
+                }
+            ],
+            "isError": false
+        }))
+    );
+}
 
 #[tokio::test]
 async fn mcp_provider_discovers_namespaced_tool_specs() {
