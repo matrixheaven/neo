@@ -115,7 +115,14 @@ pub enum McpCommand {
 #[derive(Debug, Subcommand)]
 pub enum McpResourceCommand {
     List,
-    Read { uri: String },
+    Read {
+        uri: String,
+    },
+    Watch {
+        uri: String,
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+    },
 }
 
 #[derive(Debug, Subcommand)]

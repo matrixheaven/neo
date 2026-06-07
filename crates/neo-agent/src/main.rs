@@ -100,6 +100,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
                 cli::McpResourceCommand::Read { uri } => {
                     modes::run::read_mcp_resource(&config, &server_id, &uri).await
                 }
+                cli::McpResourceCommand::Watch { uri, count } => {
+                    modes::run::watch_mcp_resource(&config, &server_id, &uri, count).await
+                }
             },
         },
         Some(Command::Rpc) => rpc_mode::execute(&config).await,

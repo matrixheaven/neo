@@ -169,6 +169,45 @@ pub async fn read_mcp_resource(
     Ok(out)
 }
 
+pub async fn watch_mcp_resource(
+    config: &AppConfig,
+    server_id: &str,
+    uri: &str,
+    count: usize,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(count > 0, "MCP resource watch count must be greater than 0");
+    let server = enabled_mcp_server(config, server_id)?;
+    let adapter = mcp_adapter_for_server(server)?;
+    adapter
+        .subscribe_resource(uri)
+        .await
+        .with_context(|| format!("failed to subscribe to MCP resource {uri} from {server_id}"))?;
+
+    let mut out = String::new();
+    let mut watch_result = Ok(());
+    for _ in 0..count {
+        match adapter.next_resource_update().await {
+            Ok(update) => {
+                let _ = writeln!(out, "{}", update.uri);
+            }
+            Err(err) => {
+                watch_result = Err(err);
+                break;
+            }
+        }
+    }
+
+    let unsubscribe_result = adapter.unsubscribe_resource(uri).await;
+    if let Err(err) = watch_result {
+        return Err(anyhow::Error::from(err).context(format!(
+            "failed while watching MCP resource {uri} from {server_id}"
+        )));
+    }
+    unsubscribe_result
+        .with_context(|| format!("failed to unsubscribe from MCP resource {uri} on {server_id}"))?;
+    Ok(out)
+}
+
 pub struct PromptTurn {
     pub events: Vec<AgentEvent>,
     pub assistant_text: String,

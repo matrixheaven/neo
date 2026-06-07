@@ -15,8 +15,9 @@
 - Config loading merges CLI overrides, environment overrides, project config,
   user-global `~/.neo/config.toml`, and built-in defaults.
 - Supported config keys include `default_model`, `default_provider`,
-  `api_base`, `api_key_env`, `sessions_dir`, `permissions.file_read`,
-  `permissions.file_write`, `permissions.shell`, `defaults.mode`,
+  `api_base`, `api_key_env`, `model_catalogs`, `sessions_dir`,
+  `permissions.file_read`, `permissions.file_write`, `permissions.shell`,
+  `defaults.mode`,
   provider-specific API key env names, and runtime generation/agent options
   such as temperature, max tokens, queue modes, tool execution mode, and
   compaction thresholds.
@@ -41,7 +42,8 @@
 - `mcp list` reads project MCP server entries without starting servers.
 - `mcp resources <server-id> list/read` explicitly fetches configured MCP
   server resource catalogs and content over the same stdio or HTTP/SSE
-  transport adapters.
+  transport adapters. `mcp resources <server-id> watch <uri>` subscribes to a
+  stdio resource, prints real update notifications, and unsubscribes.
 - `print` and `run` discover enabled project MCP servers with
   `transport = "stdio"`, `transport = "http"`, or `transport = "sse"` and
   register their tools in the runtime tool registry.
@@ -73,6 +75,6 @@ and platform-specific guidance.
   yet.
 - Add richer session tree UI and hosted share only when real local or hosted
   backing behavior exists.
-- Keep MCP runtime config limited to tools and explicit resource reads until
-  subscriptions, hosted server lifecycle, and OAuth/trust flows are
-  implemented.
+- Keep MCP runtime config limited to tools and explicit stdio resource
+  subscription/watch flows until remote resource streams, hosted server
+  lifecycle, and OAuth/trust flows are implemented.

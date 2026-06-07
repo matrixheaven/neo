@@ -97,7 +97,9 @@ stdio adapter also supports `resources/subscribe`,
 `transport = "http"`, and `transport = "sse"` servers from project config and
 advertise their tools to the configured model. `neo mcp resources <server>
 list/read` fetches resource catalogs and content without adding them to model
-context automatically.
+context automatically. `neo mcp resources <server> watch <uri>` subscribes to a
+stdio resource, waits for real `notifications/resources/updated` messages,
+prints updated URIs, and unsubscribes before exiting.
 
 Current limitation: remote HTTP/SSE resource update streams, OAuth/hosted server
 lifecycle, and hosted MCP management remain future work.
