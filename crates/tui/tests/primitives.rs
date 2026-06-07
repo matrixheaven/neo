@@ -186,6 +186,32 @@ fn prompt_edit_applies_character_and_word_operations() {
 }
 
 #[test]
+fn prompt_edit_tracks_undo_and_kill_ring_yank() {
+    let mut prompt = PromptState::new("hello brave world").with_cursor(6);
+
+    assert_eq!(
+        prompt.apply_edit(PromptEdit::DeleteToLineEnd),
+        Some("brave world".into())
+    );
+    assert_eq!(prompt.text, "hello ");
+
+    assert_eq!(
+        prompt.apply_edit(PromptEdit::Yank),
+        Some("brave world".into())
+    );
+    assert_eq!(prompt.text, "hello brave world");
+    assert_eq!(prompt.cursor, 17);
+
+    assert_eq!(prompt.apply_edit(PromptEdit::Undo), None);
+    assert_eq!(prompt.text, "hello ");
+    assert_eq!(prompt.cursor, 6);
+
+    assert_eq!(prompt.apply_edit(PromptEdit::Undo), None);
+    assert_eq!(prompt.text, "hello brave world");
+    assert_eq!(prompt.cursor, 6);
+}
+
+#[test]
 fn wrap_width_preserves_display_width_for_wide_text() {
     let lines = wrap_width("ab界cd🙂ef", 5);
 

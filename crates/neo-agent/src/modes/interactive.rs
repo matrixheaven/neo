@@ -212,8 +212,17 @@ where
                     .prompt_mut()
                     .apply_edit(PromptEdit::DeleteToLineEnd);
             }
+            KeybindingAction::EditorYank => {
+                self.app.prompt_mut().apply_edit(PromptEdit::Yank);
+            }
+            KeybindingAction::EditorUndo => {
+                self.app.prompt_mut().apply_edit(PromptEdit::Undo);
+            }
             KeybindingAction::InputNewLine => {
                 self.app.prompt_mut().apply_edit(PromptEdit::Insert("\n"));
+            }
+            KeybindingAction::InputTab => {
+                self.app.prompt_mut().apply_edit(PromptEdit::Insert("\t"));
             }
             KeybindingAction::InputSubmit => {
                 self.submit_current_prompt().await?;
@@ -243,9 +252,6 @@ where
             | KeybindingAction::EditorCursorDown
             | KeybindingAction::EditorPageUp
             | KeybindingAction::EditorPageDown
-            | KeybindingAction::EditorYank
-            | KeybindingAction::EditorUndo
-            | KeybindingAction::InputTab
             | KeybindingAction::InputCopy
             | KeybindingAction::SelectPageUp
             | KeybindingAction::SelectPageDown => {}
@@ -314,6 +320,9 @@ const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::EditorDeleteWordForward,
     KeybindingAction::EditorDeleteToLineStart,
     KeybindingAction::EditorDeleteToLineEnd,
+    KeybindingAction::EditorYank,
+    KeybindingAction::EditorUndo,
+    KeybindingAction::InputTab,
     KeybindingAction::SelectCancel,
 ];
 
@@ -623,6 +632,10 @@ mod tests {
                         InputEvent::Action(KeybindingAction::EditorCursorWordLeft),
                         InputEvent::Action(KeybindingAction::EditorDeleteWordBackward),
                         InputEvent::Action(KeybindingAction::EditorDeleteToLineEnd),
+                        InputEvent::Action(KeybindingAction::EditorYank),
+                        InputEvent::Action(KeybindingAction::EditorUndo),
+                        InputEvent::Action(KeybindingAction::EditorUndo),
+                        InputEvent::Action(KeybindingAction::InputTab),
                         InputEvent::Action(KeybindingAction::SelectCancel),
                     ]
                     .into_iter(),
@@ -631,8 +644,8 @@ mod tests {
             .await
             .expect("event loop succeeds");
 
-        assert_eq!(controller.app().prompt().text, "hello ");
-        assert_eq!(controller.app().prompt().cursor, 6);
+        assert_eq!(controller.app().prompt().text, "hello \tworld");
+        assert_eq!(controller.app().prompt().cursor, 7);
     }
 
     #[tokio::test]

@@ -17,12 +17,12 @@ Target: `crates/tui`.
 - The live interactive loop now dispatches default `KeybindingsManager` actions
   into real prompt and overlay primitives for word movement, word deletion,
   delete-to-line-start/end, submit/newline, approval selection up/down,
-  approval confirm, overlay cancel, and exit cancel.
+  approval confirm, overlay cancel, exit cancel, tab insertion, prompt undo, and
+  kill-ring yank.
 
 ## Remaining lower-priority gaps
 
 - The Rust crate does not implement the full TypeScript terminal diff renderer,
   image protocols, ANSI-preserving wrapping, autocomplete, stdin buffering,
-  undo stack, kill ring, yank, copy, tab completion, or page-up/page-down
-  selection actions.
+  copy, tab completion, or page-up/page-down selection actions.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.

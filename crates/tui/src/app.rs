@@ -1313,6 +1313,14 @@ impl ToolStatus {
 pub struct PromptState {
     pub text: String,
     pub cursor: usize,
+    undo_stack: Vec<PromptSnapshot>,
+    kill_ring: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptSnapshot {
+    text: String,
+    cursor: usize,
 }
 
 impl PromptState {
@@ -1320,7 +1328,12 @@ impl PromptState {
     pub fn new(text: impl Into<String>) -> Self {
         let text = text.into();
         let cursor = text.chars().count();
-        Self { text, cursor }
+        Self {
+            text,
+            cursor,
+            undo_stack: Vec::new(),
+            kill_ring: Vec::new(),
+        }
     }
 
     #[must_use]
@@ -1335,19 +1348,28 @@ impl PromptState {
         match edit {
             PromptEdit::Insert(text) => {
                 let inserted = text.to_string();
+                if inserted.is_empty() {
+                    return None;
+                }
+                let before = self.snapshot();
                 let index = self.byte_index(self.cursor);
                 self.text.insert_str(index, &inserted);
                 self.cursor += inserted.chars().count();
+                self.push_undo(before);
                 Some(inserted)
             }
-            PromptEdit::Backspace => self.delete_range(
+            PromptEdit::Backspace => self.apply_delete(
                 self.cursor.saturating_sub(1),
                 self.cursor,
                 DeleteDirection::Backward,
+                false,
             ),
-            PromptEdit::Delete => {
-                self.delete_range(self.cursor, self.cursor + 1, DeleteDirection::Forward)
-            }
+            PromptEdit::Delete => self.apply_delete(
+                self.cursor,
+                self.cursor + 1,
+                DeleteDirection::Forward,
+                false,
+            ),
             PromptEdit::MoveLeft => {
                 self.cursor = self.cursor.saturating_sub(1);
                 None
@@ -1374,17 +1396,33 @@ impl PromptState {
             }
             PromptEdit::DeleteWordBackward => {
                 let start = find_word_backward(&self.text, self.cursor);
-                self.delete_range(start, self.cursor, DeleteDirection::Backward)
+                self.apply_delete(start, self.cursor, DeleteDirection::Backward, true)
             }
             PromptEdit::DeleteWordForward => {
                 let end = find_word_forward(&self.text, self.cursor);
-                self.delete_range(self.cursor, end, DeleteDirection::Forward)
+                self.apply_delete(self.cursor, end, DeleteDirection::Forward, true)
             }
             PromptEdit::DeleteToLineStart => {
-                self.delete_range(0, self.cursor, DeleteDirection::Backward)
+                self.apply_delete(0, self.cursor, DeleteDirection::Backward, true)
             }
             PromptEdit::DeleteToLineEnd => {
-                self.delete_range(self.cursor, self.char_len(), DeleteDirection::Forward)
+                self.apply_delete(self.cursor, self.char_len(), DeleteDirection::Forward, true)
+            }
+            PromptEdit::Yank => {
+                let yanked = self.kill_ring.last().cloned()?;
+                let before = self.snapshot();
+                let index = self.byte_index(self.cursor);
+                self.text.insert_str(index, &yanked);
+                self.cursor += yanked.chars().count();
+                self.push_undo(before);
+                Some(yanked)
+            }
+            PromptEdit::Undo => {
+                if let Some(snapshot) = self.undo_stack.pop() {
+                    self.text = snapshot.text;
+                    self.cursor = snapshot.cursor.min(self.char_len());
+                }
+                None
             }
         }
     }
@@ -1403,6 +1441,33 @@ impl PromptState {
             .char_indices()
             .nth(char_index)
             .map_or(self.text.len(), |(index, _)| index)
+    }
+
+    fn snapshot(&self) -> PromptSnapshot {
+        PromptSnapshot {
+            text: self.text.clone(),
+            cursor: self.cursor,
+        }
+    }
+
+    fn push_undo(&mut self, snapshot: PromptSnapshot) {
+        self.undo_stack.push(snapshot);
+    }
+
+    fn apply_delete(
+        &mut self,
+        start: usize,
+        end: usize,
+        direction: DeleteDirection,
+        record_kill: bool,
+    ) -> Option<String> {
+        let before = self.snapshot();
+        let deleted = self.delete_range(start, end, direction)?;
+        self.push_undo(before);
+        if record_kill {
+            self.kill_ring.push(deleted.clone());
+        }
+        Some(deleted)
     }
 
     fn delete_range(
@@ -1453,6 +1518,8 @@ pub enum PromptEdit<'a> {
     DeleteWordForward,
     DeleteToLineStart,
     DeleteToLineEnd,
+    Yank,
+    Undo,
 }
 
 fn find_word_backward(text: &str, cursor: usize) -> usize {
