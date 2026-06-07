@@ -7,7 +7,8 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
-    sync::Mutex,
+    sync::{Mutex, mpsc},
+    task::JoinHandle,
 };
 
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolRegistry, ToolResult};
@@ -134,6 +135,11 @@ pub struct McpResourceRead {
     pub contents: Vec<McpResourceContent>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpResourceUpdate {
+    pub uri: String,
+}
+
 #[async_trait]
 pub trait McpToolAdapter: Send + Sync {
     async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError>;
@@ -153,6 +159,24 @@ pub trait McpToolAdapter: Send + Sync {
     async fn read_resource(&self, _uri: &str) -> Result<McpResourceRead, McpError> {
         Err(McpError::protocol(
             "MCP adapter does not support resources/read",
+        ))
+    }
+
+    async fn subscribe_resource(&self, _uri: &str) -> Result<(), McpError> {
+        Err(McpError::protocol(
+            "MCP adapter does not support resources/subscribe",
+        ))
+    }
+
+    async fn unsubscribe_resource(&self, _uri: &str) -> Result<(), McpError> {
+        Err(McpError::protocol(
+            "MCP adapter does not support resources/unsubscribe",
+        ))
+    }
+
+    async fn next_resource_update(&self) -> Result<McpResourceUpdate, McpError> {
+        Err(McpError::protocol(
+            "MCP adapter does not support resource update notifications",
         ))
     }
 }
@@ -470,12 +494,52 @@ impl McpToolAdapter for McpStdioToolAdapter {
             .await?;
         serde_json::from_value(result).map_err(|err| McpError::protocol(err.to_string()))
     }
+
+    async fn subscribe_resource(&self, uri: &str) -> Result<(), McpError> {
+        self.request(
+            "resources/subscribe",
+            Some(json_obj([(
+                "uri",
+                serde_json::Value::String(uri.to_owned()),
+            )])),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn unsubscribe_resource(&self, uri: &str) -> Result<(), McpError> {
+        self.request(
+            "resources/unsubscribe",
+            Some(json_obj([(
+                "uri",
+                serde_json::Value::String(uri.to_owned()),
+            )])),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn next_resource_update(&self) -> Result<McpResourceUpdate, McpError> {
+        let mut session = self.session.lock().await;
+        let Some(active) = session.as_mut() else {
+            return Err(McpError::protocol(
+                "MCP stdio resource updates require an active subscription",
+            ));
+        };
+        let result = active.next_resource_update().await;
+        if result.is_err() {
+            *session = None;
+        }
+        result
+    }
 }
 
 struct StdioJsonRpcSession {
     child: tokio::process::Child,
     stdin: tokio::process::ChildStdin,
-    stdout: BufReader<tokio::process::ChildStdout>,
+    response_rx: mpsc::UnboundedReceiver<Result<serde_json::Value, McpError>>,
+    resource_update_rx: mpsc::UnboundedReceiver<McpResourceUpdate>,
+    reader_task: JoinHandle<()>,
     next_id: u64,
 }
 
@@ -504,10 +568,16 @@ impl StdioJsonRpcSession {
             .stdout
             .take()
             .ok_or_else(|| McpError::protocol("failed to open MCP server stdout"))?;
+        let (response_tx, response_rx) = mpsc::unbounded_channel();
+        let (resource_update_tx, resource_update_rx) = mpsc::unbounded_channel();
+        let reader_task =
+            tokio::spawn(read_stdio_messages(stdout, response_tx, resource_update_tx));
         Ok(Self {
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            response_rx,
+            resource_update_rx,
+            reader_task,
             next_id: 1,
         })
     }
@@ -562,7 +632,11 @@ impl StdioJsonRpcSession {
         self.write_message(serde_json::Value::Object(request))
             .await?;
         loop {
-            let response = self.read_message().await?;
+            let response = self
+                .response_rx
+                .recv()
+                .await
+                .ok_or_else(|| McpError::protocol("MCP server closed stdout"))??;
             if response.get("id").and_then(serde_json::Value::as_u64) != Some(id) {
                 continue;
             }
@@ -602,22 +676,17 @@ impl StdioJsonRpcSession {
             .map_err(|err| McpError::protocol(format!("failed to flush MCP request: {err}")))
     }
 
-    async fn read_message(&mut self) -> Result<serde_json::Value, McpError> {
-        let mut line = String::new();
-        let bytes = self
-            .stdout
-            .read_line(&mut line)
+    async fn next_resource_update(&mut self) -> Result<McpResourceUpdate, McpError> {
+        self.resource_update_rx
+            .recv()
             .await
-            .map_err(|err| McpError::protocol(format!("failed to read MCP response: {err}")))?;
-        if bytes == 0 {
-            return Err(McpError::protocol("MCP server closed stdout"));
-        }
-        serde_json::from_str(&line).map_err(|err| McpError::protocol(err.to_string()))
+            .ok_or_else(|| McpError::protocol("MCP server closed stdout"))
     }
 }
 
 impl Drop for StdioJsonRpcSession {
     fn drop(&mut self) {
+        self.reader_task.abort();
         let _ = self.child.start_kill();
     }
 }
@@ -762,6 +831,72 @@ struct RemoteMcpToolDefinition {
 #[derive(Debug, Deserialize)]
 struct ListResourcesResponse {
     resources: Vec<McpResourceDefinition>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResourceUpdatedNotificationParams {
+    uri: String,
+}
+
+async fn read_stdio_messages(
+    stdout: tokio::process::ChildStdout,
+    response_tx: mpsc::UnboundedSender<Result<serde_json::Value, McpError>>,
+    resource_update_tx: mpsc::UnboundedSender<McpResourceUpdate>,
+) {
+    let mut stdout = BufReader::new(stdout);
+    loop {
+        let mut line = String::new();
+        match stdout.read_line(&mut line).await {
+            Ok(0) => {
+                let _ = response_tx.send(Err(McpError::protocol("MCP server closed stdout")));
+                break;
+            }
+            Ok(_) => {
+                let message = match serde_json::from_str::<serde_json::Value>(&line) {
+                    Ok(message) => message,
+                    Err(err) => {
+                        let _ = response_tx.send(Err(McpError::protocol(err.to_string())));
+                        break;
+                    }
+                };
+                if message.get("id").is_some() {
+                    if response_tx.send(Ok(message)).is_err() {
+                        break;
+                    }
+                } else if message.get("method").and_then(serde_json::Value::as_str)
+                    == Some("notifications/resources/updated")
+                {
+                    match resource_update_from_notification(&message) {
+                        Ok(update) => {
+                            let _ = resource_update_tx.send(update);
+                        }
+                        Err(err) => {
+                            let _ = response_tx.send(Err(err));
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                let _ = response_tx.send(Err(McpError::protocol(format!(
+                    "failed to read MCP response: {err}"
+                ))));
+                break;
+            }
+        }
+    }
+}
+
+fn resource_update_from_notification(
+    message: &serde_json::Value,
+) -> Result<McpResourceUpdate, McpError> {
+    let params = message
+        .get("params")
+        .cloned()
+        .ok_or_else(|| McpError::protocol("MCP resource update notification missing params"))?;
+    let params: ResourceUpdatedNotificationParams =
+        serde_json::from_value(params).map_err(|err| McpError::protocol(err.to_string()))?;
+    Ok(McpResourceUpdate { uri: params.uri })
 }
 
 fn empty_object_schema() -> serde_json::Value {

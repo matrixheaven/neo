@@ -18,13 +18,16 @@
   namespaced `ToolSpec` values and execute them through an async adapter
   registered in `ToolRegistry`.
 - `McpStdioToolAdapter` starts configured stdio MCP commands and speaks
-  JSON-RPC for `initialize`, `tools/list`, and `tools/call`, reusing the
-  initialized stdio session across discovery and tool calls without local
-  fallback behavior.
+  JSON-RPC for `initialize`, `tools/list`, `tools/call`, `resources/list`,
+  `resources/read`, `resources/subscribe`, and `resources/unsubscribe`,
+  reusing the initialized stdio session across discovery, tool calls, and
+  resource operations without local fallback behavior. It also queues real
+  `notifications/resources/updated` messages from the stdio server.
 - `McpHttpToolAdapter` sends JSON-RPC POST requests to configured HTTP/SSE MCP
   endpoints, applies configured headers, accepts JSON and SSE `data:`
   JSON-RPC responses, and supports `initialize`, `tools/list`, and
-  `tools/call` without local fallback behavior.
+  `tools/call` without local fallback behavior. Resource update subscriptions
+  are explicitly unsupported on the one-shot remote transport.
 - Stdio and HTTP/SSE MCP adapters also support explicit `resources/list` and
   `resources/read` requests without injecting resource content into model
   context.
@@ -52,8 +55,8 @@ interactive behavior.
   treating broad workspace checks as green.
 - Add docs and tests for `Ask` permission behavior once there is a CLI/TUI
   approval path. Today tools only execute on `Allow`.
-- Add MCP resource subscriptions/notifications once those runtime semantics are
-  needed.
+- Add remote HTTP/SSE MCP resource update streams once Neo has a long-lived
+  remote MCP transport.
 - Add hook/steering docs only when the runtime exposes those APIs.
 - Decide whether Neo needs full PTY/interactivity later. Current `bash`
   background support is intentionally compact start/poll process management.

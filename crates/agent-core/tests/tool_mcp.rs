@@ -194,6 +194,56 @@ for line in sys.stdin:
     print(json.dumps(response), flush=True)
 "#;
 
+const MCP_STDIO_RESOURCE_UPDATE_FIXTURE: &str = r#"
+import json
+import os
+import sys
+
+method_log = os.environ["MCP_METHOD_LOG"]
+
+def log_method(method):
+    with open(method_log, "a", encoding="utf-8") as log:
+        log.write(method + "\n")
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request["method"]
+    log_method(method)
+    if method == "initialize":
+        response = {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "resource-fixture", "version": "0.1.0"},
+                "capabilities": {"resources": {"subscribe": True}},
+            },
+        }
+    elif method == "notifications/initialized":
+        continue
+    elif method == "resources/subscribe":
+        assert request["params"]["uri"] == "file://docs/readme.md"
+        response = {"jsonrpc": "2.0", "id": request["id"], "result": {}}
+        print(json.dumps(response), flush=True)
+        notification = {
+            "jsonrpc": "2.0",
+            "method": "notifications/resources/updated",
+            "params": {"uri": "file://docs/readme.md"},
+        }
+        print(json.dumps(notification), flush=True)
+        continue
+    elif method == "resources/unsubscribe":
+        assert request["params"]["uri"] == "file://docs/readme.md"
+        response = {"jsonrpc": "2.0", "id": request["id"], "result": {}}
+    else:
+        response = {
+            "jsonrpc": "2.0",
+            "id": request.get("id"),
+            "error": {"code": -32601, "message": f"unknown method {method}"},
+        }
+    print(json.dumps(response), flush=True)
+"#;
+
 #[tokio::test]
 async fn mcp_stdio_adapter_discovers_and_calls_json_rpc_tools() {
     let workspace = tempfile::tempdir().expect("workspace");
@@ -306,6 +356,48 @@ async fn mcp_stdio_adapter_reuses_initialized_session_across_operations() {
 }
 
 #[tokio::test]
+async fn mcp_stdio_adapter_subscribes_and_receives_resource_updates() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let fixture_path = workspace.path().join("mcp-resource-update-fixture.py");
+    let method_log = workspace.path().join("mcp-methods.log");
+    fs::write(&fixture_path, MCP_STDIO_RESOURCE_UPDATE_FIXTURE)
+        .expect("write MCP resource fixture");
+    let adapter = McpStdioToolAdapter::new(McpStdioConfig {
+        command: "python3".to_owned(),
+        args: vec!["-u".to_owned(), fixture_path.display().to_string()],
+        env: BTreeMap::from([(
+            "MCP_METHOD_LOG".to_owned(),
+            method_log.display().to_string(),
+        )]),
+    });
+
+    adapter
+        .subscribe_resource("file://docs/readme.md")
+        .await
+        .expect("subscribe to MCP resource");
+    let update = adapter
+        .next_resource_update()
+        .await
+        .expect("receive resource update notification");
+    adapter
+        .unsubscribe_resource("file://docs/readme.md")
+        .await
+        .expect("unsubscribe from MCP resource");
+
+    assert_eq!(update.uri, "file://docs/readme.md");
+    let methods = fs::read_to_string(method_log).expect("read method log");
+    assert_eq!(
+        methods.lines().collect::<Vec<_>>(),
+        vec![
+            "initialize",
+            "notifications/initialized",
+            "resources/subscribe",
+            "resources/unsubscribe"
+        ]
+    );
+}
+
+#[tokio::test]
 async fn mcp_stdio_adapter_reconnects_after_cached_session_closes() {
     let workspace = tempfile::tempdir().expect("workspace");
     let fixture_path = workspace.path().join("mcp-reconnect-fixture.py");
@@ -354,6 +446,32 @@ async fn mcp_stdio_adapter_reconnects_after_cached_session_closes() {
     assert_eq!(recovered.content, "after reconnect");
     let startups = fs::read_to_string(startup_log).expect("read startup log");
     assert_eq!(startups.lines().count(), 2);
+}
+
+#[tokio::test]
+async fn mcp_http_adapter_does_not_fake_resource_update_subscriptions() {
+    let adapter = McpHttpToolAdapter::new(McpHttpConfig {
+        url: "http://127.0.0.1:9".to_owned(),
+        headers: BTreeMap::new(),
+    });
+
+    let subscribe_error = adapter
+        .subscribe_resource("file://docs/readme.md")
+        .await
+        .expect_err("HTTP adapter should not fake resource subscription support");
+    let update_error = adapter
+        .next_resource_update()
+        .await
+        .expect_err("HTTP adapter should not fake resource update notifications");
+
+    assert_eq!(
+        subscribe_error.message(),
+        "MCP adapter does not support resources/subscribe"
+    );
+    assert_eq!(
+        update_error.message(),
+        "MCP adapter does not support resource update notifications"
+    );
 }
 
 #[tokio::test]
