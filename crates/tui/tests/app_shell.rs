@@ -315,6 +315,80 @@ fn command_palette_session_and_model_pickers_filter_and_select_values() {
 }
 
 #[test]
+fn command_palette_session_and_model_pickers_page_selection() {
+    let mut palette = CommandPaletteState::new((0..10).map(|index| {
+        CommandSpec::new(
+            format!("command-{index}"),
+            format!("Command {index}"),
+            None::<String>,
+        )
+    }));
+    palette.page_down();
+    assert_eq!(palette.selected_command().expect("command").id, "command-8");
+    palette.page_down();
+    assert_eq!(palette.selected_command().expect("command").id, "command-9");
+    palette.page_up();
+    assert_eq!(palette.selected_command().expect("command").id, "command-1");
+    palette.page_up();
+    assert_eq!(palette.selected_command().expect("command").id, "command-0");
+
+    let mut sessions = SessionPickerState::new((0..10).map(|index| {
+        PickerItem::new(
+            format!("session-{index}"),
+            format!("Session {index}"),
+            None::<String>,
+        )
+    }));
+    sessions.page_down();
+    assert_eq!(sessions.confirm().expect("session").value, "session-8");
+
+    let mut models = ModelPickerState::new((0..10).map(|index| {
+        PickerItem::new(
+            format!("provider/model-{index}"),
+            format!("Model {index}"),
+            None::<String>,
+        )
+    }));
+    models.page_down();
+    models.page_up();
+    assert_eq!(
+        models.selected_model().expect("model").value,
+        "provider/model-0"
+    );
+}
+
+#[test]
+fn app_moves_focused_overlay_selection_by_page() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    app.push_overlay(Overlay::new(
+        "palette",
+        OverlayKind::CommandPalette(CommandPaletteState::new((0..10).map(|index| {
+            CommandSpec::new(
+                format!("command-{index}"),
+                format!("Command {index}"),
+                None::<String>,
+            )
+        }))),
+    ));
+
+    app.move_overlay_selection_page_down();
+    let Some(OverlayKind::CommandPalette(palette)) =
+        app.focused_overlay().map(|overlay| &overlay.kind)
+    else {
+        panic!("expected command palette overlay");
+    };
+    assert_eq!(palette.selected_command().expect("command").id, "command-8");
+
+    app.move_overlay_selection_page_up();
+    let Some(OverlayKind::CommandPalette(palette)) =
+        app.focused_overlay().map(|overlay| &overlay.kind)
+    else {
+        panic!("expected command palette overlay");
+    };
+    assert_eq!(palette.selected_command().expect("command").id, "command-0");
+}
+
+#[test]
 fn approval_overlay_exposes_selected_decision_without_runtime_logic() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
     let request = app.request_approval(

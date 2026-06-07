@@ -233,6 +233,12 @@ where
             KeybindingAction::SelectDown => {
                 self.app.move_overlay_selection_down();
             }
+            KeybindingAction::SelectPageUp => {
+                self.app.move_overlay_selection_page_up();
+            }
+            KeybindingAction::SelectPageDown => {
+                self.app.move_overlay_selection_page_down();
+            }
             KeybindingAction::SelectConfirm => {
                 if self.app.approval_choice().is_some() {
                     let _ = self.app.confirm_approval();
@@ -252,9 +258,7 @@ where
             | KeybindingAction::EditorCursorDown
             | KeybindingAction::EditorPageUp
             | KeybindingAction::EditorPageDown
-            | KeybindingAction::InputCopy
-            | KeybindingAction::SelectPageUp
-            | KeybindingAction::SelectPageDown => {}
+            | KeybindingAction::InputCopy => {}
         }
 
         Ok(false)
@@ -331,6 +335,8 @@ const OVERLAY_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::SelectCancel,
     KeybindingAction::SelectUp,
     KeybindingAction::SelectDown,
+    KeybindingAction::SelectPageUp,
+    KeybindingAction::SelectPageDown,
 ];
 
 struct RawTerminal {
@@ -695,6 +701,43 @@ mod tests {
             .await
             .expect("approval confirms");
         assert!(controller.app().focused_overlay().is_none());
+
+        controller.app.push_overlay(neo_tui::Overlay::new(
+            "palette",
+            OverlayKind::CommandPalette(neo_tui::CommandPaletteState::new((0..10).map(|index| {
+                neo_tui::CommandSpec::new(
+                    format!("command-{index}"),
+                    format!("Command {index}"),
+                    None::<String>,
+                )
+            }))),
+        ));
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectPageDown))
+            .await
+            .expect("selection pages down");
+        let Some(OverlayKind::CommandPalette(palette)) = controller
+            .app()
+            .focused_overlay()
+            .map(|overlay| &overlay.kind)
+        else {
+            panic!("expected command palette overlay");
+        };
+        assert_eq!(palette.selected_command().expect("command").id, "command-8");
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectPageUp))
+            .await
+            .expect("selection pages up");
+        let Some(OverlayKind::CommandPalette(palette)) = controller
+            .app()
+            .focused_overlay()
+            .map(|overlay| &overlay.kind)
+        else {
+            panic!("expected command palette overlay");
+        };
+        assert_eq!(palette.selected_command().expect("command").id, "command-0");
+        let _ = controller.app.close_focused_overlay();
 
         controller.app.push_overlay(neo_tui::Overlay::new(
             "custom",

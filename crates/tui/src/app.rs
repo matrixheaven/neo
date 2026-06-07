@@ -522,6 +522,14 @@ impl NeoTuiApp {
         self.with_focused_overlay_mut(Overlay::move_selection_up);
     }
 
+    pub fn move_overlay_selection_page_down(&mut self) {
+        self.with_focused_overlay_mut(Overlay::move_selection_page_down);
+    }
+
+    pub fn move_overlay_selection_page_up(&mut self) {
+        self.with_focused_overlay_mut(Overlay::move_selection_page_up);
+    }
+
     fn with_focused_overlay_mut(&mut self, action: impl FnOnce(&mut Overlay)) {
         let Some(id) = self.focused_overlay else {
             return;
@@ -691,6 +699,26 @@ impl Overlay {
             OverlayKind::Message(_) => {}
         }
     }
+
+    pub fn move_selection_page_down(&mut self) {
+        match &mut self.kind {
+            OverlayKind::CommandPalette(state) => state.page_down(),
+            OverlayKind::SessionPicker(state) | OverlayKind::ModelPicker(state) => {
+                state.page_down();
+            }
+            OverlayKind::Approval(_) | OverlayKind::Message(_) => {}
+        }
+    }
+
+    pub fn move_selection_page_up(&mut self) {
+        match &mut self.kind {
+            OverlayKind::CommandPalette(state) => state.page_up(),
+            OverlayKind::SessionPicker(state) | OverlayKind::ModelPicker(state) => {
+                state.page_up();
+            }
+            OverlayKind::Approval(_) | OverlayKind::Message(_) => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -756,6 +784,14 @@ impl PickerState {
 
     pub fn move_down(&mut self) {
         self.list.move_down();
+    }
+
+    pub fn page_up(&mut self) {
+        self.list.page_up();
+    }
+
+    pub fn page_down(&mut self) {
+        self.list.page_down();
     }
 
     #[must_use]
@@ -837,6 +873,14 @@ impl CommandPaletteState {
 
     pub fn move_down(&mut self) {
         self.list.move_down();
+    }
+
+    pub fn page_up(&mut self) {
+        self.list.page_up();
+    }
+
+    pub fn page_down(&mut self) {
+        self.list.page_down();
     }
 
     #[must_use]
@@ -1715,6 +1759,23 @@ impl SelectListState {
             self.selected_index = 0;
         } else {
             self.selected_index = (self.selected_index + 1) % len;
+        }
+    }
+
+    pub fn page_up(&mut self) {
+        if self.filtered_len() == 0 {
+            self.selected_index = 0;
+        } else {
+            self.selected_index = self.selected_index.saturating_sub(self.max_visible);
+        }
+    }
+
+    pub fn page_down(&mut self) {
+        let len = self.filtered_len();
+        if len == 0 {
+            self.selected_index = 0;
+        } else {
+            self.selected_index = (self.selected_index + self.max_visible).min(len - 1);
         }
     }
 

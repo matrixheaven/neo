@@ -286,6 +286,44 @@ fn select_list_filters_wraps_and_reports_visible_window() {
 }
 
 #[test]
+fn select_list_pages_by_visible_window_and_clamps() {
+    let mut list = SelectListState::new(
+        (0..10).map(|index| {
+            SelectItem::new(
+                format!("item-{index}"),
+                format!("Item {index}"),
+                None::<String>,
+            )
+        }),
+        4,
+    );
+
+    list.page_down();
+    assert_eq!(list.selected_item().expect("selected").value, "item-4");
+    assert_eq!(list.visible_range(), 2..6);
+
+    list.page_down();
+    assert_eq!(list.selected_item().expect("selected").value, "item-8");
+    assert_eq!(list.visible_range(), 6..10);
+
+    list.page_down();
+    assert_eq!(list.selected_item().expect("selected").value, "item-9");
+    assert_eq!(list.visible_range(), 6..10);
+
+    list.page_up();
+    assert_eq!(list.selected_item().expect("selected").value, "item-5");
+    assert_eq!(list.visible_range(), 3..7);
+
+    list.page_up();
+    assert_eq!(list.selected_item().expect("selected").value, "item-1");
+    assert_eq!(list.visible_range(), 0..4);
+
+    list.page_up();
+    assert_eq!(list.selected_item().expect("selected").value, "item-0");
+    assert_eq!(list.visible_range(), 0..4);
+}
+
+#[test]
 fn transcript_widget_renders_roles_tools_and_wraps_content() {
     let transcript = ChatTranscript::from_items([
         TranscriptItem::user("hello world from me"),
