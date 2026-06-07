@@ -58,9 +58,12 @@
   and redirected stdout. `ctrl+r` opens a local session picker backed by
   `sessions_dir` metadata and JSONL files; selecting a session replays its
   compacted context into the TUI, and subsequent prompts use that context while
-  appending new events to the selected JSONL session. `ctrl+o` opens a model
-  picker backed by the resolved `ModelRegistry`; selecting a model updates the
-  TUI header and uses that provider/model for subsequent turns.
+  appending new events to the selected JSONL session. With the session picker
+  focused, `ctrl+n` forks the selected session through
+  `SessionMetadataStore::fork()`, loads the child transcript, and routes later
+  prompts to the child JSONL session. `ctrl+o` opens a model picker backed by
+  the resolved `ModelRegistry`; selecting a model updates the TUI header and
+  uses that provider/model for subsequent turns.
 
 ## Pi Parity Pressure
 
@@ -78,8 +81,8 @@ and platform-specific guidance.
 - Do not document `/login`, `/tree`, hosted sharing, hosted extension
   marketplace catalog/search/install flows, or themes as available Neo features
   yet.
-- Add richer session tree UI, explicit fork-before-continue controls, and hosted
-  share only when real local or hosted backing behavior exists.
+- Add richer session tree navigation UI and hosted share only when real local
+  or hosted backing behavior exists.
 - Keep MCP runtime config limited to tools and explicit stdio resource
   subscription/watch flows until remote resource streams, hosted server
   lifecycle, and OAuth/trust flows are implemented.

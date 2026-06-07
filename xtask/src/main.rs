@@ -257,6 +257,9 @@ enum ImplementedSurface {
     StdioMcpProcessAdapter,
     ExtensionLifecycleCommands,
     SessionMetadataBranching,
+    InteractiveSessionPicker,
+    InteractiveModelPicker,
+    InteractiveSessionFork,
     RuntimeHooksAndQueues,
 }
 
@@ -298,6 +301,16 @@ impl ParityCodeTruth {
                 .join("src")
                 .join("runtime.rs"),
         )?;
+        let interactive_source = read_optional_source(
+            &root
+                .join("crates")
+                .join("neo-agent")
+                .join("src")
+                .join("modes")
+                .join("interactive.rs"),
+        )?;
+        let input_source =
+            read_optional_source(&root.join("crates").join("tui").join("src").join("input.rs"))?;
 
         if mcp_source.contains("trait McpToolAdapter") && mcp_source.contains("McpToolProvider") {
             implemented.insert(ImplementedSurface::McpToolAdapterBoundary);
@@ -320,6 +333,27 @@ impl ParityCodeTruth {
             && session_source.contains("pub fn rename")
         {
             implemented.insert(ImplementedSurface::SessionMetadataBranching);
+        }
+        if interactive_source.contains("open_session_picker")
+            && interactive_source.contains("load_selected_session")
+            && interactive_source.contains("session_catalog_for_config")
+            && input_source.contains("SessionPickerOpen")
+        {
+            implemented.insert(ImplementedSurface::InteractiveSessionPicker);
+        }
+        if interactive_source.contains("open_model_picker")
+            && interactive_source.contains("apply_selected_model")
+            && interactive_source.contains("model_catalog_for_config")
+            && input_source.contains("ModelPickerOpen")
+        {
+            implemented.insert(ImplementedSurface::InteractiveModelPicker);
+        }
+        if interactive_source.contains("fork_selected_session")
+            && interactive_source.contains("fork_session_transcript")
+            && input_source.contains("SessionFork")
+            && input_source.contains("tui.session.fork")
+        {
+            implemented.insert(ImplementedSurface::InteractiveSessionFork);
         }
         if runtime_source.contains("with_before_tool_call")
             && runtime_source.contains("with_after_tool_call")
@@ -566,6 +600,37 @@ fn stale_gap_claim_violation(
             || normalized.contains("not implemented"))
     {
         return Some("stale session branching gap claim");
+    }
+
+    if code_truth.has(ImplementedSurface::InteractiveSessionPicker)
+        && normalized.contains("session picker")
+        && (normalized.contains("missing")
+            || normalized.contains("not implemented")
+            || normalized.contains("future work"))
+    {
+        return Some("stale live session picker gap claim");
+    }
+
+    if code_truth.has(ImplementedSurface::InteractiveModelPicker)
+        && normalized.contains("model picker")
+        && (normalized.contains("missing")
+            || normalized.contains("not implemented")
+            || normalized.contains("future work"))
+    {
+        return Some("stale live model picker gap claim");
+    }
+
+    if code_truth.has(ImplementedSurface::InteractiveSessionFork)
+        && (normalized.contains("fork-before-continue")
+            || normalized.contains("fork before continue"))
+        && (normalized.contains("missing")
+            || normalized.contains("not implemented")
+            || normalized.contains("future work")
+            || normalized.contains("gap")
+            || normalized.contains("only when")
+            || normalized.contains("beyond local jsonl append"))
+    {
+        return Some("stale interactive session fork gap claim");
     }
 
     if code_truth.has(ImplementedSurface::RuntimeHooksAndQueues)
@@ -1381,6 +1446,120 @@ mod tests {
             errors,
             vec![
                 "docs/gap/INDEX.md:1 contains stale session branching gap claim: Session tree branching and naming remain pi-inspired future work.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_live_session_picker_gap_after_interactive_symbols_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let interactive_dir = dir
+            .path()
+            .join("crates")
+            .join("neo-agent")
+            .join("src")
+            .join("modes");
+        let input_dir = dir.path().join("crates").join("tui").join("src");
+        std::fs::create_dir_all(&interactive_dir).expect("interactive source dir");
+        std::fs::create_dir_all(&input_dir).expect("input source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            interactive_dir.join("interactive.rs"),
+            "fn open_session_picker() {} fn load_selected_session() {} fn session_catalog_for_config() {}\n",
+        )
+        .expect("write interactive source");
+        std::fs::write(
+            input_dir.join("input.rs"),
+            "enum Key { SessionPickerOpen }\n",
+        )
+        .expect("write input source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("neo-agent.md"),
+            "The live session picker remains future work.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/neo-agent.md:1 contains stale live session picker gap claim: The live session picker remains future work.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_live_model_picker_gap_after_interactive_symbols_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let interactive_dir = dir
+            .path()
+            .join("crates")
+            .join("neo-agent")
+            .join("src")
+            .join("modes");
+        let input_dir = dir.path().join("crates").join("tui").join("src");
+        std::fs::create_dir_all(&interactive_dir).expect("interactive source dir");
+        std::fs::create_dir_all(&input_dir).expect("input source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            interactive_dir.join("interactive.rs"),
+            "fn open_model_picker() {} fn apply_selected_model() {} fn model_catalog_for_config() {}\n",
+        )
+        .expect("write interactive source");
+        std::fs::write(input_dir.join("input.rs"), "enum Key { ModelPickerOpen }\n")
+            .expect("write input source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("neo-agent.md"),
+            "The live model picker is still missing.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/neo-agent.md:1 contains stale live model picker gap claim: The live model picker is still missing.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_fork_before_continue_gap_after_session_fork_ui_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let interactive_dir = dir
+            .path()
+            .join("crates")
+            .join("neo-agent")
+            .join("src")
+            .join("modes");
+        let input_dir = dir.path().join("crates").join("tui").join("src");
+        std::fs::create_dir_all(&interactive_dir).expect("interactive source dir");
+        std::fs::create_dir_all(&input_dir).expect("input source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            interactive_dir.join("interactive.rs"),
+            "fn fork_selected_session() {} fn fork_session_transcript() {}\n",
+        )
+        .expect("write interactive source");
+        std::fs::write(
+            input_dir.join("input.rs"),
+            "enum Action { SessionFork } const ID: &str = \"tui.session.fork\";\n",
+        )
+        .expect("write input source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("neo-agent.md"),
+            "Explicit fork-before-continue controls are still a gap beyond local JSONL append.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/neo-agent.md:1 contains stale interactive session fork gap claim: Explicit fork-before-continue controls are still a gap beyond local JSONL append.".to_string()
             ]
         );
     }

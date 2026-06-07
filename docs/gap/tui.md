@@ -23,6 +23,9 @@ Target: `crates/tui`.
 - The live interactive loop opens a local session picker with `ctrl+r`, using
   real `SessionMetadataStore` records prepared by `neo-agent`, and can load a
   selected JSONL transcript into the TUI before continuing in that session.
+- With the session picker focused, the live interactive loop can fork the
+  selected session with `ctrl+n`, load the child JSONL transcript, and continue
+  subsequent prompts in the forked session.
 - The live interactive loop opens a model picker with `ctrl+o`, using real
   `ModelRegistry` entries prepared by `neo-agent`, and updates the active model
   label after selection.

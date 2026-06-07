@@ -75,6 +75,10 @@ fn keybinding_manager_matches_defaults_overrides_and_conflicts() {
         &KeyId::new("left").expect("valid key"),
         KeybindingAction::EditorCursorLeft
     ));
+    assert!(manager.matches(
+        &KeyId::new("ctrl+n").expect("valid key"),
+        KeybindingAction::SessionFork
+    ));
     assert!(!manager.matches(
         &KeyId::new("ctrl+c").expect("valid key"),
         KeybindingAction::EditorCursorLeft

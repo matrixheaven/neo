@@ -27,6 +27,8 @@ use ratatui::{
 type BoxedTurnFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<AgentEvent>>> + Send + 'a>>;
 type BoxedSessionFuture<'a> =
     Pin<Box<dyn Future<Output = Result<LoadedSessionTranscript>> + Send + 'a>>;
+type BoxedForkFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ForkedSessionTranscript>> + Send + 'a>>;
 
 pub fn execute(config: &AppConfig) -> String {
     let mut controller = controller_for_config(config);
@@ -47,7 +49,7 @@ pub async fn execute_tty(config: &AppConfig) -> Result<Option<String>> {
     Ok(None)
 }
 
-pub(crate) struct InteractiveController<RunTurn, LoadSession> {
+pub(crate) struct InteractiveController<RunTurn, LoadSession, ForkSession> {
     app: NeoTuiApp,
     keybindings: KeybindingsManager,
     run_turn: RunTurn,
@@ -56,6 +58,7 @@ pub(crate) struct InteractiveController<RunTurn, LoadSession> {
     model_items: Vec<PickerItem>,
     model_list_error: Option<String>,
     load_session: LoadSession,
+    fork_session: ForkSession,
     active_session_id: Option<String>,
     active_model: Option<SelectedModel>,
 }
@@ -130,8 +133,28 @@ impl LoadedSessionTranscript {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ForkedSessionTranscript {
+    session_id: String,
+    transcript: LoadedSessionTranscript,
+}
+
+impl ForkedSessionTranscript {
+    #[must_use]
+    pub(crate) fn new(session_id: impl Into<String>, transcript: LoadedSessionTranscript) -> Self {
+        Self {
+            session_id: session_id.into(),
+            transcript,
+        }
+    }
+}
+
 impl<RunTurn, Fut>
-    InteractiveController<RunTurn, fn(String) -> Ready<Result<LoadedSessionTranscript>>>
+    InteractiveController<
+        RunTurn,
+        fn(String) -> Ready<Result<LoadedSessionTranscript>>,
+        fn(String) -> Ready<Result<ForkedSessionTranscript>>,
+    >
 where
     RunTurn: Fn(TurnRequest) -> Fut,
     Fut: Future<Output = Result<Vec<AgentEvent>>> + Send,
@@ -143,24 +166,31 @@ where
         model_label: impl Into<String>,
         run_turn: RunTurn,
     ) -> Self {
-        Self::new_with_sessions(
+        Self::new_with_session_forker(
             title,
             session_label,
             model_label,
             run_turn,
             PickerCatalogs::default(),
             empty_session_loader,
+            empty_session_forker,
         )
     }
 }
 
-impl<RunTurn, Fut, LoadSession, LoadFut> InteractiveController<RunTurn, LoadSession>
+impl<RunTurn, Fut, LoadSession, LoadFut>
+    InteractiveController<
+        RunTurn,
+        LoadSession,
+        fn(String) -> Ready<Result<ForkedSessionTranscript>>,
+    >
 where
     RunTurn: Fn(TurnRequest) -> Fut,
     Fut: Future<Output = Result<Vec<AgentEvent>>> + Send,
     LoadSession: Fn(String) -> LoadFut,
     LoadFut: Future<Output = Result<LoadedSessionTranscript>> + Send,
 {
+    #[allow(dead_code)]
     pub fn new_with_sessions(
         title: impl Into<String>,
         session_label: impl Into<String>,
@@ -168,6 +198,37 @@ where
         run_turn: RunTurn,
         catalogs: PickerCatalogs,
         load_session: LoadSession,
+    ) -> Self {
+        Self::new_with_session_forker(
+            title,
+            session_label,
+            model_label,
+            run_turn,
+            catalogs,
+            load_session,
+            empty_session_forker,
+        )
+    }
+}
+
+impl<RunTurn, Fut, LoadSession, LoadFut, ForkSession, ForkFut>
+    InteractiveController<RunTurn, LoadSession, ForkSession>
+where
+    RunTurn: Fn(TurnRequest) -> Fut,
+    Fut: Future<Output = Result<Vec<AgentEvent>>> + Send,
+    LoadSession: Fn(String) -> LoadFut,
+    LoadFut: Future<Output = Result<LoadedSessionTranscript>> + Send,
+    ForkSession: Fn(String) -> ForkFut,
+    ForkFut: Future<Output = Result<ForkedSessionTranscript>> + Send,
+{
+    pub fn new_with_session_forker(
+        title: impl Into<String>,
+        session_label: impl Into<String>,
+        model_label: impl Into<String>,
+        run_turn: RunTurn,
+        catalogs: PickerCatalogs,
+        load_session: LoadSession,
+        fork_session: ForkSession,
     ) -> Self {
         Self {
             app: NeoTuiApp::new(title, session_label, model_label),
@@ -178,6 +239,7 @@ where
             model_items: catalogs.model_items,
             model_list_error: catalogs.model_error,
             load_session,
+            fork_session,
             active_session_id: None,
             active_model: None,
         }
@@ -288,6 +350,11 @@ where
             }
             KeybindingAction::SessionPickerOpen => {
                 self.open_session_picker();
+            }
+            KeybindingAction::SessionFork => {
+                if self.app.selected_session().is_some() {
+                    self.fork_selected_session().await?;
+                }
             }
             KeybindingAction::ModelPickerOpen => {
                 self.open_model_picker();
@@ -434,6 +501,22 @@ where
         Ok(())
     }
 
+    async fn fork_selected_session(&mut self) -> Result<()> {
+        let Some(parent) = self.app.confirm_session_picker() else {
+            return Ok(());
+        };
+        let forked = (self.fork_session)(parent.value.clone())
+            .await
+            .with_context(|| format!("failed to fork session {}", parent.value))?;
+        self.app.load_session_transcript(
+            forked.transcript.label,
+            forked.transcript.notices,
+            forked.transcript.messages,
+        );
+        self.active_session_id = Some(forked.session_id);
+        Ok(())
+    }
+
     fn apply_selected_model(&mut self) -> Result<()> {
         let Some(model) = self.app.confirm_model_picker() else {
             return Ok(());
@@ -504,6 +587,7 @@ const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
 const OVERLAY_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::SelectConfirm,
     KeybindingAction::SelectCancel,
+    KeybindingAction::SessionFork,
     KeybindingAction::SelectUp,
     KeybindingAction::SelectDown,
     KeybindingAction::SelectPageUp,
@@ -570,9 +654,10 @@ pub fn controller_for_config<'a>(
 ) -> InteractiveController<
     impl Fn(TurnRequest) -> BoxedTurnFuture<'a> + 'a,
     impl Fn(String) -> BoxedSessionFuture<'a> + 'a,
+    impl Fn(String) -> BoxedForkFuture<'a> + 'a,
 > {
     let catalogs = picker_catalogs_for_config(config);
-    InteractiveController::new_with_sessions(
+    InteractiveController::new_with_session_forker(
         "neo",
         "new",
         format!("{}/{}", config.default_provider, config.default_model),
@@ -603,6 +688,11 @@ pub fn controller_for_config<'a>(
                 Box::pin(async move { load_session_transcript(session_id, config).await });
             future
         },
+        move |session_id| {
+            let future: BoxedForkFuture<'a> =
+                Box::pin(async move { fork_session_transcript(session_id, config).await });
+            future
+        },
     )
 }
 
@@ -612,6 +702,14 @@ fn empty_session_loader(session_id: String) -> Ready<Result<LoadedSessionTranscr
         session_id,
         Vec::new(),
         Vec::new(),
+    )))
+}
+
+#[allow(dead_code)]
+fn empty_session_forker(session_id: String) -> Ready<Result<ForkedSessionTranscript>> {
+    ready(Ok(ForkedSessionTranscript::new(
+        session_id.clone(),
+        LoadedSessionTranscript::new(session_id, Vec::new(), Vec::new()),
     )))
 }
 
@@ -716,6 +814,19 @@ async fn load_session_transcript(
         notices,
         context.messages().to_vec(),
     ))
+}
+
+async fn fork_session_transcript(
+    parent_id: String,
+    config: &AppConfig,
+) -> Result<ForkedSessionTranscript> {
+    let session = SessionMetadataStore::new(&config.sessions_dir)
+        .fork(&parent_id, None)
+        .with_context(|| format!("failed to create local fork for session {parent_id}"))?;
+    let child_id = session.id;
+    let mut loaded = load_session_transcript(child_id.clone(), config).await?;
+    loaded.notices.insert(0, format!("forked from {parent_id}"));
+    Ok(ForkedSessionTranscript::new(child_id, loaded))
 }
 
 fn render_terminal_fallback(app: &NeoTuiApp) -> String {
@@ -1187,6 +1298,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn event_loop_forks_selected_session_and_continues_child_session() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let mut controller = InteractiveController::new_with_session_forker(
+            "neo",
+            "new",
+            "openai/gpt-4.1",
+            move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("record request")
+                        .push(request);
+                    Ok(vec![
+                        AgentEvent::MessageStarted {
+                            turn: 3,
+                            id: "assistant-3".to_owned(),
+                        },
+                        AgentEvent::TextDelta {
+                            turn: 3,
+                            text: "continued on fork".to_owned(),
+                        },
+                        AgentEvent::TurnFinished {
+                            turn: 3,
+                            stop_reason: StopReason::EndTurn,
+                        },
+                    ])
+                }
+            },
+            PickerCatalogs {
+                session_items: vec![PickerItem::new(
+                    "alpha",
+                    "Alpha session",
+                    Some("branch summary"),
+                )],
+                session_error: None,
+                model_items: Vec::new(),
+                model_error: None,
+            },
+            |_session_id| async move {
+                panic!("fork action should not use the plain session loader");
+                #[allow(unreachable_code)]
+                Ok(LoadedSessionTranscript::new("", Vec::new(), Vec::new()))
+            },
+            |parent_id| async move {
+                assert_eq!(parent_id, "alpha");
+                Ok(ForkedSessionTranscript::new(
+                    "alpha-fork-1",
+                    LoadedSessionTranscript::new(
+                        "alpha-fork-1",
+                        ["forked from alpha".to_owned()],
+                        [
+                            AgentMessage::user_text("hello"),
+                            AgentMessage::assistant(
+                                [Content::text("hi back")],
+                                Vec::new(),
+                                StopReason::EndTurn,
+                            ),
+                        ],
+                    ),
+                ))
+            },
+        );
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SessionPickerOpen))
+            .await
+            .expect("session picker opens");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SessionFork))
+            .await
+            .expect("session fork loads child transcript");
+
+        assert_eq!(controller.app().session_label(), "alpha-fork-1");
+        assert!(controller.app().focused_overlay().is_none());
+        assert!(matches!(
+            &controller.app().transcript().items()[0],
+            neo_tui::TranscriptItem::Notice { content } if content == "forked from alpha"
+        ));
+        assert!(matches!(
+            &controller.app().transcript().items()[1],
+            neo_tui::TranscriptItem::User { content } if content == "hello"
+        ));
+
+        controller.type_text("continue fork");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("continued prompt submits on fork");
+        let requests = requests.lock().expect("recorded requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].prompt, vec!["continue fork".to_owned()]);
+        assert_eq!(requests[0].session_id.as_deref(), Some("alpha-fork-1"));
+        assert_eq!(requests[0].model, None);
+    }
+
+    #[tokio::test]
     async fn event_loop_opens_model_picker_and_submits_with_selected_model() {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured_requests = std::sync::Arc::clone(&requests);
@@ -1324,6 +1533,53 @@ mod tests {
             &loaded.messages[1],
             AgentMessage::Assistant { content, .. } if content[0].as_text() == Some("hi back")
         ));
+    }
+
+    #[tokio::test]
+    async fn fork_session_transcript_copies_jsonl_metadata_and_loads_child() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        fs::write(
+            sessions_dir.join("alpha.jsonl"),
+            concat!(
+                "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
+                "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi back\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
+            ),
+        )
+        .expect("write session jsonl");
+
+        let config = test_config(temp.path(), sessions_dir.clone());
+        let forked = fork_session_transcript("alpha".to_owned(), &config)
+            .await
+            .expect("fork session");
+
+        assert!(forked.session_id.starts_with("alpha-fork-"));
+        assert_eq!(forked.transcript.label, forked.session_id);
+        assert_eq!(
+            forked.transcript.notices.first().map(String::as_str),
+            Some("forked from alpha")
+        );
+        assert_eq!(forked.transcript.messages.len(), 2);
+        assert!(
+            sessions_dir
+                .join(format!("{}.jsonl", forked.session_id))
+                .is_file()
+        );
+
+        let sessions = SessionMetadataStore::new(&sessions_dir)
+            .list()
+            .expect("list sessions");
+        let parent = sessions
+            .iter()
+            .find(|session| session.id == "alpha")
+            .expect("parent listed");
+        assert!(parent.children.contains(&forked.session_id));
+        let child = sessions
+            .iter()
+            .find(|session| session.id == forked.session_id)
+            .expect("child listed");
+        assert_eq!(child.parent_id.as_deref(), Some("alpha"));
     }
 
     fn test_config(project_dir: &Path, sessions_dir: PathBuf) -> AppConfig {

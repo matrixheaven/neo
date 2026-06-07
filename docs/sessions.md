@@ -54,7 +54,10 @@ In live interactive TTY mode, `ctrl+r` opens a local session picker backed by
 `SessionMetadataStore::list()` and the configured `sessions_dir`. Selecting a
 session replays its JSONL context into the TUI, updates the session label, and
 uses that same replayed context for the next prompt. New events from that turn
-are appended to the selected JSONL file.
+are appended to the selected JSONL file. With the session picker focused,
+`ctrl+n` forks the selected session through `SessionMetadataStore::fork()`,
+loads the forked JSONL transcript, and appends subsequent prompts to the child
+session.
 
 ## Storage Expectations
 
@@ -70,8 +73,8 @@ Still missing from pi parity:
 - Hosted or model-generated branch summaries beyond local metadata summaries.
 - Model-generated compaction summaries; current compaction is deterministic
   local transcript extraction only.
-- Hosted session tree continuation and explicit fork-before-continue flows
-  beyond local JSONL append.
+- Hosted session tree continuation and share flows beyond local JSONL
+  fork-before-continue controls.
 
 ## CLI Surface
 
