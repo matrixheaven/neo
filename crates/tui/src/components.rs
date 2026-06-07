@@ -4,7 +4,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Clear, Widget},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 use crate::{
     ApprovalModal, ChatTranscript, NeoTuiApp, Overlay, OverlayKind, PromptState, ToolStatus,
@@ -13,7 +13,21 @@ use crate::{
 
 #[must_use]
 pub fn visible_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
+    let mut width = 0;
+    let mut index = 0;
+    while index < text.len() {
+        if let Some(sequence) = ansi_escape_sequence(text, index) {
+            index += sequence.len();
+            continue;
+        }
+
+        let Some(character) = text[index..].chars().next() else {
+            break;
+        };
+        width += character.width().unwrap_or(0);
+        index += character.len_utf8();
+    }
+    width
 }
 
 #[must_use]
@@ -76,8 +90,19 @@ pub fn wrap_width(text: &str, max_width: usize) -> Vec<String> {
 fn wrap_single_line(text: &str, max_width: usize, lines: &mut Vec<String>) {
     let mut current = String::new();
     let mut current_width = 0;
+    let mut index = 0;
 
-    for character in text.chars() {
+    while index < text.len() {
+        if let Some(sequence) = ansi_escape_sequence(text, index) {
+            current.push_str(sequence);
+            index += sequence.len();
+            continue;
+        }
+
+        let Some(character) = text[index..].chars().next() else {
+            break;
+        };
+
         let character_width = character.width().unwrap_or(0);
         if current_width > 0 && current_width + character_width > max_width {
             lines.push(std::mem::take(&mut current));
@@ -86,11 +111,7 @@ fn wrap_single_line(text: &str, max_width: usize, lines: &mut Vec<String>) {
 
         current.push(character);
         current_width += character_width;
-
-        if current_width >= max_width {
-            lines.push(std::mem::take(&mut current));
-            current_width = 0;
-        }
+        index += character.len_utf8();
     }
 
     if !current.is_empty() {
@@ -439,15 +460,73 @@ fn write_line(area: Rect, buf: &mut Buffer, y: u16, text: &str, style: Style) {
 fn clip_width(text: &str, max_width: usize) -> String {
     let mut clipped = String::new();
     let mut width = 0;
+    let mut index = 0;
 
-    for character in text.chars() {
+    while index < text.len() {
+        if let Some(sequence) = ansi_escape_sequence(text, index) {
+            clipped.push_str(sequence);
+            index += sequence.len();
+            continue;
+        }
+
+        let Some(character) = text[index..].chars().next() else {
+            break;
+        };
+
         let character_width = character.width().unwrap_or(0);
         if width + character_width > max_width {
             break;
         }
         clipped.push(character);
         width += character_width;
+        index += character.len_utf8();
     }
 
     clipped
+}
+
+fn ansi_escape_sequence(text: &str, start: usize) -> Option<&str> {
+    let bytes = text.as_bytes();
+    if bytes.get(start).copied()? != 0x1b {
+        return None;
+    }
+    let introducer = *bytes.get(start + 1)?;
+    match introducer {
+        b'[' => csi_sequence(text, start),
+        b']' | b'P' | b'_' | b'^' | b'X' => string_escape_sequence(text, start),
+        b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => fixed_escape_sequence(text, start, 3),
+        0x40..=0x5f => fixed_escape_sequence(text, start, 2),
+        _ => None,
+    }
+}
+
+fn csi_sequence(text: &str, start: usize) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut index = start + 2;
+    while index < bytes.len() {
+        if (0x40..=0x7e).contains(&bytes[index]) {
+            return text.get(start..index + 1);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn string_escape_sequence(text: &str, start: usize) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut index = start + 2;
+    while index < bytes.len() {
+        match bytes[index] {
+            0x07 => return text.get(start..index + 1),
+            0x1b if bytes.get(index + 1).copied() == Some(b'\\') => {
+                return text.get(start..index + 2);
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn fixed_escape_sequence(text: &str, start: usize, byte_len: usize) -> Option<&str> {
+    text.get(start..start + byte_len)
 }

@@ -3,7 +3,7 @@ use neo_tui::{
     ApprovalChoice, ApprovalModal, ApprovalOption, ChatTranscript, InputEvent, KeyId,
     KeybindingAction, KeybindingsManager, NeoTuiApp, PromptEdit, PromptState, PromptWidget,
     SelectItem, SelectListState, StatusWidget, ToolStatus, ToolStatusKind, TranscriptItem,
-    TranscriptView, TranscriptWidget, truncate_width, wrap_width,
+    TranscriptView, TranscriptWidget, truncate_width, visible_width, wrap_width,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Cell};
 
@@ -225,6 +225,37 @@ fn wrap_width_preserves_display_width_for_wide_text() {
             .iter()
             .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 5)
     );
+}
+
+#[test]
+fn visible_width_ignores_ansi_csi_and_osc_sequences() {
+    assert_eq!(visible_width("\x1b[31mred\x1b[0m plain"), 9);
+    assert_eq!(visible_width("\x1b]133;A\x07hello\x1b]133;B\x07"), 5);
+    assert_eq!(visible_width("\x1b]133;A\x1b\\hello\x1b]133;B\x1b\\"), 5);
+}
+
+#[test]
+fn wrap_width_preserves_ansi_sequences_without_counting_them() {
+    let red = "\x1b[31m";
+    let reset = "\x1b[0m";
+    let input = format!("{red}abcdef{reset}");
+    let lines = wrap_width(&input, 3);
+
+    assert_eq!(lines.concat(), input);
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].starts_with(red));
+    assert!(lines[1].ends_with(reset));
+    assert!(lines.iter().all(|line| visible_width(line) <= 3));
+}
+
+#[test]
+fn truncate_width_does_not_split_ansi_or_osc_sequences() {
+    let input = "\x1b]133;A\x07\x1b[32mabcdef\x1b[0m";
+    let truncated = truncate_width(input, 4, "..", false);
+
+    assert!(truncated.starts_with("\x1b]133;A\x07\x1b[32m"));
+    assert_eq!(visible_width(&truncated), 4);
+    assert_eq!(truncated, "\x1b]133;A\x07\x1b[32mab..");
 }
 
 #[test]
