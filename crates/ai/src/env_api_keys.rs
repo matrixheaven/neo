@@ -15,8 +15,6 @@ const PROVIDER_ENV_KEYS: &[(&str, &[&str])] = &[
     ("google-vertex", &["GOOGLE_APPLICATION_CREDENTIALS"]),
     ("mistral", &["MISTRAL_API_KEY"]),
     ("openrouter", &["OPENROUTER_API_KEY"]),
-    ("bedrock", &["AWS_ACCESS_KEY_ID"]),
-    ("amazon-bedrock", &["AWS_ACCESS_KEY_ID"]),
 ];
 
 #[must_use]

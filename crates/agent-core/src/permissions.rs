@@ -13,6 +13,7 @@ pub struct PermissionPolicy {
     pub file_read: PermissionDecision,
     pub file_write: PermissionDecision,
     pub shell: PermissionDecision,
+    pub tool: PermissionDecision,
 }
 
 impl PermissionPolicy {
@@ -22,6 +23,7 @@ impl PermissionPolicy {
             file_read: PermissionDecision::Allow,
             file_write: PermissionDecision::Deny,
             shell: PermissionDecision::Deny,
+            tool: PermissionDecision::Deny,
         }
     }
 
@@ -31,6 +33,7 @@ impl PermissionPolicy {
             file_read: PermissionDecision::Allow,
             file_write: PermissionDecision::Allow,
             shell: PermissionDecision::Allow,
+            tool: PermissionDecision::Allow,
         }
     }
 
@@ -40,6 +43,7 @@ impl PermissionPolicy {
             file_read: PermissionDecision::Deny,
             file_write: PermissionDecision::Deny,
             shell: PermissionDecision::Deny,
+            tool: PermissionDecision::Deny,
         }
     }
 
@@ -57,6 +61,11 @@ impl PermissionPolicy {
     pub const fn can_run_shell(&self) -> bool {
         matches!(self.shell, PermissionDecision::Allow)
     }
+
+    #[must_use]
+    pub const fn can_run_tools(&self) -> bool {
+        matches!(self.tool, PermissionDecision::Allow)
+    }
 }
 
 impl Default for PermissionPolicy {
@@ -65,6 +74,15 @@ impl Default for PermissionPolicy {
             file_read: PermissionDecision::Allow,
             file_write: PermissionDecision::Ask,
             shell: PermissionDecision::Ask,
+            tool: PermissionDecision::Allow,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum PermissionOperation {
+    FileRead,
+    FileWrite,
+    Shell,
+    Tool,
 }

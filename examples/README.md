@@ -2,7 +2,7 @@
 
 Examples in this directory are small reference artifacts for the documented Neo interfaces.
 
-- [config/minimal.toml](config/minimal.toml) shows a minimal project configuration.
+- [config/minimal.toml](config/minimal.toml) shows a deterministic development fixture, not production provider guidance.
 - [config/mcp-server.toml](config/mcp-server.toml) shows an MCP stdio server entry.
 - [tools/read-file-schema.json](tools/read-file-schema.json) shows a compact model-facing tool schema.
 - [rust/provider_registry.rs](rust/provider_registry.rs) shows the provider registry and request options.

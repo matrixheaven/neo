@@ -1,13 +1,19 @@
 use futures::StreamExt;
-use neo_agent_core::harness::FakeHarness;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentToolCall, Content,
-    QueueMode, StopReason, Tool, ToolContext, ToolExecutionMode, ToolFuture, ToolRegistry,
-    ToolResult,
+    PermissionDecision, PermissionOperation, PermissionPolicy, QueueMode, StopReason, Tool,
+    ToolContext, ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult, harness::FakeHarness,
 };
-use neo_ai::{AiStreamEvent, ToolSpec};
+use neo_ai::{
+    AiError, AiStreamEvent, ApiKind, ChatRequest, ModelCapabilities, ModelClient, ModelSpec,
+    ProviderId, ToolSpec,
+};
 use serde_json::json;
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::time::{sleep, timeout};
 
 #[tokio::test]
 async fn runtime_streams_one_turn_text_and_updates_context() {
@@ -37,7 +43,13 @@ async fn runtime_streams_one_turn_text_and_updates_context() {
         .collect::<Result<Vec<_>, _>>()
         .expect("turn should succeed");
 
-    assert_eq!(events.first(), Some(&AgentEvent::TurnStarted { turn: 1 }));
+    assert_eq!(
+        events.first(),
+        Some(&AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("say hello"),
+        })
+    );
+    assert_eq!(events.get(1), Some(&AgentEvent::TurnStarted { turn: 1 }));
     assert!(events.contains(&AgentEvent::TextDelta {
         turn: 1,
         text: "hel".to_owned()
@@ -57,6 +69,68 @@ async fn runtime_streams_one_turn_text_and_updates_context() {
     assert_eq!(
         context.messages()[1],
         AgentMessage::assistant([Content::text("hello")], Vec::new(), StopReason::EndTurn)
+    );
+}
+
+#[tokio::test]
+async fn runtime_yields_model_events_before_model_stream_finishes() {
+    let harness = DelayedHarness::new(vec![
+        DelayedStep::Event(AiStreamEvent::MessageStart {
+            id: "msg_1".to_owned(),
+        }),
+        DelayedStep::Event(AiStreamEvent::TextDelta {
+            text: "early".to_owned(),
+        }),
+        DelayedStep::Delay(Duration::from_secs(5)),
+        DelayedStep::Event(AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        }),
+    ]);
+    let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
+    let mut context = AgentContext::new();
+
+    let mut stream = runtime.run_turn(&mut context, AgentMessage::user_text("stream"));
+
+    assert_eq!(
+        timeout(Duration::from_millis(250), stream.next())
+            .await
+            .expect("prompt append should stream before delayed message end")
+            .expect("prompt append event")
+            .expect("prompt append should be ok"),
+        AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("stream"),
+        }
+    );
+    assert_eq!(
+        timeout(Duration::from_millis(250), stream.next())
+            .await
+            .expect("turn start should stream before delayed message end")
+            .expect("turn start event")
+            .expect("turn start should be ok"),
+        AgentEvent::TurnStarted { turn: 1 }
+    );
+    assert_eq!(
+        timeout(Duration::from_millis(250), stream.next())
+            .await
+            .expect("message start should stream before delayed message end")
+            .expect("message start event")
+            .expect("message start should be ok"),
+        AgentEvent::MessageStarted {
+            turn: 1,
+            id: "msg_1".to_owned(),
+        }
+    );
+    assert_eq!(
+        timeout(Duration::from_millis(250), stream.next())
+            .await
+            .expect("text delta should stream before delayed message end")
+            .expect("text delta event")
+            .expect("text delta should be ok"),
+        AgentEvent::TextDelta {
+            turn: 1,
+            text: "early".to_owned(),
+        }
     );
 }
 
@@ -314,6 +388,7 @@ async fn runtime_drains_queued_steering_before_followups() {
     assert_eq!(
         appended,
         vec![
+            AgentMessage::user_text("start"),
             AgentMessage::user_text("steer one"),
             AgentMessage::assistant([Content::text("first")], Vec::new(), StopReason::EndTurn),
             AgentMessage::user_text("steer two"),
@@ -484,6 +559,164 @@ async fn runtime_emits_tool_execution_events_and_honors_block_and_terminate_hook
         context.messages()[3],
         AgentMessage::tool_result("tool_2", "echo", vec![Content::text("stop")], false)
     );
+}
+
+#[tokio::test]
+async fn runtime_emits_approval_request_for_ask_permission_and_skips_tool_execution() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "text": "needs approval" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools.register(EchoTool);
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let executed_for_hook = Arc::clone(&executed);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_permission_policy(PermissionPolicy {
+                file_read: PermissionDecision::Allow,
+                file_write: PermissionDecision::Deny,
+                shell: PermissionDecision::Deny,
+                tool: PermissionDecision::Ask,
+            })
+            .with_after_tool_call(move |call, result| {
+                executed_for_hook
+                    .lock()
+                    .expect("executed lock poisoned")
+                    .push(call.id.clone());
+                result
+            }),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("call tool"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("tool loop should succeed");
+
+    assert!(events.contains(&AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        operation: PermissionOperation::Tool,
+        subject: "echo".to_owned(),
+        arguments: json!({ "text": "needs approval" }),
+    }));
+    assert!(events.contains(&AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        name: "echo".to_owned(),
+        result: ToolResult::error("approval required for tool: echo"),
+    }));
+    assert!(executed.lock().expect("executed lock poisoned").is_empty());
+    assert_eq!(
+        context.messages()[2],
+        AgentMessage::tool_result(
+            "tool_1",
+            "echo",
+            vec![Content::text("approval required for tool: echo")],
+            true
+        )
+    );
+}
+
+#[tokio::test]
+async fn runtime_emits_shell_lifecycle_for_bash_tool() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "bash".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "command": "printf shell-ok" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_permission_policy(PermissionPolicy::allow_all()),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("run shell"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("shell tool should succeed");
+
+    assert!(events.contains(&AgentEvent::ShellCommandStarted {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        command: "printf shell-ok".to_owned(),
+        cwd: std::env::current_dir().expect("cwd"),
+    }));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ShellCommandFinished {
+            turn: 1,
+            id,
+            exit_code: Some(0),
+            stdout,
+            stderr,
+            ..
+        } if id == "tool_1" && stdout.contains("shell-ok") && stderr.is_empty()
+    )));
 }
 
 fn blocking_then_terminating_tool_harness() -> FakeHarness {
@@ -736,5 +969,81 @@ impl Tool for SleepEchoTool {
             }
             Ok(ToolResult::ok(text))
         })
+    }
+}
+
+#[derive(Clone)]
+struct DelayedHarness {
+    model: ModelSpec,
+    client: Arc<DelayedModelClient>,
+}
+
+impl DelayedHarness {
+    fn new(steps: Vec<DelayedStep>) -> Self {
+        Self {
+            model: ModelSpec {
+                provider: ProviderId("delayed".to_owned()),
+                model: "delayed-agent-model".to_owned(),
+                api: ApiKind::Local,
+                capabilities: ModelCapabilities {
+                    streaming: true,
+                    tools: true,
+                    images: false,
+                    reasoning: false,
+                    embeddings: false,
+                    max_context_tokens: None,
+                },
+            },
+            client: Arc::new(DelayedModelClient {
+                steps: Mutex::new(Some(steps)),
+                requests: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    fn model(&self) -> ModelSpec {
+        self.model.clone()
+    }
+
+    fn client(&self) -> Arc<dyn ModelClient> {
+        self.client.clone()
+    }
+}
+
+#[derive(Clone)]
+enum DelayedStep {
+    Event(AiStreamEvent),
+    Delay(Duration),
+}
+
+struct DelayedModelClient {
+    steps: Mutex<Option<Vec<DelayedStep>>>,
+    requests: Mutex<Vec<ChatRequest>>,
+}
+
+impl ModelClient for DelayedModelClient {
+    fn stream_chat(
+        &self,
+        request: ChatRequest,
+    ) -> futures::stream::BoxStream<'static, Result<AiStreamEvent, AiError>> {
+        self.requests
+            .lock()
+            .expect("request lock poisoned")
+            .push(request);
+        let steps = self
+            .steps
+            .lock()
+            .expect("steps lock poisoned")
+            .take()
+            .unwrap_or_default();
+        futures::stream::unfold(steps.into_iter(), |mut steps| async move {
+            loop {
+                match steps.next()? {
+                    DelayedStep::Event(event) => return Some((Ok(event), steps)),
+                    DelayedStep::Delay(duration) => sleep(duration).await,
+                }
+            }
+        })
+        .boxed()
     }
 }

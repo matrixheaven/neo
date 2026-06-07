@@ -3,6 +3,7 @@ use std::{ffi::OsStr, fs, path::PathBuf};
 use anyhow::{Context, bail};
 use neo_agent_core::session::JsonlSessionReader;
 use neo_agent_core::{AgentMessage, Content};
+use neo_sdk::{ExportConversation, ExportMessage, HtmlExportOptions, export_html as render_html};
 
 use crate::config::AppConfig;
 
@@ -61,6 +62,19 @@ pub async fn transcript(session_id: &str, config: &AppConfig) -> anyhow::Result<
     }
 }
 
+pub async fn export_html(session_id: &str, config: &AppConfig) -> anyhow::Result<String> {
+    let messages = JsonlSessionReader::replay_messages(session_path(session_id, config)?)
+        .await
+        .with_context(|| format!("failed to replay session {session_id}"))?;
+    let export_messages = messages
+        .iter()
+        .map(|message| ExportMessage::new(message_role(message), message_text(message)))
+        .collect();
+    let conversation =
+        ExportConversation::new(format!("neo session {session_id}"), export_messages);
+    render_html(&conversation, &HtmlExportOptions::default()).map_err(anyhow::Error::from)
+}
+
 pub fn session_path(session_id: &str, config: &AppConfig) -> anyhow::Result<PathBuf> {
     if !is_safe_session_id(session_id) {
         bail!("invalid session id {session_id:?}");
@@ -76,14 +90,28 @@ fn is_safe_session_id(session_id: &str) -> bool {
 }
 
 fn format_message(message: &AgentMessage) -> String {
-    let (role, content) = match message {
-        AgentMessage::System { content } => ("system", content),
-        AgentMessage::User { content } => ("user", content),
-        AgentMessage::Assistant { content, .. } => ("assistant", content),
-        AgentMessage::ToolResult { content, .. } => ("tool", content),
-    };
+    let role = message_role(message);
 
-    format!("{role}: {}", text_content(content))
+    format!("{role}: {}", message_text(message))
+}
+
+fn message_role(message: &AgentMessage) -> &'static str {
+    match message {
+        AgentMessage::System { .. } => "system",
+        AgentMessage::User { .. } => "user",
+        AgentMessage::Assistant { .. } => "assistant",
+        AgentMessage::ToolResult { .. } => "tool",
+    }
+}
+
+fn message_text(message: &AgentMessage) -> String {
+    let content = match message {
+        AgentMessage::System { content }
+        | AgentMessage::User { content }
+        | AgentMessage::Assistant { content, .. }
+        | AgentMessage::ToolResult { content, .. } => content,
+    };
+    text_content(content)
 }
 
 fn text_content(content: &[Content]) -> String {

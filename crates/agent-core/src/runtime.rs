@@ -5,9 +5,11 @@ use neo_ai::{AiStreamEvent, ChatRequest, ModelClient, ModelSpec, RequestOptions,
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    AgentEvent, AgentMessage, AgentToolCall, Content, StopReason, ToolContext, ToolError,
+    AgentEvent, AgentMessage, AgentToolCall, CompactionSummary, Content, PermissionDecision,
+    PermissionOperation, PermissionPolicy, QueueKind, StopReason, ToolContext, ToolError,
     ToolRegistry, ToolResult,
 };
 
@@ -38,6 +40,8 @@ pub struct AgentConfig {
     pub steering_queue_mode: QueueMode,
     pub follow_up_queue_mode: QueueMode,
     pub tool_execution_mode: ToolExecutionMode,
+    pub tool_permission_policy: PermissionPolicy,
+    pub compaction: Option<CompactionSettings>,
     #[serde(skip)]
     #[schemars(skip)]
     pub context_transform: Option<ContextTransform>,
@@ -62,6 +66,8 @@ impl AgentConfig {
             steering_queue_mode: QueueMode::All,
             follow_up_queue_mode: QueueMode::All,
             tool_execution_mode: ToolExecutionMode::Parallel,
+            tool_permission_policy: PermissionPolicy::default(),
+            compaction: None,
             context_transform: None,
             before_tool_call: None,
             after_tool_call: None,
@@ -100,6 +106,18 @@ impl AgentConfig {
     }
 
     #[must_use]
+    pub const fn with_tool_permission_policy(mut self, policy: PermissionPolicy) -> Self {
+        self.tool_permission_policy = policy;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_compaction(mut self, settings: CompactionSettings) -> Self {
+        self.compaction = Some(settings);
+        self
+    }
+
+    #[must_use]
     pub fn with_context_transform(
         mut self,
         transform: impl Fn(&[AgentMessage]) -> Vec<AgentMessage> + Send + Sync + 'static,
@@ -127,6 +145,24 @@ impl AgentConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CompactionSettings {
+    pub enabled: bool,
+    pub max_estimated_tokens: usize,
+    pub keep_recent_messages: usize,
+}
+
+impl CompactionSettings {
+    #[must_use]
+    pub const fn new(max_estimated_tokens: usize, keep_recent_messages: usize) -> Self {
+        Self {
+            enabled: true,
+            max_estimated_tokens,
+            keep_recent_messages,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AgentContext {
     messages: Vec<AgentMessage>,
@@ -134,6 +170,7 @@ pub struct AgentContext {
     cancelled: bool,
     steering_queue: Vec<AgentMessage>,
     follow_up_queue: Vec<AgentMessage>,
+    compaction_summary: Option<CompactionSummary>,
 }
 
 impl AgentContext {
@@ -162,6 +199,18 @@ impl AgentContext {
 
     pub fn queue_follow_up_message(&mut self, message: AgentMessage) {
         self.follow_up_queue.push(message);
+    }
+
+    pub fn apply_compaction(&mut self, summary: CompactionSummary) {
+        let keep_from = summary.first_kept_message_index.min(self.messages.len());
+        let kept = self.messages.split_off(keep_from);
+        self.messages = kept;
+        self.compaction_summary = Some(summary);
+    }
+
+    #[must_use]
+    pub fn compaction_summary(&self) -> Option<&CompactionSummary> {
+        self.compaction_summary.as_ref()
     }
 
     #[must_use]
@@ -197,6 +246,25 @@ impl AgentContext {
                         context.cancel();
                     }
                 }
+                AgentEvent::SteeringQueued { message } => {
+                    context.queue_steering_message(message.clone());
+                }
+                AgentEvent::FollowUpQueued { message } => {
+                    context.queue_follow_up_message(message.clone());
+                }
+                AgentEvent::QueueDrained { kind, count } => match kind {
+                    QueueKind::Steering => {
+                        let drain_count = (*count).min(context.steering_queue.len());
+                        context.steering_queue.drain(0..drain_count);
+                    }
+                    QueueKind::FollowUp => {
+                        let drain_count = (*count).min(context.follow_up_queue.len());
+                        context.follow_up_queue.drain(0..drain_count);
+                    }
+                },
+                AgentEvent::CompactionApplied { summary } => {
+                    context.apply_compaction(summary.clone());
+                }
                 _ => {}
             }
         }
@@ -218,7 +286,7 @@ pub enum AgentRuntimeError {
     Cancelled,
 }
 
-pub type AgentEventStream = stream::BoxStream<'static, Result<AgentEvent, AgentRuntimeError>>;
+pub type AgentEventStream<'a> = stream::BoxStream<'a, Result<AgentEvent, AgentRuntimeError>>;
 
 #[derive(Clone)]
 pub struct AgentRuntime {
@@ -257,7 +325,11 @@ impl AgentRuntime {
         &self.config
     }
 
-    pub fn run_turn(&self, context: &mut AgentContext, message: AgentMessage) -> AgentEventStream {
+    pub fn run_turn<'a>(
+        &'a self,
+        context: &'a mut AgentContext,
+        message: AgentMessage,
+    ) -> AgentEventStream<'a> {
         if context.is_cancelled() {
             return stream::iter([Ok(AgentEvent::TurnFinished {
                 turn: context.turns.saturating_add(1),
@@ -274,25 +346,51 @@ impl AgentRuntime {
             .boxed();
         }
 
-        context.append_message(message);
+        let live_context = context.clone();
         let model = Arc::clone(&self.model);
         let tools = self.tools.clone();
         let config = self.config.clone();
-        let messages = run_agent_turn(model, config, tools, context.clone());
-        let events = futures::executor::block_on(async {
-            let outcome = messages.await?;
-            Ok::<_, AgentRuntimeError>(outcome)
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let (final_sender, final_receiver) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let mut emitter = EventEmitter::new(sender, live_context);
+            emitter.emit(AgentEvent::MessageAppended { message });
+            if let Err(err) = run_agent_turn(model, config, tools, &mut emitter).await {
+                let _ = emitter.send_error(err);
+            }
+            let _ = final_sender.send(emitter.context);
         });
 
-        match events {
-            Ok(outcome) => {
-                *context = outcome.context;
-                let events = outcome.events;
-                stream::iter(events.into_iter().map(Ok)).boxed()
-            }
-            Err(err) => stream::iter([Err(err)]).boxed(),
-        }
+        stream::unfold(
+            SpawnedRun {
+                receiver,
+                final_receiver: Some(final_receiver),
+                context,
+            },
+            |mut state| async move {
+                if let Some(event) = state.receiver.recv().await {
+                    if let Ok(event) = &event {
+                        EventEmitter::apply_to_context(state.context, event);
+                    }
+                    return Some((event, state));
+                }
+                if let Some(final_receiver) = state.final_receiver.take()
+                    && let Ok(final_context) = final_receiver.await
+                {
+                    *state.context = final_context;
+                }
+                None
+            },
+        )
+        .boxed()
     }
+}
+
+struct SpawnedRun<'a> {
+    receiver: mpsc::UnboundedReceiver<Result<AgentEvent, AgentRuntimeError>>,
+    final_receiver: Option<oneshot::Receiver<AgentContext>>,
+    context: &'a mut AgentContext,
 }
 
 fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {
@@ -318,50 +416,100 @@ fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {
     }
 }
 
-struct RunOutcome {
-    events: Vec<AgentEvent>,
+struct EventEmitter {
+    sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
     context: AgentContext,
+}
+
+impl EventEmitter {
+    fn new(
+        sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
+        context: AgentContext,
+    ) -> Self {
+        Self { sender, context }
+    }
+
+    fn emit(&mut self, event: AgentEvent) {
+        Self::apply_to_context(&mut self.context, &event);
+        let _ = self.sender.send(Ok(event));
+    }
+
+    fn send_error(&mut self, err: AgentRuntimeError) -> Result<(), AgentRuntimeError> {
+        self.sender
+            .send(Err(err))
+            .map_err(|_| AgentRuntimeError::Cancelled)
+    }
+
+    fn apply_to_context(context: &mut AgentContext, event: &AgentEvent) {
+        match event {
+            AgentEvent::MessageAppended { message } => context.append_message(message.clone()),
+            AgentEvent::TurnFinished { turn, stop_reason } => {
+                context.turns = context.turns.max(*turn);
+                if matches!(stop_reason, StopReason::Cancelled) {
+                    context.cancel();
+                }
+            }
+            AgentEvent::SteeringQueued { message } => {
+                context.queue_steering_message(message.clone());
+            }
+            AgentEvent::FollowUpQueued { message } => {
+                context.queue_follow_up_message(message.clone());
+            }
+            AgentEvent::QueueDrained { kind, count } => match kind {
+                QueueKind::Steering => {
+                    let drain_count = (*count).min(context.steering_queue.len());
+                    context.steering_queue.drain(0..drain_count);
+                }
+                QueueKind::FollowUp => {
+                    let drain_count = (*count).min(context.follow_up_queue.len());
+                    context.follow_up_queue.drain(0..drain_count);
+                }
+            },
+            AgentEvent::CompactionApplied { summary } => {
+                context.apply_compaction(summary.clone());
+            }
+            _ => {}
+        }
+    }
 }
 
 async fn run_agent_turn(
     model: Arc<dyn ModelClient>,
     config: AgentConfig,
     tools: Option<Arc<ToolRegistry>>,
-    mut context: AgentContext,
-) -> Result<RunOutcome, AgentRuntimeError> {
-    let mut all_events = Vec::new();
+    emitter: &mut EventEmitter,
+) -> Result<(), AgentRuntimeError> {
     let mut pending_messages =
-        drain_messages(&mut context.steering_queue, config.steering_queue_mode);
+        take_messages(&emitter.context.steering_queue, config.steering_queue_mode);
+    if !pending_messages.is_empty() {
+        emitter.emit(AgentEvent::QueueDrained {
+            kind: QueueKind::Steering,
+            count: pending_messages.len(),
+        });
+    }
 
     loop {
         if !pending_messages.is_empty() {
-            append_queued_messages(&mut context, pending_messages, &mut all_events);
+            append_queued_messages(emitter, pending_messages);
         }
 
-        if context.is_cancelled() {
+        maybe_compact(&config, emitter);
+
+        if emitter.context.is_cancelled() {
             break;
         }
 
-        if context.turns >= config.max_turns {
-            all_events.push(AgentEvent::TurnFinished {
-                turn: context.turns.saturating_add(1),
+        if emitter.context.turns >= config.max_turns {
+            emitter.emit(AgentEvent::TurnFinished {
+                turn: emitter.context.turns.saturating_add(1),
                 stop_reason: StopReason::MaxTurns,
             });
             break;
         }
 
-        context.turns = context.turns.saturating_add(1);
-        let turn = context.turns;
-        let request = chat_request(&config, &context);
-        let events = run_model_turn(Arc::clone(&model), request, turn).await?;
-        let assistant = events.iter().find_map(|event| {
-            if let AgentEvent::MessageAppended { message } = event {
-                Some(message.clone())
-            } else {
-                None
-            }
-        });
-        all_events.extend(events);
+        let turn = emitter.context.turns.saturating_add(1);
+        let request = chat_request(&config, &emitter.context);
+        let assistant = run_model_turn(Arc::clone(&model), request, turn, emitter).await?;
 
         let Some(AgentMessage::Assistant {
             tool_calls: model_tool_calls,
@@ -369,14 +517,25 @@ async fn run_agent_turn(
             ..
         }) = assistant.clone()
         else {
-            if let Some(assistant) = assistant {
-                context.append_message(assistant);
-            }
             pending_messages =
-                drain_messages(&mut context.steering_queue, config.steering_queue_mode);
+                take_messages(&emitter.context.steering_queue, config.steering_queue_mode);
+            if !pending_messages.is_empty() {
+                emitter.emit(AgentEvent::QueueDrained {
+                    kind: QueueKind::Steering,
+                    count: pending_messages.len(),
+                });
+            }
             if pending_messages.is_empty() {
-                pending_messages =
-                    drain_messages(&mut context.follow_up_queue, config.follow_up_queue_mode);
+                pending_messages = take_messages(
+                    &emitter.context.follow_up_queue,
+                    config.follow_up_queue_mode,
+                );
+                if !pending_messages.is_empty() {
+                    emitter.emit(AgentEvent::QueueDrained {
+                        kind: QueueKind::FollowUp,
+                        count: pending_messages.len(),
+                    });
+                }
             }
             if pending_messages.is_empty() {
                 break;
@@ -385,15 +544,11 @@ async fn run_agent_turn(
         };
         let tool_calls = model_tool_calls.clone();
 
-        if let Some(assistant) = assistant {
-            context.append_message(assistant);
-        }
-
         let Some(registry) = &tools else {
             break;
         };
         let tool_results =
-            execute_tool_calls(&config, registry, turn, &tool_calls, &mut all_events).await?;
+            execute_tool_calls(&config, registry, turn, &tool_calls, emitter).await?;
         for (tool_call, result) in &tool_results {
             let message = AgentMessage::tool_result(
                 tool_call.id.clone(),
@@ -401,38 +556,117 @@ async fn run_agent_turn(
                 vec![Content::text(result.content.clone())],
                 result.is_error,
             );
-            context.append_message(message.clone());
-            all_events.push(AgentEvent::MessageAppended { message });
+            emitter.emit(AgentEvent::MessageAppended { message });
         }
         if terminates_tool_batch(&tool_results) {
             break;
         }
-        pending_messages = drain_messages(&mut context.steering_queue, config.steering_queue_mode);
+        pending_messages =
+            take_messages(&emitter.context.steering_queue, config.steering_queue_mode);
+        if !pending_messages.is_empty() {
+            emitter.emit(AgentEvent::QueueDrained {
+                kind: QueueKind::Steering,
+                count: pending_messages.len(),
+            });
+        }
     }
 
-    Ok(RunOutcome {
-        events: all_events,
-        context,
-    })
+    Ok(())
 }
 
-fn append_queued_messages(
-    context: &mut AgentContext,
-    messages: Vec<AgentMessage>,
-    events: &mut Vec<AgentEvent>,
-) {
+fn append_queued_messages(emitter: &mut EventEmitter, messages: Vec<AgentMessage>) {
     for message in messages {
-        context.append_message(message.clone());
-        events.push(AgentEvent::MessageAppended { message });
+        emitter.emit(AgentEvent::MessageAppended { message });
     }
 }
 
-fn drain_messages(queue: &mut Vec<AgentMessage>, mode: QueueMode) -> Vec<AgentMessage> {
+fn maybe_compact(config: &AgentConfig, emitter: &mut EventEmitter) {
+    let Some(settings) = config.compaction else {
+        return;
+    };
+    if !settings.enabled || emitter.context.compaction_summary.is_some() {
+        return;
+    }
+    let estimated_tokens = estimate_messages_tokens(emitter.context.messages());
+    if estimated_tokens <= settings.max_estimated_tokens {
+        return;
+    }
+    let keep_recent = settings
+        .keep_recent_messages
+        .min(emitter.context.messages().len());
+    let first_kept_message_index = emitter.context.messages().len().saturating_sub(keep_recent);
+    if first_kept_message_index == 0 {
+        return;
+    }
+    let compacted_messages = &emitter.context.messages()[..first_kept_message_index];
+    let summary = CompactionSummary {
+        summary: summarize_messages(compacted_messages),
+        tokens_before: estimated_tokens,
+        first_kept_message_index,
+    };
+    emitter.emit(AgentEvent::CompactionApplied { summary });
+}
+
+fn estimate_messages_tokens(messages: &[AgentMessage]) -> usize {
+    messages.iter().map(estimate_message_tokens).sum()
+}
+
+fn estimate_message_tokens(message: &AgentMessage) -> usize {
+    let chars = match message {
+        AgentMessage::System { content }
+        | AgentMessage::User { content }
+        | AgentMessage::ToolResult { content, .. } => estimate_content_chars(content),
+        AgentMessage::Assistant {
+            content,
+            tool_calls,
+            ..
+        } => {
+            let content_chars = estimate_content_chars(content);
+            let tool_chars = tool_calls
+                .iter()
+                .map(|call| call.name.len() + call.arguments.to_string().len())
+                .sum::<usize>();
+            content_chars + tool_chars
+        }
+    };
+    chars.div_ceil(4)
+}
+
+fn estimate_content_chars(content: &[Content]) -> usize {
+    content
+        .iter()
+        .map(|part| match part {
+            Content::Text { text } => text.len(),
+            Content::Image { .. } => 4800,
+        })
+        .sum()
+}
+
+fn summarize_messages(messages: &[AgentMessage]) -> String {
+    let user_messages = messages
+        .iter()
+        .filter(|message| matches!(message, AgentMessage::User { .. }))
+        .count();
+    let assistant_messages = messages
+        .iter()
+        .filter(|message| matches!(message, AgentMessage::Assistant { .. }))
+        .count();
+    let tool_results = messages
+        .iter()
+        .filter(|message| matches!(message, AgentMessage::ToolResult { .. }))
+        .count();
+    format!(
+        "Compacted {count} messages: {user_messages} user, {assistant_messages} assistant, {tool_results} tool result.",
+        count = messages.len()
+    )
+}
+
+fn take_messages(queue: &[AgentMessage], mode: QueueMode) -> Vec<AgentMessage> {
     let count = match mode {
         QueueMode::All => queue.len(),
         QueueMode::OneAtATime => usize::from(!queue.is_empty()),
     };
-    queue.drain(0..count).collect()
+    queue.iter().take(count).cloned().collect()
 }
 
 fn terminates_tool_batch(tool_results: &[(AgentToolCall, ToolResult)]) -> bool {
@@ -444,14 +678,14 @@ async fn execute_tool_calls(
     registry: &ToolRegistry,
     turn: u32,
     tool_calls: &[AgentToolCall],
-    events: &mut Vec<AgentEvent>,
+    emitter: &mut EventEmitter,
 ) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
     match config.tool_execution_mode {
         ToolExecutionMode::Sequential => {
-            execute_tool_calls_sequential(config, registry, turn, tool_calls, events).await
+            execute_tool_calls_sequential(config, registry, turn, tool_calls, emitter).await
         }
         ToolExecutionMode::Parallel => {
-            execute_tool_calls_parallel(config, registry, turn, tool_calls, events).await
+            execute_tool_calls_parallel(config, registry, turn, tool_calls, emitter).await
         }
     }
 }
@@ -461,34 +695,33 @@ async fn execute_tool_calls_sequential(
     registry: &ToolRegistry,
     turn: u32,
     tool_calls: &[AgentToolCall],
-    events: &mut Vec<AgentEvent>,
+    emitter: &mut EventEmitter,
 ) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
-    let tool_context = default_tool_context()?;
+    let tool_context = default_tool_context(config)?;
     let mut results = Vec::new();
     for tool_call in tool_calls {
-        events.push(AgentEvent::ToolExecutionStarted {
+        emitter.emit(AgentEvent::ToolExecutionStarted {
             turn,
             id: tool_call.id.clone(),
             name: tool_call.name.clone(),
             arguments: tool_call.arguments.clone(),
         });
+        emit_shell_started(turn, tool_call, &tool_context, emitter);
         let mut result = if let Some(before_tool_call) = &config.before_tool_call {
             if let Some(blocked) = before_tool_call(tool_call) {
                 blocked
             } else {
-                registry
-                    .run(&tool_call.name, &tool_context, tool_call.arguments.clone())
+                prepare_and_run_tool(config, registry, &tool_context, turn, tool_call, emitter)
                     .await?
             }
         } else {
-            registry
-                .run(&tool_call.name, &tool_context, tool_call.arguments.clone())
-                .await?
+            prepare_and_run_tool(config, registry, &tool_context, turn, tool_call, emitter).await?
         };
         if let Some(after_tool_call) = &config.after_tool_call {
             result = after_tool_call(tool_call, result);
         }
-        events.push(AgentEvent::ToolExecutionFinished {
+        emit_shell_finished(turn, tool_call, &result, emitter);
+        emitter.emit(AgentEvent::ToolExecutionFinished {
             turn,
             id: tool_call.id.clone(),
             name: tool_call.name.clone(),
@@ -504,19 +737,20 @@ async fn execute_tool_calls_parallel(
     registry: &ToolRegistry,
     turn: u32,
     tool_calls: &[AgentToolCall],
-    events: &mut Vec<AgentEvent>,
+    emitter: &mut EventEmitter,
 ) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
-    let tool_context = default_tool_context()?;
+    let tool_context = default_tool_context(config)?;
     let mut completed = Vec::with_capacity(tool_calls.len());
     let mut running = FuturesUnordered::new();
 
     for (index, tool_call) in tool_calls.iter().cloned().enumerate() {
-        events.push(AgentEvent::ToolExecutionStarted {
+        emitter.emit(AgentEvent::ToolExecutionStarted {
             turn,
             id: tool_call.id.clone(),
             name: tool_call.name.clone(),
             arguments: tool_call.arguments.clone(),
         });
+        emit_shell_started(turn, &tool_call, &tool_context, emitter);
 
         if let Some(before_tool_call) = &config.before_tool_call
             && let Some(mut result) = before_tool_call(&tool_call)
@@ -524,7 +758,20 @@ async fn execute_tool_calls_parallel(
             if let Some(after_tool_call) = &config.after_tool_call {
                 result = after_tool_call(&tool_call, result);
             }
-            events.push(AgentEvent::ToolExecutionFinished {
+            emit_shell_finished(turn, &tool_call, &result, emitter);
+            emitter.emit(AgentEvent::ToolExecutionFinished {
+                turn,
+                id: tool_call.id.clone(),
+                name: tool_call.name.clone(),
+                result: result.clone(),
+            });
+            completed.push((index, tool_call, result));
+            continue;
+        }
+
+        if let Some(result) = permission_preflight(config, turn, &tool_call, emitter) {
+            emit_shell_finished(turn, &tool_call, &result, emitter);
+            emitter.emit(AgentEvent::ToolExecutionFinished {
                 turn,
                 id: tool_call.id.clone(),
                 name: tool_call.name.clone(),
@@ -549,7 +796,8 @@ async fn execute_tool_calls_parallel(
 
     while let Some(outcome) = running.next().await {
         let (index, tool_call, result) = outcome?;
-        events.push(AgentEvent::ToolExecutionFinished {
+        emit_shell_finished(turn, &tool_call, &result, emitter);
+        emitter.emit(AgentEvent::ToolExecutionFinished {
             turn,
             id: tool_call.id.clone(),
             name: tool_call.name.clone(),
@@ -569,8 +817,9 @@ async fn run_model_turn(
     model: Arc<dyn ModelClient>,
     request: ChatRequest,
     turn: u32,
-) -> Result<Vec<AgentEvent>, AgentRuntimeError> {
-    let mut events = vec![AgentEvent::TurnStarted { turn }];
+    emitter: &mut EventEmitter,
+) -> Result<Option<AgentMessage>, AgentRuntimeError> {
+    emitter.emit(AgentEvent::TurnStarted { turn });
     let mut text = String::new();
     let mut tool_calls = Vec::new();
     let mut stop_reason = StopReason::EndTurn;
@@ -580,18 +829,18 @@ async fn run_model_turn(
     while let Some(event) = stream.next().await {
         match event? {
             AiStreamEvent::MessageStart { id } => {
-                events.push(AgentEvent::MessageStarted { turn, id });
+                emitter.emit(AgentEvent::MessageStarted { turn, id });
             }
             AiStreamEvent::TextDelta { text: delta } => {
                 text.push_str(&delta);
-                events.push(AgentEvent::TextDelta { turn, text: delta });
+                emitter.emit(AgentEvent::TextDelta { turn, text: delta });
             }
             AiStreamEvent::ToolCallStart { id, name } => {
                 tool_names.insert(id.clone(), name.clone());
-                events.push(AgentEvent::ToolCallStarted { turn, id, name });
+                emitter.emit(AgentEvent::ToolCallStarted { turn, id, name });
             }
             AiStreamEvent::ToolCallArgsDelta { id, json_fragment } => {
-                events.push(AgentEvent::ToolCallArgumentsDelta {
+                emitter.emit(AgentEvent::ToolCallArgumentsDelta {
                     turn,
                     id,
                     json_fragment,
@@ -603,7 +852,7 @@ async fn run_model_turn(
                     id,
                     arguments,
                 };
-                events.push(AgentEvent::ToolCallFinished {
+                emitter.emit(AgentEvent::ToolCallFinished {
                     turn,
                     tool_call: tool_call.clone(),
                 });
@@ -616,7 +865,7 @@ async fn run_model_turn(
                 stop_reason = reason.into();
             }
             AiStreamEvent::Error { message } => {
-                events.push(AgentEvent::Error {
+                emitter.emit(AgentEvent::Error {
                     turn,
                     message: message.clone(),
                 });
@@ -631,11 +880,123 @@ async fn run_model_turn(
         vec![Content::text(text)]
     };
     let message = AgentMessage::assistant(content, tool_calls, stop_reason);
-    events.push(AgentEvent::MessageAppended { message });
-    events.push(AgentEvent::TurnFinished { turn, stop_reason });
-    Ok(events)
+    emitter.emit(AgentEvent::MessageAppended {
+        message: message.clone(),
+    });
+    emitter.emit(AgentEvent::TurnFinished { turn, stop_reason });
+    Ok(Some(message))
 }
 
-fn default_tool_context() -> Result<ToolContext, AgentRuntimeError> {
-    ToolContext::new(std::env::current_dir()?).map_err(AgentRuntimeError::Tool)
+async fn prepare_and_run_tool(
+    config: &AgentConfig,
+    registry: &ToolRegistry,
+    tool_context: &ToolContext,
+    turn: u32,
+    tool_call: &AgentToolCall,
+    emitter: &mut EventEmitter,
+) -> Result<ToolResult, AgentRuntimeError> {
+    if let Some(result) = permission_preflight(config, turn, tool_call, emitter) {
+        return Ok(result);
+    }
+    registry
+        .run(&tool_call.name, tool_context, tool_call.arguments.clone())
+        .await
+        .map_err(AgentRuntimeError::Tool)
+}
+
+fn permission_preflight(
+    config: &AgentConfig,
+    turn: u32,
+    tool_call: &AgentToolCall,
+    emitter: &mut EventEmitter,
+) -> Option<ToolResult> {
+    match config.tool_permission_policy.tool {
+        PermissionDecision::Allow => None,
+        PermissionDecision::Deny => Some(ToolResult::error(format!(
+            "permission denied for tool: {}",
+            tool_call.name
+        ))),
+        PermissionDecision::Ask => {
+            emitter.emit(AgentEvent::ApprovalRequested {
+                turn,
+                id: tool_call.id.clone(),
+                operation: PermissionOperation::Tool,
+                subject: tool_call.name.clone(),
+                arguments: tool_call.arguments.clone(),
+            });
+            Some(ToolResult::error(format!(
+                "approval required for tool: {}",
+                tool_call.name
+            )))
+        }
+    }
+}
+
+fn emit_shell_started(
+    turn: u32,
+    tool_call: &AgentToolCall,
+    tool_context: &ToolContext,
+    emitter: &mut EventEmitter,
+) {
+    if tool_call.name != "bash" {
+        return;
+    }
+    if let Some(command) = tool_call
+        .arguments
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+    {
+        emitter.emit(AgentEvent::ShellCommandStarted {
+            turn,
+            id: tool_call.id.clone(),
+            command: command.to_owned(),
+            cwd: tool_context.workspace_root().to_path_buf(),
+        });
+    }
+}
+
+fn emit_shell_finished(
+    turn: u32,
+    tool_call: &AgentToolCall,
+    result: &ToolResult,
+    emitter: &mut EventEmitter,
+) {
+    if tool_call.name != "bash" {
+        return;
+    }
+    let Some(details) = &result.details else {
+        return;
+    };
+    let stdout = details
+        .get("stdout")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let stderr = details
+        .get("stderr")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let exit_code = details
+        .get("exit_code")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok());
+    let truncated = details
+        .get("truncated")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    emitter.emit(AgentEvent::ShellCommandFinished {
+        turn,
+        id: tool_call.id.clone(),
+        exit_code,
+        stdout,
+        stderr,
+        truncated,
+    });
+}
+
+fn default_tool_context(config: &AgentConfig) -> Result<ToolContext, AgentRuntimeError> {
+    ToolContext::new(std::env::current_dir()?)
+        .map(|context| context.with_permission_policy(config.tool_permission_policy.clone()))
+        .map_err(AgentRuntimeError::Tool)
 }

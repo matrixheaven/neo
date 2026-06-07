@@ -42,16 +42,20 @@ impl Tool for BashTool {
             let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
             let output =
                 run_command(ctx, &input.command, Duration::from_millis(timeout_ms)).await?;
-            let (stdout, stdout_truncated) = cap_output(&output.stdout, max_output_bytes);
-            let (stderr, stderr_truncated) = cap_output(&output.stderr, max_output_bytes);
+            let (stdout_capped, stdout_truncated) = cap_output(&output.stdout, max_output_bytes);
+            let (stderr_capped, stderr_truncated) = cap_output(&output.stderr, max_output_bytes);
             let truncated = stdout_truncated || stderr_truncated;
             let combined = format!(
                 "exit_code: {:?}\nstdout:\n{}\nstderr:\n{}",
-                output.exit_code, stdout, stderr
+                output.exit_code, stdout_capped, stderr_capped
             );
             Ok(
                 ToolResult::ok(format!("{combined}\ntruncated: {truncated}")).with_details(json!({
                     "exit_code": output.exit_code,
+                    "stdout": output.stdout,
+                    "stderr": output.stderr,
+                    "stdout_truncated": stdout_truncated,
+                    "stderr_truncated": stderr_truncated,
                     "truncated": truncated,
                 })),
             )

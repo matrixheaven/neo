@@ -1142,6 +1142,8 @@ dependencies = [
  "futures",
  "neo-agent-core",
  "neo-ai",
+ "neo-extensions",
+ "neo-sdk",
  "serde",
  "serde_json",
  "tempfile",
@@ -1186,13 +1188,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "neo-extensions"
+version = "0.1.0"
+dependencies = [
+ "neo-sdk",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "neo-sdk"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "neo-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm 0.29.0",
+ "neo-agent-core",
  "pulldown-cmark",
  "ratatui",
  "serde",
+ "serde_json",
  "syntect",
  "tokio",
  "unicode-width 0.2.0",

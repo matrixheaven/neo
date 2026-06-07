@@ -7,7 +7,8 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    ApprovalModal, ChatTranscript, PromptState, ToolStatus, ToolStatusKind, TranscriptItem,
+    ApprovalModal, ChatTranscript, NeoTuiApp, Overlay, OverlayKind, PromptState, ToolStatus,
+    ToolStatusKind, TranscriptItem,
 };
 
 #[must_use]
@@ -275,6 +276,144 @@ impl Widget for ApprovalModal {
             write_line(inner, buf, y, &format!("{marker} {}", option.label), style);
             y = y.saturating_add(1);
         }
+    }
+}
+
+impl Widget for &NeoTuiApp {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let header = format!(
+            "{} | session: {} | model: {} | {:?}",
+            self.title(),
+            self.session_label(),
+            self.model_label(),
+            self.mode()
+        );
+        write_line(
+            area,
+            buf,
+            area.y,
+            &header,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        );
+
+        let prompt_height = prompt_height(self.prompt(), area.width);
+        let status_height = self
+            .tool_statuses()
+            .len()
+            .min(usize::from(area.height.saturating_sub(2)))
+            .try_into()
+            .unwrap_or(0);
+        let body_y = area.y.saturating_add(1);
+        let footer_height = prompt_height.saturating_add(status_height);
+        let body_height = area.height.saturating_sub(1).saturating_sub(footer_height);
+
+        let body = Rect {
+            x: area.x,
+            y: body_y,
+            width: area.width,
+            height: body_height,
+        };
+        TranscriptWidget::new(self.transcript()).render(body, buf);
+
+        let status_y = body.y.saturating_add(body.height);
+        let statuses = self.tool_statuses();
+        if status_height > 0 {
+            StatusWidget::new(&statuses).render(
+                Rect {
+                    x: area.x,
+                    y: status_y,
+                    width: area.width,
+                    height: status_height,
+                },
+                buf,
+            );
+        }
+
+        PromptWidget::new(self.prompt()).render(
+            Rect {
+                x: area.x,
+                y: status_y.saturating_add(status_height),
+                width: area.width,
+                height: prompt_height,
+            },
+            buf,
+        );
+
+        if let Some(overlay) = self.focused_overlay() {
+            render_overlay(overlay, area, buf);
+        }
+    }
+}
+
+fn prompt_height(prompt: &PromptState, width: u16) -> u16 {
+    let display_width = usize::from(width.max(1));
+    let lines = wrap_width(&format!("> {}", prompt.text), display_width)
+        .len()
+        .max(1);
+    u16::try_from(lines).unwrap_or(u16::MAX)
+}
+
+fn render_overlay(overlay: &Overlay, area: Rect, buf: &mut Buffer) {
+    let width = area.width.saturating_sub(4).clamp(20, 56);
+    let lines = overlay_lines(overlay, usize::from(width.saturating_sub(2).max(1)));
+    let content_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    let height = content_height.saturating_add(2).min(area.height).max(3);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let overlay_area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    if let OverlayKind::Approval(request) = &overlay.kind {
+        request.modal.clone().render(overlay_area, buf);
+        return;
+    }
+
+    Clear.render(overlay_area, buf);
+    let title = overlay_title(overlay);
+    let block = Block::default()
+        .title(title)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue));
+    let inner = block.inner(overlay_area);
+    block.render(overlay_area, buf);
+
+    for (index, line) in lines.iter().enumerate().take(usize::from(inner.height)) {
+        let Ok(row) = u16::try_from(index) else {
+            break;
+        };
+        write_line(inner, buf, inner.y + row, line, Style::default());
+    }
+}
+
+fn overlay_title(overlay: &Overlay) -> &str {
+    match overlay.kind {
+        OverlayKind::CommandPalette(_) => "Command Palette",
+        OverlayKind::SessionPicker(_) => "Sessions",
+        OverlayKind::ModelPicker(_) => "Models",
+        OverlayKind::Approval(_) => "Approval",
+        OverlayKind::Message(_) => overlay.title.as_str(),
+    }
+}
+
+fn overlay_lines(overlay: &Overlay, width: usize) -> Vec<String> {
+    match &overlay.kind {
+        OverlayKind::CommandPalette(state) => state.render_lines(width),
+        OverlayKind::SessionPicker(state) | OverlayKind::ModelPicker(state) => {
+            state.render_lines(width)
+        }
+        OverlayKind::Approval(request) => wrap_width(&request.modal.body, width),
+        OverlayKind::Message(message) => wrap_width(message, width),
     }
 }
 

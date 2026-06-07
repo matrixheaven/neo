@@ -12,6 +12,11 @@
   completion, and error events.
 - `ModelClient::stream_chat` is the provider adapter trait.
 - `ModelRegistry` stores configured models and a first-registered default.
+- `ProviderRegistry::production()` stores built-in production provider metadata.
+- `ProviderResolver` resolves registered models to production clients when
+  credentials and base URLs are available.
+- `OpenAiResponsesClient`, `AnthropicMessagesClient`, and
+  `OpenAiCompatibleClient` implement network provider adapters.
 - `schema_for<T>()` and `ToolSpec::from_schema<T>()` generate JSON Schema from
   Rust input types.
 - `providers::fake::FakeModelClient` supports tests.
@@ -19,17 +24,17 @@
 
 ## Pi Parity Pressure
 
-`pi-ai` documents production provider catalogs, OAuth/API-key resolution,
-reasoning controls, image generation, cross-provider handoffs, cost accounting,
-browser notes, and context serialization. Neo should not copy that surface until
-the Rust adapters exist.
+`pi-ai` documents broader provider catalogs, OAuth/API-key resolution, reasoning
+controls, image generation, cross-provider handoffs, cost accounting, browser
+notes, and context serialization. Neo should not copy unsupported surface area
+until the Rust contracts exist.
 
 ## High-Priority Gaps
 
-- Add real provider adapter docs only after modules under `crates/ai/src/providers`
-  implement network requests.
-- Add model catalog docs only after `ModelRegistry` has a loader or generated
-  source of truth.
+- Add docs for provider APIs only after modules under `crates/ai/src/providers`
+  implement network requests and production resolver support.
+- Add external model catalog docs only after `ModelRegistry` has a loader or
+  generated source of truth.
 - Keep provider credentials environment-only for now; auth-file and OAuth
   flows are future work.
 - Keep request metadata internal-facing. Do not expose provider-native chunk

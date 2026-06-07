@@ -15,7 +15,8 @@ xtask maintenance commands
 ## Implemented Today
 
 - `neo-ai` defines provider-neutral request, message, model, capability, tool, and stream event types.
-- `neo-ai` defines request options, environment key helpers, and a small model registry.
+- `neo-ai` defines request options, environment key helpers, model/provider registries, and production provider resolution.
+- `neo-ai` includes OpenAI Responses, Anthropic Messages, and OpenAI-compatible network clients.
 - `neo-ai::providers::fake::FakeModelClient` records requests and replays stream events for tests.
 - `neo-agent-core` contains a runtime turn loop, fake harness, permissions, built-in tools, and JSONL session helpers.
 - `neo-agent` exposes the initial command-line surface.
@@ -25,7 +26,7 @@ xtask maintenance commands
 
 1. `neo-agent` parses CLI arguments and loads configuration.
 2. `neo-agent-core` opens or creates a session.
-3. The runtime resolves a model provider from config and task needs.
+3. The runtime resolves a model provider from config and the production provider registry.
 4. The agent loop sends a `neo_ai::ChatRequest` to a `ModelClient`.
 5. Stream events are normalized as `AiStreamEvent` values.
 6. Tool calls are authorized, executed, and returned as `ChatMessage::ToolResult`.

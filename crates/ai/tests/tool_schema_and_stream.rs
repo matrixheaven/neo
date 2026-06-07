@@ -150,6 +150,19 @@ fn openai_chat_sse_normalizer_keeps_tool_deltas_tied_to_stream_index() {
 }
 
 #[test]
+fn openai_chat_sse_normalizer_rejects_truncated_stream_without_done() {
+    let body = [
+        r#"data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"partial"}}]}"#,
+        "",
+    ]
+    .join("\n");
+
+    let err = normalize_openai_chat_sse(&body).expect_err("missing DONE should be rejected");
+
+    assert!(err.to_string().contains("missing SSE done marker"));
+}
+
+#[test]
 fn chat_message_stream_event_and_tool_spec_serialize_stably() {
     let message = ChatMessage::Assistant {
         content: vec![

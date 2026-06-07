@@ -34,6 +34,14 @@ pub enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    Skills {
+        #[command(subcommand)]
+        command: SkillCommand,
+    },
+    Extensions {
+        #[command(subcommand)]
+        command: ExtensionCommand,
+    },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -52,6 +60,7 @@ pub enum Command {
 pub enum SessionCommand {
     List,
     Show { session_id: String },
+    ExportHtml { session_id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -68,4 +77,25 @@ pub enum ModelCommand {
 #[derive(Debug, Subcommand)]
 pub enum McpCommand {
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SkillCommand {
+    Show { path: std::path::PathBuf },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ExtensionCommand {
+    List {
+        #[arg(default_value = ".neo/extensions")]
+        root: std::path::PathBuf,
+    },
+    Call {
+        extension_id: String,
+        method: String,
+        #[arg(default_value = "{}")]
+        params: String,
+        #[arg(long, default_value = ".neo/extensions")]
+        root: std::path::PathBuf,
+    },
 }

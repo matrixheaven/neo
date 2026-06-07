@@ -1,7 +1,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentMessage, AgentToolCall, ToolResult};
+use std::path::PathBuf;
+
+use crate::{AgentMessage, AgentToolCall, PermissionOperation, ToolResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum StopReason {
@@ -64,6 +66,46 @@ pub enum AgentEvent {
         name: String,
         result: ToolResult,
     },
+    ToolExecutionUpdate {
+        turn: u32,
+        id: String,
+        name: String,
+        partial_result: ToolResult,
+    },
+    ApprovalRequested {
+        turn: u32,
+        id: String,
+        operation: PermissionOperation,
+        subject: String,
+        arguments: serde_json::Value,
+    },
+    ShellCommandStarted {
+        turn: u32,
+        id: String,
+        command: String,
+        cwd: PathBuf,
+    },
+    ShellCommandFinished {
+        turn: u32,
+        id: String,
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+        truncated: bool,
+    },
+    SteeringQueued {
+        message: AgentMessage,
+    },
+    FollowUpQueued {
+        message: AgentMessage,
+    },
+    QueueDrained {
+        kind: QueueKind,
+        count: usize,
+    },
+    CompactionApplied {
+        summary: CompactionSummary,
+    },
     MessageAppended {
         message: AgentMessage,
     },
@@ -75,4 +117,17 @@ pub enum AgentEvent {
         turn: u32,
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum QueueKind {
+    Steering,
+    FollowUp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CompactionSummary {
+    pub summary: String,
+    pub tokens_before: usize,
+    pub first_kept_message_index: usize,
 }

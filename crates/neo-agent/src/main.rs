@@ -1,12 +1,17 @@
 mod cli;
 mod config;
+mod extension_commands;
 mod modes;
 mod session_commands;
+mod skill_commands;
 
 use clap::Parser;
 
 use crate::{
-    cli::{Cli, Command, ConfigCommand, McpCommand, ModelCommand, SessionCommand},
+    cli::{
+        Cli, Command, ConfigCommand, ExtensionCommand, McpCommand, ModelCommand, SessionCommand,
+        SkillCommand,
+    },
     config::{AppConfig, ConfigOverrides},
 };
 
@@ -31,6 +36,21 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
         Some(Command::Sessions { command }) => match command {
             SessionCommand::List => session_commands::list(&config),
             SessionCommand::Show { session_id } => session_commands::show(&session_id, &config),
+            SessionCommand::ExportHtml { session_id } => {
+                session_commands::export_html(&session_id, &config).await
+            }
+        },
+        Some(Command::Skills { command }) => match command {
+            SkillCommand::Show { path } => skill_commands::show(&path),
+        },
+        Some(Command::Extensions { command }) => match command {
+            ExtensionCommand::List { root } => extension_commands::list(&root),
+            ExtensionCommand::Call {
+                extension_id,
+                method,
+                params,
+                root,
+            } => extension_commands::call(&root, &extension_id, &method, &params).await,
         },
         Some(Command::Config { command }) => match command {
             ConfigCommand::Show => config::show(&config),

@@ -1,6 +1,8 @@
 # Minimal Neo project config example for .neo/config.toml.
 
+# xtask-parity: allow fake-provider-example - deterministic development fixture, not production guidance.
 default_provider = "fake"
+# xtask-parity: allow fake-provider-example - deterministic development fixture, not production guidance.
 default_model = "fake"
 sessions_dir = ".neo/sessions"
 

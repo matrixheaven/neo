@@ -270,6 +270,7 @@ fn stream_response(
 struct IncrementalSse {
     buffer: Vec<u8>,
     parser: ParseState,
+    saw_done: bool,
     done: bool,
 }
 
@@ -289,6 +290,7 @@ impl IncrementalSse {
                 .collect::<Vec<_>>();
             match parse_sse_frame(&frame) {
                 Ok(Some(payload)) if payload == "[DONE]" => {
+                    self.saw_done = true;
                     self.done = true;
                     out.extend(self.finish());
                     break;
@@ -330,6 +332,10 @@ impl IncrementalSse {
         }
 
         self.done = true;
+        if !self.saw_done {
+            return vec![Err(AiError::Stream("missing SSE done marker".to_owned()))];
+        }
+
         if let Some(payload) = parse_sse_frame(&self.buffer).transpose() {
             match payload {
                 Ok(payload) if payload == "[DONE]" => {}
@@ -385,13 +391,18 @@ fn parse_sse_frame(frame: &[u8]) -> Result<Option<String>, AiError> {
 
 fn parse_sse_events(body: &str) -> Result<Vec<AiStreamEvent>, ProviderError> {
     let mut state = ParseState::default();
+    let mut saw_done = false;
     for payload in sse_payloads(body) {
         if payload == "[DONE]" {
+            saw_done = true;
             break;
         }
         let value = serde_json::from_str::<Value>(&payload)
             .map_err(|err| ProviderError::Stream(format!("invalid SSE JSON: {err}")))?;
         state.ingest(&value);
+    }
+    if !saw_done {
+        return Err(ProviderError::Stream("missing SSE done marker".to_owned()));
     }
     state.finish_events()
 }

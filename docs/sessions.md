@@ -43,7 +43,7 @@ Still missing from pi parity:
 - Session tree branching.
 - Session names and labels.
 - Compaction and branch summaries.
-- HTML export/share.
+- Share targets beyond local HTML export.
 - A stable schema version field.
 
 ## CLI Surface
@@ -53,11 +53,15 @@ The `neo-agent` binary exposes:
 ```bash
 neo sessions list
 neo sessions show <session-id>
+neo sessions export-html <session-id>
 neo resume <session-id>
 ```
 
 Session directory defaults to `.neo/sessions` and can be changed with
 `sessions_dir` or `NEO_SESSIONS_DIR`.
+
+`export-html` replays `MessageAppended` events and renders a standalone HTML
+conversation with `neo-sdk`'s safe Markdown renderer.
 
 See [examples/rust/session_replay.rs](../examples/rust/session_replay.rs) for a
 JSONL replay snippet.

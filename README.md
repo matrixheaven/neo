@@ -6,17 +6,24 @@ Rust-native agent monorepo inspired by pi. The workspace contains:
 - `neo-agent-core`: agent loop, tools, permissions, sessions, and harness
 - `neo-tui`: reusable terminal UI primitives
 - `neo-agent`: CLI/TUI application binary
+- `neo-sdk`: JSONL RPC, skill loading, and HTML export helpers
+- `neo-extensions`: extension discovery and stdio JSONL runner
 
 ## Start
 
 ```bash
 cargo run -p neo-agent -- print "hello from neo"
+cargo run -p neo-agent -- models list
 cargo run -p xtask -- check --docs
 ```
 
 The default maintenance gate intentionally checks the stable `xtask` slice while
-other workers are building adjacent crates. Use `cargo run -p xtask -- check
---workspace` when you want the full workspace fmt, clippy, and test gate.
+other workers are building adjacent crates. Use
+`cargo run -p xtask -- check --workspace` when you want the full workspace fmt,
+clippy, and test gate.
+`cargo run -p xtask -- check --docs` also runs the docs/examples parity gate,
+including local Markdown link checks, deployment-fixture guidance scans, and
+example TOML/JSON validation.
 
 ## Documentation
 

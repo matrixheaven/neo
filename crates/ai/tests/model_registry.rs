@@ -76,8 +76,12 @@ fn model_registry_can_seed_common_builtin_chat_models() {
     assert!(registry.get("anthropic", "claude-sonnet-4-5").is_some());
     assert!(registry.get("google", "gemini-2.5-pro").is_some());
     assert_eq!(
+        registry.get("openai", "gpt-5-mini").map(|model| &model.api),
+        Some(&ApiKind::OpenAiResponses)
+    );
+    assert_eq!(
         registry.default_model().map(|model| model.model.as_str()),
-        Some("gpt-4.1")
+        Some("gpt-5.4")
     );
 }
 

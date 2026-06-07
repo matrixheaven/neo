@@ -1,5 +1,5 @@
 use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter};
-use neo_agent_core::{AgentContext, AgentEvent, AgentMessage, StopReason};
+use neo_agent_core::{AgentContext, AgentEvent, AgentMessage, CompactionSummary, StopReason};
 
 #[tokio::test]
 async fn jsonl_session_appends_reads_and_replays_events() {
@@ -92,4 +92,49 @@ async fn jsonl_session_replays_runtime_context_with_turns_and_terminal_state() {
 
     let events = JsonlSessionReader::read_all(&path).await.expect("read all");
     assert_eq!(AgentContext::from_replay(events.iter()), context);
+}
+
+#[tokio::test]
+async fn jsonl_session_replays_queues_and_compaction_summary() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let mut writer = JsonlSessionWriter::create(&path)
+        .await
+        .expect("create session");
+
+    let summary = CompactionSummary {
+        summary: "Older work summarized".to_owned(),
+        tokens_before: 4096,
+        first_kept_message_index: 2,
+    };
+    for event in [
+        AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("before"),
+        },
+        AgentEvent::SteeringQueued {
+            message: AgentMessage::user_text("steer"),
+        },
+        AgentEvent::FollowUpQueued {
+            message: AgentMessage::user_text("follow"),
+        },
+        AgentEvent::CompactionApplied {
+            summary: summary.clone(),
+        },
+        AgentEvent::TurnFinished {
+            turn: 3,
+            stop_reason: StopReason::EndTurn,
+        },
+    ] {
+        writer.append(&event).await.expect("append event");
+    }
+    writer.flush().await.expect("flush");
+
+    let context = JsonlSessionReader::replay_context(&path)
+        .await
+        .expect("replay context");
+
+    assert_eq!(context.pending_steering_len(), 1);
+    assert_eq!(context.pending_follow_up_len(), 1);
+    assert_eq!(context.compaction_summary(), Some(&summary));
+    assert_eq!(context.turns(), 3);
 }

@@ -17,6 +17,8 @@ color-eyre.workspace = true
 futures.workspace = true
 neo-agent-core = { path = "../agent-core" }
 neo-ai = { path = "../ai" }
+neo-extensions = { path = "../extensions" }
+neo-sdk = { path = "../sdk" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

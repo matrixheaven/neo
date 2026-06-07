@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
 };
@@ -11,8 +12,8 @@ use crate::cli::Cli;
 
 const CONFIG_DIR: &str = ".neo";
 const CONFIG_FILE: &str = "config.toml";
-const DEFAULT_MODEL: &str = "fake";
-const DEFAULT_PROVIDER: &str = "fake";
+const DEFAULT_MODEL: &str = "gpt-4.1";
+const DEFAULT_PROVIDER: &str = "openai";
 const DEFAULT_MODE: &str = "interactive";
 
 #[derive(Debug, Clone)]
@@ -43,6 +44,7 @@ pub struct AppConfig {
     pub sessions_dir: PathBuf,
     pub permissions: PermissionPolicy,
     pub defaults: Defaults,
+    pub mcp: McpConfig,
 
     #[serde(skip)]
     pub config_path: PathBuf,
@@ -54,6 +56,29 @@ pub struct Defaults {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub id: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub transport: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+const fn default_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct FileConfig {
     default_model: Option<String>,
     default_provider: Option<String>,
@@ -62,6 +87,7 @@ struct FileConfig {
     sessions_dir: Option<PathBuf>,
     permissions: Option<PermissionPolicy>,
     defaults: Option<FileDefaults>,
+    mcp: Option<McpConfig>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -101,6 +127,7 @@ impl AppConfig {
             .or(file_config.sessions_dir)
             .unwrap_or_else(|| project_dir.join(CONFIG_DIR).join("sessions"));
         let permissions = file_config.permissions.unwrap_or_default();
+        let mcp = file_config.mcp.unwrap_or_default();
         let mode = env_mode
             .or(file_config.defaults.and_then(|defaults| defaults.mode))
             .unwrap_or_else(|| DEFAULT_MODE.to_owned());
@@ -113,6 +140,7 @@ impl AppConfig {
             sessions_dir,
             permissions,
             defaults: Defaults { mode },
+            mcp,
             config_path,
         })
     }
@@ -129,6 +157,7 @@ pub fn show(config: &AppConfig) -> anyhow::Result<String> {
         defaults: Some(FileDefaults {
             mode: Some(config.defaults.mode.clone()),
         }),
+        mcp: Some(config.mcp.clone()),
     };
 
     Ok(format!(
@@ -165,6 +194,12 @@ pub fn set(key: &str, value: &str) -> anyhow::Result<String> {
                 .permissions
                 .get_or_insert_with(PermissionPolicy::default);
             permissions.shell = toml::from_str(&format!("\"{value}\""))?;
+        }
+        "permissions.tool" | "tool" => {
+            let permissions = config
+                .permissions
+                .get_or_insert_with(PermissionPolicy::default);
+            permissions.tool = toml::from_str(&format!("\"{value}\""))?;
         }
         "defaults.mode" | "mode" => {
             let defaults = config.defaults.get_or_insert_with(FileDefaults::default);

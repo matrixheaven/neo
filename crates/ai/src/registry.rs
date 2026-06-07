@@ -1,4 +1,14 @@
-use crate::{ApiKind, ModelCapabilities, ModelSpec, ProviderId};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use crate::{
+    AiError, ApiKind, ModelCapabilities, ModelClient, ModelSpec, ProviderId,
+    env_api_keys::{env_api_key_from, find_env_keys_from},
+    providers::{
+        anthropic::AnthropicMessagesClient, openai_compatible::OpenAiCompatibleClient,
+        openai_responses::OpenAiResponsesClient,
+    },
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct ModelRegistry {
@@ -64,6 +74,152 @@ impl ModelRegistry {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSpec {
+    pub id: String,
+    pub display_name: String,
+    pub api: ApiKind,
+    pub base_url: Option<String>,
+    pub api_key_env_vars: Vec<String>,
+    pub ambient_auth_env_vars: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderCredentialStatus {
+    pub provider: String,
+    pub configured: bool,
+    pub env_keys: Vec<String>,
+    pub authenticated_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProviderRegistry {
+    providers: BTreeMap<String, ProviderSpec>,
+}
+
+impl ProviderRegistry {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            providers: BTreeMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn production() -> Self {
+        let mut registry = Self::new();
+        registry.register_builtin_providers();
+        registry
+    }
+
+    pub fn register_builtin_providers(&mut self) {
+        for provider in builtin_providers() {
+            self.register(provider);
+        }
+    }
+
+    pub fn register(&mut self, provider: ProviderSpec) {
+        self.providers.insert(provider.id.clone(), provider);
+    }
+
+    #[must_use]
+    pub fn get(&self, provider: &str) -> Option<&ProviderSpec> {
+        self.providers.get(provider)
+    }
+
+    #[must_use]
+    pub fn list(&self) -> Vec<ProviderSpec> {
+        self.providers.values().cloned().collect()
+    }
+
+    #[must_use]
+    pub fn credential_status(&self, provider: &str) -> Option<ProviderCredentialStatus> {
+        self.credential_status_from(provider, &std::env::vars().collect())
+    }
+
+    #[must_use]
+    pub fn credential_status_from(
+        &self,
+        provider: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Option<ProviderCredentialStatus> {
+        let spec = self.get(provider)?;
+        let env_keys = find_env_keys_from(provider, env);
+        let authenticated = spec.ambient_auth_env_vars.iter().any(|group| {
+            group
+                .iter()
+                .all(|key| env.get(key).is_some_and(|value| !value.is_empty()))
+        });
+        let configured = !env_keys.is_empty() || authenticated;
+
+        Some(ProviderCredentialStatus {
+            provider: provider.to_owned(),
+            configured,
+            env_keys,
+            authenticated_label: authenticated.then(|| "<authenticated>".to_owned()),
+        })
+    }
+
+    #[must_use]
+    pub fn resolver(&self) -> ProviderResolver {
+        ProviderResolver {
+            registry: self.clone(),
+            env: std::env::vars().collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn resolver_from(&self, env: BTreeMap<String, String>) -> ProviderResolver {
+        ProviderResolver {
+            registry: self.clone(),
+            env,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderResolver {
+    registry: ProviderRegistry,
+    env: BTreeMap<String, String>,
+}
+
+impl ProviderResolver {
+    pub fn resolve(&self, model: &ModelSpec) -> Result<Arc<dyn ModelClient>, AiError> {
+        let provider = self.registry.get(&model.provider.0).ok_or_else(|| {
+            AiError::Configuration(format!("provider {} is not registered", model.provider.0))
+        })?;
+
+        let api_key = env_api_key_from(&provider.id, &self.env).ok_or_else(|| {
+            let keys = provider.api_key_env_vars.join(", ");
+            AiError::Configuration(format!(
+                "missing credentials for provider {} (set one of: {keys})",
+                provider.id
+            ))
+        })?;
+
+        let base_url = provider.base_url.as_deref().ok_or_else(|| {
+            AiError::Configuration(format!(
+                "provider {} does not define a base URL",
+                provider.id
+            ))
+        })?;
+
+        match model.api {
+            ApiKind::OpenAiResponses => Ok(Arc::new(OpenAiResponsesClient::new(base_url, api_key))),
+            ApiKind::AnthropicMessages => {
+                Ok(Arc::new(AnthropicMessagesClient::new(base_url, api_key)))
+            }
+            ApiKind::OpenAiCompatible | ApiKind::OpenAiChatCompletions => {
+                Ok(Arc::new(OpenAiCompatibleClient::new(base_url, api_key)))
+            }
+            ApiKind::GoogleGenerativeAi | ApiKind::Local => Err(AiError::Configuration(format!(
+                "provider {} model API {:?} is not supported by production resolver",
+                provider.id, model.api
+            ))),
+        }
+    }
+}
+
 fn model_key(model: &ModelSpec) -> (String, String) {
     (model.provider.0.clone(), model.model.clone())
 }
@@ -72,8 +228,20 @@ fn builtin_models() -> Vec<ModelSpec> {
     vec![
         builtin_model(
             "openai",
+            "gpt-5.4",
+            ApiKind::OpenAiResponses,
+            ModelCapabilities::tool_chat().with_max_context_tokens(400_000),
+        ),
+        builtin_model(
+            "openai",
+            "gpt-5-mini",
+            ApiKind::OpenAiResponses,
+            ModelCapabilities::tool_chat().with_max_context_tokens(400_000),
+        ),
+        builtin_model(
+            "openai",
             "gpt-4.1",
-            ApiKind::OpenAiChatCompletions,
+            ApiKind::OpenAiResponses,
             ModelCapabilities::tool_chat().with_max_context_tokens(1_047_576),
         ),
         builtin_model(
@@ -108,5 +276,73 @@ fn builtin_model(
         model: model.to_owned(),
         api,
         capabilities,
+    }
+}
+
+fn builtin_providers() -> Vec<ProviderSpec> {
+    vec![
+        provider(
+            "openai",
+            "OpenAI",
+            ApiKind::OpenAiResponses,
+            Some("https://api.openai.com/v1"),
+            &["OPENAI_API_KEY"],
+            &[],
+        ),
+        provider(
+            "anthropic",
+            "Anthropic",
+            ApiKind::AnthropicMessages,
+            Some("https://api.anthropic.com/v1"),
+            &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            &[],
+        ),
+        provider(
+            "openrouter",
+            "OpenRouter",
+            ApiKind::OpenAiCompatible,
+            Some("https://openrouter.ai/api/v1"),
+            &["OPENROUTER_API_KEY"],
+            &[],
+        ),
+        provider(
+            "amazon-bedrock",
+            "Amazon Bedrock",
+            ApiKind::AnthropicMessages,
+            None,
+            &[],
+            &[
+                &["AWS_PROFILE"],
+                &["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+                &["AWS_BEARER_TOKEN_BEDROCK"],
+                &["AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"],
+                &["AWS_CONTAINER_CREDENTIALS_FULL_URI"],
+                &["AWS_WEB_IDENTITY_TOKEN_FILE"],
+            ],
+        ),
+    ]
+}
+
+fn provider(
+    id: &str,
+    display_name: &str,
+    api: ApiKind,
+    base_url: Option<&str>,
+    api_key_env_vars: &[&str],
+    ambient_auth_env_vars: &[&[&str]],
+) -> ProviderSpec {
+    ProviderSpec {
+        id: id.to_owned(),
+        display_name: display_name.to_owned(),
+        api,
+        base_url: base_url.map(str::to_owned),
+        api_key_env_vars: api_key_env_vars
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
+        ambient_auth_env_vars: ambient_auth_env_vars
+            .iter()
+            .map(|group| group.iter().map(|value| (*value).to_owned()).collect())
+            .collect(),
     }
 }

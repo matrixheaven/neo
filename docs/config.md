@@ -1,7 +1,8 @@
 # Configuration
 
-Configuration should let contributors start with a project-local fake model
-while leaving enough structure for provider and MCP work to land later.
+Configuration currently covers the wired `neo-agent` CLI surface and keeps
+provider/MCP extension points visible without treating development fixtures as
+production defaults.
 
 ## Current Precedence
 
@@ -10,7 +11,7 @@ while leaving enough structure for provider and MCP work to land later.
 1. CLI flags for a single invocation.
 2. `NEO_*` environment variables.
 3. Project config at `.neo/config.toml` or the path passed with `--config`.
-4. Built-in defaults suitable for local fake-model testing.
+4. Built-in `openai/gpt-4.1` defaults.
 
 There is no user-global Neo config file yet.
 
@@ -19,9 +20,8 @@ There is no user-global Neo config file yet.
 The current loader accepts this shape:
 
 ```toml
-default_provider = "fake"
-default_model = "fake"
-api_base = "http://127.0.0.1:11434/v1"
+default_provider = "openai"
+default_model = "gpt-4.1"
 api_key_env = "OPENAI_API_KEY"
 sessions_dir = ".neo/sessions"
 
@@ -29,18 +29,30 @@ sessions_dir = ".neo/sessions"
 file_read = "Allow"
 file_write = "Ask"
 shell = "Ask"
+tool = "Allow"
 
 [defaults]
 mode = "interactive"
+
+[[mcp.servers]]
+id = "filesystem"
+enabled = true
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 ```
 
 `api_key_env` names an environment variable. Do not write raw API keys into
-config files.
+config files. `neo-agent` resolves the configured model through
+`ModelRegistry::seeded()` and `ProviderRegistry::production()`. With the built-in
+defaults, set `OPENAI_API_KEY` before running provider-backed commands. Custom
+OpenAI-compatible deployments can override `api_base` and `api_key_env` for the
+selected provider.
 
 The default permissions mirror `neo_agent_core::PermissionPolicy::default()`:
-file reads are allowed, file writes ask, and shell asks. Tool execution currently
-treats only `Allow` as executable; an interactive ask/approve flow is still a
-runtime gap.
+file reads are allowed, file writes ask, shell asks, and tools are allowed.
+Tool approval request events exist in `neo-agent-core`; a full interactive
+ask/approve UI remains a runtime gap.
 
 ## Environment Variables
 
@@ -56,8 +68,8 @@ runtime gap.
 
 ## MCP Config
 
-MCP server entries are not loaded by the current `neo-agent` config module yet.
-The intended shape includes:
+`neo mcp list` reads configured server entries from `.neo/config.toml`. The
+current shape includes:
 
 - Server id.
 - Transport type such as `stdio`.
@@ -76,6 +88,9 @@ neo config show
 neo config set <key> <value>
 neo models list
 neo mcp list
+neo skills show <path>
+neo extensions list [root]
+neo extensions call <extension-id> <method> [params] --root <root>
 ```
 
 Supported `config set` keys are:
@@ -88,6 +103,7 @@ Supported `config set` keys are:
 - `permissions.file_read` or `file_read`
 - `permissions.file_write` or `file_write`
 - `permissions.shell` or `shell`
+- `permissions.tool` or `tool`
 - `defaults.mode` or `mode`
 
 Use TOML enum values `Allow`, `Ask`, or `Deny` for permission settings.

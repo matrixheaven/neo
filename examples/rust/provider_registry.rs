@@ -1,18 +1,19 @@
 use neo_ai::{
-    ApiKind, CacheRetention, ChatMessage, ChatRequest, ModelCapabilities, ModelRegistry,
-    ModelSpec, ProviderId, RequestMetadata, RequestOptions,
+    CacheRetention, ChatMessage, ChatRequest, ModelRegistry, ProviderRegistry, RequestMetadata,
+    RequestOptions,
 };
 
 fn main() {
-    let mut registry = ModelRegistry::new();
-    registry.register(ModelSpec {
-        provider: ProviderId("fake".to_owned()),
-        model: "fake".to_owned(),
-        api: ApiKind::Local,
-        capabilities: ModelCapabilities::tool_chat().with_max_context_tokens(8192),
-    });
+    let registry = ModelRegistry::seeded();
+    let providers = ProviderRegistry::production();
 
-    let model = registry.default_model().expect("registered model").clone();
+    let model = registry
+        .get("openai", "gpt-4.1")
+        .expect("seeded OpenAI model")
+        .clone();
+    let provider = providers
+        .get(&model.provider.0)
+        .expect("production provider");
     let request = ChatRequest {
         model,
         messages: vec![ChatMessage::User {
@@ -31,8 +32,10 @@ fn main() {
     };
 
     println!(
-        "{} messages for {}",
+        "{} messages for {}/{} via {:?}",
         request.messages.len(),
-        request.model.model
+        provider.id,
+        request.model.model,
+        provider.api
     );
 }

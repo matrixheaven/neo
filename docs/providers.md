@@ -1,8 +1,8 @@
 # Providers
 
 Provider integration starts in `neo-ai`. The crate defines the shared model
-contract, request options, registry, and fake client. Production network
-adapters are still future work.
+contract, request options, model/provider registries, production resolver, and
+test client.
 
 ## Core Types
 
@@ -17,6 +17,13 @@ adapters are still future work.
   `AiStreamEvent` values.
 - `ModelRegistry` stores available `ModelSpec` values and exposes the first
   registered model as the default unless replaced by configuration.
+- `ProviderRegistry::production()` registers the provider catalog used by
+  production resolution: OpenAI, Anthropic, OpenRouter, and Amazon Bedrock
+  credential hints.
+- `ProviderResolver` turns a registered `ModelSpec` plus environment credentials
+  into a `ModelClient`. It constructs `OpenAiResponsesClient`,
+  `AnthropicMessagesClient`, or `OpenAiCompatibleClient` for supported APIs and
+  rejects test-only/local providers in production resolution.
 
 ## Stream Contract
 
@@ -39,10 +46,25 @@ know a small environment-key map for common provider ids such as `anthropic`,
 `openai`, `openai-codex`, `github-copilot`, `google`, `google-vertex`,
 `mistral`, `openrouter`, and `amazon-bedrock`.
 
-Neo does not have pi-style auth-file or OAuth login flows yet. Keep provider
-secrets in environment variables or external secret managers.
+Neo does not have pi-style auth-file login flows yet. Keep provider secrets in
+environment variables or external secret managers. Anthropic can use
+`ANTHROPIC_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`; OpenAI uses `OPENAI_API_KEY`.
 
-## Fake Provider
+## Production Adapters
+
+`neo-ai` includes production network clients for:
+
+- `OpenAiResponsesClient` for OpenAI Responses models such as `openai/gpt-4.1`.
+- `AnthropicMessagesClient` for Anthropic Messages models such as
+  `anthropic/claude-sonnet-4-5`.
+- `OpenAiCompatibleClient` for OpenAI-compatible Chat Completions providers
+  such as OpenRouter.
+
+The production resolver requires a registered provider, a supported API kind,
+credentials from the provider's environment-key list, and a base URL. It does
+not resolve `ApiKind::Local` or the fake test provider.
+
+## Test Provider
 
 `neo_ai::providers::fake::FakeModelClient` is available for tests. It stores
 incoming `ChatRequest` values and replays a configured list of `AiStreamEvent`
@@ -52,9 +74,11 @@ values. `neo_agent_core::FakeHarness` wraps the same idea for runtime tests.
 
 1. Add a provider module under `crates/ai/src/providers`.
 2. Implement `ModelClient` for the adapter.
-3. Normalize provider-specific errors into `AiError`.
-4. Emit `ToolCallArgsDelta` fragments and a final `ToolCallEnd` with parsed arguments.
-5. Add tests using representative native payloads.
+3. Register production provider metadata in `ProviderRegistry` when the adapter
+   is ready for production resolution.
+4. Normalize provider-specific errors into `AiError`.
+5. Emit `ToolCallArgsDelta` fragments and a final `ToolCallEnd` with parsed arguments.
+6. Add tests using representative native payloads.
 
 Do not expose provider-native request or response types to `neo-agent-core`.
 

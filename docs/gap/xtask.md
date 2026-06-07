@@ -5,11 +5,27 @@
 - `cargo run -p xtask -- check` runs the stable xtask-only gate:
   `cargo fmt -p xtask --check`, `cargo clippy -p xtask --all-targets --
   -D warnings`, and `cargo test -p xtask`.
-- `cargo run -p xtask -- check --docs` adds local Markdown link validation for
-  `README.md`, `docs/**/*.md`, and `examples/**/*.md`.
+- `cargo run -p xtask -- check --docs` runs the docs/examples parity gate:
+  local Markdown link validation for `README.md`, `docs/**/*.md`, and
+  `examples/**/*.md`; deployment-fixture guidance scans; and
+  TOML/JSON validation for the documented example artifacts.
+- `cargo run -p xtask -- parity` runs the docs/examples parity gate without the
+  fmt, clippy, and test steps.
 - `cargo run -p xtask -- check --workspace` opts into full workspace fmt,
   clippy, and tests.
 - `--quick` remains an xtask-only compatibility alias.
+
+## Parity Scan Allowlists
+
+Intentional fixture lines that mention fake providers must be preceded by an
+inline comment:
+
+```text
+# xtask-parity: allow fake-provider-example - deterministic development fixture.
+```
+
+Keep the reason specific. This hook is for examples and tests, not for
+production or deployment guidance.
 
 ## Pi Parity Pressure
 
@@ -19,8 +35,9 @@ not inherit those Node-specific gates.
 
 ## High-Priority Gaps
 
-- Keep docs link validation in xtask because it is cheap and stable.
-- Add generated-docs or example compilation gates only after Neo examples become
-  workspace targets.
+- Keep the deployment-fixture guidance scan narrow enough that honest "not
+  implemented" gap language remains allowed.
+- Add generated-docs or Rust example compilation gates only after Neo examples
+  become workspace targets or a stable example harness exists.
 - Keep the default gate narrow while independent crate workers are making API
   migrations.

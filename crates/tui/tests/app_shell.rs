@@ -1,0 +1,395 @@
+use neo_tui::{
+    AppMode, CommandPaletteState, CommandSpec, ModelPickerState, NeoTuiApp, Overlay, OverlayKind,
+    PickerItem, SessionPickerState, StreamUpdate, TranscriptLine, TranscriptRenderer,
+};
+use ratatui::{Terminal, backend::TestBackend, buffer::Cell};
+use std::fmt::Write as _;
+use std::path::PathBuf;
+
+fn render_app(width: u16, height: u16, app: &NeoTuiApp) -> Vec<String> {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("test backend is valid");
+    terminal
+        .draw(|frame| frame.render_widget(app, frame.area()))
+        .expect("app renders");
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .chunks(width as usize)
+        .map(|line| line.iter().map(Cell::symbol).collect::<String>())
+        .collect()
+}
+
+fn apply_agent_event_to_tui_primitives(app: &mut NeoTuiApp, event: neo_agent_core::AgentEvent) {
+    match event {
+        neo_agent_core::AgentEvent::ApprovalRequested {
+            id,
+            operation,
+            subject,
+            arguments,
+            ..
+        } => {
+            let body = if arguments.is_null() {
+                subject
+            } else {
+                format!("{subject}\n{arguments}")
+            };
+            app.request_approval(id, format!("{operation:?} approval"), body);
+        }
+        neo_agent_core::AgentEvent::ShellCommandStarted {
+            id, command, cwd, ..
+        } => {
+            app.apply_stream_update(StreamUpdate::ToolStarted {
+                id,
+                name: "shell.run".to_owned(),
+                detail: format!("{command} ({})", cwd.display()),
+            });
+        }
+        neo_agent_core::AgentEvent::ShellCommandFinished {
+            id,
+            exit_code,
+            stdout,
+            stderr,
+            truncated,
+            ..
+        } => {
+            let exit_label = exit_code.map_or_else(|| "signal".to_owned(), |code| code.to_string());
+            let mut detail = format!("exit {exit_label}");
+            if !stdout.is_empty() {
+                let _ = write!(detail, ", stdout: {stdout}");
+            }
+            if !stderr.is_empty() {
+                let _ = write!(detail, ", stderr: {stderr}");
+            }
+            if truncated {
+                detail.push_str(", truncated");
+            }
+            app.apply_stream_update(StreamUpdate::ToolFinished {
+                id,
+                detail,
+                success: exit_code == Some(0),
+            });
+        }
+        neo_agent_core::AgentEvent::QueueDrained { kind, count } => {
+            app.apply_stream_update(StreamUpdate::Notice {
+                text: format!("{kind:?} queue drained ({count})"),
+            });
+        }
+        neo_agent_core::AgentEvent::CompactionApplied { summary } => {
+            app.apply_stream_update(StreamUpdate::Notice {
+                text: format!(
+                    "Compaction applied: kept from message {}, {} tokens before",
+                    summary.first_kept_message_index, summary.tokens_before
+                ),
+            });
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn app_shell_maps_agent_core_approval_request_to_approval_overlay() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+
+    apply_agent_event_to_tui_primitives(
+        &mut app,
+        neo_agent_core::AgentEvent::ApprovalRequested {
+            turn: 7,
+            id: "approval-7".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Tool,
+            subject: "shell.run".to_owned(),
+            arguments: serde_json::json!({ "command": "cargo test -p neo-tui" }),
+        },
+    );
+
+    assert_eq!(app.mode(), AppMode::Approval);
+    assert_eq!(
+        app.approval_choice(),
+        Some(neo_tui::ApprovalChoice::Approve)
+    );
+    assert!(matches!(
+        app.focused_overlay().map(|overlay| &overlay.kind),
+        Some(OverlayKind::Approval(modal))
+            if modal.request_id == "approval-7"
+                && modal.modal.title.contains("Tool")
+                && modal.modal.body.contains("cargo test -p neo-tui")
+    ));
+}
+
+#[test]
+fn app_shell_maps_agent_core_shell_command_lifecycle_to_tool_status() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+
+    apply_agent_event_to_tui_primitives(
+        &mut app,
+        neo_agent_core::AgentEvent::ShellCommandStarted {
+            turn: 1,
+            id: "shell-1".to_owned(),
+            command: "cargo test -p neo-tui".to_owned(),
+            cwd: PathBuf::from("/workspace/neo"),
+        },
+    );
+
+    let statuses = app.tool_statuses();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].name, "shell.run");
+    assert_eq!(statuses[0].kind, neo_tui::ToolStatusKind::Running);
+    assert!(statuses[0].detail.as_deref().is_some_and(|detail| {
+        detail.contains("cargo test -p neo-tui") && detail.contains("/workspace/neo")
+    }));
+
+    apply_agent_event_to_tui_primitives(
+        &mut app,
+        neo_agent_core::AgentEvent::ShellCommandFinished {
+            turn: 1,
+            id: "shell-1".to_owned(),
+            exit_code: Some(0),
+            stdout: "ok".to_owned(),
+            stderr: String::new(),
+            truncated: false,
+        },
+    );
+
+    assert!(app.tool_statuses().is_empty());
+    assert!(matches!(
+        app.transcript().items().last(),
+        Some(neo_tui::TranscriptItem::Tool {
+            name,
+            detail,
+            status,
+        }) if name == "shell.run"
+            && detail.contains("exit 0")
+            && detail.contains("stdout: ok")
+            && status == &neo_tui::ToolStatusKind::Succeeded
+    ));
+}
+
+#[test]
+fn app_shell_maps_agent_core_queue_and_compaction_events_to_notices() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+
+    apply_agent_event_to_tui_primitives(
+        &mut app,
+        neo_agent_core::AgentEvent::QueueDrained {
+            kind: neo_agent_core::QueueKind::FollowUp,
+            count: 2,
+        },
+    );
+    apply_agent_event_to_tui_primitives(
+        &mut app,
+        neo_agent_core::AgentEvent::CompactionApplied {
+            summary: neo_agent_core::CompactionSummary {
+                summary: "Older context summarized.".to_owned(),
+                tokens_before: 12_345,
+                first_kept_message_index: 4,
+            },
+        },
+    );
+
+    let notices: Vec<&str> = app
+        .transcript()
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            neo_tui::TranscriptItem::Notice { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices.len(), 2);
+    assert!(notices[0].contains("FollowUp queue drained (2)"));
+    assert!(notices[1].contains("Compaction applied"));
+    assert!(notices[1].contains("12345 tokens before"));
+}
+
+#[test]
+fn app_shell_records_submissions_and_streaming_updates() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+
+    assert_eq!(app.mode(), AppMode::Editing);
+    app.prompt_mut()
+        .apply_edit(neo_tui::PromptEdit::Insert("hello"));
+    assert_eq!(app.submit_prompt(), Some("hello".to_owned()));
+    assert_eq!(app.mode(), AppMode::Streaming);
+
+    app.apply_stream_update(StreamUpdate::AssistantStarted {
+        id: "msg-1".to_owned(),
+    });
+    app.apply_stream_update(StreamUpdate::TextDelta {
+        text: "Hel".to_owned(),
+    });
+    app.apply_stream_update(StreamUpdate::TextDelta {
+        text: "lo".to_owned(),
+    });
+    app.apply_stream_update(StreamUpdate::ToolStarted {
+        id: "tool-1".to_owned(),
+        name: "shell.run".to_owned(),
+        detail: "cargo test".to_owned(),
+    });
+    app.apply_stream_update(StreamUpdate::ToolFinished {
+        id: "tool-1".to_owned(),
+        detail: "exit 0".to_owned(),
+        success: true,
+    });
+    app.apply_stream_update(StreamUpdate::TurnFinished);
+
+    assert_eq!(app.mode(), AppMode::Editing);
+    assert_eq!(app.active_assistant_id(), None);
+    assert_eq!(app.transcript().items().len(), 3);
+    assert!(app.tool_statuses().is_empty());
+    assert!(matches!(
+        &app.transcript().items()[1],
+        neo_tui::TranscriptItem::Assistant { content } if content == "Hello"
+    ));
+    assert!(matches!(
+        &app.transcript().items()[2],
+        neo_tui::TranscriptItem::Tool { status, detail, .. }
+            if status == &neo_tui::ToolStatusKind::Succeeded && detail == "exit 0"
+    ));
+}
+
+#[test]
+fn modal_stack_tracks_focus_and_restores_previous_overlay() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+
+    let first = app.push_overlay(Overlay::new(
+        "palette",
+        OverlayKind::CommandPalette(CommandPaletteState::new([CommandSpec::new(
+            "open",
+            "Open",
+            Some("Open session"),
+        )])),
+    ));
+    let second = app.push_overlay(Overlay::new(
+        "models",
+        OverlayKind::ModelPicker(ModelPickerState::new([PickerItem::new(
+            "gpt-4.1",
+            "GPT-4.1",
+            Some("default"),
+        )])),
+    ));
+
+    assert_eq!(app.focused_overlay_id(), Some(second));
+    assert_eq!(app.mode(), AppMode::Overlay);
+
+    app.focus_overlay(first);
+    assert_eq!(app.focused_overlay_id(), Some(first));
+
+    let removed = app.close_focused_overlay().expect("focused overlay closes");
+    assert_eq!(removed.id, first);
+    assert_eq!(app.focused_overlay_id(), Some(second));
+
+    app.close_overlay(second);
+    assert_eq!(app.focused_overlay_id(), None);
+    assert_eq!(app.mode(), AppMode::Editing);
+}
+
+#[test]
+fn command_palette_session_and_model_pickers_filter_and_select_values() {
+    let mut palette = CommandPaletteState::new([
+        CommandSpec::new("new-session", "New session", Some("Start clean")),
+        CommandSpec::new("resume", "Resume", Some("Open an existing session")),
+        CommandSpec::new("model", "Model", Some("Switch model")),
+    ]);
+    palette.set_filter("mo");
+    assert_eq!(palette.selected_command().expect("command").id, "model");
+    assert_eq!(palette.confirm().expect("confirmed").id, "model");
+
+    let mut sessions = SessionPickerState::new([
+        PickerItem::new("s1", "Session one", Some("today")),
+        PickerItem::new("s2", "Long task", Some("yesterday")),
+    ]);
+    sessions.set_filter("long");
+    assert_eq!(sessions.confirm().expect("session").value, "s2");
+
+    let mut models = ModelPickerState::new([
+        PickerItem::new("openai/gpt-4.1", "GPT-4.1", Some("balanced")),
+        PickerItem::new("anthropic/claude-sonnet", "Claude Sonnet", Some("coding")),
+    ]);
+    models.set_filter("claude");
+    assert_eq!(
+        models.selected_model().expect("model").value,
+        "anthropic/claude-sonnet"
+    );
+}
+
+#[test]
+fn approval_overlay_exposes_selected_decision_without_runtime_logic() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let request = app.request_approval(
+        "approval-1",
+        "Run command?",
+        "cargo clippy -p neo-tui --all-targets",
+    );
+
+    assert_eq!(app.focused_overlay_id(), Some(request));
+    assert_eq!(app.mode(), AppMode::Approval);
+    assert_eq!(
+        app.approval_choice(),
+        Some(neo_tui::ApprovalChoice::Approve)
+    );
+
+    app.move_overlay_selection_down();
+    assert_eq!(app.approval_choice(), Some(neo_tui::ApprovalChoice::Deny));
+
+    let confirmed = app.confirm_approval().expect("approval confirmed");
+    assert_eq!(confirmed.request_id, "approval-1");
+    assert_eq!(confirmed.choice, neo_tui::ApprovalChoice::Deny);
+    assert_eq!(app.mode(), AppMode::Editing);
+}
+
+#[test]
+fn transcript_renderer_handles_markdownish_blocks_and_wrapping() {
+    let renderer = TranscriptRenderer::new(28);
+    let lines = renderer.render_markdownish(
+        "# Plan\n- inspect files\n- run tests\n```rust\nfn main() {}\n```\nplain text wraps across the available terminal width",
+    );
+
+    assert!(lines.iter().any(|line| {
+        matches!(
+            line,
+            TranscriptLine::Heading { level: 1, text } if text == "Plan"
+        )
+    }));
+    assert!(lines.iter().any(|line| {
+        matches!(
+            line,
+            TranscriptLine::ListItem { text, indent } if text == "inspect files" && *indent == 0
+        )
+    }));
+    assert!(lines.iter().any(|line| {
+        matches!(
+            line,
+            TranscriptLine::Code { text, language } if text == "fn main() {}" && language.as_deref() == Some("rust")
+        )
+    }));
+    assert!(
+        lines
+            .iter()
+            .all(|line| neo_tui::visible_width(line.text()) <= 28)
+    );
+}
+
+#[test]
+fn app_widget_renders_header_transcript_prompt_and_top_overlay() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    app.transcript_mut().push(neo_tui::TranscriptItem::notice(
+        "Welcome to neo terminal shell",
+    ));
+    app.push_overlay(Overlay::new(
+        "palette",
+        OverlayKind::CommandPalette(CommandPaletteState::new([
+            CommandSpec::new("new-session", "New session", Some("Start clean")),
+            CommandSpec::new("resume", "Resume", Some("Open session")),
+        ])),
+    ));
+
+    let lines = render_app(64, 18, &app);
+
+    assert!(lines.iter().any(|line| line.contains("neo")));
+    assert!(lines.iter().any(|line| line.contains("session-a")));
+    assert!(lines.iter().any(|line| line.contains("openai/gpt-4.1")));
+    assert!(lines.iter().any(|line| line.contains("Welcome to neo")));
+    assert!(lines.iter().any(|line| line.contains("Command Palette")));
+    assert!(lines.iter().any(|line| line.contains("New session")));
+}

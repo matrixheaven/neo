@@ -7,7 +7,7 @@ Neo is a Rust-native coding-agent workspace. The repository is intentionally spl
 - [Quickstart](quickstart.md) - run the current CLI and development checks.
 - [Architecture](architecture.md) - crate boundaries and request flow.
 - [Configuration](config.md) - current `.neo/config.toml`, environment, and CLI override model.
-- [Providers](providers.md) - model/provider abstraction, request options, registry, and fake client.
+- [Providers](providers.md) - model/provider abstraction, request options, production resolver, and test client.
 - [Tools](tools.md) - implemented built-in tools, schemas, permissions, and runtime boundary.
 - [Sessions](sessions.md) - JSONL event persistence and current resume expectations.
 - [MCP](mcp.md) - conceptual Model Context Protocol interface.
