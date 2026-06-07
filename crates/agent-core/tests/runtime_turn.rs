@@ -1,8 +1,9 @@
 use futures::StreamExt;
 use neo_agent_core::{
-    AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentToolCall, Content,
-    PermissionDecision, PermissionOperation, PermissionPolicy, QueueMode, StopReason, Tool,
-    ToolContext, ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult, harness::FakeHarness,
+    AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentRuntimeError,
+    AgentToolCall, ApprovalRequest, Content, PermissionDecision, PermissionOperation,
+    PermissionPolicy, QueueMode, StopReason, Tool, ToolContext, ToolExecutionMode, ToolFuture,
+    ToolRegistry, ToolResult, harness::FakeHarness,
 };
 use neo_ai::{
     AiError, AiStreamEvent, ApiKind, ChatRequest, ModelCapabilities, ModelClient, ModelSpec,
@@ -13,7 +14,10 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::time::{sleep, timeout};
+use tokio::{
+    sync::oneshot,
+    time::{sleep, timeout},
+};
 
 #[tokio::test]
 async fn runtime_streams_one_turn_text_and_updates_context() {
@@ -816,6 +820,388 @@ async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
         name: "echo".to_owned(),
         result: ToolResult::error("approval denied for tool: echo"),
     }));
+}
+
+struct AsyncEchoRuntime {
+    runtime: AgentRuntime,
+    executed: Arc<Mutex<Vec<String>>>,
+    decision_sender: oneshot::Sender<PermissionDecision>,
+    observed_requests: Arc<Mutex<Vec<ApprovalRequest>>>,
+}
+
+fn echo_tool_harness(text: &str) -> FakeHarness {
+    FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "text": text }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ])
+}
+
+fn async_echo_runtime(harness: &FakeHarness) -> AsyncEchoRuntime {
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools.register(RecordingEchoTool {
+        executed: Arc::clone(&executed),
+    });
+    let (decision_sender, decision_receiver) = oneshot::channel();
+    let decision_receiver = Arc::new(Mutex::new(Some(decision_receiver)));
+    let observed_requests = Arc::new(Mutex::new(Vec::new()));
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_permission_policy(PermissionPolicy {
+                file_read: PermissionDecision::Allow,
+                file_write: PermissionDecision::Deny,
+                shell: PermissionDecision::Deny,
+                tool: PermissionDecision::Ask,
+            })
+            .with_async_approval_handler({
+                let decision_receiver = Arc::clone(&decision_receiver);
+                let observed_requests = Arc::clone(&observed_requests);
+                move |request| {
+                    observed_requests
+                        .lock()
+                        .expect("observed requests lock poisoned")
+                        .push(request.clone());
+                    let decision_receiver = take_decision_receiver(&decision_receiver);
+                    async move {
+                        decision_receiver
+                            .await
+                            .expect("approval decision should be sent")
+                    }
+                }
+            }),
+        harness.client(),
+        tools,
+    );
+
+    AsyncEchoRuntime {
+        runtime,
+        executed,
+        decision_sender,
+        observed_requests,
+    }
+}
+
+fn take_decision_receiver(
+    receiver: &Arc<Mutex<Option<oneshot::Receiver<PermissionDecision>>>>,
+) -> oneshot::Receiver<PermissionDecision> {
+    receiver
+        .lock()
+        .expect("decision receiver lock poisoned")
+        .take()
+        .expect("single approval decision receiver")
+}
+
+async fn collect_until_approval<S>(stream: &mut S, events: &mut Vec<AgentEvent>)
+where
+    S: futures::Stream<Item = Result<AgentEvent, AgentRuntimeError>> + Unpin,
+{
+    loop {
+        let event = timeout(Duration::from_millis(250), stream.next())
+            .await
+            .expect("event before approval request")
+            .expect("stream should not end before approval request")
+            .expect("event should be ok");
+        let approval_requested = matches!(event, AgentEvent::ApprovalRequested { .. });
+        events.push(event);
+        if approval_requested {
+            break;
+        }
+    }
+}
+
+async fn assert_waits_for_approval_decision<S>(stream: &mut S, action: &str)
+where
+    S: futures::Stream<Item = Result<AgentEvent, AgentRuntimeError>> + Unpin,
+{
+    assert!(
+        timeout(Duration::from_millis(50), stream.next())
+            .await
+            .is_err(),
+        "runtime should wait for the async approval decision before {action}"
+    );
+}
+
+fn final_done_turn() -> Vec<AiStreamEvent> {
+    vec![
+        AiStreamEvent::MessageStart {
+            id: "msg_2".to_owned(),
+        },
+        AiStreamEvent::TextDelta {
+            text: "done".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]
+}
+
+#[tokio::test]
+async fn runtime_executes_ask_permission_tool_after_async_approval_wait_allows_it() {
+    let harness = echo_tool_harness("async approved");
+    let AsyncEchoRuntime {
+        runtime,
+        executed,
+        decision_sender,
+        observed_requests,
+    } = async_echo_runtime(&harness);
+    let mut context = AgentContext::new();
+
+    let mut stream = runtime.run_turn(&mut context, AgentMessage::user_text("call tool"));
+    let mut events = Vec::new();
+    collect_until_approval(&mut stream, &mut events).await;
+
+    assert_eq!(
+        *observed_requests
+            .lock()
+            .expect("observed requests lock poisoned"),
+        vec![ApprovalRequest {
+            turn: 1,
+            id: "tool_1".to_owned(),
+            operation: PermissionOperation::Tool,
+            subject: "echo".to_owned(),
+            arguments: json!({ "text": "async approved" }),
+        }]
+    );
+    assert!(events.contains(&AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        operation: PermissionOperation::Tool,
+        subject: "echo".to_owned(),
+        arguments: json!({ "text": "async approved" }),
+    }));
+    assert!(executed.lock().expect("executed lock poisoned").is_empty());
+    assert_waits_for_approval_decision(&mut stream, "executing").await;
+
+    decision_sender
+        .send(PermissionDecision::Allow)
+        .expect("send allow decision");
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("event should be ok"));
+    }
+    drop(stream);
+
+    assert_eq!(
+        *executed.lock().expect("executed lock poisoned"),
+        vec!["async approved".to_owned()]
+    );
+    assert!(events.contains(&AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        name: "echo".to_owned(),
+        result: ToolResult::ok("async approved"),
+    }));
+    assert_eq!(
+        context.messages()[2],
+        AgentMessage::tool_result(
+            "tool_1",
+            "echo",
+            vec![Content::text("async approved")],
+            false
+        )
+    );
+}
+
+#[tokio::test]
+async fn runtime_skips_ask_permission_tool_after_async_approval_wait_denies_it() {
+    let harness = echo_tool_harness("async denied");
+    let AsyncEchoRuntime {
+        runtime,
+        executed,
+        decision_sender,
+        ..
+    } = async_echo_runtime(&harness);
+    let mut context = AgentContext::new();
+
+    let mut stream = runtime.run_turn(&mut context, AgentMessage::user_text("call tool"));
+    let mut events = Vec::new();
+    collect_until_approval(&mut stream, &mut events).await;
+
+    assert!(events.contains(&AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        operation: PermissionOperation::Tool,
+        subject: "echo".to_owned(),
+        arguments: json!({ "text": "async denied" }),
+    }));
+    assert!(executed.lock().expect("executed lock poisoned").is_empty());
+    assert_waits_for_approval_decision(&mut stream, "denying").await;
+
+    decision_sender
+        .send(PermissionDecision::Deny)
+        .expect("send deny decision");
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("event should be ok"));
+    }
+    drop(stream);
+
+    assert!(executed.lock().expect("executed lock poisoned").is_empty());
+    assert!(events.contains(&AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        name: "echo".to_owned(),
+        result: ToolResult::error("approval denied for tool: echo"),
+    }));
+    assert_eq!(
+        context.messages()[2],
+        AgentMessage::tool_result(
+            "tool_1",
+            "echo",
+            vec![Content::text("approval denied for tool: echo")],
+            true
+        )
+    );
+}
+
+#[tokio::test]
+async fn runtime_parallel_mode_runs_allowed_tool_while_async_approval_is_pending() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let harness = parallel_write_and_echo_harness();
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::with_builtin_tools();
+    tools.register(RecordingEchoTool {
+        executed: Arc::clone(&executed),
+    });
+    let (decision_sender, decision_receiver) = oneshot::channel();
+    let decision_receiver = Arc::new(Mutex::new(Some(decision_receiver)));
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_execution_mode(ToolExecutionMode::Parallel)
+            .with_tool_permission_policy(PermissionPolicy {
+                file_read: PermissionDecision::Allow,
+                file_write: PermissionDecision::Ask,
+                shell: PermissionDecision::Deny,
+                tool: PermissionDecision::Allow,
+            })
+            .with_workspace_root(workspace.path())
+            .expect("workspace config")
+            .with_async_approval_handler({
+                let decision_receiver = Arc::clone(&decision_receiver);
+                move |request| {
+                    assert_eq!(request.operation, PermissionOperation::FileWrite);
+                    let decision_receiver = take_decision_receiver(&decision_receiver);
+                    async move {
+                        decision_receiver
+                            .await
+                            .expect("approval decision should be sent")
+                    }
+                }
+            }),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+
+    let mut stream = runtime.run_turn(&mut context, AgentMessage::user_text("call tools"));
+    let mut events = Vec::new();
+    collect_until_approval(&mut stream, &mut events).await;
+
+    let allowed_finish = timeout(Duration::from_millis(250), stream.next())
+        .await
+        .expect("allowed tool should finish while approval is pending")
+        .expect("stream should continue")
+        .expect("event should be ok");
+    assert_eq!(
+        allowed_finish,
+        AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "tool_2".to_owned(),
+            name: "echo".to_owned(),
+            result: ToolResult::ok("already allowed"),
+        }
+    );
+    events.push(allowed_finish);
+    assert_eq!(
+        *executed.lock().expect("executed lock poisoned"),
+        vec!["already allowed".to_owned()]
+    );
+    assert!(
+        !workspace.path().join("approved.txt").exists(),
+        "approval-gated write should still be pending"
+    );
+
+    decision_sender
+        .send(PermissionDecision::Allow)
+        .expect("send allow decision");
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("event should be ok"));
+    }
+    drop(stream);
+
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("approved.txt")).expect("written file"),
+        "ok"
+    );
+    assert!(matches!(
+        &context.messages()[2],
+        AgentMessage::ToolResult {
+            tool_call_id,
+            tool_name,
+            content,
+            is_error,
+        } if tool_call_id == "tool_1"
+            && tool_name == "write"
+            && content
+                .iter()
+                .any(|part| matches!(part, Content::Text { text } if text.contains("approved.txt")))
+            && !is_error
+    ));
+    assert_eq!(
+        context.messages()[3],
+        AgentMessage::tool_result(
+            "tool_2",
+            "echo",
+            vec![Content::text("already allowed")],
+            false
+        )
+    );
+}
+
+fn parallel_write_and_echo_harness() -> FakeHarness {
+    FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "write".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "path": "approved.txt", "content": "ok" }),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_2".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_2".to_owned(),
+                arguments: json!({ "text": "already allowed" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ])
 }
 
 #[tokio::test]

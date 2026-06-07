@@ -1,6 +1,6 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{future::Future, path::PathBuf, sync::Arc};
 
-use futures::{StreamExt, stream, stream::FuturesUnordered};
+use futures::{FutureExt, StreamExt, future::BoxFuture, stream, stream::FuturesUnordered};
 use neo_ai::{AiStreamEvent, ChatRequest, ModelClient, ModelSpec, RequestOptions, ToolSpec};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,8 @@ pub type ContextTransform = Arc<dyn Fn(&[AgentMessage]) -> Vec<AgentMessage> + S
 pub type BeforeToolCallHook = Arc<dyn Fn(&AgentToolCall) -> Option<ToolResult> + Send + Sync>;
 pub type AfterToolCallHook = Arc<dyn Fn(&AgentToolCall, ToolResult) -> ToolResult + Send + Sync>;
 pub type ApprovalHandler = Arc<dyn Fn(&ApprovalRequest) -> PermissionDecision + Send + Sync>;
+pub type AsyncApprovalHandler =
+    Arc<dyn Fn(ApprovalRequest) -> BoxFuture<'static, PermissionDecision> + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ApprovalRequest {
@@ -70,6 +72,9 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub approval_handler: Option<ApprovalHandler>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub async_approval_handler: Option<AsyncApprovalHandler>,
 }
 
 impl AgentConfig {
@@ -92,6 +97,7 @@ impl AgentConfig {
             before_tool_call: None,
             after_tool_call: None,
             approval_handler: None,
+            async_approval_handler: None,
         }
     }
 
@@ -179,6 +185,16 @@ impl AgentConfig {
         handler: impl Fn(&ApprovalRequest) -> PermissionDecision + Send + Sync + 'static,
     ) -> Self {
         self.approval_handler = Some(Arc::new(handler));
+        self
+    }
+
+    #[must_use]
+    pub fn with_async_approval_handler<F, Fut>(mut self, handler: F) -> Self
+    where
+        F: Fn(ApprovalRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = PermissionDecision> + Send + 'static,
+    {
+        self.async_approval_handler = Some(Arc::new(move |request| handler(request).boxed()));
         self
     }
 }
@@ -472,6 +488,12 @@ impl EventEmitter {
         let _ = self.sender.send(Ok(event));
     }
 
+    fn sink(&self) -> EventSink {
+        EventSink {
+            sender: self.sender.clone(),
+        }
+    }
+
     fn send_error(&mut self, err: AgentRuntimeError) -> Result<(), AgentRuntimeError> {
         self.sender
             .send(Err(err))
@@ -508,6 +530,27 @@ impl EventEmitter {
             }
             _ => {}
         }
+    }
+}
+
+trait EventPublisher {
+    fn emit(&mut self, event: AgentEvent);
+}
+
+impl EventPublisher for EventEmitter {
+    fn emit(&mut self, event: AgentEvent) {
+        Self::emit(self, event);
+    }
+}
+
+#[derive(Clone)]
+struct EventSink {
+    sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
+}
+
+impl EventPublisher for EventSink {
+    fn emit(&mut self, event: AgentEvent) {
+        let _ = self.sender.send(Ok(event));
     }
 }
 
@@ -806,24 +849,20 @@ async fn execute_tool_calls_parallel(
             continue;
         }
 
-        let tool_context =
-            match prepare_tool_context(config, &tool_context, turn, &tool_call, emitter) {
-                ToolPreparation::Run(context) => context,
-                ToolPreparation::Skip(result) => {
-                    emit_shell_finished(turn, &tool_call, &result, emitter);
-                    emitter.emit(AgentEvent::ToolExecutionFinished {
-                        turn,
-                        id: tool_call.id.clone(),
-                        name: tool_call.name.clone(),
-                        result: result.clone(),
-                    });
-                    completed.push((index, tool_call, result));
-                    continue;
-                }
-            };
-
+        let config = config.clone();
+        let tool_context = tool_context.clone();
         let after_tool_call = config.after_tool_call.clone();
+        let mut sink = emitter.sink();
         running.push(async move {
+            let tool_context =
+                match prepare_tool_context(&config, &tool_context, turn, &tool_call, &mut sink)
+                    .await
+                {
+                    ToolPreparation::Run(context) => context,
+                    ToolPreparation::Skip(result) => {
+                        return Ok::<_, AgentRuntimeError>((index, tool_call, result));
+                    }
+                };
             let mut result = registry
                 .run(&tool_call.name, &tool_context, tool_call.arguments.clone())
                 .await?;
@@ -935,7 +974,7 @@ async fn prepare_and_run_tool(
     tool_call: &AgentToolCall,
     emitter: &mut EventEmitter,
 ) -> Result<ToolResult, AgentRuntimeError> {
-    match prepare_tool_context(config, tool_context, turn, tool_call, emitter) {
+    match prepare_tool_context(config, tool_context, turn, tool_call, emitter).await {
         ToolPreparation::Run(context) => registry
             .run(&tool_call.name, &context, tool_call.arguments.clone())
             .await
@@ -944,12 +983,12 @@ async fn prepare_and_run_tool(
     }
 }
 
-fn prepare_tool_context(
+async fn prepare_tool_context(
     config: &AgentConfig,
     base_context: &ToolContext,
     turn: u32,
     tool_call: &AgentToolCall,
-    emitter: &mut EventEmitter,
+    emitter: &mut impl EventPublisher,
 ) -> ToolPreparation {
     let mut context = base_context.clone();
     if let Some(result) = permission_result_for_decision(
@@ -960,7 +999,9 @@ fn prepare_tool_context(
         PermissionOperation::Tool,
         tool_call.name.clone(),
         emitter,
-    ) {
+    )
+    .await
+    {
         return ToolPreparation::Skip(result);
     }
     context.permissions.tool = PermissionDecision::Allow;
@@ -976,7 +1017,9 @@ fn prepare_tool_context(
     };
     if let Some(result) = permission_result_for_decision(
         decision, config, turn, tool_call, operation, subject, emitter,
-    ) {
+    )
+    .await
+    {
         return ToolPreparation::Skip(result);
     }
     match operation {
@@ -993,31 +1036,31 @@ fn prepare_tool_context(
     ToolPreparation::Run(context)
 }
 
-fn permission_result_for_decision(
+async fn permission_result_for_decision(
     decision: PermissionDecision,
     config: &AgentConfig,
     turn: u32,
     tool_call: &AgentToolCall,
     operation: PermissionOperation,
     subject: String,
-    emitter: &mut EventEmitter,
+    emitter: &mut impl EventPublisher,
 ) -> Option<ToolResult> {
     match decision {
         PermissionDecision::Allow => None,
         PermissionDecision::Deny => Some(permission_error(operation, &subject, "denied")),
         PermissionDecision::Ask => {
-            approval_decision(config, turn, tool_call, operation, subject, emitter)
+            approval_decision(config, turn, tool_call, operation, subject, emitter).await
         }
     }
 }
 
-fn approval_decision(
+async fn approval_decision(
     config: &AgentConfig,
     turn: u32,
     tool_call: &AgentToolCall,
     operation: PermissionOperation,
     subject: String,
-    emitter: &mut EventEmitter,
+    emitter: &mut impl EventPublisher,
 ) -> Option<ToolResult> {
     let request = ApprovalRequest {
         turn,
@@ -1033,10 +1076,13 @@ fn approval_decision(
         subject: request.subject.clone(),
         arguments: request.arguments.clone(),
     });
-    let decision = config
-        .approval_handler
-        .as_ref()
-        .map_or(PermissionDecision::Ask, |handler| handler(&request));
+    let decision = if let Some(handler) = &config.approval_handler {
+        handler(&request)
+    } else if let Some(handler) = &config.async_approval_handler {
+        handler(request.clone()).await
+    } else {
+        PermissionDecision::Ask
+    };
     match decision {
         PermissionDecision::Allow => None,
         PermissionDecision::Deny => Some(permission_error(
@@ -1102,7 +1148,7 @@ fn emit_shell_started(
     turn: u32,
     tool_call: &AgentToolCall,
     tool_context: &ToolContext,
-    emitter: &mut EventEmitter,
+    emitter: &mut impl EventPublisher,
 ) {
     if tool_call.name != "bash" {
         return;
@@ -1125,7 +1171,7 @@ fn emit_shell_finished(
     turn: u32,
     tool_call: &AgentToolCall,
     result: &ToolResult,
-    emitter: &mut EventEmitter,
+    emitter: &mut impl EventPublisher,
 ) {
     if tool_call.name != "bash" {
         return;
