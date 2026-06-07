@@ -1,0 +1,51 @@
+[workspace]
+members = [
+    "crates/ai",
+    "crates/agent-core",
+    "crates/tui",
+    "crates/neo-agent",
+    "xtask"
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/matrixheaven/neo"
+rust-version = "1.88"
+
+[workspace.dependencies]
+anyhow = "1.0.100"
+async-trait = "0.1.89"
+clap = { version = "4.5.53", features = ["derive", "env"] }
+color-eyre = "0.6.5"
+crossterm = "0.29.0"
+futures = "0.3.31"
+ignore = "0.4.25"
+jsonschema = "0.37.4"
+pulldown-cmark = "0.13.0"
+ratatui = "0.29.0"
+regex = "1.12.2"
+reqwest = { version = "0.12.24", features = ["json", "stream", "rustls-tls"], default-features = false }
+schemars = { version = "1.1.0", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+syntect = "5.3.0"
+tempfile = "3.23.0"
+thiserror = "2.0.17"
+tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "process", "fs", "signal", "time", "io-util", "sync"] }
+tokio-util = "0.7.17"
+toml = "0.9.8"
+tracing = "0.1.43"
+tracing-subscriber = "0.3.22"
+unicode-width = "0.2.0"
+uuid = { version = "1.19.0", features = ["v4", "serde"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"

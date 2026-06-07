@@ -1,0 +1,12 @@
+# Example MCP server configuration. This is documentation for the intended
+# config shape; runtime loading is not implemented in this slice.
+
+[[mcp.servers]]
+id = "filesystem"
+enabled = true
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+
+[mcp.servers.env]
+RUST_LOG = "info"

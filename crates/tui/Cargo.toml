@@ -1,0 +1,19 @@
+[package]
+name = "neo-tui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+crossterm.workspace = true
+pulldown-cmark.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+syntect.workspace = true
+tokio.workspace = true
+unicode-width = "0.2.0"
+
+[lints]
+workspace = true

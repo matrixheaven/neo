@@ -1,0 +1,15 @@
+# Minimal Neo config example.
+
+[providers.fake]
+api = "local"
+default_model = "fake-small"
+api_key_env = ""
+
+[models.fake-small]
+provider = "fake"
+streaming = true
+tools = true
+images = false
+reasoning = false
+embeddings = false
+max_context_tokens = 8192
