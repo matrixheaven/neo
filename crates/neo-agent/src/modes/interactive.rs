@@ -224,6 +224,9 @@ where
             KeybindingAction::InputTab => {
                 self.app.prompt_mut().apply_edit(PromptEdit::Insert("\t"));
             }
+            KeybindingAction::InputCopy => {
+                let _ = self.app.copy_prompt_text();
+            }
             KeybindingAction::InputSubmit => {
                 self.submit_current_prompt().await?;
             }
@@ -257,8 +260,7 @@ where
             KeybindingAction::EditorCursorUp
             | KeybindingAction::EditorCursorDown
             | KeybindingAction::EditorPageUp
-            | KeybindingAction::EditorPageDown
-            | KeybindingAction::InputCopy => {}
+            | KeybindingAction::EditorPageDown => {}
         }
 
         Ok(false)
@@ -635,6 +637,7 @@ mod tests {
                 |_app| Ok(()),
                 FakeEvents {
                     events: vec![
+                        InputEvent::Action(KeybindingAction::InputCopy),
                         InputEvent::Action(KeybindingAction::EditorCursorWordLeft),
                         InputEvent::Action(KeybindingAction::EditorDeleteWordBackward),
                         InputEvent::Action(KeybindingAction::EditorDeleteToLineEnd),
@@ -650,6 +653,7 @@ mod tests {
             .await
             .expect("event loop succeeds");
 
+        assert_eq!(controller.app().copy_buffer(), Some("hello brave world"));
         assert_eq!(controller.app().prompt().text, "hello \tworld");
         assert_eq!(controller.app().prompt().cursor, 7);
     }

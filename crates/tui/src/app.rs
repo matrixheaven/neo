@@ -18,6 +18,7 @@ pub struct NeoTuiApp {
     transcript: ChatTranscript,
     transcript_view: TranscriptView,
     prompt: PromptState,
+    copy_buffer: Option<String>,
     mode: AppMode,
     overlays: Vec<Overlay>,
     next_overlay_id: OverlayId,
@@ -42,6 +43,7 @@ impl NeoTuiApp {
             transcript: ChatTranscript::default(),
             transcript_view: TranscriptView::new(),
             prompt: PromptState::default(),
+            copy_buffer: None,
             mode: AppMode::Editing,
             overlays: Vec::new(),
             next_overlay_id: OverlayId::default(),
@@ -90,6 +92,17 @@ impl NeoTuiApp {
 
     pub fn prompt_mut(&mut self) -> &mut PromptState {
         &mut self.prompt
+    }
+
+    #[must_use]
+    pub fn copy_buffer(&self) -> Option<&str> {
+        self.copy_buffer.as_deref()
+    }
+
+    pub fn copy_prompt_text(&mut self) -> Option<String> {
+        let copied = self.prompt.copy_text()?;
+        self.copy_buffer = Some(copied.clone());
+        Some(copied)
     }
 
     pub fn transcript_mut(&mut self) -> &mut ChatTranscript {
@@ -1474,6 +1487,11 @@ impl PromptState {
     #[must_use]
     pub fn char_len(&self) -> usize {
         self.text.chars().count()
+    }
+
+    #[must_use]
+    pub fn copy_text(&self) -> Option<String> {
+        (!self.text.is_empty()).then(|| self.text.clone())
     }
 
     fn byte_index(&self, char_index: usize) -> usize {

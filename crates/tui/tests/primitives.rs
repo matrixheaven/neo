@@ -1,9 +1,9 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use neo_tui::{
     ApprovalChoice, ApprovalModal, ApprovalOption, ChatTranscript, InputEvent, KeyId,
-    KeybindingAction, KeybindingsManager, PromptEdit, PromptState, PromptWidget, SelectItem,
-    SelectListState, StatusWidget, ToolStatus, ToolStatusKind, TranscriptItem, TranscriptView,
-    TranscriptWidget, truncate_width, wrap_width,
+    KeybindingAction, KeybindingsManager, NeoTuiApp, PromptEdit, PromptState, PromptWidget,
+    SelectItem, SelectListState, StatusWidget, ToolStatus, ToolStatusKind, TranscriptItem,
+    TranscriptView, TranscriptWidget, truncate_width, wrap_width,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Cell};
 
@@ -321,6 +321,24 @@ fn select_list_pages_by_visible_window_and_clamps() {
     list.page_up();
     assert_eq!(list.selected_item().expect("selected").value, "item-0");
     assert_eq!(list.visible_range(), 0..4);
+}
+
+#[test]
+fn prompt_copy_uses_internal_buffer_without_mutating_editor_state() {
+    let mut prompt = PromptState::new("hello world").with_cursor(5);
+
+    assert_eq!(prompt.copy_text().as_deref(), Some("hello world"));
+    assert_eq!(prompt.text, "hello world");
+    assert_eq!(prompt.cursor, 5);
+    assert_eq!(prompt.apply_edit(PromptEdit::Yank), None);
+
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    app.prompt_mut().apply_edit(PromptEdit::Insert("copy me"));
+
+    assert_eq!(app.copy_prompt_text().as_deref(), Some("copy me"));
+    assert_eq!(app.copy_buffer(), Some("copy me"));
+    assert_eq!(app.prompt().text, "copy me");
+    assert_eq!(app.prompt().cursor, 7);
 }
 
 #[test]

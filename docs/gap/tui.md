@@ -18,11 +18,12 @@ Target: `crates/tui`.
   into real prompt and overlay primitives for word movement, word deletion,
   delete-to-line-start/end, submit/newline, approval selection up/down,
   overlay page-up/page-down selection, approval confirm, overlay cancel, exit
-  cancel, tab insertion, prompt undo, and kill-ring yank.
+  cancel, tab insertion, prompt undo, kill-ring yank, and an internal prompt
+  copy buffer.
 
 ## Remaining lower-priority gaps
 
 - The Rust crate does not implement the full TypeScript terminal diff renderer,
   image protocols, ANSI-preserving wrapping, autocomplete, stdin buffering,
-  copy, or tab completion.
+  OS/terminal clipboard integration, or tab completion.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.
