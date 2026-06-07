@@ -7,18 +7,21 @@
 - Commands: `print`, `run`, `resume`, `sessions list`, `sessions show`,
   `sessions rename`, `sessions fork`, `sessions compact`,
   `sessions export-html`, `skills show`, `extensions list`,
-  `extensions install`, `extensions update`, `extensions status`, `extensions enable`,
-  `extensions disable`, `extensions call`, `config show`, `config set`,
+  `extensions install`, `extensions update`, `extensions uninstall`,
+  `extensions status`, `extensions enable`, `extensions disable`,
+  `extensions call`, `config show`, `config set`,
   `models list`, and `mcp list`.
 - Project config defaults to `.neo/config.toml`.
 - Config loading merges CLI overrides, environment overrides, project config,
-  and built-in defaults.
+  user-global `~/.neo/config.toml`, and built-in defaults.
 - Supported config keys include `default_model`, `default_provider`,
   `api_base`, `api_key_env`, `sessions_dir`, `permissions.file_read`,
   `permissions.file_write`, `permissions.shell`, `defaults.mode`,
   provider-specific API key env names, and runtime generation/agent options
   such as temperature, max tokens, queue modes, tool execution mode, and
   compaction thresholds.
+- User-global config is merged below project config with `~` expansion for
+  paths such as `sessions_dir`.
 - Session commands read project session files from `sessions_dir`, store local
   tree/name metadata next to JSONL records, compact sessions with a local
   deterministic transcript summary event, and can export replayed messages to
@@ -28,6 +31,8 @@
   git URL into `.neo/extensions/<id>`, records its source in
   `.neo/extensions-sources.toml`, and `extensions update` refreshes from that
   recorded source without changing enable/disable state.
+- `extensions uninstall` removes the installed extension directory and source
+  registry entry without mutating explicit enable/disable lifecycle state.
 - `extensions list`, `extensions status`, `extensions enable`, and
   `extensions disable` discover project-local extension manifests and persist
   local enablement state under `.neo/extensions-state.toml`.
@@ -61,8 +66,8 @@ and platform-specific guidance.
 
 - Keep quickstart scoped to currently wired commands until interactive mode has
   full controls beyond the current raw-terminal prompt/edit/approval slice.
-- Document project-local config before user-global config because Neo currently
-  resolves `.neo/config.toml` from the current working directory.
+- Keep config docs scoped to project/global TOML layering until profile sync or
+  hosted settings exist.
 - Do not document `/login`, `/tree`, hosted sharing, hosted extension
   marketplace catalog/search/install flows, or themes as available Neo features
   yet.

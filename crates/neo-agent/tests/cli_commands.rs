@@ -166,6 +166,55 @@ mode = "print"
 }
 
 #[test]
+fn config_show_layers_user_global_config_below_project_config_and_expands_home_paths() {
+    let home = TempDir::new().expect("home tempdir");
+    let project = TempDir::new().expect("project tempdir");
+    fs::create_dir_all(home.path().join(".neo")).expect("create global .neo");
+    fs::write(
+        home.path().join(".neo/config.toml"),
+        r#"
+default_provider = "anthropic"
+default_model = "claude-sonnet-4-5"
+sessions_dir = "~/.neo/sessions"
+api_key_env = "GLOBAL_KEY"
+
+[runtime]
+max_tokens = 1024
+"#,
+    )
+    .expect("write global config");
+    fs::create_dir_all(project.path().join(".neo")).expect("create project .neo");
+    fs::write(
+        project.path().join(".neo/config.toml"),
+        r#"
+default_model = "project-model"
+
+[runtime]
+temperature = 0.3
+"#,
+    )
+    .expect("write project config");
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["config", "show"]);
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("default_provider = \"anthropic\""));
+    assert!(stdout.contains("default_model = \"project-model\""));
+    assert!(stdout.contains("api_key_env = \"GLOBAL_KEY\""));
+    assert!(stdout.contains("max_tokens = 1024"));
+    assert!(stdout.contains("temperature = 0.3"));
+    assert!(stdout.contains(&format!(
+        "sessions_dir = \"{}\"",
+        home.path().join(".neo/sessions").display()
+    )));
+}
+
+#[test]
 fn config_show_reads_provider_specific_api_key_env_without_secret_values() {
     let temp = TempDir::new().expect("tempdir");
     fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
@@ -555,6 +604,39 @@ fn extensions_install_update_and_list_sources_from_local_directory() {
         .expect("read lifecycle state");
     assert!(state.contains("[extensions.echo]"));
     assert!(state.contains("enabled = false"));
+}
+
+#[test]
+fn extensions_uninstall_removes_install_dir_and_source_entry() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.path().join("source");
+    write_extension_manifest(&source, "echo", "Echo", "0.1.0");
+    let root = temp.path().join("extensions");
+
+    let mut install = neo();
+    install
+        .current_dir(temp.path())
+        .args(["extensions", "install"])
+        .arg(&source)
+        .arg("--root")
+        .arg(&root);
+    run(install);
+    assert!(root.join("echo/neo-extension.toml").exists());
+
+    let mut uninstall = neo();
+    uninstall
+        .current_dir(temp.path())
+        .args(["extensions", "uninstall", "echo", "--root"])
+        .arg(&root);
+    let uninstalled = run(uninstall);
+
+    assert!(uninstalled.contains("echo uninstalled"));
+    assert!(!root.join("echo").exists());
+
+    let registry = fs::read_to_string(temp.path().join(".neo/extensions-sources.toml"))
+        .expect("read extension source registry");
+    assert!(!registry.contains("[extensions.echo"));
+    assert!(!registry.contains(source.to_string_lossy().as_ref()));
 }
 
 #[test]

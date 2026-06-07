@@ -136,6 +136,11 @@ pub enum ExtensionCommand {
         #[arg(long, default_value = ".neo/extensions")]
         root: std::path::PathBuf,
     },
+    Uninstall {
+        extension_id: String,
+        #[arg(long, default_value = ".neo/extensions")]
+        root: std::path::PathBuf,
+    },
     Status {
         extension_id: String,
         #[arg(long, default_value = ".neo/extensions")]

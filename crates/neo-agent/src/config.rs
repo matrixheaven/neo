@@ -66,17 +66,11 @@ pub struct Defaults {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    #[serde(default = "default_queue_mode")]
     pub steering_queue_mode: QueueMode,
-    #[serde(default = "default_queue_mode")]
     pub follow_up_queue_mode: QueueMode,
-    #[serde(default = "default_tool_execution_mode")]
     pub tool_execution_mode: ToolExecutionMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<RuntimeCompactionConfig>,
 }
 
@@ -95,11 +89,8 @@ impl Default for RuntimeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeCompactionConfig {
-    #[serde(default = "default_enabled")]
     pub enabled: bool,
-    #[serde(default = "default_runtime_compaction_max_estimated_tokens")]
     pub max_estimated_tokens: usize,
-    #[serde(default = "default_runtime_compaction_keep_recent_messages")]
     pub keep_recent_messages: usize,
 }
 
@@ -146,14 +137,6 @@ const fn default_enabled() -> bool {
     true
 }
 
-const fn default_queue_mode() -> QueueMode {
-    QueueMode::All
-}
-
-const fn default_tool_execution_mode() -> ToolExecutionMode {
-    ToolExecutionMode::Parallel
-}
-
 const fn default_runtime_compaction_max_estimated_tokens() -> usize {
     32_000
 }
@@ -172,13 +155,65 @@ struct FileConfig {
     sessions_dir: Option<PathBuf>,
     permissions: Option<PermissionPolicy>,
     defaults: Option<FileDefaults>,
-    runtime: Option<RuntimeConfig>,
+    runtime: Option<FileRuntimeConfig>,
     mcp: Option<McpConfig>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct FileDefaults {
     mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct FileRuntimeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    steering_queue_mode: Option<QueueMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    follow_up_queue_mode: Option<QueueMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_execution_mode: Option<ToolExecutionMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compaction: Option<FileRuntimeCompactionConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct FileRuntimeCompactionConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_estimated_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keep_recent_messages: Option<usize>,
+}
+
+impl FileRuntimeConfig {
+    fn from_runtime(runtime: &RuntimeConfig) -> Self {
+        Self {
+            temperature: runtime.temperature,
+            max_tokens: runtime.max_tokens,
+            steering_queue_mode: Some(runtime.steering_queue_mode),
+            follow_up_queue_mode: Some(runtime.follow_up_queue_mode),
+            tool_execution_mode: Some(runtime.tool_execution_mode),
+            compaction: runtime
+                .compaction
+                .as_ref()
+                .map(FileRuntimeCompactionConfig::from_runtime),
+        }
+    }
+}
+
+impl FileRuntimeCompactionConfig {
+    fn from_runtime(compaction: &RuntimeCompactionConfig) -> Self {
+        Self {
+            enabled: Some(compaction.enabled),
+            max_estimated_tokens: Some(compaction.max_estimated_tokens),
+            keep_recent_messages: Some(compaction.keep_recent_messages),
+        }
+    }
 }
 
 impl AppConfig {
@@ -189,12 +224,20 @@ impl AppConfig {
             .and_then(Path::parent)
             .map_or(env::current_dir()?, Path::to_path_buf);
 
-        let file_config = read_file_config(&config_path)?;
+        let global_config = find_global_config_path()
+            .map(|path| read_file_config(&path))
+            .transpose()?
+            .unwrap_or_default();
+        let project_config = read_file_config(&config_path)?;
+        let file_config = merge_file_configs(global_config, project_config);
         let env_model = env::var("NEO_MODEL").ok();
         let env_provider = env::var("NEO_PROVIDER").ok();
         let env_api_base = env::var("NEO_API_BASE").ok();
         let env_api_key = env::var("NEO_API_KEY_ENV").ok();
-        let env_sessions_dir = env::var("NEO_SESSIONS_DIR").ok().map(PathBuf::from);
+        let env_sessions_dir = env::var("NEO_SESSIONS_DIR")
+            .ok()
+            .map(PathBuf::from)
+            .map(expand_user_path);
         let env_mode = env::var("NEO_MODE").ok();
 
         let default_model = overrides
@@ -213,10 +256,10 @@ impl AppConfig {
             .or(file_config.api_key_env)
             .or_else(|| provider_api_key_env(&providers, &default_provider));
         let sessions_dir = env_sessions_dir
-            .or(file_config.sessions_dir)
+            .or_else(|| file_config.sessions_dir.map(expand_user_path))
             .unwrap_or_else(|| project_dir.join(CONFIG_DIR).join("sessions"));
         let permissions = file_config.permissions.unwrap_or_default();
-        let runtime = file_config.runtime.unwrap_or_default();
+        let runtime = runtime_from_file(file_config.runtime);
         validate_runtime_config(&runtime)?;
         let mcp = file_config.mcp.unwrap_or_default();
         let mode = env_mode
@@ -263,7 +306,7 @@ pub fn show(config: &AppConfig) -> anyhow::Result<String> {
         defaults: Some(FileDefaults {
             mode: Some(config.defaults.mode.clone()),
         }),
-        runtime: Some(config.runtime.clone()),
+        runtime: Some(FileRuntimeConfig::from_runtime(&config.runtime)),
         mcp: Some(config.mcp.clone()),
     };
 
@@ -332,41 +375,156 @@ pub fn set(key: &str, value: &str) -> anyhow::Result<String> {
             runtime_config_mut(&mut config).max_tokens = Some(value.parse()?);
         }
         "runtime.steering_queue_mode" | "steering_queue_mode" => {
-            runtime_config_mut(&mut config).steering_queue_mode = parse_queue_mode(value)?;
+            runtime_config_mut(&mut config).steering_queue_mode = Some(parse_queue_mode(value)?);
         }
         "runtime.follow_up_queue_mode" | "follow_up_queue_mode" => {
-            runtime_config_mut(&mut config).follow_up_queue_mode = parse_queue_mode(value)?;
+            runtime_config_mut(&mut config).follow_up_queue_mode = Some(parse_queue_mode(value)?);
         }
         "runtime.tool_execution_mode" | "tool_execution_mode" => {
-            runtime_config_mut(&mut config).tool_execution_mode = parse_tool_execution_mode(value)?;
+            runtime_config_mut(&mut config).tool_execution_mode =
+                Some(parse_tool_execution_mode(value)?);
         }
         "runtime.compaction.enabled" | "compaction.enabled" => {
-            compaction_config_mut(&mut config).enabled = value.parse()?;
+            compaction_config_mut(&mut config).enabled = Some(value.parse()?);
         }
         "runtime.compaction.max_estimated_tokens" | "compaction.max_estimated_tokens" => {
-            compaction_config_mut(&mut config).max_estimated_tokens = value.parse()?;
+            compaction_config_mut(&mut config).max_estimated_tokens = Some(value.parse()?);
         }
         "runtime.compaction.keep_recent_messages" | "compaction.keep_recent_messages" => {
-            compaction_config_mut(&mut config).keep_recent_messages = value.parse()?;
+            compaction_config_mut(&mut config).keep_recent_messages = Some(value.parse()?);
         }
         unknown => bail!("unsupported config key: {unknown}"),
     }
 
     if let Some(runtime) = &config.runtime {
-        validate_runtime_config(runtime)?;
+        validate_runtime_config(&runtime_from_file(Some(runtime.clone())))?;
     }
     write_file_config(&config_path, &config)?;
     Ok(format!("set {key}\n"))
 }
 
-fn runtime_config_mut(config: &mut FileConfig) -> &mut RuntimeConfig {
-    config.runtime.get_or_insert_with(RuntimeConfig::default)
+fn merge_file_configs(base: FileConfig, layer: FileConfig) -> FileConfig {
+    FileConfig {
+        default_model: layer.default_model.or(base.default_model),
+        default_provider: layer.default_provider.or(base.default_provider),
+        api_base: layer.api_base.or(base.api_base),
+        api_key_env: layer.api_key_env.or(base.api_key_env),
+        providers: merge_provider_configs(base.providers, layer.providers),
+        sessions_dir: layer.sessions_dir.or(base.sessions_dir),
+        permissions: layer.permissions.or(base.permissions),
+        defaults: merge_defaults(base.defaults, layer.defaults),
+        runtime: merge_runtime_configs(base.runtime, layer.runtime),
+        mcp: merge_mcp_configs(base.mcp, layer.mcp),
+    }
 }
 
-fn compaction_config_mut(config: &mut FileConfig) -> &mut RuntimeCompactionConfig {
+fn merge_provider_configs(
+    base: Option<BTreeMap<String, ProviderConfig>>,
+    layer: Option<BTreeMap<String, ProviderConfig>>,
+) -> Option<BTreeMap<String, ProviderConfig>> {
+    match (base, layer) {
+        (None, None) => None,
+        (Some(providers), None) | (None, Some(providers)) => Some(providers),
+        (Some(mut base), Some(layer)) => {
+            base.extend(layer);
+            Some(base)
+        }
+    }
+}
+
+fn merge_defaults(base: Option<FileDefaults>, layer: Option<FileDefaults>) -> Option<FileDefaults> {
+    match (base, layer) {
+        (None, None) => None,
+        (Some(defaults), None) | (None, Some(defaults)) => Some(defaults),
+        (Some(base), Some(layer)) => Some(FileDefaults {
+            mode: layer.mode.or(base.mode),
+        }),
+    }
+}
+
+fn merge_runtime_configs(
+    base: Option<FileRuntimeConfig>,
+    layer: Option<FileRuntimeConfig>,
+) -> Option<FileRuntimeConfig> {
+    match (base, layer) {
+        (None, None) => None,
+        (Some(runtime), None) | (None, Some(runtime)) => Some(runtime),
+        (Some(base), Some(layer)) => Some(FileRuntimeConfig {
+            temperature: layer.temperature.or(base.temperature),
+            max_tokens: layer.max_tokens.or(base.max_tokens),
+            steering_queue_mode: layer.steering_queue_mode.or(base.steering_queue_mode),
+            follow_up_queue_mode: layer.follow_up_queue_mode.or(base.follow_up_queue_mode),
+            tool_execution_mode: layer.tool_execution_mode.or(base.tool_execution_mode),
+            compaction: merge_runtime_compaction_configs(base.compaction, layer.compaction),
+        }),
+    }
+}
+
+fn merge_runtime_compaction_configs(
+    base: Option<FileRuntimeCompactionConfig>,
+    layer: Option<FileRuntimeCompactionConfig>,
+) -> Option<FileRuntimeCompactionConfig> {
+    match (base, layer) {
+        (None, None) => None,
+        (Some(compaction), None) | (None, Some(compaction)) => Some(compaction),
+        (Some(base), Some(layer)) => Some(FileRuntimeCompactionConfig {
+            enabled: layer.enabled.or(base.enabled),
+            max_estimated_tokens: layer.max_estimated_tokens.or(base.max_estimated_tokens),
+            keep_recent_messages: layer.keep_recent_messages.or(base.keep_recent_messages),
+        }),
+    }
+}
+
+fn merge_mcp_configs(base: Option<McpConfig>, layer: Option<McpConfig>) -> Option<McpConfig> {
+    match (base, layer) {
+        (None, None) => None,
+        (Some(mcp), None) | (None, Some(mcp)) => Some(mcp),
+        (Some(mut base), Some(layer)) => {
+            for server in layer.servers {
+                base.servers.retain(|candidate| candidate.id != server.id);
+                base.servers.push(server);
+            }
+            Some(base)
+        }
+    }
+}
+
+fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
+    let Some(runtime) = runtime else {
+        return RuntimeConfig::default();
+    };
+    RuntimeConfig {
+        temperature: runtime.temperature,
+        max_tokens: runtime.max_tokens,
+        steering_queue_mode: runtime.steering_queue_mode.unwrap_or(QueueMode::All),
+        follow_up_queue_mode: runtime.follow_up_queue_mode.unwrap_or(QueueMode::All),
+        tool_execution_mode: runtime
+            .tool_execution_mode
+            .unwrap_or(ToolExecutionMode::Parallel),
+        compaction: runtime
+            .compaction
+            .map(|compaction| RuntimeCompactionConfig {
+                enabled: compaction.enabled.unwrap_or(true),
+                max_estimated_tokens: compaction
+                    .max_estimated_tokens
+                    .unwrap_or_else(default_runtime_compaction_max_estimated_tokens),
+                keep_recent_messages: compaction
+                    .keep_recent_messages
+                    .unwrap_or_else(default_runtime_compaction_keep_recent_messages),
+            }),
+    }
+}
+
+fn runtime_config_mut(config: &mut FileConfig) -> &mut FileRuntimeConfig {
+    config
+        .runtime
+        .get_or_insert_with(FileRuntimeConfig::default)
+}
+
+fn compaction_config_mut(config: &mut FileConfig) -> &mut FileRuntimeCompactionConfig {
     runtime_config_mut(config)
         .compaction
-        .get_or_insert_with(RuntimeCompactionConfig::default)
+        .get_or_insert_with(FileRuntimeCompactionConfig::default)
 }
 
 fn parse_queue_mode(value: &str) -> anyhow::Result<QueueMode> {
@@ -412,6 +570,29 @@ fn validate_runtime_config(config: &RuntimeConfig) -> anyhow::Result<()> {
 
 fn find_config_path() -> anyhow::Result<PathBuf> {
     Ok(env::current_dir()?.join(CONFIG_DIR).join(CONFIG_FILE))
+}
+
+fn find_global_config_path() -> Option<PathBuf> {
+    home_dir().map(|home| home.join(CONFIG_DIR).join(CONFIG_FILE))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
+fn expand_user_path(path: PathBuf) -> PathBuf {
+    let Some(raw) = path.to_str().map(str::to_owned) else {
+        return path;
+    };
+    if raw == "~" {
+        return home_dir().unwrap_or(path);
+    }
+    let Some(rest) = raw.strip_prefix("~/") else {
+        return path;
+    };
+    home_dir().map_or(path, |home| home.join(rest))
 }
 
 fn read_file_config(path: &Path) -> anyhow::Result<FileConfig> {

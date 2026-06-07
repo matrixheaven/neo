@@ -57,6 +57,15 @@ pub fn update(root: &Path, extension_id: &str) -> anyhow::Result<String> {
     ))
 }
 
+pub fn uninstall(root: &Path, extension_id: &str) -> anyhow::Result<String> {
+    let uninstalled = installer(root).uninstall(extension_id)?;
+    Ok(format!(
+        "{} uninstalled\t{}\n",
+        uninstalled.id,
+        uninstalled.root.display()
+    ))
+}
+
 pub fn status(root: &Path, extension_id: &str) -> anyhow::Result<String> {
     let status = lifecycle_store().status(root, extension_id)?;
     Ok(format_status(&status))

@@ -11,9 +11,13 @@ production defaults.
 1. CLI flags for a single invocation.
 2. `NEO_*` environment variables.
 3. Project config at `.neo/config.toml` or the path passed with `--config`.
-4. Built-in `openai/gpt-4.1` defaults.
+4. User-global config at `~/.neo/config.toml`.
+5. Built-in `openai/gpt-4.1` defaults.
 
-There is no user-global Neo config file yet.
+Project config is merged over user-global config field by field. Provider maps
+are merged by provider id, MCP servers are merged by server id with project
+entries taking precedence, and runtime options preserve global values when the
+project only overrides a subset. `sessions_dir` supports `~` expansion.
 
 ## Project Config
 
@@ -75,6 +79,9 @@ without storing the secret value. Do not write raw API keys into config files.
 OpenAI-compatible deployments can override `api_base` and `api_key_env` for the
 selected provider.
 
+User defaults can live in `~/.neo/config.toml`; project `.neo/config.toml`
+overrides them for that workspace.
+
 The default permissions mirror `neo_agent_core::PermissionPolicy::default()`:
 file reads are allowed, file writes ask, shell asks, and tools are allowed.
 Tool approval request events exist in `neo-agent-core`; a full interactive
@@ -135,6 +142,7 @@ neo skills show <path>
 neo extensions list [root]
 neo extensions install <path-or-git-url> --root <root>
 neo extensions update <extension-id> --root <root>
+neo extensions uninstall <extension-id> --root <root>
 neo extensions status <extension-id> --root <root>
 neo extensions enable <extension-id> --root <root>
 neo extensions disable <extension-id> --root <root>

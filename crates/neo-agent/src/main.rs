@@ -62,6 +62,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
             ExtensionCommand::Update { extension_id, root } => {
                 extension_commands::update(&root, &extension_id)
             }
+            ExtensionCommand::Uninstall { extension_id, root } => {
+                extension_commands::uninstall(&root, &extension_id)
+            }
             ExtensionCommand::Status { extension_id, root } => {
                 extension_commands::status(&root, &extension_id)
             }

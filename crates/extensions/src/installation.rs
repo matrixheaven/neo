@@ -19,6 +19,12 @@ pub struct InstalledExtension {
     pub manifest: crate::ExtensionManifest,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UninstalledExtension {
+    pub id: String,
+    pub root: PathBuf,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ExtensionInstallError {
     #[error(transparent)]
@@ -31,6 +37,8 @@ pub enum ExtensionInstallError {
     AmbiguousSource { path: PathBuf },
     #[error("extension {id:?} is not installed")]
     NotInstalled { id: String },
+    #[error("extension {id:?} resolved outside extension root {root}")]
+    OutsideExtensionRoot { id: String, root: PathBuf },
     #[error("failed to read extension source registry {path}: {source}")]
     ReadRegistry {
         path: PathBuf,
@@ -117,6 +125,35 @@ impl ExtensionInstaller {
             });
         };
         self.install_source(&entry.source)
+    }
+
+    pub fn uninstall(
+        &self,
+        extension_id: &str,
+    ) -> Result<UninstalledExtension, ExtensionInstallError> {
+        let destination = self.root.join(extension_id);
+        if !destination.exists() {
+            return Err(ExtensionInstallError::NotInstalled {
+                id: extension_id.to_owned(),
+            });
+        }
+        ensure_inside_root(&self.root, &destination, extension_id)?;
+
+        fs::remove_dir_all(&destination).map_err(|source| {
+            ExtensionInstallError::RemoveDirectory {
+                path: destination.clone(),
+                source,
+            }
+        })?;
+
+        let mut registry = self.read_registry()?;
+        registry.extensions.remove(extension_id);
+        self.write_registry(&registry)?;
+
+        Ok(UninstalledExtension {
+            id: extension_id.to_owned(),
+            root: destination,
+        })
     }
 
     pub fn source_for(&self, extension_id: &str) -> Result<Option<String>, ExtensionInstallError> {
@@ -278,6 +315,34 @@ fn replace_directory(from: &Path, to: &Path) -> Result<(), ExtensionInstallError
         })?;
     }
     copy_directory(from, to)
+}
+
+fn ensure_inside_root(
+    root: &Path,
+    destination: &Path,
+    extension_id: &str,
+) -> Result<(), ExtensionInstallError> {
+    let root = root
+        .canonicalize()
+        .map_err(|source| ExtensionInstallError::ReadRegistry {
+            path: root.to_path_buf(),
+            source,
+        })?;
+    let destination =
+        destination
+            .canonicalize()
+            .map_err(|source| ExtensionInstallError::RemoveDirectory {
+                path: destination.to_path_buf(),
+                source,
+            })?;
+    if destination.starts_with(&root) {
+        Ok(())
+    } else {
+        Err(ExtensionInstallError::OutsideExtensionRoot {
+            id: extension_id.to_owned(),
+            root,
+        })
+    }
 }
 
 fn copy_directory(from: &Path, to: &Path) -> Result<(), ExtensionInstallError> {
