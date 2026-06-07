@@ -6,6 +6,7 @@ members = [
     "crates/extensions",
     "crates/tui",
     "crates/neo-agent",
+    "examples/rust",
     "xtask"
 ]
 resolver = "2"

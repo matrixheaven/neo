@@ -2,6 +2,10 @@
 
 Examples in this directory are small reference artifacts for the documented Neo interfaces.
 
+The Rust examples are declared in [rust/Cargo.toml](rust/Cargo.toml). The
+docs/examples parity gate checks that every `rust/*.rs` file is declared there
+and compiles as a Cargo example target.
+
 - [config/minimal.toml](config/minimal.toml) shows a deterministic development fixture, not production provider guidance.
 - [config/mcp-server.toml](config/mcp-server.toml) shows an MCP stdio server entry.
 - [tools/read-file-schema.json](tools/read-file-schema.json) shows a compact model-facing tool schema.

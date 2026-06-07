@@ -1,5 +1,5 @@
 use futures::StreamExt;
-use neo_agent_core::{AgentConfig, AgentContext, AgentMessage, AgentRuntime, FakeHarness};
+use neo_agent_core::{AgentConfig, AgentContext, AgentMessage, AgentRuntime, harness::FakeHarness};
 use neo_ai::{AiStreamEvent, StopReason};
 
 #[tokio::main]

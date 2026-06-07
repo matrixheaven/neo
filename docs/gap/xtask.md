@@ -8,8 +8,10 @@
 - `cargo run -p xtask -- check --docs` runs the docs/examples parity gate:
   local Markdown link validation for `README.md`, `docs/**/*.md`, and
   `examples/**/*.md`; production fake/local/placeholder guidance scans; and
-  stale gap-claim scans for implemented MCP/session/extension surfaces; and
-  TOML/JSON validation for the documented example artifacts.
+  stale gap-claim scans for implemented MCP/session/extension surfaces; TOML,
+  JSON, and Rust example harness validation for the documented example
+  artifacts; and `cargo check --manifest-path examples/rust/Cargo.toml
+  --examples`.
 - `cargo run -p xtask -- parity` runs the docs/examples parity gate without the
   fmt, clippy, and test steps.
 - `cargo run -p xtask -- check --workspace` opts into full workspace fmt,
@@ -46,7 +48,7 @@ not inherit those Node-specific gates.
 
 - Keep the deployment-fixture guidance scan narrow enough that honest "not
   implemented" gap language and provider-rejection documentation remain allowed.
-- Add generated-docs or Rust example compilation gates only after Neo examples
-  become workspace targets or a stable example harness exists.
+- Add generated-docs checks only after Neo has stable generated documentation
+  artifacts.
 - Keep the default gate narrow while independent crate workers are making API
   migrations.

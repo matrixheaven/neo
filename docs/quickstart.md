@@ -61,7 +61,8 @@ cargo run -p xtask -- check --docs
 
 `--docs` also runs the docs/examples parity gate: it scans production source,
 docs, and examples for fake/local/placeholder production guidance, validates
-local Markdown links, and parses the example TOML/JSON artifacts.
+local Markdown links, parses the example TOML/JSON artifacts, verifies the Rust
+example harness, and compiles the Rust examples with Cargo.
 
 When all workspace crates are ready for broad verification, opt in explicitly:
 
@@ -107,6 +108,10 @@ under `.neo/extensions-sources.toml`, lifecycle commands persist local
 enablement state, and `extensions call` uses the JSONL RPC stdio runner.
 
 ## Rust API Examples
+
+The Rust examples are Cargo targets under
+[examples/rust/Cargo.toml](../examples/rust/Cargo.toml), and the docs parity
+gate checks that every `.rs` file in `examples/rust` is declared and compiles.
 
 - [provider_registry.rs](../examples/rust/provider_registry.rs) shows
   `neo_ai::ModelRegistry` and `RequestOptions`.

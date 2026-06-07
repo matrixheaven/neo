@@ -79,6 +79,7 @@ fn run_parity_gate(root: &Path) -> Result<()> {
             errors.join("\n")
         );
     }
+    run_rust_examples_compile_gate(root)?;
     println!("production/docs/examples parity validation passed");
     Ok(())
 }
@@ -607,7 +608,92 @@ fn validate_examples(root: &Path) -> Result<Vec<String>> {
         errors.extend(validate_read_file_schema(root, &read_schema)?);
     }
 
+    errors.extend(validate_rust_examples(root)?);
     errors.sort();
+    Ok(errors)
+}
+
+fn run_rust_examples_compile_gate(root: &Path) -> Result<()> {
+    let manifest = root.join("examples/rust/Cargo.toml");
+    if !manifest.exists() {
+        return Ok(());
+    }
+
+    run(&CommandStep {
+        program: "cargo".to_owned(),
+        args: vec![
+            "check".to_owned(),
+            "--manifest-path".to_owned(),
+            manifest.display().to_string(),
+            "--examples".to_owned(),
+        ],
+    })
+}
+
+fn validate_rust_examples(root: &Path) -> Result<Vec<String>> {
+    let mut errors = Vec::new();
+    let example_dir = root.join("examples/rust");
+    if !example_dir.is_dir() {
+        return Ok(errors);
+    }
+
+    let mut example_files = Vec::new();
+    collect_files_with_extensions(&example_dir, &["rs"], &mut example_files)?;
+    example_files.sort();
+    if example_files.is_empty() {
+        return Ok(errors);
+    }
+
+    let manifest = example_dir.join("Cargo.toml");
+    let relative_manifest = relative_path(root, &manifest);
+    if !manifest.exists() {
+        errors.push("examples/rust contains Rust examples but is missing Cargo.toml".to_owned());
+        return Ok(errors);
+    }
+
+    let source = fs::read_to_string(&manifest)?;
+    let value = match toml::from_str::<toml::Value>(&source) {
+        Ok(value) => value,
+        Err(error) => {
+            errors.push(format!(
+                "{} is invalid TOML: {error}",
+                relative_manifest.display()
+            ));
+            return Ok(errors);
+        }
+    };
+
+    let declared_paths = value
+        .get("example")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|target| target.get("path"))
+        .filter_map(toml::Value::as_str)
+        .map(|path| normalize_path(Path::new(path)))
+        .collect::<BTreeSet<_>>();
+
+    if declared_paths.is_empty() {
+        errors.push(format!(
+            "{} must declare at least one [[example]] target",
+            relative_manifest.display()
+        ));
+        return Ok(errors);
+    }
+
+    for example_file in example_files {
+        let relative_to_manifest = example_file
+            .strip_prefix(&example_dir)
+            .map_or_else(|_| normalize_path(&example_file), normalize_path);
+        if !declared_paths.contains(&relative_to_manifest) {
+            errors.push(format!(
+                "{} does not declare example target for {}",
+                relative_manifest.display(),
+                relative_path(root, &example_file).display()
+            ));
+        }
+    }
+
     Ok(errors)
 }
 
@@ -1268,6 +1354,56 @@ mod tests {
             errors,
             vec![
                 "docs/gap/INDEX.md:1 contains stale session branching gap claim: Session tree branching and naming remain pi-inspired future work.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn examples_validation_requires_rust_example_harness_for_rust_sources() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rust_examples = dir.path().join("examples").join("rust");
+        std::fs::create_dir_all(&rust_examples).expect("rust examples dir");
+        std::fs::write(rust_examples.join("tool_schema.rs"), "fn main() {}\n")
+            .expect("write rust example");
+
+        let errors = validate_examples(dir.path()).expect("examples validation should run");
+
+        assert_eq!(
+            errors,
+            vec!["examples/rust contains Rust examples but is missing Cargo.toml".to_string()]
+        );
+    }
+
+    #[test]
+    fn examples_validation_requires_rust_harness_to_cover_each_example_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rust_examples = dir.path().join("examples").join("rust");
+        std::fs::create_dir_all(&rust_examples).expect("rust examples dir");
+        std::fs::write(rust_examples.join("provider_registry.rs"), "fn main() {}\n")
+            .expect("write provider example");
+        std::fs::write(rust_examples.join("tool_schema.rs"), "fn main() {}\n")
+            .expect("write tool example");
+        std::fs::write(
+            rust_examples.join("Cargo.toml"),
+            concat!(
+                "[package]\n",
+                "name = \"neo-rust-examples\"\n",
+                "version = \"0.0.0\"\n",
+                "edition = \"2024\"\n",
+                "\n",
+                "[[example]]\n",
+                "name = \"provider_registry\"\n",
+                "path = \"provider_registry.rs\"\n",
+            ),
+        )
+        .expect("write harness manifest");
+
+        let errors = validate_examples(dir.path()).expect("examples validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "examples/rust/Cargo.toml does not declare example target for examples/rust/tool_schema.rs".to_string()
             ]
         );
     }
