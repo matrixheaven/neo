@@ -48,26 +48,46 @@ async fn runtime_streams_one_turn_text_and_updates_context() {
         .expect("turn should succeed");
 
     assert_eq!(
-        events.first(),
-        Some(&AgentEvent::MessageAppended {
-            message: AgentMessage::user_text("say hello"),
-        })
-    );
-    assert_eq!(events.get(1), Some(&AgentEvent::TurnStarted { turn: 1 }));
-    assert!(events.contains(&AgentEvent::TextDelta {
-        turn: 1,
-        text: "hel".to_owned()
-    }));
-    assert!(events.contains(&AgentEvent::TextDelta {
-        turn: 1,
-        text: "lo".to_owned()
-    }));
-    assert_eq!(
-        events.last(),
-        Some(&AgentEvent::TurnFinished {
-            turn: 1,
-            stop_reason: StopReason::EndTurn,
-        })
+        events,
+        vec![
+            AgentEvent::RunStarted { turn: 1 },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::user_text("say hello"),
+            },
+            AgentEvent::TurnStarted { turn: 1 },
+            AgentEvent::MessageStarted {
+                turn: 1,
+                id: "msg_1".to_owned(),
+            },
+            AgentEvent::TextDelta {
+                turn: 1,
+                text: "hel".to_owned(),
+            },
+            AgentEvent::TextDelta {
+                turn: 1,
+                text: "lo".to_owned(),
+            },
+            AgentEvent::MessageFinished {
+                turn: 1,
+                id: "msg_1".to_owned(),
+                stop_reason: StopReason::EndTurn,
+            },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::assistant(
+                    [Content::text("hello")],
+                    Vec::new(),
+                    StopReason::EndTurn,
+                ),
+            },
+            AgentEvent::TurnFinished {
+                turn: 1,
+                stop_reason: StopReason::EndTurn,
+            },
+            AgentEvent::RunFinished {
+                turn: 1,
+                stop_reason: StopReason::EndTurn,
+            },
+        ]
     );
     assert_eq!(context.messages()[0], AgentMessage::user_text("say hello"));
     assert_eq!(
@@ -96,6 +116,14 @@ async fn runtime_yields_model_events_before_model_stream_finishes() {
 
     let mut stream = runtime.run_turn(&mut context, AgentMessage::user_text("stream"));
 
+    assert_eq!(
+        timeout(Duration::from_millis(250), stream.next())
+            .await
+            .expect("run start should stream before delayed message end")
+            .expect("run start event")
+            .expect("run start should be ok"),
+        AgentEvent::RunStarted { turn: 1 }
+    );
     assert_eq!(
         timeout(Duration::from_millis(250), stream.next())
             .await
@@ -322,6 +350,73 @@ async fn runtime_executes_tool_call_and_continues_until_end_turn() {
         harness.requests()[1].messages.last(),
         Some(neo_ai::ChatMessage::ToolResult { tool_call_id, .. }) if tool_call_id == "tool_1"
     ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::RunFinished { .. }))
+            .count(),
+        1
+    );
+    assert!(events.contains(&AgentEvent::MessageFinished {
+        turn: 1,
+        id: "msg_1".to_owned(),
+        stop_reason: StopReason::ToolUse,
+    }));
+    assert!(events.contains(&AgentEvent::MessageFinished {
+        turn: 2,
+        id: "msg_2".to_owned(),
+        stop_reason: StopReason::EndTurn,
+    }));
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::RunFinished {
+            turn: 2,
+            stop_reason: StopReason::EndTurn,
+        })
+    );
+}
+
+#[tokio::test]
+async fn runtime_finishes_message_turn_and_run_with_error_stop_reason() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::MessageStart {
+            id: "msg_error".to_owned(),
+        },
+        AiStreamEvent::Error {
+            message: "provider failed".to_owned(),
+        },
+    ]);
+    let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("fail"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("error event should remain in-band");
+
+    assert!(events.contains(&AgentEvent::Error {
+        turn: 1,
+        message: "provider failed".to_owned(),
+    }));
+    assert!(events.contains(&AgentEvent::MessageFinished {
+        turn: 1,
+        id: "msg_error".to_owned(),
+        stop_reason: StopReason::Error,
+    }));
+    assert!(events.contains(&AgentEvent::TurnFinished {
+        turn: 1,
+        stop_reason: StopReason::Error,
+    }));
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::RunFinished {
+            turn: 1,
+            stop_reason: StopReason::Error,
+        })
+    );
 }
 
 #[tokio::test]
@@ -420,7 +515,7 @@ async fn runtime_drains_queued_steering_before_followups() {
     ));
     assert!(matches!(
         events.last(),
-        Some(AgentEvent::TurnFinished {
+        Some(AgentEvent::RunFinished {
             turn: 3,
             stop_reason: StopReason::EndTurn,
         })

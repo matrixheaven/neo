@@ -8,6 +8,10 @@
 - `AgentRuntime` consumes a `ModelClient`, converts context into
   `neo_ai::ChatRequest`, emits `AgentEvent` values, appends assistant/tool
   messages, and loops after `StopReason::ToolUse` when tools are registered.
+- Runtime lifecycle events now include `RunStarted`, `MessageStarted`,
+  `MessageFinished`, `TurnStarted`, `TurnFinished`, and `RunFinished`, so
+  consumers can distinguish streamed provider message boundaries from whole-run
+  completion without inferring from transcript records.
 - Runtime queue modes and hooks are real Rust APIs: `AgentContext` can queue
   steering and follow-up messages, `AgentConfig::with_queue_modes` controls
   drain behavior, and `with_before_tool_call` / `with_after_tool_call` can
@@ -56,8 +60,8 @@
 `pi-agent-core` documents a richer lifecycle: agent start/end, message start/end
 barriers, hook phases, steering/follow-up queues, cancellation, and parallel
 tool execution. Neo has the smaller Rust runtime core and exposes local
-hook/queue/parallel primitives, but not the full interactive or hosted
-lifecycle behavior.
+lifecycle barrier, hook/queue/parallel primitives, but not the full interactive
+or hosted lifecycle behavior.
 
 ## High-Priority Gaps
 

@@ -29,12 +29,20 @@ impl From<neo_ai::StopReason> for StopReason {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum AgentEvent {
+    RunStarted {
+        turn: u32,
+    },
     TurnStarted {
         turn: u32,
     },
     MessageStarted {
         turn: u32,
         id: String,
+    },
+    MessageFinished {
+        turn: u32,
+        id: String,
+        stop_reason: StopReason,
     },
     TextDelta {
         turn: u32,
@@ -110,6 +118,10 @@ pub enum AgentEvent {
         message: AgentMessage,
     },
     TurnFinished {
+        turn: u32,
+        stop_reason: StopReason,
+    },
+    RunFinished {
         turn: u32,
         stop_reason: StopReason,
     },

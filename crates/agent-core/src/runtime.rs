@@ -409,8 +409,15 @@ impl AgentRuntime {
 
         tokio::spawn(async move {
             let mut emitter = EventEmitter::new(sender, live_context);
+            emitter.emit(AgentEvent::RunStarted {
+                turn: emitter.context.turns.saturating_add(1),
+            });
             emitter.emit(AgentEvent::MessageAppended { message });
             if let Err(err) = run_agent_turn(model, config, tools, &mut emitter).await {
+                emitter.emit(AgentEvent::RunFinished {
+                    turn: emitter.context.turns.saturating_add(1),
+                    stop_reason: StopReason::Error,
+                });
                 let _ = emitter.send_error(err);
             }
             let _ = final_sender.send(emitter.context);
@@ -560,6 +567,8 @@ async fn run_agent_turn(
     tools: Option<Arc<ToolRegistry>>,
     emitter: &mut EventEmitter,
 ) -> Result<(), AgentRuntimeError> {
+    let mut final_turn: u32;
+    let mut final_stop_reason = StopReason::EndTurn;
     let mut pending_messages =
         take_messages(&emitter.context.steering_queue, config.steering_queue_mode);
     if !pending_messages.is_empty() {
@@ -577,12 +586,17 @@ async fn run_agent_turn(
         maybe_compact(&config, emitter);
 
         if emitter.context.is_cancelled() {
+            final_turn = emitter.context.turns.saturating_add(1);
+            final_stop_reason = StopReason::Cancelled;
             break;
         }
 
         if emitter.context.turns >= config.max_turns {
+            let turn = emitter.context.turns.saturating_add(1);
+            final_turn = turn;
+            final_stop_reason = StopReason::MaxTurns;
             emitter.emit(AgentEvent::TurnFinished {
-                turn: emitter.context.turns.saturating_add(1),
+                turn,
                 stop_reason: StopReason::MaxTurns,
             });
             break;
@@ -591,6 +605,10 @@ async fn run_agent_turn(
         let turn = emitter.context.turns.saturating_add(1);
         let request = chat_request(&config, &emitter.context);
         let assistant = run_model_turn(Arc::clone(&model), request, turn, emitter).await?;
+        final_turn = turn;
+        if let Some(AgentMessage::Assistant { stop_reason, .. }) = &assistant {
+            final_stop_reason = *stop_reason;
+        }
 
         let Some(AgentMessage::Assistant {
             tool_calls: model_tool_calls,
@@ -652,7 +670,12 @@ async fn run_agent_turn(
         }
     }
 
+    emit_run_finished(emitter, final_turn, final_stop_reason);
     Ok(())
+}
+
+fn emit_run_finished(emitter: &mut EventEmitter, turn: u32, stop_reason: StopReason) {
+    emitter.emit(AgentEvent::RunFinished { turn, stop_reason });
 }
 
 fn append_queued_messages(emitter: &mut EventEmitter, messages: Vec<AgentMessage>) {
@@ -904,10 +927,12 @@ async fn run_model_turn(
     let mut stop_reason = StopReason::EndTurn;
     let mut stream = model.stream_chat(request);
     let mut tool_names = std::collections::HashMap::new();
+    let mut current_message_id = None;
 
     while let Some(event) = stream.next().await {
         match event? {
             AiStreamEvent::MessageStart { id } => {
+                current_message_id = Some(id.clone());
                 emitter.emit(AgentEvent::MessageStarted { turn, id });
             }
             AiStreamEvent::TextDelta { text: delta } => {
@@ -942,6 +967,13 @@ async fn run_model_turn(
                 usage: _,
             } => {
                 stop_reason = reason.into();
+                if let Some(id) = current_message_id.take() {
+                    emitter.emit(AgentEvent::MessageFinished {
+                        turn,
+                        id,
+                        stop_reason,
+                    });
+                }
             }
             AiStreamEvent::Error { message } => {
                 emitter.emit(AgentEvent::Error {
@@ -949,6 +981,13 @@ async fn run_model_turn(
                     message: message.clone(),
                 });
                 stop_reason = StopReason::Error;
+                if let Some(id) = current_message_id.take() {
+                    emitter.emit(AgentEvent::MessageFinished {
+                        turn,
+                        id,
+                        stop_reason,
+                    });
+                }
             }
         }
     }

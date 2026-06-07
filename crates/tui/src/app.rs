@@ -271,7 +271,10 @@ impl NeoTuiApp {
             AgentEvent::Error { message, .. } => {
                 self.apply_stream_update(StreamUpdate::Error { text: message });
             }
-            AgentEvent::TurnStarted { .. } => {}
+            AgentEvent::RunStarted { .. }
+            | AgentEvent::TurnStarted { .. }
+            | AgentEvent::MessageFinished { .. }
+            | AgentEvent::RunFinished { .. } => {}
         }
     }
 
