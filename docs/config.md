@@ -88,7 +88,10 @@ ask/approve UI remains a runtime gap.
 tools as `mcp__<server>__<tool>` model functions, and call the original remote
 MCP tool names over a real JSON-RPC transport. Stdio servers reuse an
 initialized process session; HTTP/SSE servers send JSON-RPC POST requests and
-accept JSON or SSE `data:` JSON-RPC responses. The current shape includes:
+accept JSON or SSE `data:` JSON-RPC responses. `neo mcp resources <server>
+list` and `neo mcp resources <server> read <uri>` explicitly fetch resource
+catalogs and content from a configured enabled server. The current shape
+includes:
 
 - Server id.
 - Transport type: `stdio`, `http`, or `sse`.
@@ -108,6 +111,8 @@ neo config show
 neo config set <key> <value>
 neo models list
 neo mcp list
+neo mcp resources <server-id> list
+neo mcp resources <server-id> read <uri>
 neo skills show <path>
 neo extensions list [root]
 neo extensions install <path-or-git-url> --root <root>

@@ -16,6 +16,10 @@ pub trait McpToolAdapter: Send + Sync {
         name: &str,
         arguments: serde_json::Value,
     ) -> Result<McpToolResponse, McpError>;
+
+    async fn list_resources(&self) -> Result<Vec<McpResourceDefinition>, McpError>;
+
+    async fn read_resource(&self, uri: &str) -> Result<McpResourceRead, McpError>;
 }
 ```
 
@@ -39,9 +43,9 @@ behavior.
 `McpHttpToolAdapter` is the production remote JSON-RPC adapter for
 `transport = "http"` and `transport = "sse"` server entries. It sends one
 JSON-RPC POST per MCP request, applies configured headers, performs the
-`initialize` handshake before `tools/list` or `tools/call`, accepts JSON
-responses and SSE `data:` JSON-RPC responses, and surfaces HTTP/protocol errors
-without local fallback behavior.
+`initialize` handshake before tool/resource requests, accepts JSON responses
+and SSE `data:` JSON-RPC responses, and surfaces HTTP/protocol errors without
+local fallback behavior.
 
 ## Runtime Placement
 
@@ -62,6 +66,8 @@ The model should only see normal `ToolSpec` values. It should not know whether a
 - Disabled MCP servers are not started.
 - Tool names are namespaced by server id and use provider-safe characters.
 - MCP tool calls pass through the same permission policy as built-in tools.
+- MCP resources are fetched only through explicit `neo mcp resources` commands;
+  they are not silently injected into model context.
 - Server stderr and protocol logs are developer diagnostics, not model context.
 - Secrets enter through environment variables, not session logs.
 
@@ -70,10 +76,13 @@ The model should only see normal `ToolSpec` values. It should not know whether a
 `neo-agent-core` has the MCP tool adapter abstraction, stdio JSON-RPC process
 adapter, HTTP/SSE JSON-RPC adapter, discovery-to-`ToolSpec` bridge, namespaced
 `ToolRegistry` registration, persistent initialized stdio session reuse, and
-async call delegation. `neo-agent print` and `neo-agent run` load enabled
-`transport = "stdio"`, `transport = "http"`, and `transport = "sse"` servers
-from project config and advertise their tools to the configured model.
+async call delegation. It also supports explicit MCP `resources/list` and
+`resources/read` through the same stdio or HTTP/SSE JSON-RPC adapters.
+`neo-agent print` and `neo-agent run` load enabled `transport = "stdio"`,
+`transport = "http"`, and `transport = "sse"` servers from project config and
+advertise their tools to the configured model. `neo mcp resources <server>
+list/read` fetches resource catalogs and content without adding them to model
+context automatically.
 
-Current limitation: Neo supports MCP tool discovery and calls only. MCP
-resources, subscriptions, OAuth/hosted server lifecycle, and hosted MCP
-management remain future work.
+Current limitation: MCP subscriptions/notifications, OAuth/hosted server
+lifecycle, and hosted MCP management remain future work.

@@ -108,6 +108,32 @@ impl McpError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpResourceDefinition {
+    pub uri: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(rename = "mimeType", default)]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpResourceContent {
+    pub uri: String,
+    #[serde(rename = "mimeType", default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub blob: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpResourceRead {
+    pub contents: Vec<McpResourceContent>,
+}
+
 #[async_trait]
 pub trait McpToolAdapter: Send + Sync {
     async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError>;
@@ -117,6 +143,18 @@ pub trait McpToolAdapter: Send + Sync {
         name: &str,
         arguments: serde_json::Value,
     ) -> Result<McpToolResponse, McpError>;
+
+    async fn list_resources(&self) -> Result<Vec<McpResourceDefinition>, McpError> {
+        Err(McpError::protocol(
+            "MCP adapter does not support resources/list",
+        ))
+    }
+
+    async fn read_resource(&self, _uri: &str) -> Result<McpResourceRead, McpError> {
+        Err(McpError::protocol(
+            "MCP adapter does not support resources/read",
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +350,26 @@ impl McpToolAdapter for McpHttpToolAdapter {
             details: Some(result),
         })
     }
+
+    async fn list_resources(&self) -> Result<Vec<McpResourceDefinition>, McpError> {
+        let result = self.request("resources/list", None).await?;
+        let response: ListResourcesResponse =
+            serde_json::from_value(result).map_err(|err| McpError::protocol(err.to_string()))?;
+        Ok(response.resources)
+    }
+
+    async fn read_resource(&self, uri: &str) -> Result<McpResourceRead, McpError> {
+        let result = self
+            .request(
+                "resources/read",
+                Some(json_obj([(
+                    "uri",
+                    serde_json::Value::String(uri.to_owned()),
+                )])),
+            )
+            .await?;
+        serde_json::from_value(result).map_err(|err| McpError::protocol(err.to_string()))
+    }
 }
 
 #[derive(Clone)]
@@ -391,6 +449,26 @@ impl McpToolAdapter for McpStdioToolAdapter {
             is_error,
             details: Some(result),
         })
+    }
+
+    async fn list_resources(&self) -> Result<Vec<McpResourceDefinition>, McpError> {
+        let result = self.request("resources/list", None).await?;
+        let response: ListResourcesResponse =
+            serde_json::from_value(result).map_err(|err| McpError::protocol(err.to_string()))?;
+        Ok(response.resources)
+    }
+
+    async fn read_resource(&self, uri: &str) -> Result<McpResourceRead, McpError> {
+        let result = self
+            .request(
+                "resources/read",
+                Some(json_obj([(
+                    "uri",
+                    serde_json::Value::String(uri.to_owned()),
+                )])),
+            )
+            .await?;
+        serde_json::from_value(result).map_err(|err| McpError::protocol(err.to_string()))
     }
 }
 
@@ -567,6 +645,18 @@ impl McpToolProvider {
         })
     }
 
+    pub async fn discover_dyn(
+        server_id: impl Into<String>,
+        adapter: Arc<dyn McpToolAdapter>,
+    ) -> Result<Self, McpError> {
+        let tools = adapter.list_tools().await?;
+        Ok(Self {
+            server_id: server_id.into(),
+            tools,
+            adapter,
+        })
+    }
+
     #[must_use]
     pub fn specs(&self) -> Vec<ToolSpec> {
         self.tools
@@ -667,6 +757,11 @@ struct RemoteMcpToolDefinition {
     description: Option<String>,
     #[serde(rename = "inputSchema", default = "empty_object_schema")]
     input_schema: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListResourcesResponse {
+    resources: Vec<McpResourceDefinition>,
 }
 
 fn empty_object_schema() -> serde_json::Value {

@@ -5,8 +5,8 @@ use futures::StreamExt;
 use neo_agent_core::session::JsonlSessionWriter;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, Content, McpHttpConfig,
-    McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolProvider, PermissionDecision,
-    ToolRegistry,
+    McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter, McpToolProvider,
+    PermissionDecision, ToolRegistry,
 };
 use neo_ai::{ModelClient, ModelRegistry, ModelSpec, ProviderRegistry};
 
@@ -107,6 +107,67 @@ pub fn list_mcp_servers(config: &AppConfig) -> String {
     out
 }
 
+pub async fn list_mcp_resources(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
+    let server = enabled_mcp_server(config, server_id)?;
+    let adapter = mcp_adapter_for_server(server)?;
+    let resources = adapter
+        .list_resources()
+        .await
+        .with_context(|| format!("failed to list MCP resources from {server_id}"))?;
+    if resources.is_empty() {
+        return Ok("no MCP resources\n".to_owned());
+    }
+    let mut out = String::new();
+    for resource in resources {
+        let _ = writeln!(
+            out,
+            "{}\t{}\t{}\t{}",
+            resource.uri,
+            resource.name,
+            resource.mime_type.unwrap_or_default(),
+            resource.description.unwrap_or_default()
+        );
+    }
+    Ok(out)
+}
+
+pub async fn read_mcp_resource(
+    config: &AppConfig,
+    server_id: &str,
+    uri: &str,
+) -> anyhow::Result<String> {
+    let server = enabled_mcp_server(config, server_id)?;
+    let adapter = mcp_adapter_for_server(server)?;
+    let resource = adapter
+        .read_resource(uri)
+        .await
+        .with_context(|| format!("failed to read MCP resource {uri} from {server_id}"))?;
+    if resource.contents.is_empty() {
+        return Ok("no MCP resource content\n".to_owned());
+    }
+    let mut out = String::new();
+    for content in resource.contents {
+        let _ = writeln!(
+            out,
+            "{}\t{}",
+            content.uri,
+            content.mime_type.unwrap_or_default()
+        );
+        if let Some(text) = content.text {
+            out.push_str(&text);
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+        } else if let Some(blob) = content.blob {
+            out.push_str(&blob);
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub struct PromptTurn {
     pub events: Vec<AgentEvent>,
     pub assistant_text: String,
@@ -189,13 +250,36 @@ async fn register_mcp_server(
     registry: &mut ToolRegistry,
     server: &McpServerConfig,
 ) -> anyhow::Result<()> {
+    let adapter = mcp_adapter_for_server(server)?;
+    let provider = McpToolProvider::discover_dyn(&server.id, adapter)
+        .await
+        .with_context(|| format!("failed to discover MCP tools from {}", server.id))?;
+    provider.register_into(registry);
+    Ok(())
+}
+
+fn enabled_mcp_server<'a>(
+    config: &'a AppConfig,
+    server_id: &str,
+) -> anyhow::Result<&'a McpServerConfig> {
+    let server = config
+        .mcp
+        .servers
+        .iter()
+        .find(|server| server.id == server_id)
+        .with_context(|| format!("MCP server {server_id} is not configured"))?;
+    anyhow::ensure!(server.enabled, "MCP server {server_id} is disabled");
+    Ok(server)
+}
+
+fn mcp_adapter_for_server(server: &McpServerConfig) -> anyhow::Result<Arc<dyn McpToolAdapter>> {
     match server.transport.as_str() {
         "stdio" => {
             let command = server
                 .command
                 .clone()
                 .with_context(|| format!("missing MCP command for {}", server.id))?;
-            let adapter = Arc::new(McpStdioToolAdapter::new(McpStdioConfig {
+            Ok(Arc::new(McpStdioToolAdapter::new(McpStdioConfig {
                 command,
                 args: server.args.clone(),
                 env: server
@@ -205,19 +289,14 @@ async fn register_mcp_server(
                         env.insert(key.clone(), value.clone());
                         env
                     }),
-            }));
-            let provider = McpToolProvider::discover(&server.id, adapter)
-                .await
-                .with_context(|| format!("failed to discover MCP tools from {}", server.id))?;
-            provider.register_into(registry);
-            Ok(())
+            })))
         }
         "http" | "sse" => {
             let url = server
                 .url
                 .clone()
                 .with_context(|| format!("missing MCP url for {}", server.id))?;
-            let adapter = Arc::new(McpHttpToolAdapter::new(McpHttpConfig {
+            Ok(Arc::new(McpHttpToolAdapter::new(McpHttpConfig {
                 url,
                 headers: server.headers.iter().fold(
                     BTreeMap::new(),
@@ -226,12 +305,7 @@ async fn register_mcp_server(
                         headers
                     },
                 ),
-            }));
-            let provider = McpToolProvider::discover(&server.id, adapter)
-                .await
-                .with_context(|| format!("failed to discover MCP tools from {}", server.id))?;
-            provider.register_into(registry);
-            Ok(())
+            })))
         }
         other => anyhow::bail!("unsupported MCP transport for {}: {other}", server.id),
     }

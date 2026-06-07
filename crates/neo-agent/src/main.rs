@@ -87,6 +87,14 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
         },
         Some(Command::Mcp { command }) => match command {
             McpCommand::List => Ok(modes::run::list_mcp_servers(&config)),
+            McpCommand::Resources { server_id, command } => match command {
+                cli::McpResourceCommand::List => {
+                    modes::run::list_mcp_resources(&config, &server_id).await
+                }
+                cli::McpResourceCommand::Read { uri } => {
+                    modes::run::read_mcp_resource(&config, &server_id, &uri).await
+                }
+            },
         },
         Some(Command::Rpc) => rpc_mode::execute(&config).await,
         None => Ok(modes::interactive::execute_tty(&config)

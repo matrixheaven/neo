@@ -4,6 +4,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    path::Path,
     process::Command,
     sync::{Arc, Mutex},
 };
@@ -1052,6 +1053,87 @@ transport = "http"
     assert!(stderr.contains("missing MCP url for remote-docs"));
 }
 
+#[test]
+fn mcp_resources_list_reads_remote_resource_catalog() {
+    let temp = TempDir::new().expect("tempdir");
+    let mcp_server = MockSseServer::start(vec![
+        mcp_json_response(
+            1,
+            &json!({
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "remote-docs", "version": "0.1.0"},
+                "capabilities": {"resources": {}}
+            }),
+        ),
+        mcp_json_response(
+            2,
+            &json!({
+                "resources": [
+                    {
+                        "uri": "file://docs/readme.md",
+                        "name": "README",
+                        "description": "Project readme",
+                        "mimeType": "text/markdown"
+                    }
+                ]
+            }),
+        ),
+    ]);
+    write_remote_mcp_config(temp.path(), &mcp_server.url);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .args(["mcp", "resources", "remote-docs", "list"]);
+    let stdout = run(command);
+
+    assert!(stdout.contains("file://docs/readme.md"));
+    assert!(stdout.contains("README"));
+    assert!(stdout.contains("text/markdown"));
+}
+
+#[test]
+fn mcp_resources_read_fetches_remote_resource_content() {
+    let temp = TempDir::new().expect("tempdir");
+    let mcp_server = MockSseServer::start(vec![
+        mcp_json_response(
+            1,
+            &json!({
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "remote-docs", "version": "0.1.0"},
+                "capabilities": {"resources": {}}
+            }),
+        ),
+        mcp_json_response(
+            2,
+            &json!({
+                "contents": [
+                    {
+                        "uri": "file://docs/readme.md",
+                        "mimeType": "text/markdown",
+                        "text": "# Neo"
+                    }
+                ]
+            }),
+        ),
+    ]);
+    write_remote_mcp_config(temp.path(), &mcp_server.url);
+
+    let mut command = neo();
+    command.current_dir(temp.path()).args([
+        "mcp",
+        "resources",
+        "remote-docs",
+        "read",
+        "file://docs/readme.md",
+    ]);
+    let stdout = run(command);
+
+    assert!(stdout.contains("file://docs/readme.md"));
+    assert!(stdout.contains("text/markdown"));
+    assert!(stdout.contains("# Neo"));
+}
+
 #[derive(Debug, Clone)]
 struct RecordedRequest {
     method: String,
@@ -1120,6 +1202,23 @@ fn mcp_json_response(id: u64, result: &Value) -> String {
         body.len(),
         body
     )
+}
+
+fn write_remote_mcp_config(root: &Path, url: &str) {
+    fs::create_dir_all(root.join(".neo")).expect("create .neo");
+    fs::write(
+        root.join(".neo/config.toml"),
+        format!(
+            r#"
+[[mcp.servers]]
+id = "remote-docs"
+enabled = true
+transport = "http"
+url = "{url}"
+"#
+        ),
+    )
+    .expect("write remote MCP config");
 }
 
 fn sse_response(events: &[Value]) -> String {

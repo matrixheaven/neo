@@ -461,6 +461,63 @@ async fn mcp_http_adapter_accepts_sse_json_rpc_responses() {
 }
 
 #[tokio::test]
+async fn mcp_http_adapter_lists_and_reads_resources() {
+    let server = MockMcpHttpServer::start(vec![
+        mcp_json_response(json!({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {"name": "resource-fixture", "version": "0.1.0"},
+            "capabilities": {"resources": {}}
+        })),
+        mcp_json_response(json!({
+            "resources": [
+                {
+                    "uri": "file://docs/readme.md",
+                    "name": "README",
+                    "description": "Project readme",
+                    "mimeType": "text/markdown"
+                }
+            ]
+        })),
+        mcp_json_response(json!({
+            "contents": [
+                {
+                    "uri": "file://docs/readme.md",
+                    "mimeType": "text/markdown",
+                    "text": "# Neo"
+                }
+            ]
+        })),
+    ]);
+    let adapter = McpHttpToolAdapter::new(McpHttpConfig {
+        url: server.url.clone(),
+        headers: BTreeMap::new(),
+    });
+
+    let resources = adapter.list_resources().await.expect("list MCP resources");
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0].uri, "file://docs/readme.md");
+    assert_eq!(resources[0].name, "README");
+    assert_eq!(resources[0].mime_type.as_deref(), Some("text/markdown"));
+
+    let content = adapter
+        .read_resource("file://docs/readme.md")
+        .await
+        .expect("read MCP resource");
+    assert_eq!(content.contents.len(), 1);
+    assert_eq!(content.contents[0].uri, "file://docs/readme.md");
+    assert_eq!(content.contents[0].text.as_deref(), Some("# Neo"));
+
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .map(|request| request.body["method"].as_str().expect("method"))
+            .collect::<Vec<_>>(),
+        vec!["initialize", "resources/list", "resources/read"]
+    );
+}
+
+#[tokio::test]
 async fn mcp_provider_discovers_namespaced_tool_specs() {
     let adapter = Arc::new(MockMcpAdapter::new(vec![McpToolDefinition::new(
         "search",
@@ -647,8 +704,10 @@ impl MockMcpHttpServer {
         let url = format!("http://{}", listener.local_addr().expect("local addr"));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured_requests = Arc::clone(&requests);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
 
         std::thread::spawn(move || {
+            ready_tx.send(()).expect("signal mock MCP HTTP readiness");
             for response in responses {
                 let (mut socket, _) = listener.accept().expect("accept MCP HTTP request");
                 let request = read_http_json_request(&mut socket);
@@ -662,6 +721,7 @@ impl MockMcpHttpServer {
                     .expect("write MCP HTTP response");
             }
         });
+        ready_rx.recv().expect("mock MCP HTTP server ready");
 
         Self { url, requests }
     }
@@ -710,7 +770,7 @@ fn mcp_sse_response(result: Value) -> MockMcpHttpResponse {
 
 fn http_response(content_type: &str, body: &str) -> String {
     format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n\r\n{body}",
+        "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
     )
 }

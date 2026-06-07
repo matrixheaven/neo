@@ -31,6 +31,9 @@
 - `extensions call` refuses disabled extensions and round-trips JSONL RPC over
   stdio for enabled local extension manifests.
 - `mcp list` reads project MCP server entries without starting servers.
+- `mcp resources <server-id> list/read` explicitly fetches configured MCP
+  server resource catalogs and content over the same stdio or HTTP/SSE
+  transport adapters.
 - `print` and `run` discover enabled project MCP servers with
   `transport = "stdio"`, `transport = "http"`, or `transport = "sse"` and
   register their tools in the runtime tool registry.
@@ -57,6 +60,6 @@ and platform-specific guidance.
   yet.
 - Keep `sessions show` and `resume` aligned on `.jsonl` files as session
   persistence evolves.
-- Keep MCP runtime config limited to tool discovery/calls until resources,
+- Keep MCP runtime config limited to tools and explicit resource reads until
   subscriptions, hosted server lifecycle, and OAuth/trust flows are
   implemented.

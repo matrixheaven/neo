@@ -25,6 +25,9 @@
   endpoints, applies configured headers, accepts JSON and SSE `data:`
   JSON-RPC responses, and supports `initialize`, `tools/list`, and
   `tools/call` without local fallback behavior.
+- Stdio and HTTP/SSE MCP adapters also support explicit `resources/list` and
+  `resources/read` requests without injecting resource content into model
+  context.
 - `ToolContext` resolves paths inside the workspace and carries shell timeout
   and output cap settings; `bash` also supports compact non-PTY background
   start/poll handles backed by real child processes.
@@ -49,8 +52,8 @@ interactive behavior.
   treating broad workspace checks as green.
 - Add docs and tests for `Ask` permission behavior once there is a CLI/TUI
   approval path. Today tools only execute on `Allow`.
-- Add richer MCP resource/subscription handling once those runtime semantics
-  are needed.
+- Add MCP resource subscriptions/notifications once those runtime semantics are
+  needed.
 - Add hook/steering docs only when the runtime exposes those APIs.
 - Decide whether Neo needs full PTY/interactivity later. Current `bash`
   background support is intentionally compact start/poll process management.
