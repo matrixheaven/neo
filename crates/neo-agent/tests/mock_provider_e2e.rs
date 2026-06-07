@@ -133,6 +133,61 @@ fn run_emits_jsonl_events_from_mock_provider_without_fake_output() {
     assert_eq!(requests[0].body["input"][0]["content"], "stream events");
 }
 
+#[test]
+fn print_approve_allows_ask_file_write_tool_and_continues_agent_loop() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+[permissions]
+file_read = "Allow"
+file_write = "Ask"
+shell = "Deny"
+tool = "Allow"
+"#,
+    )
+    .expect("write config");
+    let server = MockSseServer::start(vec![
+        openai_tool_call_sse(
+            "resp-approve-1",
+            "call-write",
+            "write",
+            &json!({
+                "path": "approved.txt",
+                "content": "approved by flag"
+            }),
+        ),
+        openai_response_sse("resp-approve-2", "wrote it"),
+    ]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--approve", "print", "write", "file"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "wrote it\n");
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("approved.txt")).expect("written file"),
+        "approved by flag"
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].body["input"][2]["type"], "function_call_output");
+    assert_eq!(requests[1].body["input"][2]["call_id"], "call-write");
+    assert!(
+        requests[1].body["input"][2]["output"]
+            .as_str()
+            .expect("tool output")
+            .contains("wrote")
+    );
+}
+
 fn session_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut entries = std::fs::read_dir(root.join(".neo/sessions"))
         .expect("read sessions")
@@ -146,6 +201,29 @@ fn openai_response_sse(id: &str, text: &str) -> String {
     sse_response(&[
         json!({ "type": "response.created", "response": { "id": id } }),
         json!({ "type": "response.output_text.delta", "delta": text }),
+        json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "usage": { "input_tokens": 7, "output_tokens": 3 }
+            }
+        }),
+    ])
+}
+
+fn openai_tool_call_sse(id: &str, call_id: &str, name: &str, arguments: &Value) -> String {
+    let arguments = arguments.to_string();
+    sse_response(&[
+        json!({ "type": "response.created", "response": { "id": id } }),
+        json!({
+            "type": "response.output_item.added",
+            "item": { "type": "function_call", "id": "item-1", "call_id": call_id, "name": name }
+        }),
+        json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "item-1",
+            "delta": arguments
+        }),
         json!({
             "type": "response.completed",
             "response": {

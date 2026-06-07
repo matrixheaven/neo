@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use futures::{StreamExt, stream, stream::FuturesUnordered};
 use neo_ai::{AiStreamEvent, ChatRequest, ModelClient, ModelSpec, RequestOptions, ToolSpec};
@@ -16,6 +16,21 @@ use crate::{
 pub type ContextTransform = Arc<dyn Fn(&[AgentMessage]) -> Vec<AgentMessage> + Send + Sync>;
 pub type BeforeToolCallHook = Arc<dyn Fn(&AgentToolCall) -> Option<ToolResult> + Send + Sync>;
 pub type AfterToolCallHook = Arc<dyn Fn(&AgentToolCall, ToolResult) -> ToolResult + Send + Sync>;
+pub type ApprovalHandler = Arc<dyn Fn(&ApprovalRequest) -> PermissionDecision + Send + Sync>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApprovalRequest {
+    pub turn: u32,
+    pub id: String,
+    pub operation: PermissionOperation,
+    pub subject: String,
+    pub arguments: serde_json::Value,
+}
+
+enum ToolPreparation {
+    Run(ToolContext),
+    Skip(ToolResult),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum QueueMode {
@@ -32,6 +47,7 @@ pub enum ToolExecutionMode {
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AgentConfig {
     pub model: ModelSpec,
+    pub workspace_root: Option<PathBuf>,
     pub system_prompt: Option<String>,
     pub max_turns: u32,
     pub temperature: Option<f64>,
@@ -51,6 +67,9 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub after_tool_call: Option<AfterToolCallHook>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub approval_handler: Option<ApprovalHandler>,
 }
 
 impl AgentConfig {
@@ -58,6 +77,7 @@ impl AgentConfig {
     pub fn for_model(model: ModelSpec) -> Self {
         Self {
             model,
+            workspace_root: None,
             system_prompt: None,
             max_turns: 8,
             temperature: None,
@@ -71,6 +91,7 @@ impl AgentConfig {
             context_transform: None,
             before_tool_call: None,
             after_tool_call: None,
+            approval_handler: None,
         }
     }
 
@@ -111,6 +132,14 @@ impl AgentConfig {
         self
     }
 
+    pub fn with_workspace_root(
+        mut self,
+        workspace_root: impl Into<PathBuf>,
+    ) -> Result<Self, std::io::Error> {
+        self.workspace_root = Some(workspace_root.into().canonicalize()?);
+        Ok(self)
+    }
+
     #[must_use]
     pub const fn with_compaction(mut self, settings: CompactionSettings) -> Self {
         self.compaction = Some(settings);
@@ -141,6 +170,15 @@ impl AgentConfig {
         hook: impl Fn(&AgentToolCall, ToolResult) -> ToolResult + Send + Sync + 'static,
     ) -> Self {
         self.after_tool_call = Some(Arc::new(hook));
+        self
+    }
+
+    #[must_use]
+    pub fn with_approval_handler(
+        mut self,
+        handler: impl Fn(&ApprovalRequest) -> PermissionDecision + Send + Sync + 'static,
+    ) -> Self {
+        self.approval_handler = Some(Arc::new(handler));
         self
     }
 }
@@ -706,7 +744,6 @@ async fn execute_tool_calls_sequential(
             name: tool_call.name.clone(),
             arguments: tool_call.arguments.clone(),
         });
-        emit_shell_started(turn, tool_call, &tool_context, emitter);
         let mut result = if let Some(before_tool_call) = &config.before_tool_call {
             if let Some(blocked) = before_tool_call(tool_call) {
                 blocked
@@ -720,7 +757,9 @@ async fn execute_tool_calls_sequential(
         if let Some(after_tool_call) = &config.after_tool_call {
             result = after_tool_call(tool_call, result);
         }
-        emit_shell_finished(turn, tool_call, &result, emitter);
+        if tool_call.name == "bash" {
+            emit_shell_finished(turn, tool_call, &result, emitter);
+        }
         emitter.emit(AgentEvent::ToolExecutionFinished {
             turn,
             id: tool_call.id.clone(),
@@ -750,8 +789,6 @@ async fn execute_tool_calls_parallel(
             name: tool_call.name.clone(),
             arguments: tool_call.arguments.clone(),
         });
-        emit_shell_started(turn, &tool_call, &tool_context, emitter);
-
         if let Some(before_tool_call) = &config.before_tool_call
             && let Some(mut result) = before_tool_call(&tool_call)
         {
@@ -769,20 +806,23 @@ async fn execute_tool_calls_parallel(
             continue;
         }
 
-        if let Some(result) = permission_preflight(config, turn, &tool_call, emitter) {
-            emit_shell_finished(turn, &tool_call, &result, emitter);
-            emitter.emit(AgentEvent::ToolExecutionFinished {
-                turn,
-                id: tool_call.id.clone(),
-                name: tool_call.name.clone(),
-                result: result.clone(),
-            });
-            completed.push((index, tool_call, result));
-            continue;
-        }
+        let tool_context =
+            match prepare_tool_context(config, &tool_context, turn, &tool_call, emitter) {
+                ToolPreparation::Run(context) => context,
+                ToolPreparation::Skip(result) => {
+                    emit_shell_finished(turn, &tool_call, &result, emitter);
+                    emitter.emit(AgentEvent::ToolExecutionFinished {
+                        turn,
+                        id: tool_call.id.clone(),
+                        name: tool_call.name.clone(),
+                        result: result.clone(),
+                    });
+                    completed.push((index, tool_call, result));
+                    continue;
+                }
+            };
 
         let after_tool_call = config.after_tool_call.clone();
-        let tool_context = tool_context.clone();
         running.push(async move {
             let mut result = registry
                 .run(&tool_call.name, &tool_context, tool_call.arguments.clone())
@@ -895,41 +935,167 @@ async fn prepare_and_run_tool(
     tool_call: &AgentToolCall,
     emitter: &mut EventEmitter,
 ) -> Result<ToolResult, AgentRuntimeError> {
-    if let Some(result) = permission_preflight(config, turn, tool_call, emitter) {
-        return Ok(result);
+    match prepare_tool_context(config, tool_context, turn, tool_call, emitter) {
+        ToolPreparation::Run(context) => registry
+            .run(&tool_call.name, &context, tool_call.arguments.clone())
+            .await
+            .map_err(AgentRuntimeError::Tool),
+        ToolPreparation::Skip(result) => Ok(result),
     }
-    registry
-        .run(&tool_call.name, tool_context, tool_call.arguments.clone())
-        .await
-        .map_err(AgentRuntimeError::Tool)
 }
 
-fn permission_preflight(
+fn prepare_tool_context(
     config: &AgentConfig,
+    base_context: &ToolContext,
     turn: u32,
     tool_call: &AgentToolCall,
     emitter: &mut EventEmitter,
+) -> ToolPreparation {
+    let mut context = base_context.clone();
+    if let Some(result) = permission_result_for_decision(
+        config.tool_permission_policy.tool,
+        config,
+        turn,
+        tool_call,
+        PermissionOperation::Tool,
+        tool_call.name.clone(),
+        emitter,
+    ) {
+        return ToolPreparation::Skip(result);
+    }
+    context.permissions.tool = PermissionDecision::Allow;
+
+    let Some((operation, subject)) = permission_operation_for_tool(tool_call) else {
+        return ToolPreparation::Run(context);
+    };
+    let decision = match operation {
+        PermissionOperation::FileRead => config.tool_permission_policy.file_read,
+        PermissionOperation::FileWrite => config.tool_permission_policy.file_write,
+        PermissionOperation::Shell => config.tool_permission_policy.shell,
+        PermissionOperation::Tool => config.tool_permission_policy.tool,
+    };
+    if let Some(result) = permission_result_for_decision(
+        decision, config, turn, tool_call, operation, subject, emitter,
+    ) {
+        return ToolPreparation::Skip(result);
+    }
+    match operation {
+        PermissionOperation::FileRead => context.permissions.file_read = PermissionDecision::Allow,
+        PermissionOperation::FileWrite => {
+            context.permissions.file_write = PermissionDecision::Allow;
+        }
+        PermissionOperation::Shell => context.permissions.shell = PermissionDecision::Allow,
+        PermissionOperation::Tool => context.permissions.tool = PermissionDecision::Allow,
+    }
+    if tool_call.name == "bash" {
+        emit_shell_started(turn, tool_call, &context, emitter);
+    }
+    ToolPreparation::Run(context)
+}
+
+fn permission_result_for_decision(
+    decision: PermissionDecision,
+    config: &AgentConfig,
+    turn: u32,
+    tool_call: &AgentToolCall,
+    operation: PermissionOperation,
+    subject: String,
+    emitter: &mut EventEmitter,
 ) -> Option<ToolResult> {
-    match config.tool_permission_policy.tool {
+    match decision {
         PermissionDecision::Allow => None,
-        PermissionDecision::Deny => Some(ToolResult::error(format!(
-            "permission denied for tool: {}",
-            tool_call.name
-        ))),
+        PermissionDecision::Deny => Some(permission_error(operation, &subject, "denied")),
         PermissionDecision::Ask => {
-            emitter.emit(AgentEvent::ApprovalRequested {
-                turn,
-                id: tool_call.id.clone(),
-                operation: PermissionOperation::Tool,
-                subject: tool_call.name.clone(),
-                arguments: tool_call.arguments.clone(),
-            });
-            Some(ToolResult::error(format!(
-                "approval required for tool: {}",
-                tool_call.name
-            )))
+            approval_decision(config, turn, tool_call, operation, subject, emitter)
         }
     }
+}
+
+fn approval_decision(
+    config: &AgentConfig,
+    turn: u32,
+    tool_call: &AgentToolCall,
+    operation: PermissionOperation,
+    subject: String,
+    emitter: &mut EventEmitter,
+) -> Option<ToolResult> {
+    let request = ApprovalRequest {
+        turn,
+        id: tool_call.id.clone(),
+        operation,
+        subject,
+        arguments: tool_call.arguments.clone(),
+    };
+    emitter.emit(AgentEvent::ApprovalRequested {
+        turn: request.turn,
+        id: request.id.clone(),
+        operation: request.operation,
+        subject: request.subject.clone(),
+        arguments: request.arguments.clone(),
+    });
+    let decision = config
+        .approval_handler
+        .as_ref()
+        .map_or(PermissionDecision::Ask, |handler| handler(&request));
+    match decision {
+        PermissionDecision::Allow => None,
+        PermissionDecision::Deny => Some(permission_error(
+            request.operation,
+            &request.subject,
+            "approval denied",
+        )),
+        PermissionDecision::Ask => Some(permission_error(
+            request.operation,
+            &request.subject,
+            "approval required",
+        )),
+    }
+}
+
+fn permission_error(
+    operation: PermissionOperation,
+    subject: &str,
+    prefix: &'static str,
+) -> ToolResult {
+    let noun = match operation {
+        PermissionOperation::FileRead => "file read",
+        PermissionOperation::FileWrite => "file write",
+        PermissionOperation::Shell => "shell",
+        PermissionOperation::Tool => "tool",
+    };
+    ToolResult::error(format!("{prefix} for {noun}: {subject}"))
+}
+
+fn permission_operation_for_tool(
+    tool_call: &AgentToolCall,
+) -> Option<(PermissionOperation, String)> {
+    match tool_call.name.as_str() {
+        "read" | "list" | "grep" | "find" => Some((
+            PermissionOperation::FileRead,
+            path_subject(&tool_call.arguments).unwrap_or_else(|| tool_call.name.clone()),
+        )),
+        "write" | "edit" => Some((
+            PermissionOperation::FileWrite,
+            path_subject(&tool_call.arguments).unwrap_or_else(|| tool_call.name.clone()),
+        )),
+        "bash" => Some((
+            PermissionOperation::Shell,
+            tool_call
+                .arguments
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("bash")
+                .to_owned(),
+        )),
+        _ => None,
+    }
+}
+
+fn path_subject(arguments: &serde_json::Value) -> Option<String> {
+    arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
 }
 
 fn emit_shell_started(
@@ -996,7 +1162,12 @@ fn emit_shell_finished(
 }
 
 fn default_tool_context(config: &AgentConfig) -> Result<ToolContext, AgentRuntimeError> {
-    ToolContext::new(std::env::current_dir()?)
+    let workspace_root = if let Some(workspace_root) = &config.workspace_root {
+        workspace_root.clone()
+    } else {
+        std::env::current_dir()?
+    };
+    ToolContext::new(workspace_root)
         .map(|context| context.with_permission_policy(config.tool_permission_policy.clone()))
         .map_err(AgentRuntimeError::Tool)
 }

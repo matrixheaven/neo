@@ -10,7 +10,7 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use uuid::Uuid;
 
-use crate::{AgentContext, AgentEvent, AgentMessage};
+use crate::{AgentContext, AgentEvent, AgentMessage, CompactionSummary, Content};
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -109,6 +109,59 @@ impl JsonlSessionReader {
         let events = Self::read_all(path).await?;
         Ok(AgentContext::from_replay(events.iter()))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionCompactionOptions {
+    pub keep_recent_messages: usize,
+}
+
+impl Default for SessionCompactionOptions {
+    fn default() -> Self {
+        Self {
+            keep_recent_messages: 20,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionCompactionResult {
+    pub summary: CompactionSummary,
+    pub compacted_message_count: usize,
+    pub kept_message_count: usize,
+}
+
+pub async fn compact_jsonl_session(
+    path: impl AsRef<Path>,
+    options: SessionCompactionOptions,
+) -> Result<SessionCompactionResult, SessionError> {
+    let path = path.as_ref();
+    let events = JsonlSessionReader::read_all(path).await?;
+    let context = AgentContext::from_replay(events.iter());
+    let messages = context.messages();
+    let keep_recent_messages = options.keep_recent_messages.min(messages.len());
+    let first_kept_message_index = messages.len().saturating_sub(keep_recent_messages);
+    let compacted_messages = &messages[..first_kept_message_index];
+    let kept_messages = messages.len().saturating_sub(first_kept_message_index);
+    let summary = CompactionSummary {
+        summary: summarize_transcript(compacted_messages),
+        tokens_before: estimate_messages_tokens(messages),
+        first_kept_message_index,
+    };
+
+    let mut writer = JsonlSessionWriter::open_append(path).await?;
+    writer
+        .append(&AgentEvent::CompactionApplied {
+            summary: summary.clone(),
+        })
+        .await?;
+    writer.flush().await?;
+
+    Ok(SessionCompactionResult {
+        summary,
+        compacted_message_count: compacted_messages.len(),
+        kept_message_count: kept_messages,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,4 +369,88 @@ pub fn replay_messages<'a>(events: impl IntoIterator<Item = &'a AgentEvent>) -> 
             _ => None,
         })
         .collect()
+}
+
+fn summarize_transcript(messages: &[AgentMessage]) -> String {
+    if messages.is_empty() {
+        return "Algorithmic transcript summary: no earlier messages were compacted.".to_owned();
+    }
+
+    let lines = messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            format!(
+                "{}. {}: {}",
+                index + 1,
+                message_role(message),
+                one_line_message_text(message)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "Algorithmic transcript summary: {} earlier messages compacted by deterministic transcript extraction.\n{}",
+        messages.len(),
+        lines
+    )
+}
+
+fn message_role(message: &AgentMessage) -> &'static str {
+    match message {
+        AgentMessage::System { .. } => "system",
+        AgentMessage::User { .. } => "user",
+        AgentMessage::Assistant { .. } => "assistant",
+        AgentMessage::ToolResult { .. } => "tool",
+    }
+}
+
+fn one_line_message_text(message: &AgentMessage) -> String {
+    let content = match message {
+        AgentMessage::System { content }
+        | AgentMessage::User { content }
+        | AgentMessage::Assistant { content, .. }
+        | AgentMessage::ToolResult { content, .. } => content,
+    };
+    let text = content
+        .iter()
+        .filter_map(Content::as_text)
+        .collect::<Vec<_>>()
+        .join("");
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn estimate_messages_tokens(messages: &[AgentMessage]) -> usize {
+    messages.iter().map(estimate_message_tokens).sum()
+}
+
+fn estimate_message_tokens(message: &AgentMessage) -> usize {
+    let chars = match message {
+        AgentMessage::System { content }
+        | AgentMessage::User { content }
+        | AgentMessage::ToolResult { content, .. } => estimate_content_chars(content),
+        AgentMessage::Assistant {
+            content,
+            tool_calls,
+            ..
+        } => {
+            estimate_content_chars(content)
+                + tool_calls
+                    .iter()
+                    .map(|call| call.name.len() + call.arguments.to_string().len())
+                    .sum::<usize>()
+        }
+    };
+    chars.div_ceil(4)
+}
+
+fn estimate_content_chars(content: &[Content]) -> usize {
+    content
+        .iter()
+        .map(|part| match part {
+            Content::Text { text } => text.len(),
+            Content::Image { .. } => 4800,
+        })
+        .sum()
 }

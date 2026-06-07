@@ -1,4 +1,6 @@
-use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter};
+use neo_agent_core::session::{
+    JsonlSessionReader, JsonlSessionWriter, SessionCompactionOptions, compact_jsonl_session,
+};
 use neo_agent_core::{AgentContext, AgentEvent, AgentMessage, CompactionSummary, StopReason};
 
 #[tokio::test]
@@ -137,4 +139,80 @@ async fn jsonl_session_replays_queues_and_compaction_summary() {
     assert_eq!(context.pending_follow_up_len(), 1);
     assert_eq!(context.compaction_summary(), Some(&summary));
     assert_eq!(context.turns(), 3);
+}
+
+#[tokio::test]
+async fn jsonl_session_compaction_appends_algorithmic_summary_and_replays_kept_context() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let mut writer = JsonlSessionWriter::create(&path)
+        .await
+        .expect("create session");
+
+    for event in [
+        AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("Investigate parser drift"),
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                [neo_agent_core::Content::text("Found JSONL mismatch")],
+                Vec::new(),
+                StopReason::EndTurn,
+            ),
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("Keep the final request"),
+        },
+    ] {
+        writer.append(&event).await.expect("append event");
+    }
+    writer.flush().await.expect("flush");
+
+    let result = compact_jsonl_session(
+        &path,
+        SessionCompactionOptions {
+            keep_recent_messages: 1,
+        },
+    )
+    .await
+    .expect("compact session");
+
+    assert_eq!(result.compacted_message_count, 2);
+    assert_eq!(result.kept_message_count, 1);
+    assert_eq!(result.summary.first_kept_message_index, 2);
+    assert!(
+        result
+            .summary
+            .summary
+            .contains("Algorithmic transcript summary")
+    );
+    assert!(
+        result
+            .summary
+            .summary
+            .contains("user: Investigate parser drift")
+    );
+    assert!(
+        result
+            .summary
+            .summary
+            .contains("assistant: Found JSONL mismatch")
+    );
+
+    let events = JsonlSessionReader::read_all(&path)
+        .await
+        .expect("read events");
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::CompactionApplied { summary }) if summary == &result.summary
+    ));
+
+    let context = JsonlSessionReader::replay_context(&path)
+        .await
+        .expect("replay compacted context");
+    assert_eq!(
+        context.messages(),
+        &[AgentMessage::user_text("Keep the final request")]
+    );
+    assert_eq!(context.compaction_summary(), Some(&result.summary));
 }

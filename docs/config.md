@@ -76,8 +76,8 @@ ask/approve UI remains a runtime gap.
 `neo mcp list` reads configured server entries from `.neo/config.toml`.
 `neo print` and `neo run` discover enabled `transport = "stdio"` entries,
 register their remote tools as `mcp__<server>__<tool>` model functions, and
-call the original remote MCP tool names over stdio JSON-RPC. The current shape
-includes:
+call the original remote MCP tool names over a reused initialized stdio
+JSON-RPC session. The current shape includes:
 
 - Server id.
 - Transport type such as `stdio`.
@@ -98,6 +98,8 @@ neo models list
 neo mcp list
 neo skills show <path>
 neo extensions list [root]
+neo extensions install <path-or-git-url> --root <root>
+neo extensions update <extension-id> --root <root>
 neo extensions status <extension-id> --root <root>
 neo extensions enable <extension-id> --root <root>
 neo extensions disable <extension-id> --root <root>

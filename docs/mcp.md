@@ -31,8 +31,10 @@ function-name validators can accept the advertised tools.
 
 `McpStdioToolAdapter` is the production stdio JSON-RPC adapter. It starts the
 configured command with arguments and environment, performs the MCP
-`initialize` handshake, calls `tools/list`, and invokes remote tools with
-`tools/call`. It does not provide local fallback behavior.
+`initialize` handshake once per adapter session, calls `tools/list`, and
+invokes remote tools with `tools/call` over the same stdio JSON-RPC process
+until that process or request stream fails. It does not provide local fallback
+behavior.
 
 ## Runtime Placement
 
@@ -60,10 +62,11 @@ The model should only see normal `ToolSpec` values. It should not know whether a
 
 `neo-agent-core` has the MCP tool adapter abstraction, stdio JSON-RPC process
 adapter, discovery-to-`ToolSpec` bridge, namespaced `ToolRegistry`
-registration, and async call delegation. `neo-agent print` and `neo-agent run`
-load enabled `transport = "stdio"` servers from project config and advertise
-their tools to the configured model.
+registration, persistent initialized stdio session reuse, and async call
+delegation. `neo-agent print` and `neo-agent run` load enabled
+`transport = "stdio"` servers from project config and advertise their tools to
+the configured model.
 
-Current limitation: the stdio adapter opens a fresh MCP process for discovery
-and for each tool call. It is real process JSON-RPC, but it does not yet keep a
-long-lived pooled MCP session.
+Current limitation: Neo supports stdio MCP transport only. HTTP/SSE MCP
+transport, resource subscriptions, and hosted MCP management remain future
+work.

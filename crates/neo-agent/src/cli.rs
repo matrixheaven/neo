@@ -15,6 +15,12 @@ pub struct Cli {
     #[arg(long, global = true, env = "NEO_CONFIG")]
     pub config: Option<std::path::PathBuf>,
 
+    #[arg(short = 'a', long, global = true, conflicts_with = "no_approve")]
+    pub approve: bool,
+
+    #[arg(long = "no-approve", alias = "no_approve", global = true)]
+    pub no_approve: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -72,6 +78,11 @@ pub enum SessionCommand {
         #[arg(long)]
         name: Option<String>,
     },
+    Compact {
+        session_id: String,
+        #[arg(long, default_value_t = 20)]
+        keep_recent: usize,
+    },
     ExportHtml {
         session_id: String,
     },
@@ -102,6 +113,16 @@ pub enum SkillCommand {
 pub enum ExtensionCommand {
     List {
         #[arg(default_value = ".neo/extensions")]
+        root: std::path::PathBuf,
+    },
+    Install {
+        source: String,
+        #[arg(long, default_value = ".neo/extensions")]
+        root: std::path::PathBuf,
+    },
+    Update {
+        extension_id: String,
+        #[arg(long, default_value = ".neo/extensions")]
         root: std::path::PathBuf,
     },
     Status {

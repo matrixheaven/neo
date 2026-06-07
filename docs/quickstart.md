@@ -83,24 +83,28 @@ It is a deterministic fixture for config-shape validation, not production
 provider guidance.
 `mcp-server.toml` documents the CLI config shape that `neo mcp list`,
 `neo print`, and `neo run` read. Enabled stdio MCP servers are spawned for
-tool discovery and their provider-safe `mcp__<server>__<tool>` specs are sent
-to the configured model.
+tool discovery, reused for tool calls during that adapter session, and their
+provider-safe `mcp__<server>__<tool>` specs are sent to the configured model.
 
 ## SDK and Extension Commands
 
 ```bash
 cargo run -p neo-agent -- sessions export-html <session-id> > session.html
 cargo run -p neo-agent -- skills show path/to/skill
-cargo run -p neo-agent -- extensions list path/to/extensions
-cargo run -p neo-agent -- extensions status echo --root path/to/extensions
-cargo run -p neo-agent -- extensions disable echo --root path/to/extensions
-cargo run -p neo-agent -- extensions enable echo --root path/to/extensions
-cargo run -p neo-agent -- extensions call echo tool.echo '{"value":42}' --root path/to/extensions
+cargo run -p neo-agent -- extensions install path/to/extension
+cargo run -p neo-agent -- extensions install file:///path/to/git-extension
+cargo run -p neo-agent -- extensions update echo
+cargo run -p neo-agent -- extensions list
+cargo run -p neo-agent -- extensions status echo
+cargo run -p neo-agent -- extensions disable echo
+cargo run -p neo-agent -- extensions enable echo
+cargo run -p neo-agent -- extensions call echo tool.echo '{"value":42}'
 ```
 
 `skills show` uses `neo-sdk` skill loading, `sessions export-html` uses the
-safe HTML exporter, extension lifecycle commands persist local enablement state,
-and `extensions call` uses the JSONL RPC stdio runner.
+safe HTML exporter, extension install/update commands persist local sources
+under `.neo/extensions-sources.toml`, lifecycle commands persist local
+enablement state, and `extensions call` uses the JSONL RPC stdio runner.
 
 ## Rust API Examples
 

@@ -7,6 +7,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
+    sync::Mutex,
 };
 
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolRegistry, ToolResult};
@@ -127,15 +128,19 @@ pub struct McpStdioConfig {
     pub env: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct McpStdioToolAdapter {
     config: McpStdioConfig,
+    session: Arc<Mutex<Option<StdioJsonRpcSession>>>,
 }
 
 impl McpStdioToolAdapter {
     #[must_use]
-    pub const fn new(config: McpStdioConfig) -> Self {
-        Self { config }
+    pub fn new(config: McpStdioConfig) -> Self {
+        Self {
+            config,
+            session: Arc::new(Mutex::new(None)),
+        }
     }
 
     async fn request(
@@ -143,9 +148,18 @@ impl McpStdioToolAdapter {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, McpError> {
-        let mut session = StdioJsonRpcSession::spawn(&self.config)?;
-        session.initialize().await?;
-        session.request(method, params).await
+        let mut session = self.session.lock().await;
+        if session.is_none() {
+            *session = Some(StdioJsonRpcSession::connect(&self.config).await?);
+        }
+        let active = session
+            .as_mut()
+            .ok_or_else(|| McpError::protocol("MCP stdio session was not initialized"))?;
+        let result = active.request(method, params).await;
+        if result.is_err() {
+            *session = None;
+        }
+        result
     }
 }
 
@@ -202,6 +216,12 @@ struct StdioJsonRpcSession {
 }
 
 impl StdioJsonRpcSession {
+    async fn connect(config: &McpStdioConfig) -> Result<Self, McpError> {
+        let mut session = Self::spawn(config)?;
+        session.initialize().await?;
+        Ok(session)
+    }
+
     fn spawn(config: &McpStdioConfig) -> Result<Self, McpError> {
         let mut command = Command::new(&config.command);
         command.args(&config.args);

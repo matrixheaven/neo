@@ -652,6 +652,248 @@ async fn runtime_emits_approval_request_for_ask_permission_and_skips_tool_execut
 }
 
 #[tokio::test]
+async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "text": "approved" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools.register(RecordingEchoTool {
+        executed: Arc::clone(&executed),
+    });
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_permission_policy(PermissionPolicy {
+                file_read: PermissionDecision::Allow,
+                file_write: PermissionDecision::Deny,
+                shell: PermissionDecision::Deny,
+                tool: PermissionDecision::Ask,
+            })
+            .with_approval_handler(|request| {
+                assert_eq!(request.operation, PermissionOperation::Tool);
+                assert_eq!(request.subject, "echo");
+                PermissionDecision::Allow
+            }),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("call tool"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("approved tool loop should succeed");
+
+    assert!(events.contains(&AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        operation: PermissionOperation::Tool,
+        subject: "echo".to_owned(),
+        arguments: json!({ "text": "approved" }),
+    }));
+    assert_eq!(
+        *executed.lock().expect("executed lock poisoned"),
+        vec!["approved".to_owned()]
+    );
+    assert!(events.contains(&AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        name: "echo".to_owned(),
+        result: ToolResult::ok("approved"),
+    }));
+    assert_eq!(
+        context.messages()[2],
+        AgentMessage::tool_result("tool_1", "echo", vec![Content::text("approved")], false)
+    );
+}
+
+#[tokio::test]
+async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "text": "denied" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools.register(RecordingEchoTool {
+        executed: Arc::clone(&executed),
+    });
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_permission_policy(PermissionPolicy {
+                file_read: PermissionDecision::Allow,
+                file_write: PermissionDecision::Deny,
+                shell: PermissionDecision::Deny,
+                tool: PermissionDecision::Ask,
+            })
+            .with_approval_handler(|request| {
+                assert_eq!(request.operation, PermissionOperation::Tool);
+                assert_eq!(request.subject, "echo");
+                PermissionDecision::Deny
+            }),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("call tool"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("denied tool loop should succeed");
+
+    assert!(events.contains(&AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        operation: PermissionOperation::Tool,
+        subject: "echo".to_owned(),
+        arguments: json!({ "text": "denied" }),
+    }));
+    assert!(executed.lock().expect("executed lock poisoned").is_empty());
+    assert!(events.contains(&AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        name: "echo".to_owned(),
+        result: ToolResult::error("approval denied for tool: echo"),
+    }));
+}
+
+#[tokio::test]
+async fn runtime_approval_handler_allows_file_write_tool_permission() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "write".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "path": "approved.txt", "content": "ok" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_permission_policy(PermissionPolicy {
+                file_read: PermissionDecision::Allow,
+                file_write: PermissionDecision::Ask,
+                shell: PermissionDecision::Deny,
+                tool: PermissionDecision::Allow,
+            })
+            .with_workspace_root(workspace.path())
+            .expect("workspace config")
+            .with_approval_handler(|request| {
+                assert_eq!(request.operation, PermissionOperation::FileWrite);
+                assert_eq!(request.subject, "approved.txt");
+                PermissionDecision::Allow
+            }),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("write file"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("approved write should succeed");
+
+    assert!(events.contains(&AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        operation: PermissionOperation::FileWrite,
+        subject: "approved.txt".to_owned(),
+        arguments: json!({ "path": "approved.txt", "content": "ok" }),
+    }));
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("approved.txt")).expect("written file"),
+        "ok"
+    );
+}
+
+#[tokio::test]
 async fn runtime_emits_shell_lifecycle_for_bash_tool() {
     let harness = FakeHarness::from_turns([
         vec![

@@ -43,6 +43,10 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
             SessionCommand::Fork { session_id, name } => {
                 session_commands::fork(&session_id, name.as_deref(), &config)
             }
+            SessionCommand::Compact {
+                session_id,
+                keep_recent,
+            } => session_commands::compact(&session_id, keep_recent, &config).await,
             SessionCommand::ExportHtml { session_id } => {
                 session_commands::export_html(&session_id, &config).await
             }
@@ -52,6 +56,12 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
         },
         Some(Command::Extensions { command }) => match command {
             ExtensionCommand::List { root } => extension_commands::list(&root),
+            ExtensionCommand::Install { source, root } => {
+                extension_commands::install(&root, &source)
+            }
+            ExtensionCommand::Update { extension_id, root } => {
+                extension_commands::update(&root, &extension_id)
+            }
             ExtensionCommand::Status { extension_id, root } => {
                 extension_commands::status(&root, &extension_id)
             }
@@ -79,6 +89,8 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
             McpCommand::List => Ok(modes::run::list_mcp_servers(&config)),
         },
         Some(Command::Rpc) => rpc_mode::execute(&config).await,
-        None => Ok(modes::interactive::execute(&config)),
+        None => Ok(modes::interactive::execute_tty(&config)
+            .await?
+            .unwrap_or_default()),
     }
 }

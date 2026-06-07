@@ -1,7 +1,10 @@
 use std::{fs, path::PathBuf};
 
 use anyhow::Context;
-use neo_agent_core::session::{JsonlSessionReader, SessionMetadataStore, validate_session_id};
+use neo_agent_core::session::{
+    JsonlSessionReader, SessionCompactionOptions, SessionMetadataStore, compact_jsonl_session,
+    validate_session_id,
+};
 use neo_agent_core::{AgentMessage, Content};
 use neo_sdk::{ExportConversation, ExportMessage, HtmlExportOptions, export_html as render_html};
 
@@ -71,12 +74,23 @@ pub fn show(session_id: &str, config: &AppConfig) -> anyhow::Result<String> {
 }
 
 pub async fn transcript(session_id: &str, config: &AppConfig) -> anyhow::Result<String> {
-    let messages = JsonlSessionReader::replay_messages(session_path(session_id, config)?)
+    let context = JsonlSessionReader::replay_context(session_path(session_id, config)?)
         .await
         .with_context(|| format!("failed to replay session {session_id}"))?;
-    let lines = messages
+    let mut lines = Vec::new();
+    if let Some(summary) = context.compaction_summary() {
+        lines.push(format!("compaction: {}", summary.summary));
+    }
+    lines.extend(
+        context
+            .messages()
+            .iter()
+            .map(format_message)
+            .collect::<Vec<_>>(),
+    );
+    let lines = lines
         .iter()
-        .map(format_message)
+        .map(String::as_str)
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -85,6 +99,26 @@ pub async fn transcript(session_id: &str, config: &AppConfig) -> anyhow::Result<
     } else {
         Ok(format!("{lines}\n"))
     }
+}
+
+pub async fn compact(
+    session_id: &str,
+    keep_recent: usize,
+    config: &AppConfig,
+) -> anyhow::Result<String> {
+    let result = compact_jsonl_session(
+        session_path(session_id, config)?,
+        SessionCompactionOptions {
+            keep_recent_messages: keep_recent,
+        },
+    )
+    .await
+    .with_context(|| format!("failed to compact session {session_id}"))?;
+
+    Ok(format!(
+        "compacted {session_id}: compacted {}, kept {}\n{}\n",
+        result.compacted_message_count, result.kept_message_count, result.summary.summary
+    ))
 }
 
 pub async fn export_html(session_id: &str, config: &AppConfig) -> anyhow::Result<String> {

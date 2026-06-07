@@ -22,6 +22,8 @@ pub struct ConfigOverrides {
     pub provider: Option<String>,
     pub api_base: Option<String>,
     pub config_path: Option<PathBuf>,
+    pub approve: bool,
+    pub no_approve: bool,
 }
 
 impl ConfigOverrides {
@@ -31,6 +33,8 @@ impl ConfigOverrides {
             provider: cli.provider.clone(),
             api_base: cli.api_base.clone(),
             config_path: cli.config.clone(),
+            approve: cli.approve,
+            no_approve: cli.no_approve,
         }
     }
 }
@@ -46,6 +50,9 @@ pub struct AppConfig {
     pub permissions: PermissionPolicy,
     pub defaults: Defaults,
     pub mcp: McpConfig,
+    pub approve: bool,
+    pub no_approve: bool,
+    pub project_dir: PathBuf,
 
     #[serde(skip)]
     pub config_path: PathBuf,
@@ -152,6 +159,9 @@ impl AppConfig {
             permissions,
             defaults: Defaults { mode },
             mcp,
+            approve: overrides.approve,
+            no_approve: overrides.no_approve,
+            project_dir,
             config_path,
         })
     }

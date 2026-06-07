@@ -5,7 +5,7 @@ use futures::StreamExt;
 use neo_agent_core::session::JsonlSessionWriter;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, Content, McpStdioConfig,
-    McpStdioToolAdapter, McpToolProvider, ToolRegistry,
+    McpStdioToolAdapter, McpToolProvider, PermissionDecision, ToolRegistry,
 };
 use neo_ai::{ModelClient, ModelRegistry, ModelSpec, ProviderRegistry};
 
@@ -123,11 +123,7 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
     let model = resolve_model(config)?;
     let client = resolve_model_client(config, &model)?;
     let tools = tool_registry_for_config(config).await?;
-    let runtime = AgentRuntime::with_tools(
-        AgentConfig::for_model(model).with_tool_permission_policy(config.permissions.clone()),
-        client,
-        tools,
-    );
+    let runtime = AgentRuntime::with_tools(agent_config_for_app(model, config)?, client, tools);
     let mut context = AgentContext::new();
     let mut events = vec![user_event];
     let mut assistant_text = String::new();
@@ -161,6 +157,18 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
         events,
         assistant_text,
     })
+}
+
+fn agent_config_for_app(model: ModelSpec, config: &AppConfig) -> anyhow::Result<AgentConfig> {
+    let mut agent_config = AgentConfig::for_model(model)
+        .with_tool_permission_policy(config.permissions.clone())
+        .with_workspace_root(&config.project_dir)?;
+    if config.approve {
+        agent_config = agent_config.with_approval_handler(|_| PermissionDecision::Allow);
+    } else if config.no_approve {
+        agent_config = agent_config.with_approval_handler(|_| PermissionDecision::Deny);
+    }
+    Ok(agent_config)
 }
 
 async fn tool_registry_for_config(config: &AppConfig) -> anyhow::Result<ToolRegistry> {

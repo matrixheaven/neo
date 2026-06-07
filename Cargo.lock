@@ -1139,6 +1139,7 @@ dependencies = [
  "anyhow",
  "clap",
  "color-eyre",
+ "crossterm 0.29.0",
  "futures",
  "neo-agent-core",
  "neo-ai",

@@ -333,6 +333,50 @@ fn sessions_show_and_resume_read_jsonl_transcripts() {
 }
 
 #[test]
+fn sessions_compact_stores_algorithmic_summary_and_resume_replays_kept_context() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    fs::create_dir_all(&sessions).expect("create sessions");
+    fs::write(
+        sessions.join("alpha.jsonl"),
+        concat!(
+            "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"first task\"}}]}}}}\n",
+            "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"first answer\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n",
+            "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"latest task\"}}]}}}}\n"
+        ),
+    )
+    .expect("write session");
+
+    let mut compact = neo();
+    compact
+        .current_dir(temp.path())
+        .args(["sessions", "compact", "alpha", "--keep-recent", "1"]);
+    let compact_stdout = run(compact);
+
+    assert!(compact_stdout.contains("compacted alpha"));
+    assert!(compact_stdout.contains("kept 1"));
+    assert!(compact_stdout.contains("Algorithmic transcript summary"));
+    assert!(!compact_stdout.contains("fake"));
+
+    let jsonl = fs::read_to_string(sessions.join("alpha.jsonl")).expect("read compacted session");
+    assert!(jsonl.contains("\"CompactionApplied\""));
+    assert!(jsonl.contains("Algorithmic transcript summary"));
+    assert!(jsonl.contains("first task"));
+
+    let mut resume = neo();
+    resume.current_dir(temp.path()).args(["resume", "alpha"]);
+    let resume_stdout = run(resume);
+    assert!(resume_stdout.contains("session alpha"));
+    assert!(resume_stdout.contains("compaction: Algorithmic transcript summary"));
+    assert!(resume_stdout.contains("user: latest task"));
+    assert!(
+        !resume_stdout
+            .lines()
+            .any(|line| line == "user: first task" || line == "assistant: first answer")
+    );
+}
+
+#[test]
 fn sessions_export_html_renders_replayed_messages() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = temp.path().join(".neo/sessions");
@@ -435,6 +479,89 @@ command = "python3"
     assert!(stdout.contains("echo"));
     assert!(stdout.contains("Echo"));
     assert!(stdout.contains("0.1.0"));
+}
+
+#[test]
+fn extensions_install_update_and_list_sources_from_local_directory() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.path().join("source");
+    write_extension_manifest(&source, "echo", "Echo", "0.1.0");
+
+    let mut install = neo();
+    install
+        .current_dir(temp.path())
+        .args(["extensions", "install"])
+        .arg(&source);
+    let installed = run(install);
+    assert!(installed.contains("echo installed"));
+    assert!(installed.contains("0.1.0"));
+
+    let mut disable = neo();
+    disable
+        .current_dir(temp.path())
+        .args(["extensions", "disable", "echo"]);
+    run(disable);
+
+    write_extension_manifest(&source, "echo", "Echo", "0.2.0");
+
+    let mut update = neo();
+    update
+        .current_dir(temp.path())
+        .args(["extensions", "update", "echo"]);
+    let updated = run(update);
+    assert!(updated.contains("echo updated"));
+    assert!(updated.contains("0.2.0"));
+
+    let mut list = neo();
+    list.current_dir(temp.path()).args(["extensions", "list"]);
+    let listed = run(list);
+    assert!(listed.contains("echo"));
+    assert!(listed.contains("0.2.0"));
+    assert!(listed.contains("disabled"));
+    assert!(listed.contains(source.to_string_lossy().as_ref()));
+
+    let state = fs::read_to_string(temp.path().join(".neo/extensions-state.toml"))
+        .expect("read lifecycle state");
+    assert!(state.contains("[extensions.echo]"));
+    assert!(state.contains("enabled = false"));
+}
+
+#[test]
+fn extensions_install_and_update_from_local_git_repo_without_marketplace_catalog() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = temp.path().join("repo");
+    write_extension_manifest(&repo, "git_echo", "Git Echo", "0.1.0");
+    init_git_repo(&repo);
+
+    let source_url = format!("file://{}", repo.display());
+    let mut install = neo();
+    install
+        .current_dir(temp.path())
+        .args(["extensions", "install"])
+        .arg(&source_url);
+    let installed = run(install);
+    assert!(installed.contains("git_echo installed"));
+    assert!(installed.contains("0.1.0"));
+
+    write_extension_manifest(&repo, "git_echo", "Git Echo", "0.2.0");
+    commit_git_repo(&repo, "update extension");
+
+    let mut update = neo();
+    update
+        .current_dir(temp.path())
+        .args(["extensions", "update", "git_echo"]);
+    let updated = run(update);
+    assert!(updated.contains("git_echo updated"));
+    assert!(updated.contains("0.2.0"));
+
+    let mut list = neo();
+    list.current_dir(temp.path()).args(["extensions", "list"]);
+    let listed = run(list);
+    assert!(listed.contains("git_echo"));
+    assert!(listed.contains("0.2.0"));
+    assert!(listed.contains(&source_url));
+    assert!(!listed.contains("marketplace"));
+    assert!(!listed.contains("fake"));
 }
 
 #[test]
@@ -566,6 +693,51 @@ args = [{}]
         .arg(&root);
     let enabled = run(enable);
     assert!(enabled.contains("echo enabled"));
+}
+
+fn write_extension_manifest(root: &std::path::Path, id: &str, name: &str, version: &str) {
+    fs::create_dir_all(root).expect("create extension source");
+    fs::write(
+        root.join("neo-extension.toml"),
+        format!(
+            r#"
+id = "{id}"
+name = "{name}"
+version = "{version}"
+
+[runner]
+command = "python3"
+"#
+        ),
+    )
+    .expect("write extension manifest");
+}
+
+fn init_git_repo(repo: &std::path::Path) {
+    git(repo, ["init"]);
+    git(repo, ["config", "user.email", "neo@example.invalid"]);
+    git(repo, ["config", "user.name", "Neo Test"]);
+    git(repo, ["add", "neo-extension.toml"]);
+    git(repo, ["commit", "-m", "initial extension"]);
+}
+
+fn commit_git_repo(repo: &std::path::Path, message: &str) {
+    git(repo, ["add", "neo-extension.toml"]);
+    git(repo, ["commit", "-m", message]);
+}
+
+fn git<const N: usize>(repo: &std::path::Path, args: [&str; N]) {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(args)
+        .output()
+        .expect("git should run");
+    assert!(
+        output.status.success(),
+        "git failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
