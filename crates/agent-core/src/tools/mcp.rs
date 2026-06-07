@@ -128,6 +128,192 @@ pub struct McpStdioConfig {
     pub env: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpHttpConfig {
+    pub url: String,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Clone)]
+pub struct McpHttpToolAdapter {
+    config: McpHttpConfig,
+    client: reqwest::Client,
+    initialized: Arc<Mutex<bool>>,
+    next_id: Arc<Mutex<u64>>,
+}
+
+impl McpHttpToolAdapter {
+    #[must_use]
+    pub fn new(config: McpHttpConfig) -> Self {
+        Self {
+            config,
+            client: reqwest::Client::new(),
+            initialized: Arc::new(Mutex::new(false)),
+            next_id: Arc::new(Mutex::new(1)),
+        }
+    }
+
+    async fn ensure_initialized(&self) -> Result<(), McpError> {
+        let mut initialized = self.initialized.lock().await;
+        if *initialized {
+            return Ok(());
+        }
+        let _ = self
+            .request_raw(
+                "initialize",
+                Some(json_obj([
+                    (
+                        "protocolVersion",
+                        serde_json::Value::String("2024-11-05".to_owned()),
+                    ),
+                    (
+                        "clientInfo",
+                        json_obj([
+                            ("name", serde_json::Value::String("neo".to_owned())),
+                            (
+                                "version",
+                                serde_json::Value::String(env!("CARGO_PKG_VERSION").to_owned()),
+                            ),
+                        ]),
+                    ),
+                    ("capabilities", json_obj([])),
+                ])),
+            )
+            .await?;
+        *initialized = true;
+        Ok(())
+    }
+
+    async fn request(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, McpError> {
+        self.ensure_initialized().await?;
+        self.request_raw(method, params).await
+    }
+
+    async fn request_raw(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, McpError> {
+        let id = {
+            let mut next_id = self.next_id.lock().await;
+            let id = *next_id;
+            *next_id = next_id.saturating_add(1);
+            id
+        };
+        let mut request_body = serde_json::Map::from_iter([
+            (
+                "jsonrpc".to_owned(),
+                serde_json::Value::String("2.0".to_owned()),
+            ),
+            ("id".to_owned(), serde_json::Value::from(id)),
+            (
+                "method".to_owned(),
+                serde_json::Value::String(method.to_owned()),
+            ),
+        ]);
+        if let Some(params) = params {
+            request_body.insert("params".to_owned(), params);
+        }
+        let mut request = self
+            .client
+            .post(&self.config.url)
+            .header("accept", "application/json, text/event-stream")
+            .json(&serde_json::Value::Object(request_body));
+        for (key, value) in &self.config.headers {
+            request = request.header(key, value);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|err| McpError::protocol(format!("failed to send MCP HTTP request: {err}")))?;
+        let status = response.status();
+        let is_sse = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|content_type| content_type.contains("text/event-stream"));
+        let body = response.text().await.map_err(|err| {
+            McpError::protocol(format!("failed to read MCP HTTP response: {err}"))
+        })?;
+        if !status.is_success() {
+            return Err(McpError::protocol(format!(
+                "MCP HTTP server returned {status}: {body}"
+            )));
+        }
+        let response_value = if is_sse {
+            parse_sse_json_rpc_response(&body)?
+        } else {
+            serde_json::from_str(&body).map_err(|err| McpError::protocol(err.to_string()))?
+        };
+        if response_value.get("id").and_then(serde_json::Value::as_u64) != Some(id) {
+            return Err(McpError::protocol(
+                "MCP HTTP response id did not match request",
+            ));
+        }
+        if let Some(error) = response_value.get("error") {
+            let message = error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("MCP HTTP server returned JSON-RPC error");
+            return Err(McpError::protocol(message));
+        }
+        response_value
+            .get("result")
+            .cloned()
+            .ok_or_else(|| McpError::protocol("MCP HTTP response missing result"))
+    }
+}
+
+#[async_trait]
+impl McpToolAdapter for McpHttpToolAdapter {
+    async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError> {
+        let result = self.request("tools/list", None).await?;
+        let response: ListToolsResponse =
+            serde_json::from_value(result).map_err(|err| McpError::protocol(err.to_string()))?;
+        Ok(response
+            .tools
+            .into_iter()
+            .map(|tool| {
+                McpToolDefinition::new(
+                    tool.name,
+                    tool.description.unwrap_or_default(),
+                    tool.input_schema,
+                )
+            })
+            .collect())
+    }
+
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<McpToolResponse, McpError> {
+        let result = self
+            .request(
+                "tools/call",
+                Some(json_obj([
+                    ("name", serde_json::Value::String(name.to_owned())),
+                    ("arguments", arguments),
+                ])),
+            )
+            .await?;
+        let is_error = result
+            .get("isError")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        Ok(McpToolResponse {
+            content: extract_text_content(&result),
+            is_error,
+            details: Some(result),
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct McpStdioToolAdapter {
     config: McpStdioConfig,
@@ -509,4 +695,20 @@ fn extract_text_content(result: &serde_json::Value) -> String {
         })
         .filter(|content| !content.is_empty())
         .unwrap_or_else(|| result.to_string())
+}
+
+fn parse_sse_json_rpc_response(body: &str) -> Result<serde_json::Value, McpError> {
+    for event in body.split("\n\n") {
+        let data = event
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        return serde_json::from_str(&data).map_err(|err| McpError::protocol(err.to_string()));
+    }
+    Err(McpError::protocol("MCP SSE response missing data"))
 }

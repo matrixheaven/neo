@@ -844,6 +844,42 @@ RUST_LOG = "info"
 }
 
 #[test]
+fn mcp_list_displays_remote_server_urls() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+[[mcp.servers]]
+id = "remote-docs"
+enabled = true
+transport = "http"
+url = "https://mcp.example.test/rpc"
+
+[[mcp.servers]]
+id = "stream-docs"
+enabled = false
+transport = "sse"
+url = "https://mcp.example.test/sse"
+"#,
+    )
+    .expect("write config");
+
+    let mut mcp = neo();
+    mcp.current_dir(temp.path()).args(["mcp", "list"]);
+    let stdout = run(mcp);
+
+    assert!(stdout.contains("remote-docs"));
+    assert!(stdout.contains("enabled"));
+    assert!(stdout.contains("http"));
+    assert!(stdout.contains("https://mcp.example.test/rpc"));
+    assert!(stdout.contains("stream-docs"));
+    assert!(stdout.contains("disabled"));
+    assert!(stdout.contains("sse"));
+    assert!(stdout.contains("https://mcp.example.test/sse"));
+}
+
+#[test]
 fn print_registers_enabled_stdio_mcp_tools_from_project_config() {
     let temp = TempDir::new().expect("tempdir");
     let provider = MockSseServer::start(vec![openai_response_sse("resp-mcp", "mcp tools listed")]);
@@ -895,6 +931,125 @@ args = ["-u", "{}"]
         tool_names.contains(&"mcp__docs_server__docs_search"),
         "model tools should include configured MCP stdio tools: {tool_names:?}"
     );
+}
+
+#[test]
+fn print_registers_enabled_http_mcp_tools_from_project_config() {
+    let temp = TempDir::new().expect("tempdir");
+    let provider = MockSseServer::start(vec![openai_response_sse(
+        "resp-mcp-http",
+        "remote mcp tools listed",
+    )]);
+    let mcp_server = MockSseServer::start(vec![
+        mcp_json_response(
+            1,
+            &json!({
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "remote-docs", "version": "0.1.0"},
+                "capabilities": {"tools": {}}
+            }),
+        ),
+        mcp_json_response(
+            2,
+            &json!({
+                "tools": [
+                    {
+                        "name": "docs-search",
+                        "description": "Search remote docs",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"]
+                        }
+                    }
+                ]
+            }),
+        ),
+    ]);
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        format!(
+            r#"
+api_base = "{}"
+
+[[mcp.servers]]
+id = "remote-docs"
+enabled = true
+transport = "http"
+url = "{}"
+
+[mcp.servers.headers]
+"x-neo-test" = "remote-mcp"
+"#,
+            provider.url, mcp_server.url
+        ),
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .args(["print", "show", "remote", "tools"]);
+    let stdout = run(command);
+
+    assert_eq!(stdout, "remote mcp tools listed\n");
+    let requests = provider.requests();
+    let tool_names = requests[0].body["tools"]
+        .as_array()
+        .expect("model request tools")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect::<Vec<_>>();
+    assert!(
+        tool_names.contains(&"mcp__remote_docs__docs_search"),
+        "model tools should include configured MCP HTTP tools: {tool_names:?}"
+    );
+    let mcp_requests = mcp_server.requests();
+    assert_eq!(
+        mcp_requests
+            .iter()
+            .map(|request| request.body["method"].as_str().expect("method"))
+            .collect::<Vec<_>>(),
+        vec!["initialize", "tools/list"]
+    );
+    assert!(mcp_requests.iter().all(
+        |request| request.headers.get("x-neo-test").map(String::as_str) == Some("remote-mcp")
+    ));
+}
+
+#[test]
+fn print_rejects_remote_mcp_server_missing_url() {
+    let temp = TempDir::new().expect("tempdir");
+    let provider = MockSseServer::start(vec![]);
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        format!(
+            r#"
+api_base = "{}"
+
+[[mcp.servers]]
+id = "remote-docs"
+enabled = true
+transport = "http"
+"#,
+            provider.url
+        ),
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .args(["print", "show", "remote", "tools"]);
+    let output = command.output().expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("missing MCP url for remote-docs"));
 }
 
 #[derive(Debug, Clone)]
@@ -951,6 +1106,20 @@ fn openai_response_sse(id: &str, text: &str) -> String {
             }
         }),
     ])
+}
+
+fn mcp_json_response(id: u64, result: &Value) -> String {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result,
+    })
+    .to_string();
+    format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    )
 }
 
 fn sse_response(events: &[Value]) -> String {

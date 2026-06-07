@@ -1,5 +1,5 @@
 # Example MCP server configuration. `neo mcp list`, `neo print`, and `neo run`
-# read this shape for stdio MCP tool discovery and calls.
+# read these shapes for MCP tool discovery and calls.
 
 [[mcp.servers]]
 id = "filesystem"
@@ -10,3 +10,12 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 
 [mcp.servers.env]
 RUST_LOG = "info"
+
+[[mcp.servers]]
+id = "remote-docs"
+enabled = true
+transport = "http"
+url = "https://mcp.example.test/rpc"
+
+[mcp.servers.headers]
+"x-neo-client" = "neo"

@@ -4,8 +4,9 @@ use anyhow::Context;
 use futures::StreamExt;
 use neo_agent_core::session::JsonlSessionWriter;
 use neo_agent_core::{
-    AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, Content, McpStdioConfig,
-    McpStdioToolAdapter, McpToolProvider, PermissionDecision, ToolRegistry,
+    AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, Content, McpHttpConfig,
+    McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolProvider, PermissionDecision,
+    ToolRegistry,
 };
 use neo_ai::{ModelClient, ModelRegistry, ModelSpec, ProviderRegistry};
 
@@ -92,10 +93,15 @@ pub fn list_mcp_servers(config: &AppConfig) -> String {
         } else {
             format!(" {}", server.args.join(" "))
         };
+        let endpoint = if matches!(server.transport.as_str(), "http" | "sse") {
+            server.url.as_deref().unwrap_or("")
+        } else {
+            server.command.as_deref().unwrap_or("")
+        };
         let _ = writeln!(
             out,
             "{}\t{}\t{}\t{}{}",
-            server.id, state, server.transport, server.command, args
+            server.id, state, server.transport, endpoint, args
         );
     }
     out
@@ -183,28 +189,52 @@ async fn register_mcp_server(
     registry: &mut ToolRegistry,
     server: &McpServerConfig,
 ) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        server.transport == "stdio",
-        "unsupported MCP transport for {}: {}",
-        server.id,
-        server.transport
-    );
-    let adapter = Arc::new(McpStdioToolAdapter::new(McpStdioConfig {
-        command: server.command.clone(),
-        args: server.args.clone(),
-        env: server
-            .env
-            .iter()
-            .fold(BTreeMap::new(), |mut env, (key, value)| {
-                env.insert(key.clone(), value.clone());
-                env
-            }),
-    }));
-    let provider = McpToolProvider::discover(&server.id, adapter)
-        .await
-        .with_context(|| format!("failed to discover MCP tools from {}", server.id))?;
-    provider.register_into(registry);
-    Ok(())
+    match server.transport.as_str() {
+        "stdio" => {
+            let command = server
+                .command
+                .clone()
+                .with_context(|| format!("missing MCP command for {}", server.id))?;
+            let adapter = Arc::new(McpStdioToolAdapter::new(McpStdioConfig {
+                command,
+                args: server.args.clone(),
+                env: server
+                    .env
+                    .iter()
+                    .fold(BTreeMap::new(), |mut env, (key, value)| {
+                        env.insert(key.clone(), value.clone());
+                        env
+                    }),
+            }));
+            let provider = McpToolProvider::discover(&server.id, adapter)
+                .await
+                .with_context(|| format!("failed to discover MCP tools from {}", server.id))?;
+            provider.register_into(registry);
+            Ok(())
+        }
+        "http" | "sse" => {
+            let url = server
+                .url
+                .clone()
+                .with_context(|| format!("missing MCP url for {}", server.id))?;
+            let adapter = Arc::new(McpHttpToolAdapter::new(McpHttpConfig {
+                url,
+                headers: server.headers.iter().fold(
+                    BTreeMap::new(),
+                    |mut headers, (key, value)| {
+                        headers.insert(key.clone(), value.clone());
+                        headers
+                    },
+                ),
+            }));
+            let provider = McpToolProvider::discover(&server.id, adapter)
+                .await
+                .with_context(|| format!("failed to discover MCP tools from {}", server.id))?;
+            provider.register_into(registry);
+            Ok(())
+        }
+        other => anyhow::bail!("unsupported MCP transport for {}: {other}", server.id),
+    }
 }
 
 async fn create_session_path(config: &AppConfig) -> anyhow::Result<std::path::PathBuf> {

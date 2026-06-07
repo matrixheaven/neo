@@ -36,6 +36,13 @@ invokes remote tools with `tools/call` over the same stdio JSON-RPC process
 until that process or request stream fails. It does not provide local fallback
 behavior.
 
+`McpHttpToolAdapter` is the production remote JSON-RPC adapter for
+`transport = "http"` and `transport = "sse"` server entries. It sends one
+JSON-RPC POST per MCP request, applies configured headers, performs the
+`initialize` handshake before `tools/list` or `tools/call`, accepts JSON
+responses and SSE `data:` JSON-RPC responses, and surfaces HTTP/protocol errors
+without local fallback behavior.
+
 ## Runtime Placement
 
 MCP belongs at the `neo-agent-core` boundary:
@@ -61,12 +68,12 @@ The model should only see normal `ToolSpec` values. It should not know whether a
 ## Current Status
 
 `neo-agent-core` has the MCP tool adapter abstraction, stdio JSON-RPC process
-adapter, discovery-to-`ToolSpec` bridge, namespaced `ToolRegistry`
-registration, persistent initialized stdio session reuse, and async call
-delegation. `neo-agent print` and `neo-agent run` load enabled
-`transport = "stdio"` servers from project config and advertise their tools to
-the configured model.
+adapter, HTTP/SSE JSON-RPC adapter, discovery-to-`ToolSpec` bridge, namespaced
+`ToolRegistry` registration, persistent initialized stdio session reuse, and
+async call delegation. `neo-agent print` and `neo-agent run` load enabled
+`transport = "stdio"`, `transport = "http"`, and `transport = "sse"` servers
+from project config and advertise their tools to the configured model.
 
-Current limitation: Neo supports stdio MCP transport only. HTTP/SSE MCP
-transport, resource subscriptions, and hosted MCP management remain future
-work.
+Current limitation: Neo supports MCP tool discovery and calls only. MCP
+resources, subscriptions, OAuth/hosted server lifecycle, and hosted MCP
+management remain future work.

@@ -32,7 +32,8 @@
   stdio for enabled local extension manifests.
 - `mcp list` reads project MCP server entries without starting servers.
 - `print` and `run` discover enabled project MCP servers with
-  `transport = "stdio"` and register their tools in the runtime tool registry.
+  `transport = "stdio"`, `transport = "http"`, or `transport = "sse"` and
+  register their tools in the runtime tool registry.
 - Interactive mode has a testable controller and a live crossterm/raw-mode TTY
   loop slice. TTY execution renders `neo-tui`, accepts text input, submits
   prompts through the existing `run_prompt` path, exits on Esc/Ctrl-C, and keeps
@@ -56,5 +57,6 @@ and platform-specific guidance.
   yet.
 - Keep `sessions show` and `resume` aligned on `.jsonl` files as session
   persistence evolves.
-- Keep MCP runtime config limited to supported stdio servers until HTTP/SSE
-  transports are implemented.
+- Keep MCP runtime config limited to tool discovery/calls until resources,
+  subscriptions, hosted server lifecycle, and OAuth/trust flows are
+  implemented.

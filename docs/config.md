@@ -43,6 +43,15 @@ enabled = true
 transport = "stdio"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+
+[[mcp.servers]]
+id = "remote-docs"
+enabled = true
+transport = "http"
+url = "https://mcp.example.test/rpc"
+
+[mcp.servers.headers]
+"x-neo-client" = "neo"
 ```
 
 `api_key_env` names an environment variable. Provider-specific entries such as
@@ -74,14 +83,17 @@ ask/approve UI remains a runtime gap.
 ## MCP Config
 
 `neo mcp list` reads configured server entries from `.neo/config.toml`.
-`neo print` and `neo run` discover enabled `transport = "stdio"` entries,
-register their remote tools as `mcp__<server>__<tool>` model functions, and
-call the original remote MCP tool names over a reused initialized stdio
-JSON-RPC session. The current shape includes:
+`neo print` and `neo run` discover enabled `transport = "stdio"`,
+`transport = "http"`, and `transport = "sse"` entries, register their remote
+tools as `mcp__<server>__<tool>` model functions, and call the original remote
+MCP tool names over a real JSON-RPC transport. Stdio servers reuse an
+initialized process session; HTTP/SSE servers send JSON-RPC POST requests and
+accept JSON or SSE `data:` JSON-RPC responses. The current shape includes:
 
 - Server id.
-- Transport type such as `stdio`.
+- Transport type: `stdio`, `http`, or `sse`.
 - Command and arguments for local stdio servers.
+- URL and optional headers for remote HTTP/SSE servers.
 - Environment variables required by the server.
 - Whether the server is enabled by default.
 

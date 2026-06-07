@@ -21,6 +21,10 @@
   JSON-RPC for `initialize`, `tools/list`, and `tools/call`, reusing the
   initialized stdio session across discovery and tool calls without local
   fallback behavior.
+- `McpHttpToolAdapter` sends JSON-RPC POST requests to configured HTTP/SSE MCP
+  endpoints, applies configured headers, accepts JSON and SSE `data:`
+  JSON-RPC responses, and supports `initialize`, `tools/list`, and
+  `tools/call` without local fallback behavior.
 - `ToolContext` resolves paths inside the workspace and carries shell timeout
   and output cap settings; `bash` also supports compact non-PTY background
   start/poll handles backed by real child processes.
@@ -45,8 +49,8 @@ interactive behavior.
   treating broad workspace checks as green.
 - Add docs and tests for `Ask` permission behavior once there is a CLI/TUI
   approval path. Today tools only execute on `Allow`.
-- Add HTTP/SSE MCP transports and richer MCP resource/subscription handling
-  once those config shapes and runtime semantics are needed.
+- Add richer MCP resource/subscription handling once those runtime semantics
+  are needed.
 - Add hook/steering docs only when the runtime exposes those APIs.
 - Decide whether Neo needs full PTY/interactivity later. Current `bash`
   background support is intentionally compact start/poll process management.

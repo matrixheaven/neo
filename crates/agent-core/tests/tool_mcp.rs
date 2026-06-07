@@ -1,15 +1,18 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
 use neo_agent_core::{
-    McpError, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter, McpToolCall, McpToolDefinition,
-    McpToolProvider, McpToolResponse, PermissionPolicy, ToolContext, ToolRegistry,
+    McpError, McpHttpConfig, McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter,
+    McpToolAdapter, McpToolCall, McpToolDefinition, McpToolProvider, McpToolResponse,
+    PermissionPolicy, ToolContext, ToolRegistry,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 const MCP_STDIO_FIXTURE: &str = r#"
 import json
@@ -354,6 +357,110 @@ async fn mcp_stdio_adapter_reconnects_after_cached_session_closes() {
 }
 
 #[tokio::test]
+async fn mcp_http_adapter_discovers_and_calls_json_rpc_tools() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let server = MockMcpHttpServer::start(vec![
+        mcp_json_response(json!({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {"name": "http-fixture", "version": "0.1.0"},
+            "capabilities": {"tools": {}}
+        })),
+        mcp_json_response(json!({
+            "tools": [
+                {
+                    "name": "docs-search",
+                    "description": "Search project docs over HTTP",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"]
+                    }
+                }
+            ]
+        })),
+        mcp_json_response(json!({
+            "content": [{"type": "text", "text": "found http runtime"}],
+            "isError": false
+        })),
+    ]);
+    let adapter = Arc::new(McpHttpToolAdapter::new(McpHttpConfig {
+        url: server.url.clone(),
+        headers: BTreeMap::from([("x-neo-test".to_owned(), "mcp-http".to_owned())]),
+    }));
+
+    let provider = McpToolProvider::discover("remote-docs", Arc::clone(&adapter))
+        .await
+        .expect("discover provider over HTTP");
+    let specs = provider.specs();
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].name, "mcp__remote_docs__docs_search");
+    assert_eq!(specs[0].description, "Search project docs over HTTP");
+
+    let mut registry = ToolRegistry::new();
+    provider.register_into(&mut registry);
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+    let result = registry
+        .run(
+            "mcp__remote_docs__docs_search",
+            &context,
+            json!({ "query": "runtime" }),
+        )
+        .await
+        .expect("run mcp tool over HTTP");
+
+    assert_eq!(result.content, "found http runtime");
+    assert!(!result.is_error);
+    let requests = server.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.body["method"].as_str().expect("method"))
+            .collect::<Vec<_>>(),
+        vec!["initialize", "tools/list", "tools/call"]
+    );
+    assert!(
+        requests.iter().all(
+            |request| request.headers.get("x-neo-test").map(String::as_str) == Some("mcp-http")
+        )
+    );
+}
+
+#[tokio::test]
+async fn mcp_http_adapter_accepts_sse_json_rpc_responses() {
+    let server = MockMcpHttpServer::start(vec![
+        mcp_sse_response(json!({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {"name": "sse-fixture", "version": "0.1.0"},
+            "capabilities": {"tools": {}}
+        })),
+        mcp_sse_response(json!({
+            "tools": [
+                {
+                    "name": "echo",
+                    "description": "Echo over SSE",
+                    "inputSchema": {"type": "object"}
+                }
+            ]
+        })),
+    ]);
+    let adapter = McpHttpToolAdapter::new(McpHttpConfig {
+        url: server.url.clone(),
+        headers: BTreeMap::new(),
+    });
+
+    let tools = adapter
+        .list_tools()
+        .await
+        .expect("list tools from SSE JSON-RPC response");
+
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "echo");
+    assert_eq!(tools[0].description, "Echo over SSE");
+}
+
+#[tokio::test]
 async fn mcp_provider_discovers_namespaced_tool_specs() {
     let adapter = Arc::new(MockMcpAdapter::new(vec![McpToolDefinition::new(
         "search",
@@ -521,4 +628,129 @@ impl McpToolAdapter for MockMcpAdapter {
             .pop()
             .unwrap_or_else(|| Err(McpError::protocol("missing mock response")))
     }
+}
+
+#[derive(Debug, Clone)]
+struct McpHttpRecordedRequest {
+    headers: BTreeMap<String, String>,
+    body: Value,
+}
+
+struct MockMcpHttpServer {
+    url: String,
+    requests: Arc<Mutex<Vec<McpHttpRecordedRequest>>>,
+}
+
+impl MockMcpHttpServer {
+    fn start(responses: Vec<MockMcpHttpResponse>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock MCP HTTP server");
+        let url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured_requests = Arc::clone(&requests);
+
+        std::thread::spawn(move || {
+            for response in responses {
+                let (mut socket, _) = listener.accept().expect("accept MCP HTTP request");
+                let request = read_http_json_request(&mut socket);
+                let id = request.body["id"].clone();
+                captured_requests
+                    .lock()
+                    .expect("requests lock")
+                    .push(request);
+                socket
+                    .write_all(response.render(&id).as_bytes())
+                    .expect("write MCP HTTP response");
+            }
+        });
+
+        Self { url, requests }
+    }
+
+    fn requests(&self) -> Vec<McpHttpRecordedRequest> {
+        self.requests.lock().expect("requests lock").clone()
+    }
+}
+
+enum MockMcpHttpResponse {
+    Json(Value),
+    Sse(Value),
+}
+
+impl MockMcpHttpResponse {
+    fn render(self, id: &Value) -> String {
+        match self {
+            Self::Json(result) => {
+                let rpc = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result,
+                });
+                http_response("application/json", &rpc.to_string())
+            }
+            Self::Sse(result) => {
+                let rpc = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result,
+                });
+                let body = format!("data: {rpc}\n\n");
+                http_response("text/event-stream", &body)
+            }
+        }
+    }
+}
+
+fn mcp_json_response(result: Value) -> MockMcpHttpResponse {
+    MockMcpHttpResponse::Json(result)
+}
+
+fn mcp_sse_response(result: Value) -> MockMcpHttpResponse {
+    MockMcpHttpResponse::Sse(result)
+}
+
+fn http_response(content_type: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn read_http_json_request(socket: &mut TcpStream) -> McpHttpRecordedRequest {
+    let mut buffer = Vec::new();
+    let mut temp = [0_u8; 1024];
+    let header_end;
+    loop {
+        let read = socket.read(&mut temp).expect("read MCP HTTP request");
+        assert_ne!(read, 0, "client closed before sending headers");
+        buffer.extend_from_slice(&temp[..read]);
+        if let Some(index) = find_header_end(&buffer) {
+            header_end = index;
+            break;
+        }
+    }
+
+    let headers_text = String::from_utf8(buffer[..header_end].to_vec()).expect("headers utf8");
+    let headers = headers_text
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(key, value)| (key.trim().to_ascii_lowercase(), value.trim().to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .expect("content-length");
+    let body_start = header_end + 4;
+    while buffer.len() < body_start + content_length {
+        let read = socket.read(&mut temp).expect("read body");
+        assert_ne!(read, 0, "client closed before sending body");
+        buffer.extend_from_slice(&temp[..read]);
+    }
+    let body = serde_json::from_slice(&buffer[body_start..body_start + content_length])
+        .expect("MCP request body json");
+    McpHttpRecordedRequest { headers, body }
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
