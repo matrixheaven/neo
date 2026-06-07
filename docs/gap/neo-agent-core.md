@@ -8,6 +8,13 @@
 - `AgentRuntime` consumes a `ModelClient`, converts context into
   `neo_ai::ChatRequest`, emits `AgentEvent` values, appends assistant/tool
   messages, and loops after `StopReason::ToolUse` when tools are registered.
+- Runtime queue modes and hooks are real Rust APIs: `AgentContext` can queue
+  steering and follow-up messages, `AgentConfig::with_queue_modes` controls
+  drain behavior, and `with_before_tool_call` / `with_after_tool_call` can
+  block, terminate, or rewrite tool results.
+- `ToolExecutionMode` supports sequential and parallel tool execution; parallel
+  mode emits completion events as tools finish while preserving appended tool
+  result messages in source order.
 - `FakeHarness` supplies a fake model and recorded request inspection for tests.
 - `PermissionPolicy` supports `Allow`, `Ask`, and `Deny` decisions for file
   reads, file writes, shell execution, and general tools. `Ask` emits
@@ -47,9 +54,10 @@
 ## Pi Parity Pressure
 
 `pi-agent-core` documents a richer lifecycle: agent start/end, message start/end
-barriers, tool execution hooks, steering/follow-up queues, cancellation, and
-parallel tool execution. Neo has the smaller Rust runtime core but not the full
-interactive behavior.
+barriers, hook phases, steering/follow-up queues, cancellation, and parallel
+tool execution. Neo has the smaller Rust runtime core and exposes local
+hook/queue/parallel primitives, but not the full interactive or hosted
+lifecycle behavior.
 
 ## High-Priority Gaps
 
@@ -58,7 +66,8 @@ interactive behavior.
   runtime-only approval handler callbacks.
 - Add remote HTTP/SSE MCP resource update streams once Neo has a long-lived
   remote MCP transport.
-- Add hook/steering docs only when the runtime exposes those APIs.
+- Add richer hook lifecycle docs only when Neo exposes additional hook phases
+  beyond the current before/after tool-call callbacks.
 - Decide whether Neo needs full PTY/interactivity later. Current `bash`
   background support is intentionally compact start/poll process management.
 - Decide whether JSONL event persistence remains the durable session format or

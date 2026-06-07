@@ -257,6 +257,7 @@ enum ImplementedSurface {
     StdioMcpProcessAdapter,
     ExtensionLifecycleCommands,
     SessionMetadataBranching,
+    RuntimeHooksAndQueues,
 }
 
 #[derive(Debug, Clone)]
@@ -290,6 +291,13 @@ impl ParityCodeTruth {
                 .join("session")
                 .join("mod.rs"),
         )?;
+        let runtime_source = read_optional_source(
+            &root
+                .join("crates")
+                .join("agent-core")
+                .join("src")
+                .join("runtime.rs"),
+        )?;
 
         if mcp_source.contains("trait McpToolAdapter") && mcp_source.contains("McpToolProvider") {
             implemented.insert(ImplementedSurface::McpToolAdapterBoundary);
@@ -312,6 +320,13 @@ impl ParityCodeTruth {
             && session_source.contains("pub fn rename")
         {
             implemented.insert(ImplementedSurface::SessionMetadataBranching);
+        }
+        if runtime_source.contains("with_before_tool_call")
+            && runtime_source.contains("with_after_tool_call")
+            && runtime_source.contains("with_queue_modes")
+            && runtime_source.contains("queue_steering_message")
+        {
+            implemented.insert(ImplementedSurface::RuntimeHooksAndQueues);
         }
 
         Ok(Self { implemented })
@@ -551,6 +566,18 @@ fn stale_gap_claim_violation(
             || normalized.contains("not implemented"))
     {
         return Some("stale session branching gap claim");
+    }
+
+    if code_truth.has(ImplementedSurface::RuntimeHooksAndQueues)
+        && normalized.contains("hook")
+        && normalized.contains("steering")
+        && normalized.contains("docs")
+        && (normalized.contains("only when")
+            || normalized.contains("not exposed")
+            || normalized.contains("future work")
+            || normalized.contains("missing"))
+    {
+        return Some("stale runtime hook/queue gap claim");
     }
 
     None
@@ -1354,6 +1381,43 @@ mod tests {
             errors,
             vec![
                 "docs/gap/INDEX.md:1 contains stale session branching gap claim: Session tree branching and naming remain pi-inspired future work.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_runtime_hook_queue_gap_after_symbols_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_dir = dir.path().join("crates").join("agent-core").join("src");
+        std::fs::create_dir_all(&source_dir).expect("agent-core source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            source_dir.join("runtime.rs"),
+            concat!(
+                "impl AgentConfig {\n",
+                "  pub fn with_before_tool_call(&self) {}\n",
+                "  pub fn with_after_tool_call(&self) {}\n",
+                "  pub fn with_queue_modes(&self) {}\n",
+                "}\n",
+                "impl AgentContext { pub fn queue_steering_message(&self) {} }\n",
+            ),
+        )
+        .expect("write runtime source");
+        std::fs::write(
+            dir.path()
+                .join("docs")
+                .join("gap")
+                .join("neo-agent-core.md"),
+            "Add hook/steering docs only when the runtime exposes those APIs.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/neo-agent-core.md:1 contains stale runtime hook/queue gap claim: Add hook/steering docs only when the runtime exposes those APIs.".to_string()
             ]
         );
     }
