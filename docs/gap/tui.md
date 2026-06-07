@@ -7,7 +7,8 @@ Target: `crates/tui`.
 
 - Prompt editor primitives now support insert, backspace/delete, character movement, word movement, word deletion, and delete-to-line-start/end.
 - Keybinding helpers now expose normalized key IDs, default TUI action mappings, user override resolution, and conflict detection.
-- Transcript state now has a scrollback-aware viewport model with bottom-follow behavior.
+- Transcript state now has a scrollback-aware viewport model with bottom-follow
+  behavior, and the live TUI render path applies that viewport.
 - Selection/list primitives now support prefix filtering, wrap-around selection, centered visible windows, scroll indicators, and width-safe line rendering.
 - Rendering helpers now expose ANSI/OSC escape-aware terminal visible-width
   measurement, width-safe truncation with optional padding, and wrapping that
@@ -22,7 +23,8 @@ Target: `crates/tui`.
   delete-to-line-start/end, submit/newline, approval selection up/down,
   overlay page-up/page-down selection, approval confirm, overlay cancel, exit
   cancel, tab insertion, prompt undo, kill-ring yank, and an internal prompt
-  copy buffer.
+  copy buffer. In editing mode, Up/Down/PageUp/PageDown scroll the transcript
+  viewport.
 - The live interactive loop opens a local session picker with `ctrl+r`, using
   real `SessionMetadataStore` records prepared by `neo-agent`, and can load a
   selected JSONL transcript into the TUI before continuing in that session.

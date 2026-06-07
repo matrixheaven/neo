@@ -392,11 +392,18 @@ where
                     return Ok(true);
                 }
             }
-            // These actions have no live app primitive in this slice.
-            KeybindingAction::EditorCursorUp
-            | KeybindingAction::EditorCursorDown
-            | KeybindingAction::EditorPageUp
-            | KeybindingAction::EditorPageDown => {}
+            KeybindingAction::EditorCursorUp => {
+                self.app.scroll_transcript_up(1);
+            }
+            KeybindingAction::EditorCursorDown => {
+                self.app.scroll_transcript_down(1);
+            }
+            KeybindingAction::EditorPageUp => {
+                self.app.scroll_transcript_up(8);
+            }
+            KeybindingAction::EditorPageDown => {
+                self.app.scroll_transcript_down(8);
+            }
             KeybindingAction::EditorCursorLeft
             | KeybindingAction::EditorCursorRight
             | KeybindingAction::EditorCursorWordLeft
@@ -1083,6 +1090,40 @@ mod tests {
         assert_eq!(controller.app().copy_buffer(), Some("hello brave world"));
         assert_eq!(controller.app().prompt().text, "hello \tworld");
         assert_eq!(controller.app().prompt().cursor, 7);
+    }
+
+    #[tokio::test]
+    async fn event_loop_dispatches_editor_scroll_actions_to_transcript_view() {
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        for index in 0..10 {
+            controller
+                .app
+                .transcript_mut()
+                .push(neo_tui::TranscriptItem::notice(format!("line {index}")));
+        }
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::EditorPageUp))
+            .await
+            .expect("page up scrolls transcript");
+        assert_eq!(controller.app().transcript_view().scrollback(), 8);
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::EditorCursorDown))
+            .await
+            .expect("cursor down scrolls transcript toward bottom");
+        assert_eq!(controller.app().transcript_view().scrollback(), 7);
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::EditorPageDown))
+            .await
+            .expect("page down returns transcript to bottom");
+        assert_eq!(controller.app().transcript_view().scrollback(), 0);
     }
 
     #[tokio::test]

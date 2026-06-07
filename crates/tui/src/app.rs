@@ -109,6 +109,15 @@ impl NeoTuiApp {
         &mut self.transcript
     }
 
+    pub fn scroll_transcript_up(&mut self, lines: usize) {
+        self.transcript_view
+            .scroll_up_unbounded(lines, &self.transcript);
+    }
+
+    pub fn scroll_transcript_down(&mut self, lines: usize) {
+        self.transcript_view.scroll_down_unbounded(lines);
+    }
+
     pub fn set_session_label(&mut self, session_label: impl Into<String>) {
         self.session_label = session_label.into();
     }
@@ -1382,6 +1391,15 @@ impl TranscriptView {
     pub fn scroll_down(&mut self, lines: usize, transcript: &ChatTranscript, height: usize) {
         let max_scrollback = transcript.len().saturating_sub(height);
         self.scrollback = self.scrollback.saturating_sub(lines).min(max_scrollback);
+    }
+
+    pub fn scroll_up_unbounded(&mut self, lines: usize, transcript: &ChatTranscript) {
+        let max_scrollback = transcript.len().saturating_sub(1);
+        self.scrollback = self.scrollback.saturating_add(lines).min(max_scrollback);
+    }
+
+    pub fn scroll_down_unbounded(&mut self, lines: usize) {
+        self.scrollback = self.scrollback.saturating_sub(lines);
     }
 
     #[must_use]

@@ -153,6 +153,21 @@ fn transcript_view_tracks_bottom_and_manual_scroll() {
 }
 
 #[test]
+fn transcript_widget_uses_transcript_view_visible_range() {
+    let transcript = ChatTranscript::from_items(
+        (0..6).map(|index| TranscriptItem::notice(format!("line {index}"))),
+    );
+    let mut view = TranscriptView::new();
+    view.scroll_up_unbounded(2, &transcript);
+
+    let lines = render_widget(24, 3, TranscriptWidget::new(&transcript).with_view(&view));
+
+    assert!(lines.iter().any(|line| line.contains("line 1")));
+    assert!(!lines.iter().any(|line| line.contains("line 0")));
+    assert!(!lines.iter().any(|line| line.contains("line 5")));
+}
+
+#[test]
 fn prompt_edit_applies_character_and_word_operations() {
     let mut prompt = PromptState::new("hello world").with_cursor(5);
 

@@ -54,6 +54,7 @@
   loop slice. TTY execution renders `neo-tui`, accepts text input, submits
   prompts through the existing `run_prompt` path, redraws on terminal resize,
   dispatches real keybinding actions for prompt editing and approval overlays,
+  scrolls the transcript viewport with Up/Down/PageUp/PageDown in editing mode,
   exits on Esc/Ctrl-C, and keeps the no-tty snapshot fallback for command tests
   and redirected stdout. `ctrl+r` opens a local session picker backed by
   `sessions_dir` metadata and JSONL files; selecting a session replays its

@@ -8,7 +8,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     ApprovalModal, ChatTranscript, NeoTuiApp, Overlay, OverlayKind, PromptState, ToolStatus,
-    ToolStatusKind, TranscriptItem,
+    ToolStatusKind, TranscriptItem, TranscriptView,
 };
 
 #[must_use]
@@ -121,12 +121,22 @@ fn wrap_single_line(text: &str, max_width: usize, lines: &mut Vec<String>) {
 
 pub struct TranscriptWidget<'a> {
     transcript: &'a ChatTranscript,
+    view: Option<&'a TranscriptView>,
 }
 
 impl<'a> TranscriptWidget<'a> {
     #[must_use]
     pub const fn new(transcript: &'a ChatTranscript) -> Self {
-        Self { transcript }
+        Self {
+            transcript,
+            view: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_view(mut self, view: &'a TranscriptView) -> Self {
+        self.view = Some(view);
+        self
     }
 }
 
@@ -135,7 +145,11 @@ impl Widget for TranscriptWidget<'_> {
         let mut y = area.y;
         let text_width = usize::from(area.width.saturating_sub(2).max(1));
 
-        for item in self.transcript.items() {
+        let items = self.transcript.items();
+        let range = self.view.map_or(0..items.len(), |view| {
+            view.visible_range(self.transcript, usize::from(area.height))
+        });
+        for item in &items[range] {
             if y >= area.bottom() {
                 break;
             }
@@ -340,7 +354,9 @@ impl Widget for &NeoTuiApp {
             width: area.width,
             height: body_height,
         };
-        TranscriptWidget::new(self.transcript()).render(body, buf);
+        TranscriptWidget::new(self.transcript())
+            .with_view(self.transcript_view())
+            .render(body, buf);
 
         let status_y = body.y.saturating_add(body.height);
         let statuses = self.tool_statuses();
