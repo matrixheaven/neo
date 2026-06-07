@@ -14,10 +14,15 @@ Target: `crates/tui`.
 - `neo-agent` now owns a crossterm/raw-mode interactive loop slice that renders
   `NeoTuiApp` in a real terminal and uses `neo-tui` input events for text input,
   Enter submit, terminal resize redraws, and Esc/Ctrl-C exit.
+- The live interactive loop now dispatches default `KeybindingsManager` actions
+  into real prompt and overlay primitives for word movement, word deletion,
+  delete-to-line-start/end, submit/newline, approval selection up/down,
+  approval confirm, overlay cancel, and exit cancel.
 
 ## Remaining lower-priority gaps
 
 - The Rust crate does not implement the full TypeScript terminal diff renderer,
-  overlay stack, image protocols, ANSI-preserving wrapping, autocomplete, stdin
-  buffering, undo stack, or kill ring.
+  image protocols, ANSI-preserving wrapping, autocomplete, stdin buffering,
+  undo stack, kill ring, yank, copy, tab completion, or page-up/page-down
+  selection actions.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.

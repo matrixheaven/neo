@@ -12,7 +12,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use neo_agent_core::AgentEvent;
-use neo_tui::{InputEvent, NeoTuiApp, PromptEdit};
+use neo_tui::{InputEvent, KeyId, KeybindingAction, KeybindingsManager, NeoTuiApp, PromptEdit};
 use ratatui::{
     Terminal,
     backend::{CrosstermBackend, TestBackend},
@@ -42,6 +42,7 @@ pub async fn execute_tty(config: &AppConfig) -> Result<Option<String>> {
 
 pub(crate) struct InteractiveController<RunTurn> {
     app: NeoTuiApp,
+    keybindings: KeybindingsManager,
     run_turn: RunTurn,
 }
 
@@ -58,6 +59,7 @@ where
     ) -> Self {
         Self {
             app: NeoTuiApp::new(title, session_label, model_label),
+            keybindings: KeybindingsManager::default(),
             run_turn,
         }
     }
@@ -108,6 +110,8 @@ where
                     .prompt_mut()
                     .apply_edit(PromptEdit::Insert(&character.to_string()));
             }
+            InputEvent::Key(key) => return self.handle_keybinding_key(&key).await,
+            InputEvent::Action(action) => return self.handle_keybinding_action(action).await,
             InputEvent::Backspace => {
                 self.app.prompt_mut().apply_edit(PromptEdit::Backspace);
             }
@@ -145,6 +149,122 @@ where
         Ok(false)
     }
 
+    async fn handle_keybinding_key(&mut self, key: &KeyId) -> Result<bool> {
+        let actions = self.keybindings.matching_actions(key);
+        let priority = if self.app.focused_overlay_id().is_some() {
+            OVERLAY_ACTION_PRIORITY
+        } else {
+            EDITING_ACTION_PRIORITY
+        };
+
+        for action in priority {
+            if actions.contains(action) {
+                return self.handle_keybinding_action(*action).await;
+            }
+        }
+
+        Ok(false)
+    }
+
+    async fn handle_keybinding_action(&mut self, action: KeybindingAction) -> Result<bool> {
+        match action {
+            KeybindingAction::EditorCursorLeft => {
+                self.app.prompt_mut().apply_edit(PromptEdit::MoveLeft);
+            }
+            KeybindingAction::EditorCursorRight => {
+                self.app.prompt_mut().apply_edit(PromptEdit::MoveRight);
+            }
+            KeybindingAction::EditorCursorWordLeft => {
+                self.app.prompt_mut().apply_edit(PromptEdit::MoveWordLeft);
+            }
+            KeybindingAction::EditorCursorWordRight => {
+                self.app.prompt_mut().apply_edit(PromptEdit::MoveWordRight);
+            }
+            KeybindingAction::EditorCursorLineStart => {
+                self.app.prompt_mut().apply_edit(PromptEdit::MoveHome);
+            }
+            KeybindingAction::EditorCursorLineEnd => {
+                self.app.prompt_mut().apply_edit(PromptEdit::MoveEnd);
+            }
+            KeybindingAction::EditorDeleteCharBackward => {
+                self.app.prompt_mut().apply_edit(PromptEdit::Backspace);
+            }
+            KeybindingAction::EditorDeleteCharForward => {
+                self.app.prompt_mut().apply_edit(PromptEdit::Delete);
+            }
+            KeybindingAction::EditorDeleteWordBackward => {
+                self.app
+                    .prompt_mut()
+                    .apply_edit(PromptEdit::DeleteWordBackward);
+            }
+            KeybindingAction::EditorDeleteWordForward => {
+                self.app
+                    .prompt_mut()
+                    .apply_edit(PromptEdit::DeleteWordForward);
+            }
+            KeybindingAction::EditorDeleteToLineStart => {
+                self.app
+                    .prompt_mut()
+                    .apply_edit(PromptEdit::DeleteToLineStart);
+            }
+            KeybindingAction::EditorDeleteToLineEnd => {
+                self.app
+                    .prompt_mut()
+                    .apply_edit(PromptEdit::DeleteToLineEnd);
+            }
+            KeybindingAction::InputNewLine => {
+                self.app.prompt_mut().apply_edit(PromptEdit::Insert("\n"));
+            }
+            KeybindingAction::InputSubmit => {
+                self.submit_current_prompt().await?;
+            }
+            KeybindingAction::SelectUp => {
+                self.app.move_overlay_selection_up();
+            }
+            KeybindingAction::SelectDown => {
+                self.app.move_overlay_selection_down();
+            }
+            KeybindingAction::SelectConfirm => {
+                if self.app.approval_choice().is_some() {
+                    let _ = self.app.confirm_approval();
+                } else if self.app.focused_overlay_id().is_none() {
+                    self.submit_current_prompt().await?;
+                }
+            }
+            KeybindingAction::SelectCancel => {
+                if self.app.focused_overlay_id().is_some() {
+                    let _ = self.app.close_focused_overlay();
+                } else {
+                    return Ok(true);
+                }
+            }
+            // These actions have no live app primitive in this slice.
+            KeybindingAction::EditorCursorUp
+            | KeybindingAction::EditorCursorDown
+            | KeybindingAction::EditorPageUp
+            | KeybindingAction::EditorPageDown
+            | KeybindingAction::EditorYank
+            | KeybindingAction::EditorUndo
+            | KeybindingAction::InputTab
+            | KeybindingAction::InputCopy
+            | KeybindingAction::SelectPageUp
+            | KeybindingAction::SelectPageDown => {}
+        }
+
+        Ok(false)
+    }
+
+    async fn submit_current_prompt(&mut self) -> Result<()> {
+        let Some(prompt) = self.app.submit_prompt() else {
+            return Ok(());
+        };
+        let events = (self.run_turn)(vec![prompt]).await?;
+        for event in events {
+            self.app.apply_agent_event(event);
+        }
+        Ok(())
+    }
+
     #[allow(dead_code)]
     #[must_use]
     pub const fn app(&self) -> &NeoTuiApp {
@@ -165,16 +285,44 @@ struct CrosstermEvents;
 
 impl TerminalEvents for CrosstermEvents {
     fn next_input_event(&mut self) -> Result<InputEvent> {
+        let keybindings = KeybindingsManager::default();
         loop {
             if event::poll(Duration::from_millis(250))? {
                 let event = event::read()?;
-                if let Some(input) = InputEvent::from_crossterm_event(&event) {
+                if let Some(input) =
+                    InputEvent::from_crossterm_event_with_keybindings(&event, &keybindings)
+                {
                     return Ok(input);
                 }
             }
         }
     }
 }
+
+const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
+    KeybindingAction::InputSubmit,
+    KeybindingAction::InputNewLine,
+    KeybindingAction::EditorCursorLeft,
+    KeybindingAction::EditorCursorRight,
+    KeybindingAction::EditorCursorWordLeft,
+    KeybindingAction::EditorCursorWordRight,
+    KeybindingAction::EditorCursorLineStart,
+    KeybindingAction::EditorCursorLineEnd,
+    KeybindingAction::EditorDeleteCharBackward,
+    KeybindingAction::EditorDeleteCharForward,
+    KeybindingAction::EditorDeleteWordBackward,
+    KeybindingAction::EditorDeleteWordForward,
+    KeybindingAction::EditorDeleteToLineStart,
+    KeybindingAction::EditorDeleteToLineEnd,
+    KeybindingAction::SelectCancel,
+];
+
+const OVERLAY_ACTION_PRIORITY: &[KeybindingAction] = &[
+    KeybindingAction::SelectConfirm,
+    KeybindingAction::SelectCancel,
+    KeybindingAction::SelectUp,
+    KeybindingAction::SelectDown,
+];
 
 struct RawTerminal {
     terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -276,6 +424,7 @@ fn render_terminal_fallback(app: &NeoTuiApp) -> String {
 #[cfg(test)]
 mod tests {
     use neo_agent_core::{AgentEvent, StopReason};
+    use neo_tui::{KeybindingAction, OverlayKind};
 
     use super::*;
 
@@ -436,5 +585,122 @@ mod tests {
         assert_eq!(rendered.len(), 3);
         assert!(rendered[1].contains("> h"));
         assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
+    }
+
+    #[tokio::test]
+    async fn event_loop_dispatches_editor_keybinding_actions_to_prompt_edits() {
+        struct FakeEvents {
+            events: std::vec::IntoIter<InputEvent>,
+        }
+
+        impl TerminalEvents for FakeEvents {
+            fn next_input_event(&mut self) -> Result<InputEvent> {
+                self.events
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("expected test event"))
+            }
+        }
+
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_prompt| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+
+        for character in "hello brave world".chars() {
+            controller
+                .handle_input_event(InputEvent::Insert(character))
+                .await
+                .expect("insert succeeds");
+        }
+
+        controller
+            .run_terminal_loop(
+                |_app| Ok(()),
+                FakeEvents {
+                    events: vec![
+                        InputEvent::Action(KeybindingAction::EditorCursorWordLeft),
+                        InputEvent::Action(KeybindingAction::EditorDeleteWordBackward),
+                        InputEvent::Action(KeybindingAction::EditorDeleteToLineEnd),
+                        InputEvent::Action(KeybindingAction::SelectCancel),
+                    ]
+                    .into_iter(),
+                },
+            )
+            .await
+            .expect("event loop succeeds");
+
+        assert_eq!(controller.app().prompt().text, "hello ");
+        assert_eq!(controller.app().prompt().cursor, 6);
+    }
+
+    #[tokio::test]
+    async fn event_loop_dispatches_select_keybinding_actions_to_overlay_primitives() {
+        struct FakeEvents {
+            events: std::vec::IntoIter<InputEvent>,
+        }
+
+        impl TerminalEvents for FakeEvents {
+            fn next_input_event(&mut self) -> Result<InputEvent> {
+                self.events
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("expected test event"))
+            }
+        }
+
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_prompt| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller
+            .app
+            .request_approval("approval-1", "Run command?", "cargo test");
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+            .await
+            .expect("selection moves down");
+        assert_eq!(
+            controller.app().approval_choice(),
+            Some(neo_tui::ApprovalChoice::Deny)
+        );
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectUp))
+            .await
+            .expect("selection moves up");
+        assert_eq!(
+            controller.app().approval_choice(),
+            Some(neo_tui::ApprovalChoice::Approve)
+        );
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+            .await
+            .expect("approval confirms");
+        assert!(controller.app().focused_overlay().is_none());
+
+        controller.app.push_overlay(neo_tui::Overlay::new(
+            "custom",
+            OverlayKind::Message("Body".to_owned()),
+        ));
+        controller
+            .run_terminal_loop(
+                |_app| Ok(()),
+                FakeEvents {
+                    events: vec![
+                        InputEvent::Action(KeybindingAction::SelectCancel),
+                        InputEvent::Action(KeybindingAction::SelectCancel),
+                    ]
+                    .into_iter(),
+                },
+            )
+            .await
+            .expect("event loop exits after canceling overlay and receiving cancel again");
+
+        assert!(controller.app().focused_overlay().is_none());
     }
 }

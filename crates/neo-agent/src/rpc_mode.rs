@@ -1,12 +1,13 @@
 use std::io::{self, BufRead};
 
 use anyhow::Context;
+use neo_agent_core::session::JsonlSessionReader;
 use neo_sdk::{
     JsonlCodec, RpcError, RpcErrorCode, RpcMessage, RpcNotification, RpcRequest, RpcResponse,
 };
 use serde_json::{Value, json};
 
-use crate::{config::AppConfig, modes::run};
+use crate::{config::AppConfig, modes::run, session_commands};
 
 pub async fn execute(config: &AppConfig) -> anyhow::Result<String> {
     let mut output = String::new();
@@ -56,6 +57,7 @@ async fn handle_request(
             output,
             &RpcMessage::Response(RpcResponse::success(request.id, state_payload(config))),
         ),
+        "get_messages" => handle_get_messages(config, request, output).await,
         "prompt" => handle_prompt(config, request, output).await,
         unknown => push_rpc_message(
             output,
@@ -69,6 +71,77 @@ async fn handle_request(
             )),
         ),
     }
+}
+
+async fn handle_get_messages(
+    config: &AppConfig,
+    request: RpcRequest,
+    output: &mut String,
+) -> anyhow::Result<()> {
+    let Some(session_id) = request.params.get("session_id").and_then(Value::as_str) else {
+        return push_rpc_message(
+            output,
+            &RpcMessage::Response(RpcResponse::failure(
+                request.id,
+                RpcError::new(
+                    RpcErrorCode::InvalidParams,
+                    "get_messages params.session_id must be a string",
+                    None,
+                ),
+            )),
+        );
+    };
+
+    let path = match session_commands::session_path(session_id, config) {
+        Ok(path) => path,
+        Err(err) => {
+            return push_rpc_message(
+                output,
+                &RpcMessage::Response(RpcResponse::failure(
+                    request.id,
+                    RpcError::new(RpcErrorCode::InvalidParams, err.to_string(), None),
+                )),
+            );
+        }
+    };
+
+    if !path.exists() {
+        return push_rpc_message(
+            output,
+            &RpcMessage::Response(RpcResponse::failure(
+                request.id,
+                RpcError::new(
+                    RpcErrorCode::InvalidParams,
+                    format!("session {session_id:?} does not exist"),
+                    None,
+                ),
+            )),
+        );
+    }
+
+    let messages = match JsonlSessionReader::replay_messages(&path).await {
+        Ok(messages) => messages,
+        Err(err) => {
+            return push_rpc_message(
+                output,
+                &RpcMessage::Response(RpcResponse::failure(
+                    request.id,
+                    RpcError::new(RpcErrorCode::InternalError, err.to_string(), None),
+                )),
+            );
+        }
+    };
+
+    push_rpc_message(
+        output,
+        &RpcMessage::Response(RpcResponse::success(
+            request.id,
+            json!({
+                "session_id": session_id,
+                "messages": messages,
+            }),
+        )),
+    )
 }
 
 async fn handle_prompt(
@@ -116,10 +189,26 @@ fn state_payload(config: &AppConfig) -> Value {
     json!({
         "provider": config.default_provider,
         "model": config.default_model,
-        "is_streaming": false,
         "sessions_dir": config.sessions_dir,
+        "session_count": session_count(config),
         "mode": config.defaults.mode,
     })
+}
+
+fn session_count(config: &AppConfig) -> usize {
+    let Ok(entries) = std::fs::read_dir(&config.sessions_dir) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .count()
 }
 
 fn push_rpc_message(output: &mut String, message: &RpcMessage) -> anyhow::Result<()> {

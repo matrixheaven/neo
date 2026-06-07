@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-use neo_agent_core::PermissionPolicy;
+use neo_agent_core::{PermissionPolicy, QueueMode, ToolExecutionMode};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::Cli;
@@ -49,6 +49,7 @@ pub struct AppConfig {
     pub sessions_dir: PathBuf,
     pub permissions: PermissionPolicy,
     pub defaults: Defaults,
+    pub runtime: RuntimeConfig,
     pub mcp: McpConfig,
     pub approve: bool,
     pub no_approve: bool,
@@ -61,6 +62,55 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Defaults {
     pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(default = "default_queue_mode")]
+    pub steering_queue_mode: QueueMode,
+    #[serde(default = "default_queue_mode")]
+    pub follow_up_queue_mode: QueueMode,
+    #[serde(default = "default_tool_execution_mode")]
+    pub tool_execution_mode: ToolExecutionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<RuntimeCompactionConfig>,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            temperature: None,
+            max_tokens: None,
+            steering_queue_mode: QueueMode::All,
+            follow_up_queue_mode: QueueMode::All,
+            tool_execution_mode: ToolExecutionMode::Parallel,
+            compaction: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCompactionConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_runtime_compaction_max_estimated_tokens")]
+    pub max_estimated_tokens: usize,
+    #[serde(default = "default_runtime_compaction_keep_recent_messages")]
+    pub keep_recent_messages: usize,
+}
+
+impl Default for RuntimeCompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_estimated_tokens: default_runtime_compaction_max_estimated_tokens(),
+            keep_recent_messages: default_runtime_compaction_keep_recent_messages(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -96,6 +146,22 @@ const fn default_enabled() -> bool {
     true
 }
 
+const fn default_queue_mode() -> QueueMode {
+    QueueMode::All
+}
+
+const fn default_tool_execution_mode() -> ToolExecutionMode {
+    ToolExecutionMode::Parallel
+}
+
+const fn default_runtime_compaction_max_estimated_tokens() -> usize {
+    32_000
+}
+
+const fn default_runtime_compaction_keep_recent_messages() -> usize {
+    20
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct FileConfig {
     default_model: Option<String>,
@@ -106,6 +172,7 @@ struct FileConfig {
     sessions_dir: Option<PathBuf>,
     permissions: Option<PermissionPolicy>,
     defaults: Option<FileDefaults>,
+    runtime: Option<RuntimeConfig>,
     mcp: Option<McpConfig>,
 }
 
@@ -149,6 +216,8 @@ impl AppConfig {
             .or(file_config.sessions_dir)
             .unwrap_or_else(|| project_dir.join(CONFIG_DIR).join("sessions"));
         let permissions = file_config.permissions.unwrap_or_default();
+        let runtime = file_config.runtime.unwrap_or_default();
+        validate_runtime_config(&runtime)?;
         let mcp = file_config.mcp.unwrap_or_default();
         let mode = env_mode
             .or(file_config.defaults.and_then(|defaults| defaults.mode))
@@ -163,6 +232,7 @@ impl AppConfig {
             sessions_dir,
             permissions,
             defaults: Defaults { mode },
+            runtime,
             mcp,
             approve: overrides.approve,
             no_approve: overrides.no_approve,
@@ -193,6 +263,7 @@ pub fn show(config: &AppConfig) -> anyhow::Result<String> {
         defaults: Some(FileDefaults {
             mode: Some(config.defaults.mode.clone()),
         }),
+        runtime: Some(config.runtime.clone()),
         mcp: Some(config.mcp.clone()),
     };
 
@@ -254,11 +325,89 @@ pub fn set(key: &str, value: &str) -> anyhow::Result<String> {
             let defaults = config.defaults.get_or_insert_with(FileDefaults::default);
             defaults.mode = Some(value.to_owned());
         }
+        "runtime.temperature" | "temperature" => {
+            runtime_config_mut(&mut config).temperature = Some(value.parse()?);
+        }
+        "runtime.max_tokens" | "max_tokens" => {
+            runtime_config_mut(&mut config).max_tokens = Some(value.parse()?);
+        }
+        "runtime.steering_queue_mode" | "steering_queue_mode" => {
+            runtime_config_mut(&mut config).steering_queue_mode = parse_queue_mode(value)?;
+        }
+        "runtime.follow_up_queue_mode" | "follow_up_queue_mode" => {
+            runtime_config_mut(&mut config).follow_up_queue_mode = parse_queue_mode(value)?;
+        }
+        "runtime.tool_execution_mode" | "tool_execution_mode" => {
+            runtime_config_mut(&mut config).tool_execution_mode = parse_tool_execution_mode(value)?;
+        }
+        "runtime.compaction.enabled" | "compaction.enabled" => {
+            compaction_config_mut(&mut config).enabled = value.parse()?;
+        }
+        "runtime.compaction.max_estimated_tokens" | "compaction.max_estimated_tokens" => {
+            compaction_config_mut(&mut config).max_estimated_tokens = value.parse()?;
+        }
+        "runtime.compaction.keep_recent_messages" | "compaction.keep_recent_messages" => {
+            compaction_config_mut(&mut config).keep_recent_messages = value.parse()?;
+        }
         unknown => bail!("unsupported config key: {unknown}"),
     }
 
+    if let Some(runtime) = &config.runtime {
+        validate_runtime_config(runtime)?;
+    }
     write_file_config(&config_path, &config)?;
     Ok(format!("set {key}\n"))
+}
+
+fn runtime_config_mut(config: &mut FileConfig) -> &mut RuntimeConfig {
+    config.runtime.get_or_insert_with(RuntimeConfig::default)
+}
+
+fn compaction_config_mut(config: &mut FileConfig) -> &mut RuntimeCompactionConfig {
+    runtime_config_mut(config)
+        .compaction
+        .get_or_insert_with(RuntimeCompactionConfig::default)
+}
+
+fn parse_queue_mode(value: &str) -> anyhow::Result<QueueMode> {
+    match value {
+        "All" => Ok(QueueMode::All),
+        "OneAtATime" => Ok(QueueMode::OneAtATime),
+        other => bail!("unsupported queue mode: {other}"),
+    }
+}
+
+fn parse_tool_execution_mode(value: &str) -> anyhow::Result<ToolExecutionMode> {
+    match value {
+        "Sequential" => Ok(ToolExecutionMode::Sequential),
+        "Parallel" => Ok(ToolExecutionMode::Parallel),
+        other => bail!("unsupported tool execution mode: {other}"),
+    }
+}
+
+fn validate_runtime_config(config: &RuntimeConfig) -> anyhow::Result<()> {
+    if let Some(temperature) = config.temperature {
+        anyhow::ensure!(
+            temperature.is_finite() && temperature >= 0.0,
+            "runtime.temperature must be a finite non-negative number"
+        );
+    }
+    if let Some(max_tokens) = config.max_tokens {
+        anyhow::ensure!(max_tokens > 0, "runtime.max_tokens must be greater than 0");
+    }
+    if let Some(compaction) = &config.compaction
+        && compaction.enabled
+    {
+        anyhow::ensure!(
+            compaction.max_estimated_tokens > 0,
+            "runtime.compaction.max_estimated_tokens must be greater than 0"
+        );
+        anyhow::ensure!(
+            compaction.keep_recent_messages > 0,
+            "runtime.compaction.keep_recent_messages must be greater than 0"
+        );
+    }
+    Ok(())
 }
 
 fn find_config_path() -> anyhow::Result<PathBuf> {

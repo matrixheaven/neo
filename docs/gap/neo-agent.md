@@ -15,7 +15,10 @@
   and built-in defaults.
 - Supported config keys include `default_model`, `default_provider`,
   `api_base`, `api_key_env`, `sessions_dir`, `permissions.file_read`,
-  `permissions.file_write`, `permissions.shell`, and `defaults.mode`.
+  `permissions.file_write`, `permissions.shell`, `defaults.mode`,
+  provider-specific API key env names, and runtime generation/agent options
+  such as temperature, max tokens, queue modes, tool execution mode, and
+  compaction thresholds.
 - Session commands read project session files from `sessions_dir`, store local
   tree/name metadata next to JSONL records, compact sessions with a local
   deterministic transcript summary event, and can export replayed messages to
@@ -37,10 +40,15 @@
 - `print` and `run` discover enabled project MCP servers with
   `transport = "stdio"`, `transport = "http"`, or `transport = "sse"` and
   register their tools in the runtime tool registry.
+- RPC mode supports `get_state`, `prompt`, and JSONL-backed `get_messages`;
+  state reports real project/session counts and omits unsupported streaming
+  state.
 - Interactive mode has a testable controller and a live crossterm/raw-mode TTY
   loop slice. TTY execution renders `neo-tui`, accepts text input, submits
-  prompts through the existing `run_prompt` path, exits on Esc/Ctrl-C, and keeps
-  the no-tty snapshot fallback for command tests and redirected stdout.
+  prompts through the existing `run_prompt` path, redraws on terminal resize,
+  dispatches real keybinding actions for prompt editing and approval overlays,
+  exits on Esc/Ctrl-C, and keeps the no-tty snapshot fallback for command tests
+  and redirected stdout.
 
 ## Pi Parity Pressure
 
@@ -52,14 +60,14 @@ and platform-specific guidance.
 ## High-Priority Gaps
 
 - Keep quickstart scoped to currently wired commands until interactive mode has
-  full controls beyond the current text-input raw-terminal loop slice.
+  full controls beyond the current raw-terminal prompt/edit/approval slice.
 - Document project-local config before user-global config because Neo currently
   resolves `.neo/config.toml` from the current working directory.
 - Do not document `/login`, `/tree`, hosted sharing, hosted extension
   marketplace catalog/search/install flows, or themes as available Neo features
   yet.
-- Keep `sessions show` and `resume` aligned on `.jsonl` files as session
-  persistence evolves.
+- Add richer session tree UI, branch summaries, and hosted share only when real
+  local or hosted backing behavior exists.
 - Keep MCP runtime config limited to tools and explicit resource reads until
   subscriptions, hosted server lifecycle, and OAuth/trust flows are
   implemented.

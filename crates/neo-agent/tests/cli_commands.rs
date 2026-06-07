@@ -204,6 +204,36 @@ fn config_set_writes_project_config_value() {
 }
 
 #[test]
+fn config_set_writes_runtime_agent_options() {
+    let temp = TempDir::new().expect("tempdir");
+    for (key, value) in [
+        ("runtime.temperature", "0.4"),
+        ("runtime.max_tokens", "2048"),
+        ("runtime.steering_queue_mode", "OneAtATime"),
+        ("runtime.follow_up_queue_mode", "OneAtATime"),
+        ("runtime.tool_execution_mode", "Sequential"),
+        ("runtime.compaction.max_estimated_tokens", "12000"),
+        ("runtime.compaction.keep_recent_messages", "16"),
+    ] {
+        let mut command = neo();
+        command
+            .current_dir(temp.path())
+            .args(["config", "set", key, value]);
+        let stdout = run(command);
+        assert!(stdout.contains(&format!("set {key}")));
+    }
+
+    let config = fs::read_to_string(temp.path().join(".neo/config.toml")).expect("read config");
+    assert!(config.contains("temperature = 0.4"));
+    assert!(config.contains("max_tokens = 2048"));
+    assert!(config.contains("steering_queue_mode = \"OneAtATime\""));
+    assert!(config.contains("follow_up_queue_mode = \"OneAtATime\""));
+    assert!(config.contains("tool_execution_mode = \"Sequential\""));
+    assert!(config.contains("max_estimated_tokens = 12000"));
+    assert!(config.contains("keep_recent_messages = 16"));
+}
+
+#[test]
 fn config_set_writes_provider_specific_api_key_env_name() {
     let temp = TempDir::new().expect("tempdir");
     let mut command = neo();

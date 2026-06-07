@@ -5,9 +5,11 @@ use std::{
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputEvent {
     Insert(char),
+    Key(KeyId),
+    Action(KeybindingAction),
     Backspace,
     Delete,
     MoveLeft,
@@ -26,6 +28,21 @@ impl InputEvent {
     pub fn from_crossterm_event(event: &Event) -> Option<Self> {
         match event {
             Event::Key(key_event) => Self::from_key_event(*key_event),
+            Event::Resize(columns, rows) => Some(Self::Resize {
+                columns: *columns,
+                rows: *rows,
+            }),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn from_crossterm_event_with_keybindings(
+        event: &Event,
+        keybindings: &KeybindingsManager,
+    ) -> Option<Self> {
+        match event {
+            Event::Key(key_event) => Self::from_key_event_with_keybindings(*key_event, keybindings),
             Event::Resize(columns, rows) => Some(Self::Resize {
                 columns: *columns,
                 rows: *rows,
@@ -56,6 +73,28 @@ impl InputEvent {
             (KeyCode::Esc, _) => Some(Self::Cancel),
             _ => None,
         }
+    }
+
+    #[must_use]
+    pub fn from_key_event_with_keybindings(
+        event: KeyEvent,
+        keybindings: &KeybindingsManager,
+    ) -> Option<Self> {
+        if event.kind != KeyEventKind::Press {
+            return None;
+        }
+
+        if matches!(event.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+            && let KeyCode::Char(character) = event.code
+        {
+            return Some(Self::Insert(character));
+        }
+
+        let key = KeyId::from_key_event(event)?;
+        if keybindings.matching_actions(&key).is_empty() {
+            return None;
+        }
+        Some(Self::Key(key))
     }
 }
 
@@ -237,6 +276,18 @@ impl KeybindingsManager {
         self.resolved
             .get(&action)
             .is_some_and(|keys| keys.iter().any(|candidate| candidate == key))
+    }
+
+    #[must_use]
+    pub fn matching_actions(&self, key: &KeyId) -> Vec<KeybindingAction> {
+        self.resolved
+            .iter()
+            .filter_map(|(action, keys)| {
+                keys.iter()
+                    .any(|candidate| candidate == key)
+                    .then_some(*action)
+            })
+            .collect()
     }
 
     #[must_use]

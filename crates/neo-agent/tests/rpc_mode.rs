@@ -82,6 +82,8 @@ fn run_with_stdin(mut command: Command, stdin: &str) -> String {
 fn rpc_get_state_reports_project_runtime_state() {
     let temp = TempDir::new().expect("tempdir");
     std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::create_dir_all(temp.path().join(".neo/sessions")).expect("create sessions");
+    std::fs::write(temp.path().join(".neo/sessions/alpha.jsonl"), "{}\n").expect("write session");
     std::fs::write(
         temp.path().join(".neo/config.toml"),
         r#"
@@ -104,12 +106,102 @@ default_model = "claude-sonnet-4-5"
     assert_eq!(messages[0]["id"], "state-1");
     assert_eq!(messages[0]["result"]["provider"], "anthropic");
     assert_eq!(messages[0]["result"]["model"], "claude-sonnet-4-5");
-    assert_eq!(messages[0]["result"]["is_streaming"], false);
+    assert!(messages[0]["result"]["is_streaming"].is_null());
     assert!(
         messages[0]["result"]["sessions_dir"]
             .as_str()
             .expect("sessions dir")
             .ends_with(".neo/sessions")
+    );
+    assert_eq!(messages[0]["result"]["session_count"], 1);
+}
+
+#[test]
+fn rpc_get_messages_replays_session_jsonl_messages() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    std::fs::write(
+        sessions.join("alpha.jsonl"),
+        concat!(
+            "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello rpc history\"}}]}}}}\n",
+            "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi from jsonl\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
+        ),
+    )
+    .expect("write session");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"messages-1","method":"get_messages","params":{"session_id":"alpha"}}"#,
+    );
+
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "response");
+    assert_eq!(messages[0]["id"], "messages-1");
+    assert_eq!(messages[0]["result"]["session_id"], "alpha");
+    assert_eq!(
+        messages[0]["result"]["messages"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        messages[0]["result"]["messages"][0]["User"]["content"][0]["Text"]["text"],
+        "hello rpc history"
+    );
+    assert_eq!(
+        messages[0]["result"]["messages"][1]["Assistant"]["content"][0]["Text"]["text"],
+        "hi from jsonl"
+    );
+}
+
+#[test]
+fn rpc_get_messages_returns_empty_replay_for_empty_session() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    std::fs::write(sessions.join("empty.jsonl"), "").expect("write empty session");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"messages-empty","method":"get_messages","params":{"session_id":"empty"}}"#,
+    );
+
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "response");
+    assert_eq!(messages[0]["id"], "messages-empty");
+    assert_eq!(messages[0]["result"]["session_id"], "empty");
+    assert_eq!(
+        messages[0]["result"]["messages"].as_array().unwrap().len(),
+        0
+    );
+}
+
+#[test]
+fn rpc_get_messages_reports_missing_session_as_invalid_params() {
+    let temp = TempDir::new().expect("tempdir");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"messages-missing","method":"get_messages","params":{"session_id":"missing"}}"#,
+    );
+
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "response");
+    assert_eq!(messages[0]["id"], "messages-missing");
+    assert_eq!(messages[0]["error"]["code"], "invalid_params");
+    assert!(
+        messages[0]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing")
     );
 }
 

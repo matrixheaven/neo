@@ -108,6 +108,38 @@ fn print_uses_production_openai_responses_adapter_against_mock_provider() {
 }
 
 #[test]
+fn print_applies_project_runtime_generation_options_to_provider_request() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        temp.path().join(".neo/config.toml"),
+        r"
+[runtime]
+temperature = 0.25
+max_tokens = 321
+",
+    )
+    .expect("write config");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-runtime", "configured")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "runtime", "options"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "configured\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["temperature"], 0.25);
+    assert_eq!(requests[0].body["max_output_tokens"], 321);
+}
+
+#[test]
 fn run_emits_jsonl_events_from_mock_provider_without_fake_output() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-run", "jsonl text")]);

@@ -37,6 +37,18 @@ tool = "Allow"
 [defaults]
 mode = "interactive"
 
+[runtime]
+temperature = 0.2
+max_tokens = 4096
+steering_queue_mode = "All"
+follow_up_queue_mode = "All"
+tool_execution_mode = "Parallel"
+
+[runtime.compaction]
+enabled = true
+max_estimated_tokens = 32000
+keep_recent_messages = 20
+
 [[mcp.servers]]
 id = "filesystem"
 enabled = true
@@ -67,6 +79,12 @@ The default permissions mirror `neo_agent_core::PermissionPolicy::default()`:
 file reads are allowed, file writes ask, shell asks, and tools are allowed.
 Tool approval request events exist in `neo-agent-core`; a full interactive
 ask/approve UI remains a runtime gap.
+
+The `[runtime]` table maps directly to `neo_agent_core::AgentConfig` for real
+provider-backed runs. `temperature` and `max_tokens` are sent through
+`neo_ai::RequestOptions`; queue modes use `All` or `OneAtATime`; tool execution
+uses `Parallel` or `Sequential`; and optional compaction settings control the
+runtime's deterministic context compaction trigger.
 
 ## Environment Variables
 
@@ -136,5 +154,15 @@ Supported `config set` keys are:
 - `permissions.shell` or `shell`
 - `permissions.tool` or `tool`
 - `defaults.mode` or `mode`
+- `runtime.temperature` or `temperature`
+- `runtime.max_tokens` or `max_tokens`
+- `runtime.steering_queue_mode` or `steering_queue_mode`
+- `runtime.follow_up_queue_mode` or `follow_up_queue_mode`
+- `runtime.tool_execution_mode` or `tool_execution_mode`
+- `runtime.compaction.enabled` or `compaction.enabled`
+- `runtime.compaction.max_estimated_tokens` or `compaction.max_estimated_tokens`
+- `runtime.compaction.keep_recent_messages` or `compaction.keep_recent_messages`
 
 Use TOML enum values `Allow`, `Ask`, or `Deny` for permission settings.
+Use `All` or `OneAtATime` for queue modes and `Parallel` or `Sequential` for
+tool execution mode.

@@ -4,9 +4,9 @@ use anyhow::Context;
 use futures::StreamExt;
 use neo_agent_core::session::JsonlSessionWriter;
 use neo_agent_core::{
-    AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, Content, McpHttpConfig,
-    McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter, McpToolProvider,
-    PermissionDecision, ToolRegistry,
+    AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, CompactionSettings, Content,
+    McpHttpConfig, McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter,
+    McpToolProvider, PermissionDecision, ToolRegistry,
 };
 use neo_ai::{ModelClient, ModelRegistry, ModelSpec, ProviderRegistry};
 
@@ -229,7 +229,21 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
 fn agent_config_for_app(model: ModelSpec, config: &AppConfig) -> anyhow::Result<AgentConfig> {
     let mut agent_config = AgentConfig::for_model(model)
         .with_tool_permission_policy(config.permissions.clone())
+        .with_queue_modes(
+            config.runtime.steering_queue_mode,
+            config.runtime.follow_up_queue_mode,
+        )
+        .with_tool_execution_mode(config.runtime.tool_execution_mode)
         .with_workspace_root(&config.project_dir)?;
+    agent_config.temperature = config.runtime.temperature;
+    agent_config.max_tokens = config.runtime.max_tokens;
+    if let Some(compaction) = &config.runtime.compaction {
+        agent_config = agent_config.with_compaction(CompactionSettings {
+            enabled: compaction.enabled,
+            max_estimated_tokens: compaction.max_estimated_tokens,
+            keep_recent_messages: compaction.keep_recent_messages,
+        });
+    }
     if config.approve {
         agent_config = agent_config.with_approval_handler(|_| PermissionDecision::Allow);
     } else if config.no_approve {
@@ -392,4 +406,75 @@ fn message_text(message: &AgentMessage) -> String {
         .filter_map(Content::as_text)
         .collect::<Vec<_>>()
         .join("")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use neo_agent_core::{CompactionSettings, PermissionPolicy, QueueMode, ToolExecutionMode};
+    use neo_ai::{ApiKind, ModelCapabilities, ModelSpec, ProviderId};
+
+    use super::agent_config_for_app;
+    use crate::config::{AppConfig, Defaults, McpConfig, RuntimeCompactionConfig, RuntimeConfig};
+
+    #[test]
+    fn agent_config_for_app_applies_runtime_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            default_model: "test-model".to_owned(),
+            default_provider: "openai".to_owned(),
+            api_base: None,
+            api_key_env: None,
+            providers: BTreeMap::new(),
+            sessions_dir: temp.path().join(".neo/sessions"),
+            permissions: PermissionPolicy::default(),
+            defaults: Defaults {
+                mode: "print".to_owned(),
+            },
+            runtime: RuntimeConfig {
+                temperature: Some(0.35),
+                max_tokens: Some(512),
+                steering_queue_mode: QueueMode::OneAtATime,
+                follow_up_queue_mode: QueueMode::OneAtATime,
+                tool_execution_mode: ToolExecutionMode::Sequential,
+                compaction: Some(RuntimeCompactionConfig {
+                    enabled: true,
+                    max_estimated_tokens: 16_000,
+                    keep_recent_messages: 24,
+                }),
+            },
+            mcp: McpConfig::default(),
+            approve: false,
+            no_approve: false,
+            project_dir: temp.path().to_path_buf(),
+            config_path: temp.path().join(".neo/config.toml"),
+        };
+        let model = ModelSpec {
+            provider: ProviderId("openai".to_owned()),
+            model: "test-model".to_owned(),
+            api: ApiKind::OpenAiResponses,
+            capabilities: ModelCapabilities::tool_chat(),
+        };
+
+        let agent_config = agent_config_for_app(model, &config).expect("agent config");
+
+        assert_eq!(agent_config.temperature, Some(0.35));
+        assert_eq!(agent_config.max_tokens, Some(512));
+        assert_eq!(agent_config.steering_queue_mode, QueueMode::OneAtATime);
+        assert_eq!(agent_config.follow_up_queue_mode, QueueMode::OneAtATime);
+        assert_eq!(
+            agent_config.tool_execution_mode,
+            ToolExecutionMode::Sequential
+        );
+        assert_eq!(
+            agent_config.compaction,
+            Some(CompactionSettings {
+                enabled: true,
+                max_estimated_tokens: 16_000,
+                keep_recent_messages: 24,
+            })
+        );
+        assert!(agent_config.workspace_root.is_some());
+    }
 }

@@ -11,8 +11,8 @@ whole map.
 | --- | --- | --- | --- |
 | [`neo-ai`](neo-ai.md) | Provider-neutral `ChatRequest`, `RequestOptions`, `ModelRegistry`, `ProviderRegistry`, `ProviderResolver`, OpenAI Responses, Anthropic Messages, OpenAI-compatible adapters, stream events, tool schemas, test fake provider, and environment key helpers. | `pi-ai` documents broad provider discovery, credential resolution, tool streaming, reasoning, images, and context handoff. | Keep Neo docs focused on implemented Rust contracts and mark unsupported provider APIs/model catalog loading as future work. |
 | [`neo-agent-core`](neo-agent-core.md) | Runtime turn loop, `AgentConfig`, `AgentContext`, normalized events, permissions, built-in workspace tools, MCP adapter/provider boundary with stdio and HTTP/SSE tool/resource transports, JSONL session reader/writer, local session metadata fork/rename, deterministic JSONL compaction, fake harness. | `pi-agent-core` documents richer event lifecycle, hooks, steering, parallel tool execution, and cancellation. | Document implemented event/tool/MCP/session APIs now; leave hooks/steering/parallel execution as explicit gaps. |
-| [`neo-agent`](neo-agent.md) | Clap command surface, project `.neo/config.toml`, environment overrides, config setters, provider-backed print/run, sessions commands including fork/rename/compact/HTML export, skill loading, extension JSONL RPC calls plus status/enable/disable lifecycle, models list, MCP server listing, and explicit MCP resource list/read commands. | pi coding-agent docs cover settings, providers, sessions, TUI, MCP/resources, and trust. | Describe actual project-local config/session/extension commands and mark interactive TUI/trust/installer gaps explicitly. |
-| [`neo-tui`](tui.md) | Prompt/editor, transcript viewport, keybinding, selection/list, and width-safe rendering primitives. | `pi-tui` has a richer terminal renderer and interaction stack. | Keep TUI docs scoped to primitives until the full app renderer lands. |
+| [`neo-agent`](neo-agent.md) | Clap command surface, project `.neo/config.toml`, environment overrides, config setters including runtime `AgentConfig` options, provider-backed print/run, sessions commands including fork/rename/compact/HTML export, skill loading, extension JSONL RPC calls plus status/enable/disable lifecycle, JSONL-backed RPC `get_messages`, models list, MCP server listing, and explicit MCP resource list/read commands. | pi coding-agent docs cover settings, providers, sessions, TUI, MCP/resources, and trust. | Describe actual project-local config/session/extension/RPC commands and mark hosted trust/marketplace/share gaps explicitly. |
+| [`neo-tui`](tui.md) | Prompt/editor, transcript viewport, keybinding, selection/list, width-safe rendering primitives, and a live raw-mode keybinding dispatcher for prompt/approval actions. | `pi-tui` has a richer terminal renderer and interaction stack. | Keep TUI docs scoped to implemented primitives and live prompt/overlay actions until diff rendering, images, autocomplete, undo, and kill-ring land. |
 | [`xtask`](xtask.md) | Stable xtask gate, opt-in workspace gate, docs/examples parity scan, Markdown local-link validation, and example TOML/JSON validation. | pi has npm check/supply-chain automation and generated docs metadata. | Preserve a small Rust gate, block fake/placeholder production guidance, and add future checks only when Neo has stable generated artifacts. |
 
 ## Cross-Cutting Gaps
@@ -33,6 +33,12 @@ whole map.
   compaction, schema metadata, and HTML export are wired, while hosted share,
   branch summaries, and model-generated/richer compaction remain pi-inspired
   future work.
+- Project runtime config now maps generation options, queue modes, tool
+  execution mode, and compaction thresholds into real `AgentConfig` fields for
+  provider-backed runs.
+- RPC mode now exposes real session message replay through `get_messages`;
+  hosted streaming/session services remain out of scope until they have backing
+  infrastructure.
 
 ## Docs Updated In This Pass
 
