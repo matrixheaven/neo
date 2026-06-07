@@ -49,12 +49,14 @@ The `neo-agent-core` tool layer separates:
 
 - `ToolRegistry`: lists available tools and their schemas.
 - `PermissionPolicy`: records `Allow`, `Ask`, or `Deny` for file reads, file
-  writes, and shell.
+  writes, shell, and general tools.
 - `Tool`: owns schema generation and execution.
 - `ToolResult`: returns text content, error state, and optional details.
 
-An interactive ask/approve authorizer is still a gap. Today a tool operation
-executes only when the relevant permission is `Allow`.
+When a policy is `Ask`, the runtime emits `AgentEvent::ApprovalRequested` and
+executes only if the configured approval handler returns `Allow`. Without a
+handler, ask-mode operations return an approval-required tool result instead of
+silently executing.
 
 ## Example
 

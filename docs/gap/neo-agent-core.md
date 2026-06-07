@@ -10,8 +10,9 @@
   messages, and loops after `StopReason::ToolUse` when tools are registered.
 - `FakeHarness` supplies a fake model and recorded request inspection for tests.
 - `PermissionPolicy` supports `Allow`, `Ask`, and `Deny` decisions for file
-  reads, file writes, and shell execution. The current tool executor treats only
-  `Allow` as executable.
+  reads, file writes, shell execution, and general tools. `Ask` emits
+  `AgentEvent::ApprovalRequested` and executes only when the configured
+  approval handler returns `Allow`.
 - `ToolRegistry::with_builtin_tools()` registers `read`, `list`, `grep`,
   `find`, `write`, `edit`, and `bash`.
 - `McpToolAdapter` and `McpToolProvider` can discover configured MCP tools as
@@ -51,10 +52,9 @@ interactive behavior.
 
 ## High-Priority Gaps
 
-- Finish the `neo_ai::ChatRequest` options migration in runtime code before
-  treating broad workspace checks as green.
-- Add docs and tests for `Ask` permission behavior once there is a CLI/TUI
-  approval path. Today tools only execute on `Allow`.
+- Add richer interactive approval UI wiring once the raw terminal event loop can
+  resume pending tool calls from explicit user choices instead of relying on
+  static approve/deny handlers.
 - Add remote HTTP/SSE MCP resource update streams once Neo has a long-lived
   remote MCP transport.
 - Add hook/steering docs only when the runtime exposes those APIs.
