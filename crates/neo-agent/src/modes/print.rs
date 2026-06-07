@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 
-pub fn execute(prompt: &[String], _config: &AppConfig) -> String {
-    format!("{}\n", prompt.join(" "))
+pub async fn execute(prompt: &[String], config: &AppConfig) -> anyhow::Result<String> {
+    let turn = crate::modes::run::run_prompt(prompt, config).await?;
+    Ok(format!("{}\n", turn.assistant_text))
 }

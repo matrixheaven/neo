@@ -1,6 +1,6 @@
 use neo_ai::{
     AiStreamEvent, ChatMessage, ContentPart, ImageData, StopReason, ToolCall, ToolSpec,
-    collect_tool_arguments, schema_for,
+    collect_tool_arguments, providers::openai_compatible::normalize_openai_chat_sse, schema_for,
 };
 use schemars::JsonSchema;
 use serde_json::{Value, json};
@@ -100,6 +100,53 @@ fn collect_tool_arguments_reports_missing_or_invalid_arguments() {
     )
     .expect_err("invalid args should error");
     assert!(invalid.to_string().contains("invalid tool arguments"));
+}
+
+#[test]
+fn openai_chat_sse_normalizer_keeps_tool_deltas_tied_to_stream_index() {
+    let body = [
+        r#"data: {"id":"chatcmpl-1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}"#,
+        "",
+        r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Cargo.toml\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":3}}"#,
+        "",
+        "data: [DONE]",
+        "",
+    ]
+    .join("\n");
+
+    let events = normalize_openai_chat_sse(&body).expect("SSE should normalize");
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "chatcmpl-1".to_owned()
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "call-1".to_owned(),
+                name: "read_file".to_owned()
+            },
+            AiStreamEvent::ToolCallArgsDelta {
+                id: "call-1".to_owned(),
+                json_fragment: "{\"path\":".to_owned()
+            },
+            AiStreamEvent::ToolCallArgsDelta {
+                id: "call-1".to_owned(),
+                json_fragment: "\"Cargo.toml\"}".to_owned()
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "call-1".to_owned(),
+                arguments: json!({ "path": "Cargo.toml" })
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+                usage: Some(neo_ai::TokenUsage {
+                    input_tokens: 2,
+                    output_tokens: 3,
+                })
+            },
+        ]
+    );
 }
 
 #[test]

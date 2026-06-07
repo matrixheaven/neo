@@ -2,7 +2,7 @@ use futures::stream::BoxStream;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::AiError;
+use crate::{AiError, RequestOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderId(pub String);
@@ -195,13 +195,12 @@ impl ToolSpec {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ChatRequest {
     pub model: ModelSpec,
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolSpec>,
-    pub temperature: Option<u32>,
-    pub max_tokens: Option<u32>,
+    pub options: RequestOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -1,20 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "read_file",
-  "description": "Read a UTF-8 text file from the current workspace.",
+  "title": "read",
+  "description": "Read a UTF-8 file from the workspace.",
   "type": "object",
   "required": ["path"],
   "additionalProperties": false,
   "properties": {
     "path": {
-      "type": "string",
-      "description": "Workspace-relative path to read."
-    },
-    "max_bytes": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 1048576,
-      "description": "Optional maximum number of bytes to return."
+      "type": "string"
     }
   }
 }

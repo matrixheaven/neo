@@ -1,0 +1,574 @@
+use std::collections::BTreeMap;
+
+use futures::{StreamExt, future, stream};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
+use serde_json::{Value, json};
+
+use crate::{
+    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ModelClient,
+    StopReason, TokenUsage, ToolSpec,
+};
+
+#[derive(Clone)]
+pub struct OpenAiCompatibleClient {
+    base_url: String,
+    api_key: String,
+    client: reqwest::Client,
+}
+
+impl OpenAiCompatibleClient {
+    #[must_use]
+    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            api_key: api_key.into(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    async fn open_response(&self, request: ChatRequest) -> Result<reqwest::Response, AiError> {
+        let attempts = request.options.retries.unwrap_or(0).saturating_add(1);
+        let mut last_error = None;
+
+        for attempt in 0..attempts {
+            match self.open_response_once(&request).await {
+                Ok(response) => return Ok(response),
+                Err(err) if attempt + 1 < attempts && err.is_retryable() => {
+                    last_error = Some(err);
+                }
+                Err(err) => return Err(err.into_ai_error()),
+            }
+        }
+
+        Err(last_error.map_or_else(
+            || AiError::Stream("provider request failed without an error".to_owned()),
+            ProviderError::into_ai_error,
+        ))
+    }
+
+    async fn open_response_once(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let mut builder = self
+            .client
+            .post(url)
+            .headers(headers(
+                &self.api_key,
+                &request.options.headers,
+                request.options.session_id.as_deref(),
+            )?)
+            .json(&request_body(request));
+
+        if let Some(timeout) = request.options.timeout {
+            builder = builder.timeout(timeout);
+        }
+
+        let response = builder.send().await.map_err(ProviderError::Transport)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ProviderError::HttpStatus(status.as_u16()));
+        }
+
+        Ok(response)
+    }
+}
+
+impl ModelClient for OpenAiCompatibleClient {
+    fn stream_chat(
+        &self,
+        request: ChatRequest,
+    ) -> futures::stream::BoxStream<'static, Result<AiStreamEvent, AiError>> {
+        let client = self.clone();
+        stream::once(async move { client.open_response(request).await })
+            .flat_map(|result| match result {
+                Ok(response) => stream_response(response),
+                Err(err) => stream::iter(vec![Err(err)]).boxed(),
+            })
+            .boxed()
+    }
+}
+
+#[derive(Debug)]
+enum ProviderError {
+    Header(String),
+    HttpStatus(u16),
+    Transport(reqwest::Error),
+    Stream(String),
+}
+
+impl ProviderError {
+    const fn is_retryable(&self) -> bool {
+        match self {
+            Self::HttpStatus(status) => *status == 429 || *status >= 500,
+            Self::Transport(_) => true,
+            Self::Header(_) | Self::Stream(_) => false,
+        }
+    }
+
+    fn into_ai_error(self) -> AiError {
+        match self {
+            Self::Header(message) | Self::Stream(message) => AiError::Stream(message),
+            Self::HttpStatus(status) => AiError::Stream(format!("http status {status}")),
+            Self::Transport(err) => AiError::Stream(format!("transport error: {err}")),
+        }
+    }
+}
+
+fn headers(
+    api_key: &str,
+    extra_headers: &BTreeMap<String, String>,
+    session_id: Option<&str>,
+) -> Result<HeaderMap, ProviderError> {
+    let mut headers = HeaderMap::new();
+    let authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
+        .map_err(|err| ProviderError::Header(format!("invalid authorization header: {err}")))?;
+    headers.insert(AUTHORIZATION, authorization);
+
+    for (name, value) in extra_headers {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|err| ProviderError::Header(format!("invalid header name {name}: {err}")))?;
+        let value = HeaderValue::from_str(value)
+            .map_err(|err| ProviderError::Header(format!("invalid header value {name}: {err}")))?;
+        headers.insert(name, value);
+    }
+    if let Some(session_id) = session_id {
+        let value = HeaderValue::from_str(session_id).map_err(|err| {
+            ProviderError::Header(format!("invalid x-client-request-id header: {err}"))
+        })?;
+        headers.insert(HeaderName::from_static("x-client-request-id"), value);
+    }
+
+    Ok(headers)
+}
+
+fn request_body(request: &ChatRequest) -> Value {
+    let mut body = json!({
+        "model": request.model.model,
+        "stream": true,
+        "messages": request.messages.iter().map(message_body).collect::<Vec<_>>(),
+    });
+
+    if !request.tools.is_empty() {
+        body["tools"] = Value::Array(request.tools.iter().map(tool_body).collect());
+    }
+    if let Some(temperature) = request.options.temperature {
+        body["temperature"] = json!(rounded_f64(temperature));
+    }
+    if let Some(max_tokens) = request.options.max_tokens {
+        body["max_tokens"] = json!(max_tokens);
+    }
+    if !request.options.metadata.is_empty() {
+        body["metadata"] = json!(request.options.metadata.as_map());
+    }
+    if let Some(session_id) = &request.options.session_id {
+        body["prompt_cache_key"] = json!(session_id);
+    }
+    match request.options.cache {
+        CacheRetention::None => {}
+        CacheRetention::Short => {
+            body["prompt_cache_retention"] = json!("1h");
+        }
+        CacheRetention::Long => {
+            body["prompt_cache_retention"] = json!("24h");
+        }
+    }
+
+    body
+}
+
+fn message_body(message: &ChatMessage) -> Value {
+    match message {
+        ChatMessage::System { content } => json!({
+            "role": "system",
+            "content": content_text(content),
+        }),
+        ChatMessage::User { content } => json!({
+            "role": "user",
+            "content": content_text(content),
+        }),
+        ChatMessage::Assistant {
+            content,
+            tool_calls,
+        } => json!({
+            "role": "assistant",
+            "content": content_text(content),
+            "tool_calls": tool_calls.iter().map(|tool_call| json!({
+                "id": tool_call.id,
+                "type": "function",
+                "function": {
+                    "name": tool_call.name,
+                    "arguments": tool_call.arguments.to_string(),
+                },
+            })).collect::<Vec<_>>(),
+        }),
+        ChatMessage::ToolResult {
+            tool_call_id,
+            content,
+            is_error: _,
+        } => json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": content_text(content),
+        }),
+    }
+}
+
+fn content_text(content: &[ContentPart]) -> String {
+    content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } => Some(text.as_str()),
+            ContentPart::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn tool_body(tool: &ToolSpec) -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.input_schema,
+        },
+    })
+}
+
+pub fn normalize_openai_chat_sse(body: &str) -> Result<Vec<AiStreamEvent>, AiError> {
+    parse_sse_events(body).map_err(ProviderError::into_ai_error)
+}
+
+enum StreamChunk {
+    Data(Result<Vec<u8>, reqwest::Error>),
+    End,
+}
+
+fn stream_response(
+    response: reqwest::Response,
+) -> futures::stream::BoxStream<'static, Result<AiStreamEvent, AiError>> {
+    response
+        .bytes_stream()
+        .map(|chunk| StreamChunk::Data(chunk.map(|bytes| bytes.to_vec())))
+        .chain(stream::once(async { StreamChunk::End }))
+        .scan(IncrementalSse::default(), |state, chunk| {
+            future::ready(Some(match chunk {
+                StreamChunk::Data(Ok(bytes)) => state.push_chunk(&bytes),
+                StreamChunk::Data(Err(err)) => {
+                    vec![Err(AiError::Stream(format!("transport error: {err}")))]
+                }
+                StreamChunk::End => state.finish(),
+            }))
+        })
+        .flat_map(stream::iter)
+        .boxed()
+}
+
+#[derive(Default)]
+struct IncrementalSse {
+    buffer: Vec<u8>,
+    parser: ParseState,
+    done: bool,
+}
+
+impl IncrementalSse {
+    fn push_chunk(&mut self, bytes: &[u8]) -> Vec<Result<AiStreamEvent, AiError>> {
+        if self.done {
+            return Vec::new();
+        }
+
+        self.buffer.extend_from_slice(bytes);
+        let mut out = Vec::new();
+
+        while let Some((index, delimiter_len)) = find_frame_end(&self.buffer) {
+            let frame = self
+                .buffer
+                .drain(..index + delimiter_len)
+                .collect::<Vec<_>>();
+            match parse_sse_frame(&frame) {
+                Ok(Some(payload)) if payload == "[DONE]" => {
+                    self.done = true;
+                    out.extend(self.finish());
+                    break;
+                }
+                Ok(Some(payload)) => {
+                    if let Err(err) = self.ingest_payload(&payload, &mut out) {
+                        self.done = true;
+                        out.push(Err(err));
+                        break;
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    self.done = true;
+                    out.push(Err(err));
+                    break;
+                }
+            }
+        }
+
+        out
+    }
+
+    fn ingest_payload(
+        &mut self,
+        payload: &str,
+        out: &mut Vec<Result<AiStreamEvent, AiError>>,
+    ) -> Result<(), AiError> {
+        let value = serde_json::from_str::<Value>(payload)
+            .map_err(|err| AiError::Stream(format!("invalid SSE JSON: {err}")))?;
+        self.parser.ingest(&value);
+        out.extend(self.parser.drain_events().into_iter().map(Ok));
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Vec<Result<AiStreamEvent, AiError>> {
+        if self.parser.is_finished() {
+            return Vec::new();
+        }
+
+        self.done = true;
+        if let Some(payload) = parse_sse_frame(&self.buffer).transpose() {
+            match payload {
+                Ok(payload) if payload == "[DONE]" => {}
+                Ok(payload) => {
+                    let mut out = Vec::new();
+                    if let Err(err) = self.ingest_payload(&payload, &mut out) {
+                        return vec![Err(err)];
+                    }
+                    if !out.is_empty() {
+                        let mut finished = out;
+                        match self.parser.finish_events() {
+                            Ok(events) => finished.extend(events.into_iter().map(Ok)),
+                            Err(err) => finished.push(Err(err.into_ai_error())),
+                        }
+                        return finished;
+                    }
+                }
+                Err(err) => return vec![Err(err)],
+            }
+        }
+
+        self.parser.finish_events().map_or_else(
+            |err| vec![Err(err.into_ai_error())],
+            |events| events.into_iter().map(Ok).collect(),
+        )
+    }
+}
+
+fn find_frame_end(buffer: &[u8]) -> Option<(usize, usize)> {
+    buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| (index, 2))
+        .or_else(|| {
+            buffer
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|index| (index, 4))
+        })
+}
+
+fn parse_sse_frame(frame: &[u8]) -> Result<Option<String>, AiError> {
+    let text = std::str::from_utf8(frame)
+        .map_err(|err| AiError::Stream(format!("invalid SSE UTF-8: {err}")))?;
+    let data = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((!data.is_empty()).then_some(data))
+}
+
+fn parse_sse_events(body: &str) -> Result<Vec<AiStreamEvent>, ProviderError> {
+    let mut state = ParseState::default();
+    for payload in sse_payloads(body) {
+        if payload == "[DONE]" {
+            break;
+        }
+        let value = serde_json::from_str::<Value>(&payload)
+            .map_err(|err| ProviderError::Stream(format!("invalid SSE JSON: {err}")))?;
+        state.ingest(&value);
+    }
+    state.finish_events()
+}
+
+fn sse_payloads(body: &str) -> impl Iterator<Item = String> + '_ {
+    body.split("\n\n").filter_map(|chunk| {
+        let data = chunk
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("\n");
+        (!data.is_empty()).then_some(data)
+    })
+}
+
+struct ParseState {
+    events: Vec<AiStreamEvent>,
+    started: bool,
+    tool_args: BTreeMap<String, String>,
+    tool_index_ids: BTreeMap<u64, String>,
+    last_stop_reason: StopReason,
+    usage: Option<TokenUsage>,
+    finished: bool,
+}
+
+impl Default for ParseState {
+    fn default() -> Self {
+        Self {
+            events: Vec::new(),
+            started: false,
+            tool_args: BTreeMap::new(),
+            tool_index_ids: BTreeMap::new(),
+            last_stop_reason: StopReason::EndTurn,
+            usage: None,
+            finished: false,
+        }
+    }
+}
+
+impl ParseState {
+    fn ingest(&mut self, value: &Value) {
+        self.ensure_started(value);
+        if let Some(usage) = value.get("usage") {
+            self.usage = token_usage(usage);
+        }
+
+        let Some(choice) = value
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+        else {
+            return;
+        };
+
+        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            self.last_stop_reason = stop_reason(reason);
+        }
+        if let Some(delta) = choice.get("delta") {
+            self.ingest_delta(delta);
+        }
+    }
+
+    fn drain_events(&mut self) -> Vec<AiStreamEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    const fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    fn ensure_started(&mut self, value: &Value) {
+        if self.started {
+            return;
+        }
+        let id = value
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("message")
+            .to_owned();
+        self.events.push(AiStreamEvent::MessageStart { id });
+        self.started = true;
+    }
+
+    fn ingest_delta(&mut self, delta: &Value) {
+        if let Some(text) = delta.get("content").and_then(Value::as_str)
+            && !text.is_empty()
+        {
+            self.events.push(AiStreamEvent::TextDelta {
+                text: text.to_owned(),
+            });
+        }
+
+        let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) else {
+            return;
+        };
+
+        for tool_call in tool_calls {
+            self.ingest_tool_call(tool_call);
+        }
+    }
+
+    fn ingest_tool_call(&mut self, tool_call: &Value) {
+        let index = tool_call
+            .get("index")
+            .and_then(Value::as_u64)
+            .unwrap_or(self.tool_index_ids.len() as u64);
+        let existing_id = self.tool_index_ids.get(&index).cloned();
+        let id = tool_call
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or(existing_id)
+            .unwrap_or_else(|| format!("tool-{index}"));
+        self.tool_index_ids.insert(index, id.clone());
+
+        let function = tool_call.get("function").unwrap_or(&Value::Null);
+        if let Some(name) = function.get("name").and_then(Value::as_str) {
+            self.events.push(AiStreamEvent::ToolCallStart {
+                id: id.clone(),
+                name: name.to_owned(),
+            });
+        }
+        if let Some(fragment) = function.get("arguments").and_then(Value::as_str) {
+            self.tool_args
+                .entry(id.clone())
+                .or_default()
+                .push_str(fragment);
+            self.events.push(AiStreamEvent::ToolCallArgsDelta {
+                id,
+                json_fragment: fragment.to_owned(),
+            });
+        }
+    }
+
+    fn finish_events(&mut self) -> Result<Vec<AiStreamEvent>, ProviderError> {
+        if self.finished {
+            return Ok(Vec::new());
+        }
+        self.finished = true;
+
+        for (id, arguments) in &self.tool_args {
+            let parsed = serde_json::from_str(arguments)
+                .map_err(|err| ProviderError::Stream(format!("invalid tool arguments: {err}")))?;
+            self.events.push(AiStreamEvent::ToolCallEnd {
+                id: id.clone(),
+                arguments: parsed,
+            });
+        }
+
+        if self.started {
+            self.events.push(AiStreamEvent::MessageEnd {
+                stop_reason: self.last_stop_reason.clone(),
+                usage: self.usage.clone(),
+            });
+        }
+
+        Ok(self.drain_events())
+    }
+}
+
+fn token_usage(value: &Value) -> Option<TokenUsage> {
+    Some(TokenUsage {
+        input_tokens: u32::try_from(value.get("prompt_tokens")?.as_u64()?).ok()?,
+        output_tokens: u32::try_from(value.get("completion_tokens")?.as_u64()?).ok()?,
+    })
+}
+
+fn rounded_f64(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
+}
+
+fn stop_reason(reason: &str) -> StopReason {
+    match reason {
+        "tool_calls" | "function_call" => StopReason::ToolUse,
+        "length" => StopReason::MaxTokens,
+        "content_filter" => StopReason::Error,
+        _ => StopReason::EndTurn,
+    }
+}

@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentMessage, AgentToolCall};
+use crate::{AgentMessage, AgentToolCall, ToolResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum StopReason {
@@ -51,6 +51,18 @@ pub enum AgentEvent {
     ToolCallFinished {
         turn: u32,
         tool_call: AgentToolCall,
+    },
+    ToolExecutionStarted {
+        turn: u32,
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    ToolExecutionFinished {
+        turn: u32,
+        id: String,
+        name: String,
+        result: ToolResult,
     },
     MessageAppended {
         message: AgentMessage,

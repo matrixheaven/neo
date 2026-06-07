@@ -15,7 +15,9 @@ xtask maintenance commands
 ## Implemented Today
 
 - `neo-ai` defines provider-neutral request, message, model, capability, tool, and stream event types.
+- `neo-ai` defines request options, environment key helpers, and a small model registry.
 - `neo-ai::providers::fake::FakeModelClient` records requests and replays stream events for tests.
+- `neo-agent-core` contains a runtime turn loop, fake harness, permissions, built-in tools, and JSONL session helpers.
 - `neo-agent` exposes the initial command-line surface.
 - `xtask check` verifies the stable developer tooling slice and can validate docs links.
 
@@ -28,6 +30,9 @@ xtask maintenance commands
 5. Stream events are normalized as `AiStreamEvent` values.
 6. Tool calls are authorized, executed, and returned as `ChatMessage::ToolResult`.
 7. Session events are persisted so `resume` can rebuild conversation and tool state.
+
+The current Rust surface implements parts of this flow. See [Gap Map](gap/INDEX.md)
+for the module-by-module parity status.
 
 ## Design Principles
 

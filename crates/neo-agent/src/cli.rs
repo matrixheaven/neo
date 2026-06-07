@@ -6,6 +6,9 @@ pub struct Cli {
     #[arg(long, global = true, env = "NEO_MODEL")]
     pub model: Option<String>,
 
+    #[arg(long, global = true, env = "NEO_PROVIDER")]
+    pub provider: Option<String>,
+
     #[arg(long, global = true, env = "NEO_API_BASE")]
     pub api_base: Option<String>,
 

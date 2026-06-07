@@ -24,6 +24,9 @@ struct CheckOptions {
     /// Validate local links in docs and examples Markdown files.
     #[arg(long)]
     docs: bool,
+    /// Run full workspace checks instead of the stable xtask gate.
+    #[arg(long)]
+    workspace: bool,
     /// Run only the xtask package checks.
     #[arg(long)]
     quick: bool,
@@ -69,7 +72,7 @@ fn check(options: &CheckOptions) -> Result<()> {
 }
 
 fn check_steps(options: &CheckOptions) -> Vec<CommandStep> {
-    if options.quick {
+    if !options.workspace || options.quick {
         vec![
             CommandStep::new("cargo", &["fmt", "-p", "xtask", "--check"]),
             CommandStep::new(
@@ -217,8 +220,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_check_runs_workspace_gate() {
+    fn default_check_runs_xtask_gate() {
         let steps = check_steps(&CheckOptions::default());
+
+        assert_eq!(
+            steps,
+            vec![
+                CommandStep::new("cargo", &["fmt", "-p", "xtask", "--check"]),
+                CommandStep::new(
+                    "cargo",
+                    &[
+                        "clippy",
+                        "-p",
+                        "xtask",
+                        "--all-targets",
+                        "--",
+                        "-D",
+                        "warnings"
+                    ]
+                ),
+                CommandStep::new("cargo", &["test", "-p", "xtask"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_check_opts_into_workspace_gate() {
+        let steps = check_steps(&CheckOptions {
+            workspace: true,
+            ..CheckOptions::default()
+        });
 
         assert_eq!(
             steps,

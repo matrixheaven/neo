@@ -2,10 +2,12 @@ use futures::StreamExt;
 use neo_agent_core::harness::FakeHarness;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentToolCall, Content,
-    StopReason, Tool, ToolContext, ToolFuture, ToolRegistry, ToolResult,
+    QueueMode, StopReason, Tool, ToolContext, ToolExecutionMode, ToolFuture, ToolRegistry,
+    ToolResult,
 };
 use neo_ai::{AiStreamEvent, ToolSpec};
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 
 #[tokio::test]
 async fn runtime_streams_one_turn_text_and_updates_context() {
@@ -244,6 +246,376 @@ async fn runtime_executes_tool_call_and_continues_until_end_turn() {
     ));
 }
 
+#[tokio::test]
+async fn runtime_drains_queued_steering_before_followups() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "first".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "second".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_3".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "third".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model())
+            .with_queue_modes(QueueMode::OneAtATime, QueueMode::All),
+        harness.client(),
+    );
+    let mut context = AgentContext::new();
+    context.queue_steering_message(AgentMessage::user_text("steer one"));
+    context.queue_steering_message(AgentMessage::user_text("steer two"));
+    context.queue_follow_up_message(AgentMessage::user_text("follow"));
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("start"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("queued run should succeed");
+
+    let appended = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::MessageAppended { message } => Some(message.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        appended,
+        vec![
+            AgentMessage::user_text("steer one"),
+            AgentMessage::assistant([Content::text("first")], Vec::new(), StopReason::EndTurn),
+            AgentMessage::user_text("steer two"),
+            AgentMessage::assistant([Content::text("second")], Vec::new(), StopReason::EndTurn),
+            AgentMessage::user_text("follow"),
+            AgentMessage::assistant([Content::text("third")], Vec::new(), StopReason::EndTurn),
+        ]
+    );
+    assert_eq!(context.pending_steering_len(), 0);
+    assert_eq!(context.pending_follow_up_len(), 0);
+    assert_eq!(harness.requests().len(), 3);
+    assert!(matches!(
+        harness.requests()[0].messages.last(),
+        Some(neo_ai::ChatMessage::User { content }) if matches!(
+            content.first(),
+            Some(neo_ai::ContentPart::Text { text }) if text == "steer one"
+        )
+    ));
+    assert!(matches!(
+        harness.requests()[1].messages.last(),
+        Some(neo_ai::ChatMessage::User { content }) if matches!(
+            content.first(),
+            Some(neo_ai::ContentPart::Text { text }) if text == "steer two"
+        )
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnFinished {
+            turn: 3,
+            stop_reason: StopReason::EndTurn,
+        })
+    ));
+}
+
+#[tokio::test]
+async fn runtime_applies_context_transform_before_model_request() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::MessageStart {
+            id: "msg_1".to_owned(),
+        },
+        AiStreamEvent::TextDelta {
+            text: "trimmed".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model()).with_context_transform(|messages| {
+            messages
+                .iter()
+                .filter(|message| {
+                    !matches!(
+                        message,
+                        AgentMessage::User { content }
+                            if content.iter().any(|part| part.as_text() == Some("drop"))
+                    )
+                })
+                .cloned()
+                .collect()
+        }),
+        harness.client(),
+    );
+    let mut context = AgentContext::new();
+    context.append_message(AgentMessage::user_text("drop"));
+
+    runtime
+        .run_turn(&mut context, AgentMessage::user_text("keep"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert_eq!(harness.requests()[0].messages.len(), 1);
+    assert!(matches!(
+        &harness.requests()[0].messages[0],
+        neo_ai::ChatMessage::User { content } if matches!(
+            content.first(),
+            Some(neo_ai::ContentPart::Text { text }) if text == "keep"
+        )
+    ));
+    assert_eq!(context.messages()[0], AgentMessage::user_text("drop"));
+    assert_eq!(context.messages()[1], AgentMessage::user_text("keep"));
+}
+
+#[tokio::test]
+async fn runtime_emits_tool_execution_events_and_honors_block_and_terminate_hooks() {
+    let harness = blocking_then_terminating_tool_harness();
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools.register(RecordingEchoTool {
+        executed: Arc::clone(&executed),
+    });
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_execution_mode(ToolExecutionMode::Sequential)
+            .with_before_tool_call(|call| {
+                if call
+                    .arguments
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("blocked")
+                {
+                    Some(ToolResult::error("blocked by policy").terminate())
+                } else {
+                    None
+                }
+            })
+            .with_after_tool_call(|call, mut result| {
+                if call
+                    .arguments
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("stop")
+                {
+                    result = result.terminate();
+                }
+                result
+            }),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("call tools"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("tool loop should succeed");
+
+    assert_eq!(
+        *executed.lock().expect("executed lock poisoned"),
+        vec!["stop".to_owned()]
+    );
+    assert!(events.contains(&AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        name: "echo".to_owned(),
+        arguments: json!({ "text": "blocked" }),
+    }));
+    assert!(events.contains(&AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        name: "echo".to_owned(),
+        result: ToolResult::error("blocked by policy").terminate(),
+    }));
+    assert!(events.contains(&AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool_2".to_owned(),
+        name: "echo".to_owned(),
+        result: ToolResult::ok("stop").terminate(),
+    }));
+    assert_eq!(harness.requests().len(), 1);
+    assert_eq!(
+        context.messages()[2],
+        AgentMessage::tool_result(
+            "tool_1",
+            "echo",
+            vec![Content::text("blocked by policy")],
+            true
+        )
+    );
+    assert_eq!(
+        context.messages()[3],
+        AgentMessage::tool_result("tool_2", "echo", vec![Content::text("stop")], false)
+    );
+}
+
+fn blocking_then_terminating_tool_harness() -> FakeHarness {
+    FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "text": "blocked" }),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_2".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_2".to_owned(),
+                arguments: json!({ "text": "stop" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "should not run".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ])
+}
+
+#[tokio::test]
+async fn runtime_parallel_tool_mode_finishes_by_completion_but_appends_in_source_order() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "sleep_echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "text": "slow", "delay_ms": 40 }),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_2".to_owned(),
+                name: "sleep_echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_2".to_owned(),
+                arguments: json!({ "text": "fast", "delay_ms": 0 }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools.register(SleepEchoTool);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_execution_mode(ToolExecutionMode::Parallel),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("call tools"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("tool loop should succeed");
+
+    let execution_end_ids = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolExecutionFinished { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(execution_end_ids, vec!["tool_2", "tool_1"]);
+
+    let appended_tool_ids = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::MessageAppended {
+                message: AgentMessage::ToolResult { tool_call_id, .. },
+            } => Some(tool_call_id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(appended_tool_ids, vec!["tool_1", "tool_2"]);
+    assert_eq!(
+        context.messages()[2],
+        AgentMessage::tool_result("tool_1", "sleep_echo", vec![Content::text("slow")], false)
+    );
+    assert_eq!(
+        context.messages()[3],
+        AgentMessage::tool_result("tool_2", "sleep_echo", vec![Content::text("fast")], false)
+    );
+}
+
 struct EchoTool;
 
 impl Tool for EchoTool {
@@ -273,6 +645,96 @@ impl Tool for EchoTool {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default(),
             ))
+        })
+    }
+}
+
+struct RecordingEchoTool {
+    executed: Arc<Mutex<Vec<String>>>,
+}
+
+impl Tool for RecordingEchoTool {
+    fn name(&self) -> &'static str {
+        "echo"
+    }
+
+    fn description(&self) -> &'static str {
+        "Record and echo text."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string" }
+            },
+            "required": ["text"]
+        })
+    }
+
+    fn execute<'a>(&'a self, _ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let text = input
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            self.executed
+                .lock()
+                .expect("executed lock poisoned")
+                .push(text.clone());
+            Ok(ToolResult::ok(text))
+        })
+    }
+}
+
+struct SleepEchoTool;
+
+impl Tool for SleepEchoTool {
+    fn name(&self) -> &'static str {
+        "sleep_echo"
+    }
+
+    fn description(&self) -> &'static str {
+        "Sleep and echo text."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string" },
+                "delay_ms": { "type": "integer" }
+            },
+            "required": ["text", "delay_ms"]
+        })
+    }
+
+    fn execute<'a>(&'a self, _ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let text = input
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let delay_ms = input
+                .get("delay_ms")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default();
+            if delay_ms > 0 {
+                let mut pending_once = true;
+                futures::future::poll_fn(move |cx| {
+                    if pending_once {
+                        pending_once = false;
+                        cx.waker().wake_by_ref();
+                        std::task::Poll::Pending
+                    } else {
+                        std::task::Poll::Ready(())
+                    }
+                })
+                .await;
+            }
+            Ok(ToolResult::ok(text))
         })
     }
 }

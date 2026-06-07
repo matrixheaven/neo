@@ -1,36 +1,54 @@
 # Sessions
 
-Sessions are the durable record that make agent work resumable.
+Sessions are the durable event record that make agent work inspectable and
+eventually resumable.
 
-## Intended Responsibilities
+## Implemented Storage
 
-A session should store:
+`neo-agent-core` currently provides JSONL helpers under
+`neo_agent_core::session`:
 
-- Session id, creation time, and current working directory.
-- User, assistant, and tool-result messages.
-- Normalized provider stream milestones needed for replay.
-- Tool authorization decisions and execution results.
-- Config snapshot needed to explain which provider/model was used.
+- `JsonlSessionWriter::create(path)`
+- `JsonlSessionWriter::open_append(path)`
+- `append_event(&AgentEvent)`
+- `JsonlSessionReader::read_all(path)`
+- `JsonlSessionReader::replay_messages(path)`
+- `replay_messages(events.iter())`
+
+Each line is a serialized `AgentEvent`. `replay_messages` reconstructs
+conversation history from `AgentEvent::MessageAppended` entries.
 
 ## Resume Flow
 
-1. `neo-agent resume <session-id>` asks `neo-agent-core` to load the session.
-2. The runtime reconstructs conversation history as `ChatMessage` values.
-3. Pending or incomplete tool calls are surfaced to the user instead of silently replayed.
-4. New model events append to the same session log.
+The intended flow is:
+
+1. `neo-agent resume <session-id>` resolves the session file from `sessions_dir`.
+2. `JsonlSessionReader` loads event history.
+3. `replay_messages` reconstructs `AgentMessage` values.
+4. The runtime converts those messages into `neo_ai::ChatMessage` values for
+   the next model turn.
+5. Pending or incomplete tool calls are surfaced to the user instead of silently
+   replayed.
 
 ## Storage Expectations
 
-The storage format is not implemented in this slice. The intended constraints are:
+The current constraints are:
 
 - Append-only event records for auditability.
-- A stable schema version in every session file or database row.
 - Human-inspectable data where practical.
-- No secrets in session logs; store provider references, not raw keys.
+- No secrets in session logs; store provider/config references, not raw keys.
+
+Still missing from pi parity:
+
+- Session tree branching.
+- Session names and labels.
+- Compaction and branch summaries.
+- HTML export/share.
+- A stable schema version field.
 
 ## CLI Surface
 
-The `neo-agent` binary already reserves:
+The `neo-agent` binary exposes:
 
 ```bash
 neo sessions list
@@ -38,4 +56,8 @@ neo sessions show <session-id>
 neo resume <session-id>
 ```
 
-These commands currently print placeholders until the session store lands in `neo-agent-core`.
+Session directory defaults to `.neo/sessions` and can be changed with
+`sessions_dir` or `NEO_SESSIONS_DIR`.
+
+See [examples/rust/session_replay.rs](../examples/rust/session_replay.rs) for a
+JSONL replay snippet.

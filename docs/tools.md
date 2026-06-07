@@ -1,6 +1,7 @@
 # Tools
 
-Tools are model-visible capabilities that the runtime can authorize and execute.
+Tools are model-visible capabilities that the runtime can authorize and execute
+inside a workspace.
 
 ## Model-Facing Shape
 
@@ -20,17 +21,39 @@ Use `neo_ai::tool_schema::schema_for<T>()` to generate JSON Schema from small se
 - Use descriptive field names rather than overloaded strings.
 - Return errors as tool results when the model can recover.
 
-## Intended Runtime Boundary
+## Implemented Built-In Tools
 
-The future `neo-agent-core` tool layer should separate:
+`neo_agent_core::ToolRegistry::with_builtin_tools()` currently registers:
+
+| Tool | Arguments | Permission |
+| --- | --- | --- |
+| `read` | `{ "path": "docs/index.md" }` | file read |
+| `list` | `{ "path": "." }` | file read |
+| `grep` | `{ "pattern": "ToolSpec", "path": "crates", "limit": 20 }` | file read |
+| `find` | `{ "pattern": "config", "path": ".", "limit": 20 }` | file read |
+| `write` | `{ "path": "tmp.txt", "content": "hello" }` | file write |
+| `edit` | `{ "path": "tmp.txt", "old": "hello", "new": "hi", "replace_all": false }` | file write |
+| `bash` | `{ "command": "cargo test -p xtask", "timeout_ms": 30000, "max_output_bytes": 65536 }` | shell |
+
+All file paths are resolved inside `ToolContext::workspace_root()`. Attempts to
+escape the workspace fail before execution.
+
+## Runtime Boundary
+
+The `neo-agent-core` tool layer separates:
 
 - `ToolRegistry`: lists available tools and their schemas.
-- `ToolAuthorizer`: approves, denies, or asks before execution.
-- `ToolExecutor`: performs the operation and returns structured output.
-- `ToolAuditLog`: records the request, decision, and result for session replay.
+- `PermissionPolicy`: records `Allow`, `Ask`, or `Deny` for file reads, file
+  writes, and shell.
+- `Tool`: owns schema generation and execution.
+- `ToolResult`: returns text content, error state, and optional details.
 
-This split lets CLI, TUI, and MCP entrypoints share the same policy.
+An interactive ask/approve authorizer is still a gap. Today a tool operation
+executes only when the relevant permission is `Allow`.
 
 ## Example
 
-See [examples/tools/read-file-schema.json](../examples/tools/read-file-schema.json) for the intended shape of a small file-reading tool schema.
+See [examples/tools/read-file-schema.json](../examples/tools/read-file-schema.json)
+for the current `read` tool shape, and
+[examples/rust/tool_schema.rs](../examples/rust/tool_schema.rs) for the Rust
+schema-generation API.

@@ -1,8 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use neo_tui::{
-    ApprovalChoice, ApprovalModal, ApprovalOption, ChatTranscript, InputEvent, PromptState,
-    PromptWidget, StatusWidget, ToolStatus, ToolStatusKind, TranscriptItem, TranscriptWidget,
-    wrap_width,
+    ApprovalChoice, ApprovalModal, ApprovalOption, ChatTranscript, InputEvent, KeyId,
+    KeybindingAction, KeybindingsManager, PromptEdit, PromptState, PromptWidget, SelectItem,
+    SelectListState, StatusWidget, ToolStatus, ToolStatusKind, TranscriptItem, TranscriptView,
+    TranscriptWidget, truncate_width, wrap_width,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Cell};
 
@@ -52,6 +53,53 @@ fn input_event_maps_printable_submit_escape_and_ctrl_c() {
 }
 
 #[test]
+fn keybinding_manager_matches_defaults_overrides_and_conflicts() {
+    let mut manager = KeybindingsManager::default();
+
+    assert!(manager.matches(
+        &KeyId::new("ctrl+b").expect("valid key"),
+        KeybindingAction::EditorCursorLeft
+    ));
+    assert!(manager.matches(
+        &KeyId::new("left").expect("valid key"),
+        KeybindingAction::EditorCursorLeft
+    ));
+    assert!(!manager.matches(
+        &KeyId::new("ctrl+c").expect("valid key"),
+        KeybindingAction::EditorCursorLeft
+    ));
+
+    manager.set_user_bindings([(
+        KeybindingAction::EditorCursorLeft,
+        vec![KeyId::new("alt+h").expect("valid key")],
+    )]);
+
+    assert!(manager.matches(
+        &KeyId::new("alt+h").expect("valid key"),
+        KeybindingAction::EditorCursorLeft
+    ));
+    assert!(!manager.matches(
+        &KeyId::new("left").expect("valid key"),
+        KeybindingAction::EditorCursorLeft
+    ));
+
+    manager.set_user_bindings([
+        (
+            KeybindingAction::EditorCursorLeft,
+            vec![KeyId::new("alt+h").expect("valid key")],
+        ),
+        (
+            KeybindingAction::EditorCursorRight,
+            vec![KeyId::new("alt+h").expect("valid key")],
+        ),
+    ]);
+
+    let conflicts = manager.conflicts();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].key, KeyId::new("alt+h").expect("valid key"));
+}
+
+#[test]
 fn chat_transcript_keeps_order_and_allows_streaming_update() {
     let mut transcript = ChatTranscript::default();
 
@@ -70,6 +118,63 @@ fn chat_transcript_keeps_order_and_allows_streaming_update() {
 }
 
 #[test]
+fn transcript_view_tracks_bottom_and_manual_scroll() {
+    let transcript = ChatTranscript::from_items(
+        (0..8).map(|index| TranscriptItem::notice(format!("line {index}"))),
+    );
+    let mut view = TranscriptView::new();
+
+    let bottom = view.visible_range(&transcript, 3);
+    assert_eq!(bottom, 5..8);
+
+    view.scroll_up(2, &transcript, 3);
+    assert_eq!(view.visible_range(&transcript, 3), 3..6);
+
+    view.scroll_down(1, &transcript, 3);
+    assert_eq!(view.visible_range(&transcript, 3), 4..7);
+
+    view.follow_bottom();
+    assert_eq!(view.visible_range(&transcript, 3), 5..8);
+}
+
+#[test]
+fn prompt_edit_applies_character_and_word_operations() {
+    let mut prompt = PromptState::new("hello world").with_cursor(5);
+
+    assert_eq!(
+        prompt.apply_edit(PromptEdit::Insert(", brave")),
+        Some(", brave".into())
+    );
+    assert_eq!(prompt.text, "hello, brave world");
+    assert_eq!(prompt.cursor, 12);
+
+    assert_eq!(prompt.apply_edit(PromptEdit::MoveWordLeft), None);
+    assert_eq!(prompt.cursor, 7);
+
+    assert_eq!(
+        prompt.apply_edit(PromptEdit::DeleteWordForward),
+        Some("brave".into())
+    );
+    assert_eq!(prompt.text, "hello,  world");
+    assert_eq!(prompt.cursor, 7);
+
+    assert_eq!(prompt.apply_edit(PromptEdit::MoveEnd), None);
+    assert_eq!(
+        prompt.apply_edit(PromptEdit::DeleteWordBackward),
+        Some("world".into())
+    );
+    assert_eq!(prompt.text, "hello,  ");
+    assert_eq!(prompt.cursor, 8);
+
+    assert_eq!(
+        prompt.apply_edit(PromptEdit::DeleteToLineStart),
+        Some("hello,  ".into())
+    );
+    assert_eq!(prompt.text, "");
+    assert_eq!(prompt.cursor, 0);
+}
+
+#[test]
 fn wrap_width_preserves_display_width_for_wide_text() {
     let lines = wrap_width("ab界cd🙂ef", 5);
 
@@ -78,6 +183,68 @@ fn wrap_width_preserves_display_width_for_wide_text() {
         lines
             .iter()
             .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 5)
+    );
+}
+
+#[test]
+fn truncate_width_is_display_width_safe_and_can_pad() {
+    assert_eq!(truncate_width("abcdef", 4, "...", false), "a...");
+    assert_eq!(truncate_width("abcdef", 4, "", false), "abcd");
+
+    let truncated = truncate_width("ab界🙂cd", 6, "..", true);
+    assert_eq!(unicode_width::UnicodeWidthStr::width(truncated.as_str()), 6);
+    assert!(truncated.contains(".."));
+}
+
+#[test]
+fn wrap_width_breaks_long_words_and_keeps_blank_lines() {
+    let lines = wrap_width("alpha\n\nsuperwide", 4);
+
+    assert_eq!(lines[0], "alph");
+    assert_eq!(lines[1], "a");
+    assert_eq!(lines[2], "");
+    assert!(
+        lines
+            .iter()
+            .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 4)
+    );
+}
+
+#[test]
+fn select_list_filters_wraps_and_reports_visible_window() {
+    let mut list = SelectListState::new(
+        [
+            SelectItem::new("open", "Open", Some("Open a file")),
+            SelectItem::new("close", "Close", Some("Close the active file")),
+            SelectItem::new("copy", "Copy", Some("Copy selection")),
+            SelectItem::new("commit", "Commit", Some("Commit staged changes")),
+        ],
+        2,
+    );
+
+    list.set_filter("c");
+    assert_eq!(list.filtered_len(), 3);
+    assert_eq!(list.selected_item().expect("selected").value, "close");
+
+    list.move_down();
+    assert_eq!(list.selected_item().expect("selected").value, "copy");
+    assert_eq!(list.visible_range(), 0..2);
+
+    list.move_down();
+    assert_eq!(list.selected_item().expect("selected").value, "commit");
+    assert_eq!(list.visible_range(), 1..3);
+
+    list.move_down();
+    assert_eq!(list.selected_item().expect("selected").value, "close");
+
+    let lines = list.render_lines(18);
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].contains("> Close"));
+    assert!(lines[2].contains("(1/3)"));
+    assert!(
+        lines
+            .iter()
+            .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 18)
     );
 }
 

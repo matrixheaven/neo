@@ -67,3 +67,32 @@ fn model_registry_replaces_existing_model_without_moving_default() {
     assert_eq!(registry.list(), vec![replacement.clone(), second]);
     assert_eq!(registry.default_model(), Some(&replacement));
 }
+
+#[test]
+fn model_registry_can_seed_common_builtin_chat_models() {
+    let registry = ModelRegistry::seeded();
+
+    assert!(registry.get("openai", "gpt-4.1").is_some());
+    assert!(registry.get("anthropic", "claude-sonnet-4-5").is_some());
+    assert!(registry.get("google", "gemini-2.5-pro").is_some());
+    assert_eq!(
+        registry.default_model().map(|model| model.model.as_str()),
+        Some("gpt-4.1")
+    );
+}
+
+#[test]
+fn model_registry_seed_helper_deduplicates_existing_models() {
+    let mut registry = ModelRegistry::new();
+    registry.register(model("openai", "gpt-4.1", ModelCapabilities::chat()));
+
+    registry.register_builtin_models();
+
+    let openai_gpt_41 = registry
+        .list()
+        .into_iter()
+        .filter(|model| model.provider.0 == "openai" && model.model == "gpt-4.1")
+        .count();
+    assert_eq!(openai_gpt_41, 1);
+    assert!(registry.get("openai", "gpt-4o-mini").is_some());
+}

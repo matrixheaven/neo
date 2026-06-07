@@ -1,15 +1,13 @@
-# Minimal Neo config example.
+# Minimal Neo project config example for .neo/config.toml.
 
-[providers.fake]
-api = "local"
-default_model = "fake-small"
-api_key_env = ""
+default_provider = "fake"
+default_model = "fake"
+sessions_dir = ".neo/sessions"
 
-[models.fake-small]
-provider = "fake"
-streaming = true
-tools = true
-images = false
-reasoning = false
-embeddings = false
-max_context_tokens = 8192
+[permissions]
+file_read = "Allow"
+file_write = "Ask"
+shell = "Ask"
+
+[defaults]
+mode = "interactive"

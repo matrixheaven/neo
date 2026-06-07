@@ -1,7 +1,7 @@
 use futures::StreamExt;
 use neo_ai::{
     AiStreamEvent, ApiKind, ChatRequest, ModelCapabilities, ModelClient, ModelSpec, ProviderId,
-    StopReason, providers::fake::FakeModelClient,
+    RequestOptions, StopReason, providers::fake::FakeModelClient,
 };
 
 fn request() -> ChatRequest {
@@ -14,8 +14,7 @@ fn request() -> ChatRequest {
         },
         messages: Vec::new(),
         tools: Vec::new(),
-        temperature: None,
-        max_tokens: None,
+        options: RequestOptions::default(),
     }
 }
 

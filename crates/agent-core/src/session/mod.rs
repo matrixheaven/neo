@@ -4,7 +4,7 @@ use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 
-use crate::{AgentEvent, AgentMessage};
+use crate::{AgentContext, AgentEvent, AgentMessage};
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -93,6 +93,11 @@ impl JsonlSessionReader {
     ) -> Result<Vec<AgentMessage>, SessionError> {
         let events = Self::read_all(path).await?;
         Ok(replay_messages(events.iter()))
+    }
+
+    pub async fn replay_context(path: impl AsRef<Path>) -> Result<AgentContext, SessionError> {
+        let events = Self::read_all(path).await?;
+        Ok(AgentContext::from_replay(events.iter()))
     }
 }
 

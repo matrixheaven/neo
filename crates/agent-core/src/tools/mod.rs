@@ -146,6 +146,7 @@ pub struct ToolResult {
     pub content: String,
     pub is_error: bool,
     pub details: Option<serde_json::Value>,
+    pub terminate: bool,
 }
 
 impl ToolResult {
@@ -155,6 +156,7 @@ impl ToolResult {
             content: content.into(),
             is_error: false,
             details: None,
+            terminate: false,
         }
     }
 
@@ -164,12 +166,19 @@ impl ToolResult {
             content: content.into(),
             is_error: true,
             details: None,
+            terminate: false,
         }
     }
 
     #[must_use]
     pub fn with_details(mut self, details: serde_json::Value) -> Self {
         self.details = Some(details);
+        self
+    }
+
+    #[must_use]
+    pub const fn terminate(mut self) -> Self {
+        self.terminate = true;
         self
     }
 }

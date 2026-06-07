@@ -4,11 +4,52 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Clear, Widget},
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     ApprovalModal, ChatTranscript, PromptState, ToolStatus, ToolStatusKind, TranscriptItem,
 };
+
+#[must_use]
+pub fn visible_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+#[must_use]
+pub fn truncate_width(text: &str, max_width: usize, ellipsis: &str, pad: bool) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let text_width = visible_width(text);
+    if text_width <= max_width {
+        if pad {
+            let mut padded = text.to_string();
+            padded.push_str(&" ".repeat(max_width - text_width));
+            return padded;
+        }
+        return text.to_string();
+    }
+
+    let ellipsis_width = visible_width(ellipsis);
+    if ellipsis_width >= max_width {
+        let clipped = clip_width(ellipsis, max_width);
+        if pad {
+            let clipped_width = visible_width(&clipped);
+            return format!("{clipped}{}", " ".repeat(max_width - clipped_width));
+        }
+        return clipped;
+    }
+
+    let prefix_width = max_width - ellipsis_width;
+    let prefix = clip_width(text, prefix_width);
+    let mut truncated = format!("{prefix}{ellipsis}");
+    if pad {
+        let truncated_width = visible_width(&truncated);
+        truncated.push_str(&" ".repeat(max_width - truncated_width));
+    }
+    truncated
+}
 
 #[must_use]
 pub fn wrap_width(text: &str, max_width: usize) -> Vec<String> {
@@ -17,16 +58,25 @@ pub fn wrap_width(text: &str, max_width: usize) -> Vec<String> {
     }
 
     let mut lines = Vec::new();
+    for logical_line in text.split('\n') {
+        if logical_line.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        wrap_single_line(logical_line, max_width, &mut lines);
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn wrap_single_line(text: &str, max_width: usize, lines: &mut Vec<String>) {
     let mut current = String::new();
     let mut current_width = 0;
 
     for character in text.chars() {
-        if character == '\n' {
-            lines.push(std::mem::take(&mut current));
-            current_width = 0;
-            continue;
-        }
-
         let character_width = character.width().unwrap_or(0);
         if current_width > 0 && current_width + character_width > max_width {
             lines.push(std::mem::take(&mut current));
@@ -35,13 +85,16 @@ pub fn wrap_width(text: &str, max_width: usize) -> Vec<String> {
 
         current.push(character);
         current_width += character_width;
+
+        if current_width >= max_width {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
     }
 
-    if !current.is_empty() || lines.is_empty() {
+    if !current.is_empty() {
         lines.push(current);
     }
-
-    lines
 }
 
 pub struct TranscriptWidget<'a> {

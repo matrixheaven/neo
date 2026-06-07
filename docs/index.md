@@ -6,11 +6,12 @@ Neo is a Rust-native coding-agent workspace. The repository is intentionally spl
 
 - [Quickstart](quickstart.md) - run the current CLI and development checks.
 - [Architecture](architecture.md) - crate boundaries and request flow.
-- [Configuration](config.md) - intended config model and precedence.
-- [Providers](providers.md) - model/provider abstraction and capability flags.
-- [Tools](tools.md) - tool schema conventions and execution boundary.
-- [Sessions](sessions.md) - intended durable session and resume model.
+- [Configuration](config.md) - current `.neo/config.toml`, environment, and CLI override model.
+- [Providers](providers.md) - model/provider abstraction, request options, registry, and fake client.
+- [Tools](tools.md) - implemented built-in tools, schemas, permissions, and runtime boundary.
+- [Sessions](sessions.md) - JSONL event persistence and current resume expectations.
 - [MCP](mcp.md) - conceptual Model Context Protocol interface.
+- [Gap Map](gap/INDEX.md) - module-by-module pi parity map.
 
 ## Repository Map
 
@@ -23,4 +24,7 @@ Neo is a Rust-native coding-agent workspace. The repository is intentionally spl
 
 ## Stability Notes
 
-The project is early-stage. Some crates are skeletal while other workers build adjacent pieces. Documentation in this directory labels planned behavior as intended, and Rust stubs avoid depending on unstable runtime APIs.
+The project is early-stage and other workers may be changing crate APIs while
+docs are updated. Documentation in this directory separates implemented Rust
+surface from pi-inspired future behavior. Use the [gap map](gap/INDEX.md) when
+deciding whether a missing capability is a docs omission or a code gap.
