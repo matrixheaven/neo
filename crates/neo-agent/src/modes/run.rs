@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
 
 use anyhow::Context;
 use futures::StreamExt;
-use neo_agent_core::session::JsonlSessionWriter;
+use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter};
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, CompactionSettings, Content,
     McpHttpConfig, McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter,
@@ -219,20 +219,78 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
     let mut writer = JsonlSessionWriter::create(&session_path)
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
+    let (user_message, events) = append_user_event(prompt, &mut writer).await?;
+    let runtime = runtime_for_config(config).await?;
+    finish_prompt_turn(
+        user_message,
+        AgentContext::new(),
+        &mut writer,
+        runtime,
+        events,
+    )
+    .await
+}
 
-    let user_message = AgentMessage::user_text(prompt.clone());
+pub async fn run_prompt_in_session(
+    session_id: &str,
+    prompt: &[String],
+    config: &AppConfig,
+) -> anyhow::Result<PromptTurn> {
+    let prompt = prompt.join(" ");
+    let session_path = session_commands::session_path(session_id, config)?;
+    let context = JsonlSessionReader::replay_context(&session_path)
+        .await
+        .with_context(|| format!("failed to replay session {}", session_path.display()))?;
+    let mut writer = JsonlSessionWriter::open_append(&session_path)
+        .await
+        .with_context(|| format!("failed to append session {}", session_path.display()))?;
+    let (user_message, events) = append_user_event(prompt, &mut writer).await?;
+    let runtime = runtime_for_config(config).await?;
+    finish_prompt_turn(user_message, context, &mut writer, runtime, events).await
+}
+
+async fn runtime_for_config(config: &AppConfig) -> anyhow::Result<AgentRuntime> {
+    let model = resolve_model(config)?;
+    let client = resolve_model_client(config, &model)?;
+    let tools = tool_registry_for_config(config).await?;
+    Ok(AgentRuntime::with_tools(
+        agent_config_for_app(model, config)?,
+        client,
+        tools,
+    ))
+}
+
+#[cfg(test)]
+async fn run_prompt_with_runtime(
+    prompt: String,
+    context: AgentContext,
+    writer: &mut JsonlSessionWriter,
+    runtime: AgentRuntime,
+) -> anyhow::Result<PromptTurn> {
+    let (user_message, events) = append_user_event(prompt, writer).await?;
+    finish_prompt_turn(user_message, context, writer, runtime, events).await
+}
+
+async fn append_user_event(
+    prompt: String,
+    writer: &mut JsonlSessionWriter,
+) -> anyhow::Result<(AgentMessage, Vec<AgentEvent>)> {
+    let user_message = AgentMessage::user_text(prompt);
     let user_event = AgentEvent::MessageAppended {
         message: user_message.clone(),
     };
     writer.append_event(&user_event).await?;
     writer.flush().await?;
+    Ok((user_message, vec![user_event]))
+}
 
-    let model = resolve_model(config)?;
-    let client = resolve_model_client(config, &model)?;
-    let tools = tool_registry_for_config(config).await?;
-    let runtime = AgentRuntime::with_tools(agent_config_for_app(model, config)?, client, tools);
-    let mut context = AgentContext::new();
-    let mut events = vec![user_event];
+async fn finish_prompt_turn(
+    user_message: AgentMessage,
+    mut context: AgentContext,
+    writer: &mut JsonlSessionWriter,
+    runtime: AgentRuntime,
+    mut events: Vec<AgentEvent>,
+) -> anyhow::Result<PromptTurn> {
     let mut assistant_text = String::new();
     let turn_events = runtime
         .run_turn(&mut context, user_message.clone())
@@ -460,12 +518,19 @@ fn message_text(message: &AgentMessage) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, sync::Arc};
 
-    use neo_agent_core::{CompactionSettings, PermissionPolicy, QueueMode, ToolExecutionMode};
-    use neo_ai::{ApiKind, ModelCapabilities, ModelSpec, ProviderId};
+    use neo_agent_core::{
+        AgentConfig, AgentEvent, AgentMessage, CompactionSettings, Content, PermissionPolicy,
+        QueueMode, StopReason as AgentStopReason, ToolExecutionMode,
+        session::{JsonlSessionReader, JsonlSessionWriter},
+    };
+    use neo_ai::{
+        AiStreamEvent, ApiKind, ChatMessage, ContentPart, ModelCapabilities, ModelSpec, ProviderId,
+        StopReason, providers::fake::FakeModelClient,
+    };
 
-    use super::agent_config_for_app;
+    use super::{agent_config_for_app, run_prompt_with_runtime};
     use crate::config::{AppConfig, Defaults, McpConfig, RuntimeCompactionConfig, RuntimeConfig};
 
     #[test]
@@ -527,5 +592,110 @@ mod tests {
             })
         );
         assert!(agent_config.workspace_root.is_some());
+    }
+
+    #[tokio::test]
+    async fn run_prompt_with_runtime_appends_continuation_to_existing_session_context() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_path = temp.path().join("alpha.jsonl");
+        let mut seed = JsonlSessionWriter::create(&session_path)
+            .await
+            .expect("create session");
+        seed.append_event(&AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("hello"),
+        })
+        .await
+        .expect("append user");
+        seed.append_event(&AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                [Content::text("hi back")],
+                Vec::new(),
+                AgentStopReason::EndTurn,
+            ),
+        })
+        .await
+        .expect("append assistant");
+        seed.append_event(&AgentEvent::TurnFinished {
+            turn: 1,
+            stop_reason: AgentStopReason::EndTurn,
+        })
+        .await
+        .expect("append turn finish");
+        seed.flush().await.expect("flush seed");
+
+        let context = JsonlSessionReader::replay_context(&session_path)
+            .await
+            .expect("replay context");
+        let fake = FakeModelClient::new(vec![
+            AiStreamEvent::MessageStart {
+                id: "msg-2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "continued answer".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]);
+        let runtime =
+            super::AgentRuntime::new(AgentConfig::for_model(fake_model()), Arc::new(fake.clone()));
+        let mut writer = JsonlSessionWriter::open_append(&session_path)
+            .await
+            .expect("append session");
+
+        let turn = run_prompt_with_runtime("continue".to_owned(), context, &mut writer, runtime)
+            .await
+            .expect("run continuation");
+
+        assert_eq!(turn.assistant_text, "continued answer");
+        let requests = fake.requests();
+        assert_eq!(requests.len(), 1);
+        let contents = requests[0]
+            .messages
+            .iter()
+            .map(chat_message_text)
+            .collect::<Vec<_>>();
+        assert_eq!(contents, vec!["hello", "hi back", "continue"]);
+
+        let messages = JsonlSessionReader::replay_messages(&session_path)
+            .await
+            .expect("replay appended messages");
+        assert_eq!(messages.len(), 4);
+        assert!(matches!(
+            &messages[2],
+            AgentMessage::User { content } if content[0].as_text() == Some("continue")
+        ));
+        assert!(matches!(
+            &messages[3],
+            AgentMessage::Assistant { content, .. }
+                if content[0].as_text() == Some("continued answer")
+        ));
+    }
+
+    fn fake_model() -> ModelSpec {
+        ModelSpec {
+            provider: ProviderId("test-provider".to_owned()),
+            model: "test-model".to_owned(),
+            api: ApiKind::Local,
+            capabilities: ModelCapabilities::tool_chat(),
+        }
+    }
+
+    fn chat_message_text(message: &ChatMessage) -> String {
+        let content = match message {
+            ChatMessage::System { content }
+            | ChatMessage::User { content }
+            | ChatMessage::Assistant { content, .. }
+            | ChatMessage::ToolResult { content, .. } => content,
+        };
+        content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => Some(text.as_str()),
+                ContentPart::Image { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
     }
 }

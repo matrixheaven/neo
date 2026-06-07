@@ -52,9 +52,9 @@ The current local replay flow is:
 
 In live interactive TTY mode, `ctrl+r` opens a local session picker backed by
 `SessionMetadataStore::list()` and the configured `sessions_dir`. Selecting a
-session replays its JSONL context into the TUI as a read-only transcript view,
-updates the session label, and blocks new prompt submission from that historical
-view. This avoids pretending that the selected JSONL file will be appended.
+session replays its JSONL context into the TUI, updates the session label, and
+uses that same replayed context for the next prompt. New events from that turn
+are appended to the selected JSONL file.
 
 ## Storage Expectations
 
@@ -70,8 +70,8 @@ Still missing from pi parity:
 - Hosted or model-generated branch summaries beyond local metadata summaries.
 - Model-generated compaction summaries; current compaction is deterministic
   local transcript extraction only.
-- Live continuation that appends new turns to a selected existing JSONL session
-  or creates an explicit fork before continuing.
+- Hosted session tree continuation and explicit fork-before-continue flows
+  beyond local JSONL append.
 
 ## CLI Surface
 

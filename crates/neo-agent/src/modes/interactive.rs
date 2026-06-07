@@ -54,7 +54,20 @@ pub(crate) struct InteractiveController<RunTurn, LoadSession> {
     session_items: Vec<PickerItem>,
     session_list_error: Option<String>,
     load_session: LoadSession,
-    read_only_session_loaded: bool,
+    active_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TurnRequest {
+    pub prompt: Vec<String>,
+    pub session_id: Option<String>,
+}
+
+impl TurnRequest {
+    #[must_use]
+    pub(crate) fn new(prompt: Vec<String>, session_id: Option<String>) -> Self {
+        Self { prompt, session_id }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,7 +95,7 @@ impl LoadedSessionTranscript {
 impl<RunTurn, Fut>
     InteractiveController<RunTurn, fn(String) -> Ready<Result<LoadedSessionTranscript>>>
 where
-    RunTurn: Fn(Vec<String>) -> Fut,
+    RunTurn: Fn(TurnRequest) -> Fut,
     Fut: Future<Output = Result<Vec<AgentEvent>>> + Send,
 {
     #[allow(dead_code)]
@@ -106,7 +119,7 @@ where
 
 impl<RunTurn, Fut, LoadSession, LoadFut> InteractiveController<RunTurn, LoadSession>
 where
-    RunTurn: Fn(Vec<String>) -> Fut,
+    RunTurn: Fn(TurnRequest) -> Fut,
     Fut: Future<Output = Result<Vec<AgentEvent>>> + Send,
     LoadSession: Fn(String) -> LoadFut,
     LoadFut: Future<Output = Result<LoadedSessionTranscript>> + Send,
@@ -127,7 +140,7 @@ where
             session_items,
             session_list_error,
             load_session,
-            read_only_session_loaded: false,
+            active_session_id: None,
         }
     }
 
@@ -317,18 +330,14 @@ where
     }
 
     async fn submit_current_prompt(&mut self) -> Result<()> {
-        if self.read_only_session_loaded {
-            if !self.app.prompt().text.trim().is_empty() {
-                self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                    text: "Read-only session loaded; prompt not submitted".to_owned(),
-                });
-            }
-            return Ok(());
-        }
         let Some(prompt) = self.app.submit_prompt() else {
             return Ok(());
         };
-        let events = (self.run_turn)(vec![prompt]).await?;
+        let events = (self.run_turn)(TurnRequest::new(
+            vec![prompt],
+            self.active_session_id.clone(),
+        ))
+        .await?;
         for event in events {
             self.app.apply_agent_event(event);
         }
@@ -360,7 +369,7 @@ where
             .with_context(|| format!("failed to load session {}", session.value))?;
         self.app
             .load_session_transcript(loaded.label, loaded.notices, loaded.messages);
-        self.read_only_session_loaded = true;
+        self.active_session_id = Some(session.value);
         Ok(())
     }
 
@@ -487,7 +496,7 @@ impl Drop for RawModeGuard {
 pub fn controller_for_config<'a>(
     config: &'a AppConfig,
 ) -> InteractiveController<
-    impl Fn(Vec<String>) -> BoxedTurnFuture<'a> + 'a,
+    impl Fn(TurnRequest) -> BoxedTurnFuture<'a> + 'a,
     impl Fn(String) -> BoxedSessionFuture<'a> + 'a,
 > {
     let session_catalog = session_catalog_for_config(config);
@@ -495,9 +504,14 @@ pub fn controller_for_config<'a>(
         "neo",
         "new",
         format!("{}/{}", config.default_provider, config.default_model),
-        move |prompt| {
+        move |request| {
             let future: BoxedTurnFuture<'a> = Box::pin(async move {
-                let turn = crate::modes::run::run_prompt(&prompt, config).await?;
+                let turn = if let Some(session_id) = request.session_id {
+                    crate::modes::run::run_prompt_in_session(&session_id, &request.prompt, config)
+                        .await?
+                } else {
+                    crate::modes::run::run_prompt(&request.prompt, config).await?
+                };
                 Ok(turn.events)
             });
             future
@@ -513,8 +527,7 @@ pub fn controller_for_config<'a>(
 }
 
 #[allow(dead_code)]
-fn empty_session_loader(mut session_id: String) -> Ready<Result<LoadedSessionTranscript>> {
-    session_id.push_str(" (read-only)");
+fn empty_session_loader(session_id: String) -> Ready<Result<LoadedSessionTranscript>> {
     ready(Ok(LoadedSessionTranscript::new(
         session_id,
         Vec::new(),
@@ -584,7 +597,7 @@ async fn load_session_transcript(
         notices.push(format!("branch summary: {summary}"));
     }
     Ok(LoadedSessionTranscript::new(
-        format!("{session_id} (read-only)"),
+        session_id,
         notices,
         context.messages().to_vec(),
     ))
@@ -635,8 +648,9 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
-            |prompt| async move {
-                assert_eq!(prompt, vec!["hello neo".to_owned()]);
+            |request| async move {
+                assert_eq!(request.prompt, vec!["hello neo".to_owned()]);
+                assert_eq!(request.session_id, None);
                 Ok(vec![
                     AgentEvent::MessageStarted {
                         turn: 1,
@@ -688,8 +702,9 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
-            |prompt| async move {
-                assert_eq!(prompt, vec!["hi".to_owned()]);
+            |request| async move {
+                assert_eq!(request.prompt, vec!["hi".to_owned()]);
+                assert_eq!(request.session_id, None);
                 Ok(vec![
                     AgentEvent::MessageStarted {
                         turn: 1,
@@ -755,7 +770,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
-            |_prompt| async move {
+            |_request| async move {
                 panic!("resize should not submit a turn");
                 #[allow(unreachable_code)]
                 Ok(Vec::<AgentEvent>::new())
@@ -806,7 +821,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
-            |_prompt| async move { Ok(Vec::<AgentEvent>::new()) },
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
 
         for character in "hello brave world".chars() {
@@ -860,7 +875,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
-            |_prompt| async move { Ok(Vec::<AgentEvent>::new()) },
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
         controller
             .app
@@ -949,15 +964,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn event_loop_opens_session_picker_and_loads_read_only_transcript() {
+    async fn event_loop_opens_session_picker_and_continues_selected_transcript() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
         let mut controller = InteractiveController::new_with_sessions(
             "neo",
             "new",
             "openai/gpt-4.1",
-            |_prompt| async move {
-                panic!("read-only loaded sessions should not submit a new turn");
-                #[allow(unreachable_code)]
-                Ok(Vec::<AgentEvent>::new())
+            move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("record request")
+                        .push(request);
+                    Ok(vec![
+                        AgentEvent::MessageStarted {
+                            turn: 2,
+                            id: "assistant-2".to_owned(),
+                        },
+                        AgentEvent::TextDelta {
+                            turn: 2,
+                            text: "continued".to_owned(),
+                        },
+                        AgentEvent::TurnFinished {
+                            turn: 2,
+                            stop_reason: StopReason::EndTurn,
+                        },
+                    ])
+                }
             },
             vec![PickerItem::new(
                 "alpha",
@@ -968,7 +1003,7 @@ mod tests {
             |session_id| async move {
                 assert_eq!(session_id, "alpha");
                 Ok(LoadedSessionTranscript::new(
-                    "alpha (read-only)",
+                    "alpha",
                     ["branch summary: Local branch summary".to_owned()],
                     [
                         AgentMessage::user_text("hello"),
@@ -999,7 +1034,7 @@ mod tests {
             .await
             .expect("session loads");
 
-        assert_eq!(controller.app().session_label(), "alpha (read-only)");
+        assert_eq!(controller.app().session_label(), "alpha");
         assert!(controller.app().focused_overlay().is_none());
         assert!(matches!(
             &controller.app().transcript().items()[0],
@@ -1019,13 +1054,13 @@ mod tests {
         controller
             .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
             .await
-            .expect("read-only submit is handled locally");
+            .expect("continued prompt submits");
+        let requests = requests.lock().expect("recorded requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].prompt, vec!["continue".to_owned()]);
+        assert_eq!(requests[0].session_id.as_deref(), Some("alpha"));
         assert!(controller.app().transcript().items().iter().any(|item| {
-            matches!(
-                item,
-                neo_tui::TranscriptItem::Notice { content }
-                    if content == "Read-only session loaded; prompt not submitted"
-            )
+            matches!(item, neo_tui::TranscriptItem::Assistant { content } if content == "continued")
         }));
     }
 
@@ -1069,7 +1104,7 @@ mod tests {
         let loaded = load_session_transcript("alpha".to_owned(), &config)
             .await
             .expect("load session transcript");
-        assert_eq!(loaded.label, "alpha (read-only)");
+        assert_eq!(loaded.label, "alpha");
         assert_eq!(
             loaded.notices,
             vec!["branch summary: Local branch summary".to_owned()]

@@ -22,12 +22,11 @@ Target: `crates/tui`.
   copy buffer.
 - The live interactive loop opens a local session picker with `ctrl+r`, using
   real `SessionMetadataStore` records prepared by `neo-agent`, and can load a
-  selected JSONL transcript into the TUI as a read-only session view.
+  selected JSONL transcript into the TUI before continuing in that session.
 
 ## Remaining lower-priority gaps
 
 - The Rust crate does not implement the full TypeScript terminal diff renderer,
   image protocols, ANSI-preserving wrapping, autocomplete, stdin buffering,
-  OS/terminal clipboard integration, tab completion, or live continuation that
-  appends new turns to a selected historical session.
+  OS/terminal clipboard integration, or tab completion.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.
