@@ -30,13 +30,14 @@ pub async fn resume(session_id: &str, config: &AppConfig) -> anyhow::Result<Stri
     Ok(format!("session {session_id}\n{transcript}"))
 }
 
-pub fn list_models(config: &AppConfig) -> String {
+pub fn list_models(config: &AppConfig) -> anyhow::Result<String> {
     let providers = provider_registry_for_config(config);
+    let models = model_registry_for_config(config)?;
     let mut out = format!(
         "models:\n- {}/{} (configured default)\n",
         config.default_provider, config.default_model
     );
-    for model in ModelRegistry::seeded().list() {
+    for model in models.list() {
         let marker =
             if model.provider.0 == config.default_provider && model.model == config.default_model {
                 " default"
@@ -62,7 +63,7 @@ pub fn list_models(config: &AppConfig) -> String {
             });
         let _ = writeln!(out, "- {} ({:?}, {status})", provider.id, provider.api);
     }
-    out
+    Ok(out)
 }
 
 fn provider_registry_for_config(config: &AppConfig) -> ProviderRegistry {
@@ -356,7 +357,7 @@ async fn create_session_path(config: &AppConfig) -> anyhow::Result<std::path::Pa
 }
 
 fn resolve_model(config: &AppConfig) -> anyhow::Result<ModelSpec> {
-    ModelRegistry::seeded()
+    model_registry_for_config(config)?
         .get(&config.default_provider, &config.default_model)
         .cloned()
         .with_context(|| {
@@ -365,6 +366,16 @@ fn resolve_model(config: &AppConfig) -> anyhow::Result<ModelSpec> {
                 config.default_provider, config.default_model
             )
         })
+}
+
+fn model_registry_for_config(config: &AppConfig) -> anyhow::Result<ModelRegistry> {
+    let mut registry = ModelRegistry::seeded();
+    for path in &config.model_catalogs {
+        registry
+            .load_catalog_path(path)
+            .map_err(anyhow::Error::from)?;
+    }
+    Ok(registry)
 }
 
 fn resolve_model_client(
@@ -427,6 +438,7 @@ mod tests {
             api_base: None,
             api_key_env: None,
             providers: BTreeMap::new(),
+            model_catalogs: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
             permissions: PermissionPolicy::default(),
             defaults: Defaults {

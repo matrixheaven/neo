@@ -89,7 +89,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
             ConfigCommand::Set { key, value } => config::set(&key, &value),
         },
         Some(Command::Models { command }) => match command {
-            ModelCommand::List => Ok(modes::run::list_models(&config)),
+            ModelCommand::List => modes::run::list_models(&config),
         },
         Some(Command::Mcp { command }) => match command {
             McpCommand::List => Ok(modes::run::list_mcp_servers(&config)),

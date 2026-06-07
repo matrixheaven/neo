@@ -11,7 +11,8 @@
 - `AiStreamEvent` normalizes provider streams into message, text, tool-call,
   completion, and error events.
 - `ModelClient::stream_chat` is the provider adapter trait.
-- `ModelRegistry` stores configured models and a first-registered default.
+- `ModelRegistry` stores configured models, a first-registered default, and
+  strict local JSON catalog loading for existing `ModelSpec` shapes.
 - `ProviderRegistry::production()` stores built-in production provider metadata.
 - `ProviderResolver` resolves registered models to production clients when
   credentials and base URLs are available.
@@ -34,8 +35,8 @@ until the Rust contracts exist.
 
 - Add docs for provider APIs only after modules under `crates/ai/src/providers`
   implement network requests and production resolver support.
-- Add external model catalog docs only after `ModelRegistry` has a loader or
-  generated source of truth.
+- Pi `models.json` compatibility, pricing metadata, generated catalog sources,
+  and provider-native model override formats remain future work.
 - Keep provider credentials environment-only for now; auth-file and OAuth
   flows are future work.
 - Keep request metadata internal-facing. Do not expose provider-native chunk

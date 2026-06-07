@@ -46,6 +46,7 @@ pub struct AppConfig {
     pub api_base: Option<String>,
     pub api_key_env: Option<String>,
     pub providers: BTreeMap<String, ProviderConfig>,
+    pub model_catalogs: Vec<PathBuf>,
     pub sessions_dir: PathBuf,
     pub permissions: PermissionPolicy,
     pub defaults: Defaults,
@@ -152,6 +153,7 @@ struct FileConfig {
     api_base: Option<String>,
     api_key_env: Option<String>,
     providers: Option<BTreeMap<String, ProviderConfig>>,
+    model_catalogs: Option<Vec<PathBuf>>,
     sessions_dir: Option<PathBuf>,
     permissions: Option<PermissionPolicy>,
     defaults: Option<FileDefaults>,
@@ -255,6 +257,12 @@ impl AppConfig {
         let api_key_env = env_api_key
             .or(file_config.api_key_env)
             .or_else(|| provider_api_key_env(&providers, &default_provider));
+        let model_catalogs = file_config
+            .model_catalogs
+            .unwrap_or_default()
+            .into_iter()
+            .map(|path| resolve_project_path(&project_dir, path))
+            .collect();
         let sessions_dir = env_sessions_dir
             .or_else(|| file_config.sessions_dir.map(expand_user_path))
             .unwrap_or_else(|| project_dir.join(CONFIG_DIR).join("sessions"));
@@ -272,6 +280,7 @@ impl AppConfig {
             api_base,
             api_key_env,
             providers,
+            model_catalogs,
             sessions_dir,
             permissions,
             defaults: Defaults { mode },
@@ -301,6 +310,7 @@ pub fn show(config: &AppConfig) -> anyhow::Result<String> {
         api_base: config.api_base.clone(),
         api_key_env: config.api_key_env.clone(),
         providers: (!config.providers.is_empty()).then(|| config.providers.clone()),
+        model_catalogs: (!config.model_catalogs.is_empty()).then(|| config.model_catalogs.clone()),
         sessions_dir: Some(config.sessions_dir.clone()),
         permissions: Some(config.permissions.clone()),
         defaults: Some(FileDefaults {
@@ -410,6 +420,7 @@ fn merge_file_configs(base: FileConfig, layer: FileConfig) -> FileConfig {
         api_base: layer.api_base.or(base.api_base),
         api_key_env: layer.api_key_env.or(base.api_key_env),
         providers: merge_provider_configs(base.providers, layer.providers),
+        model_catalogs: merge_path_lists(base.model_catalogs, layer.model_catalogs),
         sessions_dir: layer.sessions_dir.or(base.sessions_dir),
         permissions: layer.permissions.or(base.permissions),
         defaults: merge_defaults(base.defaults, layer.defaults),
@@ -427,6 +438,24 @@ fn merge_provider_configs(
         (Some(providers), None) | (None, Some(providers)) => Some(providers),
         (Some(mut base), Some(layer)) => {
             base.extend(layer);
+            Some(base)
+        }
+    }
+}
+
+fn merge_path_lists(
+    base: Option<Vec<PathBuf>>,
+    layer: Option<Vec<PathBuf>>,
+) -> Option<Vec<PathBuf>> {
+    match (base, layer) {
+        (None, None) => None,
+        (Some(paths), None) | (None, Some(paths)) => Some(paths),
+        (Some(mut base), Some(layer)) => {
+            for path in layer {
+                if !base.contains(&path) {
+                    base.push(path);
+                }
+            }
             Some(base)
         }
     }
@@ -593,6 +622,15 @@ fn expand_user_path(path: PathBuf) -> PathBuf {
         return path;
     };
     home_dir().map_or(path, |home| home.join(rest))
+}
+
+fn resolve_project_path(project_dir: &Path, path: PathBuf) -> PathBuf {
+    let path = expand_user_path(path);
+    if path.is_absolute() {
+        path
+    } else {
+        project_dir.join(path)
+    }
 }
 
 fn read_file_config(path: &Path) -> anyhow::Result<FileConfig> {

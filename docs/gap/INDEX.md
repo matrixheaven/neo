@@ -9,7 +9,7 @@ whole map.
 
 | Module | Current Neo surface | Pi reference pressure | High-priority gap |
 | --- | --- | --- | --- |
-| [`neo-ai`](neo-ai.md) | Provider-neutral `ChatRequest`, `RequestOptions`, `ModelRegistry`, `ProviderRegistry`, `ProviderResolver`, OpenAI Responses, Anthropic Messages, Google Generative AI, OpenAI-compatible adapters, stream events, tool schemas, test fake provider, and environment key helpers. | `pi-ai` documents broad provider discovery, credential resolution, tool streaming, reasoning, images, and context handoff. | Keep Neo docs focused on implemented Rust contracts and mark unsupported external catalog/auth APIs as future work. |
+| [`neo-ai`](neo-ai.md) | Provider-neutral `ChatRequest`, `RequestOptions`, `ModelRegistry`, strict local JSON model catalogs, `ProviderRegistry`, `ProviderResolver`, OpenAI Responses, Anthropic Messages, Google Generative AI, OpenAI-compatible adapters, stream events, tool schemas, test fake provider, and environment key helpers. | `pi-ai` documents broad provider discovery, credential resolution, tool streaming, reasoning, images, and context handoff. | Keep Neo docs focused on implemented Rust contracts and mark unsupported pi `models.json` compatibility and auth APIs as future work. |
 | [`neo-agent-core`](neo-agent-core.md) | Runtime turn loop, `AgentConfig`, `AgentContext`, normalized events, permissions, built-in workspace tools, MCP adapter/provider boundary with stdio and HTTP/SSE tool/resource transports, JSONL session reader/writer, local session metadata fork/rename, deterministic JSONL compaction, fake harness. | `pi-agent-core` documents richer event lifecycle, hooks, steering, parallel tool execution, and cancellation. | Document implemented event/tool/MCP/session APIs now; leave hooks/steering/parallel execution as explicit gaps. |
 | [`neo-agent`](neo-agent.md) | Clap command surface, project `.neo/config.toml`, user-global `~/.neo/config.toml`, environment overrides, config setters including runtime `AgentConfig` options, provider-backed print/run, sessions commands including fork/rename/summarize/compact/HTML export, skill loading, extension install/update/uninstall plus JSONL RPC calls and status/enable/disable lifecycle, JSONL-backed RPC `get_messages`, models list, MCP server listing, and explicit MCP resource list/read commands. | pi coding-agent docs cover settings, providers, sessions, TUI, MCP/resources, and trust. | Describe actual project/global config, session, extension, and RPC commands while marking hosted trust/marketplace/share gaps explicitly. |
 | [`neo-tui`](tui.md) | Prompt/editor with undo/kill-ring yank, transcript viewport, keybinding, selection/list paging, width-safe rendering primitives, and a live raw-mode keybinding dispatcher for prompt/approval actions. | `pi-tui` has a richer terminal renderer and interaction stack. | Keep TUI docs scoped to implemented primitives and live prompt/overlay actions until diff rendering, images, autocomplete, copy, and tab completion land. |
@@ -19,8 +19,9 @@ whole map.
 
 - OpenAI Responses, Anthropic Messages, Google Generative AI, and
   OpenAI-compatible adapters are wired through `ProviderRegistry::production()`
-  and `ProviderResolver`. External model catalog loading, auth-file/OAuth
-  flows, and local APIs remain catalog/API gaps.
+  and `ProviderResolver`. Strict local JSON model catalogs can extend
+  `ModelRegistry`; pi `models.json` compatibility, auth-file/OAuth flows, and
+  local APIs remain catalog/API gaps.
 - MCP is documented as a runtime boundary. `neo-agent-core` now has the
   adapter/provider abstraction, stdio JSON-RPC process adapter, HTTP/SSE
   JSON-RPC adapter, discovery-to-`ToolSpec` bridge, namespaced `ToolRegistry`
@@ -49,9 +50,9 @@ whole map.
 - Configuration docs now reflect `.neo/config.toml`, `NEO_*` overrides, and
   supported `neo config set` keys without treating deterministic development
   fixtures as production defaults.
-- Providers docs now reflect `ModelSpec`, `RequestOptions`, environment key
-  helpers, production provider resolution, real OpenAI/Anthropic-compatible
-  clients, and the fake test provider.
+- Providers docs now reflect `ModelSpec`, strict local model catalogs,
+  `RequestOptions`, environment key helpers, production provider resolution,
+  real OpenAI/Anthropic-compatible clients, and the fake test provider.
 - Tools docs now list the implemented built-in workspace tools and permissions.
 - Sessions docs now describe JSONL event persistence, local session metadata
   fork/rename, deterministic extractive compaction, and current CLI/session

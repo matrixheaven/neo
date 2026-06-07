@@ -904,6 +904,51 @@ fn models_list_uses_seeded_catalog_without_local_fake() {
 }
 
 #[test]
+fn models_list_loads_project_model_catalogs() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+default_provider = "openrouter"
+default_model = "anthropic/claude-sonnet-4.5"
+model_catalogs = [".neo/models.json"]
+"#,
+    )
+    .expect("write config");
+    fs::write(
+        temp.path().join(".neo/models.json"),
+        r#"
+{
+  "models": [
+    {
+      "provider": "openrouter",
+      "model": "anthropic/claude-sonnet-4.5",
+      "api": "OpenAiCompatible",
+      "capabilities": {
+        "streaming": true,
+        "tools": true,
+        "images": false,
+        "reasoning": true,
+        "embeddings": false,
+        "max_context_tokens": 200000
+      }
+    }
+  ]
+}
+"#,
+    )
+    .expect("write model catalog");
+
+    let mut models = neo();
+    models.current_dir(temp.path()).args(["models", "list"]);
+    let stdout = run(models);
+
+    assert!(stdout.contains("openrouter/anthropic/claude-sonnet-4.5"));
+    assert!(stdout.contains("OpenAiCompatible default"));
+}
+
+#[test]
 fn models_list_applies_provider_specific_api_key_env_status() {
     let temp = TempDir::new().expect("tempdir");
     fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");

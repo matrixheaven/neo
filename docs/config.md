@@ -28,6 +28,7 @@ default_provider = "openai"
 default_model = "gpt-4.1"
 api_key_env = "OPENAI_API_KEY"
 sessions_dir = ".neo/sessions"
+model_catalogs = [".neo/models.json"]
 
 [providers.openai]
 api_key_env = "PROJECT_OPENAI_KEY"
@@ -73,11 +74,12 @@ url = "https://mcp.example.test/rpc"
 `api_key_env` names an environment variable. Provider-specific entries such as
 `[providers.openai].api_key_env` name the environment variable for that provider
 without storing the secret value. Do not write raw API keys into config files.
-`neo-agent` resolves the configured model through `ModelRegistry::seeded()` and
-`ProviderRegistry::production()`. With the built-in defaults, set
-`OPENAI_API_KEY` before running provider-backed commands. Custom
-OpenAI-compatible deployments can override `api_base` and `api_key_env` for the
-selected provider.
+`neo-agent` resolves the configured model through the built-in
+`ModelRegistry::seeded()` entries plus any strict JSON `model_catalogs`, then
+uses `ProviderRegistry::production()` for provider clients. With the built-in
+defaults, set `OPENAI_API_KEY` before running provider-backed commands. Custom
+OpenAI-compatible deployments can add a model catalog entry and override
+`api_base` and `api_key_env` for the selected provider.
 
 User defaults can live in `~/.neo/config.toml`; project `.neo/config.toml`
 overrides them for that workspace.

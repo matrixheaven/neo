@@ -1,5 +1,4 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, fs, path::Path, sync::Arc};
 
 use crate::{
     AiError, ApiKind, ModelCapabilities, ModelClient, ModelSpec, ProviderId,
@@ -8,6 +7,7 @@ use crate::{
         openai_compatible::OpenAiCompatibleClient, openai_responses::OpenAiResponsesClient,
     },
 };
+use serde::Deserialize;
 
 #[derive(Debug, Clone, Default)]
 pub struct ModelRegistry {
@@ -35,6 +35,50 @@ impl ModelRegistry {
         for model in builtin_models() {
             self.register(model);
         }
+    }
+
+    pub fn load_catalog_path(&mut self, path: impl AsRef<Path>) -> Result<(), AiError> {
+        let path = path.as_ref();
+        let source = fs::read_to_string(path).map_err(|err| {
+            AiError::Configuration(format!(
+                "failed to read model catalog {}: {err}",
+                path.display()
+            ))
+        })?;
+        self.load_catalog_str(&source, &path.display().to_string())
+    }
+
+    pub fn load_catalog_str(&mut self, source: &str, label: &str) -> Result<(), AiError> {
+        let catalog: ModelCatalog = serde_json::from_str(source).map_err(|err| {
+            AiError::Configuration(format!("failed to parse model catalog {label}: {err}"))
+        })?;
+        if catalog.models.is_empty() {
+            return Err(AiError::Configuration(format!(
+                "model catalog {label} must define at least one model"
+            )));
+        }
+        for model in &catalog.models {
+            validate_catalog_model(label, model)?;
+        }
+        if let Some(default) = &catalog.default {
+            validate_catalog_default(label, default)?;
+        }
+
+        let mut candidate = self.clone();
+        for model in catalog.models {
+            candidate.register(model);
+        }
+        if let Some(default) = catalog.default {
+            if candidate.get(&default.provider, &default.model).is_none() {
+                return Err(AiError::Configuration(format!(
+                    "model catalog {label} default {}/{} is not registered",
+                    default.provider, default.model
+                )));
+            }
+            candidate.default = Some((default.provider, default.model));
+        }
+        *self = candidate;
+        Ok(())
     }
 
     pub fn register(&mut self, model: ModelSpec) {
@@ -71,6 +115,52 @@ impl ModelRegistry {
         let (provider, model) = self.default.as_ref()?;
         self.get(provider, model)
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ModelCatalog {
+    models: Vec<ModelSpec>,
+    #[serde(default)]
+    default: Option<ModelCatalogDefault>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ModelCatalogDefault {
+    provider: String,
+    model: String,
+}
+
+fn validate_catalog_model(label: &str, model: &ModelSpec) -> Result<(), AiError> {
+    if model.provider.0.trim().is_empty() {
+        return Err(AiError::Configuration(format!(
+            "model catalog {label} provider must not be empty"
+        )));
+    }
+    if model.model.trim().is_empty() {
+        return Err(AiError::Configuration(format!(
+            "model catalog {label} model must not be empty"
+        )));
+    }
+    if model.capabilities.max_context_tokens == Some(0) {
+        return Err(AiError::Configuration(format!(
+            "model catalog {label} max_context_tokens must be greater than 0"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_catalog_default(label: &str, default: &ModelCatalogDefault) -> Result<(), AiError> {
+    if default.provider.trim().is_empty() {
+        return Err(AiError::Configuration(format!(
+            "model catalog {label} default provider must not be empty"
+        )));
+    }
+    if default.model.trim().is_empty() {
+        return Err(AiError::Configuration(format!(
+            "model catalog {label} default model must not be empty"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

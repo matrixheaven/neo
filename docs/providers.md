@@ -17,6 +17,8 @@ test client.
   `AiStreamEvent` values.
 - `ModelRegistry` stores available `ModelSpec` values and exposes the first
   registered model as the default unless replaced by configuration.
+- `ModelRegistry::load_catalog_path` and `ModelRegistry::load_catalog_str` load
+  strict local JSON catalogs that use the existing `ModelSpec` wire shape.
 - `ProviderRegistry::production()` registers the provider catalog used by
   production resolution: OpenAI, Anthropic, Google Generative AI, OpenRouter,
   and Amazon Bedrock credential hints.
@@ -73,6 +75,43 @@ The production resolver requires a registered provider, a supported API kind,
 credentials from the provider's environment-key list, and a base URL. It does
 not resolve `ApiKind::Local` or the fake test provider.
 
+## Local Model Catalogs
+
+Neo supports strict local JSON model catalogs. They extend or replace
+`ModelRegistry::seeded()` entries by `provider` and `model`; they do not
+implement pi `models.json` compatibility, pricing metadata, auth files, or
+provider-native override formats.
+
+```json
+{
+  "models": [
+    {
+      "provider": "openrouter",
+      "model": "anthropic/claude-sonnet-4.5",
+      "api": "OpenAiCompatible",
+      "capabilities": {
+        "streaming": true,
+        "tools": true,
+        "images": false,
+        "reasoning": true,
+        "embeddings": false,
+        "max_context_tokens": 200000
+      }
+    }
+  ],
+  "default": {
+    "provider": "openrouter",
+    "model": "anthropic/claude-sonnet-4.5"
+  }
+}
+```
+
+Catalog loading fails on missing files, invalid JSON, empty model lists, empty
+provider/model strings, zero `max_context_tokens`, or a `default` that does not
+match a registered model. `neo-agent` project config can reference catalog files
+with `model_catalogs = [".neo/models.json"]`; relative paths resolve from the
+project root.
+
 ## Test Provider
 
 `neo_ai::providers::fake::FakeModelClient` is available for tests. It stores
@@ -94,4 +133,6 @@ Do not expose provider-native request or response types to `neo-agent-core`.
 ## Example
 
 See [examples/rust/provider_registry.rs](../examples/rust/provider_registry.rs)
-for a small registry and `RequestOptions` snippet.
+for a small registry and `RequestOptions` snippet, and
+[examples/rust/model_catalog.rs](../examples/rust/model_catalog.rs) for loading
+a local JSON catalog.

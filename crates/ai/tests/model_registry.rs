@@ -100,3 +100,137 @@ fn model_registry_seed_helper_deduplicates_existing_models() {
     assert_eq!(openai_gpt_41, 1);
     assert!(registry.get("openai", "gpt-4o-mini").is_some());
 }
+
+#[test]
+fn model_registry_loads_models_from_json_catalog() {
+    let mut registry = ModelRegistry::seeded();
+
+    registry
+        .load_catalog_str(
+            r#"
+{
+  "models": [
+    {
+      "provider": "openrouter",
+      "model": "anthropic/claude-sonnet-4.5",
+      "api": "OpenAiCompatible",
+      "capabilities": {
+        "streaming": true,
+        "tools": true,
+        "images": false,
+        "reasoning": true,
+        "embeddings": false,
+        "max_context_tokens": 200000
+      }
+    }
+  ],
+  "default": {
+    "provider": "openrouter",
+    "model": "anthropic/claude-sonnet-4.5"
+  }
+}
+"#,
+            "test catalog",
+        )
+        .expect("load model catalog");
+
+    let model = registry
+        .get("openrouter", "anthropic/claude-sonnet-4.5")
+        .expect("catalog model");
+    assert_eq!(model.api, ApiKind::OpenAiCompatible);
+    assert!(model.capabilities.streaming);
+    assert!(model.capabilities.tools);
+    assert!(model.capabilities.reasoning);
+    assert_eq!(model.capabilities.max_context_tokens, Some(200_000));
+    assert_eq!(
+        registry.default_model().map(|model| model.model.as_str()),
+        Some("anthropic/claude-sonnet-4.5")
+    );
+}
+
+#[test]
+fn model_registry_rejects_invalid_json_catalog_entries() {
+    let mut registry = ModelRegistry::new();
+
+    let error = registry
+        .load_catalog_str(
+            r#"
+{
+  "models": [
+    {
+      "provider": "",
+      "model": "broken",
+      "api": "OpenAiCompatible",
+      "capabilities": {
+        "streaming": true,
+        "tools": false,
+        "images": false,
+        "reasoning": false,
+        "embeddings": false
+      }
+    }
+  ]
+}
+"#,
+            "bad catalog",
+        )
+        .expect_err("empty provider should be rejected");
+
+    assert!(error.to_string().contains("provider must not be empty"));
+}
+
+#[test]
+fn model_registry_rejects_unknown_catalog_default() {
+    let mut registry = ModelRegistry::new();
+
+    let error = registry
+        .load_catalog_str(
+            r#"
+{
+  "models": [
+    {
+      "provider": "openrouter",
+      "model": "known",
+      "api": "OpenAiCompatible",
+      "capabilities": {
+        "streaming": true,
+        "tools": false,
+        "images": false,
+        "reasoning": false,
+        "embeddings": false
+      }
+    }
+  ],
+  "default": {
+    "provider": "openrouter",
+    "model": "missing"
+  }
+}
+"#,
+            "bad default catalog",
+        )
+        .expect_err("unknown default should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("catalog default openrouter/missing")
+    );
+}
+
+#[test]
+fn model_registry_reports_missing_catalog_path() {
+    let mut registry = ModelRegistry::new();
+    let missing = std::env::temp_dir().join(format!(
+        "neo-missing-model-catalog-{}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&missing);
+
+    let error = registry
+        .load_catalog_path(&missing)
+        .expect_err("missing catalog path should be rejected");
+
+    assert!(error.to_string().contains("failed to read model catalog"));
+    assert!(error.to_string().contains(&missing.display().to_string()));
+}
