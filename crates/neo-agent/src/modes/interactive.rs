@@ -1,18 +1,23 @@
 use crate::config::AppConfig;
 use std::{
-    future::Future,
+    future::{Future, Ready, ready},
     io::{IsTerminal as _, Stdout, stdout},
     pin::Pin,
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     event, execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use neo_agent_core::AgentEvent;
-use neo_tui::{InputEvent, KeyId, KeybindingAction, KeybindingsManager, NeoTuiApp, PromptEdit};
+use neo_agent_core::{
+    AgentEvent, AgentMessage,
+    session::{JsonlSessionReader, SessionMetadataStore, SessionRecord},
+};
+use neo_tui::{
+    InputEvent, KeyId, KeybindingAction, KeybindingsManager, NeoTuiApp, PickerItem, PromptEdit,
+};
 use ratatui::{
     Terminal,
     backend::{CrosstermBackend, TestBackend},
@@ -20,6 +25,8 @@ use ratatui::{
 };
 
 type BoxedTurnFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<AgentEvent>>> + Send + 'a>>;
+type BoxedSessionFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<LoadedSessionTranscript>> + Send + 'a>>;
 
 pub fn execute(config: &AppConfig) -> String {
     let mut controller = controller_for_config(config);
@@ -40,27 +47,87 @@ pub async fn execute_tty(config: &AppConfig) -> Result<Option<String>> {
     Ok(None)
 }
 
-pub(crate) struct InteractiveController<RunTurn> {
+pub(crate) struct InteractiveController<RunTurn, LoadSession> {
     app: NeoTuiApp,
     keybindings: KeybindingsManager,
     run_turn: RunTurn,
+    session_items: Vec<PickerItem>,
+    session_list_error: Option<String>,
+    load_session: LoadSession,
+    read_only_session_loaded: bool,
 }
 
-impl<RunTurn, Fut> InteractiveController<RunTurn>
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LoadedSessionTranscript {
+    label: String,
+    notices: Vec<String>,
+    messages: Vec<AgentMessage>,
+}
+
+impl LoadedSessionTranscript {
+    #[must_use]
+    pub(crate) fn new(
+        label: impl Into<String>,
+        notices: impl IntoIterator<Item = String>,
+        messages: impl IntoIterator<Item = AgentMessage>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            notices: notices.into_iter().collect(),
+            messages: messages.into_iter().collect(),
+        }
+    }
+}
+
+impl<RunTurn, Fut>
+    InteractiveController<RunTurn, fn(String) -> Ready<Result<LoadedSessionTranscript>>>
 where
     RunTurn: Fn(Vec<String>) -> Fut,
     Fut: Future<Output = Result<Vec<AgentEvent>>> + Send,
 {
+    #[allow(dead_code)]
     pub fn new(
         title: impl Into<String>,
         session_label: impl Into<String>,
         model_label: impl Into<String>,
         run_turn: RunTurn,
     ) -> Self {
+        Self::new_with_sessions(
+            title,
+            session_label,
+            model_label,
+            run_turn,
+            Vec::new(),
+            None,
+            empty_session_loader,
+        )
+    }
+}
+
+impl<RunTurn, Fut, LoadSession, LoadFut> InteractiveController<RunTurn, LoadSession>
+where
+    RunTurn: Fn(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<Vec<AgentEvent>>> + Send,
+    LoadSession: Fn(String) -> LoadFut,
+    LoadFut: Future<Output = Result<LoadedSessionTranscript>> + Send,
+{
+    pub fn new_with_sessions(
+        title: impl Into<String>,
+        session_label: impl Into<String>,
+        model_label: impl Into<String>,
+        run_turn: RunTurn,
+        session_items: Vec<PickerItem>,
+        session_list_error: Option<String>,
+        load_session: LoadSession,
+    ) -> Self {
         Self {
             app: NeoTuiApp::new(title, session_label, model_label),
             keybindings: KeybindingsManager::default(),
             run_turn,
+            session_items,
+            session_list_error,
+            load_session,
+            read_only_session_loaded: false,
         }
     }
 
@@ -75,15 +142,7 @@ where
 
     #[allow(dead_code)]
     pub async fn submit_prompt(&mut self) -> Result<String> {
-        let Some(prompt) = self.app.submit_prompt() else {
-            return Ok(self.render_snapshot());
-        };
-
-        let events = (self.run_turn)(vec![prompt]).await?;
-        for event in events {
-            self.app.apply_agent_event(event);
-        }
-
+        self.submit_current_prompt().await?;
         Ok(self.render_snapshot())
     }
 
@@ -134,13 +193,7 @@ where
                 self.app.prompt_mut().apply_edit(PromptEdit::Insert("\n"));
             }
             InputEvent::Submit => {
-                let Some(prompt) = self.app.submit_prompt() else {
-                    return Ok(false);
-                };
-                let events = (self.run_turn)(vec![prompt]).await?;
-                for event in events {
-                    self.app.apply_agent_event(event);
-                }
+                self.submit_current_prompt().await?;
             }
             InputEvent::Resize { .. } => {}
             InputEvent::Cancel | InputEvent::Interrupt => return Ok(true),
@@ -167,57 +220,11 @@ where
     }
 
     async fn handle_keybinding_action(&mut self, action: KeybindingAction) -> Result<bool> {
+        if self.handle_prompt_keybinding_action(action) {
+            return Ok(false);
+        }
+
         match action {
-            KeybindingAction::EditorCursorLeft => {
-                self.app.prompt_mut().apply_edit(PromptEdit::MoveLeft);
-            }
-            KeybindingAction::EditorCursorRight => {
-                self.app.prompt_mut().apply_edit(PromptEdit::MoveRight);
-            }
-            KeybindingAction::EditorCursorWordLeft => {
-                self.app.prompt_mut().apply_edit(PromptEdit::MoveWordLeft);
-            }
-            KeybindingAction::EditorCursorWordRight => {
-                self.app.prompt_mut().apply_edit(PromptEdit::MoveWordRight);
-            }
-            KeybindingAction::EditorCursorLineStart => {
-                self.app.prompt_mut().apply_edit(PromptEdit::MoveHome);
-            }
-            KeybindingAction::EditorCursorLineEnd => {
-                self.app.prompt_mut().apply_edit(PromptEdit::MoveEnd);
-            }
-            KeybindingAction::EditorDeleteCharBackward => {
-                self.app.prompt_mut().apply_edit(PromptEdit::Backspace);
-            }
-            KeybindingAction::EditorDeleteCharForward => {
-                self.app.prompt_mut().apply_edit(PromptEdit::Delete);
-            }
-            KeybindingAction::EditorDeleteWordBackward => {
-                self.app
-                    .prompt_mut()
-                    .apply_edit(PromptEdit::DeleteWordBackward);
-            }
-            KeybindingAction::EditorDeleteWordForward => {
-                self.app
-                    .prompt_mut()
-                    .apply_edit(PromptEdit::DeleteWordForward);
-            }
-            KeybindingAction::EditorDeleteToLineStart => {
-                self.app
-                    .prompt_mut()
-                    .apply_edit(PromptEdit::DeleteToLineStart);
-            }
-            KeybindingAction::EditorDeleteToLineEnd => {
-                self.app
-                    .prompt_mut()
-                    .apply_edit(PromptEdit::DeleteToLineEnd);
-            }
-            KeybindingAction::EditorYank => {
-                self.app.prompt_mut().apply_edit(PromptEdit::Yank);
-            }
-            KeybindingAction::EditorUndo => {
-                self.app.prompt_mut().apply_edit(PromptEdit::Undo);
-            }
             KeybindingAction::InputNewLine => {
                 self.app.prompt_mut().apply_edit(PromptEdit::Insert("\n"));
             }
@@ -226,6 +233,9 @@ where
             }
             KeybindingAction::InputCopy => {
                 let _ = self.app.copy_prompt_text();
+            }
+            KeybindingAction::SessionPickerOpen => {
+                self.open_session_picker();
             }
             KeybindingAction::InputSubmit => {
                 self.submit_current_prompt().await?;
@@ -245,6 +255,8 @@ where
             KeybindingAction::SelectConfirm => {
                 if self.app.approval_choice().is_some() {
                     let _ = self.app.confirm_approval();
+                } else if self.app.selected_session().is_some() {
+                    self.load_selected_session().await?;
                 } else if self.app.focused_overlay_id().is_none() {
                     self.submit_current_prompt().await?;
                 }
@@ -261,12 +273,58 @@ where
             | KeybindingAction::EditorCursorDown
             | KeybindingAction::EditorPageUp
             | KeybindingAction::EditorPageDown => {}
+            KeybindingAction::EditorCursorLeft
+            | KeybindingAction::EditorCursorRight
+            | KeybindingAction::EditorCursorWordLeft
+            | KeybindingAction::EditorCursorWordRight
+            | KeybindingAction::EditorCursorLineStart
+            | KeybindingAction::EditorCursorLineEnd
+            | KeybindingAction::EditorDeleteCharBackward
+            | KeybindingAction::EditorDeleteCharForward
+            | KeybindingAction::EditorDeleteWordBackward
+            | KeybindingAction::EditorDeleteWordForward
+            | KeybindingAction::EditorDeleteToLineStart
+            | KeybindingAction::EditorDeleteToLineEnd
+            | KeybindingAction::EditorYank
+            | KeybindingAction::EditorUndo => {
+                unreachable!("prompt edit actions are handled before overlay actions")
+            }
         }
 
         Ok(false)
     }
 
+    fn handle_prompt_keybinding_action(&mut self, action: KeybindingAction) -> bool {
+        let edit = match action {
+            KeybindingAction::EditorCursorLeft => PromptEdit::MoveLeft,
+            KeybindingAction::EditorCursorRight => PromptEdit::MoveRight,
+            KeybindingAction::EditorCursorWordLeft => PromptEdit::MoveWordLeft,
+            KeybindingAction::EditorCursorWordRight => PromptEdit::MoveWordRight,
+            KeybindingAction::EditorCursorLineStart => PromptEdit::MoveHome,
+            KeybindingAction::EditorCursorLineEnd => PromptEdit::MoveEnd,
+            KeybindingAction::EditorDeleteCharBackward => PromptEdit::Backspace,
+            KeybindingAction::EditorDeleteCharForward => PromptEdit::Delete,
+            KeybindingAction::EditorDeleteWordBackward => PromptEdit::DeleteWordBackward,
+            KeybindingAction::EditorDeleteWordForward => PromptEdit::DeleteWordForward,
+            KeybindingAction::EditorDeleteToLineStart => PromptEdit::DeleteToLineStart,
+            KeybindingAction::EditorDeleteToLineEnd => PromptEdit::DeleteToLineEnd,
+            KeybindingAction::EditorYank => PromptEdit::Yank,
+            KeybindingAction::EditorUndo => PromptEdit::Undo,
+            _ => return false,
+        };
+        self.app.prompt_mut().apply_edit(edit);
+        true
+    }
+
     async fn submit_current_prompt(&mut self) -> Result<()> {
+        if self.read_only_session_loaded {
+            if !self.app.prompt().text.trim().is_empty() {
+                self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                    text: "Read-only session loaded; prompt not submitted".to_owned(),
+                });
+            }
+            return Ok(());
+        }
         let Some(prompt) = self.app.submit_prompt() else {
             return Ok(());
         };
@@ -274,6 +332,35 @@ where
         for event in events {
             self.app.apply_agent_event(event);
         }
+        Ok(())
+    }
+
+    fn open_session_picker(&mut self) {
+        if let Some(error) = &self.session_list_error {
+            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: format!("Error loading sessions: {error}"),
+            });
+            return;
+        }
+        if self.session_items.is_empty() {
+            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: "No local sessions".to_owned(),
+            });
+            return;
+        }
+        self.app.open_session_picker(self.session_items.clone());
+    }
+
+    async fn load_selected_session(&mut self) -> Result<()> {
+        let Some(session) = self.app.confirm_session_picker() else {
+            return Ok(());
+        };
+        let loaded = (self.load_session)(session.value.clone())
+            .await
+            .with_context(|| format!("failed to load session {}", session.value))?;
+        self.app
+            .load_session_transcript(loaded.label, loaded.notices, loaded.messages);
+        self.read_only_session_loaded = true;
         Ok(())
     }
 
@@ -314,6 +401,7 @@ impl TerminalEvents for CrosstermEvents {
 const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::InputSubmit,
     KeybindingAction::InputNewLine,
+    KeybindingAction::SessionPickerOpen,
     KeybindingAction::EditorCursorLeft,
     KeybindingAction::EditorCursorRight,
     KeybindingAction::EditorCursorWordLeft,
@@ -398,8 +486,12 @@ impl Drop for RawModeGuard {
 
 pub fn controller_for_config<'a>(
     config: &'a AppConfig,
-) -> InteractiveController<impl Fn(Vec<String>) -> BoxedTurnFuture<'a> + 'a> {
-    InteractiveController::new(
+) -> InteractiveController<
+    impl Fn(Vec<String>) -> BoxedTurnFuture<'a> + 'a,
+    impl Fn(String) -> BoxedSessionFuture<'a> + 'a,
+> {
+    let session_catalog = session_catalog_for_config(config);
+    InteractiveController::new_with_sessions(
         "neo",
         "new",
         format!("{}/{}", config.default_provider, config.default_model),
@@ -410,7 +502,92 @@ pub fn controller_for_config<'a>(
             });
             future
         },
+        session_catalog.items,
+        session_catalog.error,
+        move |session_id| {
+            let future: BoxedSessionFuture<'a> =
+                Box::pin(async move { load_session_transcript(session_id, config).await });
+            future
+        },
     )
+}
+
+#[allow(dead_code)]
+fn empty_session_loader(mut session_id: String) -> Ready<Result<LoadedSessionTranscript>> {
+    session_id.push_str(" (read-only)");
+    ready(Ok(LoadedSessionTranscript::new(
+        session_id,
+        Vec::new(),
+        Vec::new(),
+    )))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionCatalog {
+    items: Vec<PickerItem>,
+    error: Option<String>,
+}
+
+fn session_catalog_for_config(config: &AppConfig) -> SessionCatalog {
+    match SessionMetadataStore::new(&config.sessions_dir).list() {
+        Ok(records) => SessionCatalog {
+            items: records
+                .into_iter()
+                .map(session_record_to_picker_item)
+                .collect(),
+            error: None,
+        },
+        Err(error) => SessionCatalog {
+            items: Vec::new(),
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+fn session_record_to_picker_item(record: SessionRecord) -> PickerItem {
+    let label = record.name.clone().unwrap_or_else(|| record.id.clone());
+    let mut details = vec![record.id.clone()];
+    if let Some(parent_id) = &record.parent_id {
+        details.push(format!("parent={parent_id}"));
+    }
+    if let Some(summary) = &record.summary {
+        details.push(summary.clone());
+    }
+    if !record.children.is_empty() {
+        details.push(format!("children={}", record.children.join(",")));
+    }
+    PickerItem::new(record.id, label, Some(details.join(" | ")))
+}
+
+async fn load_session_transcript(
+    session_id: String,
+    config: &AppConfig,
+) -> Result<LoadedSessionTranscript> {
+    let path = crate::session_commands::session_path(&session_id, config)?;
+    let context = JsonlSessionReader::replay_context(&path)
+        .await
+        .with_context(|| format!("failed to replay session {}", path.display()))?;
+    let mut notices = Vec::new();
+    if let Some(summary) = context.compaction_summary() {
+        notices.push(format!("compaction: {}", summary.summary));
+    }
+    if let Some(summary) = SessionMetadataStore::new(&config.sessions_dir)
+        .list()
+        .ok()
+        .and_then(|sessions| {
+            sessions
+                .into_iter()
+                .find(|session| session.id == session_id)
+                .and_then(|session| session.summary)
+        })
+    {
+        notices.push(format!("branch summary: {summary}"));
+    }
+    Ok(LoadedSessionTranscript::new(
+        format!("{session_id} (read-only)"),
+        notices,
+        context.messages().to_vec(),
+    ))
 }
 
 fn render_terminal_fallback(app: &NeoTuiApp) -> String {
@@ -440,10 +617,17 @@ fn render_terminal_fallback(app: &NeoTuiApp) -> String {
 
 #[cfg(test)]
 mod tests {
-    use neo_agent_core::{AgentEvent, StopReason};
+    use std::{
+        collections::BTreeMap,
+        fs,
+        path::{Path, PathBuf},
+    };
+
+    use neo_agent_core::{AgentEvent, AgentMessage, Content, PermissionPolicy, StopReason};
     use neo_tui::{KeybindingAction, OverlayKind};
 
     use super::*;
+    use crate::config::{Defaults, McpConfig, RuntimeConfig};
 
     #[tokio::test]
     async fn controller_submits_prompt_reduces_turn_events_and_renders_snapshot() {
@@ -762,5 +946,164 @@ mod tests {
             .expect("event loop exits after canceling overlay and receiving cancel again");
 
         assert!(controller.app().focused_overlay().is_none());
+    }
+
+    #[tokio::test]
+    async fn event_loop_opens_session_picker_and_loads_read_only_transcript() {
+        let mut controller = InteractiveController::new_with_sessions(
+            "neo",
+            "new",
+            "openai/gpt-4.1",
+            |_prompt| async move {
+                panic!("read-only loaded sessions should not submit a new turn");
+                #[allow(unreachable_code)]
+                Ok(Vec::<AgentEvent>::new())
+            },
+            vec![PickerItem::new(
+                "alpha",
+                "Alpha session",
+                Some("branch summary"),
+            )],
+            None,
+            |session_id| async move {
+                assert_eq!(session_id, "alpha");
+                Ok(LoadedSessionTranscript::new(
+                    "alpha (read-only)",
+                    ["branch summary: Local branch summary".to_owned()],
+                    [
+                        AgentMessage::user_text("hello"),
+                        AgentMessage::assistant(
+                            [Content::text("hi back")],
+                            Vec::new(),
+                            StopReason::EndTurn,
+                        ),
+                    ],
+                ))
+            },
+        );
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SessionPickerOpen))
+            .await
+            .expect("session picker opens");
+        assert!(matches!(
+            controller
+                .app()
+                .focused_overlay()
+                .map(|overlay| &overlay.kind),
+            Some(OverlayKind::SessionPicker(_))
+        ));
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+            .await
+            .expect("session loads");
+
+        assert_eq!(controller.app().session_label(), "alpha (read-only)");
+        assert!(controller.app().focused_overlay().is_none());
+        assert!(matches!(
+            &controller.app().transcript().items()[0],
+            neo_tui::TranscriptItem::Notice { content }
+                if content == "branch summary: Local branch summary"
+        ));
+        assert!(matches!(
+            &controller.app().transcript().items()[1],
+            neo_tui::TranscriptItem::User { content } if content == "hello"
+        ));
+        assert!(matches!(
+            &controller.app().transcript().items()[2],
+            neo_tui::TranscriptItem::Assistant { content } if content == "hi back"
+        ));
+
+        controller.type_text("continue");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("read-only submit is handled locally");
+        assert!(controller.app().transcript().items().iter().any(|item| {
+            matches!(
+                item,
+                neo_tui::TranscriptItem::Notice { content }
+                    if content == "Read-only session loaded; prompt not submitted"
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn session_catalog_and_loader_use_real_local_session_store() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        fs::write(
+            sessions_dir.join("alpha.jsonl"),
+            concat!(
+                "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
+                "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi back\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
+            ),
+        )
+        .expect("write session jsonl");
+
+        let store = SessionMetadataStore::new(&sessions_dir);
+        store
+            .rename("alpha", "Alpha Session".to_owned())
+            .expect("rename session");
+        store
+            .summarize("alpha", "Local branch summary".to_owned())
+            .expect("summarize session");
+
+        let config = test_config(temp.path(), sessions_dir);
+        let catalog = session_catalog_for_config(&config);
+        assert_eq!(catalog.error, None);
+        assert_eq!(catalog.items.len(), 1);
+        assert_eq!(catalog.items[0].value, "alpha");
+        assert_eq!(catalog.items[0].label, "Alpha Session");
+        assert!(
+            catalog.items[0]
+                .description
+                .as_deref()
+                .is_some_and(|description| {
+                    description.contains("alpha") && description.contains("Local branch summary")
+                })
+        );
+
+        let loaded = load_session_transcript("alpha".to_owned(), &config)
+            .await
+            .expect("load session transcript");
+        assert_eq!(loaded.label, "alpha (read-only)");
+        assert_eq!(
+            loaded.notices,
+            vec!["branch summary: Local branch summary".to_owned()]
+        );
+        assert_eq!(loaded.messages.len(), 2);
+        assert!(matches!(
+            &loaded.messages[0],
+            AgentMessage::User { content } if content[0].as_text() == Some("hello")
+        ));
+        assert!(matches!(
+            &loaded.messages[1],
+            AgentMessage::Assistant { content, .. } if content[0].as_text() == Some("hi back")
+        ));
+    }
+
+    fn test_config(project_dir: &Path, sessions_dir: PathBuf) -> AppConfig {
+        AppConfig {
+            default_model: "gpt-4.1".to_owned(),
+            default_provider: "openai".to_owned(),
+            api_base: None,
+            api_key_env: None,
+            providers: BTreeMap::new(),
+            model_catalogs: Vec::new(),
+            sessions_dir,
+            permissions: PermissionPolicy::default(),
+            defaults: Defaults {
+                mode: "interactive".to_owned(),
+            },
+            runtime: RuntimeConfig::default(),
+            mcp: McpConfig::default(),
+            approve: false,
+            no_approve: false,
+            project_dir: project_dir.to_path_buf(),
+            config_path: project_dir.join(".neo/config.toml"),
+        }
     }
 }

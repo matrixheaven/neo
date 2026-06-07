@@ -41,16 +41,20 @@ The summary text is labeled as an algorithmic transcript summary.
 
 ## Resume Flow
 
-The intended flow is:
+The current local replay flow is:
 
 1. `neo-agent resume <session-id>` resolves the session file from `sessions_dir`.
 2. `JsonlSessionReader` loads event history.
 3. `replay_context` reconstructs `AgentContext`, including any stored
    `CompactionApplied` event.
-4. The runtime converts those messages into `neo_ai::ChatMessage` values for
-   the next model turn.
-5. Pending or incomplete tool calls are surfaced to the user instead of silently
-   replayed.
+4. The CLI prints the replayed transcript, compaction summary, and stored local
+   branch summary.
+
+In live interactive TTY mode, `ctrl+r` opens a local session picker backed by
+`SessionMetadataStore::list()` and the configured `sessions_dir`. Selecting a
+session replays its JSONL context into the TUI as a read-only transcript view,
+updates the session label, and blocks new prompt submission from that historical
+view. This avoids pretending that the selected JSONL file will be appended.
 
 ## Storage Expectations
 
@@ -66,6 +70,8 @@ Still missing from pi parity:
 - Hosted or model-generated branch summaries beyond local metadata summaries.
 - Model-generated compaction summaries; current compaction is deterministic
   local transcript extraction only.
+- Live continuation that appends new turns to a selected existing JSONL session
+  or creates an explicit fork before continuing.
 
 ## CLI Surface
 

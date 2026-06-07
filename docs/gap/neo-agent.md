@@ -55,7 +55,10 @@
   prompts through the existing `run_prompt` path, redraws on terminal resize,
   dispatches real keybinding actions for prompt editing and approval overlays,
   exits on Esc/Ctrl-C, and keeps the no-tty snapshot fallback for command tests
-  and redirected stdout.
+  and redirected stdout. `ctrl+r` opens a local session picker backed by
+  `sessions_dir` metadata and JSONL files; selecting a session replays its
+  compacted context into the TUI as a read-only transcript and blocks new
+  prompt submission from that loaded historical view.
 
 ## Pi Parity Pressure
 
@@ -74,7 +77,8 @@ and platform-specific guidance.
   marketplace catalog/search/install flows, or themes as available Neo features
   yet.
 - Add richer session tree UI and hosted share only when real local or hosted
-  backing behavior exists.
+  backing behavior exists. Continue-to-existing-session writes remain a gap
+  until new turns append to the selected JSONL or an explicit fork.
 - Keep MCP runtime config limited to tools and explicit stdio resource
   subscription/watch flows until remote resource streams, hosted server
   lifecycle, and OAuth/trust flows are implemented.

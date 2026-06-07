@@ -20,10 +20,14 @@ Target: `crates/tui`.
   overlay page-up/page-down selection, approval confirm, overlay cancel, exit
   cancel, tab insertion, prompt undo, kill-ring yank, and an internal prompt
   copy buffer.
+- The live interactive loop opens a local session picker with `ctrl+r`, using
+  real `SessionMetadataStore` records prepared by `neo-agent`, and can load a
+  selected JSONL transcript into the TUI as a read-only session view.
 
 ## Remaining lower-priority gaps
 
 - The Rust crate does not implement the full TypeScript terminal diff renderer,
   image protocols, ANSI-preserving wrapping, autocomplete, stdin buffering,
-  OS/terminal clipboard integration, or tab completion.
+  OS/terminal clipboard integration, tab completion, or live continuation that
+  appends new turns to a selected historical session.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.

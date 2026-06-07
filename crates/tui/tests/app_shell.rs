@@ -250,6 +250,54 @@ fn app_shell_records_submissions_and_streaming_updates() {
 }
 
 #[test]
+fn app_loads_read_only_session_transcript_and_updates_label() {
+    let mut app = NeoTuiApp::new("neo", "new", "openai/gpt-4.1");
+    app.apply_stream_update(StreamUpdate::AssistantStarted {
+        id: "in-flight".to_owned(),
+    });
+    app.apply_stream_update(StreamUpdate::ToolStarted {
+        id: "tool-1".to_owned(),
+        name: "shell.run".to_owned(),
+        detail: "cargo test".to_owned(),
+    });
+    app.prompt_mut()
+        .apply_edit(neo_tui::PromptEdit::Insert("draft"));
+
+    app.load_session_transcript(
+        "alpha (read-only)",
+        ["compaction: older context summarized".to_owned()],
+        [
+            neo_agent_core::AgentMessage::user_text("hello"),
+            neo_agent_core::AgentMessage::assistant(
+                [neo_agent_core::Content::text("hi back")],
+                Vec::new(),
+                neo_agent_core::StopReason::EndTurn,
+            ),
+        ],
+    );
+
+    assert_eq!(app.session_label(), "alpha (read-only)");
+    assert_eq!(app.mode(), AppMode::Editing);
+    assert_eq!(app.active_assistant_id(), None);
+    assert!(app.tool_statuses().is_empty());
+    assert!(app.prompt().text.is_empty());
+    assert_eq!(app.transcript().items().len(), 3);
+    assert!(matches!(
+        &app.transcript().items()[0],
+        neo_tui::TranscriptItem::Notice { content }
+            if content == "compaction: older context summarized"
+    ));
+    assert!(matches!(
+        &app.transcript().items()[1],
+        neo_tui::TranscriptItem::User { content } if content == "hello"
+    ));
+    assert!(matches!(
+        &app.transcript().items()[2],
+        neo_tui::TranscriptItem::Assistant { content } if content == "hi back"
+    ));
+}
+
+#[test]
 fn modal_stack_tracks_focus_and_restores_previous_overlay() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
 
@@ -312,6 +360,18 @@ fn command_palette_session_and_model_pickers_filter_and_select_values() {
         models.selected_model().expect("model").value,
         "anthropic/claude-sonnet"
     );
+
+    let mut app = NeoTuiApp::new("neo", "new", "openai/gpt-4.1");
+    app.open_session_picker([
+        PickerItem::new("alpha", "Alpha", Some("first session")),
+        PickerItem::new("beta", "Beta", Some("second session")),
+    ]);
+    app.move_overlay_selection_down();
+    let selected = app
+        .confirm_session_picker()
+        .expect("selected session returned");
+    assert_eq!(selected.value, "beta");
+    assert!(app.focused_overlay().is_none());
 }
 
 #[test]

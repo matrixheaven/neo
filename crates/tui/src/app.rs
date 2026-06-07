@@ -109,6 +109,36 @@ impl NeoTuiApp {
         &mut self.transcript
     }
 
+    pub fn set_session_label(&mut self, session_label: impl Into<String>) {
+        self.session_label = session_label.into();
+    }
+
+    pub fn load_session_transcript(
+        &mut self,
+        session_label: impl Into<String>,
+        notices: impl IntoIterator<Item = String>,
+        messages: impl IntoIterator<Item = AgentMessage>,
+    ) {
+        self.set_session_label(session_label);
+        self.transcript = ChatTranscript::default();
+        self.transcript_view = TranscriptView::new();
+        self.prompt = PromptState::default();
+        self.active_assistant_id = None;
+        self.active_assistant_buffer.clear();
+        self.active_tools.clear();
+        self.completed_tool_result_ids.clear();
+
+        for notice in notices {
+            self.transcript.push(TranscriptItem::notice(notice));
+        }
+        for message in messages {
+            self.apply_message(message);
+        }
+
+        self.transcript_view.follow_bottom();
+        self.mode = self.overlay_mode();
+    }
+
     #[must_use]
     pub fn active_assistant_id(&self) -> Option<&str> {
         self.active_assistant_id.as_deref()
@@ -504,6 +534,33 @@ impl NeoTuiApp {
             "approval",
             OverlayKind::Approval(ApprovalRequestModal::new(request_id, title, body)),
         ))
+    }
+
+    pub fn open_session_picker(
+        &mut self,
+        items: impl IntoIterator<Item = PickerItem>,
+    ) -> OverlayId {
+        self.push_overlay(Overlay::new(
+            "sessions",
+            OverlayKind::SessionPicker(SessionPickerState::new(items)),
+        ))
+    }
+
+    #[must_use]
+    pub fn selected_session(&self) -> Option<PickerItem> {
+        let OverlayKind::SessionPicker(picker) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        picker.confirm()
+    }
+
+    pub fn confirm_session_picker(&mut self) -> Option<PickerItem> {
+        let id = self.focused_overlay;
+        let selected = self.selected_session()?;
+        if let Some(id) = id {
+            let _ = self.close_overlay(id);
+        }
+        Some(selected)
     }
 
     #[must_use]
