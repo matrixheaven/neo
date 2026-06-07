@@ -58,7 +58,9 @@
   and redirected stdout. `ctrl+r` opens a local session picker backed by
   `sessions_dir` metadata and JSONL files; selecting a session replays its
   compacted context into the TUI, and subsequent prompts use that context while
-  appending new events to the selected JSONL session.
+  appending new events to the selected JSONL session. `ctrl+o` opens a model
+  picker backed by the resolved `ModelRegistry`; selecting a model updates the
+  TUI header and uses that provider/model for subsequent turns.
 
 ## Pi Parity Pressure
 

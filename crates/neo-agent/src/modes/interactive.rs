@@ -53,20 +53,58 @@ pub(crate) struct InteractiveController<RunTurn, LoadSession> {
     run_turn: RunTurn,
     session_items: Vec<PickerItem>,
     session_list_error: Option<String>,
+    model_items: Vec<PickerItem>,
+    model_list_error: Option<String>,
     load_session: LoadSession,
     active_session_id: Option<String>,
+    active_model: Option<SelectedModel>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PickerCatalogs {
+    session_items: Vec<PickerItem>,
+    session_error: Option<String>,
+    model_items: Vec<PickerItem>,
+    model_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TurnRequest {
     pub prompt: Vec<String>,
     pub session_id: Option<String>,
+    pub model: Option<SelectedModel>,
 }
 
 impl TurnRequest {
     #[must_use]
-    pub(crate) fn new(prompt: Vec<String>, session_id: Option<String>) -> Self {
-        Self { prompt, session_id }
+    pub(crate) fn new(
+        prompt: Vec<String>,
+        session_id: Option<String>,
+        model: Option<SelectedModel>,
+    ) -> Self {
+        Self {
+            prompt,
+            session_id,
+            model,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SelectedModel {
+    pub provider: String,
+    pub model: String,
+}
+
+impl SelectedModel {
+    fn from_picker_item(item: &PickerItem) -> Result<Self> {
+        let Some((provider, model)) = item.value.split_once('/') else {
+            anyhow::bail!("invalid model picker value {}", item.value);
+        };
+        Ok(Self {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+        })
     }
 }
 
@@ -110,8 +148,7 @@ where
             session_label,
             model_label,
             run_turn,
-            Vec::new(),
-            None,
+            PickerCatalogs::default(),
             empty_session_loader,
         )
     }
@@ -129,18 +166,20 @@ where
         session_label: impl Into<String>,
         model_label: impl Into<String>,
         run_turn: RunTurn,
-        session_items: Vec<PickerItem>,
-        session_list_error: Option<String>,
+        catalogs: PickerCatalogs,
         load_session: LoadSession,
     ) -> Self {
         Self {
             app: NeoTuiApp::new(title, session_label, model_label),
             keybindings: KeybindingsManager::default(),
             run_turn,
-            session_items,
-            session_list_error,
+            session_items: catalogs.session_items,
+            session_list_error: catalogs.session_error,
+            model_items: catalogs.model_items,
+            model_list_error: catalogs.model_error,
             load_session,
             active_session_id: None,
+            active_model: None,
         }
     }
 
@@ -250,6 +289,9 @@ where
             KeybindingAction::SessionPickerOpen => {
                 self.open_session_picker();
             }
+            KeybindingAction::ModelPickerOpen => {
+                self.open_model_picker();
+            }
             KeybindingAction::InputSubmit => {
                 self.submit_current_prompt().await?;
             }
@@ -270,6 +312,8 @@ where
                     let _ = self.app.confirm_approval();
                 } else if self.app.selected_session().is_some() {
                     self.load_selected_session().await?;
+                } else if self.app.selected_model().is_some() {
+                    self.apply_selected_model()?;
                 } else if self.app.focused_overlay_id().is_none() {
                     self.submit_current_prompt().await?;
                 }
@@ -336,6 +380,7 @@ where
         let events = (self.run_turn)(TurnRequest::new(
             vec![prompt],
             self.active_session_id.clone(),
+            self.active_model.clone(),
         ))
         .await?;
         for event in events {
@@ -360,6 +405,22 @@ where
         self.app.open_session_picker(self.session_items.clone());
     }
 
+    fn open_model_picker(&mut self) {
+        if let Some(error) = &self.model_list_error {
+            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: format!("Error loading models: {error}"),
+            });
+            return;
+        }
+        if self.model_items.is_empty() {
+            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: "No configured models".to_owned(),
+            });
+            return;
+        }
+        self.app.open_model_picker(self.model_items.clone());
+    }
+
     async fn load_selected_session(&mut self) -> Result<()> {
         let Some(session) = self.app.confirm_session_picker() else {
             return Ok(());
@@ -370,6 +431,16 @@ where
         self.app
             .load_session_transcript(loaded.label, loaded.notices, loaded.messages);
         self.active_session_id = Some(session.value);
+        Ok(())
+    }
+
+    fn apply_selected_model(&mut self) -> Result<()> {
+        let Some(model) = self.app.confirm_model_picker() else {
+            return Ok(());
+        };
+        let selected = SelectedModel::from_picker_item(&model)?;
+        self.app.set_model_label(model.label);
+        self.active_model = Some(selected);
         Ok(())
     }
 
@@ -411,6 +482,7 @@ const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::InputSubmit,
     KeybindingAction::InputNewLine,
     KeybindingAction::SessionPickerOpen,
+    KeybindingAction::ModelPickerOpen,
     KeybindingAction::EditorCursorLeft,
     KeybindingAction::EditorCursorRight,
     KeybindingAction::EditorCursorWordLeft,
@@ -499,25 +571,33 @@ pub fn controller_for_config<'a>(
     impl Fn(TurnRequest) -> BoxedTurnFuture<'a> + 'a,
     impl Fn(String) -> BoxedSessionFuture<'a> + 'a,
 > {
-    let session_catalog = session_catalog_for_config(config);
+    let catalogs = picker_catalogs_for_config(config);
     InteractiveController::new_with_sessions(
         "neo",
         "new",
         format!("{}/{}", config.default_provider, config.default_model),
         move |request| {
             let future: BoxedTurnFuture<'a> = Box::pin(async move {
+                let mut effective_config = config.clone();
+                if let Some(model) = request.model {
+                    effective_config.default_provider = model.provider;
+                    effective_config.default_model = model.model;
+                }
                 let turn = if let Some(session_id) = request.session_id {
-                    crate::modes::run::run_prompt_in_session(&session_id, &request.prompt, config)
-                        .await?
+                    crate::modes::run::run_prompt_in_session(
+                        &session_id,
+                        &request.prompt,
+                        &effective_config,
+                    )
+                    .await?
                 } else {
-                    crate::modes::run::run_prompt(&request.prompt, config).await?
+                    crate::modes::run::run_prompt(&request.prompt, &effective_config).await?
                 };
                 Ok(turn.events)
             });
             future
         },
-        session_catalog.items,
-        session_catalog.error,
+        catalogs,
         move |session_id| {
             let future: BoxedSessionFuture<'a> =
                 Box::pin(async move { load_session_transcript(session_id, config).await });
@@ -541,6 +621,23 @@ struct SessionCatalog {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelCatalog {
+    items: Vec<PickerItem>,
+    error: Option<String>,
+}
+
+fn picker_catalogs_for_config(config: &AppConfig) -> PickerCatalogs {
+    let sessions = session_catalog_for_config(config);
+    let models = model_catalog_for_config(config);
+    PickerCatalogs {
+        session_items: sessions.items,
+        session_error: sessions.error,
+        model_items: models.items,
+        model_error: models.error,
+    }
+}
+
 fn session_catalog_for_config(config: &AppConfig) -> SessionCatalog {
     match SessionMetadataStore::new(&config.sessions_dir).list() {
         Ok(records) => SessionCatalog {
@@ -555,6 +652,24 @@ fn session_catalog_for_config(config: &AppConfig) -> SessionCatalog {
             error: Some(error.to_string()),
         },
     }
+}
+
+fn model_catalog_for_config(config: &AppConfig) -> ModelCatalog {
+    match crate::modes::run::model_registry_for_config(config) {
+        Ok(registry) => ModelCatalog {
+            items: registry.list().iter().map(model_to_picker_item).collect(),
+            error: None,
+        },
+        Err(error) => ModelCatalog {
+            items: Vec::new(),
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+fn model_to_picker_item(model: &neo_ai::ModelSpec) -> PickerItem {
+    let value = format!("{}/{}", model.provider.0, model.model);
+    PickerItem::new(value.clone(), value, Some(format!("{:?}", model.api)))
 }
 
 fn session_record_to_picker_item(record: SessionRecord) -> PickerItem {
@@ -651,6 +766,7 @@ mod tests {
             |request| async move {
                 assert_eq!(request.prompt, vec!["hello neo".to_owned()]);
                 assert_eq!(request.session_id, None);
+                assert_eq!(request.model, None);
                 Ok(vec![
                     AgentEvent::MessageStarted {
                         turn: 1,
@@ -705,6 +821,7 @@ mod tests {
             |request| async move {
                 assert_eq!(request.prompt, vec!["hi".to_owned()]);
                 assert_eq!(request.session_id, None);
+                assert_eq!(request.model, None);
                 Ok(vec![
                     AgentEvent::MessageStarted {
                         turn: 1,
@@ -994,12 +1111,16 @@ mod tests {
                     ])
                 }
             },
-            vec![PickerItem::new(
-                "alpha",
-                "Alpha session",
-                Some("branch summary"),
-            )],
-            None,
+            PickerCatalogs {
+                session_items: vec![PickerItem::new(
+                    "alpha",
+                    "Alpha session",
+                    Some("branch summary"),
+                )],
+                session_error: None,
+                model_items: Vec::new(),
+                model_error: None,
+            },
             |session_id| async move {
                 assert_eq!(session_id, "alpha");
                 Ok(LoadedSessionTranscript::new(
@@ -1059,9 +1180,94 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].prompt, vec!["continue".to_owned()]);
         assert_eq!(requests[0].session_id.as_deref(), Some("alpha"));
+        assert_eq!(requests[0].model, None);
         assert!(controller.app().transcript().items().iter().any(|item| {
             matches!(item, neo_tui::TranscriptItem::Assistant { content } if content == "continued")
         }));
+    }
+
+    #[tokio::test]
+    async fn event_loop_opens_model_picker_and_submits_with_selected_model() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let mut controller = InteractiveController::new_with_sessions(
+            "neo",
+            "new",
+            "openai/gpt-4.1",
+            move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("record request")
+                        .push(request);
+                    Ok(vec![
+                        AgentEvent::MessageStarted {
+                            turn: 1,
+                            id: "assistant-1".to_owned(),
+                        },
+                        AgentEvent::TextDelta {
+                            turn: 1,
+                            text: "model switched".to_owned(),
+                        },
+                        AgentEvent::TurnFinished {
+                            turn: 1,
+                            stop_reason: StopReason::EndTurn,
+                        },
+                    ])
+                }
+            },
+            PickerCatalogs {
+                session_items: Vec::new(),
+                session_error: None,
+                model_items: vec![
+                    PickerItem::new("openai/gpt-4.1", "openai/gpt-4.1", Some("Responses")),
+                    PickerItem::new(
+                        "anthropic/claude-sonnet-4-5",
+                        "anthropic/claude-sonnet-4-5",
+                        Some("Messages"),
+                    ),
+                ],
+                model_error: None,
+            },
+            |session_id| async move {
+                Ok(LoadedSessionTranscript::new(
+                    session_id,
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            },
+        );
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::ModelPickerOpen))
+            .await
+            .expect("model picker opens");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+            .await
+            .expect("model selection moves");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+            .await
+            .expect("model selection applies");
+
+        assert_eq!(
+            controller.app().model_label(),
+            "anthropic/claude-sonnet-4-5"
+        );
+        controller.type_text("use selected model");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("turn submits with selected model");
+
+        let requests = requests.lock().expect("recorded requests");
+        assert_eq!(requests.len(), 1);
+        let selected = requests[0].model.as_ref().expect("selected model");
+        assert_eq!(selected.provider, "anthropic");
+        assert_eq!(selected.model, "claude-sonnet-4-5");
+        assert_eq!(requests[0].session_id, None);
     }
 
     #[tokio::test]

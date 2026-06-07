@@ -465,7 +465,7 @@ fn resolve_model(config: &AppConfig) -> anyhow::Result<ModelSpec> {
         })
 }
 
-fn model_registry_for_config(config: &AppConfig) -> anyhow::Result<ModelRegistry> {
+pub(crate) fn model_registry_for_config(config: &AppConfig) -> anyhow::Result<ModelRegistry> {
     let mut registry = ModelRegistry::seeded();
     for path in &config.model_catalogs {
         registry

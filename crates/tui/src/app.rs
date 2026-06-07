@@ -113,6 +113,10 @@ impl NeoTuiApp {
         self.session_label = session_label.into();
     }
 
+    pub fn set_model_label(&mut self, model_label: impl Into<String>) {
+        self.model_label = model_label.into();
+    }
+
     pub fn load_session_transcript(
         &mut self,
         session_label: impl Into<String>,
@@ -557,6 +561,30 @@ impl NeoTuiApp {
     pub fn confirm_session_picker(&mut self) -> Option<PickerItem> {
         let id = self.focused_overlay;
         let selected = self.selected_session()?;
+        if let Some(id) = id {
+            let _ = self.close_overlay(id);
+        }
+        Some(selected)
+    }
+
+    pub fn open_model_picker(&mut self, items: impl IntoIterator<Item = PickerItem>) -> OverlayId {
+        self.push_overlay(Overlay::new(
+            "models",
+            OverlayKind::ModelPicker(ModelPickerState::new(items)),
+        ))
+    }
+
+    #[must_use]
+    pub fn selected_model(&self) -> Option<PickerItem> {
+        let OverlayKind::ModelPicker(picker) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        picker.confirm()
+    }
+
+    pub fn confirm_model_picker(&mut self) -> Option<PickerItem> {
+        let id = self.focused_overlay;
+        let selected = self.selected_model()?;
         if let Some(id) = id {
             let _ = self.close_overlay(id);
         }

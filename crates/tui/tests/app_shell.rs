@@ -372,6 +372,17 @@ fn command_palette_session_and_model_pickers_filter_and_select_values() {
         .expect("selected session returned");
     assert_eq!(selected.value, "beta");
     assert!(app.focused_overlay().is_none());
+
+    app.open_model_picker([
+        PickerItem::new("openai/gpt-4.1", "openai/gpt-4.1", Some("responses")),
+        PickerItem::new("anthropic/claude", "anthropic/claude", Some("messages")),
+    ]);
+    app.move_overlay_selection_down();
+    let selected = app.confirm_model_picker().expect("selected model returned");
+    app.set_model_label(selected.label.clone());
+    assert_eq!(selected.value, "anthropic/claude");
+    assert_eq!(app.model_label(), "anthropic/claude");
+    assert!(app.focused_overlay().is_none());
 }
 
 #[test]
