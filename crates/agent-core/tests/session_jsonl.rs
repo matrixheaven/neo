@@ -2,6 +2,7 @@ use neo_agent_core::session::{
     JsonlSessionReader, JsonlSessionWriter, SessionCompactionOptions, compact_jsonl_session,
 };
 use neo_agent_core::{AgentContext, AgentEvent, AgentMessage, CompactionSummary, StopReason};
+use serde_json::json;
 
 #[tokio::test]
 async fn jsonl_session_appends_reads_and_replays_events() {
@@ -44,6 +45,87 @@ async fn jsonl_session_appends_reads_and_replays_events() {
         .await
         .expect("replay");
     assert_eq!(replayed, vec![AgentMessage::user_text("remember this")]);
+}
+
+#[tokio::test]
+async fn jsonl_session_create_writes_schema_metadata_without_replay_message() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let mut writer = JsonlSessionWriter::create(&path)
+        .await
+        .expect("create session");
+
+    writer
+        .append(&AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("metadata should not replay"),
+        })
+        .await
+        .expect("append user");
+    writer.flush().await.expect("flush");
+
+    let content = std::fs::read_to_string(&path).expect("read session file");
+    let lines = content.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+
+    let metadata = serde_json::from_str::<serde_json::Value>(lines[0]).expect("metadata json");
+    assert_eq!(
+        metadata,
+        json!({
+            "kind": "session_metadata",
+            "format": "neo.session.jsonl",
+            "schema_version": 1,
+            "created_at": metadata["created_at"],
+        })
+    );
+    assert!(
+        metadata["created_at"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+
+    let events = JsonlSessionReader::read_all(&path).await.expect("read all");
+    assert_eq!(
+        events,
+        vec![AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("metadata should not replay"),
+        }]
+    );
+
+    let replayed = JsonlSessionReader::replay_messages(&path)
+        .await
+        .expect("replay");
+    assert_eq!(
+        replayed,
+        vec![AgentMessage::user_text("metadata should not replay")]
+    );
+}
+
+#[tokio::test]
+async fn jsonl_session_replays_existing_event_only_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("legacy.jsonl");
+    let legacy_event = AgentEvent::MessageAppended {
+        message: AgentMessage::user_text("legacy still works"),
+    };
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&legacy_event).expect("serialize legacy event")
+        ),
+    )
+    .expect("write legacy session");
+
+    let events = JsonlSessionReader::read_all(&path).await.expect("read all");
+    assert_eq!(events, vec![legacy_event.clone()]);
+
+    let replayed = JsonlSessionReader::replay_messages(&path)
+        .await
+        .expect("replay");
+    assert_eq!(
+        replayed,
+        vec![AgentMessage::user_text("legacy still works")]
+    );
 }
 
 #[tokio::test]

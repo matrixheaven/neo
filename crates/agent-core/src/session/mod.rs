@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use uuid::Uuid;
 
 use crate::{AgentContext, AgentEvent, AgentMessage, CompactionSummary, Content};
+
+const SESSION_FORMAT_NAME: &str = "neo.session.jsonl";
+const SESSION_SCHEMA_VERSION: u32 = 1;
+const SESSION_METADATA_KIND: &str = "session_metadata";
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -32,6 +37,14 @@ pub struct JsonlSessionWriter {
     writer: BufWriter<File>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SessionSchemaMetadata {
+    kind: String,
+    format: String,
+    schema_version: u32,
+    created_at: String,
+}
+
 impl JsonlSessionWriter {
     pub async fn create(path: impl AsRef<Path>) -> Result<Self, SessionError> {
         let file = OpenOptions::new()
@@ -40,9 +53,11 @@ impl JsonlSessionWriter {
             .write(true)
             .open(path)
             .await?;
-        Ok(Self {
+        let mut session = Self {
             writer: BufWriter::new(file),
-        })
+        };
+        session.append_metadata().await?;
+        Ok(session)
     }
 
     pub async fn open_append(path: impl AsRef<Path>) -> Result<Self, SessionError> {
@@ -61,7 +76,21 @@ impl JsonlSessionWriter {
     }
 
     pub async fn append(&mut self, event: &AgentEvent) -> Result<(), SessionError> {
-        let line = serde_json::to_string(event)
+        self.append_json_line(event).await
+    }
+
+    async fn append_metadata(&mut self) -> Result<(), SessionError> {
+        self.append_json_line(&SessionSchemaMetadata {
+            kind: SESSION_METADATA_KIND.to_owned(),
+            format: SESSION_FORMAT_NAME.to_owned(),
+            schema_version: SESSION_SCHEMA_VERSION,
+            created_at: current_unix_timestamp(),
+        })
+        .await
+    }
+
+    async fn append_json_line<T: Serialize>(&mut self, record: &T) -> Result<(), SessionError> {
+        let line = serde_json::to_string(record)
             .map_err(|source| SessionError::Json { line: 0, source })?;
         self.writer.write_all(line.as_bytes()).await?;
         self.writer.write_all(b"\n").await?;
@@ -88,6 +117,12 @@ impl JsonlSessionReader {
             if line.trim().is_empty() {
                 continue;
             }
+            if is_session_metadata_line(&line).map_err(|source| SessionError::Json {
+                line: line_number,
+                source,
+            })? {
+                continue;
+            }
             let event = serde_json::from_str(&line).map_err(|source| SessionError::Json {
                 line: line_number,
                 source,
@@ -109,6 +144,21 @@ impl JsonlSessionReader {
         let events = Self::read_all(path).await?;
         Ok(AgentContext::from_replay(events.iter()))
     }
+}
+
+fn is_session_metadata_line(line: &str) -> Result<bool, serde_json::Error> {
+    let value = serde_json::from_str::<serde_json::Value>(line)?;
+    Ok(value
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| kind == SESSION_METADATA_KIND))
+}
+
+fn current_unix_timestamp() -> String {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}.{:09}Z", duration.as_secs(), duration.subsec_nanos())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

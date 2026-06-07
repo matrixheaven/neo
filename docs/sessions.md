@@ -20,8 +20,12 @@ resumable from local JSONL history.
 - `SessionMetadataStore::fork(parent_id, name)`
 - `SessionMetadataStore::rename(session_id, name)`
 
-Each line is a serialized `AgentEvent`. `replay_messages` reconstructs
-conversation history from `AgentEvent::MessageAppended` entries.
+New JSONL files start with a `session_metadata` record containing the
+`neo.session.jsonl` format name, schema version, and creation timestamp.
+Subsequent lines are serialized `AgentEvent` records. Readers skip the metadata
+record during replay, and existing event-only JSONL files remain readable.
+`replay_messages` reconstructs conversation history from
+`AgentEvent::MessageAppended` entries.
 Session tree metadata is stored next to JSONL records in
 `sessions.metadata.json`. Fork and rename entries decorate real `.jsonl`
 session files; they do not create hosted or remote share records.
@@ -60,7 +64,6 @@ Still missing from pi parity:
   records.
 - Model-generated compaction summaries; current compaction is deterministic
   local transcript extraction only.
-- A stable schema version field.
 
 ## CLI Surface
 
