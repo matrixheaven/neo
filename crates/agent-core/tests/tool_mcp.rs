@@ -1,0 +1,178 @@
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use neo_agent_core::{
+    McpError, McpToolAdapter, McpToolCall, McpToolDefinition, McpToolProvider, McpToolResponse,
+    PermissionPolicy, ToolContext, ToolRegistry,
+};
+use serde_json::json;
+
+#[tokio::test]
+async fn mcp_provider_discovers_namespaced_tool_specs() {
+    let adapter = Arc::new(MockMcpAdapter::new(vec![McpToolDefinition::new(
+        "search",
+        "Search project docs",
+        json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" }
+            },
+            "required": ["query"]
+        }),
+    )]));
+
+    let provider = McpToolProvider::discover("docs", adapter)
+        .await
+        .expect("discover provider");
+
+    let specs = provider.specs();
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].name, "mcp__docs__search");
+    assert!(
+        specs[0]
+            .name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'),
+        "MCP tool names must be safe for production model function-name APIs"
+    );
+    assert_eq!(specs[0].description, "Search project docs");
+    assert_eq!(
+        specs[0].input_schema,
+        json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" }
+            },
+            "required": ["query"]
+        })
+    );
+}
+
+#[tokio::test]
+async fn mcp_tool_execution_delegates_to_async_adapter() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let adapter = Arc::new(MockMcpAdapter::new(vec![McpToolDefinition::new(
+        "search",
+        "Search project docs",
+        json!({ "type": "object" }),
+    )]));
+    adapter.push_response(McpToolResponse::ok("found: architecture.md"));
+
+    let provider = McpToolProvider::discover("docs", Arc::clone(&adapter))
+        .await
+        .expect("discover provider");
+    let mut registry = ToolRegistry::new();
+    provider.register_into(&mut registry);
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let result = registry
+        .run(
+            "mcp__docs__search",
+            &context,
+            json!({ "query": "runtime tools" }),
+        )
+        .await
+        .expect("run mcp tool");
+
+    assert_eq!(result.content, "found: architecture.md");
+    assert!(!result.is_error);
+    assert_eq!(
+        adapter.calls(),
+        vec![McpToolCall {
+            name: "search".to_owned(),
+            arguments: json!({ "query": "runtime tools" }),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn mcp_tool_execution_surfaces_adapter_errors() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let adapter = Arc::new(MockMcpAdapter::new(vec![McpToolDefinition::new(
+        "broken",
+        "Broken remote tool",
+        json!({ "type": "object" }),
+    )]));
+    adapter.push_error(McpError::protocol(
+        "server returned invalid JSON-RPC response",
+    ));
+
+    let provider = McpToolProvider::discover("remote", Arc::clone(&adapter))
+        .await
+        .expect("discover provider");
+    let mut registry = ToolRegistry::new();
+    provider.register_into(&mut registry);
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let error = registry
+        .run("mcp__remote__broken", &context, json!({}))
+        .await
+        .expect_err("adapter error should not be faked into success");
+
+    assert_eq!(
+        error.to_string(),
+        "mcp error from remote/broken: server returned invalid JSON-RPC response"
+    );
+}
+
+#[derive(Debug)]
+struct MockMcpAdapter {
+    tools: Vec<McpToolDefinition>,
+    calls: Mutex<Vec<McpToolCall>>,
+    responses: Mutex<Vec<Result<McpToolResponse, McpError>>>,
+}
+
+impl MockMcpAdapter {
+    fn new(tools: Vec<McpToolDefinition>) -> Self {
+        Self {
+            tools,
+            calls: Mutex::new(Vec::new()),
+            responses: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn push_response(&self, response: McpToolResponse) {
+        self.responses
+            .lock()
+            .expect("responses lock")
+            .push(Ok(response));
+    }
+
+    fn push_error(&self, error: McpError) {
+        self.responses
+            .lock()
+            .expect("responses lock")
+            .push(Err(error));
+    }
+
+    fn calls(&self) -> Vec<McpToolCall> {
+        self.calls.lock().expect("calls lock").clone()
+    }
+}
+
+#[async_trait]
+impl McpToolAdapter for MockMcpAdapter {
+    async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError> {
+        Ok(self.tools.clone())
+    }
+
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<McpToolResponse, McpError> {
+        self.calls.lock().expect("calls lock").push(McpToolCall {
+            name: name.to_owned(),
+            arguments,
+        });
+        self.responses
+            .lock()
+            .expect("responses lock")
+            .pop()
+            .unwrap_or_else(|| Err(McpError::protocol("missing mock response")))
+    }
+}

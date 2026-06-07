@@ -1,4 +1,6 @@
-use std::ops::Range;
+use std::{fmt::Write as _, ops::Range};
+
+use neo_agent_core::{AgentEvent, AgentMessage, Content};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
@@ -23,6 +25,7 @@ pub struct NeoTuiApp {
     active_assistant_id: Option<String>,
     active_assistant_buffer: String,
     active_tools: Vec<ActiveTool>,
+    completed_tool_result_ids: Vec<String>,
 }
 
 impl NeoTuiApp {
@@ -46,6 +49,7 @@ impl NeoTuiApp {
             active_assistant_id: None,
             active_assistant_buffer: String::new(),
             active_tools: Vec::new(),
+            completed_tool_result_ids: Vec::new(),
         }
     }
 
@@ -160,12 +164,18 @@ impl NeoTuiApp {
                     .update_last_assistant(self.active_assistant_buffer.clone());
             }
             StreamUpdate::ToolStarted { id, name, detail } => {
-                self.active_tools.push(ActiveTool {
-                    id,
-                    name,
-                    detail,
-                    status: ToolStatusKind::Running,
-                });
+                if let Some(tool) = self.active_tools.iter_mut().find(|tool| tool.id == id) {
+                    tool.name = name;
+                    tool.detail = detail;
+                    tool.status = ToolStatusKind::Running;
+                } else {
+                    self.active_tools.push(ActiveTool {
+                        id,
+                        name,
+                        detail,
+                        status: ToolStatusKind::Running,
+                    });
+                }
             }
             StreamUpdate::ToolUpdated { id, detail } => {
                 if let Some(tool) = self.active_tools.iter_mut().find(|tool| tool.id == id) {
@@ -203,6 +213,232 @@ impl NeoTuiApp {
                 self.active_assistant_buffer.clear();
                 self.active_tools.clear();
                 self.mode = self.overlay_mode();
+            }
+        }
+        self.transcript_view.follow_bottom();
+    }
+
+    pub fn apply_agent_event(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::MessageStarted { .. }
+            | AgentEvent::TextDelta { .. }
+            | AgentEvent::ToolCallStarted { .. }
+            | AgentEvent::ToolCallArgumentsDelta { .. }
+            | AgentEvent::ToolCallFinished { .. } => self.apply_model_stream_event(event),
+            AgentEvent::ToolExecutionStarted { .. }
+            | AgentEvent::ToolExecutionUpdate { .. }
+            | AgentEvent::ToolExecutionFinished { .. } => self.apply_tool_execution_event(event),
+            AgentEvent::ApprovalRequested {
+                id,
+                operation,
+                subject,
+                arguments,
+                ..
+            } => {
+                let body = if arguments.is_null() {
+                    subject
+                } else {
+                    format!("{subject}\n{arguments}")
+                };
+                self.request_approval(id, format!("{operation:?} approval"), body);
+            }
+            AgentEvent::ShellCommandStarted { .. } | AgentEvent::ShellCommandFinished { .. } => {
+                self.apply_shell_event(event);
+            }
+            AgentEvent::SteeringQueued { .. }
+            | AgentEvent::FollowUpQueued { .. }
+            | AgentEvent::QueueDrained { .. }
+            | AgentEvent::CompactionApplied { .. } => self.apply_runtime_notice_event(event),
+            AgentEvent::MessageAppended { message } => {
+                self.apply_message(message);
+            }
+            AgentEvent::TurnFinished { .. } => {
+                self.apply_stream_update(StreamUpdate::TurnFinished);
+            }
+            AgentEvent::Error { message, .. } => {
+                self.apply_stream_update(StreamUpdate::Error { text: message });
+            }
+            AgentEvent::TurnStarted { .. } => {}
+        }
+    }
+
+    fn apply_model_stream_event(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::MessageStarted { id, .. } => {
+                self.apply_stream_update(StreamUpdate::AssistantStarted { id });
+            }
+            AgentEvent::TextDelta { text, .. } => {
+                self.apply_stream_update(StreamUpdate::TextDelta { text });
+            }
+            AgentEvent::ToolCallStarted { id, name, .. } => {
+                self.apply_stream_update(StreamUpdate::ToolStarted {
+                    id,
+                    name,
+                    detail: String::new(),
+                });
+            }
+            AgentEvent::ToolCallArgumentsDelta {
+                id, json_fragment, ..
+            } => {
+                self.apply_stream_update(StreamUpdate::ToolUpdated {
+                    id,
+                    detail: json_fragment,
+                });
+            }
+            AgentEvent::ToolCallFinished { tool_call, .. } => {
+                self.apply_stream_update(StreamUpdate::ToolUpdated {
+                    id: tool_call.id,
+                    detail: tool_call.arguments.to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_tool_execution_event(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::ToolExecutionStarted {
+                id,
+                name,
+                arguments,
+                ..
+            } => {
+                self.apply_stream_update(StreamUpdate::ToolStarted {
+                    id,
+                    name,
+                    detail: arguments.to_string(),
+                });
+            }
+            AgentEvent::ToolExecutionUpdate {
+                id, partial_result, ..
+            } => {
+                self.apply_stream_update(StreamUpdate::ToolUpdated {
+                    id,
+                    detail: tool_result_detail(&partial_result),
+                });
+            }
+            AgentEvent::ToolExecutionFinished {
+                id, name, result, ..
+            } => self.finish_tool_execution(id, name, &result),
+            _ => {}
+        }
+    }
+
+    fn finish_tool_execution(
+        &mut self,
+        id: String,
+        name: String,
+        result: &neo_agent_core::ToolResult,
+    ) {
+        let success = !result.is_error;
+        let detail = tool_result_detail(result);
+        if self.active_tools.iter().any(|tool| tool.id == id) {
+            self.apply_stream_update(StreamUpdate::ToolFinished {
+                id: id.clone(),
+                detail,
+                success,
+            });
+            self.completed_tool_result_ids.push(id);
+        } else {
+            self.transcript.push(TranscriptItem::tool(
+                name,
+                detail,
+                if success {
+                    ToolStatusKind::Succeeded
+                } else {
+                    ToolStatusKind::Failed
+                },
+            ));
+            self.transcript_view.follow_bottom();
+        }
+    }
+
+    fn apply_shell_event(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::ShellCommandStarted {
+                id, command, cwd, ..
+            } => {
+                self.apply_stream_update(StreamUpdate::ToolStarted {
+                    id,
+                    name: "shell.run".to_owned(),
+                    detail: format!("{command} ({})", cwd.display()),
+                });
+            }
+            AgentEvent::ShellCommandFinished {
+                id,
+                exit_code,
+                stdout,
+                stderr,
+                truncated,
+                ..
+            } => {
+                let detail = shell_finished_detail(exit_code, &stdout, &stderr, truncated);
+                self.apply_stream_update(StreamUpdate::ToolFinished {
+                    id,
+                    detail,
+                    success: exit_code == Some(0),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_runtime_notice_event(&mut self, event: AgentEvent) {
+        let text = match event {
+            AgentEvent::SteeringQueued { message } => {
+                format!("Steering queued: {}", message_text(&message))
+            }
+            AgentEvent::FollowUpQueued { message } => {
+                format!("Follow-up queued: {}", message_text(&message))
+            }
+            AgentEvent::QueueDrained { kind, count } => {
+                format!("{kind:?} queue drained ({count})")
+            }
+            AgentEvent::CompactionApplied { summary } => format!(
+                "Compaction applied: kept from message {}, {} tokens before",
+                summary.first_kept_message_index, summary.tokens_before
+            ),
+            _ => return,
+        };
+        self.apply_stream_update(StreamUpdate::Notice { text });
+    }
+
+    fn apply_message(&mut self, message: AgentMessage) {
+        let text = message_text(&message);
+        if text.is_empty() {
+            return;
+        }
+
+        match message {
+            AgentMessage::User { .. } => self.transcript.push(TranscriptItem::user(text)),
+            AgentMessage::Assistant { .. } => {
+                if self.active_assistant_id.is_some() {
+                    let _ = self.transcript.update_last_assistant(text);
+                } else {
+                    self.transcript.push(TranscriptItem::assistant(text));
+                }
+            }
+            AgentMessage::ToolResult {
+                tool_call_id,
+                tool_name,
+                is_error,
+                ..
+            } => {
+                if take_completed_tool_result(&mut self.completed_tool_result_ids, &tool_call_id) {
+                    return;
+                }
+                self.transcript.push(TranscriptItem::tool(
+                    tool_name,
+                    text,
+                    if is_error {
+                        ToolStatusKind::Failed
+                    } else {
+                        ToolStatusKind::Succeeded
+                    },
+                ));
+            }
+            AgentMessage::System { .. } => {
+                self.transcript.push(TranscriptItem::notice(text));
             }
         }
         self.transcript_view.follow_bottom();
@@ -307,6 +543,64 @@ impl NeoTuiApp {
         } else {
             AppMode::Editing
         }
+    }
+}
+
+fn message_text(message: &AgentMessage) -> String {
+    let content = match message {
+        AgentMessage::System { content }
+        | AgentMessage::User { content }
+        | AgentMessage::Assistant { content, .. }
+        | AgentMessage::ToolResult { content, .. } => content,
+    };
+
+    content
+        .iter()
+        .filter_map(Content::as_text)
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn tool_result_detail(result: &neo_agent_core::ToolResult) -> String {
+    if let Some(details) = &result.details {
+        if result.content.is_empty() {
+            return details.to_string();
+        }
+        return format!("{}, details: {details}", result.content);
+    }
+
+    result.content.clone()
+}
+
+fn shell_finished_detail(
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+    truncated: bool,
+) -> String {
+    let exit_label = exit_code.map_or_else(|| "signal".to_owned(), |code| code.to_string());
+    let mut detail = format!("exit {exit_label}");
+    if !stdout.is_empty() {
+        let _ = write!(detail, ", stdout: {stdout}");
+    }
+    if !stderr.is_empty() {
+        let _ = write!(detail, ", stderr: {stderr}");
+    }
+    if truncated {
+        detail.push_str(", truncated");
+    }
+    detail
+}
+
+fn take_completed_tool_result(completed_tool_result_ids: &mut Vec<String>, id: &str) -> bool {
+    if let Some(index) = completed_tool_result_ids
+        .iter()
+        .position(|completed_id| completed_id == id)
+    {
+        completed_tool_result_ids.remove(index);
+        true
+    } else {
+        false
     }
 }
 

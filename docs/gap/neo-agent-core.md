@@ -14,6 +14,9 @@
   `Allow` as executable.
 - `ToolRegistry::with_builtin_tools()` registers `read`, `list`, `grep`,
   `find`, `write`, `edit`, and `bash`.
+- `McpToolAdapter` and `McpToolProvider` can discover configured MCP tools as
+  namespaced `ToolSpec` values and execute them through an async adapter
+  registered in `ToolRegistry`.
 - `ToolContext` resolves paths inside the workspace and carries shell timeout
   and output cap settings.
 - `session::JsonlSessionWriter`, `session::JsonlSessionReader`, and
@@ -33,6 +36,8 @@ interactive behavior.
   treating broad workspace checks as green.
 - Add docs and tests for `Ask` permission behavior once there is a CLI/TUI
   approval path. Today tools only execute on `Allow`.
+- Add a real stdio JSON-RPC MCP process adapter and CLI config plumbing on top
+  of the agent-core adapter boundary.
 - Add hook/steering docs only when the runtime exposes those APIs.
 - Define whether `bash` remains foreground-only or grows a background/PTY
   sibling; keep the model-facing schema compact either way.

@@ -1,41 +1,66 @@
-use std::{ffi::OsStr, fs, path::PathBuf};
+use std::{fs, path::PathBuf};
 
-use anyhow::{Context, bail};
-use neo_agent_core::session::JsonlSessionReader;
+use anyhow::Context;
+use neo_agent_core::session::{JsonlSessionReader, SessionMetadataStore, validate_session_id};
 use neo_agent_core::{AgentMessage, Content};
 use neo_sdk::{ExportConversation, ExportMessage, HtmlExportOptions, export_html as render_html};
 
 use crate::config::AppConfig;
 
 pub fn list(config: &AppConfig) -> anyhow::Result<String> {
-    if !config.sessions_dir.exists() {
-        return Ok("no sessions\n".to_owned());
-    }
-
-    let mut sessions = fs::read_dir(&config.sessions_dir)
-        .with_context(|| {
-            format!(
-                "failed to read sessions directory {}",
-                config.sessions_dir.display()
-            )
-        })?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            (path.extension() == Some(OsStr::new("jsonl")))
-                .then(|| path.file_stem().map(OsStr::to_owned))
-                .flatten()
-        })
-        .map(|name| name.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-
-    sessions.sort_unstable();
+    let sessions = metadata_store(config).list().with_context(|| {
+        format!(
+            "failed to read sessions directory {}",
+            config.sessions_dir.display()
+        )
+    })?;
 
     if sessions.is_empty() {
         Ok("no sessions\n".to_owned())
     } else {
-        Ok(format!("{}\n", sessions.join("\n")))
+        let lines = sessions
+            .iter()
+            .map(|session| {
+                let mut parts = vec![session.id.clone()];
+                if let Some(name) = &session.name {
+                    parts.push(name.clone());
+                }
+                if let Some(parent_id) = &session.parent_id {
+                    parts.push(format!("parent={parent_id}"));
+                }
+                if !session.children.is_empty() {
+                    parts.push(format!("children={}", session.children.join(",")));
+                }
+                parts.join("\t")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(format!("{lines}\n"))
     }
+}
+
+pub fn rename(session_id: &str, name: &str, config: &AppConfig) -> anyhow::Result<String> {
+    let session = metadata_store(config)
+        .rename(session_id, name.to_owned())
+        .with_context(|| format!("failed to rename session {session_id}"))?;
+    Ok(format!(
+        "renamed {} {}\n",
+        session.id,
+        session.name.unwrap_or_default()
+    ))
+}
+
+pub fn fork(session_id: &str, name: Option<&str>, config: &AppConfig) -> anyhow::Result<String> {
+    let session = metadata_store(config)
+        .fork(session_id, name.map(str::to_owned))
+        .with_context(|| format!("failed to fork session {session_id}"))?;
+    let mut output = format!("forked {session_id} -> {}", session.id);
+    if let Some(name) = session.name {
+        output.push(' ');
+        output.push_str(&name);
+    }
+    output.push('\n');
+    Ok(output)
 }
 
 pub fn show(session_id: &str, config: &AppConfig) -> anyhow::Result<String> {
@@ -76,17 +101,13 @@ pub async fn export_html(session_id: &str, config: &AppConfig) -> anyhow::Result
 }
 
 pub fn session_path(session_id: &str, config: &AppConfig) -> anyhow::Result<PathBuf> {
-    if !is_safe_session_id(session_id) {
-        bail!("invalid session id {session_id:?}");
-    }
+    validate_session_id(session_id)
+        .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
     Ok(config.sessions_dir.join(format!("{session_id}.jsonl")))
 }
 
-fn is_safe_session_id(session_id: &str) -> bool {
-    !session_id.is_empty()
-        && session_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+fn metadata_store(config: &AppConfig) -> SessionMetadataStore {
+    SessionMetadataStore::new(&config.sessions_dir)
 }
 
 fn format_message(message: &AgentMessage) -> String {

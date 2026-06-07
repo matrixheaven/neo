@@ -49,6 +49,11 @@ know a small environment-key map for common provider ids such as `anthropic`,
 Neo does not have pi-style auth-file login flows yet. Keep provider secrets in
 environment variables or external secret managers. Anthropic can use
 `ANTHROPIC_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`; OpenAI uses `OPENAI_API_KEY`.
+`ProviderCredentialStatus` reports configured environment variable names,
+ambient auth labels, and explicit missing-key reasons without including secret
+values. If a provider needs a browser or external backend for login, Neo should
+surface that as unsupported or environment-only rather than pretending a login
+succeeded.
 
 ## Production Adapters
 

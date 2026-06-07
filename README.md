@@ -22,8 +22,8 @@ other workers are building adjacent crates. Use
 `cargo run -p xtask -- check --workspace` when you want the full workspace fmt,
 clippy, and test gate.
 `cargo run -p xtask -- check --docs` also runs the docs/examples parity gate,
-including local Markdown link checks, deployment-fixture guidance scans, and
-example TOML/JSON validation.
+including local Markdown link checks, production fake/local/placeholder guidance
+scans, and example TOML/JSON validation.
 
 ## Documentation
 

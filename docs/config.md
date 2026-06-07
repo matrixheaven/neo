@@ -25,6 +25,9 @@ default_model = "gpt-4.1"
 api_key_env = "OPENAI_API_KEY"
 sessions_dir = ".neo/sessions"
 
+[providers.openai]
+api_key_env = "PROJECT_OPENAI_KEY"
+
 [permissions]
 file_read = "Allow"
 file_write = "Ask"
@@ -42,10 +45,12 @@ command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 ```
 
-`api_key_env` names an environment variable. Do not write raw API keys into
-config files. `neo-agent` resolves the configured model through
-`ModelRegistry::seeded()` and `ProviderRegistry::production()`. With the built-in
-defaults, set `OPENAI_API_KEY` before running provider-backed commands. Custom
+`api_key_env` names an environment variable. Provider-specific entries such as
+`[providers.openai].api_key_env` name the environment variable for that provider
+without storing the secret value. Do not write raw API keys into config files.
+`neo-agent` resolves the configured model through `ModelRegistry::seeded()` and
+`ProviderRegistry::production()`. With the built-in defaults, set
+`OPENAI_API_KEY` before running provider-backed commands. Custom
 OpenAI-compatible deployments can override `api_base` and `api_key_env` for the
 selected provider.
 
@@ -99,6 +104,7 @@ Supported `config set` keys are:
 - `default_provider` or `provider`
 - `api_base`
 - `api_key_env`
+- `providers.<provider-id>.api_key_env`
 - `sessions_dir`
 - `permissions.file_read` or `file_read`
 - `permissions.file_write` or `file_write`

@@ -36,6 +36,12 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
         Some(Command::Sessions { command }) => match command {
             SessionCommand::List => session_commands::list(&config),
             SessionCommand::Show { session_id } => session_commands::show(&session_id, &config),
+            SessionCommand::Rename { session_id, name } => {
+                session_commands::rename(&session_id, &name, &config)
+            }
+            SessionCommand::Fork { session_id, name } => {
+                session_commands::fork(&session_id, name.as_deref(), &config)
+            }
             SessionCommand::ExportHtml { session_id } => {
                 session_commands::export_html(&session_id, &config).await
             }
@@ -45,6 +51,15 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
         },
         Some(Command::Extensions { command }) => match command {
             ExtensionCommand::List { root } => extension_commands::list(&root),
+            ExtensionCommand::Status { extension_id, root } => {
+                extension_commands::status(&root, &extension_id)
+            }
+            ExtensionCommand::Enable { extension_id, root } => {
+                extension_commands::enable(&root, &extension_id)
+            }
+            ExtensionCommand::Disable { extension_id, root } => {
+                extension_commands::disable(&root, &extension_id)
+            }
             ExtensionCommand::Call {
                 extension_id,
                 method,

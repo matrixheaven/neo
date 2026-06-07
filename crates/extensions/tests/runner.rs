@@ -1,5 +1,5 @@
 use neo_extensions::{ExtensionRunner, ExtensionTransport};
-use neo_sdk::{JsonlCodec, RpcMessage, RpcRequest, RpcResponse};
+use neo_sdk::{JsonlCodec, RpcErrorCode, RpcMessage, RpcRequest, RpcResponse};
 use serde_json::json;
 
 #[tokio::test]
@@ -74,6 +74,46 @@ print(json.dumps({"type":"response","id":"wrong","result":True}), flush=True)
         .unwrap_err();
 
     assert!(err.to_string().contains("response id mismatch"));
+}
+
+#[tokio::test]
+async fn stdio_runner_surfaces_structured_rpc_failures() {
+    let script = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        script.path(),
+        r#"
+import json
+message = json.loads(input())
+print(json.dumps({
+  "type": "response",
+  "id": message["id"],
+  "error": {
+    "code": "method_not_found",
+    "message": "unknown method",
+    "data": {"method": message["method"]}
+  }
+}), flush=True)
+"#,
+    )
+    .unwrap();
+
+    let mut runner = ExtensionRunner::spawn(ExtensionTransport::Stdio {
+        command: "python3".into(),
+        args: vec![script.path().to_string_lossy().into_owned()],
+        env: vec![],
+    })
+    .unwrap();
+
+    let err = runner
+        .request(RpcRequest::new("call-404", "missing.tool", json!({})))
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("unknown method"));
+    assert!(
+        err.to_string()
+            .contains(&format!("{:?}", RpcErrorCode::MethodNotFound))
+    );
 }
 
 #[test]

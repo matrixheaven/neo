@@ -120,15 +120,39 @@ pub enum RpcCodecError {
     EmptyFrame,
     #[error("JSONL frame contains trailing content")]
     TrailingContent,
+    #[error("failed to decode JSONL frame on line {line}: {source}")]
+    Line {
+        line: usize,
+        source: Box<RpcCodecError>,
+    },
     #[error("failed to serialize RPC message: {0}")]
-    Serialize(#[from] serde_json::Error),
+    Serialize(serde_json::Error),
+    #[error("failed to deserialize RPC message: {0}")]
+    Deserialize(serde_json::Error),
+}
+
+impl RpcCodecError {
+    #[must_use]
+    pub fn to_response(&self, id: impl Into<String>) -> RpcResponse {
+        RpcResponse::failure(id, RpcError::new(self.error_code(), self.to_string(), None))
+    }
+
+    #[must_use]
+    pub fn error_code(&self) -> RpcErrorCode {
+        match self {
+            Self::EmptyFrame | Self::TrailingContent | Self::Deserialize(_) | Self::Line { .. } => {
+                RpcErrorCode::ParseError
+            }
+            Self::Serialize(_) => RpcErrorCode::InternalError,
+        }
+    }
 }
 
 pub struct JsonlCodec;
 
 impl JsonlCodec {
     pub fn encode(message: &RpcMessage) -> Result<String, RpcCodecError> {
-        let mut line = serde_json::to_string(message)?;
+        let mut line = serde_json::to_string(message).map_err(RpcCodecError::Serialize)?;
         line.push('\n');
         Ok(line)
     }
@@ -151,10 +175,19 @@ impl JsonlCodec {
         if trimmed.contains('\n') || trimmed.contains('\r') {
             return Err(RpcCodecError::TrailingContent);
         }
-        Ok(serde_json::from_str(trimmed)?)
+        serde_json::from_str(trimmed).map_err(RpcCodecError::Deserialize)
     }
 
     pub fn decode_stream(input: &str) -> Result<Vec<RpcMessage>, RpcCodecError> {
-        input.lines().map(Self::decode_line).collect()
+        input
+            .lines()
+            .enumerate()
+            .map(|(index, line)| {
+                Self::decode_line(line).map_err(|source| RpcCodecError::Line {
+                    line: index + 1,
+                    source: Box::new(source),
+                })
+            })
+            .collect()
     }
 }

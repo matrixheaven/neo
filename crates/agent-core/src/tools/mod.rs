@@ -3,6 +3,7 @@ mod edit;
 mod find;
 mod grep;
 mod list;
+mod mcp;
 mod read;
 mod write;
 
@@ -21,6 +22,8 @@ use thiserror::Error;
 
 use crate::PermissionPolicy;
 
+pub use mcp::*;
+
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolResult, ToolError>> + Send + 'a>>;
 
 #[derive(Debug, Error)]
@@ -35,6 +38,12 @@ pub enum ToolError {
     InvalidInput { tool: String, message: String },
     #[error("command timed out after {timeout_ms} ms")]
     CommandTimedOut { timeout_ms: u64 },
+    #[error("mcp error from {server_id}/{tool_name}: {message}")]
+    Mcp {
+        server_id: String,
+        tool_name: String,
+        message: String,
+    },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("regex error: {0}")]
@@ -184,8 +193,8 @@ impl ToolResult {
 }
 
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
     fn input_schema(&self) -> serde_json::Value;
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a>;
 
@@ -200,7 +209,7 @@ pub trait Tool: Send + Sync {
 
 #[derive(Default)]
 pub struct ToolRegistry {
-    tools: BTreeMap<&'static str, Box<dyn Tool>>,
+    tools: BTreeMap<String, Box<dyn Tool>>,
 }
 
 impl ToolRegistry {
@@ -226,7 +235,7 @@ impl ToolRegistry {
     where
         T: Tool + 'static,
     {
-        self.tools.insert(tool.name(), Box::new(tool));
+        self.tools.insert(tool.name().to_owned(), Box::new(tool));
     }
 
     #[must_use]

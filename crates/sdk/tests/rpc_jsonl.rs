@@ -1,5 +1,6 @@
 use neo_sdk::{
-    JsonlCodec, RpcError, RpcErrorCode, RpcMessage, RpcNotification, RpcRequest, RpcResponse,
+    JsonlCodec, RpcCodecError, RpcError, RpcErrorCode, RpcMessage, RpcNotification, RpcRequest,
+    RpcResponse,
 };
 use serde_json::json;
 
@@ -46,4 +47,33 @@ fn rpc_response_preserves_structured_error() {
 fn decoder_rejects_empty_or_trailing_content() {
     assert!(JsonlCodec::decode_line("\n").is_err());
     assert!(JsonlCodec::decode_line("{}\n{}").is_err());
+}
+
+#[test]
+fn stream_decoder_reports_malformed_frame_line_number() {
+    let err = JsonlCodec::decode_stream(concat!(
+        "{\"type\":\"notification\",\"method\":\"ready\"}\n",
+        "{\"type\":\"request\",\"id\":\"bad\",\"method\":\n"
+    ))
+    .unwrap_err();
+
+    assert!(matches!(err, RpcCodecError::Line { line: 2, .. }));
+    assert!(err.to_string().contains("line 2"));
+}
+
+#[test]
+fn parse_error_can_be_returned_as_structured_rpc_failure() {
+    let err = JsonlCodec::decode_line("{").unwrap_err();
+    let response = err.to_response("bad-json");
+    let line = JsonlCodec::encode(&RpcMessage::Response(response.clone())).unwrap();
+
+    assert_eq!(
+        response,
+        RpcResponse::failure(
+            "bad-json",
+            RpcError::new(RpcErrorCode::ParseError, err.to_string(), None)
+        )
+    );
+    assert!(line.contains("\"error\""));
+    assert!(line.contains("\"code\":\"parse_error\""));
 }

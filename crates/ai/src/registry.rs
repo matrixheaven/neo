@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use crate::{
     AiError, ApiKind, ModelCapabilities, ModelClient, ModelSpec, ProviderId,
-    env_api_keys::{env_api_key_from, find_env_keys_from},
     providers::{
         anthropic::AnthropicMessagesClient, openai_compatible::OpenAiCompatibleClient,
         openai_responses::OpenAiResponsesClient,
@@ -90,6 +89,7 @@ pub struct ProviderCredentialStatus {
     pub configured: bool,
     pub env_keys: Vec<String>,
     pub authenticated_label: Option<String>,
+    pub missing_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -144,19 +144,21 @@ impl ProviderRegistry {
         env: &BTreeMap<String, String>,
     ) -> Option<ProviderCredentialStatus> {
         let spec = self.get(provider)?;
-        let env_keys = find_env_keys_from(provider, env);
+        let env_keys = configured_env_keys(spec, env);
         let authenticated = spec.ambient_auth_env_vars.iter().any(|group| {
             group
                 .iter()
                 .all(|key| env.get(key).is_some_and(|value| !value.is_empty()))
         });
         let configured = !env_keys.is_empty() || authenticated;
+        let missing_reason = (!configured).then(|| missing_reason(spec));
 
         Some(ProviderCredentialStatus {
             provider: provider.to_owned(),
             configured,
             env_keys,
             authenticated_label: authenticated.then(|| "<authenticated>".to_owned()),
+            missing_reason,
         })
     }
 
@@ -189,10 +191,10 @@ impl ProviderResolver {
             AiError::Configuration(format!("provider {} is not registered", model.provider.0))
         })?;
 
-        let api_key = env_api_key_from(&provider.id, &self.env).ok_or_else(|| {
-            let keys = provider.api_key_env_vars.join(", ");
+        let api_key = api_key_from_provider(provider, &self.env).ok_or_else(|| {
+            let reason = missing_reason(provider);
             AiError::Configuration(format!(
-                "missing credentials for provider {} (set one of: {keys})",
+                "missing credentials for provider {} ({reason})",
                 provider.id
             ))
         })?;
@@ -217,6 +219,41 @@ impl ProviderResolver {
                 provider.id, model.api
             ))),
         }
+    }
+}
+
+fn api_key_from_provider(
+    provider: &ProviderSpec,
+    env: &BTreeMap<String, String>,
+) -> Option<String> {
+    provider
+        .api_key_env_vars
+        .iter()
+        .find_map(|key| env.get(key).filter(|value| !value.is_empty()).cloned())
+}
+
+fn configured_env_keys(provider: &ProviderSpec, env: &BTreeMap<String, String>) -> Vec<String> {
+    provider
+        .api_key_env_vars
+        .iter()
+        .filter(|key| env.get(*key).is_some_and(|value| !value.is_empty()))
+        .cloned()
+        .collect()
+}
+
+fn missing_reason(provider: &ProviderSpec) -> String {
+    let mut options: Vec<String> = provider.api_key_env_vars.clone();
+    options.extend(
+        provider
+            .ambient_auth_env_vars
+            .iter()
+            .map(|group| group.join(" + ")),
+    );
+
+    match options.as_slice() {
+        [] => "no environment credential sources are registered".to_owned(),
+        [key] => format!("missing {key}"),
+        _ => format!("missing one of: {}", options.join("; ")),
     }
 }
 

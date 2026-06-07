@@ -5,7 +5,8 @@
 - Global flags: `--model`/`NEO_MODEL`, `--provider`/`NEO_PROVIDER`,
   `--api-base`/`NEO_API_BASE`, and `--config`/`NEO_CONFIG`.
 - Commands: `print`, `run`, `resume`, `sessions list`, `sessions show`,
-  `sessions export-html`, `skills show`, `extensions list`,
+  `sessions rename`, `sessions fork`, `sessions export-html`, `skills show`,
+  `extensions list`,
   `extensions call`, `config show`, `config set`, `models list`, and `mcp list`.
 - Project config defaults to `.neo/config.toml`.
 - Config loading merges CLI overrides, environment overrides, project config,
@@ -13,8 +14,9 @@
 - Supported config keys include `default_model`, `default_provider`,
   `api_base`, `api_key_env`, `sessions_dir`, `permissions.file_read`,
   `permissions.file_write`, `permissions.shell`, and `defaults.mode`.
-- Session commands read project session files from `sessions_dir` and can export
-  replayed messages to standalone HTML.
+- Session commands read project session files from `sessions_dir`, store local
+  tree/name metadata next to JSONL records, and can export replayed messages to
+  standalone HTML.
 - `skills show` loads TOML-frontmatter skill files through `neo-sdk`.
 - `extensions list` and `extensions call` discover local extension manifests and
   round-trip JSONL RPC over stdio.
@@ -23,9 +25,9 @@
 ## Pi Parity Pressure
 
 Pi's coding-agent docs include interactive setup, provider login, settings,
-TUI controls, session tree navigation, compaction, richer JSON/RPC modes,
-extension lifecycle management, themes, terminal setup, and platform-specific
-guidance.
+TUI controls, session tree navigation UI, hosted sharing, compaction, richer
+JSON/RPC modes, extension lifecycle management, themes, terminal setup, and
+platform-specific guidance.
 
 ## High-Priority Gaps
 

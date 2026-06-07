@@ -59,8 +59,21 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum SessionCommand {
     List,
-    Show { session_id: String },
-    ExportHtml { session_id: String },
+    Show {
+        session_id: String,
+    },
+    Rename {
+        session_id: String,
+        name: String,
+    },
+    Fork {
+        session_id: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    ExportHtml {
+        session_id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -88,6 +101,21 @@ pub enum SkillCommand {
 pub enum ExtensionCommand {
     List {
         #[arg(default_value = ".neo/extensions")]
+        root: std::path::PathBuf,
+    },
+    Status {
+        extension_id: String,
+        #[arg(long, default_value = ".neo/extensions")]
+        root: std::path::PathBuf,
+    },
+    Enable {
+        extension_id: String,
+        #[arg(long, default_value = ".neo/extensions")]
+        root: std::path::PathBuf,
+    },
+    Disable {
+        extension_id: String,
+        #[arg(long, default_value = ".neo/extensions")]
         root: std::path::PathBuf,
     },
     Call {

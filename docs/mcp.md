@@ -2,29 +2,36 @@
 
 MCP support is intended to expose external tools and resources to Neo without coupling the agent loop to a specific server implementation.
 
-## Conceptual Interface
+## Agent-Core Interface
 
-The stable boundary should look like:
+`neo-agent-core` exposes the production adapter boundary in `tools::mcp`:
 
 ```rust
-pub struct McpServerConfig {
-    pub id: String,
-    pub transport: McpTransport,
-    pub enabled: bool,
-}
+#[async_trait::async_trait]
+pub trait McpToolAdapter: Send + Sync {
+    async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError>;
 
-pub enum McpTransport {
-    Stdio { command: String, args: Vec<String>, env: Vec<(String, String)> },
-}
-
-pub trait McpClient {
-    fn list_tools(&self) -> impl Future<Output = Result<Vec<McpTool>, McpError>> + Send;
-    fn call_tool(&self, name: &str, arguments: serde_json::Value)
-        -> impl Future<Output = Result<McpToolResult, McpError>> + Send;
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<McpToolResponse, McpError>;
 }
 ```
 
-The exact Rust trait can change once `neo-agent-core` has stable runtime and async trait conventions. The important contract is that MCP discovery becomes tool metadata, and MCP invocation becomes an authorized tool execution.
+`McpToolProvider::discover(server_id, adapter)` calls `list_tools`, converts
+the returned definitions to normal `ToolSpec` values, and can register those
+tools into `ToolRegistry`. Registered MCP tools execute by delegating to
+`adapter.call_tool`; production code must provide a real adapter implementation.
+
+Tool names are exposed to the model as `mcp__<server_id>__<tool_name>` and call
+the remote MCP tool by its original unprefixed name. Non-alphanumeric
+characters in server and tool ids are converted to `_` so model provider
+function-name validators can accept the advertised tools.
+
+Transport configuration is intentionally outside this core slice. A stdio or
+other JSON-RPC client should implement `McpToolAdapter` without adding local
+fallback behavior.
 
 ## Runtime Placement
 
@@ -43,11 +50,13 @@ The model should only see normal `ToolSpec` values. It should not know whether a
 ## Safety Rules
 
 - Disabled MCP servers are not started.
-- Tool names are namespaced by server id when needed.
+- Tool names are namespaced by server id and use provider-safe characters.
 - MCP tool calls pass through the same permission policy as built-in tools.
 - Server stderr and protocol logs are developer diagnostics, not model context.
 - Secrets enter through environment variables, not session logs.
 
 ## Current Status
 
-This slice documents the intended interface and adds no runtime dependency on MCP crates. A compile-time Rust stub should only be added after `neo-agent-core` has stable adjacent modules to export alongside it.
+`neo-agent-core` has the MCP tool adapter abstraction, discovery-to-`ToolSpec`
+bridge, namespaced `ToolRegistry` registration, and async call delegation. It
+does not yet spawn external MCP server processes or load MCP CLI config.

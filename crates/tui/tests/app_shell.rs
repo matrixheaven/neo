@@ -3,7 +3,6 @@ use neo_tui::{
     PickerItem, SessionPickerState, StreamUpdate, TranscriptLine, TranscriptRenderer,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Cell};
-use std::fmt::Write as _;
 use std::path::PathBuf;
 
 fn render_app(width: u16, height: u16, app: &NeoTuiApp) -> Vec<String> {
@@ -21,87 +20,17 @@ fn render_app(width: u16, height: u16, app: &NeoTuiApp) -> Vec<String> {
         .collect()
 }
 
-fn apply_agent_event_to_tui_primitives(app: &mut NeoTuiApp, event: neo_agent_core::AgentEvent) {
-    match event {
-        neo_agent_core::AgentEvent::ApprovalRequested {
-            id,
-            operation,
-            subject,
-            arguments,
-            ..
-        } => {
-            let body = if arguments.is_null() {
-                subject
-            } else {
-                format!("{subject}\n{arguments}")
-            };
-            app.request_approval(id, format!("{operation:?} approval"), body);
-        }
-        neo_agent_core::AgentEvent::ShellCommandStarted {
-            id, command, cwd, ..
-        } => {
-            app.apply_stream_update(StreamUpdate::ToolStarted {
-                id,
-                name: "shell.run".to_owned(),
-                detail: format!("{command} ({})", cwd.display()),
-            });
-        }
-        neo_agent_core::AgentEvent::ShellCommandFinished {
-            id,
-            exit_code,
-            stdout,
-            stderr,
-            truncated,
-            ..
-        } => {
-            let exit_label = exit_code.map_or_else(|| "signal".to_owned(), |code| code.to_string());
-            let mut detail = format!("exit {exit_label}");
-            if !stdout.is_empty() {
-                let _ = write!(detail, ", stdout: {stdout}");
-            }
-            if !stderr.is_empty() {
-                let _ = write!(detail, ", stderr: {stderr}");
-            }
-            if truncated {
-                detail.push_str(", truncated");
-            }
-            app.apply_stream_update(StreamUpdate::ToolFinished {
-                id,
-                detail,
-                success: exit_code == Some(0),
-            });
-        }
-        neo_agent_core::AgentEvent::QueueDrained { kind, count } => {
-            app.apply_stream_update(StreamUpdate::Notice {
-                text: format!("{kind:?} queue drained ({count})"),
-            });
-        }
-        neo_agent_core::AgentEvent::CompactionApplied { summary } => {
-            app.apply_stream_update(StreamUpdate::Notice {
-                text: format!(
-                    "Compaction applied: kept from message {}, {} tokens before",
-                    summary.first_kept_message_index, summary.tokens_before
-                ),
-            });
-        }
-        _ => {}
-    }
-}
-
 #[test]
 fn app_shell_maps_agent_core_approval_request_to_approval_overlay() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
 
-    apply_agent_event_to_tui_primitives(
-        &mut app,
-        neo_agent_core::AgentEvent::ApprovalRequested {
-            turn: 7,
-            id: "approval-7".to_owned(),
-            operation: neo_agent_core::PermissionOperation::Tool,
-            subject: "shell.run".to_owned(),
-            arguments: serde_json::json!({ "command": "cargo test -p neo-tui" }),
-        },
-    );
+    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 7,
+        id: "approval-7".to_owned(),
+        operation: neo_agent_core::PermissionOperation::Tool,
+        subject: "shell.run".to_owned(),
+        arguments: serde_json::json!({ "command": "cargo test -p neo-tui" }),
+    });
 
     assert_eq!(app.mode(), AppMode::Approval);
     assert_eq!(
@@ -121,15 +50,12 @@ fn app_shell_maps_agent_core_approval_request_to_approval_overlay() {
 fn app_shell_maps_agent_core_shell_command_lifecycle_to_tool_status() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
 
-    apply_agent_event_to_tui_primitives(
-        &mut app,
-        neo_agent_core::AgentEvent::ShellCommandStarted {
-            turn: 1,
-            id: "shell-1".to_owned(),
-            command: "cargo test -p neo-tui".to_owned(),
-            cwd: PathBuf::from("/workspace/neo"),
-        },
-    );
+    app.apply_agent_event(neo_agent_core::AgentEvent::ShellCommandStarted {
+        turn: 1,
+        id: "shell-1".to_owned(),
+        command: "cargo test -p neo-tui".to_owned(),
+        cwd: PathBuf::from("/workspace/neo"),
+    });
 
     let statuses = app.tool_statuses();
     assert_eq!(statuses.len(), 1);
@@ -139,17 +65,14 @@ fn app_shell_maps_agent_core_shell_command_lifecycle_to_tool_status() {
         detail.contains("cargo test -p neo-tui") && detail.contains("/workspace/neo")
     }));
 
-    apply_agent_event_to_tui_primitives(
-        &mut app,
-        neo_agent_core::AgentEvent::ShellCommandFinished {
-            turn: 1,
-            id: "shell-1".to_owned(),
-            exit_code: Some(0),
-            stdout: "ok".to_owned(),
-            stderr: String::new(),
-            truncated: false,
-        },
-    );
+    app.apply_agent_event(neo_agent_core::AgentEvent::ShellCommandFinished {
+        turn: 1,
+        id: "shell-1".to_owned(),
+        exit_code: Some(0),
+        stdout: "ok".to_owned(),
+        stderr: String::new(),
+        truncated: false,
+    });
 
     assert!(app.tool_statuses().is_empty());
     assert!(matches!(
@@ -166,26 +89,75 @@ fn app_shell_maps_agent_core_shell_command_lifecycle_to_tool_status() {
 }
 
 #[test]
+fn app_shell_merges_model_tool_call_and_execution_lifecycle() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "read".to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolCallArgumentsDelta {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        json_fragment: r#"{"path":"README.md"}"#.to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "read".to_owned(),
+        arguments: serde_json::json!({ "path": "README.md" }),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "read".to_owned(),
+        result: neo_agent_core::ToolResult::ok("read README"),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageAppended {
+        message: neo_agent_core::AgentMessage::tool_result(
+            "tool-1",
+            "read",
+            [neo_agent_core::Content::text("read README")],
+            false,
+        ),
+    });
+
+    assert!(app.tool_statuses().is_empty());
+    let tool_items = app
+        .transcript()
+        .items()
+        .iter()
+        .filter(|item| matches!(item, neo_tui::TranscriptItem::Tool { .. }))
+        .count();
+    assert_eq!(tool_items, 1);
+    assert!(matches!(
+        app.transcript().items().last(),
+        Some(neo_tui::TranscriptItem::Tool {
+            name,
+            detail,
+            status,
+        }) if name == "read"
+            && detail == "read README"
+            && status == &neo_tui::ToolStatusKind::Succeeded
+    ));
+}
+
+#[test]
 fn app_shell_maps_agent_core_queue_and_compaction_events_to_notices() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
 
-    apply_agent_event_to_tui_primitives(
-        &mut app,
-        neo_agent_core::AgentEvent::QueueDrained {
-            kind: neo_agent_core::QueueKind::FollowUp,
-            count: 2,
+    app.apply_agent_event(neo_agent_core::AgentEvent::QueueDrained {
+        kind: neo_agent_core::QueueKind::FollowUp,
+        count: 2,
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::CompactionApplied {
+        summary: neo_agent_core::CompactionSummary {
+            summary: "Older context summarized.".to_owned(),
+            tokens_before: 12_345,
+            first_kept_message_index: 4,
         },
-    );
-    apply_agent_event_to_tui_primitives(
-        &mut app,
-        neo_agent_core::AgentEvent::CompactionApplied {
-            summary: neo_agent_core::CompactionSummary {
-                summary: "Older context summarized.".to_owned(),
-                tokens_before: 12_345,
-                first_kept_message_index: 4,
-            },
-        },
-    );
+    });
 
     let notices: Vec<&str> = app
         .transcript()
@@ -200,6 +172,35 @@ fn app_shell_maps_agent_core_queue_and_compaction_events_to_notices() {
     assert!(notices[0].contains("FollowUp queue drained (2)"));
     assert!(notices[1].contains("Compaction applied"));
     assert!(notices[1].contains("12345 tokens before"));
+}
+
+#[test]
+fn app_shell_reduces_agent_core_streaming_message_and_turn_events() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        turn: 1,
+        id: "assistant-1".to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "Hel".to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "lo".to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::TurnFinished {
+        turn: 1,
+        stop_reason: neo_agent_core::StopReason::EndTurn,
+    });
+
+    assert_eq!(app.mode(), AppMode::Editing);
+    assert_eq!(app.active_assistant_id(), None);
+    assert!(matches!(
+        app.transcript().items().last(),
+        Some(neo_tui::TranscriptItem::Assistant { content }) if content == "Hello"
+    ));
 }
 
 #[test]

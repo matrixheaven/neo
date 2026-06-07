@@ -24,7 +24,7 @@ pub async fn resume(session_id: &str, config: &AppConfig) -> anyhow::Result<Stri
 }
 
 pub fn list_models(config: &AppConfig) -> String {
-    let providers = ProviderRegistry::production();
+    let providers = provider_registry_for_config(config);
     let mut out = format!(
         "models:\n- {}/{} (configured default)\n",
         config.default_provider, config.default_model
@@ -56,6 +56,17 @@ pub fn list_models(config: &AppConfig) -> String {
         let _ = writeln!(out, "- {} ({:?}, {status})", provider.id, provider.api);
     }
     out
+}
+
+fn provider_registry_for_config(config: &AppConfig) -> ProviderRegistry {
+    let mut registry = ProviderRegistry::production();
+    if let Some(env_name) = &config.api_key_env
+        && let Some(mut provider) = registry.get(&config.default_provider).cloned()
+    {
+        provider.api_key_env_vars = vec![env_name.clone()];
+        registry.register(provider);
+    }
+    registry
 }
 
 pub fn list_mcp_servers(config: &AppConfig) -> String {
@@ -113,14 +124,24 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
     let mut events = vec![user_event];
     let mut assistant_text = String::new();
     let turn_events = runtime
-        .run_turn(&mut context, user_message)
+        .run_turn(&mut context, user_message.clone())
         .collect::<Vec<_>>()
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
 
     for event in turn_events {
-        if let AgentEvent::MessageAppended { message } = &event {
+        let is_duplicate_user_message = matches!(
+            &event,
+            AgentEvent::MessageAppended { message } if message == &user_message
+        );
+        if is_duplicate_user_message {
+            events.push(event);
+            continue;
+        }
+        if let AgentEvent::MessageAppended { message } = &event
+            && matches!(message, AgentMessage::Assistant { .. })
+        {
             assistant_text.push_str(&message_text(message));
         }
         writer.append_event(&event).await?;

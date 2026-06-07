@@ -59,9 +59,9 @@ To include Markdown local-link validation:
 cargo run -p xtask -- check --docs
 ```
 
-`--docs` also runs the docs/examples parity gate: it scans for production docs
-that point at fake or placeholder provider paths, validates local Markdown links,
-and parses the example TOML/JSON artifacts.
+`--docs` also runs the docs/examples parity gate: it scans production source,
+docs, and examples for fake/local/placeholder production guidance, validates
+local Markdown links, and parses the example TOML/JSON artifacts.
 
 When all workspace crates are ready for broad verification, opt in explicitly:
 

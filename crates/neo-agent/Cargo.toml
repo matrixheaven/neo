@@ -18,7 +18,9 @@ futures.workspace = true
 neo-agent-core = { path = "../agent-core" }
 neo-ai = { path = "../ai" }
 neo-extensions = { path = "../extensions" }
+neo-tui = { path = "../tui" }
 neo-sdk = { path = "../sdk" }
+ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

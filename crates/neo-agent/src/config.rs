@@ -41,6 +41,7 @@ pub struct AppConfig {
     pub default_provider: String,
     pub api_base: Option<String>,
     pub api_key_env: Option<String>,
+    pub providers: BTreeMap<String, ProviderConfig>,
     pub sessions_dir: PathBuf,
     pub permissions: PermissionPolicy,
     pub defaults: Defaults,
@@ -53,6 +54,11 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Defaults {
     pub mode: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    pub api_key_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -84,6 +90,7 @@ struct FileConfig {
     default_provider: Option<String>,
     api_base: Option<String>,
     api_key_env: Option<String>,
+    providers: Option<BTreeMap<String, ProviderConfig>>,
     sessions_dir: Option<PathBuf>,
     permissions: Option<PermissionPolicy>,
     defaults: Option<FileDefaults>,
@@ -121,8 +128,11 @@ impl AppConfig {
             .or(env_provider)
             .or(file_config.default_provider)
             .unwrap_or_else(|| DEFAULT_PROVIDER.to_owned());
+        let providers = file_config.providers.unwrap_or_default();
         let api_base = overrides.api_base.or(env_api_base).or(file_config.api_base);
-        let api_key_env = env_api_key.or(file_config.api_key_env);
+        let api_key_env = env_api_key
+            .or(file_config.api_key_env)
+            .or_else(|| provider_api_key_env(&providers, &default_provider));
         let sessions_dir = env_sessions_dir
             .or(file_config.sessions_dir)
             .unwrap_or_else(|| project_dir.join(CONFIG_DIR).join("sessions"));
@@ -137,6 +147,7 @@ impl AppConfig {
             default_provider,
             api_base,
             api_key_env,
+            providers,
             sessions_dir,
             permissions,
             defaults: Defaults { mode },
@@ -146,12 +157,22 @@ impl AppConfig {
     }
 }
 
+fn provider_api_key_env(
+    providers: &BTreeMap<String, ProviderConfig>,
+    provider_id: &str,
+) -> Option<String> {
+    providers
+        .get(provider_id)
+        .and_then(|provider| provider.api_key_env.clone())
+}
+
 pub fn show(config: &AppConfig) -> anyhow::Result<String> {
     let snapshot = FileConfig {
         default_model: Some(config.default_model.clone()),
         default_provider: Some(config.default_provider.clone()),
         api_base: config.api_base.clone(),
         api_key_env: config.api_key_env.clone(),
+        providers: (!config.providers.is_empty()).then(|| config.providers.clone()),
         sessions_dir: Some(config.sessions_dir.clone()),
         permissions: Some(config.permissions.clone()),
         defaults: Some(FileDefaults {
@@ -176,6 +197,19 @@ pub fn set(key: &str, value: &str) -> anyhow::Result<String> {
         "default_provider" | "provider" => config.default_provider = Some(value.to_owned()),
         "api_base" => config.api_base = Some(value.to_owned()),
         "api_key_env" => config.api_key_env = Some(value.to_owned()),
+        key if key.starts_with("providers.") && key.ends_with(".api_key_env") => {
+            let provider_id = key
+                .strip_prefix("providers.")
+                .and_then(|key| key.strip_suffix(".api_key_env"))
+                .filter(|provider_id| !provider_id.is_empty())
+                .with_context(|| format!("invalid provider config key: {key}"))?;
+            let provider = config
+                .providers
+                .get_or_insert_with(BTreeMap::new)
+                .entry(provider_id.to_owned())
+                .or_default();
+            provider.api_key_env = Some(value.to_owned());
+        }
         "sessions_dir" => config.sessions_dir = Some(PathBuf::from(value)),
         "permissions.file_read" | "file_read" => {
             let permissions = config

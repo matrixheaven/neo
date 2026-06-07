@@ -180,7 +180,7 @@ fn validate_docs_parity(root: &Path) -> Result<Vec<String>> {
 
         for (index, line) in source.lines().enumerate() {
             let line_number = index + 1;
-            if parity_allowlist_reason(line).is_some() {
+            if explicit_fixture_path && parity_allowlist_reason(line).is_some() {
                 allow_next_line = true;
                 continue;
             }
@@ -306,6 +306,8 @@ fn is_gap_or_checker_description(line: &str) -> bool {
     normalized.contains("no longer placeholder level")
         || (normalized.contains("scans for production docs")
             && normalized.contains("fake or placeholder"))
+        || normalized.contains("production fake/local/placeholder guidance")
+        || normalized.contains("fake/local/placeholder production guidance")
         || normalized.contains("that point at fake or placeholder provider paths")
         || normalized.contains("compile time rust stub should only be added")
         || normalized.contains("parity gate")
@@ -367,6 +369,10 @@ fn parity_line_violation(line: &str, explicit_fixture_path: bool) -> Option<&'st
         ],
     ) || normalized.contains("localhost")
         || normalized.contains("127.0.0.1");
+    let local_provider_context = normalized.contains("local provider")
+        || normalized.contains("local providers")
+        || normalized.contains("api kind::local")
+        || normalized.contains("apikind::local");
 
     if is_explicit_fixture_line(line) {
         return None;
@@ -374,6 +380,10 @@ fn parity_line_violation(line: &str, explicit_fixture_path: bool) -> Option<&'st
 
     if production_context && fake_context {
         return Some("production fake/default guidance");
+    }
+
+    if production_context && local_provider_context && !is_rejection_or_gap_statement(&normalized) {
+        return Some("production local-provider guidance");
     }
 
     if explicit_fixture_path && parity_line_is_fixture_safe(line) {
@@ -396,6 +406,22 @@ fn parity_line_violation(line: &str, explicit_fixture_path: bool) -> Option<&'st
     }
 
     None
+}
+
+fn is_rejection_or_gap_statement(normalized: &str) -> bool {
+    contains_any_word(
+        normalized,
+        &[
+            "reject",
+            "rejects",
+            "rejected",
+            "unsupported",
+            "never",
+            "missing",
+            "gap",
+            "gaps",
+        ],
+    )
 }
 
 fn contains_any_word(haystack: &str, needles: &[&str]) -> bool {
@@ -780,6 +806,89 @@ mod tests {
     }
 
     #[test]
+    fn parity_validation_rejects_allowlisted_fake_production_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("crates").join("neo-agent").join("src");
+        std::fs::create_dir_all(&src).expect("crate src dir");
+        std::fs::write(
+            src.join("config.rs"),
+            concat!(
+                "// xtask-parity: allow fake-provider-example - fixture only.\n",
+                "const DEFAULT_PROVIDER: &str = \"fake\";\n",
+            ),
+        )
+        .expect("write production source");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "crates/neo-agent/src/config.rs:2 contains production fake/default guidance: const DEFAULT_PROVIDER: &str = \"fake\";".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_local_production_guidance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("docs")).expect("docs dir");
+        std::fs::write(
+            dir.path().join("docs").join("providers.md"),
+            "Production deployments can use the local provider by default.\n",
+        )
+        .expect("write docs");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/providers.md:1 contains production local-provider guidance: Production deployments can use the local provider by default.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_softened_local_production_guidance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("docs")).expect("docs dir");
+        std::fs::write(
+            dir.path().join("docs").join("providers.md"),
+            concat!(
+                "Production local provider is not risky.\n",
+                "Future production deployments can use the local provider.\n",
+            ),
+        )
+        .expect("write docs");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/providers.md:1 contains production local-provider guidance: Production local provider is not risky.".to_string(),
+                "docs/providers.md:2 contains production local-provider guidance: Future production deployments can use the local provider.".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_allows_local_provider_rejection_docs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("docs")).expect("docs dir");
+        std::fs::write(
+            dir.path().join("docs").join("providers.md"),
+            "ProviderResolver rejects test-only/local providers in production resolution.\n",
+        )
+        .expect("write docs");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
     fn parity_validation_scans_production_crate_sources() {
         let dir = tempfile::tempdir().expect("tempdir");
         let src = dir.path().join("crates").join("neo-agent").join("src");
@@ -839,6 +948,7 @@ mod tests {
             concat!(
                 "`--docs` scans for production docs\n",
                 "that point at fake or placeholder provider paths.\n",
+                "It also scans for fake/local/placeholder production guidance.\n",
             ),
         )
         .expect("write quickstart");

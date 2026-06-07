@@ -31,6 +31,7 @@ fn provider_registry_reports_credentials_without_secret_values() {
     assert!(openai.configured);
     assert_eq!(openai.env_keys, vec!["OPENAI_API_KEY"]);
     assert_eq!(openai.authenticated_label, None);
+    assert_eq!(openai.missing_reason, None);
     assert!(!format!("{openai:?}").contains("sk-secret"));
 
     let bedrock = registry
@@ -42,7 +43,64 @@ fn provider_registry_reports_credentials_without_secret_values() {
         bedrock.authenticated_label.as_deref(),
         Some("<authenticated>")
     );
+    assert_eq!(bedrock.missing_reason, None);
     assert!(!format!("{bedrock:?}").contains("ambient-profile"));
+}
+
+#[test]
+fn provider_registry_reports_explicit_missing_credential_reasons() {
+    let registry = ProviderRegistry::production();
+    let env = BTreeMap::from([("OPENAI_API_KEY".to_owned(), String::new())]);
+
+    let openai = registry
+        .credential_status_from("openai", &env)
+        .expect("openai provider should exist");
+
+    assert!(!openai.configured);
+    assert!(openai.env_keys.is_empty());
+    assert_eq!(
+        openai.missing_reason.as_deref(),
+        Some("missing OPENAI_API_KEY")
+    );
+
+    let bedrock = registry
+        .credential_status_from("amazon-bedrock", &BTreeMap::new())
+        .expect("bedrock provider should exist");
+
+    assert!(!bedrock.configured);
+    assert_eq!(
+        bedrock.missing_reason.as_deref(),
+        Some(
+            "missing one of: AWS_PROFILE; AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY; AWS_BEARER_TOKEN_BEDROCK; AWS_CONTAINER_CREDENTIALS_RELATIVE_URI; AWS_CONTAINER_CREDENTIALS_FULL_URI; AWS_WEB_IDENTITY_TOKEN_FILE"
+        )
+    );
+}
+
+#[test]
+fn provider_registry_accepts_configured_environment_key_names_without_secret_storage() {
+    let mut registry = ProviderRegistry::production();
+    let mut provider = registry.get("openai").cloned().expect("openai provider");
+    provider.api_key_env_vars = vec!["PROJECT_OPENAI_KEY".to_owned()];
+    registry.register(provider);
+
+    let configured = registry
+        .credential_status_from(
+            "openai",
+            &BTreeMap::from([("PROJECT_OPENAI_KEY".to_owned(), "secret".to_owned())]),
+        )
+        .expect("openai provider should exist");
+    assert!(configured.configured);
+    assert_eq!(configured.env_keys, vec!["PROJECT_OPENAI_KEY"]);
+    assert!(!format!("{configured:?}").contains("secret"));
+
+    let missing = registry
+        .credential_status_from("openai", &BTreeMap::new())
+        .expect("openai provider should exist");
+    assert!(!missing.configured);
+    assert_eq!(
+        missing.missing_reason.as_deref(),
+        Some("missing PROJECT_OPENAI_KEY")
+    );
 }
 
 #[test]

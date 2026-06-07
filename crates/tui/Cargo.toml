@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 crossterm.workspace = true
+neo-agent-core = { path = "../agent-core" }
 pulldown-cmark.workspace = true
 ratatui.workspace = true
 serde.workspace = true
@@ -16,7 +17,6 @@ tokio.workspace = true
 unicode-width = "0.2.0"
 
 [dev-dependencies]
-neo-agent-core = { path = "../agent-core" }
 serde_json.workspace = true
 
 [lints]

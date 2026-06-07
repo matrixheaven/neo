@@ -14,9 +14,15 @@ eventually resumable.
 - `JsonlSessionReader::read_all(path)`
 - `JsonlSessionReader::replay_messages(path)`
 - `replay_messages(events.iter())`
+- `SessionMetadataStore::list()`
+- `SessionMetadataStore::fork(parent_id, name)`
+- `SessionMetadataStore::rename(session_id, name)`
 
 Each line is a serialized `AgentEvent`. `replay_messages` reconstructs
 conversation history from `AgentEvent::MessageAppended` entries.
+Session tree metadata is stored next to JSONL records in
+`sessions.metadata.json`; metadata decorates real `.jsonl` session files and
+does not create hosted or remote share records.
 
 ## Resume Flow
 
@@ -40,8 +46,6 @@ The current constraints are:
 
 Still missing from pi parity:
 
-- Session tree branching.
-- Session names and labels.
 - Compaction and branch summaries.
 - Share targets beyond local HTML export.
 - A stable schema version field.
@@ -53,6 +57,8 @@ The `neo-agent` binary exposes:
 ```bash
 neo sessions list
 neo sessions show <session-id>
+neo sessions rename <session-id> <name>
+neo sessions fork <session-id> --name <name>
 neo sessions export-html <session-id>
 neo resume <session-id>
 ```

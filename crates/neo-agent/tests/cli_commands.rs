@@ -23,9 +23,36 @@ fn root_command_reports_interactive_entrypoint_without_placeholders() {
 
     let stdout = run(command);
 
-    assert!(stdout.contains("neo interactive"));
+    assert!(stdout.contains("neo | session:"));
+    assert!(stdout.contains("model: openai/gpt-4.1"));
+    assert!(stdout.contains("Editing"));
     assert!(!stdout.contains("placeholder"));
     assert!(!stdout.contains("fake"));
+    assert!(!stdout.contains("commands: print, run"));
+}
+
+#[test]
+fn root_command_fallback_renders_configured_tui_session_state() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+default_provider = "anthropic"
+default_model = "claude-sonnet"
+"#,
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command.current_dir(temp.path());
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("neo | session:"));
+    assert!(stdout.contains("model: anthropic/claude-sonnet"));
+    assert!(stdout.contains('>'));
+    assert!(!stdout.contains("commands:"));
 }
 
 #[test]
@@ -129,6 +156,29 @@ mode = "print"
 }
 
 #[test]
+fn config_show_reads_provider_specific_api_key_env_without_secret_values() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+[providers.openai]
+api_key_env = "PROJECT_OPENAI_KEY"
+"#,
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).args(["config", "show"]);
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("[providers.openai]"));
+    assert!(stdout.contains("api_key_env = \"PROJECT_OPENAI_KEY\""));
+    assert!(!stdout.contains("secret"));
+}
+
+#[test]
 fn config_set_writes_project_config_value() {
     let temp = TempDir::new().expect("tempdir");
     let mut command = neo();
@@ -144,6 +194,25 @@ fn config_set_writes_project_config_value() {
 }
 
 #[test]
+fn config_set_writes_provider_specific_api_key_env_name() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut command = neo();
+    command.current_dir(temp.path()).args([
+        "config",
+        "set",
+        "providers.openai.api_key_env",
+        "PROJECT_OPENAI_KEY",
+    ]);
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("set providers.openai.api_key_env"));
+    let config = fs::read_to_string(temp.path().join(".neo/config.toml")).expect("read config");
+    assert!(config.contains("[providers.openai]"));
+    assert!(config.contains("api_key_env = \"PROJECT_OPENAI_KEY\""));
+}
+
+#[test]
 fn sessions_list_uses_project_session_directory() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = temp.path().join(".neo/sessions");
@@ -156,6 +225,46 @@ fn sessions_list_uses_project_session_directory() {
     let stdout = run(command);
 
     assert!(stdout.contains("alpha"));
+}
+
+#[test]
+fn sessions_rename_and_fork_surface_tree_metadata() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    fs::create_dir_all(&sessions).expect("create sessions");
+    fs::write(sessions.join("alpha.jsonl"), "{}\n").expect("write session");
+
+    let mut rename = neo();
+    rename
+        .current_dir(temp.path())
+        .args(["sessions", "rename", "alpha", "Main thread"]);
+    let rename_stdout = run(rename);
+    assert!(rename_stdout.contains("renamed alpha"));
+    assert!(rename_stdout.contains("Main thread"));
+
+    let mut fork = neo();
+    fork.current_dir(temp.path())
+        .args(["sessions", "fork", "alpha", "--name", "Parser branch"]);
+    let fork_stdout = run(fork);
+    assert!(fork_stdout.contains("forked alpha -> "));
+    assert!(fork_stdout.contains("Parser branch"));
+
+    let child_id = fork_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("forked alpha -> "))
+        .and_then(|line| line.split_whitespace().next())
+        .expect("fork output includes child id")
+        .to_owned();
+
+    let mut list = neo();
+    list.current_dir(temp.path()).args(["sessions", "list"]);
+    let list_stdout = run(list);
+
+    assert!(list_stdout.contains("alpha"));
+    assert!(list_stdout.contains("Main thread"));
+    assert!(list_stdout.contains(&child_id));
+    assert!(list_stdout.contains("Parser branch"));
+    assert!(list_stdout.contains("parent=alpha"));
 }
 
 #[test]
@@ -371,6 +480,86 @@ args = [{}]
 }
 
 #[test]
+fn extensions_lifecycle_commands_persist_status_and_gate_call() {
+    let temp = TempDir::new().expect("tempdir");
+    let extension = temp.path().join("extensions/echo");
+    fs::create_dir_all(&extension).expect("create extension");
+    let script = extension.join("echo.py");
+    fs::write(
+        &script,
+        r#"
+import json
+import sys
+
+message = json.loads(sys.stdin.readline())
+print(json.dumps({
+  "type": "response",
+  "id": message["id"],
+  "result": {"ok": True}
+}), flush=True)
+"#,
+    )
+    .expect("write script");
+    fs::write(
+        extension.join("neo-extension.toml"),
+        format!(
+            r#"
+id = "echo"
+name = "Echo"
+version = "0.1.0"
+
+[runner]
+command = "python3"
+args = [{}]
+"#,
+            serde_json::to_string(&script).expect("script path should serialize")
+        ),
+    )
+    .expect("write manifest");
+
+    let root = temp.path().join("extensions");
+    let mut disable = neo();
+    disable
+        .current_dir(temp.path())
+        .args(["extensions", "disable", "echo", "--root"])
+        .arg(&root);
+    let disabled = run(disable);
+    assert!(disabled.contains("echo disabled"));
+
+    let state = fs::read_to_string(temp.path().join(".neo/extensions-state.toml"))
+        .expect("read lifecycle state");
+    assert!(state.contains("[extensions.echo]"));
+    assert!(state.contains("enabled = false"));
+
+    let mut status = neo();
+    status
+        .current_dir(temp.path())
+        .args(["extensions", "status", "echo", "--root"])
+        .arg(&root);
+    let status_stdout = run(status);
+    assert!(status_stdout.contains("echo"));
+    assert!(status_stdout.contains("disabled"));
+    assert!(status_stdout.contains("state_file"));
+
+    let call = neo()
+        .current_dir(temp.path())
+        .args(["extensions", "call", "echo", "tool.echo", "{}", "--root"])
+        .arg(&root)
+        .output()
+        .expect("neo command should run");
+    assert!(!call.status.success());
+    assert!(String::from_utf8_lossy(&call.stderr).contains("extension \"echo\" is disabled"));
+
+    let mut enable = neo();
+    enable
+        .current_dir(temp.path())
+        .args(["extensions", "enable", "echo", "--root"])
+        .arg(&root);
+    let enabled = run(enable);
+    assert!(enabled.contains("echo enabled"));
+}
+
+#[test]
 fn models_list_uses_seeded_catalog_without_local_fake() {
     let mut models = neo();
     models.args(["models", "list"]);
@@ -383,6 +572,54 @@ fn models_list_uses_seeded_catalog_without_local_fake() {
     mcp.args(["mcp", "list"]);
     let mcp_stdout = run(mcp);
     assert!(mcp_stdout.contains("no MCP servers configured"));
+}
+
+#[test]
+fn models_list_applies_provider_specific_api_key_env_status() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+[providers.openai]
+api_key_env = "PROJECT_OPENAI_KEY"
+"#,
+    )
+    .expect("write config");
+
+    let mut models = neo();
+    models
+        .current_dir(temp.path())
+        .env("PROJECT_OPENAI_KEY", "secret-value")
+        .args(["models", "list"]);
+    let stdout = run(models);
+
+    assert!(stdout.contains("- openai (OpenAiResponses, configured)"));
+    assert!(!stdout.contains("secret-value"));
+}
+
+#[test]
+fn config_show_applies_selected_provider_api_key_env_without_secret_values() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+[providers.openai]
+api_key_env = "PROJECT_OPENAI_KEY"
+"#,
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("PROJECT_OPENAI_KEY", "secret-value")
+        .args(["config", "show"]);
+    let stdout = run(command);
+    assert!(stdout.contains("api_key_env = \"PROJECT_OPENAI_KEY\""));
+    assert!(stdout.contains("[providers.openai]"));
+    assert!(!stdout.contains("secret-value"));
 }
 
 #[test]

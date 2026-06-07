@@ -1144,6 +1144,8 @@ dependencies = [
  "neo-ai",
  "neo-extensions",
  "neo-sdk",
+ "neo-tui",
+ "ratatui",
  "serde",
  "serde_json",
  "tempfile",
