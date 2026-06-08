@@ -105,10 +105,15 @@ maps streamed reasoning-summary events into local thinking events. Neo does
 not request `reasoning.encrypted_content` yet because encrypted reasoning
 items must be persisted and replayed as provider-native Responses input items
 to provide real multi-turn reasoning continuity. OpenAI-compatible Chat
-Completions sends the flat `reasoning_effort` string. Neo intentionally does
-not translate this one field into Anthropic or Google thinking payloads yet:
-those APIs need provider-native budget, level, display, and off-state contracts
-before they can be implemented without silently changing model behavior.
+Completions sends the flat `reasoning_effort` string. Anthropic Messages
+maps the same typed effort into an explicit budget-based `thinking` payload
+with summarized display and omits `temperature` while extended thinking is
+enabled. Google Generative AI maps it into `generationConfig.thinkingConfig`
+with `includeThoughts` and a deterministic thinking budget. Neo still does not
+implement adaptive/off-state thinking controls, encrypted/signature replay, or
+provider-specific non-OpenAI thinking stream mapping; those contracts remain
+future work until they can be represented without silently changing model
+behavior.
 
 ## Local Model Catalogs
 
