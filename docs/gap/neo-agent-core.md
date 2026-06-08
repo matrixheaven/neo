@@ -26,8 +26,12 @@
   cancelled tool result into model/session context.
 - Runtime queue modes and hooks are real Rust APIs: `AgentContext` can queue
   steering and follow-up messages, `AgentConfig::with_queue_modes` controls
-  drain behavior, and `with_before_tool_call` / `with_after_tool_call` can
-  block, terminate, or rewrite tool results.
+  drain behavior, synchronous `with_before_tool_call` /
+  `with_after_tool_call` can block, terminate, or rewrite tool results, and
+  async `with_async_before_tool_call` / `with_async_after_tool_call` hooks race
+  the runtime cancellation token so interruption during policy or mediation
+  work finishes the tool wrapper with a cancelled result without appending it
+  into model context.
 - `ToolExecutionMode` supports sequential and parallel tool execution; parallel
   mode emits completion events as tools finish while preserving appended tool
   result messages in source order.
@@ -95,7 +99,7 @@ or hosted lifecycle behavior.
   has backing behavior for servers that do not deliver updates on the subscribe
   response SSE stream.
 - Add richer hook lifecycle docs only when Neo exposes additional hook phases
-  beyond the current before/after tool-call callbacks.
+  beyond the current synchronous and async before/after tool-call callbacks.
 - Add broader process cleanup only when Neo grows a contract for commands that
   daemonize into a new session or process group. Current cancellation support
   covers runtime state, in-flight model streams, arbitrary in-flight tool

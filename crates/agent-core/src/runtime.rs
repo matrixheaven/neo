@@ -18,7 +18,17 @@ use crate::{
 
 pub type ContextTransform = Arc<dyn Fn(&[AgentMessage]) -> Vec<AgentMessage> + Send + Sync>;
 pub type BeforeToolCallHook = Arc<dyn Fn(&AgentToolCall) -> Option<ToolResult> + Send + Sync>;
+pub type AsyncBeforeToolCallHook = Arc<
+    dyn Fn(AgentToolCall, CancellationToken) -> BoxFuture<'static, Option<ToolResult>>
+        + Send
+        + Sync,
+>;
 pub type AfterToolCallHook = Arc<dyn Fn(&AgentToolCall, ToolResult) -> ToolResult + Send + Sync>;
+pub type AsyncAfterToolCallHook = Arc<
+    dyn Fn(AgentToolCall, ToolResult, CancellationToken) -> BoxFuture<'static, ToolResult>
+        + Send
+        + Sync,
+>;
 pub type ApprovalHandler = Arc<dyn Fn(&ApprovalRequest) -> PermissionDecision + Send + Sync>;
 pub type AsyncApprovalHandler =
     Arc<dyn Fn(ApprovalRequest) -> BoxFuture<'static, PermissionDecision> + Send + Sync>;
@@ -72,7 +82,13 @@ pub struct AgentConfig {
     pub before_tool_call: Option<BeforeToolCallHook>,
     #[serde(skip)]
     #[schemars(skip)]
+    pub async_before_tool_call: Option<AsyncBeforeToolCallHook>,
+    #[serde(skip)]
+    #[schemars(skip)]
     pub after_tool_call: Option<AfterToolCallHook>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub async_after_tool_call: Option<AsyncAfterToolCallHook>,
     #[serde(skip)]
     #[schemars(skip)]
     pub approval_handler: Option<ApprovalHandler>,
@@ -100,7 +116,9 @@ impl AgentConfig {
             compaction: None,
             context_transform: None,
             before_tool_call: None,
+            async_before_tool_call: None,
             after_tool_call: None,
+            async_after_tool_call: None,
             approval_handler: None,
             async_approval_handler: None,
         }
@@ -176,11 +194,35 @@ impl AgentConfig {
     }
 
     #[must_use]
+    pub fn with_async_before_tool_call<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: Fn(AgentToolCall, CancellationToken) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<ToolResult>> + Send + 'static,
+    {
+        self.async_before_tool_call = Some(Arc::new(move |call, cancel_token| {
+            hook(call, cancel_token).boxed()
+        }));
+        self
+    }
+
+    #[must_use]
     pub fn with_after_tool_call(
         mut self,
         hook: impl Fn(&AgentToolCall, ToolResult) -> ToolResult + Send + Sync + 'static,
     ) -> Self {
         self.after_tool_call = Some(Arc::new(hook));
+        self
+    }
+
+    #[must_use]
+    pub fn with_async_after_tool_call<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: Fn(AgentToolCall, ToolResult, CancellationToken) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ToolResult> + Send + 'static,
+    {
+        self.async_after_tool_call = Some(Arc::new(move |call, result, cancel_token| {
+            hook(call, result, cancel_token).boxed()
+        }));
         self
     }
 
@@ -861,8 +903,8 @@ async fn execute_tool_calls_sequential(
             name: tool_call.name.clone(),
             arguments: tool_call.arguments.clone(),
         });
-        let mut result = if let Some(before_tool_call) = &config.before_tool_call {
-            if let Some(blocked) = before_tool_call(tool_call) {
+        let mut result =
+            if let Some(blocked) = before_tool_result(config, tool_call, cancel_token).await {
                 blocked
             } else {
                 prepare_and_run_tool(
@@ -875,23 +917,9 @@ async fn execute_tool_calls_sequential(
                     cancel_token,
                 )
                 .await?
-            }
-        } else {
-            prepare_and_run_tool(
-                config,
-                registry,
-                &tool_context,
-                turn,
-                tool_call,
-                emitter,
-                cancel_token,
-            )
-            .await?
-        };
-        if !cancel_token.is_cancelled()
-            && let Some(after_tool_call) = &config.after_tool_call
-        {
-            result = after_tool_call(tool_call, result);
+            };
+        if !cancel_token.is_cancelled() {
+            result = after_tool_result(config, tool_call, result, cancel_token).await;
         }
         if tool_call.name == "bash" {
             emit_shell_finished(turn, tool_call, &result, emitter);
@@ -932,13 +960,9 @@ async fn execute_tool_calls_parallel(
             name: tool_call.name.clone(),
             arguments: tool_call.arguments.clone(),
         });
-        if let Some(before_tool_call) = &config.before_tool_call
-            && let Some(mut result) = before_tool_call(&tool_call)
-        {
-            if !cancel_token.is_cancelled()
-                && let Some(after_tool_call) = &config.after_tool_call
-            {
-                result = after_tool_call(&tool_call, result);
+        if let Some(mut result) = before_tool_result(config, &tool_call, cancel_token).await {
+            if !cancel_token.is_cancelled() {
+                result = after_tool_result(config, &tool_call, result, cancel_token).await;
             }
             emit_shell_finished(turn, &tool_call, &result, emitter);
             emitter.emit(AgentEvent::ToolExecutionFinished {
@@ -953,7 +977,6 @@ async fn execute_tool_calls_parallel(
 
         let config = config.clone();
         let tool_context = tool_context.clone();
-        let after_tool_call = config.after_tool_call.clone();
         let cancel_token = cancel_token.clone();
         let mut sink = emitter.sink();
         running.push(async move {
@@ -977,10 +1000,8 @@ async fn execute_tool_calls_parallel(
                 &cancel_token,
             )
             .await;
-            if !cancel_token.is_cancelled()
-                && let Some(after_tool_call) = &after_tool_call
-            {
-                result = after_tool_call(&tool_call, result);
+            if !cancel_token.is_cancelled() {
+                result = after_tool_result(&config, &tool_call, result, &cancel_token).await;
             }
             Ok::<_, AgentRuntimeError>((index, tool_call, result))
         });
@@ -1003,6 +1024,43 @@ async fn execute_tool_calls_parallel(
         .into_iter()
         .map(|(_, tool_call, result)| (tool_call, result))
         .collect())
+}
+
+async fn before_tool_result(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+    cancel_token: &CancellationToken,
+) -> Option<ToolResult> {
+    if let Some(before_tool_call) = &config.before_tool_call
+        && let Some(result) = before_tool_call(tool_call)
+    {
+        return Some(result);
+    }
+    let async_before_tool_call = config.async_before_tool_call.as_ref()?;
+    tokio::select! {
+        biased;
+        result = async_before_tool_call(tool_call.clone(), cancel_token.clone()) => result,
+        () = cancel_token.cancelled() => Some(cancelled_tool_result()),
+    }
+}
+
+async fn after_tool_result(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+    mut result: ToolResult,
+    cancel_token: &CancellationToken,
+) -> ToolResult {
+    if let Some(after_tool_call) = &config.after_tool_call {
+        result = after_tool_call(tool_call, result);
+    }
+    let Some(async_after_tool_call) = &config.async_after_tool_call else {
+        return result;
+    };
+    tokio::select! {
+        biased;
+        result = async_after_tool_call(tool_call.clone(), result, cancel_token.clone()) => result,
+        () = cancel_token.cancelled() => cancelled_tool_result(),
+    }
 }
 
 async fn run_model_turn(

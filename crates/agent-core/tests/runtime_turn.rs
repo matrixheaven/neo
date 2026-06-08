@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::oneshot,
+    sync::{Notify, oneshot},
     time::{sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
@@ -961,6 +961,154 @@ async fn runtime_cancels_in_flight_tool_execution_and_finishes_run() {
         turn: 1,
         id: "tool_1".to_owned(),
         name: "never".to_owned(),
+        result: ToolResult::error("tool execution cancelled"),
+    }));
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::RunFinished {
+            turn: 1,
+            stop_reason: StopReason::Cancelled,
+        })
+    );
+    assert!(context.is_cancelled());
+    assert_eq!(context.messages().len(), 2);
+}
+
+#[tokio::test]
+async fn runtime_cancels_while_waiting_for_async_before_tool_hook() {
+    let harness = echo_tool_harness("should not execute");
+    let (hook_wait_sender, hook_wait_receiver) = oneshot::channel::<()>();
+    let hook_wait_receiver = Arc::new(Mutex::new(Some(hook_wait_receiver)));
+    let hook_started = Arc::new(Notify::new());
+    let hook_started_for_hook = Arc::clone(&hook_started);
+    let hook_wait_receiver_for_hook = Arc::clone(&hook_wait_receiver);
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools.register(RecordingEchoTool {
+        executed: Arc::clone(&executed),
+    });
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_execution_mode(ToolExecutionMode::Sequential)
+            .with_async_before_tool_call(move |_call, _cancel| {
+                let started = hook_started_for_hook.clone();
+                let receiver = hook_wait_receiver_for_hook.clone();
+                async move {
+                    started.notify_one();
+                    let wait = receiver
+                        .lock()
+                        .expect("receiver lock poisoned")
+                        .take()
+                        .expect("hook wait receiver should be present");
+                    let _ = wait.await;
+                    None
+                }
+            }),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+    let cancel = CancellationToken::new();
+    let events =
+        cancel_after_async_tool_hook_starts(&runtime, &mut context, cancel, &hook_started).await;
+    drop(hook_wait_sender);
+
+    assert_async_hook_cancelled_cleanly(&events, &context);
+    assert!(executed.lock().expect("executed lock poisoned").is_empty());
+}
+
+#[tokio::test]
+async fn runtime_cancels_while_waiting_for_async_after_tool_hook() {
+    let harness = echo_tool_harness("executed");
+    let (hook_wait_sender, hook_wait_receiver) = oneshot::channel::<()>();
+    let hook_wait_receiver = Arc::new(Mutex::new(Some(hook_wait_receiver)));
+    let hook_started = Arc::new(Notify::new());
+    let hook_started_for_hook = Arc::clone(&hook_started);
+    let hook_wait_receiver_for_hook = Arc::clone(&hook_wait_receiver);
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools.register(RecordingEchoTool {
+        executed: Arc::clone(&executed),
+    });
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_execution_mode(ToolExecutionMode::Sequential)
+            .with_async_after_tool_call(move |_call, result, _cancel| {
+                let started = hook_started_for_hook.clone();
+                let receiver = hook_wait_receiver_for_hook.clone();
+                async move {
+                    started.notify_one();
+                    let wait = receiver
+                        .lock()
+                        .expect("receiver lock poisoned")
+                        .take()
+                        .expect("hook wait receiver should be present");
+                    let _ = wait.await;
+                    result
+                }
+            }),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+    let cancel = CancellationToken::new();
+    let events =
+        cancel_after_async_tool_hook_starts(&runtime, &mut context, cancel, &hook_started).await;
+    drop(hook_wait_sender);
+
+    assert_async_hook_cancelled_cleanly(&events, &context);
+    assert_eq!(
+        *executed.lock().expect("executed lock poisoned"),
+        vec!["executed".to_owned()]
+    );
+}
+
+async fn cancel_after_async_tool_hook_starts(
+    runtime: &AgentRuntime,
+    context: &mut AgentContext,
+    cancel: CancellationToken,
+    hook_started: &Notify,
+) -> Vec<AgentEvent> {
+    let mut stream = runtime.run_turn_with_cancel(
+        context,
+        AgentMessage::user_text("call echo"),
+        cancel.clone(),
+    );
+    let mut events = Vec::new();
+
+    loop {
+        let event = timeout(Duration::from_millis(250), stream.next())
+            .await
+            .expect("tool start should arrive promptly")
+            .expect("event before cancellation")
+            .expect("event should be ok");
+        let should_cancel = matches!(
+            event,
+            AgentEvent::ToolExecutionStarted { ref id, .. } if id == "tool_1"
+        );
+        events.push(event);
+        if should_cancel {
+            break;
+        }
+    }
+    timeout(Duration::from_millis(250), hook_started.notified())
+        .await
+        .expect("async hook should start promptly");
+    cancel.cancel();
+    while let Some(event) = timeout(Duration::from_millis(250), stream.next())
+        .await
+        .expect("cancelled async hook should finish promptly")
+    {
+        events.push(event.expect("event should be ok"));
+    }
+    events
+}
+
+fn assert_async_hook_cancelled_cleanly(events: &[AgentEvent], context: &AgentContext) {
+    assert!(events.contains(&AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        name: "echo".to_owned(),
         result: ToolResult::error("tool execution cancelled"),
     }));
     assert_eq!(
