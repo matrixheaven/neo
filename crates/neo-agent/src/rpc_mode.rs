@@ -4,7 +4,8 @@ use anyhow::Context;
 use neo_agent_core::session::{JsonlSessionReader, SessionMetadataStore, SessionRecord};
 use neo_sdk::{
     JsonlCodec, RpcError, RpcErrorCode, RpcMessage, RpcNotification, RpcRequest, RpcResponse,
-    RpcSessionRecord, RpcSessionTreeRecord, RpcSessionsListResult, RpcSessionsTreeResult,
+    RpcSessionGetResult, RpcSessionRecord, RpcSessionTreeRecord, RpcSessionsListResult,
+    RpcSessionsTreeResult,
 };
 use serde_json::{Value, json};
 
@@ -61,6 +62,7 @@ async fn handle_request(
         "get_messages" => handle_get_messages(config, request, output).await,
         "sessions.list" => handle_sessions_list(config, request, output),
         "sessions.tree" => handle_sessions_tree(config, request, output),
+        "sessions.get" => handle_sessions_get(config, request, output).await,
         "prompt" => handle_prompt(config, request, output).await,
         unknown => push_rpc_message(
             output,
@@ -135,6 +137,112 @@ fn handle_sessions_tree(
         &RpcMessage::Response(RpcResponse::success(
             request.id,
             serde_json::to_value(RpcSessionsTreeResult { tree })?,
+        )),
+    )
+}
+
+async fn handle_sessions_get(
+    config: &AppConfig,
+    request: RpcRequest,
+    output: &mut String,
+) -> anyhow::Result<()> {
+    let Some(session_ref) = request.params.get("session_id").and_then(Value::as_str) else {
+        return push_rpc_message(
+            output,
+            &RpcMessage::Response(RpcResponse::failure(
+                request.id,
+                RpcError::new(
+                    RpcErrorCode::InvalidParams,
+                    "sessions.get params.session_id must be a string",
+                    None,
+                ),
+            )),
+        );
+    };
+
+    let session_id = match session_commands::resolve_session_id(session_ref, config) {
+        Ok(session_id) => session_id,
+        Err(err) => {
+            return push_rpc_message(
+                output,
+                &RpcMessage::Response(RpcResponse::failure(
+                    request.id,
+                    RpcError::new(RpcErrorCode::InvalidParams, err.to_string(), None),
+                )),
+            );
+        }
+    };
+    let path = config.sessions_dir.join(format!("{session_id}.jsonl"));
+    if !path.exists() {
+        return push_rpc_message(
+            output,
+            &RpcMessage::Response(RpcResponse::failure(
+                request.id,
+                RpcError::new(
+                    RpcErrorCode::InvalidParams,
+                    format!("session {session_ref:?} does not exist"),
+                    None,
+                ),
+            )),
+        );
+    }
+
+    let sessions = match session_store(config).list() {
+        Ok(sessions) => sessions,
+        Err(err) => {
+            return push_rpc_message(
+                output,
+                &RpcMessage::Response(RpcResponse::failure(
+                    request.id,
+                    RpcError::new(RpcErrorCode::InternalError, err.to_string(), None),
+                )),
+            );
+        }
+    };
+    let Some(record) = sessions
+        .into_iter()
+        .find(|session| session.id == session_id)
+    else {
+        return push_rpc_message(
+            output,
+            &RpcMessage::Response(RpcResponse::failure(
+                request.id,
+                RpcError::new(
+                    RpcErrorCode::InvalidParams,
+                    format!("session {session_ref:?} does not exist"),
+                    None,
+                ),
+            )),
+        );
+    };
+
+    let messages = match JsonlSessionReader::replay_messages(&path).await {
+        Ok(messages) => messages,
+        Err(err) => {
+            return push_rpc_message(
+                output,
+                &RpcMessage::Response(RpcResponse::failure(
+                    request.id,
+                    RpcError::new(RpcErrorCode::InternalError, err.to_string(), None),
+                )),
+            );
+        }
+    };
+    let rpc_record = rpc_session_record(record);
+    let messages = messages
+        .into_iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    push_rpc_message(
+        output,
+        &RpcMessage::Response(RpcResponse::success(
+            request.id,
+            serde_json::to_value(RpcSessionGetResult {
+                record: rpc_record,
+                path: path.display().to_string(),
+                messages,
+            })?,
         )),
     )
 }

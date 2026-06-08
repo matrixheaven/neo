@@ -1,6 +1,6 @@
 use neo_sdk::{
     JsonlCodec, RpcCodecError, RpcError, RpcErrorCode, RpcMessage, RpcNotification, RpcRequest,
-    RpcResponse, RpcSessionRecord, RpcSessionTreeRecord,
+    RpcResponse, RpcSessionGetResult, RpcSessionRecord, RpcSessionTreeRecord,
 };
 use serde_json::json;
 
@@ -103,5 +103,48 @@ fn session_rpc_records_have_stable_json_shape() {
     assert_eq!(
         serde_json::from_value::<RpcSessionTreeRecord>(value).expect("deserialize tree record"),
         tree_record
+    );
+}
+
+#[test]
+fn session_get_result_has_stable_json_shape() {
+    let result = RpcSessionGetResult {
+        record: RpcSessionRecord {
+            id: "alpha".to_owned(),
+            name: Some("Main thread".to_owned()),
+            summary: Some("Local branch summary".to_owned()),
+            parent_id: None,
+            children: vec!["alpha-fork-1".to_owned()],
+        },
+        path: "/tmp/neo/.neo/sessions/alpha.jsonl".to_owned(),
+        messages: vec![json!({
+            "User": {
+                "content": [
+                    {
+                        "Text": {
+                            "text": "hello"
+                        }
+                    }
+                ]
+            }
+        })],
+    };
+
+    let value = serde_json::to_value(&result).expect("serialize session get result");
+
+    assert_eq!(value["id"], "alpha");
+    assert_eq!(value["name"], "Main thread");
+    assert_eq!(value["summary"], "Local branch summary");
+    assert!(value["parent_id"].is_null());
+    assert_eq!(value["children"], json!(["alpha-fork-1"]));
+    assert_eq!(value["path"], "/tmp/neo/.neo/sessions/alpha.jsonl");
+    assert_eq!(
+        value["messages"][0]["User"]["content"][0]["Text"]["text"],
+        "hello"
+    );
+    assert_eq!(
+        serde_json::from_value::<RpcSessionGetResult>(value)
+            .expect("deserialize session get result"),
+        result
     );
 }

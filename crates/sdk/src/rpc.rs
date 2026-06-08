@@ -143,6 +143,14 @@ pub struct RpcSessionsTreeResult {
     pub tree: Vec<RpcSessionTreeRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RpcSessionGetResult {
+    #[serde(flatten)]
+    pub record: RpcSessionRecord,
+    pub path: String,
+    pub messages: Vec<serde_json::Value>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RpcCodecError {
     #[error("JSONL frame is empty")]

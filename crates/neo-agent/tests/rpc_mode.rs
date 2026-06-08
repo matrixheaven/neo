@@ -313,6 +313,128 @@ fn rpc_sessions_tree_returns_depth_ordered_local_session_tree() {
 }
 
 #[test]
+fn rpc_sessions_get_returns_local_session_metadata_and_messages() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    std::fs::write(
+        sessions.join("alpha-main.jsonl"),
+        concat!(
+            "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello session get\"}}]}}}}\n",
+            "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"session get reply\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
+        ),
+    )
+    .expect("write session");
+    std::fs::write(sessions.join("alpha-main-fork-1.jsonl"), "{}\n").expect("write child session");
+    std::fs::write(
+        sessions.join("sessions.metadata.json"),
+        json!({
+            "sessions": {
+                "alpha-main": {
+                    "name": "Main thread",
+                    "summary": "Resolved local branch summary"
+                },
+                "alpha-main-fork-1": {
+                    "parent_id": "alpha-main"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write metadata");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"sessions-get","method":"sessions.get","params":{"session_id":"alpha-main"}}"#,
+    );
+
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "response");
+    assert_eq!(messages[0]["id"], "sessions-get");
+    assert_eq!(messages[0]["result"]["id"], "alpha-main");
+    assert_eq!(messages[0]["result"]["name"], "Main thread");
+    assert_eq!(
+        messages[0]["result"]["summary"],
+        "Resolved local branch summary"
+    );
+    assert!(messages[0]["result"]["parent_id"].is_null());
+    assert_eq!(
+        messages[0]["result"]["children"],
+        json!(["alpha-main-fork-1"])
+    );
+    assert!(
+        messages[0]["result"]["path"]
+            .as_str()
+            .expect("session path")
+            .ends_with(".neo/sessions/alpha-main.jsonl")
+    );
+    assert_eq!(
+        messages[0]["result"]["messages"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        messages[0]["result"]["messages"][0]["User"]["content"][0]["Text"]["text"],
+        "hello session get"
+    );
+    assert_eq!(
+        messages[0]["result"]["messages"][1]["Assistant"]["content"][0]["Text"]["text"],
+        "session get reply"
+    );
+}
+
+#[test]
+fn rpc_sessions_get_resolves_unique_session_prefix() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    std::fs::write(sessions.join("alpha-main.jsonl"), "").expect("write session");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"sessions-get-prefix","method":"sessions.get","params":{"session_id":"alpha"}}"#,
+    );
+
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "response");
+    assert_eq!(messages[0]["id"], "sessions-get-prefix");
+    assert_eq!(messages[0]["result"]["id"], "alpha-main");
+    assert_eq!(
+        messages[0]["result"]["messages"].as_array().unwrap().len(),
+        0
+    );
+}
+
+#[test]
+fn rpc_sessions_get_reports_missing_session_as_invalid_params() {
+    let temp = TempDir::new().expect("tempdir");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"sessions-get-missing","method":"sessions.get","params":{"session_id":"missing"}}"#,
+    );
+
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "response");
+    assert_eq!(messages[0]["id"], "sessions-get-missing");
+    assert_eq!(messages[0]["error"]["code"], "invalid_params");
+    assert!(
+        messages[0]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing")
+    );
+}
+
+#[test]
 fn rpc_prompt_streams_agent_events_and_returns_assistant_text() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-rpc", "rpc answer")]);
