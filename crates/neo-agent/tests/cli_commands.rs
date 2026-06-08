@@ -1479,6 +1479,56 @@ url = "{}"
 }
 
 #[test]
+fn mcp_tools_lists_remote_tool_catalog_with_schema() {
+    let temp = TempDir::new().expect("tempdir");
+    let mcp_server = MockSseServer::start(vec![
+        mcp_json_response(
+            1,
+            &json!({
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "remote-docs", "version": "0.1.0"},
+                "capabilities": {"tools": {}}
+            }),
+        ),
+        mcp_json_response(
+            2,
+            &json!({
+                "tools": [
+                    {
+                        "name": "docs-search",
+                        "description": "Search remote docs",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"]
+                        }
+                    }
+                ]
+            }),
+        ),
+    ]);
+    write_remote_mcp_config(temp.path(), &mcp_server.url);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .args(["mcp", "tools", "remote-docs"]);
+    let stdout = run(command);
+
+    assert!(stdout.contains("mcp__remote_docs__docs_search"));
+    assert!(stdout.contains("Search remote docs"));
+    assert!(stdout.contains("\"required\":[\"query\"]"));
+    let mcp_requests = mcp_server.requests();
+    assert_eq!(
+        mcp_requests
+            .iter()
+            .map(|request| request.body["method"].as_str().expect("method"))
+            .collect::<Vec<_>>(),
+        vec!["initialize", "tools/list"]
+    );
+}
+
+#[test]
 fn print_rejects_remote_mcp_server_missing_url() {
     let temp = TempDir::new().expect("tempdir");
     let provider = MockSseServer::start(vec![]);

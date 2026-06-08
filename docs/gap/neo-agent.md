@@ -11,7 +11,7 @@
   `extensions install`, `extensions update`, `extensions uninstall`,
   `extensions status`, `extensions enable`, `extensions disable`,
   `extensions call`, `config show`, `config set`,
-  `models list`, and `mcp list`.
+  `models list`, `mcp list`, and `mcp tools`.
 - Project config defaults to `.neo/config.toml`.
 - Config loading merges CLI overrides, environment overrides, project config,
   user-global `~/.neo/config.toml`, and built-in defaults.
@@ -44,6 +44,9 @@
 - `extensions call` refuses disabled extensions and round-trips JSONL RPC over
   stdio for enabled local extension manifests.
 - `mcp list` reads project MCP server entries without starting servers.
+- `mcp tools <server-id>` discovers a configured enabled MCP server over its
+  real stdio or HTTP/SSE adapter, then prints model-facing tool names,
+  descriptions, and compact JSON input schemas.
 - `mcp resources <server-id> list/read` explicitly fetches configured MCP
   server resource catalogs and content over the same stdio or HTTP/SSE
   transport adapters. `mcp resources <server-id> watch <uri>` subscribes to a

@@ -123,6 +123,9 @@ pub enum ModelCommand {
 #[derive(Debug, Subcommand)]
 pub enum McpCommand {
     List,
+    Tools {
+        server_id: String,
+    },
     Resources {
         server_id: String,
         #[command(subcommand)]

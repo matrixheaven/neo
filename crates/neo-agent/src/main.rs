@@ -87,6 +87,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
         },
         Some(Command::Mcp { command }) => match command {
             McpCommand::List => Ok(modes::run::list_mcp_servers(&config)),
+            McpCommand::Tools { server_id } => {
+                modes::run::list_mcp_tools(&config, &server_id).await
+            }
             McpCommand::Resources { server_id, command } => match command {
                 cli::McpResourceCommand::List => {
                     modes::run::list_mcp_resources(&config, &server_id).await

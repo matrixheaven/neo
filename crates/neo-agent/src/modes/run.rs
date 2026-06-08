@@ -607,6 +607,25 @@ pub fn list_mcp_servers(config: &AppConfig) -> String {
     out
 }
 
+pub async fn list_mcp_tools(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
+    let server = enabled_mcp_server(config, server_id)?;
+    let adapter = mcp_adapter_for_server(server)?;
+    let provider = McpToolProvider::discover_dyn(&server.id, adapter)
+        .await
+        .with_context(|| format!("failed to discover MCP tools from {server_id}"))?;
+    let specs = provider.specs();
+    if specs.is_empty() {
+        return Ok("no MCP tools\n".to_owned());
+    }
+
+    let mut out = String::new();
+    for spec in specs {
+        let input_schema = serde_json::to_string(&spec.input_schema)?;
+        let _ = writeln!(out, "{}\t{}\t{}", spec.name, spec.description, input_schema);
+    }
+    Ok(out)
+}
+
 pub async fn list_mcp_resources(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
     let server = enabled_mcp_server(config, server_id)?;
     let adapter = mcp_adapter_for_server(server)?;
