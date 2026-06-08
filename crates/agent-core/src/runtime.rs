@@ -8,6 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     AgentEvent, AgentMessage, AgentToolCall, CompactionSummary, Content, PermissionDecision,
@@ -388,6 +389,15 @@ impl AgentRuntime {
         context: &'a mut AgentContext,
         message: AgentMessage,
     ) -> AgentEventStream<'a> {
+        self.run_turn_with_cancel(context, message, CancellationToken::new())
+    }
+
+    pub fn run_turn_with_cancel<'a>(
+        &'a self,
+        context: &'a mut AgentContext,
+        message: AgentMessage,
+        cancel_token: CancellationToken,
+    ) -> AgentEventStream<'a> {
         if context.is_cancelled() {
             return stream::iter([Ok(AgentEvent::TurnFinished {
                 turn: context.turns.saturating_add(1),
@@ -417,7 +427,8 @@ impl AgentRuntime {
                 turn: emitter.context.turns.saturating_add(1),
             });
             emitter.emit(AgentEvent::MessageAppended { message });
-            if let Err(err) = run_agent_turn(model, config, tools, &mut emitter).await {
+            if let Err(err) = run_agent_turn(model, config, tools, &mut emitter, cancel_token).await
+            {
                 emitter.emit(AgentEvent::RunFinished {
                     turn: emitter.context.turns.saturating_add(1),
                     stop_reason: StopReason::Error,
@@ -571,6 +582,7 @@ async fn run_agent_turn(
     config: AgentConfig,
     tools: Option<Arc<ToolRegistry>>,
     emitter: &mut EventEmitter,
+    cancel_token: CancellationToken,
 ) -> Result<(), AgentRuntimeError> {
     let mut final_turn: u32;
     let mut final_stop_reason = StopReason::EndTurn;
@@ -590,26 +602,23 @@ async fn run_agent_turn(
 
         maybe_compact(&config, emitter);
 
-        if emitter.context.is_cancelled() {
-            final_turn = emitter.context.turns.saturating_add(1);
-            final_stop_reason = StopReason::Cancelled;
-            break;
-        }
-
-        if emitter.context.turns >= config.max_turns {
-            let turn = emitter.context.turns.saturating_add(1);
+        if let Some((turn, stop_reason)) = terminal_pre_model_stop(&config, emitter, &cancel_token)
+        {
             final_turn = turn;
-            final_stop_reason = StopReason::MaxTurns;
-            emitter.emit(AgentEvent::TurnFinished {
-                turn,
-                stop_reason: StopReason::MaxTurns,
-            });
+            final_stop_reason = stop_reason;
             break;
         }
 
         let turn = emitter.context.turns.saturating_add(1);
         let request = chat_request(&config, &emitter.context);
-        let assistant = run_model_turn(Arc::clone(&model), request, turn, emitter).await?;
+        let assistant = run_model_turn(
+            Arc::clone(&model),
+            request,
+            turn,
+            emitter,
+            cancel_token.clone(),
+        )
+        .await?;
         final_turn = turn;
         if let Some(AgentMessage::Assistant { stop_reason, .. }) = &assistant {
             final_stop_reason = *stop_reason;
@@ -681,6 +690,30 @@ async fn run_agent_turn(
 
 fn emit_run_finished(emitter: &mut EventEmitter, turn: u32, stop_reason: StopReason) {
     emitter.emit(AgentEvent::RunFinished { turn, stop_reason });
+}
+
+fn terminal_pre_model_stop(
+    config: &AgentConfig,
+    emitter: &mut EventEmitter,
+    cancel_token: &CancellationToken,
+) -> Option<(u32, StopReason)> {
+    if emitter.context.is_cancelled() || cancel_token.is_cancelled() {
+        return Some((
+            emitter.context.turns.saturating_add(1),
+            StopReason::Cancelled,
+        ));
+    }
+
+    if emitter.context.turns >= config.max_turns {
+        let turn = emitter.context.turns.saturating_add(1);
+        emitter.emit(AgentEvent::TurnFinished {
+            turn,
+            stop_reason: StopReason::MaxTurns,
+        });
+        return Some((turn, StopReason::MaxTurns));
+    }
+
+    None
 }
 
 fn append_queued_messages(emitter: &mut EventEmitter, messages: Vec<AgentMessage>) {
@@ -926,6 +959,7 @@ async fn run_model_turn(
     request: ChatRequest,
     turn: u32,
     emitter: &mut EventEmitter,
+    cancel_token: CancellationToken,
 ) -> Result<Option<AgentMessage>, AgentRuntimeError> {
     emitter.emit(AgentEvent::TurnStarted { turn });
     let mut text = String::new();
@@ -935,7 +969,18 @@ async fn run_model_turn(
     let mut tool_names = std::collections::HashMap::new();
     let mut current_message_id = None;
 
-    while let Some(event) = stream.next().await {
+    while let Some(event) = next_model_event(&mut stream, &cancel_token).await {
+        if cancel_token.is_cancelled() {
+            stop_reason = StopReason::Cancelled;
+            if let Some(id) = current_message_id.take() {
+                emitter.emit(AgentEvent::MessageFinished {
+                    turn,
+                    id,
+                    stop_reason,
+                });
+            }
+            break;
+        }
         match event? {
             AiStreamEvent::MessageStart { id } => {
                 current_message_id = Some(id.clone());
@@ -1009,6 +1054,16 @@ async fn run_model_turn(
     });
     emitter.emit(AgentEvent::TurnFinished { turn, stop_reason });
     Ok(Some(message))
+}
+
+async fn next_model_event(
+    stream: &mut futures::stream::BoxStream<'_, Result<AiStreamEvent, neo_ai::AiError>>,
+    cancel_token: &CancellationToken,
+) -> Option<Result<AiStreamEvent, neo_ai::AiError>> {
+    tokio::select! {
+        event = stream.next() => event,
+        () = cancel_token.cancelled() => Some(Err(neo_ai::AiError::Cancelled)),
+    }
 }
 
 async fn prepare_and_run_tool(

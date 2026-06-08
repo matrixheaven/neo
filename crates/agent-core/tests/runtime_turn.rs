@@ -18,6 +18,7 @@ use tokio::{
     sync::oneshot,
     time::{sleep, timeout},
 };
+use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn runtime_streams_one_turn_text_and_updates_context() {
@@ -164,6 +165,78 @@ async fn runtime_yields_model_events_before_model_stream_finishes() {
             text: "early".to_owned(),
         }
     );
+}
+
+#[tokio::test]
+async fn runtime_cancels_in_flight_model_stream_and_emits_cancelled_barriers() {
+    let harness = DelayedHarness::new(vec![
+        DelayedStep::Event(AiStreamEvent::MessageStart {
+            id: "msg_cancel".to_owned(),
+        }),
+        DelayedStep::Event(AiStreamEvent::TextDelta {
+            text: "partial".to_owned(),
+        }),
+        DelayedStep::Delay(Duration::from_secs(5)),
+        DelayedStep::Event(AiStreamEvent::TextDelta {
+            text: "late".to_owned(),
+        }),
+        DelayedStep::Event(AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        }),
+    ]);
+    let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
+    let mut context = AgentContext::new();
+    let cancel = CancellationToken::new();
+
+    let mut stream = runtime.run_turn_with_cancel(
+        &mut context,
+        AgentMessage::user_text("cancel stream"),
+        cancel.clone(),
+    );
+
+    let mut events = Vec::new();
+    while let Some(event) = timeout(Duration::from_millis(250), stream.next())
+        .await
+        .expect("event before cancellation")
+    {
+        let event = event.expect("event should be ok");
+        let should_cancel = matches!(event, AgentEvent::TextDelta { .. });
+        events.push(event);
+        if should_cancel {
+            cancel.cancel();
+            break;
+        }
+    }
+    while let Some(event) = timeout(Duration::from_millis(250), stream.next())
+        .await
+        .expect("cancelled barriers should arrive promptly")
+    {
+        events.push(event.expect("event should be ok"));
+    }
+    drop(stream);
+
+    assert!(events.contains(&AgentEvent::MessageFinished {
+        turn: 1,
+        id: "msg_cancel".to_owned(),
+        stop_reason: StopReason::Cancelled,
+    }));
+    assert!(events.contains(&AgentEvent::TurnFinished {
+        turn: 1,
+        stop_reason: StopReason::Cancelled,
+    }));
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::RunFinished {
+            turn: 1,
+            stop_reason: StopReason::Cancelled,
+        })
+    );
+    assert!(context.is_cancelled());
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TextDelta { text, .. } if text == "late"
+    )));
 }
 
 #[tokio::test]

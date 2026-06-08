@@ -12,6 +12,9 @@
   `MessageFinished`, `TurnStarted`, `TurnFinished`, and `RunFinished`, so
   consumers can distinguish streamed provider message boundaries from whole-run
   completion without inferring from transcript records.
+- `AgentRuntime::run_turn_with_cancel` accepts a `CancellationToken` and can
+  stop an in-flight model stream promptly, emitting cancelled message, turn,
+  and run barriers while updating replayable runtime cancellation state.
 - Runtime queue modes and hooks are real Rust APIs: `AgentContext` can queue
   steering and follow-up messages, `AgentConfig::with_queue_modes` controls
   drain behavior, and `with_before_tool_call` / `with_after_tool_call` can
@@ -80,6 +83,9 @@ or hosted lifecycle behavior.
   response SSE stream.
 - Add richer hook lifecycle docs only when Neo exposes additional hook phases
   beyond the current before/after tool-call callbacks.
+- Finish cancellation propagation through tool futures, bash child processes,
+  and the live TUI abort path; current cancellation support covers runtime
+  state and in-flight model streams.
 - Decide whether Neo needs full PTY/interactivity later. Current `bash`
   background support is intentionally compact start/poll process management.
 - Decide whether JSONL event persistence remains the durable session format or
