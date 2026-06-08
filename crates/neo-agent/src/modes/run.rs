@@ -11,6 +11,7 @@ use neo_agent_core::{
 use neo_ai::{ModelClient, ModelRegistry, ModelSpec, ProviderRegistry};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     cli::RunOutput,
@@ -588,6 +589,7 @@ pub async fn run_prompt_streaming(
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
     approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
+    cancel_token: CancellationToken,
 ) -> anyhow::Result<PromptTurn> {
     let prompt = prompt.join(" ");
     let session_path = create_session_path(config).await?;
@@ -597,14 +599,18 @@ pub async fn run_prompt_streaming(
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
     let (user_message, events) = append_user_event(prompt, &mut writer).await?;
     let runtime = runtime_for_config(config, Some(approval_tx)).await?;
+    let streaming = StreamingTurnIo {
+        event_tx,
+        session_id,
+        cancel_token,
+    };
     finish_prompt_turn_streaming(
         user_message,
         AgentContext::new(),
         &mut writer,
         runtime,
         events,
-        event_tx,
-        session_id,
+        streaming,
     )
     .await
 }
@@ -615,6 +621,7 @@ pub async fn run_prompt_in_session_streaming(
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
     approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
+    cancel_token: CancellationToken,
 ) -> anyhow::Result<PromptTurn> {
     let prompt = prompt.join(" ");
     let session_path = session_commands::session_path(session_id, config)?;
@@ -626,14 +633,18 @@ pub async fn run_prompt_in_session_streaming(
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
     let (user_message, events) = append_user_event(prompt, &mut writer).await?;
     let runtime = runtime_for_config(config, Some(approval_tx)).await?;
+    let streaming = StreamingTurnIo {
+        event_tx,
+        session_id: session_id.to_owned(),
+        cancel_token,
+    };
     finish_prompt_turn_streaming(
         user_message,
         context,
         &mut writer,
         runtime,
         events,
-        event_tx,
-        session_id.to_owned(),
+        streaming,
     )
     .await
 }
@@ -726,29 +737,37 @@ async fn finish_prompt_turn(
     })
 }
 
+struct StreamingTurnIo {
+    event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
+    session_id: String,
+    cancel_token: CancellationToken,
+}
+
 async fn finish_prompt_turn_streaming(
     user_message: AgentMessage,
     mut context: AgentContext,
     writer: &mut JsonlSessionWriter,
     runtime: AgentRuntime,
     initial_events: Vec<AgentEvent>,
-    event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
-    session_id: String,
+    streaming: StreamingTurnIo,
 ) -> anyhow::Result<PromptTurn> {
     let mut events = Vec::new();
     for event in initial_events {
-        let _ = event_tx.send(Ok(event.clone()));
+        let _ = streaming.event_tx.send(Ok(event.clone()));
         events.push(event);
     }
 
     let mut assistant_text = String::new();
-    let mut stream = runtime.run_turn(&mut context, user_message.clone());
+    let mut stream =
+        runtime.run_turn_with_cancel(&mut context, user_message.clone(), streaming.cancel_token);
     while let Some(event) = stream.next().await {
         let event = match event {
             Ok(event) => event,
             Err(error) => {
                 let message = error.to_string();
-                let _ = event_tx.send(Err(anyhow::anyhow!(message.clone())));
+                let _ = streaming
+                    .event_tx
+                    .send(Err(anyhow::anyhow!(message.clone())));
                 anyhow::bail!(message);
             }
         };
@@ -764,13 +783,13 @@ async fn finish_prompt_turn_streaming(
             }
             writer.append_event(&event).await?;
         }
-        let _ = event_tx.send(Ok(event.clone()));
+        let _ = streaming.event_tx.send(Ok(event.clone()));
         events.push(event);
     }
     writer.flush().await?;
 
     Ok(PromptTurn {
-        session_id,
+        session_id: streaming.session_id,
         events,
         assistant_text,
     })
