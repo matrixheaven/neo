@@ -19,6 +19,11 @@
 - `AgentRuntime::run_turn_with_cancel` accepts a `CancellationToken` and can
   stop an in-flight model stream promptly, emitting cancelled message, turn,
   and run barriers while updating replayable runtime cancellation state.
+- The same runtime cancellation token now races in-flight tool preparation and
+  tool execution futures. When cancellation fires during a tool batch, Neo
+  emits a cancelled `ToolExecutionFinished`, finishes the turn and run with
+  `StopReason::Cancelled`, marks the context cancelled, and does not append the
+  cancelled tool result into model/session context.
 - Runtime queue modes and hooks are real Rust APIs: `AgentContext` can queue
   steering and follow-up messages, `AgentConfig::with_queue_modes` controls
   drain behavior, and `with_before_tool_call` / `with_after_tool_call` can
@@ -88,11 +93,11 @@ or hosted lifecycle behavior.
   response SSE stream.
 - Add richer hook lifecycle docs only when Neo exposes additional hook phases
   beyond the current before/after tool-call callbacks.
-- Finish cancellation propagation through arbitrary long-running tool futures
-  and background bash handles; current cancellation support covers runtime
-  state, in-flight model streams, foreground bash child processes, and live TUI
-  interruption that drains cooperative cancelled message/turn/run barriers
-  before falling back to abort.
+- Finish cancellation propagation for background bash handles and process-tree
+  cleanup; current cancellation support covers runtime state, in-flight model
+  streams, arbitrary in-flight tool futures at the runtime scheduling boundary,
+  foreground bash child processes, and live TUI interruption that drains
+  cooperative cancelled message/turn/run barriers before falling back to abort.
 - Decide whether Neo needs full PTY/interactivity later. Current `bash`
   background support is intentionally compact start/poll process management.
 - Decide whether JSONL event persistence remains the durable session format or

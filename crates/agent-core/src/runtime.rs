@@ -586,14 +586,7 @@ async fn run_agent_turn(
 ) -> Result<(), AgentRuntimeError> {
     let mut final_turn: u32;
     let mut final_stop_reason = StopReason::EndTurn;
-    let mut pending_messages =
-        take_messages(&emitter.context.steering_queue, config.steering_queue_mode);
-    if !pending_messages.is_empty() {
-        emitter.emit(AgentEvent::QueueDrained {
-            kind: QueueKind::Steering,
-            count: pending_messages.len(),
-        });
-    }
+    let mut pending_messages = drain_steering_queue(&config, emitter);
 
     loop {
         if !pending_messages.is_empty() {
@@ -630,26 +623,7 @@ async fn run_agent_turn(
             ..
         }) = assistant.clone()
         else {
-            pending_messages =
-                take_messages(&emitter.context.steering_queue, config.steering_queue_mode);
-            if !pending_messages.is_empty() {
-                emitter.emit(AgentEvent::QueueDrained {
-                    kind: QueueKind::Steering,
-                    count: pending_messages.len(),
-                });
-            }
-            if pending_messages.is_empty() {
-                pending_messages = take_messages(
-                    &emitter.context.follow_up_queue,
-                    config.follow_up_queue_mode,
-                );
-                if !pending_messages.is_empty() {
-                    emitter.emit(AgentEvent::QueueDrained {
-                        kind: QueueKind::FollowUp,
-                        count: pending_messages.len(),
-                    });
-                }
-            }
+            pending_messages = drain_next_pending_queue(&config, emitter);
             if pending_messages.is_empty() {
                 break;
             }
@@ -663,6 +637,14 @@ async fn run_agent_turn(
         let tool_results =
             execute_tool_calls(&config, registry, turn, &tool_calls, emitter, &cancel_token)
                 .await?;
+        if cancel_token.is_cancelled() {
+            emitter.emit(AgentEvent::TurnFinished {
+                turn,
+                stop_reason: StopReason::Cancelled,
+            });
+            final_stop_reason = StopReason::Cancelled;
+            break;
+        }
         for (tool_call, result) in &tool_results {
             let message = AgentMessage::tool_result(
                 tool_call.id.clone(),
@@ -675,18 +657,41 @@ async fn run_agent_turn(
         if terminates_tool_batch(&tool_results) {
             break;
         }
-        pending_messages =
-            take_messages(&emitter.context.steering_queue, config.steering_queue_mode);
-        if !pending_messages.is_empty() {
-            emitter.emit(AgentEvent::QueueDrained {
-                kind: QueueKind::Steering,
-                count: pending_messages.len(),
-            });
-        }
+        pending_messages = drain_steering_queue(&config, emitter);
     }
 
     emit_run_finished(emitter, final_turn, final_stop_reason);
     Ok(())
+}
+
+fn drain_next_pending_queue(config: &AgentConfig, emitter: &mut EventEmitter) -> Vec<AgentMessage> {
+    let steering = drain_steering_queue(config, emitter);
+    if steering.is_empty() {
+        drain_follow_up_queue(config, emitter)
+    } else {
+        steering
+    }
+}
+
+fn drain_steering_queue(config: &AgentConfig, emitter: &mut EventEmitter) -> Vec<AgentMessage> {
+    let messages = take_messages(&emitter.context.steering_queue, config.steering_queue_mode);
+    emit_queue_drained(emitter, QueueKind::Steering, messages.len());
+    messages
+}
+
+fn drain_follow_up_queue(config: &AgentConfig, emitter: &mut EventEmitter) -> Vec<AgentMessage> {
+    let messages = take_messages(
+        &emitter.context.follow_up_queue,
+        config.follow_up_queue_mode,
+    );
+    emit_queue_drained(emitter, QueueKind::FollowUp, messages.len());
+    messages
+}
+
+fn emit_queue_drained(emitter: &mut EventEmitter, kind: QueueKind, count: usize) {
+    if count > 0 {
+        emitter.emit(AgentEvent::QueueDrained { kind, count });
+    }
 }
 
 fn emit_run_finished(emitter: &mut EventEmitter, turn: u32, stop_reason: StopReason) {
@@ -699,10 +704,12 @@ fn terminal_pre_model_stop(
     cancel_token: &CancellationToken,
 ) -> Option<(u32, StopReason)> {
     if emitter.context.is_cancelled() || cancel_token.is_cancelled() {
-        return Some((
-            emitter.context.turns.saturating_add(1),
-            StopReason::Cancelled,
-        ));
+        let turn = emitter.context.turns.saturating_add(1);
+        emitter.emit(AgentEvent::TurnFinished {
+            turn,
+            stop_reason: StopReason::Cancelled,
+        });
+        return Some((turn, StopReason::Cancelled));
     }
 
     if emitter.context.turns >= config.max_turns {
@@ -858,13 +865,32 @@ async fn execute_tool_calls_sequential(
             if let Some(blocked) = before_tool_call(tool_call) {
                 blocked
             } else {
-                prepare_and_run_tool(config, registry, &tool_context, turn, tool_call, emitter)
-                    .await?
+                prepare_and_run_tool(
+                    config,
+                    registry,
+                    &tool_context,
+                    turn,
+                    tool_call,
+                    emitter,
+                    cancel_token,
+                )
+                .await?
             }
         } else {
-            prepare_and_run_tool(config, registry, &tool_context, turn, tool_call, emitter).await?
+            prepare_and_run_tool(
+                config,
+                registry,
+                &tool_context,
+                turn,
+                tool_call,
+                emitter,
+                cancel_token,
+            )
+            .await?
         };
-        if let Some(after_tool_call) = &config.after_tool_call {
+        if !cancel_token.is_cancelled()
+            && let Some(after_tool_call) = &config.after_tool_call
+        {
             result = after_tool_call(tool_call, result);
         }
         if tool_call.name == "bash" {
@@ -877,6 +903,9 @@ async fn execute_tool_calls_sequential(
             result: result.clone(),
         });
         results.push((tool_call.clone(), result));
+        if cancel_token.is_cancelled() {
+            break;
+        }
     }
     Ok(results)
 }
@@ -894,6 +923,9 @@ async fn execute_tool_calls_parallel(
     let mut running = FuturesUnordered::new();
 
     for (index, tool_call) in tool_calls.iter().cloned().enumerate() {
+        if cancel_token.is_cancelled() {
+            break;
+        }
         emitter.emit(AgentEvent::ToolExecutionStarted {
             turn,
             id: tool_call.id.clone(),
@@ -903,7 +935,9 @@ async fn execute_tool_calls_parallel(
         if let Some(before_tool_call) = &config.before_tool_call
             && let Some(mut result) = before_tool_call(&tool_call)
         {
-            if let Some(after_tool_call) = &config.after_tool_call {
+            if !cancel_token.is_cancelled()
+                && let Some(after_tool_call) = &config.after_tool_call
+            {
                 result = after_tool_call(&tool_call, result);
             }
             emit_shell_finished(turn, &tool_call, &result, emitter);
@@ -920,22 +954,32 @@ async fn execute_tool_calls_parallel(
         let config = config.clone();
         let tool_context = tool_context.clone();
         let after_tool_call = config.after_tool_call.clone();
+        let cancel_token = cancel_token.clone();
         let mut sink = emitter.sink();
         running.push(async move {
-            let tool_context =
-                match prepare_tool_context(&config, &tool_context, turn, &tool_call, &mut sink)
-                    .await
-                {
+            let tool_context = tokio::select! {
+                preparation = prepare_tool_context(&config, &tool_context, turn, &tool_call, &mut sink) => {
+                    match preparation {
                     ToolPreparation::Run(context) => context,
                     ToolPreparation::Skip(result) => {
                         return Ok::<_, AgentRuntimeError>((index, tool_call, result));
                     }
-                };
-            let mut result = registry
-                .run(&tool_call.name, &tool_context, tool_call.arguments.clone())
-                .await
-                .unwrap_or_else(|err| ToolResult::error(err.to_string()));
-            if let Some(after_tool_call) = &after_tool_call {
+                    }
+                }
+                () = cancel_token.cancelled() => {
+                    return Ok::<_, AgentRuntimeError>((index, tool_call, cancelled_tool_result()));
+                }
+            };
+            let mut result = run_tool_with_cancel(
+                registry,
+                &tool_call,
+                &tool_context,
+                &cancel_token,
+            )
+            .await;
+            if !cancel_token.is_cancelled()
+                && let Some(after_tool_call) = &after_tool_call
+            {
                 result = after_tool_call(&tool_call, result);
             }
             Ok::<_, AgentRuntimeError>((index, tool_call, result))
@@ -1192,14 +1236,38 @@ async fn prepare_and_run_tool(
     turn: u32,
     tool_call: &AgentToolCall,
     emitter: &mut EventEmitter,
+    cancel_token: &CancellationToken,
 ) -> Result<ToolResult, AgentRuntimeError> {
-    match prepare_tool_context(config, tool_context, turn, tool_call, emitter).await {
-        ToolPreparation::Run(context) => registry
-            .run(&tool_call.name, &context, tool_call.arguments.clone())
-            .await
-            .or_else(|err| Ok(ToolResult::error(err.to_string()))),
+    let preparation = tokio::select! {
+        biased;
+        preparation = prepare_tool_context(config, tool_context, turn, tool_call, emitter) => preparation,
+        () = cancel_token.cancelled() => return Ok(cancelled_tool_result()),
+    };
+    match preparation {
+        ToolPreparation::Run(context) => {
+            Ok(run_tool_with_cancel(registry, tool_call, &context, cancel_token).await)
+        }
         ToolPreparation::Skip(result) => Ok(result),
     }
+}
+
+async fn run_tool_with_cancel(
+    registry: &ToolRegistry,
+    tool_call: &AgentToolCall,
+    tool_context: &ToolContext,
+    cancel_token: &CancellationToken,
+) -> ToolResult {
+    tokio::select! {
+        biased;
+        result = registry.run(&tool_call.name, tool_context, tool_call.arguments.clone()) => {
+            result.unwrap_or_else(|err| ToolResult::error(err.to_string()))
+        }
+        () = cancel_token.cancelled() => cancelled_tool_result(),
+    }
+}
+
+fn cancelled_tool_result() -> ToolResult {
+    ToolResult::error(ToolError::Cancelled.to_string())
 }
 
 async fn prepare_tool_context(

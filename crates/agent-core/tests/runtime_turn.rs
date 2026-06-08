@@ -623,6 +623,47 @@ async fn runtime_reports_max_turns_and_cancelled_without_calling_model() {
 }
 
 #[tokio::test]
+async fn runtime_external_cancellation_before_model_emits_cancelled_barriers() {
+    let harness = FakeHarness::from_events([]);
+    let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
+    let mut context = AgentContext::new();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let events = runtime
+        .run_turn_with_cancel(
+            &mut context,
+            AgentMessage::user_text("already cancelled"),
+            cancel,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("cancel event");
+
+    assert_eq!(
+        events,
+        vec![
+            AgentEvent::RunStarted { turn: 1 },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::user_text("already cancelled"),
+            },
+            AgentEvent::TurnFinished {
+                turn: 1,
+                stop_reason: StopReason::Cancelled,
+            },
+            AgentEvent::RunFinished {
+                turn: 1,
+                stop_reason: StopReason::Cancelled,
+            },
+        ]
+    );
+    assert!(context.is_cancelled());
+    assert!(harness.requests().is_empty());
+}
+
+#[tokio::test]
 async fn runtime_executes_tool_call_and_continues_until_end_turn() {
     let harness = FakeHarness::from_turns([
         vec![
@@ -852,6 +893,266 @@ async fn runtime_returns_tool_errors_to_model_for_retry_instead_of_aborting() {
             ..
         }) if tool_call_id == "tool_1"
     ));
+}
+
+#[tokio::test]
+async fn runtime_cancels_in_flight_tool_execution_and_finishes_run() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "never".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({}),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools.register(NeverTool);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model()),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+    let cancel = CancellationToken::new();
+    let mut stream = runtime.run_turn_with_cancel(
+        &mut context,
+        AgentMessage::user_text("call never"),
+        cancel.clone(),
+    );
+    let mut events = Vec::new();
+
+    loop {
+        let event = timeout(Duration::from_millis(250), stream.next())
+            .await
+            .expect("tool start should arrive promptly")
+            .expect("event before cancellation")
+            .expect("event should be ok");
+        let should_cancel = matches!(
+            event,
+            AgentEvent::ToolExecutionStarted { ref id, .. } if id == "tool_1"
+        );
+        events.push(event);
+        if should_cancel {
+            cancel.cancel();
+            break;
+        }
+    }
+    while let Some(event) = timeout(Duration::from_millis(250), stream.next())
+        .await
+        .expect("cancelled tool run should finish promptly")
+    {
+        events.push(event.expect("event should be ok"));
+    }
+    drop(stream);
+
+    assert!(events.contains(&AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        name: "never".to_owned(),
+        result: ToolResult::error("tool execution cancelled"),
+    }));
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::RunFinished {
+            turn: 1,
+            stop_reason: StopReason::Cancelled,
+        })
+    );
+    assert!(context.is_cancelled());
+    assert_eq!(context.messages().len(), 2);
+}
+
+#[tokio::test]
+async fn runtime_parallel_cancellation_finishes_all_started_tool_wrappers() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "text": "fast" }),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_2".to_owned(),
+                name: "never".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_2".to_owned(),
+                arguments: json!({}),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools.register(EchoTool);
+    tools.register(NeverTool);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_execution_mode(ToolExecutionMode::Parallel),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+    let cancel = CancellationToken::new();
+    let mut stream = runtime.run_turn_with_cancel(
+        &mut context,
+        AgentMessage::user_text("call parallel tools"),
+        cancel.clone(),
+    );
+    let mut events = Vec::new();
+
+    loop {
+        let event = timeout(Duration::from_millis(250), stream.next())
+            .await
+            .expect("tool starts should arrive promptly")
+            .expect("event before cancellation")
+            .expect("event should be ok");
+        let should_cancel = matches!(
+            event,
+            AgentEvent::ToolExecutionStarted { ref id, .. } if id == "tool_2"
+        );
+        events.push(event);
+        if should_cancel {
+            cancel.cancel();
+            break;
+        }
+    }
+    while let Some(event) = timeout(Duration::from_millis(250), stream.next())
+        .await
+        .expect("cancelled parallel tool run should finish promptly")
+    {
+        events.push(event.expect("event should be ok"));
+    }
+    drop(stream);
+
+    assert!(events.contains(&AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        name: "echo".to_owned(),
+        result: ToolResult::ok("fast"),
+    }));
+    assert!(events.contains(&AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool_2".to_owned(),
+        name: "never".to_owned(),
+        result: ToolResult::error("tool execution cancelled"),
+    }));
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::RunFinished {
+            turn: 1,
+            stop_reason: StopReason::Cancelled,
+        })
+    );
+    assert!(context.is_cancelled());
+    assert_eq!(context.messages().len(), 2);
+}
+
+#[tokio::test]
+async fn runtime_parallel_cancellation_does_not_start_later_tool_calls() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "text": "first" }),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_2".to_owned(),
+                name: "never".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_2".to_owned(),
+                arguments: json!({}),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let cancel = CancellationToken::new();
+    let cancel_from_hook = cancel.clone();
+    let mut tools = ToolRegistry::new();
+    tools.register(EchoTool);
+    tools.register(NeverTool);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_execution_mode(ToolExecutionMode::Parallel)
+            .with_before_tool_call(move |call| {
+                if call.id == "tool_1" {
+                    cancel_from_hook.cancel();
+                    Some(ToolResult::ok("first"))
+                } else {
+                    None
+                }
+            }),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn_with_cancel(
+            &mut context,
+            AgentMessage::user_text("call parallel tools"),
+            cancel,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert!(events.contains(&AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        name: "echo".to_owned(),
+        result: ToolResult::ok("first"),
+    }));
+    assert!(!events.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::ToolExecutionStarted { id, .. } if id == "tool_2"
+        )
+    }));
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::RunFinished {
+            turn: 1,
+            stop_reason: StopReason::Cancelled,
+        })
+    );
+    assert!(context.is_cancelled());
+    assert_eq!(context.messages().len(), 2);
 }
 
 #[tokio::test]
@@ -2107,6 +2408,26 @@ impl Tool for FallibleTool {
                 message: "expected text".to_owned(),
             })
         })
+    }
+}
+
+struct NeverTool;
+
+impl Tool for NeverTool {
+    fn name(&self) -> &'static str {
+        "never"
+    }
+
+    fn description(&self) -> &'static str {
+        "Never completes."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({ "type": "object" })
+    }
+
+    fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+        Box::pin(std::future::pending())
     }
 }
 
