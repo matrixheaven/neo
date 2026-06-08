@@ -14,6 +14,19 @@ pub(crate) struct PromptTemplate {
     pub path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PromptTemplateCommand {
+    pub template: PromptTemplate,
+    pub location: PromptTemplateLocation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptTemplateLocation {
+    Configured,
+    Project,
+    User,
+}
+
 pub(crate) fn expand_prompt_template_args(
     prompt: Vec<String>,
     project_dir: &Path,
@@ -45,6 +58,59 @@ pub(crate) fn expand_prompt_template_args(
         return Ok(prompt);
     };
     Ok(vec![substitute_args(&template.content, &invocation.args)])
+}
+
+pub(crate) fn discover_prompt_template_commands(
+    project_dir: &Path,
+    global_prompts_dir: Option<&Path>,
+    configured_selectors: &[String],
+) -> anyhow::Result<Vec<PromptTemplateCommand>> {
+    let mut commands = Vec::new();
+    for selector in configured_selectors {
+        commands.extend(
+            load_selected_prompt_templates(selector, project_dir, global_prompts_dir)?
+                .into_iter()
+                .map(|template| PromptTemplateCommand {
+                    template,
+                    location: PromptTemplateLocation::Configured,
+                }),
+        );
+    }
+    commands.extend(
+        load_project_prompt_templates(project_dir)?
+            .into_iter()
+            .map(|template| PromptTemplateCommand {
+                template,
+                location: PromptTemplateLocation::Project,
+            }),
+    );
+    if let Some(global_prompts_dir) = global_prompts_dir {
+        commands.extend(
+            load_user_prompt_templates(global_prompts_dir)?
+                .into_iter()
+                .map(|template| PromptTemplateCommand {
+                    template,
+                    location: PromptTemplateLocation::User,
+                }),
+        );
+    }
+    commands.sort_by(|left, right| {
+        left.template
+            .name
+            .cmp(&right.template.name)
+            .then_with(|| location_rank(left.location).cmp(&location_rank(right.location)))
+            .then_with(|| left.template.path.cmp(&right.template.path))
+    });
+    commands.dedup_by(|left, right| left.template.name == right.template.name);
+    Ok(commands)
+}
+
+const fn location_rank(location: PromptTemplateLocation) -> u8 {
+    match location {
+        PromptTemplateLocation::Configured => 0,
+        PromptTemplateLocation::Project => 1,
+        PromptTemplateLocation::User => 2,
+    }
 }
 
 pub(crate) fn load_project_prompt_templates(

@@ -3,13 +3,18 @@ use std::io::{self, BufRead};
 use anyhow::Context;
 use neo_agent_core::session::{JsonlSessionReader, SessionMetadataStore, SessionRecord};
 use neo_sdk::{
-    JsonlCodec, RpcError, RpcErrorCode, RpcMessage, RpcNotification, RpcRequest, RpcResponse,
-    RpcSessionGetResult, RpcSessionRecord, RpcSessionTreeRecord, RpcSessionsListResult,
-    RpcSessionsTreeResult,
+    JsonlCodec, RpcCommandKind, RpcCommandRecord, RpcCommandsResult, RpcError, RpcErrorCode,
+    RpcMessage, RpcNotification, RpcRequest, RpcResponse, RpcSessionGetResult, RpcSessionRecord,
+    RpcSessionTreeRecord, RpcSessionsListResult, RpcSessionsTreeResult,
 };
 use serde_json::{Value, json};
 
-use crate::{config::AppConfig, modes::run, session_commands};
+use crate::{
+    config::{self, AppConfig},
+    modes::run,
+    prompt_templates::{self, PromptTemplateLocation},
+    session_commands,
+};
 
 pub async fn execute(config: &AppConfig) -> anyhow::Result<String> {
     let mut output = String::new();
@@ -59,6 +64,7 @@ async fn handle_request(
             output,
             &RpcMessage::Response(RpcResponse::success(request.id, state_payload(config))),
         ),
+        "get_commands" => handle_get_commands(config, request, output),
         "get_messages" => handle_get_messages(config, request, output).await,
         "sessions.list" => handle_sessions_list(config, request, output),
         "sessions.tree" => handle_sessions_tree(config, request, output),
@@ -76,6 +82,49 @@ async fn handle_request(
             )),
         ),
     }
+}
+
+fn handle_get_commands(
+    config: &AppConfig,
+    request: RpcRequest,
+    output: &mut String,
+) -> anyhow::Result<()> {
+    let commands = match prompt_templates::discover_prompt_template_commands(
+        &config.project_dir,
+        config::global_prompts_dir().as_deref(),
+        &config.configured_prompt_templates,
+    ) {
+        Ok(commands) => commands,
+        Err(err) => {
+            return push_rpc_message(
+                output,
+                &RpcMessage::Response(RpcResponse::failure(
+                    request.id,
+                    RpcError::new(RpcErrorCode::InternalError, err.to_string(), None),
+                )),
+            );
+        }
+    };
+    let commands = commands
+        .into_iter()
+        .map(|command| RpcCommandRecord {
+            name: format!("/{}", command.template.name),
+            kind: RpcCommandKind::PromptTemplate,
+            template: command.template.name,
+            description: command.template.description,
+            argument_hint: command.template.argument_hint,
+            location: rpc_prompt_template_location(command.location).to_owned(),
+            path: command.template.path.display().to_string(),
+        })
+        .collect();
+
+    push_rpc_message(
+        output,
+        &RpcMessage::Response(RpcResponse::success(
+            request.id,
+            serde_json::to_value(RpcCommandsResult { commands })?,
+        )),
+    )
 }
 
 fn handle_sessions_list(
@@ -370,6 +419,14 @@ fn rpc_session_record(record: SessionRecord) -> RpcSessionRecord {
         summary: record.summary,
         parent_id: record.parent_id,
         children: record.children,
+    }
+}
+
+fn rpc_prompt_template_location(location: PromptTemplateLocation) -> &'static str {
+    match location {
+        PromptTemplateLocation::Configured => "configured",
+        PromptTemplateLocation::Project => "project",
+        PromptTemplateLocation::User => "user",
     }
 }
 

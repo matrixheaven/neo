@@ -1,6 +1,7 @@
 use neo_sdk::{
-    JsonlCodec, RpcCodecError, RpcError, RpcErrorCode, RpcMessage, RpcNotification, RpcRequest,
-    RpcResponse, RpcSessionGetResult, RpcSessionRecord, RpcSessionTreeRecord,
+    JsonlCodec, RpcCodecError, RpcCommandKind, RpcCommandRecord, RpcCommandsResult, RpcError,
+    RpcErrorCode, RpcMessage, RpcNotification, RpcRequest, RpcResponse, RpcSessionGetResult,
+    RpcSessionRecord, RpcSessionTreeRecord,
 };
 use serde_json::json;
 
@@ -145,6 +146,34 @@ fn session_get_result_has_stable_json_shape() {
     assert_eq!(
         serde_json::from_value::<RpcSessionGetResult>(value)
             .expect("deserialize session get result"),
+        result
+    );
+}
+
+#[test]
+fn commands_result_has_stable_prompt_template_json_shape() {
+    let result = RpcCommandsResult {
+        commands: vec![RpcCommandRecord {
+            name: "/review".to_owned(),
+            kind: RpcCommandKind::PromptTemplate,
+            template: "review".to_owned(),
+            description: "Review a target".to_owned(),
+            argument_hint: Some("<path>".to_owned()),
+            location: "project".to_owned(),
+            path: "/tmp/neo/.neo/prompts/review.md".to_owned(),
+        }],
+    };
+
+    let value = serde_json::to_value(&result).expect("serialize commands result");
+
+    assert_eq!(value["commands"][0]["name"], "/review");
+    assert_eq!(value["commands"][0]["kind"], "prompt_template");
+    assert_eq!(value["commands"][0]["template"], "review");
+    assert_eq!(value["commands"][0]["description"], "Review a target");
+    assert_eq!(value["commands"][0]["argument_hint"], "<path>");
+    assert_eq!(value["commands"][0]["location"], "project");
+    assert_eq!(
+        serde_json::from_value::<RpcCommandsResult>(value).expect("deserialize commands result"),
         result
     );
 }

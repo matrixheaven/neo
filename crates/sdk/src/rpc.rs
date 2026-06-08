@@ -151,6 +151,29 @@ pub struct RpcSessionGetResult {
     pub messages: Vec<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RpcCommandRecord {
+    pub name: String,
+    pub kind: RpcCommandKind,
+    pub template: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+    pub location: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RpcCommandKind {
+    PromptTemplate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RpcCommandsResult {
+    pub commands: Vec<RpcCommandRecord>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RpcCodecError {
     #[error("JSONL frame is empty")]

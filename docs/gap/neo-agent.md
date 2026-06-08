@@ -68,12 +68,16 @@
   summaries. The default `run` output remains the internal `AgentEvent` JSONL
   stream for existing scripts, with additive event variants as runtime
   capabilities grow.
-- RPC mode supports `get_state`, `prompt`, JSONL-backed `get_messages`, and
-  local `sessions.list`, `sessions.tree`, and `sessions.get` metadata payloads.
-  `sessions.get` resolves exact ids, unique prefixes, and in-directory JSONL
-  paths through the local session resolver, then returns the session metadata,
-  child ids, JSONL path, and replayed messages. State reports real
-  project/session counts and omits unsupported streaming state.
+- RPC mode supports `get_state`, local prompt-template `get_commands`,
+  `prompt`, JSONL-backed `get_messages`, and local `sessions.list`,
+  `sessions.tree`, and `sessions.get` metadata payloads. `get_commands`
+  exposes configured, project, and user-global prompt-template slash commands
+  with stable command metadata and the same configured > project > user
+  selection priority used by runtime slash prompts. `sessions.get` resolves
+  exact ids, unique prefixes, and in-directory JSONL paths through the local
+  session resolver, then returns the session metadata, child ids, JSONL path,
+  and replayed messages. State reports real project/session counts and omits
+  unsupported streaming state.
 - Interactive mode has a testable controller and a live crossterm/raw-mode TTY
   loop slice. TTY execution renders `neo-tui`, accepts text input, submits
   prompts through a streaming runtime driver, redraws on terminal resize,

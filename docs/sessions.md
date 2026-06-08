@@ -116,10 +116,19 @@ summary is displayed separately.
 `neo rpc` accepts JSONL request frames for local session clients:
 
 ```json
+{"type":"request","id":"commands","method":"get_commands","params":{}}
 {"type":"request","id":"sessions","method":"sessions.list","params":{}}
 {"type":"request","id":"tree","method":"sessions.tree","params":{}}
 {"type":"request","id":"messages","method":"get_messages","params":{"session_id":"alpha"}}
 ```
+
+`get_commands` returns local prompt-template slash commands discovered from
+configured `prompt_templates` selectors, project `.neo/prompts/*.md`, and
+user-global `~/.neo/prompts/*.md`. Each command includes `name`, `kind`,
+`template`, `description`, optional `argument_hint`, `location`, and `path`.
+When multiple sources define the same slash command, the result follows runtime
+selection priority: configured selectors first, then project templates, then
+user-global templates.
 
 `sessions.list` returns typed local metadata records with `id`, optional
 `name`, optional `summary`, optional `parent_id`, and `children`.

@@ -435,6 +435,111 @@ fn rpc_sessions_get_reports_missing_session_as_invalid_params() {
 }
 
 #[test]
+fn rpc_get_commands_returns_local_prompt_template_commands() {
+    let home = TempDir::new().expect("home tempdir");
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(project.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        project.path().join(".neo/config.toml"),
+        r#"
+prompt_templates = ["prompts"]
+"#,
+    )
+    .expect("write config");
+    std::fs::create_dir_all(project.path().join("prompts")).expect("create configured prompts");
+    std::fs::write(
+        project.path().join("prompts/review.md"),
+        r#"---
+description: Review a target
+argument-hint: "<path>"
+---
+Review $1
+"#,
+    )
+    .expect("write configured prompt template");
+    std::fs::create_dir_all(project.path().join(".neo/prompts")).expect("create project prompts");
+    std::fs::write(
+        project.path().join(".neo/prompts/fix.md"),
+        "Fix the selected code\n",
+    )
+    .expect("write project prompt template");
+    std::fs::write(
+        project.path().join(".neo/prompts/review.md"),
+        "Project review should not shadow configured review\n",
+    )
+    .expect("write duplicate project prompt template");
+    std::fs::create_dir_all(home.path().join(".neo/prompts")).expect("create user prompts");
+    std::fs::write(
+        home.path().join(".neo/prompts/explain.md"),
+        "Explain the target\n",
+    )
+    .expect("write user prompt template");
+    std::fs::write(
+        home.path().join(".neo/prompts/fix.md"),
+        "User fix should not shadow project fix\n",
+    )
+    .expect("write duplicate user prompt template");
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"commands-1","method":"get_commands","params":{}}"#,
+    );
+
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "response");
+    assert_eq!(messages[0]["id"], "commands-1");
+    let commands = messages[0]["result"]["commands"]
+        .as_array()
+        .expect("commands array");
+    let names = commands
+        .iter()
+        .map(|command| command["name"].as_str().expect("name"))
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["/explain", "/fix", "/review"]);
+
+    let review = commands
+        .iter()
+        .find(|command| command["name"] == "/review")
+        .expect("review command");
+    assert_eq!(review["kind"], "prompt_template");
+    assert_eq!(review["template"], "review");
+    assert_eq!(review["description"], "Review a target");
+    assert_eq!(review["argument_hint"], "<path>");
+    assert_eq!(review["location"], "configured");
+    assert!(
+        review["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("prompts/review.md")
+    );
+
+    let fix = commands
+        .iter()
+        .find(|command| command["name"] == "/fix")
+        .expect("fix command");
+    assert_eq!(fix["description"], "Fix the selected code");
+    assert_eq!(fix["location"], "project");
+
+    let explain = commands
+        .iter()
+        .find(|command| command["name"] == "/explain")
+        .expect("explain command");
+    assert_eq!(explain["location"], "user");
+    assert!(
+        explain["path"]
+            .as_str()
+            .unwrap()
+            .ends_with(".neo/prompts/explain.md")
+    );
+}
+
+#[test]
 fn rpc_prompt_streams_agent_events_and_returns_assistant_text() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-rpc", "rpc answer")]);
