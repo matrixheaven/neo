@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use neo_ai::{
-    AiStreamEvent, ApiKind, ChatMessage, ChatRequest, ContentPart, ImageData, ModelCapabilities,
-    ModelClient, ModelSpec, ProviderId, ReasoningEffort, RequestOptions, StopReason, ToolSpec,
+    AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
+    ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningEffort, RequestMetadata,
+    RequestOptions, StopReason, ToolCall, ToolSpec,
     providers::{
         anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
         openai_responses::OpenAiResponsesClient,
@@ -116,6 +117,10 @@ fn sse_response(events: &[Value]) -> String {
     )
 }
 
+fn status_response(status: u16) -> String {
+    format!("HTTP/1.1 {status} Test\r\ncontent-length: 0\r\n\r\n")
+}
+
 fn request(api: ApiKind) -> ChatRequest {
     ChatRequest {
         model: ModelSpec {
@@ -137,6 +142,50 @@ fn request(api: ApiKind) -> ChatRequest {
         )],
         options: RequestOptions {
             max_tokens: Some(64),
+            ..RequestOptions::default()
+        },
+    }
+}
+
+fn tool_result_request(api: ApiKind, is_error: bool) -> ChatRequest {
+    ChatRequest {
+        model: ModelSpec {
+            provider: ProviderId("provider".to_owned()),
+            model: "model-test".to_owned(),
+            api,
+            capabilities: ModelCapabilities::tool_chat(),
+        },
+        messages: vec![
+            ChatMessage::User {
+                content: vec![ContentPart::Text {
+                    text: "read this".to_owned(),
+                }],
+            },
+            ChatMessage::Assistant {
+                content: Vec::new(),
+                tool_calls: vec![ToolCall {
+                    id: "call-1".to_owned(),
+                    name: "read_file".to_owned(),
+                    arguments: json!({ "path": "Cargo.toml" }),
+                }],
+            },
+            ChatMessage::ToolResult {
+                tool_call_id: "call-1".to_owned(),
+                content: vec![ContentPart::Text {
+                    text: "permission denied".to_owned(),
+                }],
+                is_error,
+            },
+        ],
+        tools: vec![ToolSpec::string_arg(
+            "read_file",
+            "Read a file",
+            "path",
+            "Path to read",
+        )],
+        options: RequestOptions {
+            max_tokens: Some(64),
+            retries: Some(0),
             ..RequestOptions::default()
         },
     }
@@ -250,6 +299,102 @@ async fn openai_responses_client_posts_responses_payload_and_streams_events() {
     assert_eq!(sent.body["max_output_tokens"], 64);
     assert_eq!(sent.body["tools"][0]["name"], "read_file");
     assert_eq!(sent.body["input"][0]["role"], "user");
+}
+
+#[tokio::test]
+async fn openai_responses_client_posts_typed_options_cache_and_metadata() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-options" } }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+    let mut headers = BTreeMap::new();
+    headers.insert("x-neo-trace".to_owned(), "trace-1".to_owned());
+    let mut request = request(ApiKind::OpenAiResponses);
+    request.options = RequestOptions {
+        temperature: Some(0.4),
+        max_tokens: Some(128),
+        headers,
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        retries: Some(0),
+        cache: CacheRetention::Long,
+        session_id: Some("session-1".to_owned()),
+        metadata: RequestMetadata::from_pairs([("user_id", "u-1"), ("trace_id", "trace-1")]),
+        ..RequestOptions::default()
+    };
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.method, "POST");
+    assert_eq!(sent.path, "/responses");
+    assert_eq!(
+        sent.headers.get("authorization").unwrap(),
+        "Bearer test-key"
+    );
+    assert_eq!(sent.headers.get("x-neo-trace").unwrap(), "trace-1");
+    assert_eq!(
+        sent.headers.get("x-client-request-id").unwrap(),
+        "session-1"
+    );
+    assert_eq!(sent.body["model"], "model-test");
+    assert_eq!(sent.body["stream"], true);
+    assert_eq!(sent.body["temperature"], 0.4);
+    assert_eq!(sent.body["max_output_tokens"], 128);
+    assert_eq!(sent.body["reasoning"]["effort"], "medium");
+    assert_eq!(sent.body["reasoning"]["summary"], "auto");
+    assert_eq!(
+        sent.body["metadata"],
+        json!({ "trace_id": "trace-1", "user_id": "u-1" })
+    );
+    assert_eq!(sent.body["prompt_cache_key"], "session-1");
+    assert_eq!(sent.body["prompt_cache_retention"], "24h");
+    assert_eq!(sent.body["tools"][0]["name"], "read_file");
+}
+
+#[tokio::test]
+async fn openai_responses_client_retries_retryable_http_responses() {
+    let server = MockServer::start(vec![
+        status_response(500),
+        sse_response(&[
+            json!({ "type": "response.created", "response": { "id": "resp-retry" } }),
+            json!({ "type": "response.output_text.delta", "delta": "ok" }),
+            json!({
+                "type": "response.completed",
+                "response": { "status": "completed" }
+            }),
+        ]),
+    ]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::OpenAiResponses);
+    request.options.retries = Some(1);
+
+    let events = client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(server.requests().len(), 2);
+    assert!(matches!(
+        events.as_slice(),
+        [
+            AiStreamEvent::MessageStart { .. },
+            AiStreamEvent::TextDelta { text },
+            AiStreamEvent::MessageEnd { stop_reason: StopReason::EndTurn, .. }
+        ] if text == "ok"
+    ));
 }
 
 #[tokio::test]
@@ -902,6 +1047,67 @@ async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
 }
 
 #[tokio::test]
+async fn anthropic_messages_client_retries_retryable_http_responses() {
+    let server = MockServer::start(vec![
+        status_response(529),
+        sse_response(&[
+            json!({ "type": "message_start", "message": { "id": "msg-retry" } }),
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": { "type": "text_delta", "text": "ok" }
+            }),
+            json!({ "type": "message_stop" }),
+        ]),
+    ]);
+    let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::AnthropicMessages);
+    request.options.retries = Some(1);
+
+    let events = client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(server.requests().len(), 2);
+    assert!(matches!(
+        events.as_slice(),
+        [
+            AiStreamEvent::MessageStart { .. },
+            AiStreamEvent::TextDelta { text },
+            AiStreamEvent::MessageEnd { stop_reason: StopReason::EndTurn, .. }
+        ] if text == "ok"
+    ));
+}
+
+#[tokio::test]
+async fn anthropic_messages_client_serializes_tool_result_errors() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "message_start", "message": { "id": "msg-tool-result" } }),
+        json!({ "type": "message_stop" }),
+    ])]);
+    let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+
+    client
+        .stream_chat(tool_result_request(ApiKind::AnthropicMessages, true))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    let tool_result = &sent.body["messages"][2]["content"][0];
+    assert_eq!(tool_result["type"], "tool_result");
+    assert_eq!(tool_result["tool_use_id"], "call-1");
+    assert_eq!(tool_result["content"], "permission denied");
+    assert_eq!(tool_result["is_error"], true);
+}
+
+#[tokio::test]
 async fn anthropic_messages_client_serializes_reasoning_effort_as_budget_thinking() {
     let server = MockServer::start(vec![sse_response(&[
         json!({ "type": "message_start", "message": { "id": "msg-thinking" } }),
@@ -1146,6 +1352,71 @@ async fn google_generative_ai_client_posts_generate_content_payload_and_streams_
             .is_none(),
         "thinkingConfig must be omitted unless reasoning_effort is requested"
     );
+}
+
+#[tokio::test]
+async fn google_generative_ai_client_retries_retryable_http_responses() {
+    let server = MockServer::start(vec![
+        status_response(503),
+        sse_response(&[json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{ "text": "ok" }]
+                },
+                "finishReason": "STOP"
+            }]
+        })]),
+    ]);
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::GoogleGenerativeAi);
+    request.options.retries = Some(1);
+
+    let events = client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(server.requests().len(), 2);
+    assert!(matches!(
+        events.as_slice(),
+        [
+            AiStreamEvent::MessageStart { .. },
+            AiStreamEvent::TextDelta { text },
+            AiStreamEvent::MessageEnd { stop_reason: StopReason::EndTurn, .. }
+        ] if text == "ok"
+    ));
+}
+
+#[tokio::test]
+async fn google_generative_ai_client_serializes_tool_result_errors() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{ "text": "done" }]
+            },
+            "finishReason": "STOP"
+        }]
+    })])]);
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
+
+    client
+        .stream_chat(tool_result_request(ApiKind::GoogleGenerativeAi, true))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    let function_response = &sent.body["contents"][2]["parts"][0]["functionResponse"];
+    assert_eq!(function_response["name"], "call-1");
+    assert_eq!(function_response["response"]["result"], "permission denied");
+    assert_eq!(function_response["response"]["is_error"], true);
 }
 
 #[tokio::test]

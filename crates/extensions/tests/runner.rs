@@ -77,6 +77,46 @@ print(json.dumps({"type":"response","id":"wrong","result":True}), flush=True)
 }
 
 #[tokio::test]
+async fn stdio_runner_skips_notifications_until_matching_response() {
+    let script = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        script.path(),
+        r#"
+import sys, json
+message = json.loads(sys.stdin.readline())
+print(json.dumps({
+  "type": "notification",
+  "method": "log",
+  "params": {"level": "info", "message": "warming up"}
+}), flush=True)
+print(json.dumps({
+  "type": "response",
+  "id": message["id"],
+  "result": {"ok": True}
+}), flush=True)
+"#,
+    )
+    .unwrap();
+
+    let mut runner = ExtensionRunner::spawn(ExtensionTransport::Stdio {
+        command: "python3".into(),
+        args: vec![script.path().to_string_lossy().into_owned()],
+        env: vec![],
+    })
+    .unwrap();
+
+    let response = runner
+        .request(RpcRequest::new("call-with-log", "tool.ready", json!({})))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response,
+        RpcResponse::success("call-with-log", json!({ "ok": true }))
+    );
+}
+
+#[tokio::test]
 async fn stdio_runner_surfaces_structured_rpc_failures() {
     let script = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(

@@ -66,18 +66,25 @@ impl ExtensionRunner {
             .await
             .map_err(ExtensionRunnerError::Write)?;
 
-        let mut line = String::new();
-        let bytes = self
-            .stdout
-            .read_line(&mut line)
-            .await
-            .map_err(ExtensionRunnerError::Read)?;
-        if bytes == 0 {
-            return Err(ExtensionRunnerError::Eof);
-        }
-        let message = JsonlCodec::decode_line(&line)?;
-        let RpcMessage::Response(response) = message else {
-            return Err(ExtensionRunnerError::UnexpectedMessage(message));
+        let response = loop {
+            let mut line = String::new();
+            let bytes = self
+                .stdout
+                .read_line(&mut line)
+                .await
+                .map_err(ExtensionRunnerError::Read)?;
+            if bytes == 0 {
+                return Err(ExtensionRunnerError::Eof);
+            }
+            match JsonlCodec::decode_line(&line)? {
+                RpcMessage::Response(response) => break response,
+                RpcMessage::Notification(_) => {}
+                RpcMessage::Request(request) => {
+                    return Err(ExtensionRunnerError::UnexpectedMessage(
+                        RpcMessage::Request(request),
+                    ));
+                }
+            }
         };
         if response.id != expected_id {
             return Err(ExtensionRunnerError::ResponseIdMismatch {

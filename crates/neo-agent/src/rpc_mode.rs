@@ -371,7 +371,7 @@ async fn handle_get_messages(
     request: RpcRequest,
     output: &mut String,
 ) -> anyhow::Result<()> {
-    let Some(session_id) = request.params.get("session_id").and_then(Value::as_str) else {
+    let Some(session_ref) = request.params.get("session_id").and_then(Value::as_str) else {
         return push_rpc_message(
             output,
             &RpcMessage::Response(RpcResponse::failure(
@@ -385,8 +385,8 @@ async fn handle_get_messages(
         );
     };
 
-    let path = match session_commands::session_path(session_id, config) {
-        Ok(path) => path,
+    let session_id = match session_commands::resolve_session_id(session_ref, config) {
+        Ok(session_id) => session_id,
         Err(err) => {
             return push_rpc_message(
                 output,
@@ -397,6 +397,7 @@ async fn handle_get_messages(
             );
         }
     };
+    let path = config.sessions_dir.join(format!("{session_id}.jsonl"));
 
     if !path.exists() {
         return push_rpc_message(
@@ -405,7 +406,7 @@ async fn handle_get_messages(
                 request.id,
                 RpcError::new(
                     RpcErrorCode::InvalidParams,
-                    format!("session {session_id:?} does not exist"),
+                    format!("session {session_ref:?} does not exist"),
                     None,
                 ),
             )),

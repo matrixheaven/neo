@@ -182,6 +182,60 @@ fn rpc_get_messages_returns_empty_replay_for_empty_session() {
 }
 
 #[test]
+fn rpc_get_messages_resolves_unique_session_prefix() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    std::fs::write(sessions.join("alpha-main.jsonl"), "").expect("write session");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"messages-prefix","method":"get_messages","params":{"session_id":"alpha"}}"#,
+    );
+
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "response");
+    assert_eq!(messages[0]["id"], "messages-prefix");
+    assert_eq!(messages[0]["result"]["session_id"], "alpha-main");
+    assert_eq!(
+        messages[0]["result"]["messages"].as_array().unwrap().len(),
+        0
+    );
+}
+
+#[test]
+fn rpc_get_messages_accepts_in_directory_jsonl_path() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    let session_path = sessions.join("alpha-main.jsonl");
+    std::fs::write(&session_path, "").expect("write session");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        &format!(
+            r#"{{"type":"request","id":"messages-path","method":"get_messages","params":{{"session_id":{}}}}}"#,
+            serde_json::to_string(session_path.to_str().expect("session path")).expect("json path")
+        ),
+    );
+
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "response");
+    assert_eq!(messages[0]["id"], "messages-path");
+    assert_eq!(messages[0]["result"]["session_id"], "alpha-main");
+    assert_eq!(
+        messages[0]["result"]["messages"].as_array().unwrap().len(),
+        0
+    );
+}
+
+#[test]
 fn rpc_get_messages_reports_missing_session_as_invalid_params() {
     let temp = TempDir::new().expect("tempdir");
 
