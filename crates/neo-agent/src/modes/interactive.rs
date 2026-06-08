@@ -325,7 +325,7 @@ impl InteractiveController {
                     if self.handle_input_event(event).await? {
                         let had_active_turn = self.active_turn.is_some();
                         if is_interrupt {
-                            self.abort_active_turn();
+                            self.cancel_active_turn().await?;
                         } else {
                             self.wait_for_active_turn().await?;
                         }
@@ -617,6 +617,22 @@ impl InteractiveController {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         Ok(())
+    }
+
+    async fn cancel_active_turn(&mut self) -> Result<()> {
+        if let Some(turn) = &self.active_turn {
+            turn.cancel_token.cancel();
+        }
+        self.pending_approvals.clear();
+        self.resolved_approvals.clear();
+        if let Ok(result) =
+            tokio::time::timeout(Duration::from_secs(2), self.wait_for_active_turn()).await
+        {
+            result
+        } else {
+            self.abort_active_turn();
+            Ok(())
+        }
     }
 
     async fn drain_active_turn(&mut self) -> Result<()> {
@@ -1895,7 +1911,7 @@ mod tests {
                     turn: 1,
                     text: "started".to_owned(),
                 });
-                std::future::pending::<()>().await;
+                channels.cancel_token.cancelled().await;
                 Ok(())
             })
         });
@@ -1930,6 +1946,101 @@ mod tests {
             .clone()
             .expect("turn token captured");
         assert!(token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn event_loop_interrupt_drains_cancelled_barriers_before_exit() {
+        use std::{collections::VecDeque, sync::Arc as StdArc};
+
+        struct ScriptedEvents {
+            events: VecDeque<Option<InputEvent>>,
+        }
+
+        impl TerminalEvents for ScriptedEvents {
+            fn next_input_event(&mut self) -> Result<InputEvent> {
+                self.poll_input_event(Duration::from_millis(0))?
+                    .ok_or_else(|| anyhow::anyhow!("expected scripted input"))
+            }
+
+            fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+                Ok(self.events.pop_front().unwrap_or(Some(InputEvent::Cancel)))
+            }
+        }
+
+        let captured_token = StdArc::new(std::sync::Mutex::new(None));
+        let observed_token = StdArc::clone(&captured_token);
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let finished_tx = StdArc::new(std::sync::Mutex::new(Some(finished_tx)));
+        let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+            let observed_token = StdArc::clone(&observed_token);
+            let finished_tx = StdArc::clone(&finished_tx);
+            Box::pin(async move {
+                *observed_token.lock().expect("token lock") = Some(channels.cancel_token.clone());
+                channels.send_event(AgentEvent::MessageStarted {
+                    turn: 1,
+                    id: "assistant-1".to_owned(),
+                });
+                channels.send_event(AgentEvent::TextDelta {
+                    turn: 1,
+                    text: "started".to_owned(),
+                });
+                channels.cancel_token.cancelled().await;
+                channels.send_event(AgentEvent::MessageFinished {
+                    turn: 1,
+                    id: "assistant-1".to_owned(),
+                    stop_reason: StopReason::Cancelled,
+                });
+                channels.send_event(AgentEvent::TurnFinished {
+                    turn: 1,
+                    stop_reason: StopReason::Cancelled,
+                });
+                channels.send_event(AgentEvent::RunFinished {
+                    turn: 1,
+                    stop_reason: StopReason::Cancelled,
+                });
+                if let Some(finished_tx) = finished_tx.lock().expect("finished lock").take() {
+                    let _ = finished_tx.send(());
+                }
+                Ok(())
+            })
+        });
+        let mut controller = InteractiveController::new_with_turn_driver(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            run_turn,
+            PickerCatalogs::default(),
+            Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        );
+
+        controller.type_text("cancel me");
+        controller
+            .run_terminal_loop(
+                |_app| Ok(()),
+                ScriptedEvents {
+                    events: VecDeque::from([
+                        Some(InputEvent::Submit),
+                        None,
+                        Some(InputEvent::Interrupt),
+                    ]),
+                },
+            )
+            .await
+            .expect("interrupt exits terminal loop after draining cancellation");
+
+        tokio::time::timeout(Duration::from_secs(1), finished_rx)
+            .await
+            .expect("turn driver should finish after cancellation")
+            .expect("finished sender should not be dropped before sending");
+        let token = captured_token
+            .lock()
+            .expect("token lock")
+            .clone()
+            .expect("turn token captured");
+        assert!(token.is_cancelled());
+        assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
+        assert_eq!(controller.app().active_assistant_id(), None);
     }
 
     #[tokio::test]

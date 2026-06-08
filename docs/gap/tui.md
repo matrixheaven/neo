@@ -38,7 +38,8 @@ Target: `crates/tui`.
   label after selection.
 - Approval overlays in the live loop now resume pending runtime tool calls:
   Approve/deny choices are sent back through `AgentConfig::with_async_approval_handler`,
-  and Ctrl-C aborts the active turn instead of inventing a decision.
+  and Ctrl-C cancels the active turn, drains cooperative cancelled barriers,
+  and only falls back to abort when the runtime task does not finish.
 - Prompt Tab completion is backed by the real project filesystem. `neo-tui`
   exposes prompt completion prefix/replacement primitives plus a completion
   picker overlay, and `neo-agent` reads matching files/directories from

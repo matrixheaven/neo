@@ -84,10 +84,11 @@ or hosted lifecycle behavior.
   response SSE stream.
 - Add richer hook lifecycle docs only when Neo exposes additional hook phases
   beyond the current before/after tool-call callbacks.
-- Finish cancellation propagation through arbitrary long-running tool futures,
-  background bash handles, and cancelled-event draining in the live TUI; current
-  cancellation support covers runtime state, in-flight model streams,
-  foreground bash child processes, and the interactive abort token handoff.
+- Finish cancellation propagation through arbitrary long-running tool futures
+  and background bash handles; current cancellation support covers runtime
+  state, in-flight model streams, foreground bash child processes, and live TUI
+  interruption that drains cooperative cancelled message/turn/run barriers
+  before falling back to abort.
 - Decide whether Neo needs full PTY/interactivity later. Current `bash`
   background support is intentionally compact start/poll process management.
 - Decide whether JSONL event persistence remains the durable session format or
