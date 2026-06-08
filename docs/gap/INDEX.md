@@ -9,7 +9,7 @@ whole map.
 
 | Module | Current Neo surface | Pi reference pressure | High-priority gap |
 | --- | --- | --- | --- |
-| [`neo-ai`](neo-ai.md) | Provider-neutral `ChatRequest`, `RequestOptions`, `ModelRegistry`, strict local JSON model catalogs including a supported custom-model subset of Pi `models.json`, `ProviderRegistry`, provider/API compatibility validation in `ProviderResolver`, OpenAI Responses, Anthropic Messages, Google Generative AI, OpenAI-compatible adapters with chat image-input serialization, stream events, tool schemas, test fake provider, and environment key helpers. | `pi-ai` documents broad provider discovery, credential resolution, tool streaming, reasoning, images, and context handoff. | Keep Neo docs focused on implemented Rust contracts and mark unsupported Pi pricing/generated catalog/provider override/auth APIs as future work. |
+| [`neo-ai`](neo-ai.md) | Provider-neutral `ChatRequest`, `RequestOptions` including typed OpenAI reasoning effort, `ModelRegistry`, strict local JSON model catalogs including a supported custom-model subset of Pi `models.json`, `ProviderRegistry`, provider/API compatibility validation in `ProviderResolver`, OpenAI Responses, Anthropic Messages, Google Generative AI, OpenAI-compatible adapters with chat image-input serialization, stream events, tool schemas, test fake provider, and environment key helpers. | `pi-ai` documents broad provider discovery, credential resolution, tool streaming, provider-native reasoning, images, and context handoff. | Keep Neo docs focused on implemented Rust contracts and mark unsupported Pi pricing/generated catalog/provider override/auth APIs plus Anthropic/Google thinking contracts as future work. |
 | [`neo-agent-core`](neo-agent-core.md) | Runtime turn loop, `AgentConfig`, `AgentContext`, normalized lifecycle events including run/message/turn barriers, permissions with synchronous and async approval handlers, built-in workspace tools, MCP adapter/provider boundary with stdio and HTTP/SSE tool/resource transports, JSONL session reader/writer, local session metadata fork/rename, deterministic JSONL compaction, fake harness. | `pi-agent-core` documents richer event lifecycle, hooks, steering, parallel tool execution, and cancellation. | Document implemented event/tool/MCP/session APIs now; leave hosted/alternate-channel MCP lifecycle and richer hook lifecycle gaps explicit. |
 | [`neo-agent`](neo-agent.md) | Clap command surface, project `.neo/config.toml`, user-global `~/.neo/config.toml`, environment overrides, provider-specific base URL/API key env config, config setters including runtime `AgentConfig` options, provider-backed print/run, sessions commands including local tree/fork/rename/summarize/compact/HTML export, skill loading, extension install/update/uninstall plus JSONL RPC calls and status/enable/disable lifecycle, JSONL-backed RPC `get_messages` plus local `sessions.list` / `sessions.tree`, models list, MCP server listing, explicit MCP resource list/read/watch commands, and live TUI local session/model pickers plus project-directory prompt file path completion that replay selected JSONL sessions, order local session trees, fork selected sessions before continuation, append continuation turns, and apply selected model overrides to later turns. | pi coding-agent docs cover settings, providers, sessions, TUI, MCP/resources, and trust. | Describe actual project/global config, session, extension, and RPC commands while marking hosted trust/marketplace/share gaps explicitly. |
 | [`neo-tui`](tui.md) | Prompt/editor with undo/kill-ring yank and internal copy buffer, filesystem-backed prompt Tab completion, rendered transcript viewport scrolling, keybinding, selection/list paging, width-safe rendering primitives, session transcript loading, and a live raw-mode keybinding dispatcher for prompt/approval/session/model-picker/session-fork actions. | `pi-tui` has a richer terminal renderer and interaction stack. | Keep TUI docs scoped to implemented primitives and live prompt/overlay actions until diff rendering, images, richer autocomplete, OS clipboard integration, and stdin buffering land. |
@@ -20,8 +20,10 @@ whole map.
 - OpenAI Responses, Anthropic Messages, Google Generative AI, and
   OpenAI-compatible adapters are wired through `ProviderRegistry::production()`
   and `ProviderResolver`, which now fails provider/API mismatches before
-  credential lookup and serializes supported chat image inputs instead of
-  silently dropping image parts. Strict local JSON model catalogs can extend
+  credential lookup, serializes supported chat image inputs instead of
+  silently dropping image parts, and maps typed reasoning effort into OpenAI
+  Responses / OpenAI-compatible request payloads. Strict local JSON model
+  catalogs can extend
   `ModelRegistry`, including a supported custom-model subset of Pi
   `models.json` that rejects request-affecting provider/model metadata until
   Neo has explicit runtime contracts for those fields. Neo provider-specific
@@ -62,9 +64,9 @@ whole map.
   supported `neo config set` keys without treating deterministic development
   fixtures as production defaults.
 - Providers docs now reflect `ModelSpec`, strict local model catalogs,
-  `RequestOptions`, environment key helpers, production provider resolution,
-  real OpenAI/Anthropic-compatible clients, fail-closed Pi catalog metadata
-  import, and the fake test provider.
+  `RequestOptions`, typed OpenAI reasoning effort, environment key helpers,
+  production provider resolution, real OpenAI/Anthropic-compatible clients,
+  fail-closed Pi catalog metadata import, and the fake test provider.
 - Tools docs now list the implemented built-in workspace tools and permissions.
 - Sessions docs now describe JSONL event persistence, local session metadata
   fork/rename, deterministic extractive compaction, and current CLI/session

@@ -180,6 +180,7 @@ api_key_env = "GLOBAL_KEY"
 
 [runtime]
 max_tokens = 1024
+reasoning_effort = "low"
 "#,
     )
     .expect("write global config");
@@ -191,6 +192,7 @@ default_model = "project-model"
 
 [runtime]
 temperature = 0.3
+reasoning_effort = "high"
 "#,
     )
     .expect("write project config");
@@ -208,6 +210,7 @@ temperature = 0.3
     assert!(stdout.contains("api_key_env = \"GLOBAL_KEY\""));
     assert!(stdout.contains("max_tokens = 1024"));
     assert!(stdout.contains("temperature = 0.3"));
+    assert!(stdout.contains("reasoning_effort = \"high\""));
     assert!(stdout.contains(&format!(
         "sessions_dir = \"{}\"",
         home.path().join(".neo/sessions").display()
@@ -321,6 +324,7 @@ fn config_set_writes_runtime_agent_options() {
     for (key, value) in [
         ("runtime.temperature", "0.4"),
         ("runtime.max_tokens", "2048"),
+        ("runtime.reasoning_effort", "xhigh"),
         ("runtime.steering_queue_mode", "OneAtATime"),
         ("runtime.follow_up_queue_mode", "OneAtATime"),
         ("runtime.tool_execution_mode", "Sequential"),
@@ -338,6 +342,7 @@ fn config_set_writes_runtime_agent_options() {
     let config = fs::read_to_string(temp.path().join(".neo/config.toml")).expect("read config");
     assert!(config.contains("temperature = 0.4"));
     assert!(config.contains("max_tokens = 2048"));
+    assert!(config.contains("reasoning_effort = \"xhigh\""));
     assert!(config.contains("steering_queue_mode = \"OneAtATime\""));
     assert!(config.contains("follow_up_queue_mode = \"OneAtATime\""));
     assert!(config.contains("tool_execution_mode = \"Sequential\""));

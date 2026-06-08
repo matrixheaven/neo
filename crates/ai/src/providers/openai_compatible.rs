@@ -164,6 +164,9 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     if let Some(max_tokens) = request.options.max_tokens {
         body["max_tokens"] = json!(max_tokens);
     }
+    if let Some(reasoning_effort) = request.options.reasoning_effort {
+        body["reasoning_effort"] = json!(reasoning_effort.as_str());
+    }
     if !request.options.metadata.is_empty() {
         body["metadata"] = json!(request.options.metadata.as_map());
     }

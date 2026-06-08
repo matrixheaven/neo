@@ -9,8 +9,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use neo_ai::{
     AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
-    ModelCapabilities, ModelClient, ModelSpec, ProviderId, RequestMetadata, RequestOptions,
-    StopReason, ToolSpec, providers::openai_compatible::OpenAiCompatibleClient,
+    ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningEffort, RequestMetadata,
+    RequestOptions, StopReason, ToolSpec, providers::openai_compatible::OpenAiCompatibleClient,
 };
 use serde_json::{Value, json};
 
@@ -205,6 +205,7 @@ async fn openai_compatible_client_posts_typed_options_and_normalizes_sse_events(
         max_tokens: Some(128),
         headers,
         timeout: Some(Duration::from_secs(5)),
+        reasoning_effort: Some(ReasoningEffort::Medium),
         retries: Some(0),
         cache: CacheRetention::Long,
         session_id: Some("session-1".to_owned()),
@@ -310,6 +311,7 @@ fn assert_typed_request(sent: &RecordedRequest) {
     assert_eq!(sent.body["stream"], true);
     assert_eq!(sent.body["temperature"], 0.4);
     assert_eq!(sent.body["max_tokens"], 128);
+    assert_eq!(sent.body["reasoning_effort"], "medium");
     assert_eq!(sent.body["metadata"], json!({ "user_id": "u-1" }));
     assert_eq!(sent.body["prompt_cache_key"], "session-1");
     assert_eq!(sent.body["prompt_cache_retention"], "24h");

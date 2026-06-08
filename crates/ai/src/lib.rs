@@ -9,7 +9,7 @@ pub mod types;
 
 pub use env_api_keys::{env_api_key, env_api_key_from, find_env_keys, find_env_keys_from};
 pub use error::AiError;
-pub use options::{CacheRetention, RequestMetadata, RequestOptions};
+pub use options::{CacheRetention, ReasoningEffort, RequestMetadata, RequestOptions};
 pub use registry::{
     ModelRegistry, ProviderCredentialStatus, ProviderRegistry, ProviderResolver, ProviderSpec,
 };

@@ -155,11 +155,12 @@ fn print_applies_project_runtime_generation_options_to_provider_request() {
     std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
     std::fs::write(
         temp.path().join(".neo/config.toml"),
-        r"
+        r#"
 [runtime]
 temperature = 0.25
 max_tokens = 321
-",
+reasoning_effort = "high"
+"#,
     )
     .expect("write config");
     let server = MockSseServer::start(vec![openai_response_sse("resp-runtime", "configured")]);
@@ -179,6 +180,7 @@ max_tokens = 321
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].body["temperature"], 0.25);
     assert_eq!(requests[0].body["max_output_tokens"], 321);
+    assert_eq!(requests[0].body["reasoning"]["effort"], "high");
 }
 
 #[test]

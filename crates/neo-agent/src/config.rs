@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use neo_agent_core::{PermissionPolicy, QueueMode, ToolExecutionMode};
+use neo_ai::ReasoningEffort;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::Cli;
@@ -69,6 +70,7 @@ pub struct Defaults {
 pub struct RuntimeConfig {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub steering_queue_mode: QueueMode,
     pub follow_up_queue_mode: QueueMode,
     pub tool_execution_mode: ToolExecutionMode,
@@ -80,6 +82,7 @@ impl Default for RuntimeConfig {
         Self {
             temperature: None,
             max_tokens: None,
+            reasoning_effort: None,
             steering_queue_mode: QueueMode::All,
             follow_up_queue_mode: QueueMode::All,
             tool_execution_mode: ToolExecutionMode::Parallel,
@@ -174,6 +177,8 @@ struct FileRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     steering_queue_mode: Option<QueueMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     follow_up_queue_mode: Option<QueueMode>,
@@ -198,6 +203,7 @@ impl FileRuntimeConfig {
         Self {
             temperature: runtime.temperature,
             max_tokens: runtime.max_tokens,
+            reasoning_effort: runtime.reasoning_effort,
             steering_queue_mode: Some(runtime.steering_queue_mode),
             follow_up_queue_mode: Some(runtime.follow_up_queue_mode),
             tool_execution_mode: Some(runtime.tool_execution_mode),
@@ -399,6 +405,9 @@ pub fn set(key: &str, value: &str) -> anyhow::Result<String> {
         "runtime.max_tokens" | "max_tokens" => {
             runtime_config_mut(&mut config).max_tokens = Some(value.parse()?);
         }
+        "runtime.reasoning_effort" | "reasoning_effort" => {
+            runtime_config_mut(&mut config).reasoning_effort = Some(parse_reasoning_effort(value)?);
+        }
         "runtime.steering_queue_mode" | "steering_queue_mode" => {
             runtime_config_mut(&mut config).steering_queue_mode = Some(parse_queue_mode(value)?);
         }
@@ -517,6 +526,7 @@ fn merge_runtime_configs(
         (Some(base), Some(layer)) => Some(FileRuntimeConfig {
             temperature: layer.temperature.or(base.temperature),
             max_tokens: layer.max_tokens.or(base.max_tokens),
+            reasoning_effort: layer.reasoning_effort.or(base.reasoning_effort),
             steering_queue_mode: layer.steering_queue_mode.or(base.steering_queue_mode),
             follow_up_queue_mode: layer.follow_up_queue_mode.or(base.follow_up_queue_mode),
             tool_execution_mode: layer.tool_execution_mode.or(base.tool_execution_mode),
@@ -561,6 +571,7 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
     RuntimeConfig {
         temperature: runtime.temperature,
         max_tokens: runtime.max_tokens,
+        reasoning_effort: runtime.reasoning_effort,
         steering_queue_mode: runtime.steering_queue_mode.unwrap_or(QueueMode::All),
         follow_up_queue_mode: runtime.follow_up_queue_mode.unwrap_or(QueueMode::All),
         tool_execution_mode: runtime
@@ -605,6 +616,17 @@ fn parse_tool_execution_mode(value: &str) -> anyhow::Result<ToolExecutionMode> {
         "Sequential" => Ok(ToolExecutionMode::Sequential),
         "Parallel" => Ok(ToolExecutionMode::Parallel),
         other => bail!("unsupported tool execution mode: {other}"),
+    }
+}
+
+fn parse_reasoning_effort(value: &str) -> anyhow::Result<ReasoningEffort> {
+    match value {
+        "minimal" | "Minimal" => Ok(ReasoningEffort::Minimal),
+        "low" | "Low" => Ok(ReasoningEffort::Low),
+        "medium" | "Medium" => Ok(ReasoningEffort::Medium),
+        "high" | "High" => Ok(ReasoningEffort::High),
+        "xhigh" | "XHigh" => Ok(ReasoningEffort::XHigh),
+        other => bail!("unsupported reasoning effort: {other}"),
     }
 }
 

@@ -11,6 +11,33 @@ pub enum CacheRetention {
     Long,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ReasoningEffort {
+    #[serde(rename = "minimal", alias = "Minimal")]
+    Minimal,
+    #[serde(rename = "low", alias = "Low")]
+    Low,
+    #[serde(rename = "medium", alias = "Medium")]
+    Medium,
+    #[serde(rename = "high", alias = "High")]
+    High,
+    #[serde(rename = "xhigh", alias = "XHigh")]
+    XHigh,
+}
+
+impl ReasoningEffort {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RequestMetadata {
     values: BTreeMap<String, String>,
@@ -50,6 +77,7 @@ pub struct RequestOptions {
     pub headers: BTreeMap<String, String>,
     #[schemars(skip)]
     pub timeout: Option<Duration>,
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub retries: Option<u32>,
     pub cache: CacheRetention,
     pub session_id: Option<String>,
@@ -63,6 +91,7 @@ impl Default for RequestOptions {
             max_tokens: None,
             headers: BTreeMap::new(),
             timeout: None,
+            reasoning_effort: None,
             retries: Some(0),
             cache: CacheRetention::Short,
             session_id: None,

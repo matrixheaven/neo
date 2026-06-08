@@ -465,6 +465,7 @@ fn agent_config_for_app(
         .with_workspace_root(&config.project_dir)?;
     agent_config.temperature = config.runtime.temperature;
     agent_config.max_tokens = config.runtime.max_tokens;
+    agent_config.reasoning_effort = config.runtime.reasoning_effort;
     if let Some(compaction) = &config.runtime.compaction {
         agent_config = agent_config.with_compaction(CompactionSettings {
             enabled: compaction.enabled,
@@ -701,6 +702,7 @@ mod tests {
             runtime: RuntimeConfig {
                 temperature: Some(0.35),
                 max_tokens: Some(512),
+                reasoning_effort: Some(neo_ai::ReasoningEffort::High),
                 steering_queue_mode: QueueMode::OneAtATime,
                 follow_up_queue_mode: QueueMode::OneAtATime,
                 tool_execution_mode: ToolExecutionMode::Sequential,
@@ -727,6 +729,10 @@ mod tests {
 
         assert_eq!(agent_config.temperature, Some(0.35));
         assert_eq!(agent_config.max_tokens, Some(512));
+        assert_eq!(
+            agent_config.reasoning_effort,
+            Some(neo_ai::ReasoningEffort::High)
+        );
         assert_eq!(agent_config.steering_queue_mode, QueueMode::OneAtATime);
         assert_eq!(agent_config.follow_up_queue_mode, QueueMode::OneAtATime);
         assert_eq!(

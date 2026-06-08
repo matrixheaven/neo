@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use neo_ai::{
-    CacheRetention, RequestMetadata, RequestOptions, env_api_key_from, find_env_keys_from,
+    CacheRetention, ReasoningEffort, RequestMetadata, RequestOptions, env_api_key_from,
+    find_env_keys_from,
 };
 
 #[test]
@@ -41,6 +42,7 @@ fn request_options_have_typed_defaults_and_preserve_metadata() {
         max_tokens: Some(4096),
         headers: BTreeMap::from([("x-neo-trace".to_owned(), "trace-1".to_owned())]),
         timeout: Some(Duration::from_secs(15)),
+        reasoning_effort: Some(ReasoningEffort::High),
         retries: Some(2),
         cache: CacheRetention::Long,
         session_id: Some("session-123".to_owned()),
@@ -50,10 +52,24 @@ fn request_options_have_typed_defaults_and_preserve_metadata() {
     assert_eq!(options.temperature, Some(0.2));
     assert_eq!(options.max_tokens, Some(4096));
     assert_eq!(options.timeout, Some(Duration::from_secs(15)));
+    assert_eq!(options.reasoning_effort, Some(ReasoningEffort::High));
     assert_eq!(options.retries, Some(2));
     assert_eq!(options.cache, CacheRetention::Long);
     assert_eq!(options.session_id.as_deref(), Some("session-123"));
     assert_eq!(options.metadata.get("project_id"), Some("p-1"));
+}
+
+#[test]
+fn reasoning_effort_serializes_as_stable_snake_case_values() {
+    assert_eq!(
+        serde_json::to_value(ReasoningEffort::Minimal).expect("serialize effort"),
+        serde_json::json!("minimal")
+    );
+    assert_eq!(
+        serde_json::from_value::<ReasoningEffort>(serde_json::json!("xhigh"))
+            .expect("deserialize effort"),
+        ReasoningEffort::XHigh
+    );
 }
 
 #[test]
@@ -64,6 +80,7 @@ fn request_options_default_to_short_cache_without_transport_overrides() {
     assert_eq!(options.max_tokens, None);
     assert!(options.headers.is_empty());
     assert_eq!(options.timeout, None);
+    assert_eq!(options.reasoning_effort, None);
     assert_eq!(options.retries, Some(0));
     assert_eq!(options.cache, CacheRetention::Short);
     assert_eq!(options.session_id, None);

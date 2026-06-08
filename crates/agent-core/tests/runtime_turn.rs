@@ -7,7 +7,7 @@ use neo_agent_core::{
 };
 use neo_ai::{
     AiError, AiStreamEvent, ApiKind, ChatRequest, ModelCapabilities, ModelClient, ModelSpec,
-    ProviderId, ToolSpec,
+    ProviderId, ReasoningEffort, ToolSpec,
 };
 use serde_json::json;
 use std::{
@@ -229,6 +229,31 @@ async fn runtime_records_tool_calls_and_sends_tool_specs_to_model() {
         )
     );
     assert_eq!(harness.requests()[0].tools, vec![tool]);
+}
+
+#[tokio::test]
+async fn runtime_passes_reasoning_effort_into_chat_request_options() {
+    let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
+        stop_reason: neo_ai::StopReason::EndTurn,
+        usage: None,
+    }]);
+    let mut config = AgentConfig::for_model(harness.model());
+    config.reasoning_effort = Some(ReasoningEffort::Low);
+    let runtime = AgentRuntime::new(config, harness.client());
+    let mut context = AgentContext::new();
+
+    runtime
+        .run_turn(&mut context, AgentMessage::user_text("think lightly"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert_eq!(
+        harness.requests()[0].options.reasoning_effort,
+        Some(ReasoningEffort::Low)
+    );
 }
 
 #[tokio::test]

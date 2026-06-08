@@ -1,7 +1,9 @@
 use std::{future::Future, path::PathBuf, sync::Arc};
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream, stream::FuturesUnordered};
-use neo_ai::{AiStreamEvent, ChatRequest, ModelClient, ModelSpec, RequestOptions, ToolSpec};
+use neo_ai::{
+    AiStreamEvent, ChatRequest, ModelClient, ModelSpec, ReasoningEffort, RequestOptions, ToolSpec,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -54,6 +56,7 @@ pub struct AgentConfig {
     pub max_turns: u32,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub tools: Vec<ToolSpec>,
     pub steering_queue_mode: QueueMode,
     pub follow_up_queue_mode: QueueMode,
@@ -87,6 +90,7 @@ impl AgentConfig {
             max_turns: 8,
             temperature: None,
             max_tokens: None,
+            reasoning_effort: None,
             tools: Vec::new(),
             steering_queue_mode: QueueMode::All,
             follow_up_queue_mode: QueueMode::All,
@@ -472,6 +476,7 @@ fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {
         options: RequestOptions {
             temperature: config.temperature,
             max_tokens: config.max_tokens,
+            reasoning_effort: config.reasoning_effort,
             ..RequestOptions::default()
         },
     }

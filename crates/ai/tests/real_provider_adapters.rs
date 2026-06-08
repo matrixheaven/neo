@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use futures::StreamExt;
 use neo_ai::{
     AiStreamEvent, ApiKind, ChatMessage, ChatRequest, ContentPart, ImageData, ModelCapabilities,
-    ModelClient, ModelSpec, ProviderId, RequestOptions, StopReason, ToolSpec,
+    ModelClient, ModelSpec, ProviderId, ReasoningEffort, RequestOptions, StopReason, ToolSpec,
     providers::{
         anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
         openai_responses::OpenAiResponsesClient,
@@ -250,6 +250,33 @@ async fn openai_responses_client_posts_responses_payload_and_streams_events() {
     assert_eq!(sent.body["max_output_tokens"], 64);
     assert_eq!(sent.body["tools"][0]["name"], "read_file");
     assert_eq!(sent.body["input"][0]["role"], "user");
+}
+
+#[tokio::test]
+async fn openai_responses_client_serializes_reasoning_effort_when_requested() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-reasoning" } }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::OpenAiResponses);
+    request.options.reasoning_effort = Some(ReasoningEffort::High);
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["reasoning"]["effort"], "high");
+    assert_eq!(sent.body["reasoning"]["summary"], "auto");
+    assert_eq!(sent.body["include"], json!(["reasoning.encrypted_content"]));
 }
 
 #[tokio::test]

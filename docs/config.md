@@ -96,10 +96,13 @@ can use static approve/deny handlers, and live interactive mode routes approval
 overlay choices back into the runtime's pending async approval handler.
 
 The `[runtime]` table maps directly to `neo_agent_core::AgentConfig` for real
-provider-backed runs. `temperature` and `max_tokens` are sent through
-`neo_ai::RequestOptions`; queue modes use `All` or `OneAtATime`; tool execution
-uses `Parallel` or `Sequential`; and optional compaction settings control the
-runtime's deterministic context compaction trigger.
+provider-backed runs. `temperature`, `max_tokens`, and `reasoning_effort` are
+sent through `neo_ai::RequestOptions`; queue modes use `All` or `OneAtATime`;
+tool execution uses `Parallel` or `Sequential`; and optional compaction
+settings control the runtime's deterministic context compaction trigger.
+Supported reasoning effort values are `minimal`, `low`, `medium`, `high`, and
+`xhigh`. OpenAI Responses serializes this as a Responses `reasoning` object;
+OpenAI-compatible Chat Completions serializes it as `reasoning_effort`.
 
 ## Environment Variables
 

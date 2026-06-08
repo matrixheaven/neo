@@ -10,8 +10,9 @@ test client.
 - `ApiKind` names the protocol family, including OpenAI Responses, Chat Completions, Anthropic Messages, Google Generative AI, OpenAI-compatible APIs, and local providers.
 - `ModelCapabilities` tells the runtime whether a model supports streaming, tools, images, reasoning, embeddings, and an optional context limit.
 - `ModelSpec` combines provider, model name, API kind, and capabilities.
-- `RequestOptions` carries temperature, max tokens, custom headers, timeout,
-  retry count, cache retention, provider session id, and metadata.
+- `RequestOptions` carries temperature, max tokens, reasoning effort, custom
+  headers, timeout, retry count, cache retention, provider session id, and
+  metadata.
 - `ChatRequest` combines `model`, `messages`, `tools`, and `options`.
 - `ModelClient::stream_chat` accepts a `ChatRequest` and returns normalized
   `AiStreamEvent` values.
@@ -94,6 +95,14 @@ base64 image sources in user messages and rejects image URLs before issuing a
 request. Google Generative AI sends base64 images as `inlineData` and rejects
 image URLs before issuing a request. This is chat image-input support only; Neo
 does not implement image generation.
+
+OpenAI reasoning controls use the typed `RequestOptions::reasoning_effort`
+field. OpenAI Responses sends `reasoning: { effort, summary: "auto" }` and
+requests `reasoning.encrypted_content` in `include`; OpenAI-compatible Chat
+Completions sends the flat `reasoning_effort` string. Neo intentionally does
+not translate this one field into Anthropic or Google thinking payloads yet:
+those APIs need provider-native budget, level, display, and off-state contracts
+before they can be implemented without silently changing model behavior.
 
 ## Local Model Catalogs
 

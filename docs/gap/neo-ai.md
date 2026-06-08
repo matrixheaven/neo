@@ -6,8 +6,8 @@
   provider/model identity contract.
 - `ChatMessage`, `ContentPart`, `ToolCall`, `ToolSpec`, and `ChatRequest`
   define the model-facing request shape.
-- `RequestOptions` carries temperature, max tokens, headers, timeout, retries,
-  cache retention, session id, and metadata.
+- `RequestOptions` carries temperature, max tokens, typed reasoning effort,
+  headers, timeout, retries, cache retention, session id, and metadata.
 - `AiStreamEvent` normalizes provider streams into message, text, tool-call,
   completion, and error events.
 - `ModelClient::stream_chat` is the provider adapter trait.
@@ -24,7 +24,9 @@
   `GoogleGenerativeAiClient`, and `OpenAiCompatibleClient` implement network
   provider adapters, including native chat image-input serialization for
   supported user-message image forms and explicit preflight rejection for
-  unsupported image URL formats.
+  unsupported image URL formats. OpenAI Responses and OpenAI-compatible Chat
+  Completions also serialize typed `reasoning_effort` options into their
+  provider-native payload shapes.
 - `schema_for<T>()` and `ToolSpec::from_schema<T>()` generate JSON Schema from
   Rust input types.
 - `providers::fake::FakeModelClient` supports tests.
@@ -32,10 +34,10 @@
 
 ## Pi Parity Pressure
 
-`pi-ai` documents broader provider catalogs, OAuth/API-key resolution, reasoning
-controls, image generation, cross-provider handoffs, cost accounting, browser
-notes, and context serialization. Neo should not copy unsupported surface area
-until the Rust contracts exist.
+`pi-ai` documents broader provider catalogs, OAuth/API-key resolution,
+provider-native reasoning controls, image generation, cross-provider handoffs,
+cost accounting, browser notes, and context serialization. Neo should not copy
+unsupported surface area until the Rust contracts exist.
 
 ## High-Priority Gaps
 
@@ -50,6 +52,8 @@ until the Rust contracts exist.
   Neo runtime contracts.
 - Keep provider credentials environment-only for now; auth-file and OAuth
   flows are future work.
+- Add Anthropic and Google thinking controls only after Neo has explicit budget,
+  level, display/off-state contracts and provider-specific tests.
 - Keep request metadata internal-facing. Do not expose provider-native chunk
   formats to `neo-agent-core`.
 
