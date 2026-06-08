@@ -331,6 +331,7 @@ pub enum KeybindingAction {
     TranscriptSelectionExtendPageUp,
     TranscriptSelectionExtendPageDown,
     TranscriptCopySelection,
+    CommandPaletteOpen,
     SessionPickerOpen,
     SessionFork,
     ModelPickerOpen,
@@ -375,6 +376,7 @@ impl KeybindingAction {
             Self::TranscriptSelectionExtendPageUp => "tui.transcript.selection.extendPageUp",
             Self::TranscriptSelectionExtendPageDown => "tui.transcript.selection.extendPageDown",
             Self::TranscriptCopySelection => "tui.transcript.copySelection",
+            Self::CommandPaletteOpen => "tui.command.open",
             Self::SessionPickerOpen => "tui.session.open",
             Self::SessionFork => "tui.session.fork",
             Self::ModelPickerOpen => "tui.model.open",
@@ -649,6 +651,11 @@ fn picker_keybinding_definitions() -> Vec<KeybindingDefinition> {
     use KeybindingAction as Action;
 
     vec![
+        definition(
+            Action::CommandPaletteOpen,
+            &["ctrl+p"],
+            "Open command palette",
+        ),
         definition(Action::SessionPickerOpen, &["ctrl+r"], "Open sessions"),
         definition(Action::SessionFork, &["ctrl+n"], "Fork selected session"),
         definition(Action::ModelPickerOpen, &["ctrl+o"], "Open models"),

@@ -642,6 +642,33 @@ impl NeoTuiApp {
         ))
     }
 
+    pub fn open_command_palette(
+        &mut self,
+        commands: impl IntoIterator<Item = CommandSpec>,
+    ) -> OverlayId {
+        self.push_overlay(Overlay::new(
+            "commands",
+            OverlayKind::CommandPalette(CommandPaletteState::new(commands)),
+        ))
+    }
+
+    #[must_use]
+    pub fn selected_command(&self) -> Option<CommandSpec> {
+        let OverlayKind::CommandPalette(palette) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        palette.confirm()
+    }
+
+    pub fn confirm_command_palette(&mut self) -> Option<CommandSpec> {
+        let id = self.focused_overlay;
+        let selected = self.selected_command()?;
+        if let Some(id) = id {
+            let _ = self.close_overlay(id);
+        }
+        Some(selected)
+    }
+
     pub fn open_session_picker(
         &mut self,
         items: impl IntoIterator<Item = PickerItem>,

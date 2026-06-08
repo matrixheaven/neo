@@ -72,11 +72,15 @@ Target: `crates/tui`.
   the same text in its internal copy buffer. Selected items are highlighted in
   the transcript renderer, and ordinary prompt copy still works when no
   transcript selection is active.
+- The live interactive loop opens a local command palette with Ctrl-P. The
+  palette uses `CommandPaletteState` for filtering/paging and executes real
+  local actions for sessions, models, prompt copy, transcript selection/copy,
+  and prompt submit.
 
 ## Remaining lower-priority gaps
 
 - The Rust crate does not implement Kitty/Sixel/OSC image protocols, command
-  autocomplete beyond local slash prompt templates, or the full TypeScript
-  renderer's advanced diff affordances beyond width-safe unified diff line
-  classification, coloring, and item-range transcript selection.
+  autocomplete from hosted or extension command catalogs, or the full
+  TypeScript renderer's advanced diff affordances beyond width-safe unified
+  diff line classification, coloring, and item-range transcript selection.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.

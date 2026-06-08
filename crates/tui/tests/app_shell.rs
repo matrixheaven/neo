@@ -459,6 +459,17 @@ fn command_palette_session_and_model_pickers_filter_and_select_values() {
     );
 
     let mut app = NeoTuiApp::new("neo", "new", "openai/gpt-4.1");
+    app.open_command_palette([
+        CommandSpec::new("sessions", "Sessions", Some("Open sessions")),
+        CommandSpec::new("models", "Models", Some("Open models")),
+    ]);
+    app.move_overlay_selection_down();
+    let selected = app
+        .confirm_command_palette()
+        .expect("selected command returned");
+    assert_eq!(selected.id, "models");
+    assert!(app.focused_overlay().is_none());
+
     app.open_session_picker([
         PickerItem::new("alpha", "Alpha", Some("first session")),
         PickerItem::new("beta", "Beta", Some("second session")),

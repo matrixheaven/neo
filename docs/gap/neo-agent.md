@@ -100,8 +100,10 @@
   `SessionMetadataStore::fork()`, loads the child transcript, and routes later
   prompts to the child JSONL session. `ctrl+o` opens a model picker backed by
   the resolved `ModelRegistry`; selecting a model updates the TUI header and
-  uses that provider/model for subsequent turns. Transcript item-range
-  selection starts with Ctrl-Space, extends with Shift-Up/Down or
+  uses that provider/model for subsequent turns. `ctrl+p` opens a local
+  command palette that executes implemented local actions for sessions, models,
+  prompt copy, transcript selection/copy, and prompt submit. Transcript
+  item-range selection starts with Ctrl-Space, extends with Shift-Up/Down or
   Shift-PageUp/PageDown, and Ctrl-C writes the selected transcript text to the
   OS clipboard before falling back to prompt copy when no transcript selection
   is active.

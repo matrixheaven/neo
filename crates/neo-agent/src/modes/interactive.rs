@@ -22,7 +22,7 @@ use neo_agent_core::{
     session::{JsonlSessionReader, SessionMetadataStore},
 };
 use neo_tui::{
-    ApprovalChoice, ApprovalResult, InputEvent, InputParser, KeyId, KeybindingAction,
+    ApprovalChoice, ApprovalResult, CommandSpec, InputEvent, InputParser, KeyId, KeybindingAction,
     KeybindingsManager, NeoTuiApp, PickerItem, PromptEdit,
 };
 use ratatui::{
@@ -431,6 +431,7 @@ impl InteractiveController {
             }
             KeybindingAction::InputTab => self.complete_prompt_or_insert_tab(),
             KeybindingAction::InputCopy => self.copy_prompt_to_clipboard(),
+            KeybindingAction::CommandPaletteOpen => self.open_command_palette(),
             KeybindingAction::SessionPickerOpen => {
                 self.open_session_picker();
             }
@@ -450,7 +451,9 @@ impl InteractiveController {
             KeybindingAction::SelectPageUp => self.app.move_overlay_selection_page_up(),
             KeybindingAction::SelectPageDown => self.app.move_overlay_selection_page_down(),
             KeybindingAction::SelectConfirm => {
-                if self.app.approval_choice().is_some() {
+                if self.app.selected_command().is_some() {
+                    self.run_selected_command().await?;
+                } else if self.app.approval_choice().is_some() {
                     if let Some(result) = self.app.confirm_approval() {
                         self.resolve_approval(&result);
                     }
@@ -618,6 +621,29 @@ impl InteractiveController {
                 text: format!("Clipboard copy failed: {error}"),
             });
         }
+    }
+
+    fn open_command_palette(&mut self) {
+        self.app.open_command_palette(local_command_specs());
+    }
+
+    async fn run_selected_command(&mut self) -> Result<()> {
+        let Some(command) = self.app.confirm_command_palette() else {
+            return Ok(());
+        };
+        match command.id.as_str() {
+            "sessions" => self.open_session_picker(),
+            "models" => self.open_model_picker(),
+            "copy-prompt" => self.copy_prompt_to_clipboard(),
+            "select-transcript" => self.app.select_visible_transcript_item(),
+            "clear-transcript-selection" => self.app.clear_transcript_selection(),
+            "copy-transcript-selection" => self.copy_transcript_selection_to_clipboard(),
+            "submit" => self.submit_current_prompt().await?,
+            unknown => self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: format!("Unknown command: {unknown}"),
+            }),
+        }
+        Ok(())
     }
 
     async fn submit_current_prompt(&mut self) -> Result<()> {
@@ -1144,6 +1170,35 @@ fn write_clipboard_command(program: &str, args: &[&str], text: &str) -> Result<(
     )
 }
 
+fn local_command_specs() -> Vec<CommandSpec> {
+    [
+        CommandSpec::new("sessions", "Open sessions", Some("Browse local sessions")),
+        CommandSpec::new("models", "Open models", Some("Switch active model")),
+        CommandSpec::new(
+            "copy-prompt",
+            "Copy prompt",
+            Some("Copy current prompt text"),
+        ),
+        CommandSpec::new(
+            "select-transcript",
+            "Select transcript item",
+            Some("Start transcript item selection"),
+        ),
+        CommandSpec::new(
+            "copy-transcript-selection",
+            "Copy transcript selection",
+            Some("Copy selected transcript items"),
+        ),
+        CommandSpec::new(
+            "clear-transcript-selection",
+            "Clear transcript selection",
+            Some("Remove transcript selection"),
+        ),
+        CommandSpec::new("submit", "Submit prompt", Some("Submit the current prompt")),
+    ]
+    .into()
+}
+
 pub trait TerminalEvents {
     fn next_input_event(&mut self) -> Result<InputEvent>;
 
@@ -1203,6 +1258,7 @@ const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::TranscriptSelectionExtendDown,
     KeybindingAction::TranscriptSelectionExtendPageUp,
     KeybindingAction::TranscriptSelectionExtendPageDown,
+    KeybindingAction::CommandPaletteOpen,
     KeybindingAction::SessionPickerOpen,
     KeybindingAction::ModelPickerOpen,
     KeybindingAction::EditorCursorLeft,
@@ -2485,6 +2541,63 @@ mod tests {
             .expect("event loop exits after canceling overlay and receiving cancel again");
 
         assert!(controller.app().focused_overlay().is_none());
+    }
+
+    #[tokio::test]
+    async fn event_loop_opens_command_palette_and_runs_local_model_command() {
+        let mut controller = InteractiveController::new_with_sessions(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+            PickerCatalogs {
+                session_items: Vec::new(),
+                session_error: None,
+                model_items: vec![PickerItem::new(
+                    "anthropic/claude-sonnet",
+                    "anthropic/claude-sonnet",
+                    Some("messages"),
+                )],
+                model_error: None,
+            },
+            |session_id| async move {
+                Ok(LoadedSessionTranscript::new(
+                    session_id,
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            },
+        );
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+p").expect("valid key")))
+            .await
+            .expect("command palette opens");
+        let Some(OverlayKind::CommandPalette(palette)) = controller
+            .app()
+            .focused_overlay()
+            .map(|overlay| &overlay.kind)
+        else {
+            panic!("expected command palette overlay");
+        };
+        assert_eq!(palette.selected_command().expect("command").id, "sessions");
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+            .await
+            .expect("moves to model command");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+            .await
+            .expect("command runs");
+
+        assert!(matches!(
+            controller
+                .app()
+                .focused_overlay()
+                .map(|overlay| &overlay.kind),
+            Some(OverlayKind::ModelPicker(_))
+        ));
     }
 
     #[tokio::test]

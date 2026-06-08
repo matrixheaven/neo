@@ -406,6 +406,10 @@ fn keybinding_manager_matches_defaults_overrides_and_conflicts() {
         &KeyId::new("ctrl+c").expect("valid key"),
         KeybindingAction::TranscriptCopySelection
     ));
+    assert!(manager.matches(
+        &KeyId::new("ctrl+p").expect("valid key"),
+        KeybindingAction::CommandPaletteOpen
+    ));
     assert!(!manager.matches(
         &KeyId::new("ctrl+c").expect("valid key"),
         KeybindingAction::EditorCursorLeft
