@@ -67,9 +67,10 @@
   `resources/read` requests without injecting resource content into model
   context.
 - `ToolContext` resolves paths inside the workspace and carries shell timeout
-  output cap settings, and cancellation state; foreground `bash` kills its
-  child process when that cancellation state is triggered. `bash` also supports
-  compact non-PTY background start/poll handles backed by real child processes.
+  output cap settings, and cancellation state. Foreground `bash` timeout or
+  cancellation terminates the shell process group on Unix, and compact non-PTY
+  background `bash` handles support real `start`, `poll`, and terminal `stop`
+  operations backed by child processes and shell process-group cleanup.
 - `session::JsonlSessionWriter`, `session::JsonlSessionReader`, and
   `session::replay_messages` persist and replay `AgentEvent::MessageAppended`
   history.
@@ -93,13 +94,15 @@ or hosted lifecycle behavior.
   response SSE stream.
 - Add richer hook lifecycle docs only when Neo exposes additional hook phases
   beyond the current before/after tool-call callbacks.
-- Finish cancellation propagation for background bash handles and process-tree
-  cleanup; current cancellation support covers runtime state, in-flight model
-  streams, arbitrary in-flight tool futures at the runtime scheduling boundary,
-  foreground bash child processes, and live TUI interruption that drains
-  cooperative cancelled message/turn/run barriers before falling back to abort.
+- Add broader process cleanup only when Neo grows a contract for commands that
+  daemonize into a new session or process group. Current cancellation support
+  covers runtime state, in-flight model streams, arbitrary in-flight tool
+  futures at the runtime scheduling boundary, foreground/background bash shell
+  process groups on Unix, and live TUI interruption that drains cooperative
+  cancelled message/turn/run barriers before falling back to abort.
 - Decide whether Neo needs full PTY/interactivity later. Current `bash`
-  background support is intentionally compact start/poll process management.
+  background support is intentionally compact start/poll/stop process
+  management.
 - Decide whether JSONL event persistence remains the durable session format or
   becomes a compatibility layer over a richer store with schema versions,
   hosted shares, and branch-level summary metadata.

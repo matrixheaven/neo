@@ -186,6 +186,176 @@ async fn bash_foreground_kills_child_when_context_is_cancelled() {
     );
 }
 
+#[tokio::test]
+#[cfg(unix)]
+async fn bash_foreground_cancellation_kills_descendant_process_group() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let cancel = CancellationToken::new();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_cancel_token(cancel.clone());
+
+    let command = tokio::spawn(async move {
+        registry
+            .run(
+                "bash",
+                &context,
+                json!({
+                    "command": "sleep 5 & echo $! > descendant.pid; wait",
+                    "timeout_ms": 10000
+                }),
+            )
+            .await
+    });
+    let descendant_pid_path = workspace.path().join("descendant.pid");
+    let descendant_pid = wait_for_pid_file(&descendant_pid_path).await;
+    cancel.cancel();
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), command)
+        .await
+        .expect("cancelled foreground command should finish promptly")
+        .expect("command task should not panic")
+        .expect_err("cancelled command should return a tool error");
+    assert!(matches!(error, ToolError::Cancelled));
+
+    let descendant_exited = wait_for_process_exit(&descendant_pid).await;
+    if !descendant_exited {
+        terminate_process(&descendant_pid).await;
+    }
+    assert!(
+        descendant_exited,
+        "cancel should terminate descendant processes in the shell process group"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn bash_background_stop_kills_descendant_process_group_and_removes_handle() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let started = registry
+        .run(
+            "bash",
+            &context,
+            json!({
+                "mode": "start",
+                "command": "sleep 5 & echo $! > background-descendant.pid; wait",
+                "max_output_bytes": 64
+            }),
+        )
+        .await
+        .expect("background start should succeed");
+    let handle = started.details.as_ref().expect("start details")["handle"]
+        .as_str()
+        .expect("handle")
+        .to_owned();
+
+    let descendant_pid_path = workspace.path().join("background-descendant.pid");
+    let descendant_pid = wait_for_pid_file(&descendant_pid_path).await;
+
+    let stopped = registry
+        .run(
+            "bash",
+            &context,
+            json!({ "mode": "stop", "handle": handle, "max_output_bytes": 64 }),
+        )
+        .await;
+    if stopped.is_err() {
+        terminate_process(&descendant_pid).await;
+        drain_background_handle(&registry, &context, &handle).await;
+    }
+    let stopped = stopped.expect("background stop should succeed");
+    let stopped_details = stopped.details.as_ref().expect("stop details");
+    assert_eq!(stopped_details["handle"], handle);
+    assert_eq!(stopped_details["status"], "stopped");
+
+    let descendant_exited = wait_for_process_exit(&descendant_pid).await;
+    if !descendant_exited {
+        terminate_process(&descendant_pid).await;
+    }
+    assert!(
+        descendant_exited,
+        "background stop should terminate descendant processes in the shell process group"
+    );
+
+    let missing = registry
+        .run(
+            "bash",
+            &context,
+            json!({ "mode": "poll", "handle": handle }),
+        )
+        .await
+        .expect_err("stopped handle should be removed");
+    assert!(matches!(missing, ToolError::InvalidInput { .. }));
+}
+
+#[cfg(unix)]
+async fn drain_background_handle(registry: &ToolRegistry, context: &ToolContext, handle: &str) {
+    for _ in 0..20 {
+        let Ok(polled) = registry
+            .run("bash", context, json!({ "mode": "poll", "handle": handle }))
+            .await
+        else {
+            break;
+        };
+        if polled
+            .details
+            .as_ref()
+            .and_then(|details| details["status"].as_str())
+            == Some("exited")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_pid_file(path: &std::path::Path) -> String {
+    for _ in 0..100 {
+        if let Ok(pid) = std::fs::read_to_string(path) {
+            let pid = pid.trim();
+            if !pid.is_empty() {
+                return pid.to_owned();
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("pid file should be written: {}", path.display());
+}
+
+#[cfg(unix)]
+async fn wait_for_process_exit(pid: &str) -> bool {
+    for _ in 0..100 {
+        if !process_exists(pid) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    !process_exists(pid)
+}
+
+#[cfg(unix)]
+async fn terminate_process(pid: &str) {
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", pid])
+        .stderr(std::process::Stdio::null())
+        .status();
+    if !wait_for_process_exit(pid).await {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", pid])
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = wait_for_process_exit(pid).await;
+    }
+}
+
 fn process_exists(pid: &str) -> bool {
     std::process::Command::new("kill")
         .args(["-0", pid])

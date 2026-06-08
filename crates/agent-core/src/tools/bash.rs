@@ -16,6 +16,12 @@ use tokio::{
 };
 use uuid::Uuid;
 
+#[cfg(unix)]
+use rustix::{
+    io::Errno,
+    process::{Pid, Signal, kill_process_group},
+};
+
 use super::{
     Tool, ToolContext, ToolError, ToolFuture, ToolResult, cap_output, parse_input, schema,
 };
@@ -36,6 +42,7 @@ enum BashMode {
     Foreground,
     Start,
     Poll,
+    Stop,
 }
 
 pub struct BashTool;
@@ -46,7 +53,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &'static str {
-        "Run a shell command in the workspace, or start/poll a compact background command."
+        "Run a shell command in the workspace, or start/poll/stop a compact background command."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -76,6 +83,11 @@ impl Tool for BashTool {
                     let handle = required_field(self.name(), input.handle, "handle")?;
                     poll_background_command(self.name(), &handle, max_output_bytes).await
                 }
+                BashMode::Stop => {
+                    reject_field(self.name(), input.command.is_some(), "command")?;
+                    let handle = required_field(self.name(), input.handle, "handle")?;
+                    stop_background_command(self.name(), &handle, max_output_bytes).await
+                }
             }
         })
     }
@@ -85,11 +97,17 @@ static BACKGROUND_COMMANDS: LazyLock<Mutex<HashMap<String, BackgroundCommand>>> 
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 struct BackgroundCommand {
-    child: Child,
+    process: ManagedChild,
     stdout: Arc<Mutex<Vec<u8>>>,
     stderr: Arc<Mutex<Vec<u8>>>,
     stdout_task: JoinHandle<()>,
     stderr_task: JoinHandle<()>,
+}
+
+struct ManagedChild {
+    child: Child,
+    #[cfg(unix)]
+    process_group: Option<Pid>,
 }
 
 struct CommandOutput {
@@ -103,6 +121,16 @@ fn required_field<T>(tool: &str, value: Option<T>, field: &'static str) -> Resul
         tool: tool.to_owned(),
         message: format!("missing required field `{field}`"),
     })
+}
+
+fn reject_field(tool: &str, present: bool, field: &'static str) -> Result<(), ToolError> {
+    if present {
+        return Err(ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: format!("field `{field}` is not supported for this mode"),
+        });
+    }
+    Ok(())
 }
 
 fn command_result(output: &CommandOutput, max_output_bytes: usize) -> ToolResult {
@@ -128,17 +156,9 @@ async fn run_command(
     command: &str,
     timeout_duration: Duration,
 ) -> Result<CommandOutput, ToolError> {
-    let mut child = Command::new("bash")
-        .arg("-lc")
-        .arg(command)
-        .current_dir(&ctx.cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    let mut stdout = child.stdout.take().expect("stdout was piped");
-    let mut stderr = child.stderr.take().expect("stderr was piped");
+    let mut process = spawn_bash_process(ctx, command)?;
+    let mut stdout = process.child.stdout.take().expect("stdout was piped");
+    let mut stderr = process.child.stderr.take().expect("stderr was piped");
 
     let stdout_task = tokio::spawn(async move {
         let mut buffer = Vec::new();
@@ -152,15 +172,15 @@ async fn run_command(
     });
 
     let status = tokio::select! {
-        status = child.wait() => status?,
+        status = process.child.wait() => status?,
         () = tokio::time::sleep(timeout_duration) => {
-            kill_child(&mut child).await;
+            kill_child(&mut process).await;
             return Err(ToolError::CommandTimedOut {
                 timeout_ms: u64::try_from(timeout_duration.as_millis()).unwrap_or(u64::MAX),
             });
         }
         () = ctx.cancel_token.cancelled() => {
-            kill_child(&mut child).await;
+            kill_child(&mut process).await;
             return Err(ToolError::Cancelled);
         }
     };
@@ -174,9 +194,51 @@ async fn run_command(
     })
 }
 
-async fn kill_child(child: &mut Child) {
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+fn spawn_bash_process(ctx: &ToolContext, command_text: &str) -> Result<ManagedChild, ToolError> {
+    let mut process_command = Command::new("bash");
+    process_command
+        .arg("-lc")
+        .arg(command_text)
+        .current_dir(&ctx.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    process_command.process_group(0);
+
+    let child = process_command.spawn()?;
+    Ok(ManagedChild {
+        #[cfg(unix)]
+        process_group: child_process_group(&child),
+        child,
+    })
+}
+
+#[cfg(unix)]
+fn child_process_group(child: &Child) -> Option<Pid> {
+    child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .and_then(Pid::from_raw)
+}
+
+async fn kill_child(process: &mut ManagedChild) -> Option<i32> {
+    kill_process_group_if_available(process);
+    let _ = process.child.start_kill();
+    process
+        .child
+        .wait()
+        .await
+        .ok()
+        .and_then(|status| status.code())
+}
+
+fn kill_process_group_if_available(process: &ManagedChild) {
+    #[cfg(unix)]
+    if let Some(process_group) = process.process_group {
+        let _ = kill_process_group(process_group, Signal::KILL)
+            .or_else(|err| if err == Errno::SRCH { Ok(()) } else { Err(err) });
+    }
 }
 
 async fn start_background_command(
@@ -184,23 +246,16 @@ async fn start_background_command(
     command: &str,
     max_output_bytes: usize,
 ) -> Result<ToolResult, ToolError> {
-    let mut child = Command::new("bash")
-        .arg("-lc")
-        .arg(command)
-        .current_dir(&ctx.cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut process = spawn_bash_process(ctx, command)?;
 
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stderr = Arc::new(Mutex::new(Vec::new()));
     let stdout_task = spawn_output_reader(
-        child.stdout.take().expect("stdout was piped"),
+        process.child.stdout.take().expect("stdout was piped"),
         stdout.clone(),
     );
     let stderr_task = spawn_output_reader(
-        child.stderr.take().expect("stderr was piped"),
+        process.child.stderr.take().expect("stderr was piped"),
         stderr.clone(),
     );
 
@@ -208,7 +263,7 @@ async fn start_background_command(
     BACKGROUND_COMMANDS.lock().await.insert(
         handle.clone(),
         BackgroundCommand {
-            child,
+            process,
             stdout,
             stderr,
             stdout_task,
@@ -258,7 +313,7 @@ async fn poll_background_command(
             message: format!("unknown background handle `{handle}`"),
         })?;
 
-    let status = command.child.try_wait()?;
+    let status = command.process.child.try_wait()?;
     if let Some(status) = status {
         let command = commands.remove(handle).expect("command existed");
         drop(commands);
@@ -267,7 +322,7 @@ async fn poll_background_command(
         let output = output_from_buffers(status.code(), command.stdout, command.stderr).await;
         return Ok(background_command_result(
             handle,
-            true,
+            "exited",
             &output,
             max_output_bytes,
         ));
@@ -281,7 +336,33 @@ async fn poll_background_command(
     let output = output_from_locked_buffers(None, &stdout, &stderr);
     Ok(background_command_result(
         handle,
-        false,
+        "running",
+        &output,
+        max_output_bytes,
+    ))
+}
+
+async fn stop_background_command(
+    tool: &str,
+    handle: &str,
+    max_output_bytes: usize,
+) -> Result<ToolResult, ToolError> {
+    let mut commands = BACKGROUND_COMMANDS.lock().await;
+    let mut command = commands
+        .remove(handle)
+        .ok_or_else(|| ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: format!("unknown background handle `{handle}`"),
+        })?;
+    drop(commands);
+
+    let exit_code = kill_child(&mut command.process).await;
+    let _ = command.stdout_task.await;
+    let _ = command.stderr_task.await;
+    let output = output_from_buffers(exit_code, command.stdout, command.stderr).await;
+    Ok(background_command_result(
+        handle,
+        "stopped",
         &output,
         max_output_bytes,
     ))
@@ -311,14 +392,13 @@ fn output_from_locked_buffers(
 
 fn background_command_result(
     handle: &str,
-    exited: bool,
+    status: &str,
     output: &CommandOutput,
     max_output_bytes: usize,
 ) -> ToolResult {
     let (stdout_capped, stdout_truncated) = cap_output(&output.stdout, max_output_bytes);
     let (stderr_capped, stderr_truncated) = cap_output(&output.stderr, max_output_bytes);
     let truncated = stdout_truncated || stderr_truncated;
-    let status = if exited { "exited" } else { "running" };
     let content = format!(
         "handle: {handle}\nstatus: {status}\nexit_code: {:?}\nstdout:\n{}\nstderr:\n{}\ntruncated: {truncated}",
         output.exit_code, stdout_capped, stderr_capped

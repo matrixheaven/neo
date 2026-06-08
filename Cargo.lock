@@ -1167,6 +1167,7 @@ dependencies = [
  "neo-ai",
  "regex",
  "reqwest",
+ "rustix 1.1.4",
  "schemars",
  "serde",
  "serde_json",
