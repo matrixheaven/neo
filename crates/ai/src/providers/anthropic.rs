@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::{
     AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
-    ModelClient, StopReason, TokenUsage, ToolSpec,
+    ModelClient, ReasoningEffort, StopReason, TokenUsage, ToolSpec,
 };
 
 #[derive(Clone)]
@@ -164,7 +164,13 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     if !request.tools.is_empty() {
         body["tools"] = Value::Array(request.tools.iter().map(tool_body).collect());
     }
-    if let Some(temperature) = request.options.temperature {
+    if let Some(reasoning_effort) = request.options.reasoning_effort {
+        body["thinking"] = json!({
+            "type": "enabled",
+            "budget_tokens": thinking_budget_tokens(reasoning_effort),
+            "display": "summarized",
+        });
+    } else if let Some(temperature) = request.options.temperature {
         body["temperature"] = json!(rounded_f64(temperature));
     }
     if !request.options.metadata.is_empty()
@@ -177,6 +183,15 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     }
 
     Ok(body)
+}
+
+const fn thinking_budget_tokens(effort: ReasoningEffort) -> u32 {
+    match effort {
+        ReasoningEffort::Minimal | ReasoningEffort::Low => 1_024,
+        ReasoningEffort::Medium => 2_048,
+        ReasoningEffort::High => 8_192,
+        ReasoningEffort::XHigh => 16_384,
+    }
 }
 
 fn message_body(message: &ChatMessage) -> Option<Result<Value, ProviderError>> {

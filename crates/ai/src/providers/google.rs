@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::{
     AiError, AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ImageData, ModelClient,
-    StopReason, TokenUsage, ToolSpec,
+    ReasoningEffort, StopReason, TokenUsage, ToolSpec,
 };
 
 #[derive(Clone)]
@@ -173,11 +173,29 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     if let Some(max_tokens) = request.options.max_tokens {
         generation_config.insert("maxOutputTokens".to_owned(), json!(max_tokens));
     }
+    if let Some(reasoning_effort) = request.options.reasoning_effort {
+        generation_config.insert(
+            "thinkingConfig".to_owned(),
+            json!({
+                "includeThoughts": true,
+                "thinkingBudget": thinking_budget_tokens(reasoning_effort),
+            }),
+        );
+    }
     if !generation_config.is_empty() {
         body["generationConfig"] = Value::Object(generation_config);
     }
 
     Ok(body)
+}
+
+const fn thinking_budget_tokens(effort: ReasoningEffort) -> i32 {
+    match effort {
+        ReasoningEffort::Minimal | ReasoningEffort::Low => 1_024,
+        ReasoningEffort::Medium => 2_048,
+        ReasoningEffort::High => 8_192,
+        ReasoningEffort::XHigh => 16_384,
+    }
 }
 
 fn content_body(message: &ChatMessage) -> Option<Result<Value, ProviderError>> {

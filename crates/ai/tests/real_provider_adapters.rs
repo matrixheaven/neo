@@ -898,6 +898,40 @@ async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
     assert_eq!(sent.body["max_tokens"], 64);
     assert_eq!(sent.body["tools"][0]["name"], "read_file");
     assert_eq!(sent.body["messages"][0]["role"], "user");
+    assert!(sent.body.get("thinking").is_none());
+}
+
+#[tokio::test]
+async fn anthropic_messages_client_serializes_reasoning_effort_as_budget_thinking() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "message_start", "message": { "id": "msg-thinking" } }),
+        json!({ "type": "message_stop" }),
+    ])]);
+    let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::AnthropicMessages);
+    request.options.temperature = Some(0.4);
+    request.options.reasoning_effort = Some(ReasoningEffort::High);
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["thinking"]["type"], "enabled");
+    assert_eq!(sent.body["thinking"]["budget_tokens"], 8192);
+    assert_eq!(sent.body["thinking"]["display"], "summarized");
+    assert!(
+        sent.body.get("temperature").is_none(),
+        "Anthropic temperature is incompatible with extended thinking"
+    );
+    assert!(
+        sent.body.get("output_config").is_none(),
+        "Neo does not opt into adaptive Anthropic thinking without explicit model compat"
+    );
 }
 
 #[tokio::test]
@@ -1028,6 +1062,46 @@ async fn google_generative_ai_client_posts_generate_content_payload_and_streams_
         "string"
     );
     assert_eq!(sent.body["generationConfig"]["maxOutputTokens"], 64);
+    assert!(
+        sent.body["generationConfig"]
+            .get("thinkingConfig")
+            .is_none(),
+        "thinkingConfig must be omitted unless reasoning_effort is requested"
+    );
+}
+
+#[tokio::test]
+async fn google_generative_ai_client_serializes_reasoning_effort_as_thinking_config() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{ "text": "done" }]
+            },
+            "finishReason": "STOP"
+        }]
+    })])]);
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::GoogleGenerativeAi);
+    request.options.reasoning_effort = Some(ReasoningEffort::Medium);
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(
+        sent.body["generationConfig"]["thinkingConfig"]["includeThoughts"],
+        true
+    );
+    assert_eq!(
+        sent.body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+        2048
+    );
 }
 
 #[tokio::test]
