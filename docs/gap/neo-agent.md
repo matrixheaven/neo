@@ -18,9 +18,9 @@
   `api_base`, `api_key_env`, `model_catalogs`, `sessions_dir`,
   `permissions.file_read`, `permissions.file_write`, `permissions.shell`,
   `defaults.mode`,
-  provider-specific API key env names, and runtime generation/agent options
-  such as temperature, max tokens, queue modes, tool execution mode, and
-  compaction thresholds.
+  provider-specific API base URLs and API key env names, and runtime
+  generation/agent options such as temperature, max tokens, queue modes, tool
+  execution mode, and compaction thresholds.
 - User-global config is merged below project config with `~` expansion for
   paths such as `sessions_dir`.
 - Session commands read project session files from `sessions_dir`, store local

@@ -73,8 +73,11 @@ succeeded.
   such as OpenRouter.
 
 The production resolver requires a registered provider, a supported API kind,
-credentials from the provider's environment-key list, and a base URL. It does
-not resolve `ApiKind::Local` or the fake test provider.
+credentials from the provider's environment-key list, and a base URL. Built-in
+provider base URLs and credential environment names can be overridden from
+`neo-agent` project config with `providers.<provider-id>.api_base` and
+`providers.<provider-id>.api_key_env`. It does not resolve `ApiKind::Local` or
+the fake test provider.
 
 ## Local Model Catalogs
 
@@ -140,8 +143,11 @@ The loader maps Pi `id`, provider map key, `api`, `reasoning`, `input`, and
 `bedrock-converse-stream` instead of silently downgrading them.
 
 Pi provider endpoint, credential, pricing, `maxTokens`, `headers`, `compat`,
-and `modelOverrides` metadata are not migrated into `ModelSpec`; configure Neo
-provider credentials and base URLs through the existing Neo provider config.
+and `modelOverrides` metadata are not migrated into `ModelSpec`. Configure Neo
+provider credentials and base URLs through Neo provider config such as
+`providers.<provider-id>.api_base` and `providers.<provider-id>.api_key_env`;
+Pi catalog import still does not automatically migrate provider metadata into
+that config.
 
 ## Test Provider
 

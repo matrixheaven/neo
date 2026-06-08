@@ -108,6 +108,48 @@ fn print_uses_production_openai_responses_adapter_against_mock_provider() {
 }
 
 #[test]
+fn print_uses_provider_specific_api_base_from_project_config() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-provider-base",
+        "provider base configured",
+    )]);
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        temp.path().join(".neo/config.toml"),
+        format!(
+            r#"
+[providers.openai]
+api_base = "{}"
+api_key_env = "PROJECT_OPENAI_KEY"
+"#,
+            server.url
+        ),
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("PROJECT_OPENAI_KEY", "test-key")
+        .env_remove("OPENAI_API_KEY")
+        .args(["print", "provider", "base"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "provider base configured\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/responses");
+    assert_eq!(
+        requests[0].headers.get("authorization").map(String::as_str),
+        Some("Bearer test-key")
+    );
+    assert_eq!(requests[0].body["input"][0]["content"], "provider base");
+}
+
+#[test]
 fn print_applies_project_runtime_generation_options_to_provider_request() {
     let temp = TempDir::new().expect("tempdir");
     std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");

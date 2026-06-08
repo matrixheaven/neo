@@ -37,9 +37,11 @@ until the Rust contracts exist.
 
 - Add docs for provider APIs only after modules under `crates/ai/src/providers`
   implement network requests and production resolver support.
-- Pi `models.json` pricing metadata, generated catalog sources, provider
-  endpoint/credential migration, and provider-native model override formats
-  remain future work.
+- Pi `models.json` pricing metadata, generated catalog sources,
+  provider-metadata migration, and provider-native model override formats
+  remain future work. Neo provider-specific base URLs and API key env names are
+  available through `neo-agent` config, but Pi catalog import does not migrate
+  those fields automatically.
 - Keep provider credentials environment-only for now; auth-file and OAuth
   flows are future work.
 - Keep request metadata internal-facing. Do not expose provider-native chunk

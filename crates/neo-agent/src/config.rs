@@ -107,6 +107,7 @@ impl Default for RuntimeCompactionConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderConfig {
+    pub api_base: Option<String>,
     pub api_key_env: Option<String>,
 }
 
@@ -303,6 +304,15 @@ fn provider_api_key_env(
         .and_then(|provider| provider.api_key_env.clone())
 }
 
+pub(crate) fn provider_api_base(
+    providers: &BTreeMap<String, ProviderConfig>,
+    provider_id: &str,
+) -> Option<String> {
+    providers
+        .get(provider_id)
+        .and_then(|provider| provider.api_base.clone())
+}
+
 pub fn show(config: &AppConfig) -> anyhow::Result<String> {
     let snapshot = FileConfig {
         default_model: Some(config.default_model.clone()),
@@ -336,12 +346,17 @@ pub fn set(key: &str, value: &str) -> anyhow::Result<String> {
         "default_provider" | "provider" => config.default_provider = Some(value.to_owned()),
         "api_base" => config.api_base = Some(value.to_owned()),
         "api_key_env" => config.api_key_env = Some(value.to_owned()),
+        key if key.starts_with("providers.") && key.ends_with(".api_base") => {
+            let provider_id = parse_provider_key(key, ".api_base")?;
+            let provider = config
+                .providers
+                .get_or_insert_with(BTreeMap::new)
+                .entry(provider_id.to_owned())
+                .or_default();
+            provider.api_base = Some(value.to_owned());
+        }
         key if key.starts_with("providers.") && key.ends_with(".api_key_env") => {
-            let provider_id = key
-                .strip_prefix("providers.")
-                .and_then(|key| key.strip_suffix(".api_key_env"))
-                .filter(|provider_id| !provider_id.is_empty())
-                .with_context(|| format!("invalid provider config key: {key}"))?;
+            let provider_id = parse_provider_key(key, ".api_key_env")?;
             let provider = config
                 .providers
                 .get_or_insert_with(BTreeMap::new)
@@ -413,6 +428,13 @@ pub fn set(key: &str, value: &str) -> anyhow::Result<String> {
     Ok(format!("set {key}\n"))
 }
 
+fn parse_provider_key<'a>(key: &'a str, suffix: &str) -> anyhow::Result<&'a str> {
+    key.strip_prefix("providers.")
+        .and_then(|key| key.strip_suffix(suffix))
+        .filter(|provider_id| !provider_id.is_empty())
+        .with_context(|| format!("invalid provider config key: {key}"))
+}
+
 fn merge_file_configs(base: FileConfig, layer: FileConfig) -> FileConfig {
     FileConfig {
         default_model: layer.default_model.or(base.default_model),
@@ -437,9 +459,23 @@ fn merge_provider_configs(
         (None, None) => None,
         (Some(providers), None) | (None, Some(providers)) => Some(providers),
         (Some(mut base), Some(layer)) => {
-            base.extend(layer);
+            for (provider_id, layer_config) in layer {
+                base.entry(provider_id)
+                    .and_modify(|base_config| {
+                        *base_config =
+                            merge_provider_config(base_config.clone(), layer_config.clone());
+                    })
+                    .or_insert(layer_config);
+            }
             Some(base)
         }
+    }
+}
+
+fn merge_provider_config(base: ProviderConfig, layer: ProviderConfig) -> ProviderConfig {
+    ProviderConfig {
+        api_base: layer.api_base.or(base.api_base),
+        api_key_env: layer.api_key_env.or(base.api_key_env),
     }
 }
 

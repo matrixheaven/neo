@@ -215,6 +215,41 @@ temperature = 0.3
 }
 
 #[test]
+fn config_show_merges_provider_config_fields_across_global_and_project_layers() {
+    let home = TempDir::new().expect("home tempdir");
+    let project = TempDir::new().expect("project tempdir");
+    fs::create_dir_all(home.path().join(".neo")).expect("create global .neo");
+    fs::write(
+        home.path().join(".neo/config.toml"),
+        r#"
+[providers.openai]
+api_base = "https://global-openai.example/v1"
+"#,
+    )
+    .expect("write global config");
+    fs::create_dir_all(project.path().join(".neo")).expect("create project .neo");
+    fs::write(
+        project.path().join(".neo/config.toml"),
+        r#"
+[providers.openai]
+api_key_env = "PROJECT_OPENAI_KEY"
+"#,
+    )
+    .expect("write project config");
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["config", "show"]);
+    let stdout = run(command);
+
+    assert!(stdout.contains("[providers.openai]"));
+    assert!(stdout.contains("api_base = \"https://global-openai.example/v1\""));
+    assert!(stdout.contains("api_key_env = \"PROJECT_OPENAI_KEY\""));
+}
+
+#[test]
 fn config_show_reads_provider_specific_api_key_env_without_secret_values() {
     let temp = TempDir::new().expect("tempdir");
     fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
@@ -235,6 +270,34 @@ api_key_env = "PROJECT_OPENAI_KEY"
     assert!(stdout.contains("[providers.openai]"));
     assert!(stdout.contains("api_key_env = \"PROJECT_OPENAI_KEY\""));
     assert!(!stdout.contains("secret"));
+}
+
+#[test]
+fn config_show_reads_provider_specific_api_base_without_secret_values() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+[providers.openai]
+api_base = "https://project-openai.example/v1"
+api_key_env = "PROJECT_OPENAI_KEY"
+"#,
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("PROJECT_OPENAI_KEY", "secret-value")
+        .args(["config", "show"]);
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("[providers.openai]"));
+    assert!(stdout.contains("api_base = \"https://project-openai.example/v1\""));
+    assert!(stdout.contains("api_key_env = \"PROJECT_OPENAI_KEY\""));
+    assert!(!stdout.contains("secret-value"));
 }
 
 #[test]
@@ -299,6 +362,25 @@ fn config_set_writes_provider_specific_api_key_env_name() {
     let config = fs::read_to_string(temp.path().join(".neo/config.toml")).expect("read config");
     assert!(config.contains("[providers.openai]"));
     assert!(config.contains("api_key_env = \"PROJECT_OPENAI_KEY\""));
+}
+
+#[test]
+fn config_set_writes_provider_specific_api_base() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut command = neo();
+    command.current_dir(temp.path()).args([
+        "config",
+        "set",
+        "providers.openai.api_base",
+        "https://project-openai.example/v1",
+    ]);
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("set providers.openai.api_base"));
+    let config = fs::read_to_string(temp.path().join(".neo/config.toml")).expect("read config");
+    assert!(config.contains("[providers.openai]"));
+    assert!(config.contains("api_base = \"https://project-openai.example/v1\""));
 }
 
 #[test]

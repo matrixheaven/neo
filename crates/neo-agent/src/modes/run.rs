@@ -12,7 +12,7 @@ use neo_ai::{ModelClient, ModelRegistry, ModelSpec, ProviderRegistry};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    config::{AppConfig, McpServerConfig},
+    config::{AppConfig, McpServerConfig, provider_api_base},
     session_commands,
 };
 
@@ -69,6 +69,7 @@ pub fn list_models(config: &AppConfig) -> anyhow::Result<String> {
 
 fn provider_registry_for_config(config: &AppConfig) -> ProviderRegistry {
     let mut registry = ProviderRegistry::production();
+    apply_configured_provider_overrides(&mut registry, config);
     if let Some(env_name) = &config.api_key_env
         && let Some(mut provider) = registry.get(&config.default_provider).cloned()
     {
@@ -76,6 +77,21 @@ fn provider_registry_for_config(config: &AppConfig) -> ProviderRegistry {
         registry.register(provider);
     }
     registry
+}
+
+fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: &AppConfig) {
+    for (provider_id, provider_config) in &config.providers {
+        let Some(mut provider) = registry.get(provider_id).cloned() else {
+            continue;
+        };
+        if let Some(base_url) = &provider_config.api_base {
+            provider.base_url = Some(base_url.clone());
+        }
+        if let Some(env_name) = &provider_config.api_key_env {
+            provider.api_key_env_vars = vec![env_name.clone()];
+        }
+        registry.register(provider);
+    }
 }
 
 pub fn list_mcp_servers(config: &AppConfig) -> String {
@@ -609,7 +625,11 @@ fn resolve_model_client(
     model: &ModelSpec,
 ) -> anyhow::Result<Arc<dyn ModelClient>> {
     let mut registry = ProviderRegistry::production();
-    if config.api_base.is_some() || config.api_key_env.is_some() {
+    apply_configured_provider_overrides(&mut registry, config);
+    if config.api_base.is_some()
+        || config.api_key_env.is_some()
+        || provider_api_base(&config.providers, &model.provider.0).is_some()
+    {
         let Some(mut provider) = registry.get(&model.provider.0).cloned() else {
             return registry
                 .resolver()
