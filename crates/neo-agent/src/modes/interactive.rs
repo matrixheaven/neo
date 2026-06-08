@@ -511,15 +511,16 @@ impl InteractiveController {
             self.app.prompt_mut().apply_edit(PromptEdit::Insert("\t"));
             return;
         };
-        let completions = match prompt_completions(&self.completion_root, &prefix.text) {
-            Ok(completions) => completions,
-            Err(error) => {
-                self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                    text: format!("Completion error: {error}"),
-                });
-                return;
-            }
-        };
+        let completions =
+            match prompt_completions(&self.completion_root, &prefix.text, &self.model_items) {
+                Ok(completions) => completions,
+                Err(error) => {
+                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                        text: format!("Completion error: {error}"),
+                    });
+                    return;
+                }
+            };
 
         if completions.is_empty() {
             self.app.prompt_mut().apply_edit(PromptEdit::Insert("\t"));
@@ -579,6 +580,10 @@ impl InteractiveController {
         let Some(prompt) = self.app.submit_prompt() else {
             return Ok(());
         };
+        let PromptSubmission {
+            prompt,
+            model_override,
+        } = PromptSubmission::from_text(prompt, &self.model_items)?;
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (approval_tx, approval_rx) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
@@ -588,11 +593,9 @@ impl InteractiveController {
             cancel_token: cancel_token.clone(),
         };
         let future = (self.run_turn)(
-            TurnRequest::new(
-                vec![prompt],
-                self.active_session_id.clone(),
-                self.active_model.clone(),
-            ),
+            TurnRequest::new(vec![prompt], self.active_session_id.clone(), {
+                model_override.or_else(|| self.active_model.clone())
+            }),
             channels,
         );
         let task = tokio::spawn(async move {
@@ -809,8 +812,17 @@ impl InteractiveController {
     }
 }
 
-fn prompt_completions(root: &Path, prefix: &str) -> Result<Vec<PickerItem>> {
+fn prompt_completions(
+    root: &Path,
+    prefix: &str,
+    model_items: &[PickerItem],
+) -> Result<Vec<PickerItem>> {
     if let Some(completions) = slash_prompt_template_completions(root, prefix)? {
+        return Ok(completions);
+    }
+    if let Some(completions) = model_prompt_completions(prefix, model_items)
+        && !completions.is_empty()
+    {
         return Ok(completions);
     }
     filesystem_prompt_completions(root, prefix)
@@ -893,6 +905,77 @@ fn filesystem_prompt_completions(root: &Path, prefix: &str) -> Result<Vec<Picker
     completions.sort_by(|left, right| left.value.cmp(&right.value));
     completions.truncate(100);
     Ok(completions)
+}
+
+fn model_prompt_completions(prefix: &str, model_items: &[PickerItem]) -> Option<Vec<PickerItem>> {
+    let model_prefix = prefix.strip_prefix('@')?;
+    if model_items.is_empty() {
+        return None;
+    }
+
+    let mut completions = model_items
+        .iter()
+        .filter(|item| item.value.starts_with(model_prefix))
+        .map(|item| {
+            let value = format!("@{}", item.value);
+            PickerItem::new(value.clone(), value, item.description.clone())
+        })
+        .collect::<Vec<_>>();
+    completions.sort_by(|left, right| left.value.cmp(&right.value));
+    completions.truncate(100);
+    Some(completions)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PromptSubmission {
+    prompt: String,
+    model_override: Option<SelectedModel>,
+}
+
+impl PromptSubmission {
+    fn from_text(prompt: String, model_items: &[PickerItem]) -> Result<Self> {
+        let Some((candidate, rest)) = split_first_prompt_token(&prompt) else {
+            return Ok(Self {
+                prompt,
+                model_override: None,
+            });
+        };
+        let Some(model_value) = candidate.strip_prefix('@') else {
+            return Ok(Self {
+                prompt,
+                model_override: None,
+            });
+        };
+        let Some(model_item) = model_items.iter().find(|item| item.value == model_value) else {
+            return Ok(Self {
+                prompt,
+                model_override: None,
+            });
+        };
+        let prompt_after_model = rest.trim_start();
+        if prompt_after_model.is_empty() {
+            return Ok(Self {
+                prompt,
+                model_override: None,
+            });
+        }
+
+        Ok(Self {
+            prompt: prompt_after_model.to_owned(),
+            model_override: Some(SelectedModel::from_picker_item(model_item)?),
+        })
+    }
+}
+
+fn split_first_prompt_token(prompt: &str) -> Option<(&str, &str)> {
+    let prompt = prompt.trim_start();
+    if prompt.is_empty() {
+        return None;
+    }
+    match prompt.find(char::is_whitespace) {
+        Some(index) => Some((&prompt[..index], &prompt[index..])),
+        None => Some((prompt, "")),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1684,6 +1767,232 @@ mod tests {
         assert_eq!(controller.app().prompt().text, "/review");
         assert_eq!(controller.app().prompt().cursor, 7);
         assert!(controller.app().focused_overlay().is_none());
+    }
+
+    #[tokio::test]
+    async fn event_loop_tab_completes_provider_model_prefix() {
+        let mut controller = InteractiveController::new_with_sessions(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+            PickerCatalogs {
+                session_items: Vec::new(),
+                session_error: None,
+                model_items: vec![
+                    PickerItem::new(
+                        "anthropic/claude-sonnet",
+                        "anthropic/claude-sonnet",
+                        Some("Messages"),
+                    ),
+                    PickerItem::new("openai/gpt-4.1", "openai/gpt-4.1", Some("Responses")),
+                ],
+                model_error: None,
+            },
+            |session_id| async move {
+                Ok(LoadedSessionTranscript::new(
+                    session_id,
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            },
+        );
+
+        controller.type_text("@anth");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+            .await
+            .expect("tab completes provider/model prefix");
+
+        assert_eq!(controller.app().prompt().text, "@anthropic/claude-sonnet");
+        assert_eq!(controller.app().prompt().cursor, 24);
+        assert!(controller.app().focused_overlay().is_none());
+    }
+
+    #[tokio::test]
+    async fn event_loop_inline_provider_model_prefix_overrides_submitted_turn() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let mut controller = InteractiveController::new_with_sessions(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("record request")
+                        .push(request);
+                    Ok(vec![
+                        AgentEvent::MessageStarted {
+                            turn: 1,
+                            id: "assistant-1".to_owned(),
+                        },
+                        AgentEvent::TextDelta {
+                            turn: 1,
+                            text: "inline model selected".to_owned(),
+                        },
+                        AgentEvent::TurnFinished {
+                            turn: 1,
+                            stop_reason: StopReason::EndTurn,
+                        },
+                    ])
+                }
+            },
+            PickerCatalogs {
+                session_items: Vec::new(),
+                session_error: None,
+                model_items: vec![
+                    PickerItem::new(
+                        "anthropic/claude-sonnet",
+                        "anthropic/claude-sonnet",
+                        Some("Messages"),
+                    ),
+                    PickerItem::new("openai/gpt-4.1", "openai/gpt-4.1", Some("Responses")),
+                ],
+                model_error: None,
+            },
+            |session_id| async move {
+                Ok(LoadedSessionTranscript::new(
+                    session_id,
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            },
+        );
+
+        controller.type_text("@anth");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+            .await
+            .expect("tab completes provider/model prefix");
+        controller.type_text(" explain this file");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("turn submits with inline model");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("inline model turn completes");
+
+        let requests = requests.lock().expect("recorded requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].prompt, vec!["explain this file".to_owned()]);
+        let selected = requests[0].model.as_ref().expect("inline model");
+        assert_eq!(selected.provider, "anthropic");
+        assert_eq!(selected.model, "claude-sonnet");
+    }
+
+    #[tokio::test]
+    async fn event_loop_keeps_unknown_at_prefix_as_prompt_text() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let mut controller = InteractiveController::new_with_sessions(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("record request")
+                        .push(request);
+                    Ok(Vec::<AgentEvent>::new())
+                }
+            },
+            PickerCatalogs {
+                session_items: Vec::new(),
+                session_error: None,
+                model_items: vec![PickerItem::new(
+                    "anthropic/claude-sonnet",
+                    "anthropic/claude-sonnet",
+                    Some("Messages"),
+                )],
+                model_error: None,
+            },
+            |session_id| async move {
+                Ok(LoadedSessionTranscript::new(
+                    session_id,
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            },
+        );
+
+        controller.type_text("@src/main.rs explain this file");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("turn submits with file mention");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("file mention turn completes");
+
+        let requests = requests.lock().expect("recorded requests");
+        assert_eq!(
+            requests[0].prompt,
+            vec!["@src/main.rs explain this file".to_owned()]
+        );
+        assert_eq!(requests[0].model, None);
+    }
+
+    #[tokio::test]
+    async fn event_loop_inline_model_token_without_prompt_does_not_override_model() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let mut controller = InteractiveController::new_with_sessions(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("record request")
+                        .push(request);
+                    Ok(Vec::<AgentEvent>::new())
+                }
+            },
+            PickerCatalogs {
+                session_items: Vec::new(),
+                session_error: None,
+                model_items: vec![PickerItem::new(
+                    "anthropic/claude-sonnet",
+                    "anthropic/claude-sonnet",
+                    Some("Messages"),
+                )],
+                model_error: None,
+            },
+            |session_id| async move {
+                Ok(LoadedSessionTranscript::new(
+                    session_id,
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            },
+        );
+
+        controller.type_text("@anthropic/claude-sonnet");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("turn submits literal model token");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("literal model token turn completes");
+
+        let requests = requests.lock().expect("recorded requests");
+        assert_eq!(
+            requests[0].prompt,
+            vec!["@anthropic/claude-sonnet".to_owned()]
+        );
+        assert_eq!(requests[0].model, None);
     }
 
     #[tokio::test]

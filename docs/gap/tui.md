@@ -49,13 +49,15 @@ Target: `crates/tui`.
 - Agent message image content is preserved in the transcript as stable text
   metadata summaries: URL images render their URL, and base64 images render
   MIME type plus payload size instead of raw image bytes.
-- Prompt Tab completion is backed by real local project data. `neo-tui`
+- Prompt Tab completion is backed by real local project/runtime data. `neo-tui`
   exposes prompt completion prefix/replacement primitives plus a completion
   picker overlay, and `neo-agent` reads matching files/directories from
   `AppConfig.project_dir` plus slash prompt templates from `.neo/prompts/*.md`,
-  auto-applies a longer common prefix, opens the picker for multiple
-  exact-prefix matches, and preserves literal tab insertion when no completion
-  exists.
+  and provider/model ids from the resolved `ModelRegistry`. It auto-applies a
+  longer common prefix, opens the picker for multiple exact-prefix matches,
+  preserves literal tab insertion when no completion exists, and treats an
+  exact leading `@provider/model` token as a per-turn model override while
+  leaving unknown `@...` prompt text intact.
 - The live interactive loop enables terminal bracketed paste mode and routes
   both native crossterm paste events and raw bracketed-paste start/end
   sequences through a buffered `InputParser`. Pasted multiline text is inserted
@@ -64,9 +66,9 @@ Target: `crates/tui`.
 
 ## Remaining lower-priority gaps
 
-- The Rust crate does not implement Kitty/Sixel/OSC image protocols, richer
-  provider or command autocomplete beyond local slash prompt templates,
-  OS/terminal clipboard integration, or the full TypeScript
+- The Rust crate does not implement Kitty/Sixel/OSC image protocols, command
+  autocomplete beyond local slash prompt templates, OS/terminal clipboard
+  integration, or the full TypeScript
   renderer's advanced diff affordances beyond width-safe unified diff line
   classification and coloring.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.
