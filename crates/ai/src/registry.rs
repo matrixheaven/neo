@@ -327,6 +327,7 @@ pub struct ProviderSpec {
     pub id: String,
     pub display_name: String,
     pub api: ApiKind,
+    pub supported_apis: Vec<ApiKind>,
     pub base_url: Option<String>,
     pub api_key_env_vars: Vec<String>,
     pub ambient_auth_env_vars: Vec<Vec<String>>,
@@ -440,6 +441,13 @@ impl ProviderResolver {
             AiError::Configuration(format!("provider {} is not registered", model.provider.0))
         })?;
 
+        if !provider.supports_api(&model.api) {
+            return Err(AiError::Configuration(format!(
+                "provider {} does not support model API {:?}",
+                provider.id, model.api
+            )));
+        }
+
         let api_key = api_key_from_provider(provider, &self.env).ok_or_else(|| {
             let reason = missing_reason(provider);
             AiError::Configuration(format!(
@@ -471,6 +479,13 @@ impl ProviderResolver {
                 provider.id, model.api
             ))),
         }
+    }
+}
+
+impl ProviderSpec {
+    #[must_use]
+    pub fn supports_api(&self, api: &ApiKind) -> bool {
+        self.supported_apis.contains(api)
     }
 }
 
@@ -574,6 +589,7 @@ fn builtin_providers() -> Vec<ProviderSpec> {
             "openai",
             "OpenAI",
             ApiKind::OpenAiResponses,
+            &[ApiKind::OpenAiResponses, ApiKind::OpenAiChatCompletions],
             Some("https://api.openai.com/v1"),
             &["OPENAI_API_KEY"],
             &[],
@@ -582,6 +598,7 @@ fn builtin_providers() -> Vec<ProviderSpec> {
             "anthropic",
             "Anthropic",
             ApiKind::AnthropicMessages,
+            &[ApiKind::AnthropicMessages],
             Some("https://api.anthropic.com/v1"),
             &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
             &[],
@@ -590,6 +607,7 @@ fn builtin_providers() -> Vec<ProviderSpec> {
             "google",
             "Google Generative AI",
             ApiKind::GoogleGenerativeAi,
+            &[ApiKind::GoogleGenerativeAi],
             Some("https://generativelanguage.googleapis.com/v1beta"),
             &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
             &[],
@@ -598,6 +616,7 @@ fn builtin_providers() -> Vec<ProviderSpec> {
             "openrouter",
             "OpenRouter",
             ApiKind::OpenAiCompatible,
+            &[ApiKind::OpenAiCompatible, ApiKind::OpenAiChatCompletions],
             Some("https://openrouter.ai/api/v1"),
             &["OPENROUTER_API_KEY"],
             &[],
@@ -606,6 +625,7 @@ fn builtin_providers() -> Vec<ProviderSpec> {
             "amazon-bedrock",
             "Amazon Bedrock",
             ApiKind::AnthropicMessages,
+            &[ApiKind::AnthropicMessages],
             None,
             &[],
             &[
@@ -624,6 +644,7 @@ fn provider(
     id: &str,
     display_name: &str,
     api: ApiKind,
+    supported_apis: &[ApiKind],
     base_url: Option<&str>,
     api_key_env_vars: &[&str],
     ambient_auth_env_vars: &[&[&str]],
@@ -632,6 +653,7 @@ fn provider(
         id: id.to_owned(),
         display_name: display_name.to_owned(),
         api,
+        supported_apis: supported_apis.to_vec(),
         base_url: base_url.map(str::to_owned),
         api_key_env_vars: api_key_env_vars
             .iter()

@@ -17,7 +17,8 @@
   Pi API names and capability fields into Neo `ModelSpec` values.
 - `ProviderRegistry::production()` stores built-in production provider metadata.
 - `ProviderResolver` resolves registered models to production clients when
-  credentials and base URLs are available.
+  the provider supports the model API kind and credentials/base URLs are
+  available. Provider/API mismatches fail before credential lookup.
 - `OpenAiResponsesClient`, `AnthropicMessagesClient`,
   `GoogleGenerativeAiClient`, and `OpenAiCompatibleClient` implement network
   provider adapters, including native chat image-input serialization for
@@ -37,8 +38,9 @@ until the Rust contracts exist.
 
 ## High-Priority Gaps
 
-- Add docs for provider APIs only after modules under `crates/ai/src/providers`
-  implement network requests and production resolver support.
+- Add docs for new provider APIs only after modules under
+  `crates/ai/src/providers` implement network requests and production resolver
+  support.
 - Pi `models.json` pricing metadata, generated catalog sources,
   provider-metadata migration, and provider-native model override formats
   remain future work. Neo provider-specific base URLs and API key env names are

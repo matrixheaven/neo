@@ -110,6 +110,7 @@ fn provider_resolver_builds_real_clients_by_model_api() {
         ("OPENAI_API_KEY".to_owned(), "openai-key".to_owned()),
         ("ANTHROPIC_API_KEY".to_owned(), "anthropic-key".to_owned()),
         ("GEMINI_API_KEY".to_owned(), "google-key".to_owned()),
+        ("OPENROUTER_API_KEY".to_owned(), "openrouter-key".to_owned()),
     ]);
     let resolver = registry.resolver_from(env);
 
@@ -133,6 +134,84 @@ fn provider_resolver_builds_real_clients_by_model_api() {
     resolver
         .resolve(&model("google", "gemini-test", ApiKind::GoogleGenerativeAi))
         .expect("google generative ai client should resolve");
+    resolver
+        .resolve(&model(
+            "openrouter",
+            "openrouter-test",
+            ApiKind::OpenAiCompatible,
+        ))
+        .expect("openrouter compatible client should resolve");
+    resolver
+        .resolve(&model(
+            "openrouter",
+            "openrouter-chat-test",
+            ApiKind::OpenAiChatCompletions,
+        ))
+        .expect("openrouter chat completions client should resolve");
+}
+
+#[test]
+fn provider_resolver_rejects_model_api_mismatches() {
+    let registry = ProviderRegistry::production();
+    let env = BTreeMap::from([
+        ("OPENAI_API_KEY".to_owned(), "openai-key".to_owned()),
+        ("ANTHROPIC_API_KEY".to_owned(), "anthropic-key".to_owned()),
+        ("GEMINI_API_KEY".to_owned(), "google-key".to_owned()),
+    ]);
+    let resolver = registry.resolver_from(env);
+
+    let Err(openai_mismatch) =
+        resolver.resolve(&model("openai", "bad-claude", ApiKind::AnthropicMessages))
+    else {
+        panic!("openai provider must reject anthropic messages models");
+    };
+    assert!(matches!(openai_mismatch, AiError::Configuration(_)));
+    assert!(
+        openai_mismatch
+            .to_string()
+            .contains("provider openai does not support model API AnthropicMessages")
+    );
+
+    let Err(anthropic_mismatch) =
+        resolver.resolve(&model("anthropic", "bad-gpt", ApiKind::OpenAiResponses))
+    else {
+        panic!("anthropic provider must reject openai responses models");
+    };
+    assert!(
+        anthropic_mismatch
+            .to_string()
+            .contains("provider anthropic does not support model API OpenAiResponses")
+    );
+
+    let Err(google_mismatch) =
+        resolver.resolve(&model("google", "bad-chat", ApiKind::OpenAiCompatible))
+    else {
+        panic!("google provider must reject openai-compatible models");
+    };
+    assert!(
+        google_mismatch
+            .to_string()
+            .contains("provider google does not support model API OpenAiCompatible")
+    );
+}
+
+#[test]
+fn provider_resolver_reports_api_mismatch_before_credential_lookup() {
+    let registry = ProviderRegistry::production();
+    let resolver = registry.resolver_from(BTreeMap::new());
+
+    let Err(mismatch) =
+        resolver.resolve(&model("openai", "bad-claude", ApiKind::AnthropicMessages))
+    else {
+        panic!("api mismatch should fail before credential lookup");
+    };
+
+    assert!(
+        mismatch
+            .to_string()
+            .contains("provider openai does not support model API AnthropicMessages")
+    );
+    assert!(!mismatch.to_string().contains("OPENAI_API_KEY"));
 }
 
 #[test]

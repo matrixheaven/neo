@@ -24,7 +24,8 @@ test client.
   production resolution: OpenAI, Anthropic, Google Generative AI, OpenRouter,
   and Amazon Bedrock credential hints.
 - `ProviderResolver` turns a registered `ModelSpec` plus environment credentials
-  into a `ModelClient`. It constructs `OpenAiResponsesClient`,
+  into a `ModelClient`. It first verifies that the selected provider supports
+  the model's `ApiKind`, then constructs `OpenAiResponsesClient`,
   `AnthropicMessagesClient`, `GoogleGenerativeAiClient`, or
   `OpenAiCompatibleClient` for supported APIs and rejects test-only/local
   providers in production resolution.
@@ -76,8 +77,15 @@ The production resolver requires a registered provider, a supported API kind,
 credentials from the provider's environment-key list, and a base URL. Built-in
 provider base URLs and credential environment names can be overridden from
 `neo-agent` project config with `providers.<provider-id>.api_base` and
-`providers.<provider-id>.api_key_env`. It does not resolve `ApiKind::Local` or
-the fake test provider.
+`providers.<provider-id>.api_key_env`. Provider/API compatibility is checked
+before credential lookup so a Pi catalog or custom catalog cannot accidentally
+route an Anthropic Messages model through OpenAI just because a matching API key
+exists. OpenAI supports both Responses and Chat Completions models; OpenRouter
+supports OpenAI-compatible and Chat Completions models. Anthropic, Google, and
+Amazon Bedrock are restricted to their registered protocol families. Bedrock is
+still credential metadata only until a production adapter/base URL contract
+exists. The resolver does not resolve `ApiKind::Local` or the fake test
+provider.
 
 `ContentPart::Image` is serialized for provider chat requests instead of being
 silently dropped. OpenAI Responses and OpenAI-compatible adapters send image
