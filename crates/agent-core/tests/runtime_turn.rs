@@ -579,6 +579,90 @@ async fn runtime_compaction_estimate_ignores_unsent_thinking_content() {
 }
 
 #[tokio::test]
+async fn runtime_can_compact_again_after_context_grows_past_threshold() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "first answer".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "second answer".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_3".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "third answer".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model()).with_compaction(CompactionSettings::new(4, 1)),
+        harness.client(),
+    );
+    let mut context = AgentContext::new();
+    let mut compactions = Vec::new();
+
+    for prompt in [
+        "first long prompt that seeds compaction",
+        "second long prompt that triggers compaction",
+        "third long prompt that should trigger compaction again",
+    ] {
+        let events = runtime
+            .run_turn(&mut context, AgentMessage::user_text(prompt))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("turn should succeed");
+        compactions.extend(events.into_iter().filter_map(|event| match event {
+            AgentEvent::CompactionApplied { summary } => Some(summary),
+            _ => None,
+        }));
+    }
+
+    assert_eq!(
+        compactions.len(),
+        2,
+        "context should compact again after later turns grow past the threshold"
+    );
+    assert_eq!(
+        context.messages(),
+        &[
+            AgentMessage::user_text("third long prompt that should trigger compaction again"),
+            AgentMessage::assistant(
+                [Content::text("third answer")],
+                Vec::new(),
+                StopReason::EndTurn,
+            ),
+        ]
+    );
+    assert_eq!(context.compaction_summary(), compactions.last());
+}
+
+#[tokio::test]
 async fn runtime_reports_max_turns_and_cancelled_without_calling_model() {
     let harness = FakeHarness::from_events([]);
     let runtime = AgentRuntime::new(

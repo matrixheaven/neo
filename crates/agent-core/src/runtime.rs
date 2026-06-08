@@ -779,7 +779,7 @@ fn maybe_compact(config: &AgentConfig, emitter: &mut EventEmitter) {
     let Some(settings) = config.compaction else {
         return;
     };
-    if !settings.enabled || emitter.context.compaction_summary.is_some() {
+    if !settings.enabled {
         return;
     }
     let estimated_tokens = estimate_messages_tokens(emitter.context.messages());
