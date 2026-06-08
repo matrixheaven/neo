@@ -1,4 +1,7 @@
-use crate::{config::AppConfig, prompt_templates::load_project_prompt_templates};
+use crate::{
+    config::{self, AppConfig},
+    prompt_templates::{expand_prompt_template_args, load_project_prompt_templates},
+};
 use std::{
     collections::{BTreeMap, VecDeque},
     fs,
@@ -626,13 +629,26 @@ impl InteractiveController {
     }
 
     fn open_command_palette(&mut self) {
-        self.app.open_command_palette(local_command_specs());
+        let (commands, error) = command_specs(&self.completion_root);
+        if let Some(error) = error {
+            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: format!("Error loading prompt templates: {error}"),
+            });
+        }
+        self.app.open_command_palette(commands);
     }
 
     async fn run_selected_command(&mut self) -> Result<()> {
         let Some(command) = self.app.confirm_command_palette() else {
             return Ok(());
         };
+        if let Some(name) = command.id.strip_prefix("prompt-template.") {
+            self.app
+                .prompt_mut()
+                .apply_edit(PromptEdit::Insert(&format!("/{name} ")));
+            return Ok(());
+        }
+
         match command.id.as_str() {
             "sessions" => self.open_session_picker(),
             "models" => self.open_model_picker(),
@@ -684,7 +700,12 @@ impl InteractiveController {
         let PromptSubmission {
             prompt,
             model_override,
-        } = PromptSubmission::from_text(prompt, &self.model_items)?;
+        } = PromptSubmission::from_text(
+            prompt,
+            &self.model_items,
+            self.local_config.as_ref(),
+            &self.completion_root,
+        )?;
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (approval_tx, approval_rx) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
@@ -1034,7 +1055,12 @@ struct PromptSubmission {
 }
 
 impl PromptSubmission {
-    fn from_text(prompt: String, model_items: &[PickerItem]) -> Result<Self> {
+    fn from_text(
+        prompt: String,
+        model_items: &[PickerItem],
+        config: Option<&AppConfig>,
+        fallback_project_dir: &Path,
+    ) -> Result<Self> {
         let Some((candidate, rest)) = split_first_prompt_token(&prompt) else {
             return Ok(Self {
                 prompt,
@@ -1043,13 +1069,13 @@ impl PromptSubmission {
         };
         let Some(model_value) = candidate.strip_prefix('@') else {
             return Ok(Self {
-                prompt,
+                prompt: expand_interactive_prompt(&prompt, config, fallback_project_dir)?,
                 model_override: None,
             });
         };
         let Some(model_item) = model_items.iter().find(|item| item.value == model_value) else {
             return Ok(Self {
-                prompt,
+                prompt: expand_interactive_prompt(&prompt, config, fallback_project_dir)?,
                 model_override: None,
             });
         };
@@ -1062,10 +1088,52 @@ impl PromptSubmission {
         }
 
         Ok(Self {
-            prompt: prompt_after_model.to_owned(),
+            prompt: expand_interactive_prompt(prompt_after_model, config, fallback_project_dir)?,
             model_override: Some(SelectedModel::from_picker_item(model_item)?),
         })
     }
+}
+
+fn expand_interactive_prompt(
+    prompt: &str,
+    config: Option<&AppConfig>,
+    fallback_project_dir: &Path,
+) -> Result<String> {
+    let Some(args) = slash_prompt_args(prompt) else {
+        return Ok(prompt.to_owned());
+    };
+    let (project_dir, selectors, disabled) = if let Some(config) = config {
+        let mut selectors = config.configured_prompt_templates.clone();
+        for selector in &config.prompt_templates {
+            if !selectors.contains(selector) {
+                selectors.push(selector.clone());
+            }
+        }
+        (
+            config.project_dir.as_path(),
+            selectors,
+            config.no_prompt_templates,
+        )
+    } else {
+        (fallback_project_dir, Vec::new(), false)
+    };
+    let expanded = expand_prompt_template_args(
+        args,
+        project_dir,
+        config::global_prompts_dir().as_deref(),
+        &selectors,
+        disabled,
+    )?;
+    Ok(expanded.join(" "))
+}
+
+fn slash_prompt_args(prompt: &str) -> Option<Vec<String>> {
+    let prompt = prompt.trim_start();
+    let (candidate, _) = split_first_prompt_token(prompt)?;
+    if !candidate.starts_with('/') || candidate.len() == 1 {
+        return None;
+    }
+    Some(prompt.split_whitespace().map(str::to_owned).collect())
 }
 
 fn split_first_prompt_token(prompt: &str) -> Option<(&str, &str)> {
@@ -1195,8 +1263,8 @@ fn write_clipboard_command(program: &str, args: &[&str], text: &str) -> Result<(
     )
 }
 
-fn local_command_specs() -> Vec<CommandSpec> {
-    [
+fn command_specs(project_dir: &Path) -> (Vec<CommandSpec>, Option<String>) {
+    let mut commands = vec![
         CommandSpec::new("sessions", "Open sessions", Some("Browse local sessions")),
         CommandSpec::new("models", "Open models", Some("Switch active model")),
         CommandSpec::new(
@@ -1225,8 +1293,22 @@ fn local_command_specs() -> Vec<CommandSpec> {
             Some("Remove transcript selection"),
         ),
         CommandSpec::new("submit", "Submit prompt", Some("Submit the current prompt")),
-    ]
-    .into()
+    ];
+    let mut templates = match load_project_prompt_templates(project_dir) {
+        Ok(templates) => templates,
+        Err(error) => return (commands, Some(error.to_string())),
+    };
+    templates.sort_by(|left, right| left.name.cmp(&right.name));
+    commands.extend(templates.into_iter().map(|template| {
+        let label = format!("/{}", template.name);
+        let description = (!template.description.is_empty()).then_some(template.description);
+        CommandSpec::new(
+            format!("prompt-template.{}", template.name),
+            label,
+            description,
+        )
+    }));
+    (commands, None)
 }
 
 pub trait TerminalEvents {
@@ -2629,6 +2711,82 @@ mod tests {
                 .map(|overlay| &overlay.kind),
             Some(OverlayKind::ModelPicker(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn command_palette_inserts_project_prompt_template_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prompts_dir = temp.path().join(".neo/prompts");
+        fs::create_dir_all(&prompts_dir).expect("create prompts");
+        fs::write(
+            prompts_dir.join("review.md"),
+            "---\ndescription: Review a target\nargument-hint: <path>\n---\nReview $1.\n",
+        )
+        .expect("write review prompt");
+
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let mut controller =
+            InteractiveController::new("neo", "test-session", "openai/gpt-4.1", move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("record request")
+                        .push(request);
+                    Ok(Vec::<AgentEvent>::new())
+                }
+            });
+        controller.completion_root = temp.path().to_path_buf();
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::CommandPaletteOpen))
+            .await
+            .expect("command palette opens");
+        for _ in 0..32 {
+            let selected = controller
+                .app()
+                .selected_command()
+                .expect("selected command");
+            if selected.id == "prompt-template.review" {
+                break;
+            }
+            controller
+                .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+                .await
+                .expect("move to review command");
+        }
+        assert_eq!(
+            controller
+                .app()
+                .selected_command()
+                .expect("review command")
+                .id,
+            "prompt-template.review"
+        );
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+            .await
+            .expect("prompt template command inserts invocation");
+
+        assert_eq!(controller.app().prompt().text, "/review ");
+        assert_eq!(controller.app().prompt().cursor, 8);
+        assert!(controller.app().focused_overlay().is_none());
+
+        controller.type_text("src/lib.rs");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("prompt template command submits");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("prompt template turn completes");
+
+        let requests = requests.lock().expect("recorded requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].prompt, vec!["Review src/lib.rs.".to_owned()]);
     }
 
     #[tokio::test]

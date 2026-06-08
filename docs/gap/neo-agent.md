@@ -108,6 +108,7 @@
   the resolved `ModelRegistry`; selecting a model updates the TUI header and
   uses that provider/model for subsequent turns. `ctrl+p` opens a local
   command palette that executes implemented local actions for sessions, models,
+  project `.neo/prompts/*.md` slash prompt-template invocation insertion,
   active-session HTML export to `sessions_dir/<session_id>.html`, prompt copy,
   transcript selection/copy, and prompt submit. Transcript
   item-range selection starts with Ctrl-Space, extends with Shift-Up/Down or

@@ -74,8 +74,9 @@ Target: `crates/tui`.
   transcript selection is active.
 - The live interactive loop opens a local command palette with Ctrl-P. The
   palette uses `CommandPaletteState` for filtering/paging and executes real
-  local actions for sessions, models, active-session HTML export, prompt copy,
-  transcript selection/copy, and prompt submit.
+  local actions for sessions, models, project slash prompt-template invocation
+  insertion, active-session HTML export, prompt copy, transcript selection/copy,
+  and prompt submit.
 
 ## Remaining lower-priority gaps
 
