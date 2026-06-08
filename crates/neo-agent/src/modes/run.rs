@@ -73,11 +73,25 @@ fn write_json_line(output: &mut String, value: &Value) -> anyhow::Result<()> {
 
 #[derive(Debug, Default)]
 struct StableJsonState {
-    assistant_text: String,
+    assistant_content: Vec<AssistantContentState>,
+    active_text_index: Option<usize>,
+    active_thinking_index: Option<usize>,
     assistant_message_id: Option<String>,
     assistant_stop_reason: Option<neo_agent_core::StopReason>,
     messages: Vec<Value>,
     tool_results: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AssistantContentState {
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: String,
+        signature: Option<String>,
+        redacted: bool,
+    },
 }
 
 impl StableJsonState {
@@ -98,33 +112,15 @@ impl StableJsonState {
                 "type": "turn_start",
                 "turn": turn,
             })),
-            AgentEvent::MessageStarted { turn, id } => {
-                self.assistant_text.clear();
-                self.assistant_message_id = Some(id.clone());
-                self.assistant_stop_reason = None;
-                Some(json!({
-                    "type": "message_start",
-                    "turn": turn,
-                    "message": self.assistant_message(),
-                }))
-            }
-            AgentEvent::TextDelta { turn, text } => {
-                self.assistant_text.push_str(text);
-                Some(json!({
-                    "type": "message_update",
-                    "turn": turn,
-                    "message": self.assistant_message(),
-                    "assistantMessageEvent": {
-                        "type": "text_delta",
-                        "contentIndex": 0,
-                        "delta": text,
-                        "partial": {
-                            "type": "text",
-                            "text": self.assistant_text,
-                        },
-                    },
-                }))
-            }
+            AgentEvent::MessageStarted { turn, id } => Some(self.map_message_started(*turn, id)),
+            AgentEvent::ThinkingStarted { turn, id: _ } => Some(self.map_thinking_started(*turn)),
+            AgentEvent::ThinkingDelta { turn, text } => Some(self.map_thinking_delta(*turn, text)),
+            AgentEvent::ThinkingFinished {
+                turn,
+                signature,
+                redacted,
+            } => Some(self.map_thinking_finished(*turn, signature.as_ref(), *redacted)),
+            AgentEvent::TextDelta { turn, text } => Some(self.map_text_delta(*turn, text)),
             AgentEvent::MessageFinished {
                 turn,
                 id: _,
@@ -234,14 +230,200 @@ impl StableJsonState {
         }
     }
 
+    fn map_message_started(&mut self, turn: u32, id: &str) -> Value {
+        self.assistant_content.clear();
+        self.active_text_index = None;
+        self.active_thinking_index = None;
+        self.assistant_message_id = Some(id.to_owned());
+        self.assistant_stop_reason = None;
+        json!({
+            "type": "message_start",
+            "turn": turn,
+            "message": self.assistant_message(),
+        })
+    }
+
+    fn map_thinking_started(&mut self, turn: u32) -> Value {
+        let content_index = self.push_thinking_content();
+        json!({
+            "type": "message_update",
+            "turn": turn,
+            "message": self.assistant_message(),
+            "assistantMessageEvent": {
+                "type": "thinking_start",
+                "contentIndex": content_index,
+                "partial": self.content_part(content_index),
+            },
+        })
+    }
+
+    fn map_thinking_delta(&mut self, turn: u32, text: &str) -> Value {
+        let content_index = self.ensure_active_thinking_content();
+        if let Some(AssistantContentState::Thinking { thinking, .. }) =
+            self.assistant_content.get_mut(content_index)
+        {
+            thinking.push_str(text);
+        }
+        json!({
+            "type": "message_update",
+            "turn": turn,
+            "message": self.assistant_message(),
+            "assistantMessageEvent": {
+                "type": "thinking_delta",
+                "contentIndex": content_index,
+                "delta": text,
+                "partial": self.content_part(content_index),
+            },
+        })
+    }
+
+    fn map_thinking_finished(
+        &mut self,
+        turn: u32,
+        signature: Option<&String>,
+        redacted: bool,
+    ) -> Value {
+        let content_index = self.ensure_active_thinking_content();
+        if let Some(AssistantContentState::Thinking {
+            signature: state_signature,
+            redacted: state_redacted,
+            ..
+        }) = self.assistant_content.get_mut(content_index)
+        {
+            *state_signature = signature.cloned();
+            *state_redacted = redacted;
+        }
+        let content = self
+            .assistant_content
+            .get(content_index)
+            .and_then(AssistantContentState::thinking_text)
+            .unwrap_or_default();
+        let partial = self.content_part(content_index);
+        self.active_thinking_index = None;
+        json!({
+            "type": "message_update",
+            "turn": turn,
+            "message": self.assistant_message(),
+            "assistantMessageEvent": {
+                "type": "thinking_end",
+                "contentIndex": content_index,
+                "content": content,
+                "partial": partial,
+            },
+        })
+    }
+
+    fn map_text_delta(&mut self, turn: u32, text: &str) -> Value {
+        let content_index = self.ensure_active_text_content();
+        if let Some(AssistantContentState::Text { text: state_text }) =
+            self.assistant_content.get_mut(content_index)
+        {
+            state_text.push_str(text);
+        }
+        json!({
+            "type": "message_update",
+            "turn": turn,
+            "message": self.assistant_message(),
+            "assistantMessageEvent": {
+                "type": "text_delta",
+                "contentIndex": content_index,
+                "delta": text,
+                "partial": self.content_part(content_index),
+            },
+        })
+    }
+
     fn assistant_message(&self) -> Value {
         json!({
             "role": "assistant",
             "id": self.assistant_message_id,
-            "content": stable_text_content(&self.assistant_text),
+            "content": self.assistant_content(),
             "toolCalls": [],
             "stopReason": self.assistant_stop_reason.map(stable_stop_reason),
         })
+    }
+
+    fn assistant_content(&self) -> Vec<Value> {
+        self.assistant_content
+            .iter()
+            .map(AssistantContentState::to_json)
+            .collect()
+    }
+
+    fn content_part(&self, index: usize) -> Value {
+        self.assistant_content
+            .get(index)
+            .map_or(Value::Null, AssistantContentState::to_json)
+    }
+
+    fn push_thinking_content(&mut self) -> usize {
+        self.assistant_content
+            .push(AssistantContentState::Thinking {
+                thinking: String::new(),
+                signature: None,
+                redacted: false,
+            });
+        let index = self.assistant_content.len() - 1;
+        self.active_thinking_index = Some(index);
+        self.active_text_index = None;
+        index
+    }
+
+    fn ensure_active_thinking_content(&mut self) -> usize {
+        if let Some(index) = self.active_thinking_index
+            && matches!(
+                self.assistant_content.get(index),
+                Some(AssistantContentState::Thinking { .. })
+            )
+        {
+            return index;
+        }
+        self.push_thinking_content()
+    }
+
+    fn ensure_active_text_content(&mut self) -> usize {
+        if let Some(index) = self.active_text_index
+            && matches!(
+                self.assistant_content.get(index),
+                Some(AssistantContentState::Text { .. })
+            )
+        {
+            return index;
+        }
+        self.assistant_content.push(AssistantContentState::Text {
+            text: String::new(),
+        });
+        let index = self.assistant_content.len() - 1;
+        self.active_text_index = Some(index);
+        index
+    }
+}
+
+impl AssistantContentState {
+    fn to_json(&self) -> Value {
+        match self {
+            Self::Text { text } => json!({
+                "type": "text",
+                "text": text,
+            }),
+            Self::Thinking {
+                thinking,
+                signature,
+                redacted,
+            } => json!({
+                "type": "thinking",
+                "thinking": thinking,
+                "thinkingSignature": signature,
+                "redacted": redacted,
+            }),
+        }
+    }
+
+    fn thinking_text(&self) -> Option<String> {
+        match self {
+            Self::Thinking { thinking, .. } => Some(thinking.clone()),
+            Self::Text { .. } => None,
+        }
     }
 }
 
@@ -294,6 +476,16 @@ fn stable_content(content: &[Content]) -> Vec<Value> {
                 "type": "text",
                 "text": text,
             }),
+            Content::Thinking {
+                text,
+                signature,
+                redacted,
+            } => json!({
+                "type": "thinking",
+                "thinking": text,
+                "thinkingSignature": signature,
+                "redacted": redacted,
+            }),
             Content::Image { mime_type, data } => json!({
                 "type": "image",
                 "mimeType": mime_type,
@@ -301,17 +493,6 @@ fn stable_content(content: &[Content]) -> Vec<Value> {
             }),
         })
         .collect()
-}
-
-fn stable_text_content(text: &str) -> Vec<Value> {
-    if text.is_empty() {
-        Vec::new()
-    } else {
-        vec![json!({
-            "type": "text",
-            "text": text,
-        })]
-    }
 }
 
 fn stable_stop_reason(stop_reason: neo_agent_core::StopReason) -> &'static str {

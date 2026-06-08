@@ -36,6 +36,9 @@ test client.
 Provider adapters should translate their native streams into:
 
 - `MessageStart`
+- `ThinkingStart`
+- `ThinkingDelta`
+- `ThinkingEnd`
 - `TextDelta`
 - `ToolCallStart`
 - `ToolCallArgsDelta`
@@ -98,7 +101,10 @@ does not implement image generation.
 
 OpenAI reasoning controls use the typed `RequestOptions::reasoning_effort`
 field. OpenAI Responses sends `reasoning: { effort, summary: "auto" }` and
-requests `reasoning.encrypted_content` in `include`; OpenAI-compatible Chat
+maps streamed reasoning-summary events into local thinking events. Neo does
+not request `reasoning.encrypted_content` yet because encrypted reasoning
+items must be persisted and replayed as provider-native Responses input items
+to provide real multi-turn reasoning continuity. OpenAI-compatible Chat
 Completions sends the flat `reasoning_effort` string. Neo intentionally does
 not translate this one field into Anthropic or Google thinking payloads yet:
 those APIs need provider-native budget, level, display, and off-state contracts

@@ -528,6 +528,7 @@ fn estimate_content_chars(content: &[Content]) -> usize {
         .iter()
         .map(|part| match part {
             Content::Text { text } => text.len(),
+            Content::Thinking { .. } => 0,
             Content::Image { .. } => 4800,
         })
         .sum()

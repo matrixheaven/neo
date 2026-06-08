@@ -204,6 +204,53 @@ fn app_shell_reduces_agent_core_streaming_message_and_turn_events() {
 }
 
 #[test]
+fn app_shell_reduces_agent_core_thinking_events_without_polluting_answer_text() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        turn: 1,
+        id: "assistant-1".to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
+        turn: 1,
+        id: "thinking-1".to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "Checked ".to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "the plan.".to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ThinkingFinished {
+        turn: 1,
+        signature: None,
+        redacted: false,
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "Final answer".to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::TurnFinished {
+        turn: 1,
+        stop_reason: neo_agent_core::StopReason::EndTurn,
+    });
+
+    assert_eq!(app.mode(), AppMode::Editing);
+    assert!(matches!(
+        &app.transcript().items()[0],
+        neo_tui::TranscriptItem::Assistant { content } if content == "Final answer"
+    ));
+    assert!(matches!(
+        &app.transcript().items()[1],
+        neo_tui::TranscriptItem::Notice { content }
+            if content.contains("Thinking")
+                && content.contains("Checked the plan.")
+    ));
+}
+
+#[test]
 fn app_shell_records_submissions_and_streaming_updates() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
 

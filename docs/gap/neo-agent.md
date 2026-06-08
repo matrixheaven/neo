@@ -56,8 +56,11 @@
   MCP servers with `transport = "stdio"`, `transport = "http"`, or
   `transport = "sse"` and register their tools in the runtime tool registry.
 - `run --output json` and top-level `--mode json run ...` emit stable typed
-  JSONL with a session header and Pi-style lifecycle event names while leaving
-  the default `run` internal event stream unchanged for existing scripts.
+  JSONL with a session header, Pi-style lifecycle event names, and assistant
+  thinking start/delta/end content events when the provider streams reasoning
+  summaries. The default `run` output remains the internal `AgentEvent` JSONL
+  stream for existing scripts, with additive event variants as runtime
+  capabilities grow.
 - RPC mode supports `get_state`, `prompt`, JSONL-backed `get_messages`, and
   local `sessions.list` / `sessions.tree` metadata payloads; state reports real
   project/session counts and omits unsupported streaming state.

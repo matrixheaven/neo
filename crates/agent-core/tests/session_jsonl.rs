@@ -1,7 +1,9 @@
 use neo_agent_core::session::{
     JsonlSessionReader, JsonlSessionWriter, SessionCompactionOptions, compact_jsonl_session,
 };
-use neo_agent_core::{AgentContext, AgentEvent, AgentMessage, CompactionSummary, StopReason};
+use neo_agent_core::{
+    AgentContext, AgentEvent, AgentMessage, CompactionSummary, Content, StopReason,
+};
 use serde_json::json;
 
 #[tokio::test]
@@ -297,4 +299,44 @@ async fn jsonl_session_compaction_appends_algorithmic_summary_and_replays_kept_c
         &[AgentMessage::user_text("Keep the final request")]
     );
     assert_eq!(context.compaction_summary(), Some(&result.summary));
+}
+
+#[tokio::test]
+async fn jsonl_session_compaction_keeps_unsent_thinking_out_of_estimates() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let mut writer = JsonlSessionWriter::create(&path)
+        .await
+        .expect("create session");
+
+    for event in [
+        AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                [
+                    Content::thinking("x".repeat(4_000), None, false),
+                    Content::text("short answer"),
+                ],
+                Vec::new(),
+                StopReason::EndTurn,
+            ),
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("keep this tiny follow-up"),
+        },
+    ] {
+        writer.append(&event).await.expect("append event");
+    }
+    writer.flush().await.expect("flush");
+
+    let result = compact_jsonl_session(
+        &path,
+        SessionCompactionOptions {
+            keep_recent_messages: 1,
+        },
+    )
+    .await
+    .expect("compact session");
+
+    assert_eq!(result.compacted_message_count, 1);
+    assert_eq!(result.summary.tokens_before, 9);
 }

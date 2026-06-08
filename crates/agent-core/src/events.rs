@@ -48,6 +48,19 @@ pub enum AgentEvent {
         turn: u32,
         text: String,
     },
+    ThinkingStarted {
+        turn: u32,
+        id: String,
+    },
+    ThinkingDelta {
+        turn: u32,
+        text: String,
+    },
+    ThinkingFinished {
+        turn: u32,
+        signature: Option<String>,
+        redacted: bool,
+    },
     ToolCallStarted {
         turn: u32,
         id: String,

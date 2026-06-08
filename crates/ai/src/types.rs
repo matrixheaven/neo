@@ -223,6 +223,16 @@ pub enum AiStreamEvent {
     MessageStart {
         id: String,
     },
+    ThinkingStart {
+        id: String,
+    },
+    ThinkingDelta {
+        text: String,
+    },
+    ThinkingEnd {
+        signature: Option<String>,
+        redacted: bool,
+    },
     TextDelta {
         text: String,
     },

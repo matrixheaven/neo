@@ -536,6 +536,157 @@ fn run_output_json_emits_stable_typed_events_from_mock_provider() {
 }
 
 #[test]
+fn run_output_json_emits_thinking_content_events_from_mock_provider() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_thinking_response_sse(
+        "resp-thinking-json",
+        "thinking_1",
+        &["Checked ", "the plan."],
+        "final answer",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["run", "--output", "json", "stream", "thinking"]);
+
+    let stdout = run(command);
+
+    let values = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("line should be json"))
+        .collect::<Vec<_>>();
+    let updates = values
+        .iter()
+        .filter(|value| value["type"] == "message_update")
+        .collect::<Vec<_>>();
+    assert!(updates.len() >= 4, "stdout was:\n{stdout}");
+    assert_eq!(
+        updates[0]["assistantMessageEvent"]["type"],
+        "thinking_start"
+    );
+    assert_eq!(updates[0]["assistantMessageEvent"]["contentIndex"], 0);
+    assert_eq!(updates[0]["message"]["content"][0]["type"], "thinking");
+    assert_eq!(
+        updates[1]["assistantMessageEvent"]["type"],
+        "thinking_delta"
+    );
+    assert_eq!(updates[1]["assistantMessageEvent"]["contentIndex"], 0);
+    assert_eq!(updates[1]["assistantMessageEvent"]["delta"], "Checked ");
+    assert_eq!(
+        updates[2]["assistantMessageEvent"]["type"],
+        "thinking_delta"
+    );
+    assert_eq!(updates[2]["assistantMessageEvent"]["delta"], "the plan.");
+    assert_eq!(updates[3]["assistantMessageEvent"]["type"], "thinking_end");
+    assert_eq!(
+        updates[3]["assistantMessageEvent"]["content"],
+        "Checked the plan."
+    );
+    let text_update = updates
+        .iter()
+        .find(|value| value["assistantMessageEvent"]["type"] == "text_delta")
+        .expect("text delta update");
+    assert_eq!(text_update["assistantMessageEvent"]["contentIndex"], 1);
+    assert_eq!(
+        text_update["assistantMessageEvent"]["delta"],
+        "final answer"
+    );
+    assert_eq!(text_update["message"]["content"][0]["type"], "thinking");
+    assert_eq!(
+        text_update["message"]["content"][0]["thinking"],
+        "Checked the plan."
+    );
+    assert_eq!(text_update["message"]["content"][1]["type"], "text");
+    assert_eq!(text_update["message"]["content"][1]["text"], "final answer");
+    assert!(!stdout.contains("fake response"));
+    assert!(!stdout.contains("placeholder"));
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["content"], "stream thinking");
+}
+
+#[test]
+fn run_output_json_preserves_multiple_thinking_content_indexes() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_multi_thinking_response_sse(
+        "resp-multi-thinking-json",
+        "final",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["run", "--output", "json", "stream", "multi", "thinking"]);
+
+    let stdout = run(command);
+
+    let values = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("line should be json"))
+        .collect::<Vec<_>>();
+    let updates = values
+        .iter()
+        .filter(|value| value["type"] == "message_update")
+        .collect::<Vec<_>>();
+    let event_indexes = updates
+        .iter()
+        .map(|value| {
+            (
+                value["assistantMessageEvent"]["type"]
+                    .as_str()
+                    .expect("event type"),
+                value["assistantMessageEvent"]["contentIndex"]
+                    .as_u64()
+                    .expect("content index"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        event_indexes,
+        vec![
+            ("text_delta", 0),
+            ("thinking_start", 1),
+            ("thinking_delta", 1),
+            ("thinking_end", 1),
+            ("thinking_start", 2),
+            ("thinking_delta", 2),
+            ("thinking_end", 2),
+            ("text_delta", 3),
+        ]
+    );
+    let final_update = updates.last().expect("last update");
+    assert_eq!(final_update["message"]["content"][0]["type"], "text");
+    assert_eq!(final_update["message"]["content"][0]["text"], "intro ");
+    assert_eq!(final_update["message"]["content"][1]["type"], "thinking");
+    assert_eq!(
+        final_update["message"]["content"][1]["thinking"],
+        "first thought"
+    );
+    assert_eq!(final_update["message"]["content"][2]["type"], "thinking");
+    assert_eq!(
+        final_update["message"]["content"][2]["thinking"],
+        "second thought"
+    );
+    assert_eq!(final_update["message"]["content"][3]["type"], "text");
+    assert_eq!(final_update["message"]["content"][3]["text"], "final");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "stream multi thinking"
+    );
+}
+
+#[test]
 fn run_mode_json_emits_stable_typed_events_without_output_flag() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-mode-json", "mode json")]);
@@ -662,6 +813,99 @@ fn openai_response_sse(id: &str, text: &str) -> String {
     sse_response(&[
         json!({ "type": "response.created", "response": { "id": id } }),
         json!({ "type": "response.output_text.delta", "delta": text }),
+        json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "usage": { "input_tokens": 7, "output_tokens": 3 }
+            }
+        }),
+    ])
+}
+
+fn openai_thinking_response_sse(
+    id: &str,
+    thinking_id: &str,
+    deltas: &[&str],
+    text: &str,
+) -> String {
+    let mut events = vec![
+        json!({ "type": "response.created", "response": { "id": id } }),
+        json!({
+            "type": "response.reasoning_summary_part.added",
+            "item_id": thinking_id,
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "" }
+        }),
+    ];
+    for delta in deltas {
+        events.push(json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": thinking_id,
+            "summary_index": 0,
+            "delta": delta
+        }));
+    }
+    events.extend([
+        json!({
+            "type": "response.reasoning_summary_part.done",
+            "item_id": thinking_id,
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": deltas.join("") }
+        }),
+        json!({ "type": "response.output_text.delta", "delta": text }),
+        json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "usage": { "input_tokens": 7, "output_tokens": 3 }
+            }
+        }),
+    ]);
+    sse_response(&events)
+}
+
+fn openai_multi_thinking_response_sse(id: &str, final_text: &str) -> String {
+    sse_response(&[
+        json!({ "type": "response.created", "response": { "id": id } }),
+        json!({ "type": "response.output_text.delta", "delta": "intro " }),
+        json!({
+            "type": "response.reasoning_summary_part.added",
+            "item_id": "thinking-1",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "thinking-1",
+            "summary_index": 0,
+            "delta": "first thought"
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.done",
+            "item_id": "thinking-1",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "first thought" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.added",
+            "item_id": "thinking-2",
+            "summary_index": 1,
+            "part": { "type": "summary_text", "text": "" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "thinking-2",
+            "summary_index": 1,
+            "delta": "second thought"
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.done",
+            "item_id": "thinking-2",
+            "summary_index": 1,
+            "part": { "type": "summary_text", "text": "second thought" }
+        }),
+        json!({ "type": "response.output_text.delta", "delta": final_text }),
         json!({
             "type": "response.completed",
             "response": {

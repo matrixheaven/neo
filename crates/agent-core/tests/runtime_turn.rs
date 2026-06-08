@@ -1,9 +1,9 @@
 use futures::StreamExt;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentRuntimeError,
-    AgentToolCall, ApprovalRequest, Content, PermissionDecision, PermissionOperation,
-    PermissionPolicy, QueueMode, StopReason, Tool, ToolContext, ToolError, ToolExecutionMode,
-    ToolFuture, ToolRegistry, ToolResult, harness::FakeHarness,
+    AgentToolCall, ApprovalRequest, CompactionSettings, Content, PermissionDecision,
+    PermissionOperation, PermissionPolicy, QueueMode, StopReason, Tool, ToolContext, ToolError,
+    ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult, harness::FakeHarness,
 };
 use neo_ai::{
     AiError, AiStreamEvent, ApiKind, ChatRequest, ModelCapabilities, ModelClient, ModelSpec,
@@ -326,6 +326,255 @@ async fn runtime_passes_reasoning_effort_into_chat_request_options() {
     assert_eq!(
         harness.requests()[0].options.reasoning_effort,
         Some(ReasoningEffort::Low)
+    );
+}
+
+#[tokio::test]
+async fn runtime_streams_thinking_events_and_persists_thinking_content() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::MessageStart {
+            id: "msg_thinking".to_owned(),
+        },
+        AiStreamEvent::ThinkingStart {
+            id: "thinking_1".to_owned(),
+        },
+        AiStreamEvent::ThinkingDelta {
+            text: "Checked ".to_owned(),
+        },
+        AiStreamEvent::ThinkingDelta {
+            text: "the plan.".to_owned(),
+        },
+        AiStreamEvent::ThinkingEnd {
+            signature: Some("sig-1".to_owned()),
+            redacted: false,
+        },
+        AiStreamEvent::TextDelta {
+            text: "final answer".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("think"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert!(events.contains(&AgentEvent::ThinkingStarted {
+        turn: 1,
+        id: "thinking_1".to_owned(),
+    }));
+    assert!(events.contains(&AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "Checked ".to_owned(),
+    }));
+    assert!(events.contains(&AgentEvent::ThinkingDelta {
+        turn: 1,
+        text: "the plan.".to_owned(),
+    }));
+    assert!(events.contains(&AgentEvent::ThinkingFinished {
+        turn: 1,
+        signature: Some("sig-1".to_owned()),
+        redacted: false,
+    }));
+    assert_eq!(
+        context.messages()[1],
+        AgentMessage::assistant(
+            [
+                Content::thinking("Checked the plan.", Some("sig-1".to_owned()), false),
+                Content::text("final answer"),
+            ],
+            Vec::new(),
+            StopReason::EndTurn,
+        )
+    );
+}
+
+#[tokio::test]
+async fn runtime_preserves_multiple_thinking_parts_and_text_order() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::MessageStart {
+            id: "msg_multi_thinking".to_owned(),
+        },
+        AiStreamEvent::TextDelta {
+            text: "intro ".to_owned(),
+        },
+        AiStreamEvent::ThinkingStart {
+            id: "thinking_1".to_owned(),
+        },
+        AiStreamEvent::ThinkingDelta {
+            text: "first thought".to_owned(),
+        },
+        AiStreamEvent::ThinkingEnd {
+            signature: Some("sig-1".to_owned()),
+            redacted: false,
+        },
+        AiStreamEvent::ThinkingStart {
+            id: "thinking_2".to_owned(),
+        },
+        AiStreamEvent::ThinkingDelta {
+            text: "second thought".to_owned(),
+        },
+        AiStreamEvent::ThinkingEnd {
+            signature: Some("sig-2".to_owned()),
+            redacted: true,
+        },
+        AiStreamEvent::TextDelta {
+            text: "outro".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
+    let mut context = AgentContext::new();
+
+    runtime
+        .run_turn(&mut context, AgentMessage::user_text("think twice"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert_eq!(
+        context.messages()[1],
+        AgentMessage::assistant(
+            [
+                Content::text("intro "),
+                Content::thinking("first thought", Some("sig-1".to_owned()), false),
+                Content::thinking("second thought", Some("sig-2".to_owned()), true),
+                Content::text("outro"),
+            ],
+            Vec::new(),
+            StopReason::EndTurn,
+        )
+    );
+}
+
+#[tokio::test]
+async fn runtime_does_not_send_persisted_thinking_content_back_to_model() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_thinking".to_owned(),
+            },
+            AiStreamEvent::ThinkingStart {
+                id: "thinking_1".to_owned(),
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "local reasoning summary".to_owned(),
+            },
+            AiStreamEvent::ThinkingEnd {
+                signature: Some("sig-1".to_owned()),
+                redacted: false,
+            },
+            AiStreamEvent::TextDelta {
+                text: "answer".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_followup".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "followup".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
+    let mut context = AgentContext::new();
+
+    runtime
+        .run_turn(&mut context, AgentMessage::user_text("think"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("first turn should succeed");
+    runtime
+        .run_turn(&mut context, AgentMessage::user_text("continue"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("second turn should succeed");
+
+    let requests = harness.requests();
+    assert_eq!(requests.len(), 2);
+    let assistant_message = requests[1]
+        .messages
+        .iter()
+        .find(|message| matches!(message, neo_ai::ChatMessage::Assistant { .. }))
+        .expect("previous assistant message should be sent");
+    assert_eq!(
+        assistant_message,
+        &neo_ai::ChatMessage::Assistant {
+            content: vec![neo_ai::ContentPart::Text {
+                text: "answer".to_owned(),
+            }],
+            tool_calls: Vec::new(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn runtime_compaction_estimate_ignores_unsent_thinking_content() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::MessageStart {
+            id: "msg_after_thinking".to_owned(),
+        },
+        AiStreamEvent::TextDelta {
+            text: "kept".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model()).with_compaction(CompactionSettings::new(32, 1)),
+        harness.client(),
+    );
+    let mut context = AgentContext::new();
+    context.append_message(AgentMessage::assistant(
+        [
+            Content::thinking("x".repeat(4_000), None, false),
+            Content::text("short text"),
+        ],
+        Vec::new(),
+        StopReason::EndTurn,
+    ));
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("next"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::CompactionApplied { .. })),
+        "thinking content is not sent back to the provider and should not trigger compaction"
     );
 }
 

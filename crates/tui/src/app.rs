@@ -25,6 +25,7 @@ pub struct NeoTuiApp {
     focused_overlay: Option<OverlayId>,
     active_assistant_id: Option<String>,
     active_assistant_buffer: String,
+    active_thinking_buffer: String,
     active_tools: Vec<ActiveTool>,
     completed_tool_result_ids: Vec<String>,
 }
@@ -50,6 +51,7 @@ impl NeoTuiApp {
             focused_overlay: None,
             active_assistant_id: None,
             active_assistant_buffer: String::new(),
+            active_thinking_buffer: String::new(),
             active_tools: Vec::new(),
             completed_tool_result_ids: Vec::new(),
         }
@@ -138,6 +140,7 @@ impl NeoTuiApp {
         self.prompt = PromptState::default();
         self.active_assistant_id = None;
         self.active_assistant_buffer.clear();
+        self.active_thinking_buffer.clear();
         self.active_tools.clear();
         self.completed_tool_result_ids.clear();
 
@@ -206,6 +209,7 @@ impl NeoTuiApp {
             StreamUpdate::AssistantStarted { id } => {
                 self.active_assistant_id = Some(id);
                 self.active_assistant_buffer.clear();
+                self.active_thinking_buffer.clear();
                 self.transcript.push(TranscriptItem::assistant(""));
                 self.mode = AppMode::Streaming;
             }
@@ -259,6 +263,22 @@ impl NeoTuiApp {
             StreamUpdate::Notice { text } => {
                 self.transcript.push(TranscriptItem::notice(text));
             }
+            StreamUpdate::ThinkingStarted => {
+                self.active_thinking_buffer.clear();
+                self.mode = AppMode::Streaming;
+            }
+            StreamUpdate::ThinkingDelta { text } => {
+                self.active_thinking_buffer.push_str(&text);
+            }
+            StreamUpdate::ThinkingFinished => {
+                if !self.active_thinking_buffer.is_empty() {
+                    self.transcript.push(TranscriptItem::notice(format!(
+                        "Thinking: {}",
+                        self.active_thinking_buffer
+                    )));
+                }
+                self.active_thinking_buffer.clear();
+            }
             StreamUpdate::Error { text } => {
                 self.transcript
                     .push(TranscriptItem::notice(format!("Error: {text}")));
@@ -267,6 +287,7 @@ impl NeoTuiApp {
             StreamUpdate::TurnFinished => {
                 self.active_assistant_id = None;
                 self.active_assistant_buffer.clear();
+                self.active_thinking_buffer.clear();
                 self.active_tools.clear();
                 self.mode = self.overlay_mode();
             }
@@ -278,6 +299,9 @@ impl NeoTuiApp {
         match event {
             AgentEvent::MessageStarted { .. }
             | AgentEvent::TextDelta { .. }
+            | AgentEvent::ThinkingStarted { .. }
+            | AgentEvent::ThinkingDelta { .. }
+            | AgentEvent::ThinkingFinished { .. }
             | AgentEvent::ToolCallStarted { .. }
             | AgentEvent::ToolCallArgumentsDelta { .. }
             | AgentEvent::ToolCallFinished { .. } => self.apply_model_stream_event(event),
@@ -328,6 +352,15 @@ impl NeoTuiApp {
             }
             AgentEvent::TextDelta { text, .. } => {
                 self.apply_stream_update(StreamUpdate::TextDelta { text });
+            }
+            AgentEvent::ThinkingStarted { .. } => {
+                self.apply_stream_update(StreamUpdate::ThinkingStarted);
+            }
+            AgentEvent::ThinkingDelta { text, .. } => {
+                self.apply_stream_update(StreamUpdate::ThinkingDelta { text });
+            }
+            AgentEvent::ThinkingFinished { .. } => {
+                self.apply_stream_update(StreamUpdate::ThinkingFinished);
             }
             AgentEvent::ToolCallStarted { id, name, .. } => {
                 self.apply_stream_update(StreamUpdate::ToolStarted {
@@ -790,6 +823,11 @@ pub enum StreamUpdate {
     Notice {
         text: String,
     },
+    ThinkingStarted,
+    ThinkingDelta {
+        text: String,
+    },
+    ThinkingFinished,
     Error {
         text: String,
     },

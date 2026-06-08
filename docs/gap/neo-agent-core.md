@@ -12,6 +12,10 @@
   `MessageFinished`, `TurnStarted`, `TurnFinished`, and `RunFinished`, so
   consumers can distinguish streamed provider message boundaries from whole-run
   completion without inferring from transcript records.
+- Runtime model-stream events also include `ThinkingStarted`,
+  `ThinkingDelta`, and `ThinkingFinished`, so provider-neutral reasoning
+  summaries can be persisted as assistant thinking content without mixing into
+  ordinary assistant text.
 - `AgentRuntime::run_turn_with_cancel` accepts a `CancellationToken` and can
   stop an in-flight model stream promptly, emitting cancelled message, turn,
   and run barriers while updating replayable runtime cancellation state.

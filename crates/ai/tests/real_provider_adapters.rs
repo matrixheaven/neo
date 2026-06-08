@@ -253,7 +253,7 @@ async fn openai_responses_client_posts_responses_payload_and_streams_events() {
 }
 
 #[tokio::test]
-async fn openai_responses_client_serializes_reasoning_effort_when_requested() {
+async fn openai_responses_client_serializes_reasoning_effort_without_encrypted_handoff() {
     let server = MockServer::start(vec![sse_response(&[
         json!({ "type": "response.created", "response": { "id": "resp-reasoning" } }),
         json!({
@@ -276,7 +276,508 @@ async fn openai_responses_client_serializes_reasoning_effort_when_requested() {
     let sent = server.requests().pop().unwrap();
     assert_eq!(sent.body["reasoning"]["effort"], "high");
     assert_eq!(sent.body["reasoning"]["summary"], "auto");
-    assert_eq!(sent.body["include"], json!(["reasoning.encrypted_content"]));
+    assert!(
+        sent.body.get("include").is_none(),
+        "Neo must not request encrypted reasoning continuity until it can persist and replay it"
+    );
+}
+
+#[tokio::test]
+async fn openai_responses_client_streams_reasoning_summary_events() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-thinking" } }),
+        json!({
+            "type": "response.reasoning_summary_part.added",
+            "item_id": "rs_1",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "summary_index": 0,
+            "delta": "Checked "
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "summary_index": 0,
+            "delta": "the plan."
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.done",
+            "item_id": "rs_1",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "Checked the plan." }
+        }),
+        json!({ "type": "response.output_text.delta", "delta": "final" }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::OpenAiResponses))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "resp-thinking".to_owned()
+            },
+            AiStreamEvent::ThinkingStart {
+                id: "rs_1:summary:0".to_owned()
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "Checked ".to_owned()
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "the plan.".to_owned()
+            },
+            AiStreamEvent::ThinkingEnd {
+                signature: None,
+                redacted: false,
+            },
+            AiStreamEvent::TextDelta {
+                text: "final".to_owned()
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn openai_responses_client_streams_reasoning_summary_text_done_without_deltas() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-thinking-done" } }),
+        json!({
+            "type": "response.reasoning_summary_part.added",
+            "item_id": "rs_done",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.done",
+            "item_id": "rs_done",
+            "summary_index": 0,
+            "text": "Read the inputs."
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.done",
+            "item_id": "rs_done",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "Read the inputs." }
+        }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::OpenAiResponses))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "resp-thinking-done".to_owned()
+            },
+            AiStreamEvent::ThinkingStart {
+                id: "rs_done:summary:0".to_owned()
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "Read the inputs.".to_owned()
+            },
+            AiStreamEvent::ThinkingEnd {
+                signature: None,
+                redacted: false,
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn openai_responses_client_serializes_interleaved_reasoning_summaries_by_start_order() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-interleaved-thinking" } }),
+        json!({
+            "type": "response.reasoning_summary_part.added",
+            "item_id": "rs_1",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "summary_index": 0,
+            "delta": "First "
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.added",
+            "item_id": "rs_2",
+            "summary_index": 1,
+            "part": { "type": "summary_text", "text": "" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_2",
+            "summary_index": 1,
+            "delta": "Second"
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "summary_index": 0,
+            "delta": "thought."
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.done",
+            "item_id": "rs_2",
+            "summary_index": 1,
+            "text": "Second thought."
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.done",
+            "item_id": "rs_2",
+            "summary_index": 1,
+            "part": { "type": "summary_text", "text": "Second thought." }
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.done",
+            "item_id": "rs_1",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "First thought." }
+        }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::OpenAiResponses))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "resp-interleaved-thinking".to_owned()
+            },
+            AiStreamEvent::ThinkingStart {
+                id: "rs_1:summary:0".to_owned()
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "First ".to_owned()
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "thought.".to_owned()
+            },
+            AiStreamEvent::ThinkingEnd {
+                signature: None,
+                redacted: false,
+            },
+            AiStreamEvent::ThinkingStart {
+                id: "rs_2:summary:1".to_owned()
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "Second thought.".to_owned()
+            },
+            AiStreamEvent::ThinkingEnd {
+                signature: None,
+                redacted: false,
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn openai_responses_client_keeps_reasoning_summaries_with_shared_item_id_separate() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-shared-thinking-item" } }),
+        json!({
+            "type": "response.reasoning_summary_part.added",
+            "item_id": "rs_item",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_item",
+            "summary_index": 0,
+            "delta": "First"
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.added",
+            "item_id": "rs_item",
+            "summary_index": 1,
+            "part": { "type": "summary_text", "text": "" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_item",
+            "summary_index": 1,
+            "delta": "Second"
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.done",
+            "item_id": "rs_item",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "First" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.done",
+            "item_id": "rs_item",
+            "summary_index": 1,
+            "text": "Second"
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.done",
+            "item_id": "rs_item",
+            "summary_index": 1,
+            "part": { "type": "summary_text", "text": "Second" }
+        }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::OpenAiResponses))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "resp-shared-thinking-item".to_owned()
+            },
+            AiStreamEvent::ThinkingStart {
+                id: "rs_item:summary:0".to_owned()
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "First".to_owned()
+            },
+            AiStreamEvent::ThinkingEnd {
+                signature: None,
+                redacted: false,
+            },
+            AiStreamEvent::ThinkingStart {
+                id: "rs_item:summary:1".to_owned()
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "Second".to_owned()
+            },
+            AiStreamEvent::ThinkingEnd {
+                signature: None,
+                redacted: false,
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn openai_responses_client_keeps_reasoning_summaries_with_shared_output_item_indexes_separate()
+ {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-shared-output-index" } }),
+        json!({
+            "type": "response.reasoning_summary_part.added",
+            "output_index": 0,
+            "item_id": "rs_item",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "output_index": 0,
+            "item_id": "rs_item",
+            "summary_index": 0,
+            "delta": "Output zero"
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.added",
+            "output_index": 1,
+            "item_id": "rs_item",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "output_index": 1,
+            "item_id": "rs_item",
+            "summary_index": 0,
+            "delta": "Output one"
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.done",
+            "output_index": 0,
+            "item_id": "rs_item",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "Output zero" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.done",
+            "output_index": 1,
+            "item_id": "rs_item",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "Output one" }
+        }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::OpenAiResponses))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "resp-shared-output-index".to_owned()
+            },
+            AiStreamEvent::ThinkingStart {
+                id: "rs_item:output:0:summary:0".to_owned()
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "Output zero".to_owned()
+            },
+            AiStreamEvent::ThinkingEnd {
+                signature: None,
+                redacted: false,
+            },
+            AiStreamEvent::ThinkingStart {
+                id: "rs_item:output:1:summary:0".to_owned()
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "Output one".to_owned()
+            },
+            AiStreamEvent::ThinkingEnd {
+                signature: None,
+                redacted: false,
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn openai_responses_client_keeps_streamed_summary_when_done_text_is_non_prefix() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-thinking-correction" } }),
+        json!({
+            "type": "response.reasoning_summary_part.added",
+            "item_id": "rs_corrected",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_corrected",
+            "summary_index": 0,
+            "delta": "streamed summary"
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.done",
+            "item_id": "rs_corrected",
+            "summary_index": 0,
+            "text": "corrected summary"
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.done",
+            "item_id": "rs_corrected",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "corrected summary" }
+        }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::OpenAiResponses))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "resp-thinking-correction".to_owned()
+            },
+            AiStreamEvent::ThinkingStart {
+                id: "rs_corrected:summary:0".to_owned()
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "streamed summary".to_owned()
+            },
+            AiStreamEvent::ThinkingEnd {
+                signature: None,
+                redacted: false,
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        "Neo's provider-neutral thinking stream is append-only; final text corrections need a future replacement event contract"
+    );
 }
 
 #[tokio::test]

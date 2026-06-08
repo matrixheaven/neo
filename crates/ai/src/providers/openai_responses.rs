@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use futures::{StreamExt, future, stream};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
@@ -169,7 +169,6 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
             "effort": reasoning_effort.as_str(),
             "summary": "auto",
         });
-        body["include"] = json!(["reasoning.encrypted_content"]);
     }
     if !request.options.metadata.is_empty() {
         body["metadata"] = json!(request.options.metadata.as_map());
@@ -437,10 +436,22 @@ struct ParseState {
     started: bool,
     tool_args: BTreeMap<String, String>,
     item_call_ids: BTreeMap<String, String>,
+    thinking_parts: BTreeMap<String, ThinkingPart>,
+    thinking_order: VecDeque<String>,
+    active_thinking_id: Option<String>,
     last_stop_reason: StopReason,
     usage: Option<TokenUsage>,
     terminal: bool,
     finished: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ThinkingPart {
+    text: String,
+    // Byte offset into `text`; it is only assigned from `String::len()` after
+    // whole-string appends, so slicing at this boundary is valid UTF-8.
+    emitted_len: usize,
+    done: bool,
 }
 
 impl Default for ParseState {
@@ -450,6 +461,9 @@ impl Default for ParseState {
             started: false,
             tool_args: BTreeMap::new(),
             item_call_ids: BTreeMap::new(),
+            thinking_parts: BTreeMap::new(),
+            thinking_order: VecDeque::new(),
+            active_thinking_id: None,
             last_stop_reason: StopReason::EndTurn,
             usage: None,
             terminal: false,
@@ -480,6 +494,10 @@ impl ParseState {
                     });
                 }
             }
+            Some("response.reasoning_summary_part.added") => self.ingest_thinking_started(value),
+            Some("response.reasoning_summary_text.delta") => self.ingest_thinking_delta(value),
+            Some("response.reasoning_summary_text.done") => self.ingest_thinking_text_done(value),
+            Some("response.reasoning_summary_part.done") => self.ingest_thinking_done(value),
             Some("response.output_item.added") => self.ingest_item_added(value),
             Some("response.function_call_arguments.delta") => self.ingest_tool_delta(value),
             Some("response.completed") => {
@@ -540,6 +558,66 @@ impl ParseState {
         }
     }
 
+    fn ingest_thinking_started(&mut self, value: &Value) {
+        self.ensure_started("response".to_owned());
+        let id = thinking_id(value);
+        self.ensure_thinking_part(id);
+        self.flush_thinking_ready();
+    }
+
+    fn ingest_thinking_delta(&mut self, value: &Value) {
+        self.ensure_started("response".to_owned());
+        let id = thinking_id(value);
+        self.ensure_thinking_part(id.clone());
+        if let Some(delta) = value.get("delta").and_then(Value::as_str)
+            && !delta.is_empty()
+        {
+            self.thinking_parts
+                .get_mut(&id)
+                .expect("thinking part should exist")
+                .text
+                .push_str(delta);
+        }
+        self.flush_thinking_ready();
+    }
+
+    fn ingest_thinking_text_done(&mut self, value: &Value) {
+        self.ensure_started("response".to_owned());
+        let id = thinking_id(value);
+        self.ensure_thinking_part(id.clone());
+        let Some(text) = value.get("text").and_then(Value::as_str) else {
+            self.flush_thinking_ready();
+            return;
+        };
+        let part = self
+            .thinking_parts
+            .get_mut(&id)
+            .expect("thinking part should exist");
+        merge_final_thinking_text(part, text);
+        self.flush_thinking_ready();
+    }
+
+    fn ingest_thinking_done(&mut self, value: &Value) {
+        let id = thinking_id(value);
+        self.ensure_thinking_part(id.clone());
+        if let Some(text) = value
+            .get("part")
+            .and_then(|part| part.get("text"))
+            .and_then(Value::as_str)
+        {
+            let part = self
+                .thinking_parts
+                .get_mut(&id)
+                .expect("thinking part should exist");
+            merge_final_thinking_text(part, text);
+        }
+        self.thinking_parts
+            .get_mut(&id)
+            .expect("thinking part should exist")
+            .done = true;
+        self.flush_thinking_ready();
+    }
+
     fn ingest_tool_delta(&mut self, value: &Value) {
         let item_id = value
             .get("item_id")
@@ -578,6 +656,11 @@ impl ParseState {
         }
         self.finished = true;
 
+        for part in self.thinking_parts.values_mut() {
+            part.done = true;
+        }
+        self.flush_thinking_ready();
+
         for (id, arguments) in &self.tool_args {
             let parsed = serde_json::from_str(arguments)
                 .map_err(|err| ProviderError::Stream(format!("invalid tool arguments: {err}")))?;
@@ -595,6 +678,76 @@ impl ParseState {
         }
 
         Ok(self.drain_events())
+    }
+
+    fn ensure_thinking_part(&mut self, id: String) {
+        if self.thinking_parts.contains_key(&id) {
+            return;
+        }
+        self.thinking_order.push_back(id.clone());
+        self.thinking_parts.insert(id, ThinkingPart::default());
+    }
+
+    fn flush_thinking_ready(&mut self) {
+        while let Some(id) = self.thinking_order.front().cloned() {
+            if self.active_thinking_id.as_deref() != Some(id.as_str()) {
+                if self.active_thinking_id.is_some() {
+                    return;
+                }
+                self.events
+                    .push(AiStreamEvent::ThinkingStart { id: id.clone() });
+                self.active_thinking_id = Some(id.clone());
+            }
+
+            let mut is_done = false;
+            if let Some(part) = self.thinking_parts.get_mut(&id) {
+                if part.emitted_len < part.text.len() {
+                    let delta = part.text[part.emitted_len..].to_owned();
+                    part.emitted_len = part.text.len();
+                    if !delta.is_empty() {
+                        self.events
+                            .push(AiStreamEvent::ThinkingDelta { text: delta });
+                    }
+                }
+                is_done = part.done;
+            }
+
+            if !is_done {
+                return;
+            }
+
+            self.events.push(AiStreamEvent::ThinkingEnd {
+                signature: None,
+                redacted: false,
+            });
+            self.active_thinking_id = None;
+            self.thinking_parts.remove(&id);
+            self.thinking_order.pop_front();
+        }
+    }
+}
+
+fn thinking_id(value: &Value) -> String {
+    let item_id = value
+        .get("item_id")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("id").and_then(Value::as_str))
+        .unwrap_or("reasoning-summary");
+    let Some(summary_index) = value.get("summary_index").and_then(Value::as_u64) else {
+        return item_id.to_owned();
+    };
+    if let Some(output_index) = value.get("output_index").and_then(Value::as_u64) {
+        format!("{item_id}:output:{output_index}:summary:{summary_index}")
+    } else {
+        format!("{item_id}:summary:{summary_index}")
+    }
+}
+
+fn merge_final_thinking_text(part: &mut ThinkingPart, text: &str) {
+    if let Some(delta) = text.strip_prefix(&part.text) {
+        part.text.push_str(delta);
+    } else if part.emitted_len == 0 {
+        text.clone_into(&mut part.text);
     }
 }
 

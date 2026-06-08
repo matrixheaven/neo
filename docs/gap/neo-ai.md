@@ -8,8 +8,8 @@
   define the model-facing request shape.
 - `RequestOptions` carries temperature, max tokens, typed reasoning effort,
   headers, timeout, retries, cache retention, session id, and metadata.
-- `AiStreamEvent` normalizes provider streams into message, text, tool-call,
-  completion, and error events.
+- `AiStreamEvent` normalizes provider streams into message, OpenAI Responses
+  reasoning-summary thinking, text, tool-call, completion, and error events.
 - `ModelClient::stream_chat` is the provider adapter trait.
 - `ModelRegistry` stores configured models, a first-registered default, strict
   local JSON catalog loading for existing `ModelSpec` shapes, and a
@@ -26,7 +26,9 @@
   supported user-message image forms and explicit preflight rejection for
   unsupported image URL formats. OpenAI Responses and OpenAI-compatible Chat
   Completions also serialize typed `reasoning_effort` options into their
-  provider-native payload shapes.
+  provider-native payload shapes; OpenAI Responses also maps streamed
+  reasoning-summary SSE events into provider-neutral thinking start/delta/end
+  events.
 - `schema_for<T>()` and `ToolSpec::from_schema<T>()` generate JSON Schema from
   Rust input types.
 - `providers::fake::FakeModelClient` supports tests.
@@ -53,7 +55,10 @@ unsupported surface area until the Rust contracts exist.
 - Keep provider credentials environment-only for now; auth-file and OAuth
   flows are future work.
 - Add Anthropic and Google thinking controls only after Neo has explicit budget,
-  level, display/off-state contracts and provider-specific tests.
+  level, display/off-state contracts and provider-specific tests. OpenAI
+  Responses reasoning summaries are streamed as local thinking events, but
+  provider-native encrypted reasoning handoff and non-OpenAI thinking formats
+  remain future work.
 - Keep request metadata internal-facing. Do not expose provider-native chunk
   formats to `neo-agent-core`.
 

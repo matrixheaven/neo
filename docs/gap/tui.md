@@ -40,6 +40,8 @@ Target: `crates/tui`.
   Approve/deny choices are sent back through `AgentConfig::with_async_approval_handler`,
   and Ctrl-C cancels the active turn, drains cooperative cancelled barriers,
   and only falls back to abort when the runtime task does not finish.
+- Streamed assistant thinking events from `neo-agent-core` are reduced into a
+  visible TUI notice while final assistant text remains a separate answer item.
 - Prompt Tab completion is backed by the real project filesystem. `neo-tui`
   exposes prompt completion prefix/replacement primitives plus a completion
   picker overlay, and `neo-agent` reads matching files/directories from
