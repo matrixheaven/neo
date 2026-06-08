@@ -1693,6 +1693,62 @@ MCP_METHOD_LOG = "{}"
 }
 
 #[test]
+fn mcp_resources_watch_respects_count_before_unsubscribe() {
+    let temp = TempDir::new().expect("tempdir");
+    let fixture = temp.path().join("mcp-resource-update.py");
+    let method_log = temp.path().join("mcp-methods.log");
+    fs::write(&fixture, MCP_STDIO_RESOURCE_UPDATE_FIXTURE).expect("write MCP fixture");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        format!(
+            r#"
+[[mcp.servers]]
+id = "docs-server"
+enabled = true
+transport = "stdio"
+command = "python3"
+args = ["-u", "{}"]
+
+[mcp.servers.env]
+MCP_METHOD_LOG = "{}"
+MCP_RESOURCE_UPDATE_COUNT = "2"
+"#,
+            fixture.display(),
+            method_log.display()
+        ),
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).args([
+        "mcp",
+        "resources",
+        "docs-server",
+        "watch",
+        "file://docs/readme.md",
+        "--count",
+        "2",
+    ]);
+    let stdout = run(command);
+
+    assert_eq!(
+        stdout,
+        "file://docs/readme.md\nfile://docs/readme.md?version=2\n"
+    );
+    let methods = fs::read_to_string(method_log).expect("read method log");
+    assert_eq!(
+        methods.lines().collect::<Vec<_>>(),
+        vec![
+            "initialize",
+            "notifications/initialized",
+            "resources/subscribe",
+            "resources/unsubscribe"
+        ]
+    );
+}
+
+#[test]
 fn mcp_resources_watch_receives_remote_sse_resource_update() {
     let temp = TempDir::new().expect("tempdir");
     let mcp_server = MockSseServer::start(vec![
@@ -1957,6 +2013,7 @@ import os
 import sys
 
 method_log = os.environ["MCP_METHOD_LOG"]
+update_count = int(os.environ.get("MCP_RESOURCE_UPDATE_COUNT", "1"))
 
 def log_method(method):
     with open(method_log, "a", encoding="utf-8") as log:
@@ -1982,12 +2039,14 @@ for line in sys.stdin:
         assert request["params"]["uri"] == "file://docs/readme.md"
         response = {"jsonrpc": "2.0", "id": request["id"], "result": {}}
         print(json.dumps(response), flush=True)
-        notification = {
-            "jsonrpc": "2.0",
-            "method": "notifications/resources/updated",
-            "params": {"uri": "file://docs/readme.md"},
-        }
-        print(json.dumps(notification), flush=True)
+        for index in range(update_count):
+            uri = "file://docs/readme.md" if index == 0 else f"file://docs/readme.md?version={index + 1}"
+            notification = {
+                "jsonrpc": "2.0",
+                "method": "notifications/resources/updated",
+                "params": {"uri": uri},
+            }
+            print(json.dumps(notification), flush=True)
         continue
     elif method == "resources/unsubscribe":
         assert request["params"]["uri"] == "file://docs/readme.md"
