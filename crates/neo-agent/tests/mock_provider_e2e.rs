@@ -3,7 +3,7 @@ use std::{
     fmt::Write as _,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    process::Command,
+    process::{Command, Stdio},
     sync::{Arc, Mutex},
 };
 
@@ -67,6 +67,29 @@ fn run(mut command: Command) -> String {
     String::from_utf8(output.stdout).expect("stdout should be utf8")
 }
 
+fn run_with_stdin(mut command: Command, stdin: &str) -> String {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("neo command should spawn");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin should be piped")
+        .write_all(stdin.as_bytes())
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("neo command should run");
+    assert!(
+        output.status.success(),
+        "command failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("stdout should be utf8")
+}
+
 #[test]
 fn print_uses_production_openai_responses_adapter_against_mock_provider() {
     let temp = TempDir::new().expect("tempdir");
@@ -105,6 +128,30 @@ fn print_uses_production_openai_responses_adapter_against_mock_provider() {
     assert!(content.contains("hello from mock"));
     assert!(!content.contains("fake response"));
     assert!(!content.contains("placeholder"));
+}
+
+#[test]
+fn print_merges_piped_stdin_with_cli_prompt() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-stdin", "merged")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "summarize"]);
+
+    let stdout = run_with_stdin(command, "stdin context\nsecond line\n");
+
+    assert_eq!(stdout, "merged\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "stdin context\nsecond line\nsummarize"
+    );
 }
 
 #[test]
@@ -181,6 +228,30 @@ reasoning_effort = "high"
     assert_eq!(requests[0].body["temperature"], 0.25);
     assert_eq!(requests[0].body["max_output_tokens"], 321);
     assert_eq!(requests[0].body["reasoning"]["effort"], "high");
+}
+
+#[test]
+fn run_merges_piped_stdin_with_cli_prompt() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-run-stdin", "jsonl merged")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["run", "continue"]);
+
+    let stdout = run_with_stdin(command, "piped task\n");
+
+    assert!(stdout.contains("\"TextDelta\":{\"turn\":1,\"text\":\"jsonl merged\"}"));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "piped task\ncontinue"
+    );
 }
 
 #[test]

@@ -23,6 +23,12 @@ configured model through the production provider registry. The built-in CLI
 default is `openai/gpt-4.1`, so a missing `OPENAI_API_KEY` is reported as a
 configuration error instead of returning a synthetic response.
 
+`print` and `run` also merge piped stdin with the CLI prompt:
+
+```bash
+printf 'diff context\n' | cargo run -p neo-agent -- print "summarize this"
+```
+
 Inspect the current project config view:
 
 ```bash

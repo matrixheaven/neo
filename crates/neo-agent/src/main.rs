@@ -6,7 +6,10 @@ mod rpc_mode;
 mod session_commands;
 mod skill_commands;
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::{self, IsTerminal as _, Read as _},
+    path::{Path, PathBuf},
+};
 
 use clap::Parser;
 
@@ -33,8 +36,14 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
     let config = AppConfig::load(ConfigOverrides::from_cli(&cli))?;
 
     match cli.command {
-        Some(Command::Print { prompt }) => modes::print::execute(&prompt, &config).await,
-        Some(Command::Run { prompt }) => modes::run::execute(&prompt, &config).await,
+        Some(Command::Print { prompt }) => {
+            let prompt = prompt_with_piped_stdin(prompt)?;
+            modes::print::execute(&prompt, &config).await
+        }
+        Some(Command::Run { prompt }) => {
+            let prompt = prompt_with_piped_stdin(prompt)?;
+            modes::run::execute(&prompt, &config).await
+        }
         Some(Command::Resume { session_id }) => modes::run::resume(&session_id, &config).await,
         Some(Command::Sessions { command }) => match command {
             SessionCommand::List => session_commands::list(&config),
@@ -87,6 +96,26 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
             .await?
             .unwrap_or_default()),
     }
+}
+
+fn prompt_with_piped_stdin(prompt: Vec<String>) -> anyhow::Result<Vec<String>> {
+    let mut stdin = io::stdin();
+    if stdin.is_terminal() {
+        return Ok(prompt);
+    }
+
+    let mut piped = String::new();
+    stdin.read_to_string(&mut piped)?;
+    if !piped.is_empty() {
+        let piped = piped.trim_end_matches(['\r', '\n']).to_owned();
+        if !piped.is_empty() {
+            if prompt.is_empty() {
+                return Ok(vec![piped]);
+            }
+            return Ok(vec![format!("{piped}\n{}", prompt.join(" "))]);
+        }
+    }
+    Ok(prompt)
 }
 
 async fn dispatch_extensions(
