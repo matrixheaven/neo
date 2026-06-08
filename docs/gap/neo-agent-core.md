@@ -73,7 +73,9 @@
   operations backed by child processes and shell process-group cleanup.
 - `session::JsonlSessionWriter`, `session::JsonlSessionReader`, and
   `session::replay_messages` persist and replay `AgentEvent::MessageAppended`
-  history.
+  history. JSONL schema metadata is validated when present: event-only legacy
+  files still replay, current v1 metadata is skipped, and future metadata
+  schema versions fail closed instead of being silently ignored.
 - `session::compact_jsonl_session` appends real
   `AgentEvent::CompactionApplied` records using deterministic extractive
   transcript summarization, and `replay_context` applies those records so active
@@ -104,5 +106,5 @@ or hosted lifecycle behavior.
   background support is intentionally compact start/poll/stop process
   management.
 - Decide whether JSONL event persistence remains the durable session format or
-  becomes a compatibility layer over a richer store with schema versions,
-  hosted shares, and branch-level summary metadata.
+  becomes a compatibility layer over a richer store with hosted shares and
+  richer branch-level summary metadata.

@@ -27,6 +27,10 @@ pub enum SessionError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("unsupported session metadata schema version {0}")]
+    UnsupportedMetadataSchemaVersion(u32),
+    #[error("unsupported session metadata format {0:?}")]
+    UnsupportedMetadataFormat(String),
     #[error("invalid session id {0:?}")]
     InvalidId(String),
     #[error("session {0:?} does not exist")]
@@ -117,10 +121,7 @@ impl JsonlSessionReader {
             if line.trim().is_empty() {
                 continue;
             }
-            if is_session_metadata_line(&line).map_err(|source| SessionError::Json {
-                line: line_number,
-                source,
-            })? {
+            if read_session_metadata_line(&line, line_number)? {
                 continue;
             }
             let event = serde_json::from_str(&line).map_err(|source| SessionError::Json {
@@ -146,12 +147,35 @@ impl JsonlSessionReader {
     }
 }
 
-fn is_session_metadata_line(line: &str) -> Result<bool, serde_json::Error> {
-    let value = serde_json::from_str::<serde_json::Value>(line)?;
-    Ok(value
+fn read_session_metadata_line(line: &str, line_number: usize) -> Result<bool, SessionError> {
+    let value =
+        serde_json::from_str::<serde_json::Value>(line).map_err(|source| SessionError::Json {
+            line: line_number,
+            source,
+        })?;
+    let is_metadata = value
         .get("kind")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|kind| kind == SESSION_METADATA_KIND))
+        .is_some_and(|kind| kind == SESSION_METADATA_KIND);
+    if !is_metadata {
+        return Ok(false);
+    }
+
+    let metadata = serde_json::from_value::<SessionSchemaMetadata>(value).map_err(|source| {
+        SessionError::Json {
+            line: line_number,
+            source,
+        }
+    })?;
+    if metadata.format != SESSION_FORMAT_NAME {
+        return Err(SessionError::UnsupportedMetadataFormat(metadata.format));
+    }
+    if metadata.schema_version != SESSION_SCHEMA_VERSION {
+        return Err(SessionError::UnsupportedMetadataSchemaVersion(
+            metadata.schema_version,
+        ));
+    }
+    Ok(true)
 }
 
 fn current_unix_timestamp() -> String {

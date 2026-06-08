@@ -131,6 +131,70 @@ async fn jsonl_session_replays_existing_event_only_files() {
 }
 
 #[tokio::test]
+async fn jsonl_session_rejects_future_metadata_schema_version_before_events() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("future-schema.jsonl");
+    let event = AgentEvent::MessageAppended {
+        message: AgentMessage::user_text("must not replay"),
+    };
+    write_jsonl_lines(
+        &path,
+        [
+            json!({
+                "kind": "session_metadata",
+                "format": "neo.session.jsonl",
+                "schema_version": 999,
+                "created_at": "1.000000000Z",
+            }),
+            serde_json::to_value(&event).expect("event json"),
+        ],
+    );
+
+    let err = JsonlSessionReader::read_all(&path)
+        .await
+        .expect_err("future metadata schema version should fail closed");
+    let message = err.to_string();
+    assert!(
+        message.contains("unsupported session metadata schema version 999"),
+        "unexpected error: {message}"
+    );
+}
+
+#[tokio::test]
+async fn jsonl_session_rejects_future_metadata_schema_version_among_events() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("future-schema-midstream.jsonl");
+    let first_event = AgentEvent::MessageAppended {
+        message: AgentMessage::user_text("before metadata"),
+    };
+    let second_event = AgentEvent::MessageAppended {
+        message: AgentMessage::user_text("after metadata"),
+    };
+    write_jsonl_lines(
+        &path,
+        [
+            serde_json::to_value(&first_event).expect("first event json"),
+            json!({
+                "kind": "session_metadata",
+                "format": "neo.session.jsonl",
+                "schema_version": 999,
+                "created_at": "1.000000000Z",
+            }),
+            serde_json::to_value(&second_event).expect("second event json"),
+        ],
+    );
+
+    let err = JsonlSessionReader::read_all(&path)
+        .await
+        .expect_err("future metadata schema version should fail closed");
+    let message = err.to_string();
+    assert!(
+        message.contains("unsupported session metadata schema version 999"),
+        "unexpected error: {message}"
+    );
+}
+
+#[tokio::test]
 async fn jsonl_session_replays_runtime_context_with_turns_and_terminal_state() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("session.jsonl");
@@ -178,6 +242,15 @@ async fn jsonl_session_replays_runtime_context_with_turns_and_terminal_state() {
 
     let events = JsonlSessionReader::read_all(&path).await.expect("read all");
     assert_eq!(AgentContext::from_replay(events.iter()), context);
+}
+
+fn write_jsonl_lines(path: &std::path::Path, lines: impl IntoIterator<Item = serde_json::Value>) {
+    let content = lines
+        .into_iter()
+        .map(|value| serde_json::to_string(&value).expect("serialize jsonl line"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(path, format!("{content}\n")).expect("write jsonl session");
 }
 
 #[tokio::test]
