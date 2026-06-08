@@ -8,6 +8,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputEvent {
     Insert(char),
+    Paste(String),
     Key(KeyId),
     Action(KeybindingAction),
     Backspace,
@@ -27,6 +28,7 @@ impl InputEvent {
     #[must_use]
     pub fn from_crossterm_event(event: &Event) -> Option<Self> {
         match event {
+            Event::Paste(text) => Some(Self::Paste(text.clone())),
             Event::Key(key_event) => Self::from_key_event(*key_event),
             Event::Resize(columns, rows) => Some(Self::Resize {
                 columns: *columns,
@@ -42,6 +44,7 @@ impl InputEvent {
         keybindings: &KeybindingsManager,
     ) -> Option<Self> {
         match event {
+            Event::Paste(text) => Some(Self::Paste(text.clone())),
             Event::Key(key_event) => Self::from_key_event_with_keybindings(*key_event, keybindings),
             Event::Resize(columns, rows) => Some(Self::Resize {
                 columns: *columns,
@@ -97,6 +100,147 @@ impl InputEvent {
         Some(Self::Key(key))
     }
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct InputParser {
+    keybindings: Option<KeybindingsManager>,
+    paste_buffer: Option<String>,
+    pending_escape: String,
+}
+
+impl InputParser {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            keybindings: None,
+            paste_buffer: None,
+            pending_escape: String::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_keybindings(keybindings: KeybindingsManager) -> Self {
+        Self {
+            keybindings: Some(keybindings),
+            paste_buffer: None,
+            pending_escape: String::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn feed_crossterm_event(&mut self, event: &Event) -> Vec<InputEvent> {
+        match event {
+            Event::Paste(text) => vec![InputEvent::Paste(text.clone())],
+            Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                self.feed_key_event(*key_event)
+            }
+            Event::Resize(columns, rows) => vec![InputEvent::Resize {
+                columns: *columns,
+                rows: *rows,
+            }],
+            _ => Vec::new(),
+        }
+    }
+
+    fn feed_key_event(&mut self, event: KeyEvent) -> Vec<InputEvent> {
+        if let Some(output) = self.feed_pending_escape(event) {
+            return output;
+        }
+
+        if let Some(paste_buffer) = &mut self.paste_buffer {
+            match event.code {
+                KeyCode::Char(character)
+                    if matches!(event.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) =>
+                {
+                    paste_buffer.push(character);
+                }
+                KeyCode::Enter => paste_buffer.push('\n'),
+                KeyCode::Tab => paste_buffer.push('\t'),
+                _ => {}
+            }
+            return Vec::new();
+        }
+
+        self.map_key_event(event).into_iter().collect()
+    }
+
+    fn feed_pending_escape(&mut self, event: KeyEvent) -> Option<Vec<InputEvent>> {
+        let Some(character) = raw_sequence_character(event) else {
+            return self.flush_pending_escape();
+        };
+
+        if self.pending_escape.is_empty() && character != '\x1b' {
+            return None;
+        }
+
+        self.pending_escape.push(character);
+
+        if self.pending_escape == BRACKETED_PASTE_START {
+            self.pending_escape.clear();
+            self.paste_buffer = Some(String::new());
+            return Some(Vec::new());
+        }
+        if self.pending_escape == BRACKETED_PASTE_END {
+            self.pending_escape.clear();
+            return Some(vec![InputEvent::Paste(
+                self.paste_buffer.take().unwrap_or_default(),
+            )]);
+        }
+        if BRACKETED_PASTE_START.starts_with(&self.pending_escape)
+            || BRACKETED_PASTE_END.starts_with(&self.pending_escape)
+        {
+            return Some(Vec::new());
+        }
+
+        self.flush_pending_escape()
+    }
+
+    fn flush_pending_escape(&mut self) -> Option<Vec<InputEvent>> {
+        if self.pending_escape.is_empty() {
+            return None;
+        }
+
+        let pending = std::mem::take(&mut self.pending_escape);
+        if let Some(paste_buffer) = &mut self.paste_buffer {
+            paste_buffer.push_str(&pending);
+            return Some(Vec::new());
+        }
+
+        Some(
+            pending
+                .chars()
+                .filter_map(|character| {
+                    self.map_key_event(KeyEvent::new_with_kind(
+                        KeyCode::Char(character),
+                        KeyModifiers::NONE,
+                        KeyEventKind::Press,
+                    ))
+                })
+                .collect(),
+        )
+    }
+
+    fn map_key_event(&self, event: KeyEvent) -> Option<InputEvent> {
+        self.keybindings.as_ref().map_or_else(
+            || InputEvent::from_key_event(event),
+            |keybindings| InputEvent::from_key_event_with_keybindings(event, keybindings),
+        )
+    }
+}
+
+fn raw_sequence_character(event: KeyEvent) -> Option<char> {
+    if event.modifiers != KeyModifiers::NONE {
+        return None;
+    }
+
+    match event.code {
+        KeyCode::Char(character) => Some(character),
+        _ => None,
+    }
+}
+
+const BRACKETED_PASTE_START: &str = "\x1b[200~";
+const BRACKETED_PASTE_END: &str = "\x1b[201~";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KeyId(String);

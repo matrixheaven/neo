@@ -45,10 +45,15 @@ Target: `crates/tui`.
   `AppConfig.project_dir`, auto-applies a longer common prefix, opens the
   picker for multiple exact-prefix matches, and preserves literal tab insertion
   when no filesystem completion exists.
+- The live interactive loop enables terminal bracketed paste mode and routes
+  both native crossterm paste events and raw bracketed-paste start/end
+  sequences through a buffered `InputParser`. Pasted multiline text is inserted
+  into the prompt without treating embedded newlines as submit; a subsequent
+  Enter still submits normally.
 
 ## Remaining lower-priority gaps
 
 - The Rust crate does not implement the full TypeScript terminal diff renderer,
-  image protocols, richer provider or command autocomplete, stdin buffering, or
-  OS/terminal clipboard integration.
+  image protocols, richer provider or command autocomplete, or OS/terminal
+  clipboard integration.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.

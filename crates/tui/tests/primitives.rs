@@ -1,6 +1,6 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use neo_tui::{
-    ApprovalChoice, ApprovalModal, ApprovalOption, ChatTranscript, InputEvent, KeyId,
+    ApprovalChoice, ApprovalModal, ApprovalOption, ChatTranscript, InputEvent, InputParser, KeyId,
     KeybindingAction, KeybindingsManager, NeoTuiApp, PromptEdit, PromptState, PromptWidget,
     SelectItem, SelectListState, StatusWidget, ToolStatus, ToolStatusKind, TranscriptItem,
     TranscriptView, TranscriptWidget, truncate_width, visible_width, wrap_width,
@@ -81,6 +81,286 @@ fn input_event_maps_terminal_resize_events() {
             rows: 30,
         })
     );
+}
+
+#[test]
+fn input_parser_maps_crossterm_paste_to_single_paste_event() {
+    let mut parser = InputParser::new();
+
+    assert_eq!(
+        parser.feed_crossterm_event(&Event::Paste("alpha\nbeta".to_owned())),
+        vec![InputEvent::Paste("alpha\nbeta".to_owned())]
+    );
+}
+
+#[test]
+fn input_parser_buffers_bracketed_paste_newlines_until_end_marker() {
+    let mut parser = InputParser::new();
+    let events = [
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('\x1b'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('['),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('2'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('0'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('0'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('~'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('b'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('\x1b'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('['),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('2'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('0'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('1'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('~'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+    ];
+
+    let parsed = events
+        .iter()
+        .flat_map(|event| parser.feed_crossterm_event(event))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        parsed,
+        vec![InputEvent::Paste("a\nb".to_owned()), InputEvent::Submit]
+    );
+}
+
+#[test]
+fn input_parser_preserves_shift_characters_inside_bracketed_paste() {
+    let mut parser = InputParser::new();
+    let events = [
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('\x1b'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('['),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('2'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('0'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('0'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('~'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('A'),
+            KeyModifiers::SHIFT,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('Z'),
+            KeyModifiers::SHIFT,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('\x1b'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('['),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('2'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('0'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('1'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('~'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+    ];
+
+    let parsed = events
+        .iter()
+        .flat_map(|event| parser.feed_crossterm_event(event))
+        .collect::<Vec<_>>();
+
+    assert_eq!(parsed, vec![InputEvent::Paste("AZ".to_owned())]);
+}
+
+#[test]
+fn input_parser_preserves_newline_after_non_marker_escape_inside_bracketed_paste() {
+    let mut parser = InputParser::new();
+    let events = [
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('\x1b'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('['),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('2'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('0'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('0'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('~'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('\x1b'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('\x1b'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('['),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('2'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('0'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('1'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('~'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )),
+    ];
+
+    let parsed = events
+        .iter()
+        .flat_map(|event| parser.feed_crossterm_event(event))
+        .collect::<Vec<_>>();
+
+    assert_eq!(parsed, vec![InputEvent::Paste("\x1bx\n".to_owned())]);
 }
 
 #[test]

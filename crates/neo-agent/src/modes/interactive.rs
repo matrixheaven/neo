@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs,
     future::{Future, Ready, ready},
     io::{IsTerminal as _, Stdout, stdout},
@@ -12,7 +12,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event, execute,
+    event::{self, DisableBracketedPaste, EnableBracketedPaste},
+    execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use neo_agent_core::{
@@ -20,8 +21,8 @@ use neo_agent_core::{
     session::{JsonlSessionReader, SessionMetadataStore},
 };
 use neo_tui::{
-    ApprovalChoice, ApprovalResult, InputEvent, KeyId, KeybindingAction, KeybindingsManager,
-    NeoTuiApp, PickerItem, PromptEdit,
+    ApprovalChoice, ApprovalResult, InputEvent, InputParser, KeyId, KeybindingAction,
+    KeybindingsManager, NeoTuiApp, PickerItem, PromptEdit,
 };
 use ratatui::{
     Terminal,
@@ -54,7 +55,7 @@ pub async fn execute_tty(config: &AppConfig) -> Result<Option<String>> {
     let mut terminal = RawTerminal::enter()?;
     let mut controller = controller_for_config(config);
     controller
-        .run_terminal_loop(|app| terminal.draw(app), CrosstermEvents)
+        .run_terminal_loop(|app| terminal.draw(app), CrosstermEvents::default())
         .await?;
     Ok(None)
 }
@@ -345,6 +346,9 @@ impl InteractiveController {
                 self.app
                     .prompt_mut()
                     .apply_edit(PromptEdit::Insert(&character.to_string()));
+            }
+            InputEvent::Paste(text) => {
+                self.app.prompt_mut().apply_edit(PromptEdit::Insert(&text));
             }
             InputEvent::Key(key) => return self.handle_keybinding_key(&key).await,
             InputEvent::Action(action) => return self.handle_keybinding_action(action).await,
@@ -910,7 +914,19 @@ pub trait TerminalEvents {
     }
 }
 
-struct CrosstermEvents;
+struct CrosstermEvents {
+    parser: InputParser,
+    pending: VecDeque<InputEvent>,
+}
+
+impl Default for CrosstermEvents {
+    fn default() -> Self {
+        Self {
+            parser: InputParser::with_keybindings(KeybindingsManager::default()),
+            pending: VecDeque::new(),
+        }
+    }
+}
 
 impl TerminalEvents for CrosstermEvents {
     fn next_input_event(&mut self) -> Result<InputEvent> {
@@ -922,12 +938,15 @@ impl TerminalEvents for CrosstermEvents {
     }
 
     fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
-        let keybindings = KeybindingsManager::default();
+        if let Some(input) = self.pending.pop_front() {
+            return Ok(Some(input));
+        }
+
         if event::poll(timeout)? {
             let event = event::read()?;
-            if let Some(input) =
-                InputEvent::from_crossterm_event_with_keybindings(&event, &keybindings)
-            {
+            self.pending
+                .extend(self.parser.feed_crossterm_event(&event));
+            if let Some(input) = self.pending.pop_front() {
                 return Ok(Some(input));
             }
         }
@@ -977,7 +996,7 @@ impl RawTerminal {
     fn enter() -> Result<Self> {
         let raw_mode = RawModeGuard::enable()?;
         let mut output = stdout();
-        execute!(output, EnterAlternateScreen)?;
+        execute!(output, EnterAlternateScreen, EnableBracketedPaste)?;
         let backend = CrosstermBackend::new(output);
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
@@ -993,7 +1012,11 @@ impl RawTerminal {
 
 impl Drop for RawTerminal {
     fn drop(&mut self) {
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         let _ = self.terminal.show_cursor();
         self.raw_mode.disable();
     }
@@ -1382,6 +1405,56 @@ mod tests {
                 .expect("final render")
                 .contains("hello from controller")
         );
+    }
+
+    #[tokio::test]
+    async fn event_loop_inserts_paste_newlines_without_submitting_until_enter() {
+        struct FakeEvents {
+            events: std::vec::IntoIter<InputEvent>,
+        }
+
+        impl TerminalEvents for FakeEvents {
+            fn next_input_event(&mut self) -> Result<InputEvent> {
+                self.events
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("expected test event"))
+            }
+        }
+
+        let mut rendered = Vec::new();
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |request| async move {
+                assert_eq!(request.prompt, vec!["alpha\nbeta".to_owned()]);
+                Ok(vec![AgentEvent::TurnFinished {
+                    turn: 1,
+                    stop_reason: StopReason::EndTurn,
+                }])
+            },
+        );
+
+        controller
+            .run_terminal_loop(
+                |app| {
+                    rendered.push(render_terminal_fallback(app));
+                    Ok(())
+                },
+                FakeEvents {
+                    events: vec![
+                        InputEvent::Paste("alpha\nbeta".to_owned()),
+                        InputEvent::Submit,
+                        InputEvent::Cancel,
+                    ]
+                    .into_iter(),
+                },
+            )
+            .await
+            .expect("event loop succeeds");
+
+        assert!(rendered.iter().any(|snapshot| snapshot.contains("alpha")));
+        assert!(rendered.iter().any(|snapshot| snapshot.contains("beta")));
     }
 
     #[tokio::test]
