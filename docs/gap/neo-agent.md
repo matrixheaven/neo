@@ -52,6 +52,9 @@
   project-relative `@file` text prompt arguments, then discover enabled project
   MCP servers with `transport = "stdio"`, `transport = "http"`, or
   `transport = "sse"` and register their tools in the runtime tool registry.
+- `run --output json` emits stable typed JSONL with a session header and
+  Pi-style lifecycle event names while leaving the default `run` internal
+  event stream unchanged for existing scripts.
 - RPC mode supports `get_state`, `prompt`, JSONL-backed `get_messages`, and
   local `sessions.list` / `sessions.tree` metadata payloads; state reports real
   project/session counts and omits unsupported streaming state.
@@ -86,6 +89,8 @@ and platform-specific guidance.
 - Keep quickstart scoped to currently wired commands until interactive mode has
   full controls beyond the current raw-terminal prompt/edit/approval/session/model
   slice.
+- Keep `run --output json` documented as Neo's explicit JSONL output mode until
+  top-level `--mode json` and the full Pi event family are backed by code.
 - Keep config docs scoped to project/global TOML layering until profile sync or
   hosted settings exist.
 - Do not document `/login`, `/tree`, hosted sharing, hosted extension

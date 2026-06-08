@@ -364,6 +364,67 @@ fn run_emits_jsonl_events_from_mock_provider_without_fake_output() {
 }
 
 #[test]
+fn run_output_json_emits_stable_typed_events_from_mock_provider() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-json", "json text")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["run", "--output", "json", "stream", "events"]);
+
+    let stdout = run(command);
+
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert!(lines.len() >= 7, "stdout was:\n{stdout}");
+    let values = lines
+        .iter()
+        .map(|line| serde_json::from_str::<Value>(line).expect("line should be json"))
+        .collect::<Vec<_>>();
+    assert_eq!(values[0]["type"], "session");
+    assert_eq!(values[0]["version"], 1);
+    let expected_cwd = temp.path().canonicalize().expect("canonical tempdir");
+    assert_eq!(values[0]["cwd"], expected_cwd.to_string_lossy().as_ref());
+    assert!(values[0]["id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(
+        values[0]["timestamp"]
+            .as_str()
+            .is_some_and(|timestamp| !timestamp.is_empty())
+    );
+
+    let event_types = values
+        .iter()
+        .filter_map(|value| value["type"].as_str())
+        .collect::<Vec<_>>();
+    assert!(event_types.contains(&"agent_start"));
+    assert!(event_types.contains(&"turn_start"));
+    assert!(event_types.contains(&"message_start"));
+    assert!(event_types.contains(&"message_update"));
+    assert!(event_types.contains(&"message_end"));
+    assert!(event_types.contains(&"turn_end"));
+    assert!(event_types.contains(&"agent_end"));
+    let update = values
+        .iter()
+        .find(|value| value["type"] == "message_update")
+        .expect("message_update event");
+    assert_eq!(update["assistantMessageEvent"]["type"], "text_delta");
+    assert_eq!(update["assistantMessageEvent"]["delta"], "json text");
+    assert_eq!(update["message"]["role"], "assistant");
+    assert!(update["message"]["content"][0]["text"].as_str().is_some());
+    assert!(!stdout.contains("TextDelta"));
+    assert!(!stdout.contains("MessageStarted"));
+    assert!(!stdout.contains("fake response"));
+    assert!(!stdout.contains("placeholder"));
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["content"], "stream events");
+}
+
+#[test]
 fn print_approve_allows_ask_file_write_tool_and_continues_agent_loop() {
     let temp = TempDir::new().expect("tempdir");
     std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");

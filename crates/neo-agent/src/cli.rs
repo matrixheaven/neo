@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "neo", version, about = "Rust-native coding agent")]
@@ -31,6 +31,8 @@ pub enum Command {
         prompt: Vec<String>,
     },
     Run {
+        #[arg(long, value_enum, default_value = "events")]
+        output: RunOutput,
         prompt: Vec<String>,
     },
     Resume {
@@ -61,6 +63,12 @@ pub enum Command {
         command: McpCommand,
     },
     Rpc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RunOutput {
+    Events,
+    Json,
 }
 
 #[derive(Debug, Subcommand)]

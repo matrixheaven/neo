@@ -36,6 +36,13 @@ turn is sent to the provider:
 cargo run -p neo-agent -- print @docs/context.txt "summarize this"
 ```
 
+`run --output json` emits a stable typed JSONL event stream with a session
+header and Pi-style lifecycle event names:
+
+```bash
+cargo run -p neo-agent -- run --output json "summarize this"
+```
+
 Inspect the current project config view:
 
 ```bash

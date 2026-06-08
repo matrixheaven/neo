@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
+use std::{collections::BTreeMap, fmt::Write as _, path::Path, sync::Arc};
 
 use anyhow::Context;
 use futures::StreamExt;
@@ -9,15 +9,25 @@ use neo_agent_core::{
     McpToolProvider, PermissionDecision, ToolRegistry,
 };
 use neo_ai::{ModelClient, ModelRegistry, ModelSpec, ProviderRegistry};
+use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
+    cli::RunOutput,
     config::{AppConfig, McpServerConfig, provider_api_base},
     session_commands,
 };
 
-pub async fn execute(prompt: &[String], config: &AppConfig) -> anyhow::Result<String> {
+pub async fn execute(
+    prompt: &[String],
+    config: &AppConfig,
+    output: RunOutput,
+) -> anyhow::Result<String> {
     let turn = run_prompt(prompt, config).await?;
+    if matches!(output, RunOutput::Json) {
+        return stable_json_output(&turn, config);
+    }
+
     let mut output = String::new();
     for event in turn.events {
         output.push_str(&serde_json::to_string(&event)?);
@@ -30,6 +40,295 @@ pub async fn resume(session_ref: &str, config: &AppConfig) -> anyhow::Result<Str
     let session_id = session_commands::resolve_session_id(session_ref, config)?;
     let transcript = session_commands::transcript(&session_id, config).await?;
     Ok(format!("session {session_id}\n{transcript}"))
+}
+
+fn stable_json_output(turn: &PromptTurn, config: &AppConfig) -> anyhow::Result<String> {
+    let mut output = String::new();
+    write_json_line(
+        &mut output,
+        &json!({
+            "type": "session",
+            "version": 1,
+            "id": turn.session_id,
+            "timestamp": current_unix_timestamp(),
+            "cwd": config.project_dir,
+        }),
+    )?;
+
+    let mut state = StableJsonState::default();
+    for event in &turn.events {
+        for value in state.map_event(event) {
+            write_json_line(&mut output, &value)?;
+        }
+    }
+    Ok(output)
+}
+
+fn write_json_line(output: &mut String, value: &Value) -> anyhow::Result<()> {
+    output.push_str(&serde_json::to_string(value)?);
+    output.push('\n');
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct StableJsonState {
+    assistant_text: String,
+    assistant_message_id: Option<String>,
+    assistant_stop_reason: Option<neo_agent_core::StopReason>,
+    messages: Vec<Value>,
+    tool_results: Vec<Value>,
+}
+
+impl StableJsonState {
+    fn map_event(&mut self, event: &AgentEvent) -> Vec<Value> {
+        if let Some(value) = self.map_lifecycle_event(event) {
+            return vec![value];
+        }
+        if let Some(value) = self.map_tool_execution_event(event) {
+            return vec![value];
+        }
+        self.map_other_event(event)
+    }
+
+    fn map_lifecycle_event(&mut self, event: &AgentEvent) -> Option<Value> {
+        match event {
+            AgentEvent::RunStarted { .. } => Some(json!({ "type": "agent_start" })),
+            AgentEvent::TurnStarted { turn } => Some(json!({
+                "type": "turn_start",
+                "turn": turn,
+            })),
+            AgentEvent::MessageStarted { turn, id } => {
+                self.assistant_text.clear();
+                self.assistant_message_id = Some(id.clone());
+                self.assistant_stop_reason = None;
+                Some(json!({
+                    "type": "message_start",
+                    "turn": turn,
+                    "message": self.assistant_message(),
+                }))
+            }
+            AgentEvent::TextDelta { turn, text } => {
+                self.assistant_text.push_str(text);
+                Some(json!({
+                    "type": "message_update",
+                    "turn": turn,
+                    "message": self.assistant_message(),
+                    "assistantMessageEvent": {
+                        "type": "text_delta",
+                        "contentIndex": 0,
+                        "delta": text,
+                        "partial": {
+                            "type": "text",
+                            "text": self.assistant_text,
+                        },
+                    },
+                }))
+            }
+            AgentEvent::MessageFinished {
+                turn,
+                id: _,
+                stop_reason,
+            } => {
+                self.assistant_stop_reason = Some(*stop_reason);
+                Some(json!({
+                    "type": "message_end",
+                    "turn": turn,
+                    "message": self.assistant_message(),
+                }))
+            }
+            AgentEvent::TurnFinished { turn, stop_reason } => Some(json!({
+                "type": "turn_end",
+                "turn": turn,
+                "stopReason": stable_stop_reason(*stop_reason),
+                "message": self.assistant_message(),
+                "toolResults": self.tool_results,
+            })),
+            AgentEvent::RunFinished { turn, stop_reason } => Some(json!({
+                "type": "agent_end",
+                "turn": turn,
+                "stopReason": stable_stop_reason(*stop_reason),
+                "messages": self.messages,
+            })),
+            _ => None,
+        }
+    }
+
+    fn map_tool_execution_event(&mut self, event: &AgentEvent) -> Option<Value> {
+        match event {
+            AgentEvent::ToolExecutionStarted {
+                turn,
+                id,
+                name,
+                arguments,
+            } => Some(json!({
+                "type": "tool_execution_start",
+                "turn": turn,
+                "toolCallId": id,
+                "toolName": name,
+                "args": arguments,
+            })),
+            AgentEvent::ToolExecutionUpdate {
+                turn,
+                id,
+                name,
+                partial_result,
+            } => Some(json!({
+                "type": "tool_execution_update",
+                "turn": turn,
+                "toolCallId": id,
+                "toolName": name,
+                "partialResult": partial_result,
+            })),
+            AgentEvent::ToolExecutionFinished {
+                turn,
+                id,
+                name,
+                result,
+            } => {
+                let result_message = json!({
+                    "role": "tool",
+                    "toolCallId": id,
+                    "toolName": name,
+                    "content": result.content,
+                    "isError": result.is_error,
+                });
+                push_unique(&mut self.tool_results, result_message);
+                Some(json!({
+                    "type": "tool_execution_end",
+                    "turn": turn,
+                    "toolCallId": id,
+                    "toolName": name,
+                    "result": result,
+                    "isError": result.is_error,
+                }))
+            }
+            _ => None,
+        }
+    }
+
+    fn map_other_event(&mut self, event: &AgentEvent) -> Vec<Value> {
+        match event {
+            AgentEvent::MessageAppended { message } => {
+                push_unique(&mut self.messages, stable_message(message));
+                Vec::new()
+            }
+            AgentEvent::Error { turn, message } => vec![json!({
+                "type": "error",
+                "turn": turn,
+                "message": message,
+            })],
+            AgentEvent::QueueDrained { kind, count } => vec![json!({
+                "type": "queue_update",
+                "kind": format!("{kind:?}").to_lowercase(),
+                "count": count,
+            })],
+            AgentEvent::CompactionApplied { summary } => vec![json!({
+                "type": "compaction_end",
+                "reason": "threshold",
+                "result": summary,
+                "aborted": false,
+                "willRetry": false,
+            })],
+            _ => Vec::new(),
+        }
+    }
+
+    fn assistant_message(&self) -> Value {
+        json!({
+            "role": "assistant",
+            "id": self.assistant_message_id,
+            "content": stable_text_content(&self.assistant_text),
+            "toolCalls": [],
+            "stopReason": self.assistant_stop_reason.map(stable_stop_reason),
+        })
+    }
+}
+
+fn push_unique(values: &mut Vec<Value>, value: Value) {
+    if values.last() != Some(&value) {
+        values.push(value);
+    }
+}
+
+fn stable_message(message: &AgentMessage) -> Value {
+    match message {
+        AgentMessage::System { content } => json!({
+            "role": "system",
+            "content": stable_content(content),
+        }),
+        AgentMessage::User { content } => json!({
+            "role": "user",
+            "content": stable_content(content),
+        }),
+        AgentMessage::Assistant {
+            content,
+            tool_calls,
+            stop_reason,
+        } => json!({
+            "role": "assistant",
+            "content": stable_content(content),
+            "toolCalls": tool_calls,
+            "stopReason": stable_stop_reason(*stop_reason),
+        }),
+        AgentMessage::ToolResult {
+            tool_call_id,
+            tool_name,
+            content,
+            is_error,
+        } => json!({
+            "role": "tool",
+            "toolCallId": tool_call_id,
+            "toolName": tool_name,
+            "content": stable_content(content),
+            "isError": is_error,
+        }),
+    }
+}
+
+fn stable_content(content: &[Content]) -> Vec<Value> {
+    content
+        .iter()
+        .map(|part| match part {
+            Content::Text { text } => json!({
+                "type": "text",
+                "text": text,
+            }),
+            Content::Image { mime_type, data } => json!({
+                "type": "image",
+                "mimeType": mime_type,
+                "data": data,
+            }),
+        })
+        .collect()
+}
+
+fn stable_text_content(text: &str) -> Vec<Value> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![json!({
+            "type": "text",
+            "text": text,
+        })]
+    }
+}
+
+fn stable_stop_reason(stop_reason: neo_agent_core::StopReason) -> &'static str {
+    match stop_reason {
+        neo_agent_core::StopReason::EndTurn => "end_turn",
+        neo_agent_core::StopReason::ToolUse => "tool_use",
+        neo_agent_core::StopReason::MaxTokens => "max_tokens",
+        neo_agent_core::StopReason::MaxTurns => "max_turns",
+        neo_agent_core::StopReason::Cancelled => "cancelled",
+        neo_agent_core::StopReason::Error => "error",
+    }
+}
+
+fn current_unix_timestamp() -> String {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}.{:09}Z", duration.as_secs(), duration.subsec_nanos())
 }
 
 pub fn list_models(config: &AppConfig) -> anyhow::Result<String> {
@@ -227,6 +526,7 @@ pub async fn watch_mcp_resource(
 }
 
 pub struct PromptTurn {
+    pub session_id: String,
     pub events: Vec<AgentEvent>,
     pub assistant_text: String,
 }
@@ -239,6 +539,7 @@ pub struct PromptApprovalRequest {
 pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result<PromptTurn> {
     let prompt = prompt.join(" ");
     let session_path = create_session_path(config).await?;
+    let session_id = session_id_from_path(&session_path)?;
     let mut writer = JsonlSessionWriter::create(&session_path)
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
@@ -250,6 +551,7 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
         &mut writer,
         runtime,
         events,
+        session_id,
     )
     .await
 }
@@ -270,7 +572,15 @@ pub async fn run_prompt_in_session(
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
     let (user_message, events) = append_user_event(prompt, &mut writer).await?;
     let runtime = runtime_for_config(config, None).await?;
-    finish_prompt_turn(user_message, context, &mut writer, runtime, events).await
+    finish_prompt_turn(
+        user_message,
+        context,
+        &mut writer,
+        runtime,
+        events,
+        session_id.to_owned(),
+    )
+    .await
 }
 
 pub async fn run_prompt_streaming(
@@ -281,6 +591,7 @@ pub async fn run_prompt_streaming(
 ) -> anyhow::Result<PromptTurn> {
     let prompt = prompt.join(" ");
     let session_path = create_session_path(config).await?;
+    let session_id = session_id_from_path(&session_path)?;
     let mut writer = JsonlSessionWriter::create(&session_path)
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
@@ -293,6 +604,7 @@ pub async fn run_prompt_streaming(
         runtime,
         events,
         event_tx,
+        session_id,
     )
     .await
 }
@@ -321,6 +633,7 @@ pub async fn run_prompt_in_session_streaming(
         runtime,
         events,
         event_tx,
+        session_id.to_owned(),
     )
     .await
 }
@@ -347,7 +660,15 @@ async fn run_prompt_with_runtime(
     runtime: AgentRuntime,
 ) -> anyhow::Result<PromptTurn> {
     let (user_message, events) = append_user_event(prompt, writer).await?;
-    finish_prompt_turn(user_message, context, writer, runtime, events).await
+    finish_prompt_turn(
+        user_message,
+        context,
+        writer,
+        runtime,
+        events,
+        "test-session".to_owned(),
+    )
+    .await
 }
 
 async fn append_user_event(
@@ -369,6 +690,7 @@ async fn finish_prompt_turn(
     writer: &mut JsonlSessionWriter,
     runtime: AgentRuntime,
     mut events: Vec<AgentEvent>,
+    session_id: String,
 ) -> anyhow::Result<PromptTurn> {
     let mut assistant_text = String::new();
     let turn_events = runtime
@@ -398,6 +720,7 @@ async fn finish_prompt_turn(
     writer.flush().await?;
 
     Ok(PromptTurn {
+        session_id,
         events,
         assistant_text,
     })
@@ -410,6 +733,7 @@ async fn finish_prompt_turn_streaming(
     runtime: AgentRuntime,
     initial_events: Vec<AgentEvent>,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
+    session_id: String,
 ) -> anyhow::Result<PromptTurn> {
     let mut events = Vec::new();
     for event in initial_events {
@@ -446,6 +770,7 @@ async fn finish_prompt_turn_streaming(
     writer.flush().await?;
 
     Ok(PromptTurn {
+        session_id,
         events,
         assistant_text,
     })
@@ -598,6 +923,13 @@ async fn create_session_path(config: &AppConfig) -> anyhow::Result<std::path::Pa
         }
         counter = counter.saturating_add(1);
     }
+}
+
+fn session_id_from_path(path: &Path) -> anyhow::Result<String> {
+    path.file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_owned)
+        .with_context(|| format!("invalid session path {}", path.display()))
 }
 
 fn resolve_model(config: &AppConfig) -> anyhow::Result<ModelSpec> {

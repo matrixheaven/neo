@@ -42,9 +42,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
             let prompt = prepare_prompt(prompt, &config)?;
             modes::print::execute(&prompt, &config).await
         }
-        Some(Command::Run { prompt }) => {
+        Some(Command::Run { output, prompt }) => {
             let prompt = prepare_prompt(prompt, &config)?;
-            modes::run::execute(&prompt, &config).await
+            modes::run::execute(&prompt, &config, output).await
         }
         Some(Command::Resume { session_id }) => modes::run::resume(&session_id, &config).await,
         Some(Command::Sessions { command }) => match command {
