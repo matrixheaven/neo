@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod extension_commands;
 mod modes;
+mod prompt_templates;
 mod rpc_mode;
 mod session_commands;
 mod skill_commands;
@@ -114,7 +115,10 @@ fn run_output_for_mode(config: &AppConfig) -> cli::RunOutput {
 }
 
 fn prepare_prompt(prompt: Vec<String>, config: &AppConfig) -> anyhow::Result<Vec<String>> {
-    prompt_with_piped_stdin(expand_prompt_files(prompt, &config.project_dir)?)
+    let prompt =
+        prompt_templates::expand_project_prompt_template_args(prompt, &config.project_dir)?;
+    let prompt = expand_prompt_files(prompt, &config.project_dir)?;
+    prompt_with_piped_stdin(prompt)
 }
 
 fn expand_prompt_files(prompt: Vec<String>, project_dir: &Path) -> anyhow::Result<Vec<String>> {

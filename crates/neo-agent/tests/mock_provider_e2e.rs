@@ -212,6 +212,117 @@ fn run_expands_workspace_relative_file_prompt_args() {
 }
 
 #[test]
+fn print_expands_project_prompt_template_with_arguments() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".neo/prompts")).expect("create prompts");
+    std::fs::write(
+        temp.path().join(".neo/prompts/review.md"),
+        r#"---
+description: Review a target
+argument-hint: "<path> [focus]"
+---
+Review target: $1
+Second arg: $2
+Focus: ${@:2}
+All args: $ARGUMENTS
+"#,
+    )
+    .expect("write prompt template");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-template", "reviewed")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "/review", "src/lib.rs", "security pass"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "reviewed\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Review target: src/lib.rs\nSecond arg: security pass\nFocus: security pass\nAll args: src/lib.rs security pass"
+    );
+}
+
+#[test]
+fn run_expands_project_prompt_template_before_json_output() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".neo/prompts")).expect("create prompts");
+    std::fs::write(
+        temp.path().join(".neo/prompts/review.md"),
+        r#"---
+description = "Review a target"
+argument-hint = "<path>"
+---
+Review target: $1
+Trailing args: $@
+"#,
+    )
+    .expect("write prompt template");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-template-json", "done")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["run", "--output", "json", "/review", "src/lib.rs"]);
+
+    let stdout = run(command);
+
+    let values = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("line should be json"))
+        .collect::<Vec<_>>();
+    assert_eq!(values[0]["type"], "session");
+    assert!(values.iter().any(|value| value["type"] == "message_update"
+        && value["assistantMessageEvent"]["delta"] == "done"));
+    assert!(!stdout.contains("/review"));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Review target: src/lib.rs\nTrailing args: src/lib.rs"
+    );
+}
+
+#[test]
+fn print_leaves_unknown_slash_prompt_unchanged() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".neo/prompts")).expect("create prompts");
+    std::fs::write(
+        temp.path().join(".neo/prompts/review.md"),
+        "Review target: $1\n",
+    )
+    .expect("write prompt template");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-unknown-slash", "kept")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "/unknown", "leave", "alone"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "kept\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "/unknown leave alone"
+    );
+}
+
+#[test]
 fn print_rejects_prompt_file_args_outside_workspace() {
     let temp = TempDir::new().expect("tempdir");
     let outside = TempDir::new().expect("outside tempdir");

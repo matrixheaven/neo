@@ -50,7 +50,9 @@
   stdio resource or a remote HTTP/SSE resource backed by a live SSE subscribe
   response, prints real update notifications, and unsubscribes.
 - `print` and `run` merge non-TTY piped stdin with CLI prompt arguments, expand
-  project-relative `@file` text prompt arguments, then discover enabled project
+  project-relative `@file` text prompt arguments, expand project-local
+  `.neo/prompts/*.md` slash prompt templates with `$1`, `$@`, `$ARGUMENTS`, and
+  `${@:N}` / `${@:N:L}` argument placeholders, then discover enabled project
   MCP servers with `transport = "stdio"`, `transport = "http"`, or
   `transport = "sse"` and register their tools in the runtime tool registry.
 - `run --output json` and top-level `--mode json run ...` emit stable typed
@@ -94,6 +96,9 @@ and platform-specific guidance.
   slice.
 - Keep stable JSONL docs scoped to the current typed event family until the full
   Pi event family is backed by code.
+- Add global/package prompt-template discovery and explicit
+  `--prompt-template` / `--no-prompt-templates` flags only when those loading
+  scopes are wired to real local paths.
 - Keep config docs scoped to project/global TOML layering until profile sync or
   hosted settings exist.
 - Do not document `/login`, `/tree`, hosted sharing, hosted extension

@@ -36,6 +36,22 @@ turn is sent to the provider:
 cargo run -p neo-agent -- print @docs/context.txt "summarize this"
 ```
 
+Project prompt templates live in `.neo/prompts/*.md`. Invoke `review.md` as
+`/review`; Neo expands `$1`, `$@`, `$ARGUMENTS`, and simple `${@:N}` slices
+before sending the turn:
+
+```bash
+mkdir -p .neo/prompts
+cat > .neo/prompts/review.md <<'EOF'
+---
+description: Review a path
+argument-hint: "<path> [focus]"
+---
+Review $1 with focus: ${@:2}
+EOF
+cargo run -p neo-agent -- print /review src/lib.rs "security pass"
+```
+
 `run --output json` emits a stable typed JSONL event stream with a session
 header and Pi-style lifecycle event names. The same stream is selected when
 the command runs under top-level `--mode json`:
