@@ -215,6 +215,33 @@ fn image_request(api: ApiKind, image: ImageData) -> ChatRequest {
     }
 }
 
+fn assistant_image_request(api: ApiKind, image: ImageData) -> ChatRequest {
+    ChatRequest {
+        model: ModelSpec {
+            provider: ProviderId("provider".to_owned()),
+            model: "model-test".to_owned(),
+            api,
+            capabilities: ModelCapabilities::vision_chat(),
+        },
+        messages: vec![
+            ChatMessage::User {
+                content: vec![ContentPart::Text {
+                    text: "describe this".to_owned(),
+                }],
+            },
+            ChatMessage::Assistant {
+                content: vec![ContentPart::Image {
+                    mime_type: "image/png".to_owned(),
+                    data: image,
+                }],
+                tool_calls: Vec::new(),
+            },
+        ],
+        tools: Vec::new(),
+        options: RequestOptions::default(),
+    }
+}
+
 #[tokio::test]
 async fn openai_responses_client_posts_responses_payload_and_streams_events() {
     let server = MockServer::start(vec![sse_response(&[
@@ -958,6 +985,125 @@ async fn openai_responses_client_serializes_image_parts() {
 }
 
 #[tokio::test]
+async fn openai_responses_client_serializes_base64_image_parts_as_data_urls() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-base64-image" } }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    client
+        .stream_chat(image_request(
+            ApiKind::OpenAiResponses,
+            ImageData::Base64("iVBORw0KGgo=".to_owned()),
+        ))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["input"][0]["content"][1]["type"], "input_image");
+    assert_eq!(
+        sent.body["input"][0]["content"][1]["image_url"],
+        "data:image/png;base64,iVBORw0KGgo="
+    );
+}
+
+#[tokio::test]
+async fn openai_responses_client_rejects_assistant_image_parts_without_posting() {
+    let server = MockServer::start(Vec::new());
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let err = client
+        .stream_chat(assistant_image_request(
+            ApiKind::OpenAiResponses,
+            ImageData::Base64("iVBORw0KGgo=".to_owned()),
+        ))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("OpenAI Responses image content is only supported")
+    );
+    assert_eq!(server.requests().len(), 0);
+}
+
+#[tokio::test]
+async fn openai_responses_client_marks_failed_streams_as_error_end() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-failed" } }),
+        json!({
+            "type": "response.failed",
+            "response": { "status": "failed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::OpenAiResponses))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "resp-failed".to_owned()
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::Error,
+                usage: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn openai_responses_client_marks_incomplete_streams_as_error_end() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-incomplete" } }),
+        json!({
+            "type": "response.incomplete",
+            "response": { "status": "incomplete" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::OpenAiResponses))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "resp-incomplete".to_owned()
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::Error,
+                usage: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
     let server = MockServer::start(vec![sse_response(&[
         json!({ "type": "message_start", "message": { "id": "msg-1" } }),
@@ -1553,6 +1699,45 @@ async fn google_generative_ai_client_does_not_treat_signature_only_parts_as_thin
                 usage: None,
             },
         ]
+    );
+}
+
+#[tokio::test]
+async fn google_generative_ai_client_serializes_base64_image_parts_as_inline_data() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{ "text": "done" }]
+            },
+            "finishReason": "STOP"
+        }]
+    })])]);
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
+
+    client
+        .stream_chat(image_request(
+            ApiKind::GoogleGenerativeAi,
+            ImageData::Base64("iVBORw0KGgo=".to_owned()),
+        ))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(
+        sent.body["contents"][0]["parts"][0]["text"],
+        "describe this"
+    );
+    assert_eq!(
+        sent.body["contents"][0]["parts"][1]["inlineData"]["mimeType"],
+        "image/png"
+    );
+    assert_eq!(
+        sent.body["contents"][0]["parts"][1]["inlineData"]["data"],
+        "iVBORw0KGgo="
     );
 }
 

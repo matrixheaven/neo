@@ -2063,6 +2063,62 @@ async fn runtime_skips_ask_permission_tool_after_async_approval_wait_denies_it()
 }
 
 #[tokio::test]
+async fn runtime_cancels_while_waiting_for_async_approval_decision() {
+    let harness = echo_tool_harness("async cancelled");
+    let AsyncEchoRuntime {
+        runtime,
+        executed,
+        decision_sender: _decision_sender,
+        ..
+    } = async_echo_runtime(&harness);
+    let mut context = AgentContext::new();
+    let cancel = CancellationToken::new();
+
+    let mut stream = runtime.run_turn_with_cancel(
+        &mut context,
+        AgentMessage::user_text("call approval-gated tool"),
+        cancel.clone(),
+    );
+    let mut events = Vec::new();
+    collect_until_approval(&mut stream, &mut events).await;
+
+    assert!(events.contains(&AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        operation: PermissionOperation::Tool,
+        subject: "echo".to_owned(),
+        arguments: json!({ "text": "async cancelled" }),
+    }));
+    assert!(executed.lock().expect("executed lock poisoned").is_empty());
+
+    cancel.cancel();
+    while let Some(event) = timeout(Duration::from_millis(250), stream.next())
+        .await
+        .expect("cancelled approval wait should finish promptly")
+    {
+        events.push(event.expect("event should be ok"));
+    }
+    drop(stream);
+
+    assert!(events.contains(&AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        name: "echo".to_owned(),
+        result: ToolResult::error("tool execution cancelled"),
+    }));
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::RunFinished {
+            turn: 1,
+            stop_reason: StopReason::Cancelled,
+        })
+    );
+    assert!(context.is_cancelled());
+    assert_eq!(context.messages().len(), 2);
+    assert!(executed.lock().expect("executed lock poisoned").is_empty());
+}
+
+#[tokio::test]
 async fn runtime_parallel_mode_runs_allowed_tool_while_async_approval_is_pending() {
     let workspace = tempfile::tempdir().expect("workspace");
     let harness = parallel_write_and_echo_harness();
