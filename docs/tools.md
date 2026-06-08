@@ -53,6 +53,11 @@ The `neo-agent-core` tool layer separates:
 - `Tool`: owns schema generation and execution.
 - `ToolResult`: returns text content, error state, and optional details.
 
+Recoverable `ToolError` values from tool lookup, input parsing, or execution
+are converted into `ToolResult::error` records and appended as model-visible
+tool-result messages. Runtime setup failures, cancellation, and max-turn
+boundaries still remain runtime errors or terminal lifecycle events.
+
 When a policy is `Ask`, the runtime emits `AgentEvent::ApprovalRequested` and
 executes only if the configured approval handler returns `Allow`. Without a
 handler, ask-mode operations return an approval-required tool result instead of

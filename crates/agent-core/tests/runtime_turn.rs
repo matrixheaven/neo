@@ -2,8 +2,8 @@ use futures::StreamExt;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentRuntimeError,
     AgentToolCall, ApprovalRequest, Content, PermissionDecision, PermissionOperation,
-    PermissionPolicy, QueueMode, StopReason, Tool, ToolContext, ToolExecutionMode, ToolFuture,
-    ToolRegistry, ToolResult, harness::FakeHarness,
+    PermissionPolicy, QueueMode, StopReason, Tool, ToolContext, ToolError, ToolExecutionMode,
+    ToolFuture, ToolRegistry, ToolResult, harness::FakeHarness,
 };
 use neo_ai::{
     AiError, AiStreamEvent, ApiKind, ChatRequest, ModelCapabilities, ModelClient, ModelSpec,
@@ -442,6 +442,94 @@ async fn runtime_finishes_message_turn_and_run_with_error_stop_reason() {
             stop_reason: StopReason::Error,
         })
     );
+}
+
+#[tokio::test]
+async fn runtime_returns_tool_errors_to_model_for_retry_instead_of_aborting() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "fallible".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "bad": true }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "retry noted".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools.register(FallibleTool);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model()),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("call fallible"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("tool error should be returned to the model");
+
+    assert_eq!(harness.requests().len(), 2);
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::ToolExecutionFinished {
+                id,
+                result: ToolResult { is_error: true, content, .. },
+                ..
+            } if id == "tool_1" && content.contains("invalid input for fallible")
+        )
+    }));
+    assert_eq!(
+        context.messages()[2],
+        AgentMessage::tool_result(
+            "tool_1",
+            "fallible",
+            vec![Content::text("invalid input for fallible: expected text")],
+            true
+        )
+    );
+    assert_eq!(
+        context.messages()[3],
+        AgentMessage::assistant(
+            vec![Content::text("retry noted")],
+            Vec::new(),
+            StopReason::EndTurn
+        )
+    );
+    assert!(matches!(
+        harness.requests()[1].messages.last(),
+        Some(neo_ai::ChatMessage::ToolResult {
+            tool_call_id,
+            is_error: true,
+            ..
+        }) if tool_call_id == "tool_1"
+    ));
 }
 
 #[tokio::test]
@@ -1665,6 +1753,37 @@ impl Tool for RecordingEchoTool {
                 .expect("executed lock poisoned")
                 .push(text.clone());
             Ok(ToolResult::ok(text))
+        })
+    }
+}
+
+struct FallibleTool;
+
+impl Tool for FallibleTool {
+    fn name(&self) -> &'static str {
+        "fallible"
+    }
+
+    fn description(&self) -> &'static str {
+        "Always returns a tool-layer error."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string" }
+            },
+            "required": ["text"]
+        })
+    }
+
+    fn execute<'a>(&'a self, _ctx: &'a ToolContext, _input: serde_json::Value) -> ToolFuture<'a> {
+        Box::pin(async {
+            Err(ToolError::InvalidInput {
+                tool: "fallible".to_owned(),
+                message: "expected text".to_owned(),
+            })
         })
     }
 }

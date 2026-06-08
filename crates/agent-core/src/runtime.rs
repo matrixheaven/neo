@@ -893,7 +893,8 @@ async fn execute_tool_calls_parallel(
                 };
             let mut result = registry
                 .run(&tool_call.name, &tool_context, tool_call.arguments.clone())
-                .await?;
+                .await
+                .unwrap_or_else(|err| ToolResult::error(err.to_string()));
             if let Some(after_tool_call) = &after_tool_call {
                 result = after_tool_call(&tool_call, result);
             }
@@ -1022,7 +1023,7 @@ async fn prepare_and_run_tool(
         ToolPreparation::Run(context) => registry
             .run(&tool_call.name, &context, tool_call.arguments.clone())
             .await
-            .map_err(AgentRuntimeError::Tool),
+            .or_else(|err| Ok(ToolResult::error(err.to_string()))),
         ToolPreparation::Skip(result) => Ok(result),
     }
 }

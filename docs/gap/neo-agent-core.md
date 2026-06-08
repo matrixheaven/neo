@@ -19,6 +19,10 @@
 - `ToolExecutionMode` supports sequential and parallel tool execution; parallel
   mode emits completion events as tools finish while preserving appended tool
   result messages in source order.
+- Tool execution errors that the model can recover from, including invalid
+  inputs and unknown tool names, are returned as `ToolResult::error` messages
+  with `is_error = true` so the next model turn can retry instead of aborting
+  the run.
 - `FakeHarness` supplies a fake model and recorded request inspection for tests.
 - `PermissionPolicy` supports `Allow`, `Ask`, and `Deny` decisions for file
   reads, file writes, shell execution, and general tools. `Ask` emits
