@@ -446,6 +446,55 @@ fn print_forces_prompt_template_from_explicit_directory() {
 }
 
 #[test]
+fn print_fails_when_explicit_directories_define_duplicate_prompt_templates() {
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(project.path().join("dir-a")).expect("create dir-a");
+    std::fs::create_dir_all(project.path().join("dir-b")).expect("create dir-b");
+    let first_path = project.path().join("dir-a/review.md");
+    let second_path = project.path().join("dir-b/review.md");
+    std::fs::write(&first_path, "First review: $1\n").expect("write first prompt template");
+    std::fs::write(&second_path, "Second review: $1\n").expect("write second prompt template");
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .args([
+            "--prompt-template",
+            "dir-a",
+            "--prompt-template",
+            "dir-b",
+            "print",
+            "/review",
+            "x",
+        ]);
+
+    let output = command.output().expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
+    assert!(stderr.contains("duplicate prompt template `review`"));
+    assert!(
+        stderr.contains(
+            &first_path
+                .canonicalize()
+                .expect("canonical first")
+                .display()
+                .to_string()
+        )
+    );
+    assert!(
+        stderr.contains(
+            &second_path
+                .canonicalize()
+                .expect("canonical second")
+                .display()
+                .to_string()
+        )
+    );
+}
+
+#[test]
 fn print_no_prompt_templates_keeps_explicit_prompt_template_enabled() {
     let project = TempDir::new().expect("project tempdir");
     std::fs::create_dir_all(project.path().join(".neo/prompts")).expect("create project prompts");

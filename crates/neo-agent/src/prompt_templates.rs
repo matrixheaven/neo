@@ -106,12 +106,18 @@ fn load_explicit_prompt_templates(
     for selector in selectors {
         let selected = load_selected_prompt_templates(selector, project_dir, global_prompts_dir)?;
         for template in selected {
-            if !templates
+            if let Some(existing) = templates
                 .iter()
-                .any(|candidate: &PromptTemplate| candidate.name == template.name)
+                .find(|candidate: &&PromptTemplate| candidate.name == template.name)
             {
-                templates.push(template);
+                anyhow::bail!(
+                    "duplicate prompt template `{}`: {} and {}",
+                    template.name,
+                    existing.path.display(),
+                    template.path.display()
+                );
             }
+            templates.push(template);
         }
     }
     Ok(templates)
