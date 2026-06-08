@@ -56,6 +56,15 @@ async fn file_tools_read_search_write_and_edit_inside_workspace() {
         .await
         .expect("edit");
     assert!(!edit.is_error);
+    let details = edit.details.expect("edit details");
+    assert_eq!(details["path"], "src/lib.txt");
+    assert_eq!(details["old"], "beta");
+    assert_eq!(details["new"], "gamma");
+    assert_eq!(details["replace_all"], false);
+    assert_eq!(
+        details["diff"],
+        "--- src/lib.txt\n+++ src/lib.txt\n@@\n alpha\n-beta\n+gamma\n alphabet\n"
+    );
 
     let updated = std::fs::read_to_string(workspace.path().join("src/lib.txt")).expect("updated");
     assert_eq!(updated, "alpha\ngamma\nalphabet\n");

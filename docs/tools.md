@@ -43,6 +43,10 @@ escape the workspace fail before execution.
 current status, exit code when finished, and captured stdout/stderr. It is not a
 PTY and does not support interactive stdin.
 
+`edit` returns concise text content for the model and structured `details` for
+consumers that need inspection metadata: the relative path, old/new strings,
+`replace_all`, and a stable unified diff.
+
 ## Runtime Boundary
 
 The `neo-agent-core` tool layer separates:

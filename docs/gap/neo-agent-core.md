@@ -33,7 +33,8 @@
   `neo-tui` approval overlay, so explicit user choices resume pending tool
   calls using user-provided allow/deny decisions.
 - `ToolRegistry::with_builtin_tools()` registers `read`, `list`, `grep`,
-  `find`, `write`, `edit`, and `bash`.
+  `find`, `write`, `edit`, and `bash`; `edit` returns structured details with
+  a stable unified diff for TUI/export consumers.
 - `McpToolAdapter` and `McpToolProvider` can discover configured MCP tools as
   namespaced `ToolSpec` values and execute them through an async adapter
   registered in `ToolRegistry`.
