@@ -446,6 +446,91 @@ fn print_forces_prompt_template_from_explicit_directory() {
 }
 
 #[test]
+fn print_expands_prompt_template_from_project_config_selector() {
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(project.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        project.path().join(".neo/config.toml"),
+        r#"
+prompt_templates = ["prompts"]
+"#,
+    )
+    .expect("write config");
+    std::fs::create_dir_all(project.path().join("prompts")).expect("create prompts");
+    std::fs::write(
+        project.path().join("prompts/review.md"),
+        "Configured review: $1\n",
+    )
+    .expect("write prompt template");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-config-template",
+        "config reviewed",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "/review", "src/lib.rs"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "config reviewed\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Configured review: src/lib.rs"
+    );
+}
+
+#[test]
+fn print_deduplicates_cli_and_config_prompt_template_selectors() {
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(project.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        project.path().join(".neo/config.toml"),
+        r#"
+prompt_templates = ["prompts"]
+"#,
+    )
+    .expect("write config");
+    std::fs::create_dir_all(project.path().join("prompts")).expect("create prompts");
+    std::fs::write(
+        project.path().join("prompts/review.md"),
+        "Review once: $1\n",
+    )
+    .expect("write prompt template");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-dedup-template", "deduped")]);
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args([
+            "--prompt-template",
+            "prompts",
+            "print",
+            "/review",
+            "src/lib.rs",
+        ]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "deduped\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Review once: src/lib.rs"
+    );
+}
+
+#[test]
 fn print_fails_when_explicit_directories_define_duplicate_prompt_templates() {
     let project = TempDir::new().expect("project tempdir");
     std::fs::create_dir_all(project.path().join("dir-a")).expect("create dir-a");

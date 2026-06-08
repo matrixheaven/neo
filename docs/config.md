@@ -29,6 +29,7 @@ default_model = "gpt-4.1"
 api_key_env = "OPENAI_API_KEY"
 sessions_dir = ".neo/sessions"
 model_catalogs = [".neo/models.json"]
+prompt_templates = ["prompts"]
 
 [providers.openai]
 api_base = "https://api.openai.com/v1"
@@ -88,6 +89,12 @@ overrides and take precedence over provider-specific config for that invocation.
 
 User defaults can live in `~/.neo/config.toml`; project `.neo/config.toml`
 overrides them for that workspace.
+
+`prompt_templates` accepts the same local selector shape as repeatable
+`--prompt-template`: template names, project-contained `.md` files, or
+non-recursive directories of `.md` prompt templates. Selectors from user-global
+and project config are merged, with duplicate selector strings loaded once, and
+CLI `--prompt-template` selectors are added for the current invocation.
 
 The default permissions mirror `neo_agent_core::PermissionPolicy::default()`:
 file reads are allowed, file writes ask, shell asks, and tools are allowed.
@@ -173,6 +180,7 @@ Supported `config set` keys are:
 - `api_key_env`
 - `providers.<provider-id>.api_base`
 - `providers.<provider-id>.api_key_env`
+- `prompt_templates`
 - `sessions_dir`
 - `permissions.file_read` or `file_read`
 - `permissions.file_write` or `file_write`

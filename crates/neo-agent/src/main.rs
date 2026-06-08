@@ -115,11 +115,17 @@ fn run_output_for_mode(config: &AppConfig) -> cli::RunOutput {
 }
 
 fn prepare_prompt(prompt: Vec<String>, config: &AppConfig) -> anyhow::Result<Vec<String>> {
+    let mut prompt_template_selectors = config.configured_prompt_templates.clone();
+    for selector in &config.prompt_templates {
+        if !prompt_template_selectors.contains(selector) {
+            prompt_template_selectors.push(selector.clone());
+        }
+    }
     let prompt = prompt_templates::expand_prompt_template_args(
         prompt,
         &config.project_dir,
         config::global_prompts_dir().as_deref(),
-        &config.prompt_templates,
+        &prompt_template_selectors,
         config.no_prompt_templates,
     )?;
     let prompt = expand_prompt_files(prompt, &config.project_dir)?;

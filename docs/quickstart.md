@@ -73,6 +73,16 @@ cargo run -p neo-agent -- --no-prompt-templates print /review src/lib.rs
 cargo run -p neo-agent -- --no-prompt-templates --prompt-template prompts print /review src/lib.rs
 ```
 
+Project or user-global config can also declare prompt template selectors with
+the same name/file/directory shape:
+
+```toml
+prompt_templates = ["prompts"]
+```
+
+Config selectors are merged across `~/.neo/config.toml` and `.neo/config.toml`;
+CLI selectors are added for the current invocation.
+
 `run --output json` emits a stable typed JSONL event stream with a session
 header and Pi-style lifecycle event names. The same stream is selected when
 the command runs under top-level `--mode json`:

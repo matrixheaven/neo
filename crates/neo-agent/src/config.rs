@@ -64,6 +64,8 @@ pub struct AppConfig {
     #[serde(skip)]
     pub prompt_templates: Vec<String>,
     #[serde(skip)]
+    pub configured_prompt_templates: Vec<String>,
+    #[serde(skip)]
     pub no_prompt_templates: bool,
     pub project_dir: PathBuf,
 
@@ -168,6 +170,7 @@ struct FileConfig {
     api_key_env: Option<String>,
     providers: Option<BTreeMap<String, ProviderConfig>>,
     model_catalogs: Option<Vec<PathBuf>>,
+    prompt_templates: Option<Vec<String>>,
     sessions_dir: Option<PathBuf>,
     permissions: Option<PermissionPolicy>,
     defaults: Option<FileDefaults>,
@@ -280,6 +283,7 @@ impl AppConfig {
             .into_iter()
             .map(|path| resolve_project_path(&project_dir, path))
             .collect();
+        let configured_prompt_templates = file_config.prompt_templates.unwrap_or_default();
         let sessions_dir = env_sessions_dir
             .or_else(|| file_config.sessions_dir.map(expand_user_path))
             .unwrap_or_else(|| project_dir.join(CONFIG_DIR).join("sessions"));
@@ -308,6 +312,7 @@ impl AppConfig {
             approve: overrides.approve,
             no_approve: overrides.no_approve,
             prompt_templates: overrides.prompt_templates,
+            configured_prompt_templates,
             no_prompt_templates: overrides.no_prompt_templates,
             project_dir,
             config_path,
@@ -341,6 +346,8 @@ pub fn show(config: &AppConfig) -> anyhow::Result<String> {
         api_key_env: config.api_key_env.clone(),
         providers: (!config.providers.is_empty()).then(|| config.providers.clone()),
         model_catalogs: (!config.model_catalogs.is_empty()).then(|| config.model_catalogs.clone()),
+        prompt_templates: (!config.configured_prompt_templates.is_empty())
+            .then(|| config.configured_prompt_templates.clone()),
         sessions_dir: Some(config.sessions_dir.clone()),
         permissions: Some(config.permissions.clone()),
         defaults: Some(FileDefaults {
@@ -385,6 +392,9 @@ pub fn set(key: &str, value: &str) -> anyhow::Result<String> {
             provider.api_key_env = Some(value.to_owned());
         }
         "sessions_dir" => config.sessions_dir = Some(PathBuf::from(value)),
+        "prompt_templates" => {
+            config.prompt_templates = Some(parse_string_list(value)?);
+        }
         "permissions.file_read" | "file_read" => {
             let permissions = config
                 .permissions
@@ -466,6 +476,7 @@ fn merge_file_configs(base: FileConfig, layer: FileConfig) -> FileConfig {
         api_key_env: layer.api_key_env.or(base.api_key_env),
         providers: merge_provider_configs(base.providers, layer.providers),
         model_catalogs: merge_path_lists(base.model_catalogs, layer.model_catalogs),
+        prompt_templates: merge_string_lists(base.prompt_templates, layer.prompt_templates),
         sessions_dir: layer.sessions_dir.or(base.sessions_dir),
         permissions: layer.permissions.or(base.permissions),
         defaults: merge_defaults(base.defaults, layer.defaults),
@@ -499,6 +510,24 @@ fn merge_provider_config(base: ProviderConfig, layer: ProviderConfig) -> Provide
     ProviderConfig {
         api_base: layer.api_base.or(base.api_base),
         api_key_env: layer.api_key_env.or(base.api_key_env),
+    }
+}
+
+fn merge_string_lists(
+    base: Option<Vec<String>>,
+    layer: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    match (base, layer) {
+        (None, None) => None,
+        (Some(values), None) | (None, Some(values)) => Some(values),
+        (Some(mut base), Some(layer)) => {
+            for value in layer {
+                if !base.contains(&value) {
+                    base.push(value);
+                }
+            }
+            Some(base)
+        }
     }
 }
 
@@ -642,6 +671,15 @@ fn parse_reasoning_effort(value: &str) -> anyhow::Result<ReasoningEffort> {
         "xhigh" | "XHigh" => Ok(ReasoningEffort::XHigh),
         other => bail!("unsupported reasoning effort: {other}"),
     }
+}
+
+fn parse_string_list(value: &str) -> anyhow::Result<Vec<String>> {
+    let trimmed = value.trim();
+    if trimmed.starts_with('[') {
+        return toml::from_str::<Vec<String>>(trimmed)
+            .with_context(|| format!("failed to parse string list: {value}"));
+    }
+    Ok(vec![value.to_owned()])
 }
 
 fn validate_runtime_config(config: &RuntimeConfig) -> anyhow::Result<()> {

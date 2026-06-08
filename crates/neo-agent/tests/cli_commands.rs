@@ -253,6 +253,48 @@ api_key_env = "PROJECT_OPENAI_KEY"
 }
 
 #[test]
+fn config_show_merges_prompt_template_selectors_across_global_and_project_layers() {
+    let home = TempDir::new().expect("home tempdir");
+    let project = TempDir::new().expect("project tempdir");
+    fs::create_dir_all(home.path().join(".neo")).expect("create global .neo");
+    fs::write(
+        home.path().join(".neo/config.toml"),
+        r#"
+prompt_templates = ["global-prompts", "shared-prompts"]
+"#,
+    )
+    .expect("write global config");
+    fs::create_dir_all(project.path().join(".neo")).expect("create project .neo");
+    fs::write(
+        project.path().join(".neo/config.toml"),
+        r#"
+prompt_templates = ["project-prompts", "shared-prompts"]
+"#,
+    )
+    .expect("write project config");
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["config", "show"]);
+    let stdout = run(command);
+
+    assert!(stdout.contains("prompt_templates = ["));
+    let global_index = stdout
+        .find("\"global-prompts\"")
+        .expect("global prompt selector");
+    let shared_index = stdout
+        .find("\"shared-prompts\"")
+        .expect("shared prompt selector");
+    let project_index = stdout
+        .find("\"project-prompts\"")
+        .expect("project prompt selector");
+    assert!(global_index < shared_index);
+    assert!(shared_index < project_index);
+}
+
+#[test]
 fn config_show_reads_provider_specific_api_key_env_without_secret_values() {
     let temp = TempDir::new().expect("tempdir");
     fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
