@@ -750,7 +750,9 @@ fn stale_ai_gap_claim_violation(
         && (normalized.contains("only after")
             || normalized.contains("future work")
             || normalized.contains("missing")
-            || normalized.contains("not implemented"))
+            || normalized.contains("not implemented")
+            || normalized.contains("does not translate")
+            || normalized.contains("not translate"))
     {
         return Some("stale Anthropic/Google thinking payload gap claim");
     }
@@ -1834,6 +1836,43 @@ mod tests {
             errors,
             vec![
                 "docs/gap/neo-ai.md:1 contains stale Anthropic/Google thinking payload gap claim: Add Anthropic and Google thinking controls only after Neo has explicit budget contracts.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_ai_thinking_translation_gap_after_payload_symbols_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let providers_dir = dir
+            .path()
+            .join("crates")
+            .join("ai")
+            .join("src")
+            .join("providers");
+        std::fs::create_dir_all(&providers_dir).expect("ai provider source dir");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
+        std::fs::write(
+            providers_dir.join("anthropic.rs"),
+            "fn thinking_budget_tokens() { let _ = \"budget_tokens\"; }\n",
+        )
+        .expect("write anthropic source");
+        std::fs::write(
+            providers_dir.join("google.rs"),
+            "fn thinking_budget_tokens() { let _ = \"thinkingConfig\"; }\n",
+        )
+        .expect("write google source");
+        std::fs::write(
+            dir.path().join("docs").join("providers.md"),
+            "Neo intentionally does not translate reasoning effort into Anthropic or Google thinking payloads yet.\n",
+        )
+        .expect("write provider doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/providers.md:1 contains stale Anthropic/Google thinking payload gap claim: Neo intentionally does not translate reasoning effort into Anthropic or Google thinking payloads yet.".to_string()
             ]
         );
     }

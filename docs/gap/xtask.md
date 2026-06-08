@@ -9,7 +9,8 @@
   local Markdown link validation for `README.md`, `docs/**/*.md`, and
   `examples/**/*.md`; production fake/local/placeholder guidance scans; and
   stale gap-claim scans for implemented MCP/session/extension, runtime hook,
-  TUI diff/paste, and provider thinking-payload surfaces; TOML, JSON, and Rust
+  TUI diff/paste, provider thinking-payload surfaces, and stale
+  Anthropic/Google thinking-translation claims; TOML, JSON, and Rust
   example harness validation for the documented example artifacts; and
   `cargo check --manifest-path examples/rust/Cargo.toml
   --examples`.
@@ -37,7 +38,9 @@ exist, "extension lifecycle unavailable" once status/enable/disable commands
 exist, and "session branching and naming are future work" once
 `SessionMetadataStore::fork`/`rename` exist. The same scan rejects stale TUI
 diff/paste-buffering and Anthropic/Google thinking-payload claims once their
-implementation symbols are present. It still allows honest gaps for hosted MCP
+implementation symbols are present, including claims that Neo still does not
+translate reasoning effort into Anthropic/Google thinking payloads once both
+budget-backed adapters exist. It still allows honest gaps for hosted MCP
 management, remote MCP servers that require alternate notification channels,
 hosted share, OAuth login, image protocols, OS clipboard integration, advanced
 diff affordances, and other surfaces that are not implemented.
