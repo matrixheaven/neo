@@ -1250,6 +1250,22 @@ pub enum TranscriptLine {
     Quote {
         text: String,
     },
+    DiffFileHeader {
+        marker: char,
+        path: String,
+    },
+    DiffHunk {
+        text: String,
+    },
+    DiffContext {
+        text: String,
+    },
+    DiffAdded {
+        text: String,
+    },
+    DiffRemoved {
+        text: String,
+    },
 }
 
 impl TranscriptLine {
@@ -1261,7 +1277,12 @@ impl TranscriptLine {
             | Self::Heading { text, .. }
             | Self::ListItem { text, .. }
             | Self::Code { text, .. }
-            | Self::Quote { text } => text,
+            | Self::Quote { text }
+            | Self::DiffHunk { text }
+            | Self::DiffContext { text }
+            | Self::DiffAdded { text }
+            | Self::DiffRemoved { text } => text,
+            Self::DiffFileHeader { path, .. } => path,
         }
     }
 
@@ -1269,13 +1290,17 @@ impl TranscriptLine {
     pub fn display_text(&self) -> String {
         match self {
             Self::Blank => String::new(),
-            Self::Text { text } => text.clone(),
+            Self::Text { text } | Self::DiffHunk { text } => text.clone(),
             Self::Heading { level, text } => {
                 format!("{} {text}", "#".repeat(usize::from(*level)))
             }
             Self::ListItem { indent, text } => format!("{}- {text}", " ".repeat(indent * 2)),
             Self::Code { text, .. } => format!("  {text}"),
             Self::Quote { text } => format!("> {text}"),
+            Self::DiffFileHeader { marker, path } => format!("{marker}{marker}{marker} {path}"),
+            Self::DiffContext { text } => format!(" {text}"),
+            Self::DiffAdded { text } => format!("+{text}"),
+            Self::DiffRemoved { text } => format!("-{text}"),
         }
     }
 }
@@ -1300,6 +1325,7 @@ impl TranscriptRenderer {
     pub fn render_markdownish(&self, text: &str) -> Vec<TranscriptLine> {
         let mut lines = Vec::new();
         let mut code_language: Option<String> = None;
+        let mut in_diff = false;
 
         for raw_line in text.lines() {
             let trimmed_end = raw_line.trim_end();
@@ -1323,7 +1349,17 @@ impl TranscriptRenderer {
                 continue;
             }
 
+            if let Some(line) = parse_diff_line(trimmed_end, in_diff) {
+                push_diff_line(&mut lines, line, self.width);
+                in_diff = true;
+                continue;
+            }
+            if in_diff && !trimmed.is_empty() {
+                in_diff = false;
+            }
+
             if trimmed.is_empty() {
+                in_diff = false;
                 lines.push(TranscriptLine::Blank);
             } else if let Some((level, heading)) = parse_heading(trimmed) {
                 push_wrapped_line(&mut lines, heading, self.width, |text| {
@@ -1348,6 +1384,74 @@ impl TranscriptRenderer {
             lines.push(TranscriptLine::Blank);
         }
         lines
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffLine<'a> {
+    FileHeader { marker: char, path: &'a str },
+    Hunk(&'a str),
+    Context(&'a str),
+    Added(&'a str),
+    Removed(&'a str),
+}
+
+fn parse_diff_line(line: &str, in_diff: bool) -> Option<DiffLine<'_>> {
+    if let Some(path) = line.strip_prefix("--- ") {
+        return Some(DiffLine::FileHeader { marker: '-', path });
+    }
+    if let Some(path) = line.strip_prefix("+++ ") {
+        return Some(DiffLine::FileHeader { marker: '+', path });
+    }
+    if !in_diff {
+        return None;
+    }
+    if line.starts_with("@@") {
+        return Some(DiffLine::Hunk(line));
+    }
+    if let Some(text) = line.strip_prefix('+') {
+        return Some(DiffLine::Added(text));
+    }
+    if let Some(text) = line.strip_prefix('-') {
+        return Some(DiffLine::Removed(text));
+    }
+    if let Some(text) = line.strip_prefix(' ') {
+        return Some(DiffLine::Context(text));
+    }
+    None
+}
+
+fn push_diff_line(lines: &mut Vec<TranscriptLine>, line: DiffLine<'_>, width: usize) {
+    match line {
+        DiffLine::FileHeader { marker, path } => {
+            let content_width = width.saturating_sub(4).max(1);
+            push_wrapped_line(lines, path, content_width, |path| {
+                TranscriptLine::DiffFileHeader { marker, path }
+            });
+        }
+        DiffLine::Hunk(text) => {
+            push_wrapped_line(lines, text, width.max(1), |text| TranscriptLine::DiffHunk {
+                text,
+            });
+        }
+        DiffLine::Context(text) => {
+            let content_width = width.saturating_sub(1).max(1);
+            push_wrapped_line(lines, text, content_width, |text| {
+                TranscriptLine::DiffContext { text }
+            });
+        }
+        DiffLine::Added(text) => {
+            let content_width = width.saturating_sub(1).max(1);
+            push_wrapped_line(lines, text, content_width, |text| {
+                TranscriptLine::DiffAdded { text }
+            });
+        }
+        DiffLine::Removed(text) => {
+            let content_width = width.saturating_sub(1).max(1);
+            push_wrapped_line(lines, text, content_width, |text| {
+                TranscriptLine::DiffRemoved { text }
+            });
+        }
     }
 }
 

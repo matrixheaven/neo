@@ -8,7 +8,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     ApprovalModal, ChatTranscript, NeoTuiApp, Overlay, OverlayKind, PromptState, ToolStatus,
-    ToolStatusKind, TranscriptItem, TranscriptView,
+    ToolStatusKind, TranscriptItem, TranscriptLine, TranscriptRenderer, TranscriptView,
 };
 
 #[must_use]
@@ -207,11 +207,17 @@ impl Widget for TranscriptWidget<'_> {
             write_line(area, buf, y, label, style.add_modifier(Modifier::BOLD));
             y = y.saturating_add(1);
 
-            for line in wrap_width(&content, text_width) {
+            for line in TranscriptRenderer::new(text_width).render_markdownish(&content) {
                 if y >= area.bottom() {
                     break;
                 }
-                write_line(area, buf, y, &format!("  {line}"), style);
+                write_line(
+                    area,
+                    buf,
+                    y,
+                    &format!("  {}", line.display_text()),
+                    transcript_line_style(&line, style),
+                );
                 y = y.saturating_add(1);
             }
         }
@@ -240,6 +246,22 @@ fn transcript_row(item: &TranscriptItem) -> (&'static str, String, Style) {
         TranscriptItem::Notice { content } => {
             ("Notice", content.clone(), Style::default().fg(Color::Gray))
         }
+    }
+}
+
+fn transcript_line_style(line: &TranscriptLine, base: Style) -> Style {
+    match line {
+        TranscriptLine::DiffFileHeader { marker: '+', .. } | TranscriptLine::DiffAdded { .. } => {
+            Style::default().fg(Color::Green)
+        }
+        TranscriptLine::DiffFileHeader { marker: '-', .. } | TranscriptLine::DiffRemoved { .. } => {
+            Style::default().fg(Color::Red)
+        }
+        TranscriptLine::DiffHunk { .. } => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        TranscriptLine::DiffContext { .. } => Style::default().fg(Color::DarkGray),
+        _ => base,
     }
 }
 

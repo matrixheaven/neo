@@ -15,6 +15,10 @@ Target: `crates/tui`.
   preserves blank lines, splits long tokens, and does not split complete escape
   sequences. Wrapped continuation lines rehydrate active SGR styles so terminal
   color/modifier state survives line boundaries.
+- Transcript rendering now classifies unified diff blocks (`---`, `+++`, `@@`,
+  context, added, and removed lines), wraps them width-safely, and renders diff
+  additions/removals/context/hunks with distinct terminal styles in the
+  transcript widget.
 - Rendering tests cover prompt, transcript, status, modal, select-list, truncation, wrapping, and keybinding behavior.
 - `neo-agent` now owns a crossterm/raw-mode interactive loop slice that renders
   `NeoTuiApp` in a real terminal and uses `neo-tui` input events for text input,
@@ -56,7 +60,8 @@ Target: `crates/tui`.
 
 ## Remaining lower-priority gaps
 
-- The Rust crate does not implement the full TypeScript terminal diff renderer,
-  image protocols, richer provider or command autocomplete, or OS/terminal
-  clipboard integration.
+- The Rust crate does not implement image protocols, richer provider or command
+  autocomplete, OS/terminal clipboard integration, or the full TypeScript
+  renderer's advanced diff affordances beyond width-safe unified diff line
+  classification and coloring.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.

@@ -5,7 +5,12 @@ use neo_tui::{
     SelectItem, SelectListState, StatusWidget, ToolStatus, ToolStatusKind, TranscriptItem,
     TranscriptView, TranscriptWidget, truncate_width, visible_width, wrap_width,
 };
-use ratatui::{Terminal, backend::TestBackend, buffer::Cell};
+use ratatui::{
+    Terminal,
+    backend::TestBackend,
+    buffer::{Buffer, Cell},
+    style::Color,
+};
 
 fn render_widget<W: ratatui::widgets::Widget>(width: u16, height: u16, widget: W) -> Vec<String> {
     let backend = TestBackend::new(width, height);
@@ -20,6 +25,15 @@ fn render_widget<W: ratatui::widgets::Widget>(width: u16, height: u16, widget: W
         .chunks(width as usize)
         .map(|line| line.iter().map(Cell::symbol).collect::<String>())
         .collect()
+}
+
+fn render_widget_buffer<W: ratatui::widgets::Widget>(width: u16, height: u16, widget: W) -> Buffer {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("test backend is valid");
+    terminal
+        .draw(|frame| frame.render_widget(widget, frame.area()))
+        .expect("widget renders");
+    terminal.backend().buffer().clone()
 }
 
 fn strip_ansi_escapes(text: &str) -> String {
@@ -799,6 +813,46 @@ fn transcript_widget_renders_roles_tools_and_wraps_content() {
     assert!(lines.iter().any(|line| line.contains("Assistant")));
     assert!(lines.iter().any(|line| line.contains("shell.run")));
     assert!(lines.iter().any(|line| line.contains("test")));
+}
+
+#[test]
+fn transcript_widget_renders_unified_diff_lines_with_diff_colors() {
+    let transcript = ChatTranscript::from_items([TranscriptItem::assistant(
+        "--- src/lib.rs\n+++ src/lib.rs\n@@\n-old\n+new\n unchanged",
+    )]);
+
+    let buffer = render_widget_buffer(32, 9, TranscriptWidget::new(&transcript));
+    let lines = buffer
+        .content
+        .chunks(32)
+        .map(|line| line.iter().map(Cell::symbol).collect::<String>())
+        .collect::<Vec<_>>();
+
+    assert!(lines.iter().any(|line| line.contains("--- src/lib.rs")));
+    assert!(lines.iter().any(|line| line.contains("+++ src/lib.rs")));
+    assert!(lines.iter().any(|line| line.contains("-old")));
+    assert!(lines.iter().any(|line| line.contains("+new")));
+    let removed_row = lines
+        .iter()
+        .position(|line| line.contains("-old"))
+        .expect("removed row");
+    let added_row = lines
+        .iter()
+        .position(|line| line.contains("+new"))
+        .expect("added row");
+    let context_row = lines
+        .iter()
+        .position(|line| line.contains(" unchanged"))
+        .expect("context row");
+    let removed_row = u16::try_from(removed_row).expect("removed row fits terminal height");
+    let added_row = u16::try_from(added_row).expect("added row fits terminal height");
+    let context_row = u16::try_from(context_row).expect("context row fits terminal height");
+    let removed = buffer.cell((2, removed_row)).expect("removed prefix cell");
+    let added = buffer.cell((2, added_row)).expect("added prefix cell");
+    let context = buffer.cell((2, context_row)).expect("context prefix cell");
+    assert_eq!(removed.fg, Color::Red);
+    assert_eq!(added.fg, Color::Green);
+    assert_eq!(context.fg, Color::DarkGray);
 }
 
 #[test]

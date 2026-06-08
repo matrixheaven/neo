@@ -596,6 +596,58 @@ fn transcript_renderer_handles_markdownish_blocks_and_wrapping() {
 }
 
 #[test]
+fn transcript_renderer_classifies_unified_diff_blocks() {
+    let renderer = TranscriptRenderer::new(17);
+    let lines = renderer.render_markdownish(
+        "--- src/lib.rs\n+++ src/lib.rs\n@@\n unchanged line\n-old value with a very long tail\n+new value\n",
+    );
+
+    assert!(matches!(
+        &lines[0],
+        TranscriptLine::DiffFileHeader { marker, path } if *marker == '-' && path == "src/lib.rs"
+    ));
+    assert!(matches!(
+        &lines[1],
+        TranscriptLine::DiffFileHeader { marker, path } if *marker == '+' && path == "src/lib.rs"
+    ));
+    assert!(matches!(&lines[2], TranscriptLine::DiffHunk { text } if text == "@@"));
+    assert!(matches!(
+        &lines[3],
+        TranscriptLine::DiffContext { text } if text == "unchanged line"
+    ));
+    assert!(matches!(
+        &lines[4],
+        TranscriptLine::DiffRemoved { text } if text == "old value with a"
+    ));
+    assert!(matches!(
+        &lines[5],
+        TranscriptLine::DiffRemoved { text } if text.contains("very long tail")
+    ));
+    assert!(matches!(
+        &lines[6],
+        TranscriptLine::DiffAdded { text } if text == "new value"
+    ));
+    assert_eq!(lines[4].display_text(), "-old value with a");
+    assert_eq!(lines[6].display_text(), "+new value");
+    assert!(
+        lines
+            .iter()
+            .all(|line| neo_tui::visible_width(&line.display_text()) <= 17)
+    );
+}
+
+#[test]
+fn transcript_renderer_does_not_classify_plain_plus_minus_text_as_diff() {
+    let renderer = TranscriptRenderer::new(40);
+    let lines = renderer.render_markdownish("+ plain plus\n- plain minus\n---\n+++");
+
+    assert!(!matches!(&lines[0], TranscriptLine::DiffAdded { .. }));
+    assert!(!matches!(&lines[1], TranscriptLine::DiffRemoved { .. }));
+    assert!(!matches!(&lines[2], TranscriptLine::DiffFileHeader { .. }));
+    assert!(!matches!(&lines[3], TranscriptLine::DiffFileHeader { .. }));
+}
+
+#[test]
 fn app_widget_renders_header_transcript_prompt_and_top_overlay() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
     app.transcript_mut().push(neo_tui::TranscriptItem::notice(
