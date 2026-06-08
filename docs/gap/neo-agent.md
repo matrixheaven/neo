@@ -51,10 +51,15 @@
   response, prints real update notifications, and unsubscribes.
 - `print` and `run` merge non-TTY piped stdin with CLI prompt arguments, expand
   project-relative `@file` text prompt arguments, expand project-local
-  `.neo/prompts/*.md` slash prompt templates with `$1`, `$@`, `$ARGUMENTS`, and
-  `${@:N}` / `${@:N:L}` argument placeholders, then discover enabled project
-  MCP servers with `transport = "stdio"`, `transport = "http"`, or
-  `transport = "sse"` and register their tools in the runtime tool registry.
+  `.neo/prompts/*.md` and user-global `~/.neo/prompts/*.md` slash prompt
+  templates with project templates taking precedence, support repeatable
+  explicit `--prompt-template <NAME_OR_PATH>` entries for template names,
+  project-contained `.md` files, and non-recursive `.md` directories, preserve
+  explicit template entries when `--no-prompt-templates` disables automatic
+  discovery, expand `$1`, `$@`, `$ARGUMENTS`, and `${@:N}` / `${@:N:L}`
+  argument placeholders, then discover enabled project MCP servers with
+  `transport = "stdio"`, `transport = "http"`, or `transport = "sse"` and
+  register their tools in the runtime tool registry.
 - `run --output json` and top-level `--mode json run ...` emit stable typed
   JSONL with a session header, Pi-style lifecycle event names, and assistant
   thinking start/delta/end content events when the provider streams reasoning
@@ -99,9 +104,11 @@ and platform-specific guidance.
   slice.
 - Keep stable JSONL docs scoped to the current typed event family until the full
   Pi event family is backed by code.
-- Add global/package prompt-template discovery and explicit
-  `--prompt-template` / `--no-prompt-templates` flags only when those loading
-  scopes are wired to real local paths.
+- Add package/settings prompt-template discovery, collision diagnostics, and
+  trust-gated project prompt loading only when Neo has real local package,
+  settings, and trust infrastructure. The current implemented prompt-template
+  scope is project `.neo/prompts`, user-global `~/.neo/prompts`, and explicit
+  local name/file/directory selectors.
 - Keep config docs scoped to project/global TOML layering until profile sync or
   hosted settings exist.
 - Do not document `/login`, `/tree`, hosted sharing, hosted extension

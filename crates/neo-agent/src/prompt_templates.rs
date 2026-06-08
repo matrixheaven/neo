@@ -14,17 +14,33 @@ pub(crate) struct PromptTemplate {
     pub path: PathBuf,
 }
 
-pub(crate) fn expand_project_prompt_template_args(
+pub(crate) fn expand_prompt_template_args(
     prompt: Vec<String>,
     project_dir: &Path,
+    global_prompts_dir: Option<&Path>,
+    explicit_selectors: &[String],
+    disabled: bool,
 ) -> anyhow::Result<Vec<String>> {
+    let explicit_templates =
+        load_explicit_prompt_templates(explicit_selectors, project_dir, global_prompts_dir)?;
+
     let Some(invocation) = PromptInvocation::from_prompt_args(&prompt) else {
+        if let [template] = explicit_templates.as_slice() {
+            return Ok(vec![substitute_args(&template.content, &prompt)]);
+        }
         return Ok(prompt);
     };
-    let templates = load_project_prompt_templates(project_dir)?;
-    let Some(template) = templates
+    if let Some(template) = explicit_templates
         .iter()
         .find(|template| template.name == invocation.name)
+    {
+        return Ok(vec![substitute_args(&template.content, &invocation.args)]);
+    }
+    if disabled {
+        return Ok(prompt);
+    }
+    let Some(template) =
+        find_prompt_template_by_name(&invocation.name, project_dir, global_prompts_dir)?
     else {
         return Ok(prompt);
     };
@@ -35,7 +51,15 @@ pub(crate) fn load_project_prompt_templates(
     project_dir: &Path,
 ) -> anyhow::Result<Vec<PromptTemplate>> {
     let prompts_dir = project_dir.join(".neo/prompts");
-    let Ok(entries) = fs::read_dir(&prompts_dir) else {
+    load_prompt_templates_from_dir(&prompts_dir)
+}
+
+fn load_user_prompt_templates(prompts_dir: &Path) -> anyhow::Result<Vec<PromptTemplate>> {
+    load_prompt_templates_from_dir(prompts_dir)
+}
+
+fn load_prompt_templates_from_dir(prompts_dir: &Path) -> anyhow::Result<Vec<PromptTemplate>> {
+    let Ok(entries) = fs::read_dir(prompts_dir) else {
         return Ok(Vec::new());
     };
     let mut templates = Vec::new();
@@ -52,6 +76,135 @@ pub(crate) fn load_project_prompt_templates(
     }
     templates.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(templates)
+}
+
+fn find_prompt_template_by_name(
+    name: &str,
+    project_dir: &Path,
+    global_prompts_dir: Option<&Path>,
+) -> anyhow::Result<Option<PromptTemplate>> {
+    if let Some(template) = load_project_prompt_templates(project_dir)?
+        .into_iter()
+        .find(|template| template.name == name)
+    {
+        return Ok(Some(template));
+    }
+    let Some(global_prompts_dir) = global_prompts_dir else {
+        return Ok(None);
+    };
+    Ok(load_user_prompt_templates(global_prompts_dir)?
+        .into_iter()
+        .find(|template| template.name == name))
+}
+
+fn load_explicit_prompt_templates(
+    selectors: &[String],
+    project_dir: &Path,
+    global_prompts_dir: Option<&Path>,
+) -> anyhow::Result<Vec<PromptTemplate>> {
+    let mut templates = Vec::new();
+    for selector in selectors {
+        let selected = load_selected_prompt_templates(selector, project_dir, global_prompts_dir)?;
+        for template in selected {
+            if !templates
+                .iter()
+                .any(|candidate: &PromptTemplate| candidate.name == template.name)
+            {
+                templates.push(template);
+            }
+        }
+    }
+    Ok(templates)
+}
+
+fn load_selected_prompt_templates(
+    selector: &str,
+    project_dir: &Path,
+    global_prompts_dir: Option<&Path>,
+) -> anyhow::Result<Vec<PromptTemplate>> {
+    if selector.is_empty() {
+        anyhow::bail!("prompt template selector cannot be empty");
+    }
+    if let Some(path) = selector_as_template_path(selector) {
+        return load_templates_from_checked_path(path, project_dir, global_prompts_dir);
+    }
+    if let Some(template) = find_prompt_template_by_name(selector, project_dir, global_prompts_dir)?
+    {
+        return Ok(vec![template]);
+    }
+    let path = Path::new(selector);
+    if explicit_path_exists(path, project_dir, global_prompts_dir) {
+        return load_templates_from_checked_path(path, project_dir, global_prompts_dir);
+    }
+    Err(anyhow::anyhow!("unknown prompt template: {selector}"))
+}
+
+fn selector_as_template_path(selector: &str) -> Option<&Path> {
+    let path = Path::new(selector);
+    (path.is_absolute()
+        || path.components().count() > 1
+        || selector.contains(std::path::MAIN_SEPARATOR)
+        || selector.contains('/')
+        || path.extension() == Some(OsStr::new("md")))
+    .then_some(path)
+}
+
+fn explicit_path_exists(
+    path: &Path,
+    project_dir: &Path,
+    global_prompts_dir: Option<&Path>,
+) -> bool {
+    if path.is_absolute() {
+        return path.exists();
+    }
+    project_dir.join(path).exists()
+        || global_prompts_dir.is_some_and(|prompts_dir| prompts_dir.join(path).exists())
+}
+
+fn load_templates_from_checked_path(
+    path: &Path,
+    project_dir: &Path,
+    global_prompts_dir: Option<&Path>,
+) -> anyhow::Result<Vec<PromptTemplate>> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_dir.join(path)
+    };
+    let candidate = candidate.canonicalize().map_err(|err| {
+        anyhow::anyhow!(
+            "failed to resolve prompt template {}: {err}",
+            candidate.display()
+        )
+    })?;
+    let project_dir = project_dir.canonicalize().map_err(|err| {
+        anyhow::anyhow!(
+            "failed to resolve project directory {}: {err}",
+            project_dir.display()
+        )
+    })?;
+    let global_prompts_dir = global_prompts_dir.and_then(|path| path.canonicalize().ok());
+    anyhow::ensure!(
+        candidate.starts_with(&project_dir)
+            || global_prompts_dir
+                .as_ref()
+                .is_some_and(|prompts_dir| candidate.starts_with(prompts_dir)),
+        "prompt template path must stay inside project directory or user prompt directory"
+    );
+    if candidate.is_dir() {
+        return load_prompt_templates_from_dir(&candidate);
+    }
+    anyhow::ensure!(
+        candidate.extension() == Some(OsStr::new("md")),
+        "prompt template path must point to a .md file: {}",
+        candidate.display()
+    );
+    anyhow::ensure!(
+        candidate.is_file(),
+        "prompt template path must be a regular file: {}",
+        candidate.display()
+    );
+    load_template_from_file(&candidate).map(|template| vec![template])
 }
 
 fn load_template_from_file(path: &Path) -> anyhow::Result<PromptTemplate> {

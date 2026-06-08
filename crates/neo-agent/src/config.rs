@@ -26,6 +26,8 @@ pub struct ConfigOverrides {
     pub mode: Option<String>,
     pub approve: bool,
     pub no_approve: bool,
+    pub prompt_templates: Vec<String>,
+    pub no_prompt_templates: bool,
 }
 
 impl ConfigOverrides {
@@ -38,6 +40,8 @@ impl ConfigOverrides {
             mode: cli.mode.clone(),
             approve: cli.approve,
             no_approve: cli.no_approve,
+            prompt_templates: cli.prompt_template.clone(),
+            no_prompt_templates: cli.no_prompt_templates,
         }
     }
 }
@@ -57,6 +61,10 @@ pub struct AppConfig {
     pub mcp: McpConfig,
     pub approve: bool,
     pub no_approve: bool,
+    #[serde(skip)]
+    pub prompt_templates: Vec<String>,
+    #[serde(skip)]
+    pub no_prompt_templates: bool,
     pub project_dir: PathBuf,
 
     #[serde(skip)]
@@ -299,6 +307,8 @@ impl AppConfig {
             mcp,
             approve: overrides.approve,
             no_approve: overrides.no_approve,
+            prompt_templates: overrides.prompt_templates,
+            no_prompt_templates: overrides.no_prompt_templates,
             project_dir,
             config_path,
         })
@@ -665,6 +675,10 @@ fn find_config_path() -> anyhow::Result<PathBuf> {
 
 fn find_global_config_path() -> Option<PathBuf> {
     home_dir().map(|home| home.join(CONFIG_DIR).join(CONFIG_FILE))
+}
+
+pub(crate) fn global_prompts_dir() -> Option<PathBuf> {
+    home_dir().map(|home| home.join(CONFIG_DIR).join("prompts"))
 }
 
 fn home_dir() -> Option<PathBuf> {

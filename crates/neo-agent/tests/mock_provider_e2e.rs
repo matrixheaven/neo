@@ -250,6 +250,281 @@ All args: $ARGUMENTS
 }
 
 #[test]
+fn print_expands_user_global_prompt_template_when_project_has_no_match() {
+    let home = TempDir::new().expect("home tempdir");
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(home.path().join(".neo/prompts")).expect("create global prompts");
+    std::fs::write(
+        home.path().join(".neo/prompts/review.md"),
+        "Global review target: $1\nAll: $ARGUMENTS\n",
+    )
+    .expect("write global prompt template");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-global-template",
+        "global reviewed",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "/review", "src/main.rs"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "global reviewed\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Global review target: src/main.rs\nAll: src/main.rs"
+    );
+}
+
+#[test]
+fn print_prefers_project_prompt_template_over_user_global_template() {
+    let home = TempDir::new().expect("home tempdir");
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(home.path().join(".neo/prompts")).expect("create global prompts");
+    std::fs::write(
+        home.path().join(".neo/prompts/review.md"),
+        "Global review target: $1\n",
+    )
+    .expect("write global prompt template");
+    std::fs::create_dir_all(project.path().join(".neo/prompts")).expect("create project prompts");
+    std::fs::write(
+        project.path().join(".neo/prompts/review.md"),
+        "Project review target: $1\n",
+    )
+    .expect("write project prompt template");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-project-template",
+        "project reviewed",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "/review", "src/main.rs"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "project reviewed\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Project review target: src/main.rs"
+    );
+}
+
+#[test]
+fn print_forces_prompt_template_by_name_without_slash_invocation() {
+    let home = TempDir::new().expect("home tempdir");
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(home.path().join(".neo/prompts")).expect("create global prompts");
+    std::fs::write(
+        home.path().join(".neo/prompts/review.md"),
+        "Forced review target: $1\nFocus: ${@:2}\n",
+    )
+    .expect("write global prompt template");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-forced-template",
+        "forced reviewed",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args([
+            "--prompt-template",
+            "review",
+            "print",
+            "src/main.rs",
+            "safety pass",
+        ]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "forced reviewed\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Forced review target: src/main.rs\nFocus: safety pass"
+    );
+}
+
+#[test]
+fn print_forces_prompt_template_by_project_relative_path() {
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(project.path().join("prompts")).expect("create prompts");
+    std::fs::write(
+        project.path().join("prompts/explain.md"),
+        "Explain target: $1\nDetails: $@\n",
+    )
+    .expect("write prompt template");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-path-template",
+        "path reviewed",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args([
+            "--prompt-template",
+            "prompts/explain.md",
+            "print",
+            "src/lib.rs",
+        ]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "path reviewed\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Explain target: src/lib.rs\nDetails: src/lib.rs"
+    );
+}
+
+#[test]
+fn print_forces_prompt_template_from_explicit_directory() {
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(project.path().join("prompts/nested")).expect("create prompts");
+    std::fs::write(project.path().join("prompts/review.md"), "Dir review: $1\n")
+        .expect("write prompt template");
+    std::fs::write(
+        project.path().join("prompts/nested/ignored.md"),
+        "Nested review: $1\n",
+    )
+    .expect("write nested prompt template");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-dir-template",
+        "dir reviewed",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args([
+            "--prompt-template",
+            "prompts",
+            "print",
+            "/review",
+            "src/lib.rs",
+        ]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "dir reviewed\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Dir review: src/lib.rs"
+    );
+}
+
+#[test]
+fn print_no_prompt_templates_keeps_explicit_prompt_template_enabled() {
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(project.path().join(".neo/prompts")).expect("create project prompts");
+    std::fs::write(
+        project.path().join(".neo/prompts/review.md"),
+        "Auto review: $1\n",
+    )
+    .expect("write auto prompt template");
+    std::fs::create_dir_all(project.path().join("prompts")).expect("create explicit prompts");
+    std::fs::write(
+        project.path().join("prompts/review.md"),
+        "Explicit review: $1\n",
+    )
+    .expect("write explicit prompt template");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-explicit-with-disabled-auto",
+        "explicit reviewed",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args([
+            "--no-prompt-templates",
+            "--prompt-template",
+            "prompts",
+            "print",
+            "/review",
+            "src/lib.rs",
+        ]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "explicit reviewed\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Explicit review: src/lib.rs"
+    );
+}
+
+#[test]
+fn print_no_prompt_templates_keeps_matching_slash_prompt_unchanged() {
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(project.path().join(".neo/prompts")).expect("create project prompts");
+    std::fs::write(
+        project.path().join(".neo/prompts/review.md"),
+        "Review target: $1\n",
+    )
+    .expect("write project prompt template");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-disabled-template",
+        "template disabled",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--no-prompt-templates", "print", "/review", "src/lib.rs"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "template disabled\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "/review src/lib.rs"
+    );
+}
+
+#[test]
 fn run_expands_project_prompt_template_before_json_output() {
     let temp = TempDir::new().expect("tempdir");
     std::fs::create_dir_all(temp.path().join(".neo/prompts")).expect("create prompts");

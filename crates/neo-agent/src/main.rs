@@ -115,8 +115,13 @@ fn run_output_for_mode(config: &AppConfig) -> cli::RunOutput {
 }
 
 fn prepare_prompt(prompt: Vec<String>, config: &AppConfig) -> anyhow::Result<Vec<String>> {
-    let prompt =
-        prompt_templates::expand_project_prompt_template_args(prompt, &config.project_dir)?;
+    let prompt = prompt_templates::expand_prompt_template_args(
+        prompt,
+        &config.project_dir,
+        config::global_prompts_dir().as_deref(),
+        &config.prompt_templates,
+        config.no_prompt_templates,
+    )?;
     let prompt = expand_prompt_files(prompt, &config.project_dir)?;
     prompt_with_piped_stdin(prompt)
 }

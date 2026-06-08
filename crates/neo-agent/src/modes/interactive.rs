@@ -2475,6 +2475,8 @@ mod tests {
             mcp: McpConfig::default(),
             approve: false,
             no_approve: false,
+            prompt_templates: Vec::new(),
+            no_prompt_templates: false,
             project_dir: project_dir.to_path_buf(),
             config_path: project_dir.join(".neo/config.toml"),
         }

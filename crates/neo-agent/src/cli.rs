@@ -24,6 +24,12 @@ pub struct Cli {
     #[arg(long = "no-approve", alias = "no_approve", global = true)]
     pub no_approve: bool,
 
+    #[arg(long, global = true, value_name = "NAME_OR_PATH")]
+    pub prompt_template: Vec<String>,
+
+    #[arg(long, global = true)]
+    pub no_prompt_templates: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

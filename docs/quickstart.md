@@ -52,6 +52,27 @@ EOF
 cargo run -p neo-agent -- print /review src/lib.rs "security pass"
 ```
 
+User-global templates in `~/.neo/prompts/*.md` are used when the project does
+not define the same name. Project templates win on name collisions.
+
+Use `--prompt-template <NAME_OR_PATH>` to force a template without a slash
+invocation, or to load a project-relative `.md` file or a non-recursive
+directory of `.md` templates:
+
+```bash
+cargo run -p neo-agent -- --prompt-template review print src/lib.rs
+cargo run -p neo-agent -- --prompt-template prompts print /review src/lib.rs
+```
+
+`--no-prompt-templates` disables automatic project/global slash discovery.
+Explicit `--prompt-template` entries still load, so the two flags can be
+combined to run with exactly the templates you named:
+
+```bash
+cargo run -p neo-agent -- --no-prompt-templates print /review src/lib.rs
+cargo run -p neo-agent -- --no-prompt-templates --prompt-template prompts print /review src/lib.rs
+```
+
 `run --output json` emits a stable typed JSONL event stream with a session
 header and Pi-style lifecycle event names. The same stream is selected when
 the command runs under top-level `--mode json`:
