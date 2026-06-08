@@ -152,6 +152,12 @@ pub struct RpcSessionGetResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RpcSessionExportHtmlResult {
+    pub session_id: String,
+    pub html: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RpcCommandRecord {
     pub name: String,
     pub kind: RpcCommandKind,

@@ -435,6 +435,43 @@ fn rpc_sessions_get_reports_missing_session_as_invalid_params() {
 }
 
 #[test]
+fn rpc_sessions_export_html_returns_rendered_local_session() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    std::fs::write(
+        sessions.join("alpha.jsonl"),
+        concat!(
+            "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello html export\"}}]}}}}\n",
+            "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"rendered **bold** local reply <script>alert(1)</script>\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
+        ),
+    )
+    .expect("write session");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"export-1","method":"sessions.export_html","params":{"session_id":"alpha"}}"#,
+    );
+
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "response");
+    assert_eq!(messages[0]["id"], "export-1");
+    assert_eq!(messages[0]["result"]["session_id"], "alpha");
+    let html = messages[0]["result"]["html"]
+        .as_str()
+        .expect("rendered html");
+    assert!(html.contains("<!doctype html>"));
+    assert!(html.contains("<title>neo session alpha</title>"));
+    assert!(html.contains("hello html export"));
+    assert!(html.contains("rendered <strong>bold</strong> local reply"));
+    assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    assert!(!html.contains("<script>alert(1)</script>"));
+}
+
+#[test]
 fn rpc_get_commands_returns_local_prompt_template_commands() {
     let home = TempDir::new().expect("home tempdir");
     let project = TempDir::new().expect("project tempdir");

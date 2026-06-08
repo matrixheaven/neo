@@ -1,7 +1,7 @@
 use neo_sdk::{
     JsonlCodec, RpcCodecError, RpcCommandKind, RpcCommandRecord, RpcCommandsResult, RpcError,
-    RpcErrorCode, RpcMessage, RpcNotification, RpcRequest, RpcResponse, RpcSessionGetResult,
-    RpcSessionRecord, RpcSessionTreeRecord,
+    RpcErrorCode, RpcMessage, RpcNotification, RpcRequest, RpcResponse, RpcSessionExportHtmlResult,
+    RpcSessionGetResult, RpcSessionRecord, RpcSessionTreeRecord,
 };
 use serde_json::json;
 
@@ -146,6 +146,27 @@ fn session_get_result_has_stable_json_shape() {
     assert_eq!(
         serde_json::from_value::<RpcSessionGetResult>(value)
             .expect("deserialize session get result"),
+        result
+    );
+}
+
+#[test]
+fn session_export_html_result_has_stable_json_shape() {
+    let result = RpcSessionExportHtmlResult {
+        session_id: "alpha".to_owned(),
+        html: "<!doctype html><title>neo session alpha</title>".to_owned(),
+    };
+
+    let value = serde_json::to_value(&result).expect("serialize session export html result");
+
+    assert_eq!(value["session_id"], "alpha");
+    assert_eq!(
+        value["html"],
+        "<!doctype html><title>neo session alpha</title>"
+    );
+    assert_eq!(
+        serde_json::from_value::<RpcSessionExportHtmlResult>(value)
+            .expect("deserialize session export html result"),
         result
     );
 }

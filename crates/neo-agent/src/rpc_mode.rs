@@ -4,8 +4,9 @@ use anyhow::Context;
 use neo_agent_core::session::{JsonlSessionReader, SessionMetadataStore, SessionRecord};
 use neo_sdk::{
     JsonlCodec, RpcCommandKind, RpcCommandRecord, RpcCommandsResult, RpcError, RpcErrorCode,
-    RpcMessage, RpcNotification, RpcRequest, RpcResponse, RpcSessionGetResult, RpcSessionRecord,
-    RpcSessionTreeRecord, RpcSessionsListResult, RpcSessionsTreeResult,
+    RpcMessage, RpcNotification, RpcRequest, RpcResponse, RpcSessionExportHtmlResult,
+    RpcSessionGetResult, RpcSessionRecord, RpcSessionTreeRecord, RpcSessionsListResult,
+    RpcSessionsTreeResult,
 };
 use serde_json::{Value, json};
 
@@ -69,6 +70,7 @@ async fn handle_request(
         "sessions.list" => handle_sessions_list(config, request, output),
         "sessions.tree" => handle_sessions_tree(config, request, output),
         "sessions.get" => handle_sessions_get(config, request, output).await,
+        "sessions.export_html" => handle_sessions_export_html(config, request, output).await,
         "prompt" => handle_prompt(config, request, output).await,
         unknown => push_rpc_message(
             output,
@@ -292,6 +294,74 @@ async fn handle_sessions_get(
                 path: path.display().to_string(),
                 messages,
             })?,
+        )),
+    )
+}
+
+async fn handle_sessions_export_html(
+    config: &AppConfig,
+    request: RpcRequest,
+    output: &mut String,
+) -> anyhow::Result<()> {
+    let Some(session_ref) = request.params.get("session_id").and_then(Value::as_str) else {
+        return push_rpc_message(
+            output,
+            &RpcMessage::Response(RpcResponse::failure(
+                request.id,
+                RpcError::new(
+                    RpcErrorCode::InvalidParams,
+                    "sessions.export_html params.session_id must be a string",
+                    None,
+                ),
+            )),
+        );
+    };
+
+    let session_id = match session_commands::resolve_session_id(session_ref, config) {
+        Ok(session_id) => session_id,
+        Err(err) => {
+            return push_rpc_message(
+                output,
+                &RpcMessage::Response(RpcResponse::failure(
+                    request.id,
+                    RpcError::new(RpcErrorCode::InvalidParams, err.to_string(), None),
+                )),
+            );
+        }
+    };
+    let path = config.sessions_dir.join(format!("{session_id}.jsonl"));
+    if !path.exists() {
+        return push_rpc_message(
+            output,
+            &RpcMessage::Response(RpcResponse::failure(
+                request.id,
+                RpcError::new(
+                    RpcErrorCode::InvalidParams,
+                    format!("session {session_ref:?} does not exist"),
+                    None,
+                ),
+            )),
+        );
+    }
+
+    let html = match session_commands::export_html(&session_id, config).await {
+        Ok(html) => html,
+        Err(err) => {
+            return push_rpc_message(
+                output,
+                &RpcMessage::Response(RpcResponse::failure(
+                    request.id,
+                    RpcError::new(RpcErrorCode::InternalError, err.to_string(), None),
+                )),
+            );
+        }
+    };
+
+    push_rpc_message(
+        output,
+        &RpcMessage::Response(RpcResponse::success(
+            request.id,
+            serde_json::to_value(RpcSessionExportHtmlResult { session_id, html })?,
         )),
     )
 }

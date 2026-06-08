@@ -56,13 +56,15 @@ unsupported surface area until the Rust contracts exist.
   Neo runtime contracts.
 - Keep provider credentials environment-only for now; auth-file and OAuth
   flows are future work.
-- Extend Anthropic and Google thinking beyond the current
-  `reasoning_effort`-to-budget request payloads only after Neo has explicit
-  adaptive-thinking, display/off-state, encrypted/signature replay, and
-  provider-specific stream mapping contracts. OpenAI Responses reasoning
-  summaries are streamed as local thinking events, but provider-native
-  encrypted reasoning handoff and non-OpenAI thinking stream formats remain
-  future work.
+- Extend Google thinking beyond the current
+  `reasoning_effort`-to-budget request payload only after Neo has an explicit
+  provider-specific stream mapping contract. Anthropic Messages extended
+  thinking now maps provider-native `thinking_delta` and `signature_delta`
+  stream chunks into local thinking events, but adaptive-thinking controls,
+  display/off-state handling, encrypted reasoning handoff, and signature replay
+  remain future work. OpenAI Responses reasoning summaries are streamed as
+  local thinking events, while provider-native encrypted reasoning handoff
+  remains out of scope.
 - Keep request metadata internal-facing. Do not expose provider-native chunk
   formats to `neo-agent-core`.
 

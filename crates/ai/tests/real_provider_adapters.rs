@@ -935,6 +935,84 @@ async fn anthropic_messages_client_serializes_reasoning_effort_as_budget_thinkin
 }
 
 #[tokio::test]
+async fn anthropic_messages_client_streams_extended_thinking_events() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "message_start", "message": { "id": "msg-thinking-stream" } }),
+        json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": { "type": "thinking", "thinking": "" }
+        }),
+        json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "thinking_delta", "thinking": "Checked " }
+        }),
+        json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "thinking_delta", "thinking": "the plan." }
+        }),
+        json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "signature_delta", "signature": "sig-test" }
+        }),
+        json!({ "type": "content_block_stop", "index": 0 }),
+        json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": { "type": "text", "text": "" }
+        }),
+        json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": { "type": "text_delta", "text": "final" }
+        }),
+        json!({ "type": "content_block_stop", "index": 1 }),
+        json!({ "type": "message_stop" }),
+    ])]);
+    let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::AnthropicMessages))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg-thinking-stream".to_owned()
+            },
+            AiStreamEvent::ThinkingStart {
+                id: "thinking:0".to_owned()
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "Checked ".to_owned()
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "the plan.".to_owned()
+            },
+            AiStreamEvent::ThinkingEnd {
+                signature: Some("sig-test".to_owned()),
+                redacted: false,
+            },
+            AiStreamEvent::TextDelta {
+                text: "final".to_owned()
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn anthropic_messages_client_serializes_image_parts() {
     let server = MockServer::start(vec![sse_response(&[
         json!({ "type": "message_start", "message": { "id": "msg-image" } }),

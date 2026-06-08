@@ -70,13 +70,16 @@
   capabilities grow.
 - RPC mode supports `get_state`, local prompt-template `get_commands`,
   `prompt`, JSONL-backed `get_messages`, and local `sessions.list`,
-  `sessions.tree`, and `sessions.get` metadata payloads. `get_commands`
+  `sessions.tree`, `sessions.get`, and `sessions.export_html` payloads.
+  `get_commands`
   exposes configured, project, and user-global prompt-template slash commands
   with stable command metadata and the same configured > project > user
-  selection priority used by runtime slash prompts. `sessions.get` resolves
+  selection priority used by runtime slash prompts. Session RPC methods resolve
   exact ids, unique prefixes, and in-directory JSONL paths through the local
-  session resolver, then returns the session metadata, child ids, JSONL path,
-  and replayed messages. State reports real project/session counts and omits
+  session resolver. `sessions.get` returns the session metadata, child ids,
+  JSONL path, and replayed messages; `sessions.export_html` returns the
+  resolved session id plus the same standalone sanitized HTML used by
+  `sessions export-html`. State reports real project/session counts and omits
   unsupported streaming state.
 - Interactive mode has a testable controller and a live crossterm/raw-mode TTY
   loop slice. TTY execution renders `neo-tui`, accepts text input, submits

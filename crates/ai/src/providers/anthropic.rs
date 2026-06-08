@@ -451,10 +451,16 @@ struct ParseState {
     started: bool,
     tool_args: BTreeMap<String, String>,
     block_tool_ids: BTreeMap<u64, String>,
+    thinking_blocks: BTreeMap<u64, ThinkingBlock>,
     last_stop_reason: StopReason,
     usage: Option<TokenUsage>,
     terminal: bool,
     finished: bool,
+}
+
+#[derive(Default)]
+struct ThinkingBlock {
+    signature: Option<String>,
 }
 
 impl Default for ParseState {
@@ -464,6 +470,7 @@ impl Default for ParseState {
             started: false,
             tool_args: BTreeMap::new(),
             block_tool_ids: BTreeMap::new(),
+            thinking_blocks: BTreeMap::new(),
             last_stop_reason: StopReason::EndTurn,
             usage: None,
             terminal: false,
@@ -486,6 +493,7 @@ impl ParseState {
             }
             Some("content_block_start") => self.ingest_block_start(value),
             Some("content_block_delta") => self.ingest_block_delta(value),
+            Some("content_block_stop") => self.ingest_block_stop(value),
             Some("message_delta") => self.ingest_message_delta(value),
             Some("message_stop") => {
                 self.terminal = true;
@@ -520,23 +528,34 @@ impl ParseState {
 
     fn ingest_block_start(&mut self, value: &Value) {
         let block = value.get("content_block").unwrap_or(&Value::Null);
-        if block.get("type").and_then(Value::as_str) != Some("tool_use") {
-            return;
-        }
-
-        self.ensure_started("message".to_owned());
         let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
-        let id = block
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("tool")
-            .to_owned();
-        self.block_tool_ids.insert(index, id.clone());
-        if let Some(name) = block.get("name").and_then(Value::as_str) {
-            self.events.push(AiStreamEvent::ToolCallStart {
-                id,
-                name: name.to_owned(),
-            });
+        match block.get("type").and_then(Value::as_str) {
+            Some("tool_use") => {
+                self.ensure_started("message".to_owned());
+                let id = block
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool")
+                    .to_owned();
+                self.block_tool_ids.insert(index, id.clone());
+                if let Some(name) = block.get("name").and_then(Value::as_str) {
+                    self.events.push(AiStreamEvent::ToolCallStart {
+                        id,
+                        name: name.to_owned(),
+                    });
+                }
+            }
+            Some("thinking") => {
+                self.start_thinking_block(index);
+                if let Some(text) = block.get("thinking").and_then(Value::as_str)
+                    && !text.is_empty()
+                {
+                    self.events.push(AiStreamEvent::ThinkingDelta {
+                        text: text.to_owned(),
+                    });
+                }
+            }
+            _ => {}
         }
     }
 
@@ -551,6 +570,27 @@ impl ParseState {
                     self.events.push(AiStreamEvent::TextDelta {
                         text: text.to_owned(),
                     });
+                }
+            }
+            Some("thinking_delta") => {
+                let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
+                self.start_thinking_block(index);
+                if let Some(text) = delta.get("thinking").and_then(Value::as_str)
+                    && !text.is_empty()
+                {
+                    self.events.push(AiStreamEvent::ThinkingDelta {
+                        text: text.to_owned(),
+                    });
+                }
+            }
+            Some("signature_delta") => {
+                let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
+                self.start_thinking_block(index);
+                if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
+                    self.thinking_blocks
+                        .get_mut(&index)
+                        .expect("thinking block should exist")
+                        .signature = Some(signature.to_owned());
                 }
             }
             Some("input_json_delta") => {
@@ -575,6 +615,16 @@ impl ParseState {
         }
     }
 
+    fn ingest_block_stop(&mut self, value: &Value) {
+        let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
+        if let Some(block) = self.thinking_blocks.remove(&index) {
+            self.events.push(AiStreamEvent::ThinkingEnd {
+                signature: block.signature,
+                redacted: false,
+            });
+        }
+    }
+
     fn ingest_message_delta(&mut self, value: &Value) {
         if let Some(reason) = value
             .get("delta")
@@ -595,6 +645,14 @@ impl ParseState {
         }
         self.finished = true;
 
+        let unfinished_thinking = std::mem::take(&mut self.thinking_blocks);
+        for block in unfinished_thinking.into_values() {
+            self.events.push(AiStreamEvent::ThinkingEnd {
+                signature: block.signature,
+                redacted: false,
+            });
+        }
+
         for (id, arguments) in &self.tool_args {
             let parsed = serde_json::from_str(arguments)
                 .map_err(|err| ProviderError::Stream(format!("invalid tool arguments: {err}")))?;
@@ -612,6 +670,18 @@ impl ParseState {
         }
 
         Ok(self.drain_events())
+    }
+
+    fn start_thinking_block(&mut self, index: u64) {
+        self.ensure_started("message".to_owned());
+        if self.thinking_blocks.contains_key(&index) {
+            return;
+        }
+
+        self.thinking_blocks.insert(index, ThinkingBlock::default());
+        self.events.push(AiStreamEvent::ThinkingStart {
+            id: format!("thinking:{index}"),
+        });
     }
 }
 
