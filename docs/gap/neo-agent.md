@@ -78,9 +78,10 @@
   handlers, cancels the active runtime token on interruption, drains cooperative
   cancelled message/turn/run barriers before falling back to abort, scrolls the
   transcript viewport with Up/Down/PageUp/PageDown in editing mode, completes
-  prompt file paths from `AppConfig.project_dir` on
-  Tab, exits on Esc/Ctrl-C, and keeps the no-tty snapshot fallback for command
-  tests and redirected stdout. `ctrl+r` opens a local session picker backed by
+  prompt file paths from `AppConfig.project_dir` and local project slash prompt
+  templates from `.neo/prompts/*.md` on Tab, exits on Esc/Ctrl-C, and keeps the
+  no-tty snapshot fallback for command tests and redirected stdout. `ctrl+r`
+  opens a local session picker backed by
   `sessions_dir` metadata and JSONL files; the picker uses local tree ordering
   and indents child sessions. Selecting a session replays its compacted context
   into the TUI, and subsequent prompts use that context while appending new

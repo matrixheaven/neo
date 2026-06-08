@@ -1,4 +1,4 @@
-use crate::config::AppConfig;
+use crate::{config::AppConfig, prompt_templates::load_project_prompt_templates};
 use std::{
     collections::{BTreeMap, VecDeque},
     fs,
@@ -511,7 +511,7 @@ impl InteractiveController {
             self.app.prompt_mut().apply_edit(PromptEdit::Insert("\t"));
             return;
         };
-        let completions = match filesystem_prompt_completions(&self.completion_root, &prefix.text) {
+        let completions = match prompt_completions(&self.completion_root, &prefix.text) {
             Ok(completions) => completions,
             Err(error) => {
                 self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
@@ -807,6 +807,35 @@ impl InteractiveController {
     pub fn render_snapshot(&self) -> String {
         render_terminal_fallback(&self.app)
     }
+}
+
+fn prompt_completions(root: &Path, prefix: &str) -> Result<Vec<PickerItem>> {
+    if let Some(completions) = slash_prompt_template_completions(root, prefix)? {
+        return Ok(completions);
+    }
+    filesystem_prompt_completions(root, prefix)
+}
+
+fn slash_prompt_template_completions(root: &Path, prefix: &str) -> Result<Option<Vec<PickerItem>>> {
+    let Some(name_prefix) = prefix.strip_prefix('/') else {
+        return Ok(None);
+    };
+    if name_prefix.contains('/') || name_prefix.is_empty() {
+        return Ok(None);
+    }
+
+    let mut completions = load_project_prompt_templates(root)?
+        .into_iter()
+        .filter(|template| template.name.starts_with(name_prefix))
+        .map(|template| {
+            let value = format!("/{}", template.name);
+            let description = (!template.description.is_empty()).then_some(template.description);
+            PickerItem::new(value.clone(), value, description)
+        })
+        .collect::<Vec<_>>();
+    completions.sort_by(|left, right| left.value.cmp(&right.value));
+    completions.truncate(100);
+    Ok(Some(completions))
 }
 
 fn filesystem_prompt_completions(root: &Path, prefix: &str) -> Result<Vec<PickerItem>> {
@@ -1624,6 +1653,36 @@ mod tests {
 
         assert_eq!(controller.app().prompt().text, "open src/main.rs");
         assert_eq!(controller.app().prompt().cursor, 16);
+        assert!(controller.app().focused_overlay().is_none());
+    }
+
+    #[tokio::test]
+    async fn event_loop_tabs_through_local_slash_prompt_template_completions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prompts_dir = temp.path().join(".neo/prompts");
+        fs::create_dir_all(&prompts_dir).expect("create prompts");
+        fs::write(
+            prompts_dir.join("review.md"),
+            "---\ndescription: Review the current change\n---\nReview this change.\n",
+        )
+        .expect("write review prompt");
+
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.completion_root = temp.path().to_path_buf();
+
+        controller.type_text("/rev");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+            .await
+            .expect("tab completes slash prompt");
+
+        assert_eq!(controller.app().prompt().text, "/review");
+        assert_eq!(controller.app().prompt().cursor, 7);
         assert!(controller.app().focused_overlay().is_none());
     }
 

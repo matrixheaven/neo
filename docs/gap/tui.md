@@ -46,12 +46,13 @@ Target: `crates/tui`.
   and only falls back to abort when the runtime task does not finish.
 - Streamed assistant thinking events from `neo-agent-core` are reduced into a
   visible TUI notice while final assistant text remains a separate answer item.
-- Prompt Tab completion is backed by the real project filesystem. `neo-tui`
+- Prompt Tab completion is backed by real local project data. `neo-tui`
   exposes prompt completion prefix/replacement primitives plus a completion
   picker overlay, and `neo-agent` reads matching files/directories from
-  `AppConfig.project_dir`, auto-applies a longer common prefix, opens the
-  picker for multiple exact-prefix matches, and preserves literal tab insertion
-  when no filesystem completion exists.
+  `AppConfig.project_dir` plus slash prompt templates from `.neo/prompts/*.md`,
+  auto-applies a longer common prefix, opens the picker for multiple
+  exact-prefix matches, and preserves literal tab insertion when no completion
+  exists.
 - The live interactive loop enables terminal bracketed paste mode and routes
   both native crossterm paste events and raw bracketed-paste start/end
   sequences through a buffered `InputParser`. Pasted multiline text is inserted
@@ -61,7 +62,8 @@ Target: `crates/tui`.
 ## Remaining lower-priority gaps
 
 - The Rust crate does not implement image protocols, richer provider or command
-  autocomplete, OS/terminal clipboard integration, or the full TypeScript
+  autocomplete beyond local slash prompt templates, OS/terminal clipboard
+  integration, or the full TypeScript
   renderer's advanced diff affordances beyond width-safe unified diff line
   classification and coloring.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.
