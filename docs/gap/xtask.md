@@ -8,9 +8,10 @@
 - `cargo run -p xtask -- check --docs` runs the docs/examples parity gate:
   local Markdown link validation for `README.md`, `docs/**/*.md`, and
   `examples/**/*.md`; production fake/local/placeholder guidance scans; and
-  stale gap-claim scans for implemented MCP/session/extension surfaces; TOML,
-  JSON, and Rust example harness validation for the documented example
-  artifacts; and `cargo check --manifest-path examples/rust/Cargo.toml
+  stale gap-claim scans for implemented MCP/session/extension, runtime hook,
+  TUI diff/paste, and provider thinking-payload surfaces; TOML, JSON, and Rust
+  example harness validation for the documented example artifacts; and
+  `cargo check --manifest-path examples/rust/Cargo.toml
   --examples`.
 - `cargo run -p xtask -- parity` runs the docs/examples parity gate without the
   fmt, clippy, and test steps.
@@ -34,10 +35,12 @@ The stale gap-claim scan is intentionally symbol-driven. It rejects statements
 such as "no MCP adapter is wired" once `McpToolAdapter`/`McpToolProvider`
 exist, "extension lifecycle unavailable" once status/enable/disable commands
 exist, and "session branching and naming are future work" once
-`SessionMetadataStore::fork`/`rename` exist. It still allows honest gaps for
-hosted MCP management, remote MCP servers that require alternate notification
-channels, hosted share, OAuth login, raw TUI loops, and other surfaces that are
-not implemented.
+`SessionMetadataStore::fork`/`rename` exist. The same scan rejects stale TUI
+diff/paste-buffering and Anthropic/Google thinking-payload claims once their
+implementation symbols are present. It still allows honest gaps for hosted MCP
+management, remote MCP servers that require alternate notification channels,
+hosted share, OAuth login, image protocols, OS clipboard integration, advanced
+diff affordances, and other surfaces that are not implemented.
 
 ## Pi Parity Pressure
 

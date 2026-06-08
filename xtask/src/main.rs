@@ -261,6 +261,9 @@ enum ImplementedSurface {
     InteractiveModelPicker,
     InteractiveSessionFork,
     RuntimeHooksAndQueues,
+    TuiUnifiedDiffRenderer,
+    TuiPasteBuffering,
+    AiAnthropicGoogleThinkingPayloads,
 }
 
 #[derive(Debug, Clone)]
@@ -268,99 +271,110 @@ struct ParityCodeTruth {
     implemented: BTreeSet<ImplementedSurface>,
 }
 
+#[derive(Debug, Clone)]
+struct ParitySources {
+    mcp: String,
+    cli: String,
+    session: String,
+    runtime: String,
+    interactive: String,
+    input: String,
+    tui_app: String,
+    tui_components: String,
+    anthropic: String,
+    google: String,
+}
+
+impl ParitySources {
+    fn load(root: &Path) -> Result<Self> {
+        Ok(Self {
+            mcp: read_agent_core_source(root, &["tools", "mcp.rs"])?,
+            cli: read_neo_agent_source(root, &["cli.rs"])?,
+            session: read_agent_core_source(root, &["session", "mod.rs"])?,
+            runtime: read_agent_core_source(root, &["runtime.rs"])?,
+            interactive: read_neo_agent_source(root, &["modes", "interactive.rs"])?,
+            input: read_tui_source(root, &["input.rs"])?,
+            tui_app: read_tui_source(root, &["app.rs"])?,
+            tui_components: read_tui_source(root, &["components.rs"])?,
+            anthropic: read_ai_provider_source(root, "anthropic.rs")?,
+            google: read_ai_provider_source(root, "google.rs")?,
+        })
+    }
+}
+
 impl ParityCodeTruth {
     fn load(root: &Path) -> Result<Self> {
+        let sources = ParitySources::load(root)?;
         let mut implemented = BTreeSet::new();
-        let mcp_source = read_optional_source(
-            &root
-                .join("crates")
-                .join("agent-core")
-                .join("src")
-                .join("tools")
-                .join("mcp.rs"),
-        )?;
-        let cli_source = read_optional_source(
-            &root
-                .join("crates")
-                .join("neo-agent")
-                .join("src")
-                .join("cli.rs"),
-        )?;
-        let session_source = read_optional_source(
-            &root
-                .join("crates")
-                .join("agent-core")
-                .join("src")
-                .join("session")
-                .join("mod.rs"),
-        )?;
-        let runtime_source = read_optional_source(
-            &root
-                .join("crates")
-                .join("agent-core")
-                .join("src")
-                .join("runtime.rs"),
-        )?;
-        let interactive_source = read_optional_source(
-            &root
-                .join("crates")
-                .join("neo-agent")
-                .join("src")
-                .join("modes")
-                .join("interactive.rs"),
-        )?;
-        let input_source =
-            read_optional_source(&root.join("crates").join("tui").join("src").join("input.rs"))?;
 
-        if mcp_source.contains("trait McpToolAdapter") && mcp_source.contains("McpToolProvider") {
+        if sources.mcp.contains("trait McpToolAdapter") && sources.mcp.contains("McpToolProvider") {
             implemented.insert(ImplementedSurface::McpToolAdapterBoundary);
         }
-        if mcp_source.contains("McpStdioToolAdapter")
-            && mcp_source.contains("tools/list")
-            && mcp_source.contains("tools/call")
+        if sources.mcp.contains("McpStdioToolAdapter")
+            && sources.mcp.contains("tools/list")
+            && sources.mcp.contains("tools/call")
         {
             implemented.insert(ImplementedSurface::StdioMcpProcessAdapter);
         }
-        if cli_source.contains("Status")
-            && cli_source.contains("Enable")
-            && cli_source.contains("Disable")
-            && cli_source.contains("ExtensionCommand")
+        if sources.cli.contains("Status")
+            && sources.cli.contains("Enable")
+            && sources.cli.contains("Disable")
+            && sources.cli.contains("ExtensionCommand")
         {
             implemented.insert(ImplementedSurface::ExtensionLifecycleCommands);
         }
-        if session_source.contains("SessionMetadataStore")
-            && session_source.contains("pub fn fork")
-            && session_source.contains("pub fn rename")
+        if sources.session.contains("SessionMetadataStore")
+            && sources.session.contains("pub fn fork")
+            && sources.session.contains("pub fn rename")
         {
             implemented.insert(ImplementedSurface::SessionMetadataBranching);
         }
-        if interactive_source.contains("open_session_picker")
-            && interactive_source.contains("load_selected_session")
-            && interactive_source.contains("session_catalog_for_config")
-            && input_source.contains("SessionPickerOpen")
+        if sources.interactive.contains("open_session_picker")
+            && sources.interactive.contains("load_selected_session")
+            && sources.interactive.contains("session_catalog_for_config")
+            && sources.input.contains("SessionPickerOpen")
         {
             implemented.insert(ImplementedSurface::InteractiveSessionPicker);
         }
-        if interactive_source.contains("open_model_picker")
-            && interactive_source.contains("apply_selected_model")
-            && interactive_source.contains("model_catalog_for_config")
-            && input_source.contains("ModelPickerOpen")
+        if sources.interactive.contains("open_model_picker")
+            && sources.interactive.contains("apply_selected_model")
+            && sources.interactive.contains("model_catalog_for_config")
+            && sources.input.contains("ModelPickerOpen")
         {
             implemented.insert(ImplementedSurface::InteractiveModelPicker);
         }
-        if interactive_source.contains("fork_selected_session")
-            && interactive_source.contains("fork_session_transcript")
-            && input_source.contains("SessionFork")
-            && input_source.contains("tui.session.fork")
+        if sources.interactive.contains("fork_selected_session")
+            && sources.interactive.contains("fork_session_transcript")
+            && sources.input.contains("SessionFork")
+            && sources.input.contains("tui.session.fork")
         {
             implemented.insert(ImplementedSurface::InteractiveSessionFork);
         }
-        if runtime_source.contains("with_before_tool_call")
-            && runtime_source.contains("with_after_tool_call")
-            && runtime_source.contains("with_queue_modes")
-            && runtime_source.contains("queue_steering_message")
+        if sources.runtime.contains("with_before_tool_call")
+            && sources.runtime.contains("with_after_tool_call")
+            && sources.runtime.contains("with_queue_modes")
+            && sources.runtime.contains("queue_steering_message")
         {
             implemented.insert(ImplementedSurface::RuntimeHooksAndQueues);
+        }
+        if sources.tui_app.contains("DiffAdded")
+            && sources.tui_app.contains("DiffRemoved")
+            && sources.tui_components.contains("transcript_line_style")
+        {
+            implemented.insert(ImplementedSurface::TuiUnifiedDiffRenderer);
+        }
+        if sources.input.contains("InputParser")
+            && sources.input.contains("BRACKETED_PASTE_START")
+            && sources.input.contains("BRACKETED_PASTE_END")
+        {
+            implemented.insert(ImplementedSurface::TuiPasteBuffering);
+        }
+        if sources.anthropic.contains("thinking_budget_tokens")
+            && sources.anthropic.contains("\"budget_tokens\"")
+            && sources.google.contains("thinking_budget_tokens")
+            && sources.google.contains("\"thinkingConfig\"")
+        {
+            implemented.insert(ImplementedSurface::AiAnthropicGoogleThinkingPayloads);
         }
 
         Ok(Self { implemented })
@@ -369,6 +383,30 @@ impl ParityCodeTruth {
     fn has(&self, surface: ImplementedSurface) -> bool {
         self.implemented.contains(&surface)
     }
+}
+
+fn read_agent_core_source(root: &Path, parts: &[&str]) -> Result<String> {
+    read_crate_source(root, "agent-core", parts)
+}
+
+fn read_neo_agent_source(root: &Path, parts: &[&str]) -> Result<String> {
+    read_crate_source(root, "neo-agent", parts)
+}
+
+fn read_tui_source(root: &Path, parts: &[&str]) -> Result<String> {
+    read_crate_source(root, "tui", parts)
+}
+
+fn read_ai_provider_source(root: &Path, file: &str) -> Result<String> {
+    read_crate_source(root, "ai", &["providers", file])
+}
+
+fn read_crate_source(root: &Path, crate_name: &str, parts: &[&str]) -> Result<String> {
+    let path = parts.iter().fold(
+        root.join("crates").join(crate_name).join("src"),
+        |path, part| path.join(part),
+    );
+    read_optional_source(&path)
 }
 
 fn read_optional_source(path: &Path) -> Result<String> {
@@ -559,6 +597,16 @@ fn stale_gap_claim_violation(
     normalized: &str,
     code_truth: &ParityCodeTruth,
 ) -> Option<&'static str> {
+    stale_backend_gap_claim_violation(normalized, code_truth)
+        .or_else(|| stale_interactive_gap_claim_violation(normalized, code_truth))
+        .or_else(|| stale_tui_gap_claim_violation(normalized, code_truth))
+        .or_else(|| stale_ai_gap_claim_violation(normalized, code_truth))
+}
+
+fn stale_backend_gap_claim_violation(
+    normalized: &str,
+    code_truth: &ParityCodeTruth,
+) -> Option<&'static str> {
     if code_truth.has(ImplementedSurface::McpToolAdapterBoundary)
         && normalized.contains("mcp")
         && normalized.contains("adapter")
@@ -602,6 +650,25 @@ fn stale_gap_claim_violation(
         return Some("stale session branching gap claim");
     }
 
+    if code_truth.has(ImplementedSurface::RuntimeHooksAndQueues)
+        && normalized.contains("hook")
+        && normalized.contains("steering")
+        && normalized.contains("docs")
+        && (normalized.contains("only when")
+            || normalized.contains("not exposed")
+            || normalized.contains("future work")
+            || normalized.contains("missing"))
+    {
+        return Some("stale runtime hook/queue gap claim");
+    }
+
+    None
+}
+
+fn stale_interactive_gap_claim_violation(
+    normalized: &str,
+    code_truth: &ParityCodeTruth,
+) -> Option<&'static str> {
     if code_truth.has(ImplementedSurface::InteractiveSessionPicker)
         && normalized.contains("session picker")
         && (normalized.contains("missing")
@@ -633,16 +700,59 @@ fn stale_gap_claim_violation(
         return Some("stale interactive session fork gap claim");
     }
 
-    if code_truth.has(ImplementedSurface::RuntimeHooksAndQueues)
-        && normalized.contains("hook")
-        && normalized.contains("steering")
-        && normalized.contains("docs")
-        && (normalized.contains("only when")
-            || normalized.contains("not exposed")
-            || normalized.contains("future work")
-            || normalized.contains("missing"))
+    None
+}
+
+fn stale_tui_gap_claim_violation(
+    normalized: &str,
+    code_truth: &ParityCodeTruth,
+) -> Option<&'static str> {
+    if code_truth.has(ImplementedSurface::TuiUnifiedDiffRenderer)
+        && stale_tui_diff_renderer_claim(normalized)
     {
-        return Some("stale runtime hook/queue gap claim");
+        return Some("stale TUI unified diff renderer gap claim");
+    }
+
+    if code_truth.has(ImplementedSurface::TuiPasteBuffering)
+        && (normalized.contains("stdin buffering") || normalized.contains("paste buffering"))
+        && (normalized.contains("not implement")
+            || normalized.contains("not implemented")
+            || normalized.contains("missing")
+            || normalized.contains("future work")
+            || normalized.contains("until")
+            || normalized.contains("land"))
+    {
+        return Some("stale TUI paste buffering gap claim");
+    }
+
+    None
+}
+
+fn stale_tui_diff_renderer_claim(normalized: &str) -> bool {
+    (normalized.contains("diff renderer")
+        || normalized.contains("diff rendering")
+        || normalized.contains("unified diff"))
+        && (normalized.contains("not implement")
+            || normalized.contains("not implemented")
+            || normalized.contains("missing")
+            || normalized.contains("future work")
+            || normalized.contains("until diff rendering"))
+}
+
+fn stale_ai_gap_claim_violation(
+    normalized: &str,
+    code_truth: &ParityCodeTruth,
+) -> Option<&'static str> {
+    if code_truth.has(ImplementedSurface::AiAnthropicGoogleThinkingPayloads)
+        && normalized.contains("anthropic")
+        && normalized.contains("google")
+        && normalized.contains("thinking")
+        && (normalized.contains("only after")
+            || normalized.contains("future work")
+            || normalized.contains("missing")
+            || normalized.contains("not implemented"))
+    {
+        return Some("stale Anthropic/Google thinking payload gap claim");
     }
 
     None
@@ -1597,6 +1707,133 @@ mod tests {
             errors,
             vec![
                 "docs/gap/neo-agent-core.md:1 contains stale runtime hook/queue gap claim: Add hook/steering docs only when the runtime exposes those APIs.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_tui_diff_gap_after_renderer_symbols_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tui_src = dir.path().join("crates").join("tui").join("src");
+        std::fs::create_dir_all(&tui_src).expect("tui source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            tui_src.join("app.rs"),
+            "enum TranscriptLine { DiffAdded, DiffRemoved }\n",
+        )
+        .expect("write tui app source");
+        std::fs::write(
+            tui_src.join("components.rs"),
+            "fn transcript_line_style() {}\n",
+        )
+        .expect("write tui components source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("tui.md"),
+            "Keep TUI docs scoped until diff rendering lands.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/tui.md:1 contains stale TUI unified diff renderer gap claim: Keep TUI docs scoped until diff rendering lands.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_allows_advanced_diff_affordance_gaps_after_basic_renderer_symbols_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tui_src = dir.path().join("crates").join("tui").join("src");
+        std::fs::create_dir_all(&tui_src).expect("tui source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            tui_src.join("app.rs"),
+            "enum TranscriptLine { DiffAdded, DiffRemoved }\n",
+        )
+        .expect("write tui app source");
+        std::fs::write(
+            tui_src.join("components.rs"),
+            "fn transcript_line_style() {}\n",
+        )
+        .expect("write tui components source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("tui.md"),
+            "Advanced diff affordances remain not implemented.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(errors, Vec::<String>::new());
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_tui_paste_buffering_gap_after_input_parser_symbols_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tui_src = dir.path().join("crates").join("tui").join("src");
+        std::fs::create_dir_all(&tui_src).expect("tui source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            tui_src.join("input.rs"),
+            concat!(
+                "struct InputParser;\n",
+                "const BRACKETED_PASTE_START: &[u8] = b\"\\x1b[200~\";\n",
+                "const BRACKETED_PASTE_END: &[u8] = b\"\\x1b[201~\";\n",
+            ),
+        )
+        .expect("write tui input source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("tui.md"),
+            "Keep TUI docs scoped until stdin buffering lands.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/tui.md:1 contains stale TUI paste buffering gap claim: Keep TUI docs scoped until stdin buffering lands.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_ai_thinking_gap_after_payload_symbols_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let providers_dir = dir
+            .path()
+            .join("crates")
+            .join("ai")
+            .join("src")
+            .join("providers");
+        std::fs::create_dir_all(&providers_dir).expect("ai provider source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            providers_dir.join("anthropic.rs"),
+            "fn thinking_budget_tokens() { let _ = \"budget_tokens\"; }\n",
+        )
+        .expect("write anthropic source");
+        std::fs::write(
+            providers_dir.join("google.rs"),
+            "fn thinking_budget_tokens() { let _ = \"thinkingConfig\"; }\n",
+        )
+        .expect("write google source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("neo-ai.md"),
+            "Add Anthropic and Google thinking controls only after Neo has explicit budget contracts.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/neo-ai.md:1 contains stale Anthropic/Google thinking payload gap claim: Add Anthropic and Google thinking controls only after Neo has explicit budget contracts.".to_string()
             ]
         );
     }
