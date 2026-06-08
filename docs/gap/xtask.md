@@ -40,10 +40,12 @@ exist, and "session branching and naming are future work" once
 diff/paste-buffering and Anthropic/Google thinking-payload claims once their
 implementation symbols are present, including claims that Neo still does not
 translate reasoning effort into Anthropic/Google thinking payloads once both
-budget-backed adapters exist. It still allows honest gaps for hosted MCP
-management, remote MCP servers that require alternate notification channels,
-hosted share, OAuth login, image protocols, selected transcript-region copy,
-advanced diff affordances, and other surfaces that are not implemented.
+budget-backed adapters exist. It also rejects stale selected-transcript copy
+gap claims once `TranscriptSelection`, transcript copy keybindings, renderer
+highlighting, and live clipboard routing are present. It still allows honest
+gaps for hosted MCP management, remote MCP servers that require alternate
+notification channels, hosted share, OAuth login, image protocols, advanced
+diff affordances, and other surfaces that are not implemented.
 
 ## Pi Parity Pressure
 

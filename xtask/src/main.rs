@@ -263,6 +263,7 @@ enum ImplementedSurface {
     RuntimeHooksAndQueues,
     TuiUnifiedDiffRenderer,
     TuiPasteBuffering,
+    TuiTranscriptSelectionCopy,
     AiAnthropicGoogleThinkingPayloads,
 }
 
@@ -368,6 +369,19 @@ impl ParityCodeTruth {
             && sources.input.contains("BRACKETED_PASTE_END")
         {
             implemented.insert(ImplementedSurface::TuiPasteBuffering);
+        }
+        if sources.tui_app.contains("TranscriptSelection")
+            && sources.tui_app.contains("copy_selection")
+            && sources.tui_app.contains("copy_selected_transcript_text")
+            && sources.tui_components.contains("with_selection")
+            && sources.input.contains("TranscriptSelectionStart")
+            && sources.input.contains("TranscriptCopySelection")
+            && sources.input.contains("tui.transcript.copySelection")
+            && sources
+                .interactive
+                .contains("copy_transcript_selection_to_clipboard")
+        {
+            implemented.insert(ImplementedSurface::TuiTranscriptSelectionCopy);
         }
         if sources.anthropic.contains("thinking_budget_tokens")
             && sources.anthropic.contains("\"budget_tokens\"")
@@ -725,6 +739,12 @@ fn stale_tui_gap_claim_violation(
         return Some("stale TUI paste buffering gap claim");
     }
 
+    if code_truth.has(ImplementedSurface::TuiTranscriptSelectionCopy)
+        && stale_tui_transcript_selection_copy_claim(normalized)
+    {
+        return Some("stale TUI transcript selection copy gap claim");
+    }
+
     None
 }
 
@@ -737,6 +757,38 @@ fn stale_tui_diff_renderer_claim(normalized: &str) -> bool {
             || normalized.contains("missing")
             || normalized.contains("future work")
             || normalized.contains("until diff rendering"))
+}
+
+fn stale_tui_transcript_selection_copy_claim(normalized: &str) -> bool {
+    let Some(copy_index) = normalized.find("copy") else {
+        return false;
+    };
+    let context = {
+        let prefix = normalized[..copy_index]
+            .chars()
+            .rev()
+            .take(80)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<String>();
+        let suffix = normalized[copy_index..]
+            .chars()
+            .take(120)
+            .collect::<String>();
+        format!("{prefix}{suffix}")
+    };
+
+    (context.contains("selected transcript")
+        || normalized.contains("transcript region")
+        || normalized.contains("transcript-region")
+        || context.contains("transcript selection"))
+        && (context.contains("not implement")
+            || context.contains("not implemented")
+            || context.contains("missing")
+            || context.contains("future work")
+            || context.contains("remain")
+            || context.contains("gap"))
 }
 
 fn stale_ai_gap_claim_violation(
@@ -1799,6 +1851,62 @@ mod tests {
             errors,
             vec![
                 "docs/gap/tui.md:1 contains stale TUI paste buffering gap claim: Keep TUI docs scoped until stdin buffering lands.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_tui_transcript_selection_copy_gap_after_symbols_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tui_src = dir.path().join("crates").join("tui").join("src");
+        let interactive_dir = dir
+            .path()
+            .join("crates")
+            .join("neo-agent")
+            .join("src")
+            .join("modes");
+        std::fs::create_dir_all(&tui_src).expect("tui source dir");
+        std::fs::create_dir_all(&interactive_dir).expect("interactive source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            tui_src.join("app.rs"),
+            concat!(
+                "struct TranscriptSelection;\n",
+                "impl ChatTranscript { fn copy_selection(&self) {} }\n",
+                "impl NeoTuiApp { fn copy_selected_transcript_text(&self) {} }\n",
+            ),
+        )
+        .expect("write tui app source");
+        std::fs::write(
+            tui_src.join("components.rs"),
+            "impl TranscriptWidget<'_> { fn with_selection(&self) {} }\n",
+        )
+        .expect("write tui components source");
+        std::fs::write(
+            tui_src.join("input.rs"),
+            concat!(
+                "enum Action { TranscriptSelectionStart, TranscriptCopySelection }\n",
+                "const ID: &str = \"tui.transcript.copySelection\";\n",
+            ),
+        )
+        .expect("write tui input source");
+        std::fs::write(
+            interactive_dir.join("interactive.rs"),
+            "fn copy_transcript_selection_to_clipboard() {}\n",
+        )
+        .expect("write interactive source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("tui.md"),
+            "Selected transcript-region copy remains future work.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/tui.md:1 contains stale TUI transcript selection copy gap claim: Selected transcript-region copy remains future work.".to_string()
             ]
         );
     }
