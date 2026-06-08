@@ -9,6 +9,7 @@ use neo_agent_core::{
     McpToolProvider, PermissionDecision, ToolRegistry,
 };
 use neo_ai::{ModelClient, ModelRegistry, ModelSpec, ProviderRegistry};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     config::{AppConfig, McpServerConfig},
@@ -213,6 +214,11 @@ pub struct PromptTurn {
     pub assistant_text: String,
 }
 
+pub struct PromptApprovalRequest {
+    pub id: String,
+    pub decision_tx: oneshot::Sender<PermissionDecision>,
+}
+
 pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result<PromptTurn> {
     let prompt = prompt.join(" ");
     let session_path = create_session_path(config).await?;
@@ -220,7 +226,7 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
     let (user_message, events) = append_user_event(prompt, &mut writer).await?;
-    let runtime = runtime_for_config(config).await?;
+    let runtime = runtime_for_config(config, None).await?;
     finish_prompt_turn(
         user_message,
         AgentContext::new(),
@@ -231,6 +237,7 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
     .await
 }
 
+#[allow(dead_code)]
 pub async fn run_prompt_in_session(
     session_id: &str,
     prompt: &[String],
@@ -245,16 +252,71 @@ pub async fn run_prompt_in_session(
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
     let (user_message, events) = append_user_event(prompt, &mut writer).await?;
-    let runtime = runtime_for_config(config).await?;
+    let runtime = runtime_for_config(config, None).await?;
     finish_prompt_turn(user_message, context, &mut writer, runtime, events).await
 }
 
-async fn runtime_for_config(config: &AppConfig) -> anyhow::Result<AgentRuntime> {
+pub async fn run_prompt_streaming(
+    prompt: &[String],
+    config: &AppConfig,
+    event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
+    approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
+) -> anyhow::Result<PromptTurn> {
+    let prompt = prompt.join(" ");
+    let session_path = create_session_path(config).await?;
+    let mut writer = JsonlSessionWriter::create(&session_path)
+        .await
+        .with_context(|| format!("failed to create session {}", session_path.display()))?;
+    let (user_message, events) = append_user_event(prompt, &mut writer).await?;
+    let runtime = runtime_for_config(config, Some(approval_tx)).await?;
+    finish_prompt_turn_streaming(
+        user_message,
+        AgentContext::new(),
+        &mut writer,
+        runtime,
+        events,
+        event_tx,
+    )
+    .await
+}
+
+pub async fn run_prompt_in_session_streaming(
+    session_id: &str,
+    prompt: &[String],
+    config: &AppConfig,
+    event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
+    approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
+) -> anyhow::Result<PromptTurn> {
+    let prompt = prompt.join(" ");
+    let session_path = session_commands::session_path(session_id, config)?;
+    let context = JsonlSessionReader::replay_context(&session_path)
+        .await
+        .with_context(|| format!("failed to replay session {}", session_path.display()))?;
+    let mut writer = JsonlSessionWriter::open_append(&session_path)
+        .await
+        .with_context(|| format!("failed to append session {}", session_path.display()))?;
+    let (user_message, events) = append_user_event(prompt, &mut writer).await?;
+    let runtime = runtime_for_config(config, Some(approval_tx)).await?;
+    finish_prompt_turn_streaming(
+        user_message,
+        context,
+        &mut writer,
+        runtime,
+        events,
+        event_tx,
+    )
+    .await
+}
+
+async fn runtime_for_config(
+    config: &AppConfig,
+    approval_tx: Option<mpsc::UnboundedSender<PromptApprovalRequest>>,
+) -> anyhow::Result<AgentRuntime> {
     let model = resolve_model(config)?;
     let client = resolve_model_client(config, &model)?;
     let tools = tool_registry_for_config(config).await?;
     Ok(AgentRuntime::with_tools(
-        agent_config_for_app(model, config)?,
+        agent_config_for_app(model, config, approval_tx)?,
         client,
         tools,
     ))
@@ -324,7 +386,59 @@ async fn finish_prompt_turn(
     })
 }
 
-fn agent_config_for_app(model: ModelSpec, config: &AppConfig) -> anyhow::Result<AgentConfig> {
+async fn finish_prompt_turn_streaming(
+    user_message: AgentMessage,
+    mut context: AgentContext,
+    writer: &mut JsonlSessionWriter,
+    runtime: AgentRuntime,
+    initial_events: Vec<AgentEvent>,
+    event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
+) -> anyhow::Result<PromptTurn> {
+    let mut events = Vec::new();
+    for event in initial_events {
+        let _ = event_tx.send(Ok(event.clone()));
+        events.push(event);
+    }
+
+    let mut assistant_text = String::new();
+    let mut stream = runtime.run_turn(&mut context, user_message.clone());
+    while let Some(event) = stream.next().await {
+        let event = match event {
+            Ok(event) => event,
+            Err(error) => {
+                let message = error.to_string();
+                let _ = event_tx.send(Err(anyhow::anyhow!(message.clone())));
+                anyhow::bail!(message);
+            }
+        };
+        let is_duplicate_user_message = matches!(
+            &event,
+            AgentEvent::MessageAppended { message } if message == &user_message
+        );
+        if !is_duplicate_user_message {
+            if let AgentEvent::MessageAppended { message } = &event
+                && matches!(message, AgentMessage::Assistant { .. })
+            {
+                assistant_text.push_str(&message_text(message));
+            }
+            writer.append_event(&event).await?;
+        }
+        let _ = event_tx.send(Ok(event.clone()));
+        events.push(event);
+    }
+    writer.flush().await?;
+
+    Ok(PromptTurn {
+        events,
+        assistant_text,
+    })
+}
+
+fn agent_config_for_app(
+    model: ModelSpec,
+    config: &AppConfig,
+    approval_tx: Option<mpsc::UnboundedSender<PromptApprovalRequest>>,
+) -> anyhow::Result<AgentConfig> {
     let mut agent_config = AgentConfig::for_model(model)
         .with_tool_permission_policy(config.permissions.clone())
         .with_queue_modes(
@@ -346,6 +460,21 @@ fn agent_config_for_app(model: ModelSpec, config: &AppConfig) -> anyhow::Result<
         agent_config = agent_config.with_approval_handler(|_| PermissionDecision::Allow);
     } else if config.no_approve {
         agent_config = agent_config.with_approval_handler(|_| PermissionDecision::Deny);
+    } else if let Some(approval_tx) = approval_tx {
+        agent_config = agent_config.with_async_approval_handler(move |request| {
+            let approval_tx = approval_tx.clone();
+            async move {
+                let (decision_tx, decision_rx) = oneshot::channel();
+                let id = request.id.clone();
+                if approval_tx
+                    .send(PromptApprovalRequest { id, decision_tx })
+                    .is_err()
+                {
+                    return PermissionDecision::Deny;
+                }
+                decision_rx.await.unwrap_or(PermissionDecision::Deny)
+            }
+        });
     }
     Ok(agent_config)
 }
@@ -521,8 +650,9 @@ mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
     use neo_agent_core::{
-        AgentConfig, AgentEvent, AgentMessage, CompactionSettings, Content, PermissionPolicy,
-        QueueMode, StopReason as AgentStopReason, ToolExecutionMode,
+        AgentConfig, AgentEvent, AgentMessage, ApprovalRequest, CompactionSettings, Content,
+        PermissionDecision, PermissionOperation, PermissionPolicy, QueueMode,
+        StopReason as AgentStopReason, ToolExecutionMode,
         session::{JsonlSessionReader, JsonlSessionWriter},
     };
     use neo_ai::{
@@ -530,7 +660,7 @@ mod tests {
         StopReason, providers::fake::FakeModelClient,
     };
 
-    use super::{agent_config_for_app, run_prompt_with_runtime};
+    use super::{PromptApprovalRequest, agent_config_for_app, run_prompt_with_runtime};
     use crate::config::{AppConfig, Defaults, McpConfig, RuntimeCompactionConfig, RuntimeConfig};
 
     #[test]
@@ -573,7 +703,7 @@ mod tests {
             capabilities: ModelCapabilities::tool_chat(),
         };
 
-        let agent_config = agent_config_for_app(model, &config).expect("agent config");
+        let agent_config = agent_config_for_app(model, &config, None).expect("agent config");
 
         assert_eq!(agent_config.temperature, Some(0.35));
         assert_eq!(agent_config.max_tokens, Some(512));
@@ -592,6 +722,61 @@ mod tests {
             })
         );
         assert!(agent_config.workspace_root.is_some());
+    }
+
+    #[tokio::test]
+    async fn agent_config_for_app_async_approval_channel_waits_for_ui_decision() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            default_model: "test-model".to_owned(),
+            default_provider: "openai".to_owned(),
+            api_base: None,
+            api_key_env: None,
+            providers: BTreeMap::new(),
+            model_catalogs: Vec::new(),
+            sessions_dir: temp.path().join(".neo/sessions"),
+            permissions: PermissionPolicy::default(),
+            defaults: Defaults {
+                mode: "interactive".to_owned(),
+            },
+            runtime: RuntimeConfig::default(),
+            mcp: McpConfig::default(),
+            approve: false,
+            no_approve: false,
+            project_dir: temp.path().to_path_buf(),
+            config_path: temp.path().join(".neo/config.toml"),
+        };
+        let model = ModelSpec {
+            provider: ProviderId("openai".to_owned()),
+            model: "test-model".to_owned(),
+            api: ApiKind::OpenAiResponses,
+            capabilities: ModelCapabilities::tool_chat(),
+        };
+        let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
+        let agent_config =
+            agent_config_for_app(model, &config, Some(approval_tx)).expect("agent config");
+        let handler = agent_config
+            .async_approval_handler
+            .expect("async approval handler");
+
+        let decision = tokio::spawn(handler(ApprovalRequest {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            operation: PermissionOperation::Tool,
+            subject: "write".to_owned(),
+            arguments: serde_json::json!({"path": "approved.txt"}),
+        }));
+        let PromptApprovalRequest { id, decision_tx } =
+            approval_rx.recv().await.expect("approval waiter");
+
+        assert_eq!(id, "tool-1");
+        decision_tx
+            .send(PermissionDecision::Allow)
+            .expect("send decision");
+        assert_eq!(
+            decision.await.expect("approval task joins"),
+            PermissionDecision::Allow
+        );
     }
 
     #[tokio::test]

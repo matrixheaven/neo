@@ -35,6 +35,9 @@ Target: `crates/tui`.
 - The live interactive loop opens a model picker with `ctrl+o`, using real
   `ModelRegistry` entries prepared by `neo-agent`, and updates the active model
   label after selection.
+- Approval overlays in the live loop now resume pending runtime tool calls:
+  Approve/deny choices are sent back through `AgentConfig::with_async_approval_handler`,
+  and Ctrl-C aborts the active turn instead of inventing a decision.
 
 ## Remaining lower-priority gaps
 

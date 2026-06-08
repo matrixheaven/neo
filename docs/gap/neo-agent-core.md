@@ -25,6 +25,9 @@
   `AgentEvent::ApprovalRequested` and executes only when the configured
   synchronous or async approval handler returns `Allow`; the async handler path
   waits on the returned future before executing or denying the tool.
+- `neo-agent` live interactive mode wires those async approval handlers to the
+  `neo-tui` approval overlay, so explicit user choices resume pending tool
+  calls using user-provided allow/deny decisions.
 - `ToolRegistry::with_builtin_tools()` registers `read`, `list`, `grep`,
   `find`, `write`, `edit`, and `bash`.
 - `McpToolAdapter` and `McpToolProvider` can discover configured MCP tools as
@@ -67,9 +70,6 @@ or hosted lifecycle behavior.
 
 ## High-Priority Gaps
 
-- Add richer interactive approval UI wiring once the raw terminal event loop can
-  resume pending tool calls from explicit user choices instead of relying on
-  runtime-only approval handler callbacks.
 - Add richer hosted or alternate-channel remote MCP lifecycle support once Neo
   has backing behavior for servers that do not deliver updates on the subscribe
   response SSE stream.

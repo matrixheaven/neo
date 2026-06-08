@@ -1,8 +1,10 @@
 use crate::config::AppConfig;
 use std::{
+    collections::BTreeMap,
     future::{Future, Ready, ready},
     io::{IsTerminal as _, Stdout, stdout},
     pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
@@ -12,23 +14,29 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use neo_agent_core::{
-    AgentEvent, AgentMessage,
+    AgentEvent, AgentMessage, PermissionDecision,
     session::{JsonlSessionReader, SessionMetadataStore},
 };
 use neo_tui::{
-    InputEvent, KeyId, KeybindingAction, KeybindingsManager, NeoTuiApp, PickerItem, PromptEdit,
+    ApprovalChoice, ApprovalResult, InputEvent, KeyId, KeybindingAction, KeybindingsManager,
+    NeoTuiApp, PickerItem, PromptEdit,
 };
 use ratatui::{
     Terminal,
     backend::{CrosstermBackend, TestBackend},
     buffer::Cell,
 };
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 
-type BoxedTurnFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<AgentEvent>>> + Send + 'a>>;
-type BoxedSessionFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<LoadedSessionTranscript>> + Send + 'a>>;
-type BoxedForkFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<ForkedSessionTranscript>> + Send + 'a>>;
+type BoxedTurnFuture = Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
+type BoxedSessionFuture = Pin<Box<dyn Future<Output = Result<LoadedSessionTranscript>> + Send>>;
+type BoxedForkFuture = Pin<Box<dyn Future<Output = Result<ForkedSessionTranscript>> + Send>>;
+type TurnDriver = Arc<dyn Fn(TurnRequest, TurnChannels) -> BoxedTurnFuture + Send + Sync>;
+type SessionLoader = Arc<dyn Fn(String) -> BoxedSessionFuture + Send + Sync>;
+type SessionForker = Arc<dyn Fn(String) -> BoxedForkFuture + Send + Sync>;
 
 pub fn execute(config: &AppConfig) -> String {
     let mut controller = controller_for_config(config);
@@ -49,18 +57,39 @@ pub async fn execute_tty(config: &AppConfig) -> Result<Option<String>> {
     Ok(None)
 }
 
-pub(crate) struct InteractiveController<RunTurn, LoadSession, ForkSession> {
+pub(crate) struct InteractiveController {
     app: NeoTuiApp,
     keybindings: KeybindingsManager,
-    run_turn: RunTurn,
+    run_turn: TurnDriver,
     session_items: Vec<PickerItem>,
     session_list_error: Option<String>,
     model_items: Vec<PickerItem>,
     model_list_error: Option<String>,
-    load_session: LoadSession,
-    fork_session: ForkSession,
+    load_session: SessionLoader,
+    fork_session: SessionForker,
     active_session_id: Option<String>,
     active_model: Option<SelectedModel>,
+    active_turn: Option<RunningTurn>,
+    pending_approvals: BTreeMap<String, oneshot::Sender<PermissionDecision>>,
+    resolved_approvals: BTreeMap<String, PermissionDecision>,
+    always_approve: bool,
+}
+
+pub(crate) struct TurnChannels {
+    events: mpsc::UnboundedSender<Result<AgentEvent>>,
+    approvals: mpsc::UnboundedSender<crate::modes::run::PromptApprovalRequest>,
+}
+
+impl TurnChannels {
+    fn send_event(&self, event: AgentEvent) {
+        let _ = self.events.send(Ok(event));
+    }
+}
+
+struct RunningTurn {
+    events: mpsc::UnboundedReceiver<Result<AgentEvent>>,
+    approvals: mpsc::UnboundedReceiver<crate::modes::run::PromptApprovalRequest>,
+    task: JoinHandle<Result<()>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -149,23 +178,18 @@ impl ForkedSessionTranscript {
     }
 }
 
-impl<RunTurn, Fut>
-    InteractiveController<
-        RunTurn,
-        fn(String) -> Ready<Result<LoadedSessionTranscript>>,
-        fn(String) -> Ready<Result<ForkedSessionTranscript>>,
-    >
-where
-    RunTurn: Fn(TurnRequest) -> Fut,
-    Fut: Future<Output = Result<Vec<AgentEvent>>> + Send,
-{
+impl InteractiveController {
     #[allow(dead_code)]
-    pub fn new(
+    pub fn new<RunTurn, Fut>(
         title: impl Into<String>,
         session_label: impl Into<String>,
         model_label: impl Into<String>,
         run_turn: RunTurn,
-    ) -> Self {
+    ) -> Self
+    where
+        RunTurn: Fn(TurnRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<AgentEvent>>> + Send + 'static,
+    {
         Self::new_with_session_forker(
             title,
             session_label,
@@ -176,29 +200,22 @@ where
             empty_session_forker,
         )
     }
-}
 
-impl<RunTurn, Fut, LoadSession, LoadFut>
-    InteractiveController<
-        RunTurn,
-        LoadSession,
-        fn(String) -> Ready<Result<ForkedSessionTranscript>>,
-    >
-where
-    RunTurn: Fn(TurnRequest) -> Fut,
-    Fut: Future<Output = Result<Vec<AgentEvent>>> + Send,
-    LoadSession: Fn(String) -> LoadFut,
-    LoadFut: Future<Output = Result<LoadedSessionTranscript>> + Send,
-{
     #[allow(dead_code)]
-    pub fn new_with_sessions(
+    pub fn new_with_sessions<RunTurn, Fut, LoadSession, LoadFut>(
         title: impl Into<String>,
         session_label: impl Into<String>,
         model_label: impl Into<String>,
         run_turn: RunTurn,
         catalogs: PickerCatalogs,
         load_session: LoadSession,
-    ) -> Self {
+    ) -> Self
+    where
+        RunTurn: Fn(TurnRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<AgentEvent>>> + Send + 'static,
+        LoadSession: Fn(String) -> LoadFut + Send + Sync + 'static,
+        LoadFut: Future<Output = Result<LoadedSessionTranscript>> + Send + 'static,
+    {
         Self::new_with_session_forker(
             title,
             session_label,
@@ -209,19 +226,8 @@ where
             empty_session_forker,
         )
     }
-}
 
-impl<RunTurn, Fut, LoadSession, LoadFut, ForkSession, ForkFut>
-    InteractiveController<RunTurn, LoadSession, ForkSession>
-where
-    RunTurn: Fn(TurnRequest) -> Fut,
-    Fut: Future<Output = Result<Vec<AgentEvent>>> + Send,
-    LoadSession: Fn(String) -> LoadFut,
-    LoadFut: Future<Output = Result<LoadedSessionTranscript>> + Send,
-    ForkSession: Fn(String) -> ForkFut,
-    ForkFut: Future<Output = Result<ForkedSessionTranscript>> + Send,
-{
-    pub fn new_with_session_forker(
+    pub fn new_with_session_forker<RunTurn, Fut, LoadSession, LoadFut, ForkSession, ForkFut>(
         title: impl Into<String>,
         session_label: impl Into<String>,
         model_label: impl Into<String>,
@@ -229,6 +235,39 @@ where
         catalogs: PickerCatalogs,
         load_session: LoadSession,
         fork_session: ForkSession,
+    ) -> Self
+    where
+        RunTurn: Fn(TurnRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<AgentEvent>>> + Send + 'static,
+        LoadSession: Fn(String) -> LoadFut + Send + Sync + 'static,
+        LoadFut: Future<Output = Result<LoadedSessionTranscript>> + Send + 'static,
+        ForkSession: Fn(String) -> ForkFut + Send + Sync + 'static,
+        ForkFut: Future<Output = Result<ForkedSessionTranscript>> + Send + 'static,
+    {
+        let run_turn = legacy_turn_driver(run_turn);
+        let load_session: SessionLoader =
+            Arc::new(move |session_id| Box::pin(load_session(session_id)));
+        let fork_session: SessionForker =
+            Arc::new(move |session_id| Box::pin(fork_session(session_id)));
+        Self::new_with_turn_driver(
+            title,
+            session_label,
+            model_label,
+            run_turn,
+            catalogs,
+            load_session,
+            fork_session,
+        )
+    }
+
+    pub fn new_with_turn_driver(
+        title: impl Into<String>,
+        session_label: impl Into<String>,
+        model_label: impl Into<String>,
+        run_turn: TurnDriver,
+        catalogs: PickerCatalogs,
+        load_session: SessionLoader,
+        fork_session: SessionForker,
     ) -> Self {
         Self {
             app: NeoTuiApp::new(title, session_label, model_label),
@@ -242,6 +281,10 @@ where
             fork_session,
             active_session_id: None,
             active_model: None,
+            active_turn: None,
+            pending_approvals: BTreeMap::new(),
+            resolved_approvals: BTreeMap::new(),
+            always_approve: false,
         }
     }
 
@@ -257,6 +300,7 @@ where
     #[allow(dead_code)]
     pub async fn submit_prompt(&mut self) -> Result<String> {
         self.submit_current_prompt().await?;
+        self.wait_for_active_turn().await?;
         Ok(self.render_snapshot())
     }
 
@@ -267,10 +311,25 @@ where
     ) -> Result<()> {
         render(&self.app)?;
         loop {
-            let event = events.next_input_event()?;
-            if self.handle_input_event(event).await? {
-                break;
+            match events.poll_input_event(Duration::from_millis(50))? {
+                Some(event) => {
+                    let is_interrupt = matches!(event, InputEvent::Interrupt);
+                    if self.handle_input_event(event).await? {
+                        let had_active_turn = self.active_turn.is_some();
+                        if is_interrupt {
+                            self.abort_active_turn();
+                        } else {
+                            self.wait_for_active_turn().await?;
+                        }
+                        if had_active_turn {
+                            render(&self.app)?;
+                        }
+                        break;
+                    }
+                }
+                None => tokio::task::yield_now().await,
             }
+            self.drain_active_turn().await?;
             render(&self.app)?;
         }
         Ok(())
@@ -376,7 +435,9 @@ where
             }
             KeybindingAction::SelectConfirm => {
                 if self.app.approval_choice().is_some() {
-                    let _ = self.app.confirm_approval();
+                    if let Some(result) = self.app.confirm_approval() {
+                        self.resolve_approval(&result);
+                    }
                 } else if self.app.selected_session().is_some() {
                     self.load_selected_session().await?;
                 } else if self.app.selected_model().is_some() {
@@ -387,7 +448,14 @@ where
             }
             KeybindingAction::SelectCancel => {
                 if self.app.focused_overlay_id().is_some() {
-                    let _ = self.app.close_focused_overlay();
+                    if let Some(overlay) = self.app.close_focused_overlay()
+                        && let neo_tui::OverlayKind::Approval(modal) = overlay.kind
+                    {
+                        self.resolve_approval(&ApprovalResult {
+                            request_id: modal.request_id,
+                            choice: ApprovalChoice::Deny,
+                        });
+                    }
                 } else {
                     return Ok(true);
                 }
@@ -448,19 +516,140 @@ where
     }
 
     async fn submit_current_prompt(&mut self) -> Result<()> {
+        if self.active_turn.is_some() {
+            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: "A turn is already running".to_owned(),
+            });
+            return Ok(());
+        }
         let Some(prompt) = self.app.submit_prompt() else {
             return Ok(());
         };
-        let events = (self.run_turn)(TurnRequest::new(
-            vec![prompt],
-            self.active_session_id.clone(),
-            self.active_model.clone(),
-        ))
-        .await?;
-        for event in events {
-            self.app.apply_agent_event(event);
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (approval_tx, approval_rx) = mpsc::unbounded_channel();
+        let channels = TurnChannels {
+            events: event_tx.clone(),
+            approvals: approval_tx,
+        };
+        let future = (self.run_turn)(
+            TurnRequest::new(
+                vec![prompt],
+                self.active_session_id.clone(),
+                self.active_model.clone(),
+            ),
+            channels,
+        );
+        let task = tokio::spawn(async move {
+            let result = future.await;
+            if let Err(error) = &result {
+                let _ = event_tx.send(Err(anyhow::anyhow!(error.to_string())));
+            }
+            result
+        });
+        self.active_turn = Some(RunningTurn {
+            events: event_rx,
+            approvals: approval_rx,
+            task,
+        });
+        self.drain_active_turn().await
+    }
+
+    async fn wait_for_active_turn(&mut self) -> Result<()> {
+        while self.active_turn.is_some() {
+            self.drain_active_turn().await?;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
         Ok(())
+    }
+
+    async fn drain_active_turn(&mut self) -> Result<()> {
+        let Some(mut turn) = self.active_turn.take() else {
+            return Ok(());
+        };
+
+        while let Ok(approval) = turn.approvals.try_recv() {
+            self.register_pending_approval(approval);
+        }
+        while let Ok(event) = turn.events.try_recv() {
+            match event {
+                Ok(event) => self.apply_turn_event(event),
+                Err(error) => {
+                    self.app.apply_stream_update(neo_tui::StreamUpdate::Error {
+                        text: error.to_string(),
+                    });
+                }
+            }
+        }
+
+        if turn.task.is_finished() {
+            let result = turn
+                .task
+                .await
+                .map_err(|error| anyhow::anyhow!("interactive turn task failed: {error}"))?;
+            while let Ok(approval) = turn.approvals.try_recv() {
+                self.register_pending_approval(approval);
+            }
+            while let Ok(event) = turn.events.try_recv() {
+                match event {
+                    Ok(event) => self.apply_turn_event(event),
+                    Err(error) => {
+                        self.app.apply_stream_update(neo_tui::StreamUpdate::Error {
+                            text: error.to_string(),
+                        });
+                    }
+                }
+            }
+            result?;
+        } else {
+            self.active_turn = Some(turn);
+        }
+        Ok(())
+    }
+
+    fn apply_turn_event(&mut self, event: AgentEvent) {
+        if self.always_approve && matches!(event, AgentEvent::ApprovalRequested { .. }) {
+            return;
+        }
+        self.app.apply_agent_event(event);
+    }
+
+    fn register_pending_approval(&mut self, approval: crate::modes::run::PromptApprovalRequest) {
+        if self.always_approve {
+            self.resolved_approvals.remove(&approval.id);
+            let _ = approval.decision_tx.send(PermissionDecision::Allow);
+            return;
+        }
+        if let Some(decision) = self.resolved_approvals.remove(&approval.id) {
+            let _ = approval.decision_tx.send(decision);
+        } else {
+            self.pending_approvals
+                .insert(approval.id, approval.decision_tx);
+        }
+    }
+
+    fn resolve_approval(&mut self, result: &ApprovalResult) {
+        let decision = match result.choice {
+            ApprovalChoice::Approve => PermissionDecision::Allow,
+            ApprovalChoice::AlwaysApprove => {
+                self.always_approve = true;
+                PermissionDecision::Allow
+            }
+            ApprovalChoice::Deny => PermissionDecision::Deny,
+        };
+        if let Some(tx) = self.pending_approvals.remove(&result.request_id) {
+            let _ = tx.send(decision);
+        } else {
+            self.resolved_approvals
+                .insert(result.request_id.clone(), decision);
+        }
+    }
+
+    fn abort_active_turn(&mut self) {
+        if let Some(turn) = self.active_turn.take() {
+            turn.task.abort();
+        }
+        self.pending_approvals.clear();
+        self.resolved_approvals.clear();
     }
 
     fn open_session_picker(&mut self) {
@@ -548,23 +737,34 @@ where
 
 pub trait TerminalEvents {
     fn next_input_event(&mut self) -> Result<InputEvent>;
+
+    fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+        self.next_input_event().map(Some)
+    }
 }
 
 struct CrosstermEvents;
 
 impl TerminalEvents for CrosstermEvents {
     fn next_input_event(&mut self) -> Result<InputEvent> {
-        let keybindings = KeybindingsManager::default();
         loop {
-            if event::poll(Duration::from_millis(250))? {
-                let event = event::read()?;
-                if let Some(input) =
-                    InputEvent::from_crossterm_event_with_keybindings(&event, &keybindings)
-                {
-                    return Ok(input);
-                }
+            if let Some(input) = self.poll_input_event(Duration::from_millis(250))? {
+                return Ok(input);
             }
         }
+    }
+
+    fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
+        let keybindings = KeybindingsManager::default();
+        if event::poll(timeout)? {
+            let event = event::read()?;
+            if let Some(input) =
+                InputEvent::from_crossterm_event_with_keybindings(&event, &keybindings)
+            {
+                return Ok(Some(input));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -656,51 +856,76 @@ impl Drop for RawModeGuard {
     }
 }
 
-pub fn controller_for_config<'a>(
-    config: &'a AppConfig,
-) -> InteractiveController<
-    impl Fn(TurnRequest) -> BoxedTurnFuture<'a> + 'a,
-    impl Fn(String) -> BoxedSessionFuture<'a> + 'a,
-    impl Fn(String) -> BoxedForkFuture<'a> + 'a,
-> {
+pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     let catalogs = picker_catalogs_for_config(config);
-    InteractiveController::new_with_session_forker(
+    let config = config.clone();
+    let run_config = config.clone();
+    let run_turn: TurnDriver = Arc::new(move |request, channels| {
+        let mut effective_config = run_config.clone();
+        Box::pin(async move {
+            if let Some(model) = request.model {
+                effective_config.default_provider = model.provider;
+                effective_config.default_model = model.model;
+            }
+            if let Some(session_id) = request.session_id {
+                crate::modes::run::run_prompt_in_session_streaming(
+                    &session_id,
+                    &request.prompt,
+                    &effective_config,
+                    channels.events,
+                    channels.approvals,
+                )
+                .await?;
+            } else {
+                crate::modes::run::run_prompt_streaming(
+                    &request.prompt,
+                    &effective_config,
+                    channels.events,
+                    channels.approvals,
+                )
+                .await?;
+            }
+            Ok(())
+        })
+    });
+    let load_config = config.clone();
+    let load_session: SessionLoader = Arc::new(move |session_id| {
+        let config = load_config.clone();
+        Box::pin(async move { load_session_transcript(session_id, &config).await })
+    });
+    let fork_config = config.clone();
+    let fork_session: SessionForker = Arc::new(move |session_id| {
+        let config = fork_config.clone();
+        Box::pin(async move { fork_session_transcript(session_id, &config).await })
+    });
+
+    InteractiveController::new_with_turn_driver(
         "neo",
         "new",
         format!("{}/{}", config.default_provider, config.default_model),
-        move |request| {
-            let future: BoxedTurnFuture<'a> = Box::pin(async move {
-                let mut effective_config = config.clone();
-                if let Some(model) = request.model {
-                    effective_config.default_provider = model.provider;
-                    effective_config.default_model = model.model;
-                }
-                let turn = if let Some(session_id) = request.session_id {
-                    crate::modes::run::run_prompt_in_session(
-                        &session_id,
-                        &request.prompt,
-                        &effective_config,
-                    )
-                    .await?
-                } else {
-                    crate::modes::run::run_prompt(&request.prompt, &effective_config).await?
-                };
-                Ok(turn.events)
-            });
-            future
-        },
+        run_turn,
         catalogs,
-        move |session_id| {
-            let future: BoxedSessionFuture<'a> =
-                Box::pin(async move { load_session_transcript(session_id, config).await });
-            future
-        },
-        move |session_id| {
-            let future: BoxedForkFuture<'a> =
-                Box::pin(async move { fork_session_transcript(session_id, config).await });
-            future
-        },
+        load_session,
+        fork_session,
     )
+}
+
+fn legacy_turn_driver<RunTurn, Fut>(run_turn: RunTurn) -> TurnDriver
+where
+    RunTurn: Fn(TurnRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Vec<AgentEvent>>> + Send + 'static,
+{
+    let run_turn = Arc::new(run_turn);
+    Arc::new(move |request, channels| {
+        let run_turn = Arc::clone(&run_turn);
+        Box::pin(async move {
+            let events = run_turn(request).await?;
+            for event in events {
+                channels.send_event(event);
+            }
+            Ok(())
+        })
+    })
 }
 
 #[allow(dead_code)]
@@ -1237,6 +1462,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn event_loop_confirms_approval_choice_to_running_turn() {
+        use std::collections::VecDeque;
+
+        struct ScriptedEvents {
+            events: VecDeque<Option<InputEvent>>,
+        }
+
+        impl TerminalEvents for ScriptedEvents {
+            fn next_input_event(&mut self) -> Result<InputEvent> {
+                self.poll_input_event(Duration::from_millis(0))?
+                    .ok_or_else(|| anyhow::anyhow!("expected scripted input"))
+            }
+
+            fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+                Ok(self.events.pop_front().unwrap_or(Some(InputEvent::Cancel)))
+            }
+        }
+
+        let decisions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_decisions = std::sync::Arc::clone(&decisions);
+        let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+            let captured_decisions = std::sync::Arc::clone(&captured_decisions);
+            Box::pin(async move {
+                channels.send_event(AgentEvent::ApprovalRequested {
+                    turn: 1,
+                    id: "tool-1".to_owned(),
+                    operation: neo_agent_core::PermissionOperation::Tool,
+                    subject: "write".to_owned(),
+                    arguments: serde_json::json!({"path": "approved.txt"}),
+                });
+                let (decision_tx, decision_rx) = oneshot::channel();
+                channels
+                    .approvals
+                    .send(crate::modes::run::PromptApprovalRequest {
+                        id: "tool-1".to_owned(),
+                        decision_tx,
+                    })
+                    .expect("approval waiter sent");
+                let decision = decision_rx.await.expect("approval decision");
+                captured_decisions
+                    .lock()
+                    .expect("decisions lock")
+                    .push(decision);
+                channels.send_event(AgentEvent::TextDelta {
+                    turn: 1,
+                    text: "approved".to_owned(),
+                });
+                channels.send_event(AgentEvent::TurnFinished {
+                    turn: 1,
+                    stop_reason: StopReason::EndTurn,
+                });
+                Ok(())
+            })
+        });
+        let mut controller = InteractiveController::new_with_turn_driver(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            run_turn,
+            PickerCatalogs::default(),
+            Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        );
+
+        controller.type_text("write file");
+        controller
+            .run_terminal_loop(
+                |_app| Ok(()),
+                ScriptedEvents {
+                    events: VecDeque::from([
+                        Some(InputEvent::Submit),
+                        None,
+                        Some(InputEvent::Action(KeybindingAction::SelectConfirm)),
+                        None,
+                        Some(InputEvent::Cancel),
+                    ]),
+                },
+            )
+            .await
+            .expect("approval loop completes");
+
+        assert_eq!(
+            *decisions.lock().expect("decisions lock"),
+            vec![PermissionDecision::Allow]
+        );
+        assert!(controller.app().focused_overlay().is_none());
+        assert!(controller.render_snapshot().contains("approved"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn event_loop_opens_session_picker_and_continues_selected_transcript() {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured_requests = std::sync::Arc::clone(&requests);
@@ -1332,6 +1648,10 @@ mod tests {
             .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
             .await
             .expect("continued prompt submits");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("continued turn completes");
         let requests = requests.lock().expect("recorded requests");
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].prompt, vec!["continue".to_owned()]);
@@ -1433,6 +1753,10 @@ mod tests {
             .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
             .await
             .expect("continued prompt submits on fork");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("continued fork turn completes");
         let requests = requests.lock().expect("recorded requests");
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].prompt, vec!["continue fork".to_owned()]);
@@ -1515,6 +1839,10 @@ mod tests {
             .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
             .await
             .expect("turn submits with selected model");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("selected model turn completes");
 
         let requests = requests.lock().expect("recorded requests");
         assert_eq!(requests.len(), 1);

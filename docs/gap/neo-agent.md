@@ -54,11 +54,12 @@
   state.
 - Interactive mode has a testable controller and a live crossterm/raw-mode TTY
   loop slice. TTY execution renders `neo-tui`, accepts text input, submits
-  prompts through the existing `run_prompt` path, redraws on terminal resize,
+  prompts through a streaming runtime driver, redraws on terminal resize,
   dispatches real keybinding actions for prompt editing and approval overlays,
-  scrolls the transcript viewport with Up/Down/PageUp/PageDown in editing mode,
-  exits on Esc/Ctrl-C, and keeps the no-tty snapshot fallback for command tests
-  and redirected stdout. `ctrl+r` opens a local session picker backed by
+  routes approval overlay choices back to pending async runtime approval
+  handlers, scrolls the transcript viewport with Up/Down/PageUp/PageDown in
+  editing mode, exits on Esc/Ctrl-C, and keeps the no-tty snapshot fallback for
+  command tests and redirected stdout. `ctrl+r` opens a local session picker backed by
   `sessions_dir` metadata and JSONL files; the picker uses local tree ordering
   and indents child sessions. Selecting a session replays its compacted context
   into the TUI, and subsequent prompts use that context while appending new
@@ -79,7 +80,8 @@ and platform-specific guidance.
 ## High-Priority Gaps
 
 - Keep quickstart scoped to currently wired commands until interactive mode has
-  full controls beyond the current raw-terminal prompt/edit/approval slice.
+  full controls beyond the current raw-terminal prompt/edit/approval/session/model
+  slice.
 - Keep config docs scoped to project/global TOML layering until profile sync or
   hosted settings exist.
 - Do not document `/login`, `/tree`, hosted sharing, hosted extension

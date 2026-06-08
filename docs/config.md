@@ -87,8 +87,8 @@ overrides them for that workspace.
 The default permissions mirror `neo_agent_core::PermissionPolicy::default()`:
 file reads are allowed, file writes ask, shell asks, and tools are allowed.
 Ask-mode operations emit approval request events in `neo-agent-core`; CLI modes
-can use static approve/deny handlers, while richer live interactive approval
-resume remains a runtime UI gap.
+can use static approve/deny handlers, and live interactive mode routes approval
+overlay choices back into the runtime's pending async approval handler.
 
 The `[runtime]` table maps directly to `neo_agent_core::AgentConfig` for real
 provider-backed runs. `temperature` and `max_tokens` are sent through
