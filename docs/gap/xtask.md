@@ -35,8 +35,9 @@ such as "no MCP adapter is wired" once `McpToolAdapter`/`McpToolProvider`
 exist, "extension lifecycle unavailable" once status/enable/disable commands
 exist, and "session branching and naming are future work" once
 `SessionMetadataStore::fork`/`rename` exist. It still allows honest gaps for
-long-lived MCP sessions, HTTP/SSE MCP transports, hosted share, OAuth login,
-raw TUI loops, and other surfaces that are not implemented.
+hosted MCP management, remote MCP servers that require alternate notification
+channels, hosted share, OAuth login, raw TUI loops, and other surfaces that are
+not implemented.
 
 ## Pi Parity Pressure
 

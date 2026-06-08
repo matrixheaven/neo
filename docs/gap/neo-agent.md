@@ -44,7 +44,8 @@
 - `mcp resources <server-id> list/read` explicitly fetches configured MCP
   server resource catalogs and content over the same stdio or HTTP/SSE
   transport adapters. `mcp resources <server-id> watch <uri>` subscribes to a
-  stdio resource, prints real update notifications, and unsubscribes.
+  stdio resource or a remote HTTP/SSE resource backed by a live SSE subscribe
+  response, prints real update notifications, and unsubscribes.
 - `print` and `run` discover enabled project MCP servers with
   `transport = "stdio"`, `transport = "http"`, or `transport = "sse"` and
   register their tools in the runtime tool registry.
@@ -86,6 +87,6 @@ and platform-specific guidance.
   yet.
 - Add hosted session tree navigation/share only when real hosted backing
   behavior exists.
-- Keep MCP runtime config limited to tools and explicit stdio resource
-  subscription/watch flows until remote resource streams, hosted server
-  lifecycle, and OAuth/trust flows are implemented.
+- Keep MCP runtime config limited to tools and explicit resource
+  subscription/watch flows until hosted server lifecycle, OAuth/trust flows, or
+  remote servers requiring alternate notification channels are implemented.

@@ -1,13 +1,14 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use neo_ai::ToolSpec;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
-    sync::{Mutex, mpsc},
+    sync::{Mutex, mpsc, oneshot},
     task::JoinHandle,
 };
 
@@ -203,16 +204,23 @@ pub struct McpHttpToolAdapter {
     client: reqwest::Client,
     initialized: Arc<Mutex<bool>>,
     next_id: Arc<Mutex<u64>>,
+    resource_update_tx: mpsc::UnboundedSender<Result<McpResourceUpdate, McpError>>,
+    resource_update_rx: Arc<Mutex<mpsc::UnboundedReceiver<Result<McpResourceUpdate, McpError>>>>,
+    resource_sse_reader: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl McpHttpToolAdapter {
     #[must_use]
     pub fn new(config: McpHttpConfig) -> Self {
+        let (resource_update_tx, resource_update_rx) = mpsc::unbounded_channel();
         Self {
             config,
             client: reqwest::Client::new(),
             initialized: Arc::new(Mutex::new(false)),
             next_id: Arc::new(Mutex::new(1)),
+            resource_update_tx,
+            resource_update_rx: Arc::new(Mutex::new(resource_update_rx)),
+            resource_sse_reader: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -261,38 +269,7 @@ impl McpHttpToolAdapter {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, McpError> {
-        let id = {
-            let mut next_id = self.next_id.lock().await;
-            let id = *next_id;
-            *next_id = next_id.saturating_add(1);
-            id
-        };
-        let mut request_body = serde_json::Map::from_iter([
-            (
-                "jsonrpc".to_owned(),
-                serde_json::Value::String("2.0".to_owned()),
-            ),
-            ("id".to_owned(), serde_json::Value::from(id)),
-            (
-                "method".to_owned(),
-                serde_json::Value::String(method.to_owned()),
-            ),
-        ]);
-        if let Some(params) = params {
-            request_body.insert("params".to_owned(), params);
-        }
-        let mut request = self
-            .client
-            .post(&self.config.url)
-            .header("accept", "application/json, text/event-stream")
-            .json(&serde_json::Value::Object(request_body));
-        for (key, value) in &self.config.headers {
-            request = request.header(key, value);
-        }
-        let response = request
-            .send()
-            .await
-            .map_err(|err| McpError::protocol(format!("failed to send MCP HTTP request: {err}")))?;
+        let (id, response) = self.send_raw_request(method, params).await?;
         let status = response.status();
         let is_sse = response
             .headers()
@@ -328,6 +305,57 @@ impl McpHttpToolAdapter {
             .get("result")
             .cloned()
             .ok_or_else(|| McpError::protocol("MCP HTTP response missing result"))
+    }
+
+    async fn send_raw_request(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<(u64, reqwest::Response), McpError> {
+        let id = {
+            let mut next_id = self.next_id.lock().await;
+            let id = *next_id;
+            *next_id = next_id.saturating_add(1);
+            id
+        };
+        let mut request_body = serde_json::Map::from_iter([
+            (
+                "jsonrpc".to_owned(),
+                serde_json::Value::String("2.0".to_owned()),
+            ),
+            ("id".to_owned(), serde_json::Value::from(id)),
+            (
+                "method".to_owned(),
+                serde_json::Value::String(method.to_owned()),
+            ),
+        ]);
+        if let Some(params) = params {
+            request_body.insert("params".to_owned(), params);
+        }
+        let mut request = self
+            .client
+            .post(&self.config.url)
+            .header("accept", "application/json, text/event-stream")
+            .json(&serde_json::Value::Object(request_body));
+        for (key, value) in &self.config.headers {
+            request = request.header(key, value);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|err| McpError::protocol(format!("failed to send MCP HTTP request: {err}")))?;
+        Ok((id, response))
+    }
+
+    async fn stop_resource_sse_reader(&self) {
+        if let Some(handle) = self.resource_sse_reader.lock().await.take() {
+            handle.abort();
+        }
+    }
+
+    async fn clear_pending_resource_updates(&self) {
+        let mut update_rx = self.resource_update_rx.lock().await;
+        while update_rx.try_recv().is_ok() {}
     }
 }
 
@@ -393,6 +421,95 @@ impl McpToolAdapter for McpHttpToolAdapter {
             )
             .await?;
         serde_json::from_value(result).map_err(|err| McpError::protocol(err.to_string()))
+    }
+
+    async fn subscribe_resource(&self, uri: &str) -> Result<(), McpError> {
+        self.ensure_initialized().await?;
+        self.stop_resource_sse_reader().await;
+        self.clear_pending_resource_updates().await;
+        let (id, response) = self
+            .send_raw_request(
+                "resources/subscribe",
+                Some(json_obj([(
+                    "uri",
+                    serde_json::Value::String(uri.to_owned()),
+                )])),
+            )
+            .await?;
+        let status = response.status();
+        let is_sse = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|content_type| content_type.contains("text/event-stream"));
+        if !status.is_success() {
+            let body = response.text().await.map_err(|err| {
+                McpError::protocol(format!("failed to read MCP HTTP response: {err}"))
+            })?;
+            return Err(McpError::protocol(format!(
+                "MCP HTTP server returned {status}: {body}"
+            )));
+        }
+        if !is_sse {
+            let body = response.text().await.map_err(|err| {
+                McpError::protocol(format!("failed to read MCP HTTP response: {err}"))
+            })?;
+            let response_value: serde_json::Value =
+                serde_json::from_str(&body).map_err(|err| McpError::protocol(err.to_string()))?;
+            validate_json_rpc_result(&response_value, id)?;
+            return Ok(());
+        }
+
+        let (response_tx, response_rx) = oneshot::channel();
+        let update_tx = self.resource_update_tx.clone();
+        let reader = tokio::spawn(read_http_sse_messages(
+            response,
+            id,
+            Some(response_tx),
+            update_tx,
+        ));
+        *self.resource_sse_reader.lock().await = Some(reader);
+        let result = response_rx.await.map_err(|_| {
+            McpError::protocol("MCP HTTP SSE stream ended before subscribe response")
+        })?;
+        if result.is_err() {
+            self.stop_resource_sse_reader().await;
+        }
+        result
+    }
+
+    async fn unsubscribe_resource(&self, uri: &str) -> Result<(), McpError> {
+        let result = self
+            .request(
+                "resources/unsubscribe",
+                Some(json_obj([(
+                    "uri",
+                    serde_json::Value::String(uri.to_owned()),
+                )])),
+            )
+            .await
+            .map(|_| ());
+        self.stop_resource_sse_reader().await;
+        result
+    }
+
+    async fn next_resource_update(&self) -> Result<McpResourceUpdate, McpError> {
+        if self.resource_sse_reader.lock().await.is_none() {
+            return Err(McpError::protocol(
+                "MCP HTTP resource updates require a live SSE subscribe response",
+            ));
+        }
+        let result = self
+            .resource_update_rx
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or_else(|| McpError::protocol("MCP HTTP SSE resource update stream closed"))?;
+        if result.is_err() {
+            self.stop_resource_sse_reader().await;
+        }
+        result
     }
 }
 
@@ -929,16 +1046,171 @@ fn extract_text_content(result: &serde_json::Value) -> String {
 
 fn parse_sse_json_rpc_response(body: &str) -> Result<serde_json::Value, McpError> {
     for event in body.split("\n\n") {
-        let data = event
-            .lines()
-            .filter_map(|line| line.strip_prefix("data:"))
-            .map(str::trim)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let data = sse_event_data(event);
         if data.is_empty() || data == "[DONE]" {
             continue;
         }
         return serde_json::from_str(&data).map_err(|err| McpError::protocol(err.to_string()));
     }
     Err(McpError::protocol("MCP SSE response missing data"))
+}
+
+async fn read_http_sse_messages(
+    response: reqwest::Response,
+    expected_response_id: u64,
+    mut response_tx: Option<oneshot::Sender<Result<(), McpError>>>,
+    resource_update_tx: mpsc::UnboundedSender<Result<McpResourceUpdate, McpError>>,
+) {
+    let mut stream = response.bytes_stream();
+    let mut buffer = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(err) => {
+                send_http_sse_error(
+                    &mut response_tx,
+                    &resource_update_tx,
+                    McpError::protocol(format!("failed to read MCP HTTP SSE stream: {err}")),
+                );
+                return;
+            }
+        };
+        buffer.extend_from_slice(&chunk);
+        while let Some(event) = take_sse_event_bytes(&mut buffer) {
+            let event = match std::str::from_utf8(&event) {
+                Ok(event) => event,
+                Err(err) => {
+                    send_http_sse_error(
+                        &mut response_tx,
+                        &resource_update_tx,
+                        McpError::protocol(format!("invalid MCP HTTP SSE UTF-8: {err}")),
+                    );
+                    return;
+                }
+            };
+            let data = sse_event_data(event);
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            let message = match serde_json::from_str::<serde_json::Value>(&data) {
+                Ok(message) => message,
+                Err(err) => {
+                    send_http_sse_error(
+                        &mut response_tx,
+                        &resource_update_tx,
+                        McpError::protocol(err.to_string()),
+                    );
+                    return;
+                }
+            };
+            if message.get("id").and_then(serde_json::Value::as_u64) == Some(expected_response_id) {
+                let result = validate_json_rpc_result(&message, expected_response_id).map(|_| ());
+                if let Some(tx) = response_tx.take() {
+                    let _ = tx.send(result);
+                }
+            } else if message.get("method").and_then(serde_json::Value::as_str)
+                == Some("notifications/resources/updated")
+            {
+                match resource_update_from_notification(&message) {
+                    Ok(update) => {
+                        let _ = resource_update_tx.send(Ok(update));
+                    }
+                    Err(err) => {
+                        send_http_sse_error(&mut response_tx, &resource_update_tx, err);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    send_http_sse_error(
+        &mut response_tx,
+        &resource_update_tx,
+        McpError::protocol("MCP HTTP SSE resource update stream ended"),
+    );
+}
+
+fn send_http_sse_error(
+    response_tx: &mut Option<oneshot::Sender<Result<(), McpError>>>,
+    resource_update_tx: &mpsc::UnboundedSender<Result<McpResourceUpdate, McpError>>,
+    error: McpError,
+) {
+    if let Some(tx) = response_tx.take() {
+        let _ = tx.send(Err(error));
+    } else {
+        let _ = resource_update_tx.send(Err(error));
+    }
+}
+
+fn take_sse_event_bytes(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let lf_index = find_bytes(buffer, b"\n\n");
+    let crlf_index = find_bytes(buffer, b"\r\n\r\n");
+    let (index, delimiter_len) = match (lf_index, crlf_index) {
+        (Some(lf), Some(crlf)) if crlf < lf => (crlf, 4),
+        (Some(lf), _) => (lf, 2),
+        (None, Some(crlf)) => (crlf, 4),
+        (None, None) => return None,
+    };
+    let event = buffer[..index].to_vec();
+    buffer.drain(..index + delimiter_len);
+    Some(event)
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn sse_event_data(event: &str) -> String {
+    event
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn validate_json_rpc_result(
+    response_value: &serde_json::Value,
+    expected_id: u64,
+) -> Result<serde_json::Value, McpError> {
+    if response_value.get("id").and_then(serde_json::Value::as_u64) != Some(expected_id) {
+        return Err(McpError::protocol(
+            "MCP HTTP response id did not match request",
+        ));
+    }
+    if let Some(error) = response_value.get("error") {
+        let message = error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("MCP HTTP server returned JSON-RPC error");
+        return Err(McpError::protocol(message));
+    }
+    response_value
+        .get("result")
+        .cloned()
+        .ok_or_else(|| McpError::protocol("MCP HTTP response missing result"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_event_byte_buffer_waits_for_complete_utf8_event() {
+        let event = "data: {\"uri\":\"file://docs/雪.md\"}\n\n";
+        let split = event.find('雪').expect("snow character");
+        let mut buffer = event.as_bytes()[..=split].to_vec();
+
+        assert!(take_sse_event_bytes(&mut buffer).is_none());
+        buffer.extend_from_slice(&event.as_bytes()[split + 1..]);
+        let event = take_sse_event_bytes(&mut buffer).expect("complete SSE event");
+
+        assert_eq!(
+            std::str::from_utf8(&event).expect("valid UTF-8 event"),
+            "data: {\"uri\":\"file://docs/雪.md\"}"
+        );
+        assert!(buffer.is_empty());
+    }
 }

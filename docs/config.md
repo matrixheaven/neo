@@ -118,8 +118,9 @@ MCP tool names over a real JSON-RPC transport. Stdio servers reuse an
 initialized process session; HTTP/SSE servers send JSON-RPC POST requests and
 accept JSON or SSE `data:` JSON-RPC responses. `neo mcp resources <server>
 list` and `neo mcp resources <server> read <uri>` explicitly fetch resource
-catalogs and content from a configured enabled server. For stdio servers,
-`neo mcp resources <server> watch <uri>` subscribes, waits for real
+catalogs and content from a configured enabled server. `neo mcp resources
+<server> watch <uri>` subscribes over stdio or over remote HTTP/SSE servers that
+return a live SSE subscribe response, waits for real
 `notifications/resources/updated` messages, prints updated URIs, and
 unsubscribes before exiting. The current shape includes:
 

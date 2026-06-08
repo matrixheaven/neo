@@ -39,8 +39,10 @@
 - `McpHttpToolAdapter` sends JSON-RPC POST requests to configured HTTP/SSE MCP
   endpoints, applies configured headers, accepts JSON and SSE `data:`
   JSON-RPC responses, and supports `initialize`, `tools/list`, and
-  `tools/call` without local fallback behavior. Resource update subscriptions
-  are explicitly unsupported on the one-shot remote transport.
+  `tools/call` without local fallback behavior. It also sends
+  `resources/subscribe` and `resources/unsubscribe`; JSON subscribe responses
+  are acknowledged, and live SSE subscribe responses are read in the background
+  so real `notifications/resources/updated` messages are queued for watchers.
 - Stdio and HTTP/SSE MCP adapters also support explicit `resources/list` and
   `resources/read` requests without injecting resource content into model
   context.
@@ -68,8 +70,9 @@ or hosted lifecycle behavior.
 - Add richer interactive approval UI wiring once the raw terminal event loop can
   resume pending tool calls from explicit user choices instead of relying on
   runtime-only approval handler callbacks.
-- Add remote HTTP/SSE MCP resource update streams once Neo has a long-lived
-  remote MCP transport.
+- Add richer hosted or alternate-channel remote MCP lifecycle support once Neo
+  has backing behavior for servers that do not deliver updates on the subscribe
+  response SSE stream.
 - Add richer hook lifecycle docs only when Neo exposes additional hook phases
   beyond the current before/after tool-call callbacks.
 - Decide whether Neo needs full PTY/interactivity later. Current `bash`

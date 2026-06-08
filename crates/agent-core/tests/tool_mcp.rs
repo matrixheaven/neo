@@ -4,6 +4,7 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -449,29 +450,108 @@ async fn mcp_stdio_adapter_reconnects_after_cached_session_closes() {
 }
 
 #[tokio::test]
-async fn mcp_http_adapter_does_not_fake_resource_update_subscriptions() {
+async fn mcp_http_adapter_subscribes_to_sse_resource_updates() {
+    let server = MockMcpHttpServer::start(vec![
+        mcp_json_response(json!({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {"name": "http-resource-fixture", "version": "0.1.0"},
+            "capabilities": {"resources": {"subscribe": true}}
+        })),
+        mcp_sse_resource_update_response(json!({}), "file://docs/readme.md"),
+        mcp_json_response(json!({})),
+    ]);
     let adapter = McpHttpToolAdapter::new(McpHttpConfig {
-        url: "http://127.0.0.1:9".to_owned(),
+        url: server.url.clone(),
         headers: BTreeMap::new(),
     });
 
-    let subscribe_error = adapter
+    adapter
         .subscribe_resource("file://docs/readme.md")
         .await
-        .expect_err("HTTP adapter should not fake resource subscription support");
-    let update_error = adapter
+        .expect("subscribe over HTTP SSE");
+    let update = adapter
         .next_resource_update()
         .await
-        .expect_err("HTTP adapter should not fake resource update notifications");
+        .expect("receive HTTP SSE resource update");
+    adapter
+        .unsubscribe_resource("file://docs/readme.md")
+        .await
+        .expect("unsubscribe over HTTP");
+
+    assert_eq!(update.uri, "file://docs/readme.md");
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .map(|request| request.body["method"].as_str().expect("method"))
+            .collect::<Vec<_>>(),
+        vec!["initialize", "resources/subscribe", "resources/unsubscribe"]
+    );
+}
+
+#[tokio::test]
+async fn mcp_http_adapter_requires_live_sse_stream_for_resource_updates() {
+    let server = MockMcpHttpServer::start(vec![
+        mcp_json_response(json!({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {"name": "http-resource-fixture", "version": "0.1.0"},
+            "capabilities": {"resources": {"subscribe": true}}
+        })),
+        mcp_json_response(json!({})),
+    ]);
+    let adapter = McpHttpToolAdapter::new(McpHttpConfig {
+        url: server.url.clone(),
+        headers: BTreeMap::new(),
+    });
+
+    adapter
+        .subscribe_resource("file://docs/readme.md")
+        .await
+        .expect("JSON subscribe response is acknowledged");
+    let error = tokio::time::timeout(Duration::from_millis(250), adapter.next_resource_update())
+        .await
+        .expect("next_resource_update should not hang")
+        .expect_err("JSON subscribe response does not provide update stream");
 
     assert_eq!(
-        subscribe_error.message(),
-        "MCP adapter does not support resources/subscribe"
+        error.message(),
+        "MCP HTTP resource updates require a live SSE subscribe response"
     );
     assert_eq!(
-        update_error.message(),
-        "MCP adapter does not support resource update notifications"
+        server
+            .requests()
+            .iter()
+            .map(|request| request.body["method"].as_str().expect("method"))
+            .collect::<Vec<_>>(),
+        vec!["initialize", "resources/subscribe"]
     );
+}
+
+#[tokio::test]
+async fn mcp_http_adapter_reports_sse_stream_end_after_subscribe_response() {
+    let server = MockMcpHttpServer::start(vec![
+        mcp_json_response(json!({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {"name": "http-resource-fixture", "version": "0.1.0"},
+            "capabilities": {"resources": {"subscribe": true}}
+        })),
+        mcp_sse_response(json!({})),
+    ]);
+    let adapter = McpHttpToolAdapter::new(McpHttpConfig {
+        url: server.url.clone(),
+        headers: BTreeMap::new(),
+    });
+
+    adapter
+        .subscribe_resource("file://docs/readme.md")
+        .await
+        .expect("subscribe over HTTP SSE");
+    let error = tokio::time::timeout(Duration::from_millis(250), adapter.next_resource_update())
+        .await
+        .expect("stream EOF should not hang")
+        .expect_err("closed SSE stream should report an error");
+
+    assert_eq!(error.message(), "MCP HTTP SSE resource update stream ended");
 }
 
 #[tokio::test]
@@ -852,6 +932,7 @@ impl MockMcpHttpServer {
 enum MockMcpHttpResponse {
     Json(Value),
     Sse(Value),
+    SseResourceUpdate { result: Value, uri: String },
 }
 
 impl MockMcpHttpResponse {
@@ -874,6 +955,20 @@ impl MockMcpHttpResponse {
                 let body = format!("data: {rpc}\n\n");
                 http_response("text/event-stream", &body)
             }
+            Self::SseResourceUpdate { result, uri } => {
+                let rpc = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result,
+                });
+                let notification = json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/resources/updated",
+                    "params": { "uri": uri },
+                });
+                let body = format!("data: {rpc}\n\ndata: {notification}\n\n");
+                http_response("text/event-stream", &body)
+            }
         }
     }
 }
@@ -884,6 +979,13 @@ fn mcp_json_response(result: Value) -> MockMcpHttpResponse {
 
 fn mcp_sse_response(result: Value) -> MockMcpHttpResponse {
     MockMcpHttpResponse::Sse(result)
+}
+
+fn mcp_sse_resource_update_response(result: Value, uri: impl Into<String>) -> MockMcpHttpResponse {
+    MockMcpHttpResponse::SseResourceUpdate {
+        result,
+        uri: uri.into(),
+    }
 }
 
 fn http_response(content_type: &str, body: &str) -> String {

@@ -54,9 +54,11 @@ does not provide local fallback behavior.
 JSON-RPC POST per MCP request, applies configured headers, performs the
 `initialize` handshake before tool/resource requests, accepts JSON responses
 and SSE `data:` JSON-RPC responses, and surfaces HTTP/protocol errors without
-local fallback behavior. The current remote adapter is one POST per request, so
-it explicitly rejects resource update subscriptions instead of pretending that
-out-of-band notifications can arrive without a long-lived stream.
+local fallback behavior. `resources/subscribe` and `resources/unsubscribe` use
+the same JSON-RPC transport. A JSON subscribe response is acknowledged as the
+server's result; when the subscribe response is a live SSE stream, the adapter
+keeps reading it in the background and queues real
+`notifications/resources/updated` messages as `McpResourceUpdate` values.
 
 ## Runtime Placement
 
@@ -92,14 +94,18 @@ adapter, HTTP/SSE JSON-RPC adapter, discovery-to-`ToolSpec` bridge, namespaced
 async call delegation. It also supports explicit MCP `resources/list` and
 `resources/read` through the same stdio or HTTP/SSE JSON-RPC adapters. The
 stdio adapter also supports `resources/subscribe`,
-`resources/unsubscribe`, and queued `notifications/resources/updated` delivery.
+`resources/unsubscribe`, and queued `notifications/resources/updated` delivery;
+the HTTP/SSE adapter does the same when a remote `resources/subscribe` response
+is backed by a live SSE stream.
 `neo-agent print` and `neo-agent run` load enabled `transport = "stdio"`,
 `transport = "http"`, and `transport = "sse"` servers from project config and
 advertise their tools to the configured model. `neo mcp resources <server>
 list/read` fetches resource catalogs and content without adding them to model
 context automatically. `neo mcp resources <server> watch <uri>` subscribes to a
-stdio resource, waits for real `notifications/resources/updated` messages,
-prints updated URIs, and unsubscribes before exiting.
+stdio resource or a remote HTTP/SSE resource backed by a live SSE subscribe
+response, waits for real `notifications/resources/updated` messages, prints
+updated URIs, and unsubscribes before exiting.
 
-Current limitation: remote HTTP/SSE resource update streams, OAuth/hosted server
-lifecycle, and hosted MCP management remain future work.
+Current limitation: remote servers that require a separate event channel beyond
+the subscribe response stream, OAuth/hosted server lifecycle, and hosted MCP
+management remain future work.

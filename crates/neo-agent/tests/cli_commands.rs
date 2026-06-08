@@ -1387,6 +1387,44 @@ MCP_METHOD_LOG = "{}"
     );
 }
 
+#[test]
+fn mcp_resources_watch_receives_remote_sse_resource_update() {
+    let temp = TempDir::new().expect("tempdir");
+    let mcp_server = MockSseServer::start(vec![
+        mcp_json_response(
+            1,
+            &json!({
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "remote-resource-fixture", "version": "0.1.0"},
+                "capabilities": {"resources": {"subscribe": true}}
+            }),
+        ),
+        mcp_sse_resource_update_response(2, &json!({}), "file://docs/readme.md"),
+        mcp_json_response(3, &json!({})),
+    ]);
+    write_remote_mcp_config(temp.path(), &mcp_server.url);
+
+    let mut command = neo();
+    command.current_dir(temp.path()).args([
+        "mcp",
+        "resources",
+        "remote-docs",
+        "watch",
+        "file://docs/readme.md",
+    ]);
+    let stdout = run(command);
+
+    assert_eq!(stdout, "file://docs/readme.md\n");
+    assert_eq!(
+        mcp_server
+            .requests()
+            .iter()
+            .map(|request| request.body["method"].as_str().expect("method"))
+            .collect::<Vec<_>>(),
+        vec!["initialize", "resources/subscribe", "resources/unsubscribe"]
+    );
+}
+
 #[derive(Debug, Clone)]
 struct RecordedRequest {
     method: String,
@@ -1455,6 +1493,21 @@ fn mcp_json_response(id: u64, result: &Value) -> String {
         body.len(),
         body
     )
+}
+
+fn mcp_sse_resource_update_response(id: u64, result: &Value, uri: &str) -> String {
+    sse_response(&[
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/resources/updated",
+            "params": { "uri": uri },
+        }),
+    ])
 }
 
 fn write_remote_mcp_config(root: &Path, url: &str) {
