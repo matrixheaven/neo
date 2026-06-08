@@ -149,6 +149,85 @@ fn model_registry_loads_models_from_json_catalog() {
 }
 
 #[test]
+fn model_registry_loads_pi_models_json_custom_models() {
+    let mut registry = ModelRegistry::new();
+
+    registry
+        .load_catalog_str(
+            r#"
+{
+  "providers": {
+    "ollama": {
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "llama3.1:8b",
+          "name": "Llama 3.1 8B",
+          "input": ["text"],
+          "contextWindow": 128000
+        },
+        {
+          "id": "llava:latest",
+          "api": "openai-completions",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 65536
+        }
+      ]
+    }
+  }
+}
+"#,
+            "pi models.json",
+        )
+        .expect("load pi models.json");
+
+    let llama = registry.get("ollama", "llama3.1:8b").expect("llama");
+    assert_eq!(llama.api, ApiKind::OpenAiCompatible);
+    assert!(llama.capabilities.streaming);
+    assert!(llama.capabilities.tools);
+    assert!(!llama.capabilities.images);
+    assert!(!llama.capabilities.reasoning);
+    assert_eq!(llama.capabilities.max_context_tokens, Some(128_000));
+
+    let vision_model = registry.get("ollama", "llava:latest").expect("llava");
+    assert_eq!(vision_model.api, ApiKind::OpenAiCompatible);
+    assert!(vision_model.capabilities.images);
+    assert!(vision_model.capabilities.reasoning);
+    assert_eq!(vision_model.capabilities.max_context_tokens, Some(65_536));
+    assert_eq!(
+        registry.default_model().map(|model| model.model.as_str()),
+        Some("llama3.1:8b")
+    );
+}
+
+#[test]
+fn model_registry_rejects_pi_models_json_with_unsupported_api() {
+    let mut registry = ModelRegistry::new();
+
+    let error = registry
+        .load_catalog_str(
+            r#"
+{
+  "providers": {
+    "amazon-bedrock": {
+      "api": "bedrock-converse-stream",
+      "models": [
+        { "id": "anthropic.claude-opus-4-6-v1" }
+      ]
+    }
+  }
+}
+"#,
+            "pi models.json",
+        )
+        .expect_err("unsupported Pi API should be rejected");
+
+    assert!(error.to_string().contains("unsupported pi models.json api"));
+    assert!(error.to_string().contains("bedrock-converse-stream"));
+}
+
+#[test]
 fn model_registry_rejects_invalid_json_catalog_entries() {
     let mut registry = ModelRegistry::new();
 

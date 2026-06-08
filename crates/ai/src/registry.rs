@@ -8,6 +8,9 @@ use crate::{
     },
 };
 use serde::Deserialize;
+use serde_json::Value;
+
+const PI_DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
 
 #[derive(Debug, Clone, Default)]
 pub struct ModelRegistry {
@@ -49,7 +52,17 @@ impl ModelRegistry {
     }
 
     pub fn load_catalog_str(&mut self, source: &str, label: &str) -> Result<(), AiError> {
-        let catalog: ModelCatalog = serde_json::from_str(source).map_err(|err| {
+        let value: Value = serde_json::from_str(source).map_err(|err| {
+            AiError::Configuration(format!("failed to parse model catalog {label}: {err}"))
+        })?;
+        if value.get("providers").is_some() {
+            let catalog: PiModelsConfig = serde_json::from_value(value).map_err(|err| {
+                AiError::Configuration(format!("failed to parse pi models.json {label}: {err}"))
+            })?;
+            return self.load_pi_models_config(catalog, label);
+        }
+
+        let catalog: ModelCatalog = serde_json::from_value(value).map_err(|err| {
             AiError::Configuration(format!("failed to parse model catalog {label}: {err}"))
         })?;
         if catalog.models.is_empty() {
@@ -76,6 +89,48 @@ impl ModelRegistry {
                 )));
             }
             candidate.default = Some((default.provider, default.model));
+        }
+        *self = candidate;
+        Ok(())
+    }
+
+    fn load_pi_models_config(
+        &mut self,
+        catalog: PiModelsConfig,
+        label: &str,
+    ) -> Result<(), AiError> {
+        if catalog.providers.is_empty() {
+            return Err(AiError::Configuration(format!(
+                "pi models.json {label} must define at least one provider"
+            )));
+        }
+
+        let mut models = Vec::new();
+        for (provider, config) in catalog.providers {
+            let provider = provider.trim().to_owned();
+            if provider.is_empty() {
+                return Err(AiError::Configuration(format!(
+                    "pi models.json {label} provider must not be empty"
+                )));
+            }
+            for model in config.models {
+                models.push(pi_model_spec(
+                    label,
+                    &provider,
+                    config.api.as_ref(),
+                    &model,
+                )?);
+            }
+        }
+        if models.is_empty() {
+            return Err(AiError::Configuration(format!(
+                "pi models.json {label} must define at least one custom model"
+            )));
+        }
+
+        let mut candidate = self.clone();
+        for model in models {
+            candidate.register(model);
         }
         *self = candidate;
         Ok(())
@@ -128,6 +183,110 @@ struct ModelCatalog {
 struct ModelCatalogDefault {
     provider: String,
     model: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PiModelsConfig {
+    providers: BTreeMap<String, PiProviderConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PiProviderConfig {
+    #[serde(default)]
+    api: Option<String>,
+    #[serde(default)]
+    models: Vec<PiModelDefinition>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PiModelDefinition {
+    id: String,
+    #[serde(default)]
+    api: Option<String>,
+    #[serde(default)]
+    reasoning: Option<bool>,
+    #[serde(default)]
+    input: Option<Vec<String>>,
+    #[serde(default, rename = "contextWindow")]
+    context_window: Option<u32>,
+}
+
+fn pi_model_spec(
+    label: &str,
+    provider: &str,
+    provider_api: Option<&String>,
+    model: &PiModelDefinition,
+) -> Result<ModelSpec, AiError> {
+    let model_id = model.id.trim().to_owned();
+    if model_id.is_empty() {
+        return Err(AiError::Configuration(format!(
+            "pi models.json {label} provider {provider} model id must not be empty"
+        )));
+    }
+    let api = model.api.as_ref().or(provider_api).ok_or_else(|| {
+        AiError::Configuration(format!(
+            "pi models.json {label} provider {provider}, model {model_id}: missing api"
+        ))
+    })?;
+    let api = pi_api_kind(label, provider, &model_id, api)?;
+    let capabilities = pi_model_capabilities(label, provider, &model_id, model)?;
+
+    Ok(ModelSpec {
+        provider: ProviderId(provider.to_owned()),
+        model: model_id,
+        api,
+        capabilities,
+    })
+}
+
+fn pi_api_kind(label: &str, provider: &str, model_id: &str, api: &str) -> Result<ApiKind, AiError> {
+    match api {
+        "openai-responses" => Ok(ApiKind::OpenAiResponses),
+        "openai-completions" | "openai-compatible" => Ok(ApiKind::OpenAiCompatible),
+        "anthropic-messages" => Ok(ApiKind::AnthropicMessages),
+        "google-generative-ai" => Ok(ApiKind::GoogleGenerativeAi),
+        "local" => Ok(ApiKind::Local),
+        other => Err(AiError::Configuration(format!(
+            "pi models.json {label} provider {provider}, model {model_id}: unsupported pi models.json api {other}"
+        ))),
+    }
+}
+
+fn pi_model_capabilities(
+    label: &str,
+    provider: &str,
+    model_id: &str,
+    model: &PiModelDefinition,
+) -> Result<ModelCapabilities, AiError> {
+    if model.context_window == Some(0) {
+        return Err(AiError::Configuration(format!(
+            "pi models.json {label} provider {provider}, model {model_id}: contextWindow must be greater than 0"
+        )));
+    }
+
+    let mut images = false;
+    if let Some(input) = &model.input {
+        for item in input {
+            match item.as_str() {
+                "text" => {}
+                "image" => images = true,
+                other => {
+                    return Err(AiError::Configuration(format!(
+                        "pi models.json {label} provider {provider}, model {model_id}: unsupported input type {other}"
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(ModelCapabilities {
+        streaming: true,
+        tools: true,
+        images,
+        reasoning: model.reasoning.unwrap_or(false),
+        embeddings: false,
+        max_context_tokens: Some(model.context_window.unwrap_or(PI_DEFAULT_CONTEXT_WINDOW)),
+    })
 }
 
 fn validate_catalog_model(label: &str, model: &ModelSpec) -> Result<(), AiError> {

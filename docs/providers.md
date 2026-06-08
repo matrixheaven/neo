@@ -18,7 +18,8 @@ test client.
 - `ModelRegistry` stores available `ModelSpec` values and exposes the first
   registered model as the default unless replaced by configuration.
 - `ModelRegistry::load_catalog_path` and `ModelRegistry::load_catalog_str` load
-  strict local JSON catalogs that use the existing `ModelSpec` wire shape.
+  strict local JSON catalogs that use either the existing `ModelSpec` wire
+  shape or the supported custom-model subset of Pi `models.json`.
 - `ProviderRegistry::production()` registers the provider catalog used by
   production resolution: OpenAI, Anthropic, Google Generative AI, OpenRouter,
   and Amazon Bedrock credential hints.
@@ -78,9 +79,9 @@ not resolve `ApiKind::Local` or the fake test provider.
 ## Local Model Catalogs
 
 Neo supports strict local JSON model catalogs. They extend or replace
-`ModelRegistry::seeded()` entries by `provider` and `model`; they do not
-implement pi `models.json` compatibility, pricing metadata, auth files, or
-provider-native override formats.
+`ModelRegistry::seeded()` entries by `provider` and `model`.
+
+The native Neo shape stores the exact `ModelSpec` fields:
 
 ```json
 {
@@ -111,6 +112,36 @@ provider/model strings, zero `max_context_tokens`, or a `default` that does not
 match a registered model. `neo-agent` project config can reference catalog files
 with `model_catalogs = [".neo/models.json"]`; relative paths resolve from the
 project root.
+
+Neo also accepts the custom-model subset of Pi `models.json`, detected by a
+top-level `providers` object:
+
+```json
+{
+  "providers": {
+    "ollama": {
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "llama3.1:8b",
+          "input": ["text"],
+          "contextWindow": 128000
+        }
+      ]
+    }
+  }
+}
+```
+
+Supported Pi API names are `openai-responses`, `openai-completions`,
+`openai-compatible`, `anthropic-messages`, `google-generative-ai`, and `local`.
+The loader maps Pi `id`, provider map key, `api`, `reasoning`, `input`, and
+`contextWindow` into `ModelSpec`. It rejects unsupported Pi APIs such as
+`bedrock-converse-stream` instead of silently downgrading them.
+
+Pi provider endpoint, credential, pricing, `maxTokens`, `headers`, `compat`,
+and `modelOverrides` metadata are not migrated into `ModelSpec`; configure Neo
+provider credentials and base URLs through the existing Neo provider config.
 
 ## Test Provider
 
