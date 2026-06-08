@@ -13,7 +13,6 @@ use tokio::{
     process::{Child, Command},
     sync::Mutex,
     task::JoinHandle,
-    time::timeout,
 };
 use uuid::Uuid;
 
@@ -152,14 +151,19 @@ async fn run_command(
         Ok::<_, std::io::Error>(String::from_utf8_lossy(&buffer).into_owned())
     });
 
-    let Ok(status) = timeout(timeout_duration, child.wait()).await else {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-        return Err(ToolError::CommandTimedOut {
-            timeout_ms: u64::try_from(timeout_duration.as_millis()).unwrap_or(u64::MAX),
-        });
+    let status = tokio::select! {
+        status = child.wait() => status?,
+        () = tokio::time::sleep(timeout_duration) => {
+            kill_child(&mut child).await;
+            return Err(ToolError::CommandTimedOut {
+                timeout_ms: u64::try_from(timeout_duration.as_millis()).unwrap_or(u64::MAX),
+            });
+        }
+        () = ctx.cancel_token.cancelled() => {
+            kill_child(&mut child).await;
+            return Err(ToolError::Cancelled);
+        }
     };
-    let status = status?;
 
     let stdout = stdout_task.await.map_err(std::io::Error::other)??;
     let stderr = stderr_task.await.map_err(std::io::Error::other)??;
@@ -168,6 +172,11 @@ async fn run_command(
         stdout,
         stderr,
     })
+}
+
+async fn kill_child(child: &mut Child) {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 }
 
 async fn start_background_command(

@@ -661,7 +661,8 @@ async fn run_agent_turn(
             break;
         };
         let tool_results =
-            execute_tool_calls(&config, registry, turn, &tool_calls, emitter).await?;
+            execute_tool_calls(&config, registry, turn, &tool_calls, emitter, &cancel_token)
+                .await?;
         for (tool_call, result) in &tool_results {
             let message = AgentMessage::tool_result(
                 tool_call.id.clone(),
@@ -821,13 +822,16 @@ async fn execute_tool_calls(
     turn: u32,
     tool_calls: &[AgentToolCall],
     emitter: &mut EventEmitter,
+    cancel_token: &CancellationToken,
 ) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
     match config.tool_execution_mode {
         ToolExecutionMode::Sequential => {
-            execute_tool_calls_sequential(config, registry, turn, tool_calls, emitter).await
+            execute_tool_calls_sequential(config, registry, turn, tool_calls, emitter, cancel_token)
+                .await
         }
         ToolExecutionMode::Parallel => {
-            execute_tool_calls_parallel(config, registry, turn, tool_calls, emitter).await
+            execute_tool_calls_parallel(config, registry, turn, tool_calls, emitter, cancel_token)
+                .await
         }
     }
 }
@@ -838,8 +842,9 @@ async fn execute_tool_calls_sequential(
     turn: u32,
     tool_calls: &[AgentToolCall],
     emitter: &mut EventEmitter,
+    cancel_token: &CancellationToken,
 ) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
-    let tool_context = default_tool_context(config)?;
+    let tool_context = default_tool_context(config, cancel_token)?;
     let mut results = Vec::new();
     for tool_call in tool_calls {
         emitter.emit(AgentEvent::ToolExecutionStarted {
@@ -881,8 +886,9 @@ async fn execute_tool_calls_parallel(
     turn: u32,
     tool_calls: &[AgentToolCall],
     emitter: &mut EventEmitter,
+    cancel_token: &CancellationToken,
 ) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
-    let tool_context = default_tool_context(config)?;
+    let tool_context = default_tool_context(config, cancel_token)?;
     let mut completed = Vec::with_capacity(tool_calls.len());
     let mut running = FuturesUnordered::new();
 
@@ -1307,13 +1313,20 @@ fn emit_shell_finished(
     });
 }
 
-fn default_tool_context(config: &AgentConfig) -> Result<ToolContext, AgentRuntimeError> {
+fn default_tool_context(
+    config: &AgentConfig,
+    cancel_token: &CancellationToken,
+) -> Result<ToolContext, AgentRuntimeError> {
     let workspace_root = if let Some(workspace_root) = &config.workspace_root {
         workspace_root.clone()
     } else {
         std::env::current_dir()?
     };
     ToolContext::new(workspace_root)
-        .map(|context| context.with_permission_policy(config.tool_permission_policy.clone()))
+        .map(|context| {
+            context
+                .with_permission_policy(config.tool_permission_policy.clone())
+                .with_cancel_token(cancel_token.clone())
+        })
         .map_err(AgentRuntimeError::Tool)
 }

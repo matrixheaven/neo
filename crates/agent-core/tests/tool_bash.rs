@@ -1,5 +1,6 @@
 use neo_agent_core::{PermissionPolicy, ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn bash_background_start_poll_and_finish_returns_real_process_output() {
@@ -129,4 +130,66 @@ async fn bash_without_mode_remains_foreground_compatible() {
         .expect("foreground bash should still run");
 
     assert_eq!(result.details.expect("details")["stdout"], "foreground");
+}
+
+#[tokio::test]
+async fn bash_foreground_kills_child_when_context_is_cancelled() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let cancel = CancellationToken::new();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_cancel_token(cancel.clone());
+
+    let command = tokio::spawn(async move {
+        registry
+            .run(
+                "bash",
+                &context,
+                json!({
+                    "command": "printf $$ > child.pid; sleep 5",
+                    "timeout_ms": 10000
+                }),
+            )
+            .await
+    });
+    let pid_path = workspace.path().join("child.pid");
+    for _ in 0..20 {
+        if pid_path.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let pid = std::fs::read_to_string(&pid_path)
+        .expect("child pid should be written")
+        .trim()
+        .to_owned();
+    cancel.cancel();
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), command)
+        .await
+        .expect("cancelled foreground command should finish promptly")
+        .expect("command task should not panic")
+        .expect_err("cancelled command should return a tool error");
+
+    assert!(matches!(error, ToolError::Cancelled));
+    for _ in 0..20 {
+        if !process_exists(&pid) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        !process_exists(&pid),
+        "cancel should terminate the child shell process"
+    );
+}
+
+fn process_exists(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }

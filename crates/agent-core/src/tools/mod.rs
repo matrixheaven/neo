@@ -19,6 +19,7 @@ use neo_ai::ToolSpec;
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 use crate::PermissionPolicy;
 
@@ -38,6 +39,8 @@ pub enum ToolError {
     InvalidInput { tool: String, message: String },
     #[error("command timed out after {timeout_ms} ms")]
     CommandTimedOut { timeout_ms: u64 },
+    #[error("tool execution cancelled")]
+    Cancelled,
     #[error("mcp error from {server_id}/{tool_name}: {message}")]
     Mcp {
         server_id: String,
@@ -56,6 +59,7 @@ pub struct ToolContext {
     pub permissions: PermissionPolicy,
     pub bash_timeout: Duration,
     pub max_output_bytes: usize,
+    pub cancel_token: CancellationToken,
 }
 
 impl ToolContext {
@@ -66,6 +70,7 @@ impl ToolContext {
             permissions: PermissionPolicy::default(),
             bash_timeout: Duration::from_secs(30),
             max_output_bytes: 64 * 1024,
+            cancel_token: CancellationToken::new(),
         })
     }
 
@@ -78,6 +83,12 @@ impl ToolContext {
     #[must_use]
     pub fn with_bash_timeout(mut self, timeout: Duration) -> Self {
         self.bash_timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
+        self.cancel_token = cancel_token;
         self
     }
 

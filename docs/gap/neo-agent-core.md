@@ -58,8 +58,9 @@
   `resources/read` requests without injecting resource content into model
   context.
 - `ToolContext` resolves paths inside the workspace and carries shell timeout
-  and output cap settings; `bash` also supports compact non-PTY background
-  start/poll handles backed by real child processes.
+  output cap settings, and cancellation state; foreground `bash` kills its
+  child process when that cancellation state is triggered. `bash` also supports
+  compact non-PTY background start/poll handles backed by real child processes.
 - `session::JsonlSessionWriter`, `session::JsonlSessionReader`, and
   `session::replay_messages` persist and replay `AgentEvent::MessageAppended`
   history.
@@ -83,10 +84,10 @@ or hosted lifecycle behavior.
   response SSE stream.
 - Add richer hook lifecycle docs only when Neo exposes additional hook phases
   beyond the current before/after tool-call callbacks.
-- Finish cancellation propagation through tool futures, bash child processes,
-  and cancelled-event draining in the live TUI; current cancellation support
-  covers runtime state, in-flight model streams, and the interactive abort
-  token handoff.
+- Finish cancellation propagation through arbitrary long-running tool futures,
+  background bash handles, and cancelled-event draining in the live TUI; current
+  cancellation support covers runtime state, in-flight model streams,
+  foreground bash child processes, and the interactive abort token handoff.
 - Decide whether Neo needs full PTY/interactivity later. Current `bash`
   background support is intentionally compact start/poll process management.
 - Decide whether JSONL event persistence remains the durable session format or
