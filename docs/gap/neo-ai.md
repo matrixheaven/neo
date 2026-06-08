@@ -20,7 +20,9 @@
   credentials and base URLs are available.
 - `OpenAiResponsesClient`, `AnthropicMessagesClient`,
   `GoogleGenerativeAiClient`, and `OpenAiCompatibleClient` implement network
-  provider adapters.
+  provider adapters, including native chat image-input serialization for
+  supported user-message image forms and explicit preflight rejection for
+  unsupported image URL formats.
 - `schema_for<T>()` and `ToolSpec::from_schema<T>()` generate JSON Schema from
   Rust input types.
 - `providers::fake::FakeModelClient` supports tests.

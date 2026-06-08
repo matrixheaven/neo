@@ -5,8 +5,8 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
 use crate::{
-    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ModelClient,
-    StopReason, TokenUsage, ToolSpec,
+    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
+    ModelClient, StopReason, TokenUsage, ToolSpec,
 };
 
 #[derive(Clone)]
@@ -51,6 +51,7 @@ impl OpenAiResponsesClient {
         request: &ChatRequest,
     ) -> Result<reqwest::Response, ProviderError> {
         let url = format!("{}/responses", self.base_url);
+        let body = request_body(request)?;
         let mut builder = self
             .client
             .post(url)
@@ -59,7 +60,7 @@ impl OpenAiResponsesClient {
                 &request.options.headers,
                 request.options.session_id.as_deref(),
             )?)
-            .json(&request_body(request));
+            .json(&body);
 
         if let Some(timeout) = request.options.timeout {
             builder = builder.timeout(timeout);
@@ -143,11 +144,15 @@ fn headers(
     Ok(headers)
 }
 
-fn request_body(request: &ChatRequest) -> Value {
+fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     let mut body = json!({
         "model": request.model.model,
         "stream": true,
-        "input": request.messages.iter().map(message_body).collect::<Vec<_>>(),
+        "input": request
+            .messages
+            .iter()
+            .map(message_body)
+            .collect::<Result<Vec<_>, _>>()?,
     });
 
     if !request.tools.is_empty() {
@@ -175,45 +180,82 @@ fn request_body(request: &ChatRequest) -> Value {
         }
     }
 
-    body
+    Ok(body)
 }
 
-fn message_body(message: &ChatMessage) -> Value {
+fn message_body(message: &ChatMessage) -> Result<Value, ProviderError> {
     match message {
-        ChatMessage::System { content } => json!({
-            "role": "system",
-            "content": content_text(content),
-        }),
-        ChatMessage::User { content } => json!({
-            "role": "user",
-            "content": content_text(content),
-        }),
+        ChatMessage::System { content } => {
+            let content = content_text(content, "system")?;
+            Ok(json!({
+                "role": "system",
+                "content": content,
+            }))
+        }
+        ChatMessage::User { content } => Ok(json!({
+                "role": "user",
+                "content": user_content(content),
+        })),
         ChatMessage::Assistant {
             content,
             tool_calls,
-        } => json!({
-            "role": "assistant",
-            "content": content_text(content),
-            "tool_calls": tool_calls.iter().map(|tool_call| json!({
-                "type": "function_call",
-                "call_id": tool_call.id,
-                "name": tool_call.name,
-                "arguments": tool_call.arguments,
-            })).collect::<Vec<_>>(),
-        }),
+        } => {
+            let content = content_text(content, "assistant")?;
+            Ok(json!({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": tool_calls.iter().map(|tool_call| json!({
+                    "type": "function_call",
+                    "call_id": tool_call.id,
+                    "name": tool_call.name,
+                    "arguments": tool_call.arguments,
+                })).collect::<Vec<_>>(),
+            }))
+        }
         ChatMessage::ToolResult {
             tool_call_id,
             content,
             is_error: _,
-        } => json!({
-            "type": "function_call_output",
-            "call_id": tool_call_id,
-            "output": content_text(content),
-        }),
+        } => {
+            let output = content_text(content, "tool result")?;
+            Ok(json!({
+                "type": "function_call_output",
+                "call_id": tool_call_id,
+                "output": output,
+            }))
+        }
     }
 }
 
-fn content_text(content: &[ContentPart]) -> String {
+fn content_part_body(part: &ContentPart) -> Value {
+    match part {
+        ContentPart::Text { text } => json!({
+            "type": "input_text",
+            "text": text,
+        }),
+        ContentPart::Image { mime_type, data } => {
+            let image_url = image_url(mime_type, data);
+            json!({
+                "type": "input_image",
+                "image_url": image_url,
+            })
+        }
+    }
+}
+
+fn image_url(mime_type: &str, data: &ImageData) -> String {
+    match data {
+        ImageData::Base64(data) => format!("data:{mime_type};base64,{data}"),
+        ImageData::Url(url) => url.clone(),
+    }
+}
+
+fn content_text(content: &[ContentPart], role: &str) -> Result<String, ProviderError> {
+    reject_images(content, role)?;
+    Ok(text_content(content))
+}
+
+fn text_content(content: &[ContentPart]) -> String {
     content
         .iter()
         .filter_map(|part| match part {
@@ -222,6 +264,29 @@ fn content_text(content: &[ContentPart]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn user_content(content: &[ContentPart]) -> Value {
+    if content
+        .iter()
+        .any(|part| matches!(part, ContentPart::Image { .. }))
+    {
+        Value::Array(content.iter().map(content_part_body).collect())
+    } else {
+        json!(text_content(content))
+    }
+}
+
+fn reject_images(content: &[ContentPart], role: &str) -> Result<(), ProviderError> {
+    if content
+        .iter()
+        .any(|part| matches!(part, ContentPart::Image { .. }))
+    {
+        return Err(ProviderError::Stream(format!(
+            "OpenAI Responses image content is only supported in user messages, not {role} messages"
+        )));
+    }
+    Ok(())
 }
 
 fn tool_body(tool: &ToolSpec) -> Value {

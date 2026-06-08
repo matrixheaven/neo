@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use neo_ai::{
-    AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart,
+    AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
     ModelCapabilities, ModelClient, ModelSpec, ProviderId, RequestMetadata, RequestOptions,
     StopReason, ToolSpec, providers::openai_compatible::OpenAiCompatibleClient,
 };
@@ -143,6 +143,30 @@ fn request(options: RequestOptions) -> ChatRequest {
     }
 }
 
+fn image_request(image: ImageData) -> ChatRequest {
+    ChatRequest {
+        model: ModelSpec {
+            provider: ProviderId("openai".to_owned()),
+            model: "gpt-test".to_owned(),
+            api: ApiKind::OpenAiChatCompletions,
+            capabilities: ModelCapabilities::vision_chat(),
+        },
+        messages: vec![ChatMessage::User {
+            content: vec![
+                ContentPart::Text {
+                    text: "describe this".to_owned(),
+                },
+                ContentPart::Image {
+                    mime_type: "image/png".to_owned(),
+                    data: image,
+                },
+            ],
+        }],
+        tools: Vec::new(),
+        options: RequestOptions::default(),
+    }
+}
+
 #[tokio::test]
 async fn openai_compatible_client_posts_typed_options_and_normalizes_sse_events() {
     let server = MockServer::start(vec![sse_response(&[
@@ -200,6 +224,37 @@ async fn openai_compatible_client_posts_typed_options_and_normalizes_sse_events(
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
     assert_typed_request(&requests[0]);
+}
+
+#[tokio::test]
+async fn openai_compatible_client_serializes_image_parts() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "id": "chatcmpl-image",
+        "choices": [{ "delta": { "content": "ok" }, "finish_reason": "stop" }]
+    })])]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    client
+        .stream_chat(image_request(ImageData::Url(
+            "https://example.test/cat.png".to_owned(),
+        )))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["messages"][0]["content"][0]["type"], "text");
+    assert_eq!(
+        sent.body["messages"][0]["content"][0]["text"],
+        "describe this"
+    );
+    assert_eq!(sent.body["messages"][0]["content"][1]["type"], "image_url");
+    assert_eq!(
+        sent.body["messages"][0]["content"][1]["image_url"]["url"],
+        "https://example.test/cat.png"
+    );
 }
 
 fn expected_tool_events() -> Vec<AiStreamEvent> {

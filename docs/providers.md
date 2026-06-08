@@ -79,6 +79,14 @@ provider base URLs and credential environment names can be overridden from
 `providers.<provider-id>.api_key_env`. It does not resolve `ApiKind::Local` or
 the fake test provider.
 
+`ContentPart::Image` is serialized for provider chat requests instead of being
+silently dropped. OpenAI Responses and OpenAI-compatible adapters send image
+URL parts or base64 data URLs in user messages. Anthropic Messages sends
+base64 image sources in user messages and rejects image URLs before issuing a
+request. Google Generative AI sends base64 images as `inlineData` and rejects
+image URLs before issuing a request. This is chat image-input support only; Neo
+does not implement image generation.
+
 ## Local Model Catalogs
 
 Neo supports strict local JSON model catalogs. They extend or replace

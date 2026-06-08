@@ -6,6 +6,8 @@ mod rpc_mode;
 mod session_commands;
 mod skill_commands;
 
+use std::path::{Path, PathBuf};
+
 use clap::Parser;
 
 use crate::{
@@ -58,33 +60,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
         Some(Command::Skills { command }) => match command {
             SkillCommand::Show { path } => skill_commands::show(&path),
         },
-        Some(Command::Extensions { command }) => match command {
-            ExtensionCommand::List { root } => extension_commands::list(&root),
-            ExtensionCommand::Install { source, root } => {
-                extension_commands::install(&root, &source)
-            }
-            ExtensionCommand::Update { extension_id, root } => {
-                extension_commands::update(&root, &extension_id)
-            }
-            ExtensionCommand::Uninstall { extension_id, root } => {
-                extension_commands::uninstall(&root, &extension_id)
-            }
-            ExtensionCommand::Status { extension_id, root } => {
-                extension_commands::status(&root, &extension_id)
-            }
-            ExtensionCommand::Enable { extension_id, root } => {
-                extension_commands::enable(&root, &extension_id)
-            }
-            ExtensionCommand::Disable { extension_id, root } => {
-                extension_commands::disable(&root, &extension_id)
-            }
-            ExtensionCommand::Call {
-                extension_id,
-                method,
-                params,
-                root,
-            } => extension_commands::call(&root, &extension_id, &method, &params).await,
-        },
+        Some(Command::Extensions { command }) => dispatch_extensions(&config, command).await,
         Some(Command::Config { command }) => match command {
             ConfigCommand::Show => config::show(&config),
             ConfigCommand::Set { key, value } => config::set(&key, &value),
@@ -110,5 +86,95 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
         None => Ok(modes::interactive::execute_tty(&config)
             .await?
             .unwrap_or_default()),
+    }
+}
+
+async fn dispatch_extensions(
+    config: &AppConfig,
+    command: ExtensionCommand,
+) -> anyhow::Result<String> {
+    match command {
+        ExtensionCommand::List { root } => {
+            let paths = extension_paths(config, root);
+            extension_commands::list(&paths.root, &paths.state_path, &paths.registry_path)
+        }
+        ExtensionCommand::Install { source, root } => {
+            let paths = extension_paths(config, root);
+            extension_commands::install(
+                &paths.root,
+                &paths.state_path,
+                &paths.registry_path,
+                &source,
+            )
+        }
+        ExtensionCommand::Update { extension_id, root } => {
+            let paths = extension_paths(config, root);
+            extension_commands::update(
+                &paths.root,
+                &paths.state_path,
+                &paths.registry_path,
+                &extension_id,
+            )
+        }
+        ExtensionCommand::Uninstall { extension_id, root } => {
+            let paths = extension_paths(config, root);
+            extension_commands::uninstall(
+                &paths.root,
+                &paths.state_path,
+                &paths.registry_path,
+                &extension_id,
+            )
+        }
+        ExtensionCommand::Status { extension_id, root } => {
+            let paths = extension_paths(config, root);
+            extension_commands::status(&paths.root, &paths.state_path, &extension_id)
+        }
+        ExtensionCommand::Enable { extension_id, root } => {
+            let paths = extension_paths(config, root);
+            extension_commands::enable(&paths.root, &paths.state_path, &extension_id)
+        }
+        ExtensionCommand::Disable { extension_id, root } => {
+            let paths = extension_paths(config, root);
+            extension_commands::disable(&paths.root, &paths.state_path, &extension_id)
+        }
+        ExtensionCommand::Call {
+            extension_id,
+            method,
+            params,
+            root,
+        } => {
+            let paths = extension_paths(config, root);
+            extension_commands::call(
+                &paths.root,
+                &paths.state_path,
+                &extension_id,
+                &method,
+                &params,
+            )
+            .await
+        }
+    }
+}
+
+struct ExtensionPaths {
+    root: PathBuf,
+    state_path: PathBuf,
+    registry_path: PathBuf,
+}
+
+fn extension_paths(config: &AppConfig, root: PathBuf) -> ExtensionPaths {
+    let project_neo_dir = config.project_dir.join(".neo");
+    ExtensionPaths {
+        root: resolve_default_extension_root(config, root),
+        state_path: project_neo_dir.join("extensions-state.toml"),
+        registry_path: project_neo_dir.join("extensions-sources.toml"),
+    }
+}
+
+fn resolve_default_extension_root(config: &AppConfig, root: PathBuf) -> PathBuf {
+    if root == Path::new(".neo/extensions") {
+        config.project_dir.join(root)
+    } else {
+        root
     }
 }

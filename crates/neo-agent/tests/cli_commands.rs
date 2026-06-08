@@ -735,6 +735,78 @@ fn extensions_install_update_and_list_sources_from_local_directory() {
 }
 
 #[test]
+fn extensions_defaults_use_project_config_directory_when_invoked_from_another_cwd() {
+    let project = TempDir::new().expect("project tempdir");
+    let caller = TempDir::new().expect("caller tempdir");
+    fs::create_dir_all(project.path().join(".neo")).expect("create project .neo");
+    fs::write(project.path().join(".neo/config.toml"), "").expect("write project config");
+    let source = project.path().join("source");
+    write_extension_manifest(&source, "echo", "Echo", "0.1.0");
+
+    let config_path = project.path().join(".neo/config.toml");
+    let mut install = neo();
+    install
+        .current_dir(caller.path())
+        .arg("--config")
+        .arg(&config_path)
+        .args(["extensions", "install"])
+        .arg(&source);
+    let installed = run(install);
+    assert!(installed.contains("echo installed"));
+
+    let mut disable = neo();
+    disable
+        .current_dir(caller.path())
+        .arg("--config")
+        .arg(&config_path)
+        .args(["extensions", "disable", "echo"]);
+    let disabled = run(disable);
+    assert!(disabled.contains("echo disabled"));
+
+    write_extension_manifest(&source, "echo", "Echo", "0.2.0");
+
+    let mut update = neo();
+    update
+        .current_dir(caller.path())
+        .arg("--config")
+        .arg(&config_path)
+        .args(["extensions", "update", "echo"]);
+    let updated = run(update);
+    assert!(updated.contains("echo updated"));
+    assert!(updated.contains("0.2.0"));
+
+    let mut list = neo();
+    list.current_dir(caller.path())
+        .arg("--config")
+        .arg(&config_path)
+        .args(["extensions", "list"]);
+    let listed = run(list);
+    assert!(listed.contains("echo"));
+    assert!(listed.contains("0.2.0"));
+    assert!(listed.contains("disabled"));
+    assert!(listed.contains(source.to_string_lossy().as_ref()));
+
+    let project_state = fs::read_to_string(project.path().join(".neo/extensions-state.toml"))
+        .expect("read project lifecycle state");
+    assert!(project_state.contains("[extensions.echo]"));
+    assert!(project_state.contains("enabled = false"));
+    let project_registry = fs::read_to_string(project.path().join(".neo/extensions-sources.toml"))
+        .expect("read project source registry");
+    assert!(project_registry.contains("[extensions.echo"));
+    assert!(project_registry.contains(source.to_string_lossy().as_ref()));
+    assert!(
+        project
+            .path()
+            .join(".neo/extensions/echo/neo-extension.toml")
+            .exists()
+    );
+
+    assert!(!caller.path().join(".neo/extensions-state.toml").exists());
+    assert!(!caller.path().join(".neo/extensions-sources.toml").exists());
+    assert!(!caller.path().join(".neo/extensions").exists());
+}
+
+#[test]
 fn extensions_uninstall_removes_install_dir_and_source_entry() {
     let temp = TempDir::new().expect("tempdir");
     let source = temp.path().join("source");

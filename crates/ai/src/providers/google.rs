@@ -51,11 +51,12 @@ impl GoogleGenerativeAiClient {
         request: &ChatRequest,
     ) -> Result<reqwest::Response, ProviderError> {
         let url = request_url(&self.base_url, &request.model.model, &self.api_key)?;
+        let body = request_body(request)?;
         let mut builder = self
             .client
             .post(url)
             .headers(headers(&request.options.headers)?)
-            .json(&request_body(request));
+            .json(&body);
 
         if let Some(timeout) = request.options.timeout {
             builder = builder.timeout(timeout);
@@ -92,6 +93,7 @@ enum ProviderError {
     HttpStatus(u16),
     Transport(reqwest::Error),
     Url(String),
+    Unsupported(String),
 }
 
 impl ProviderError {
@@ -99,13 +101,15 @@ impl ProviderError {
         match self {
             Self::HttpStatus(status) => *status == 429 || *status >= 500,
             Self::Transport(_) => true,
-            Self::Header(_) | Self::Url(_) => false,
+            Self::Header(_) | Self::Url(_) | Self::Unsupported(_) => false,
         }
     }
 
     fn into_ai_error(self) -> AiError {
         match self {
-            Self::Header(message) | Self::Url(message) => AiError::Stream(message),
+            Self::Header(message) | Self::Url(message) | Self::Unsupported(message) => {
+                AiError::Stream(message)
+            }
             Self::HttpStatus(status) => AiError::Stream(format!("http status {status}")),
             Self::Transport(err) => AiError::Stream(format!("transport error: {err}")),
         }
@@ -134,9 +138,13 @@ fn headers(extra_headers: &BTreeMap<String, String>) -> Result<HeaderMap, Provid
     Ok(headers)
 }
 
-fn request_body(request: &ChatRequest) -> Value {
+fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     let mut body = json!({
-        "contents": request.messages.iter().filter_map(content_body).collect::<Vec<_>>(),
+        "contents": request
+            .messages
+            .iter()
+            .filter_map(content_body)
+            .collect::<Result<Vec<_>, _>>()?,
     });
 
     let system = request
@@ -146,6 +154,8 @@ fn request_body(request: &ChatRequest) -> Value {
             ChatMessage::System { content } => Some(text_parts(content)),
             _ => None,
         })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .flatten()
         .collect::<Vec<_>>();
     if !system.is_empty() {
@@ -167,77 +177,89 @@ fn request_body(request: &ChatRequest) -> Value {
         body["generationConfig"] = Value::Object(generation_config);
     }
 
-    body
+    Ok(body)
 }
 
-fn content_body(message: &ChatMessage) -> Option<Value> {
+fn content_body(message: &ChatMessage) -> Option<Result<Value, ProviderError>> {
     match message {
         ChatMessage::System { .. } => None,
-        ChatMessage::User { content } => Some(json!({
-            "role": "user",
-            "parts": content_parts(content),
+        ChatMessage::User { content } => Some(content_parts(content).map(|parts| {
+            json!({
+                "role": "user",
+                "parts": parts,
+            })
         })),
         ChatMessage::Assistant {
             content,
             tool_calls,
         } => {
-            let mut parts = content_parts(content);
-            for tool_call in tool_calls {
-                parts.push(json!({
-                    "functionCall": {
-                        "name": tool_call.name,
-                        "args": tool_call.arguments,
-                    },
-                }));
-            }
-            Some(json!({
-                "role": "model",
-                "parts": parts,
+            let tool_calls = tool_calls.clone();
+            Some(content_parts(content).map(move |mut parts| {
+                for tool_call in &tool_calls {
+                    parts.push(json!({
+                        "functionCall": {
+                            "name": tool_call.name,
+                            "args": tool_call.arguments,
+                        },
+                    }));
+                }
+                json!({
+                    "role": "model",
+                    "parts": parts,
+                })
             }))
         }
         ChatMessage::ToolResult {
             tool_call_id,
             content,
             is_error,
-        } => Some(json!({
-            "role": "function",
-            "parts": [{
-                "functionResponse": {
-                    "name": tool_call_id,
-                    "response": {
-                        "result": content_text(content),
-                        "is_error": is_error,
+        } => Some(reject_images(content, "tool result").map(|()| {
+            json!({
+                "role": "function",
+                "parts": [{
+                    "functionResponse": {
+                        "name": tool_call_id,
+                        "response": {
+                            "result": content_text(content),
+                            "is_error": is_error,
+                        },
                     },
-                },
-            }],
+                }],
+            })
         })),
     }
 }
 
-fn content_parts(content: &[ContentPart]) -> Vec<Value> {
+fn content_parts(content: &[ContentPart]) -> Result<Vec<Value>, ProviderError> {
     content
         .iter()
-        .filter_map(|part| match part {
-            ContentPart::Text { text } => Some(json!({ "text": text })),
+        .map(|part| match part {
+            ContentPart::Text { text } => Ok(json!({ "text": text })),
             ContentPart::Image { mime_type, data } => match data {
-                ImageData::Base64(data) => Some(json!({
+                ImageData::Base64(data) => Ok(json!({
                     "inlineData": {
                         "mimeType": mime_type,
                         "data": data,
                     },
                 })),
-                ImageData::Url(_) => None,
+                ImageData::Url(_) => Err(ProviderError::Unsupported(
+                    "Google Generative AI image URL content is unsupported; provide base64 image data"
+                        .to_owned(),
+                )),
             },
         })
         .collect()
 }
 
-fn text_parts(content: &[ContentPart]) -> Vec<Value> {
+fn text_parts(content: &[ContentPart]) -> Result<Vec<Value>, ProviderError> {
     content
         .iter()
-        .filter_map(|part| match part {
-            ContentPart::Text { text } => Some(json!({ "text": text })),
-            ContentPart::Image { .. } => None,
+        .map(|part| match part {
+            ContentPart::Text { text } => Ok(json!({ "text": text })),
+            ContentPart::Image { .. } => Err(ProviderError::Unsupported(
+                "Google Generative AI image content is only supported in user/model messages, not system messages"
+                    .to_owned(),
+            )),
         })
         .collect()
 }
@@ -251,6 +273,18 @@ fn content_text(content: &[ContentPart]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn reject_images(content: &[ContentPart], role: &str) -> Result<(), ProviderError> {
+    if content
+        .iter()
+        .any(|part| matches!(part, ContentPart::Image { .. }))
+    {
+        return Err(ProviderError::Unsupported(format!(
+            "Google Generative AI image content is only supported in user/model messages, not {role} messages"
+        )));
+    }
+    Ok(())
 }
 
 fn tool_body(tool: &ToolSpec) -> Value {

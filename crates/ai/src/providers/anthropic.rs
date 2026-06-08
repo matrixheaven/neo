@@ -5,8 +5,8 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
 use crate::{
-    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ModelClient,
-    StopReason, TokenUsage, ToolSpec,
+    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
+    ModelClient, StopReason, TokenUsage, ToolSpec,
 };
 
 #[derive(Clone)]
@@ -51,11 +51,12 @@ impl AnthropicMessagesClient {
         request: &ChatRequest,
     ) -> Result<reqwest::Response, ProviderError> {
         let url = format!("{}/messages", self.base_url);
+        let body = request_body(request)?;
         let mut builder = self
             .client
             .post(url)
             .headers(headers(&self.api_key, &request.options.headers)?)
-            .json(&request_body(request));
+            .json(&body);
 
         if let Some(timeout) = request.options.timeout {
             builder = builder.timeout(timeout);
@@ -136,22 +137,26 @@ fn headers(
     Ok(headers)
 }
 
-fn request_body(request: &ChatRequest) -> Value {
+fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     let mut body = json!({
         "model": request.model.model,
         "stream": true,
         "max_tokens": request.options.max_tokens.unwrap_or(4096),
-        "messages": request.messages.iter().filter_map(message_body).collect::<Vec<_>>(),
+        "messages": request
+            .messages
+            .iter()
+            .filter_map(message_body)
+            .collect::<Result<Vec<_>, _>>()?,
     });
 
     let system = request
         .messages
         .iter()
         .filter_map(|message| match message {
-            ChatMessage::System { content } => Some(content_text(content)),
+            ChatMessage::System { content } => Some(content_text(content, "system")),
             _ => None,
         })
-        .collect::<Vec<_>>()
+        .collect::<Result<Vec<_>, _>>()?
         .join("\n");
     if !system.is_empty() {
         body["system"] = json!(system);
@@ -171,42 +176,59 @@ fn request_body(request: &ChatRequest) -> Value {
         CacheRetention::None | CacheRetention::Short | CacheRetention::Long => {}
     }
 
-    body
+    Ok(body)
 }
 
-fn message_body(message: &ChatMessage) -> Option<Value> {
+fn message_body(message: &ChatMessage) -> Option<Result<Value, ProviderError>> {
     match message {
         ChatMessage::System { .. } => None,
-        ChatMessage::User { content } => Some(json!({
-            "role": "user",
-            "content": content_text(content),
+        ChatMessage::User { content } => Some(user_content(content).map(|content| {
+            json!({
+                "role": "user",
+                "content": content,
+            })
         })),
         ChatMessage::Assistant {
             content,
             tool_calls,
-        } => Some(json!({
-            "role": "assistant",
-            "content": assistant_content(content, tool_calls),
+        } => Some(assistant_content(content, tool_calls).map(|content| {
+            json!({
+                "role": "assistant",
+                "content": content,
+            })
         })),
         ChatMessage::ToolResult {
             tool_call_id,
             content,
             is_error,
-        } => Some(json!({
-            "role": "user",
-            "content": [{
-                "type": "tool_result",
-                "tool_use_id": tool_call_id,
-                "content": content_text(content),
-                "is_error": is_error,
-            }],
+        } => Some(content_text(content, "tool result").map(|content| {
+            json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_call_id,
+                    "content": content,
+                    "is_error": is_error,
+                }],
+            })
         })),
     }
 }
 
-fn assistant_content(content: &[ContentPart], tool_calls: &[crate::ToolCall]) -> Value {
+fn user_content(content: &[ContentPart]) -> Result<Value, ProviderError> {
     let mut parts = Vec::new();
-    let text = content_text(content);
+    for part in content {
+        parts.push(content_part_body(part)?);
+    }
+    Ok(Value::Array(parts))
+}
+
+fn assistant_content(
+    content: &[ContentPart],
+    tool_calls: &[crate::ToolCall],
+) -> Result<Value, ProviderError> {
+    let mut parts = Vec::new();
+    let text = content_text(content, "assistant")?;
     if !text.is_empty() {
         parts.push(json!({ "type": "text", "text": text }));
     }
@@ -218,10 +240,40 @@ fn assistant_content(content: &[ContentPart], tool_calls: &[crate::ToolCall]) ->
             "input": tool_call.arguments,
         }));
     }
-    Value::Array(parts)
+    Ok(Value::Array(parts))
 }
 
-fn content_text(content: &[ContentPart]) -> String {
+fn content_part_body(part: &ContentPart) -> Result<Value, ProviderError> {
+    Ok(match part {
+        ContentPart::Text { text } => json!({
+            "type": "text",
+            "text": text,
+        }),
+        ContentPart::Image { mime_type, data } => match data {
+            ImageData::Base64(data) => json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime_type,
+                    "data": data,
+                },
+            }),
+            ImageData::Url(_) => {
+                return Err(ProviderError::Stream(
+                    "Anthropic image URL content is unsupported; provide base64 image data"
+                        .to_owned(),
+                ));
+            }
+        },
+    })
+}
+
+fn content_text(content: &[ContentPart], role: &str) -> Result<String, ProviderError> {
+    reject_images(content, role)?;
+    Ok(text_content(content))
+}
+
+fn text_content(content: &[ContentPart]) -> String {
     content
         .iter()
         .filter_map(|part| match part {
@@ -230,6 +282,18 @@ fn content_text(content: &[ContentPart]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn reject_images(content: &[ContentPart], role: &str) -> Result<(), ProviderError> {
+    if content
+        .iter()
+        .any(|part| matches!(part, ContentPart::Image { .. }))
+    {
+        return Err(ProviderError::Stream(format!(
+            "Anthropic image content is only supported in user messages, not {role} messages"
+        )));
+    }
+    Ok(())
 }
 
 fn tool_body(tool: &ToolSpec) -> Value {

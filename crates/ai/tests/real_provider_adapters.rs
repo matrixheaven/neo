@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use neo_ai::{
-    AiStreamEvent, ApiKind, ChatMessage, ChatRequest, ContentPart, ModelCapabilities, ModelClient,
-    ModelSpec, ProviderId, RequestOptions, StopReason, ToolSpec,
+    AiStreamEvent, ApiKind, ChatMessage, ChatRequest, ContentPart, ImageData, ModelCapabilities,
+    ModelClient, ModelSpec, ProviderId, RequestOptions, StopReason, ToolSpec,
     providers::{
         anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
         openai_responses::OpenAiResponsesClient,
@@ -142,6 +142,30 @@ fn request(api: ApiKind) -> ChatRequest {
     }
 }
 
+fn image_request(api: ApiKind, image: ImageData) -> ChatRequest {
+    ChatRequest {
+        model: ModelSpec {
+            provider: ProviderId("provider".to_owned()),
+            model: "model-test".to_owned(),
+            api,
+            capabilities: ModelCapabilities::vision_chat(),
+        },
+        messages: vec![ChatMessage::User {
+            content: vec![
+                ContentPart::Text {
+                    text: "describe this".to_owned(),
+                },
+                ContentPart::Image {
+                    mime_type: "image/png".to_owned(),
+                    data: image,
+                },
+            ],
+        }],
+        tools: Vec::new(),
+        options: RequestOptions::default(),
+    }
+}
+
 #[tokio::test]
 async fn openai_responses_client_posts_responses_payload_and_streams_events() {
     let server = MockServer::start(vec![sse_response(&[
@@ -226,6 +250,38 @@ async fn openai_responses_client_posts_responses_payload_and_streams_events() {
     assert_eq!(sent.body["max_output_tokens"], 64);
     assert_eq!(sent.body["tools"][0]["name"], "read_file");
     assert_eq!(sent.body["input"][0]["role"], "user");
+}
+
+#[tokio::test]
+async fn openai_responses_client_serializes_image_parts() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-image" } }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    client
+        .stream_chat(image_request(
+            ApiKind::OpenAiResponses,
+            ImageData::Url("https://example.test/cat.png".to_owned()),
+        ))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["input"][0]["content"][0]["type"], "input_text");
+    assert_eq!(sent.body["input"][0]["content"][0]["text"], "describe this");
+    assert_eq!(sent.body["input"][0]["content"][1]["type"], "input_image");
+    assert_eq!(
+        sent.body["input"][0]["content"][1]["image_url"],
+        "https://example.test/cat.png"
+    );
 }
 
 #[tokio::test]
@@ -317,6 +373,46 @@ async fn anthropic_messages_client_posts_messages_payload_and_streams_events() {
 }
 
 #[tokio::test]
+async fn anthropic_messages_client_serializes_image_parts() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "message_start", "message": { "id": "msg-image" } }),
+        json!({ "type": "message_stop" }),
+    ])]);
+    let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+
+    client
+        .stream_chat(image_request(
+            ApiKind::AnthropicMessages,
+            ImageData::Base64("iVBORw0KGgo=".to_owned()),
+        ))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["messages"][0]["content"][0]["type"], "text");
+    assert_eq!(
+        sent.body["messages"][0]["content"][0]["text"],
+        "describe this"
+    );
+    assert_eq!(sent.body["messages"][0]["content"][1]["type"], "image");
+    assert_eq!(
+        sent.body["messages"][0]["content"][1]["source"]["type"],
+        "base64"
+    );
+    assert_eq!(
+        sent.body["messages"][0]["content"][1]["source"]["media_type"],
+        "image/png"
+    );
+    assert_eq!(
+        sent.body["messages"][0]["content"][1]["source"]["data"],
+        "iVBORw0KGgo="
+    );
+}
+
+#[tokio::test]
 async fn google_generative_ai_client_posts_generate_content_payload_and_streams_events() {
     let server = MockServer::start(vec![sse_response(&[
         json!({
@@ -404,4 +500,24 @@ async fn google_generative_ai_client_posts_generate_content_payload_and_streams_
         "string"
     );
     assert_eq!(sent.body["generationConfig"]["maxOutputTokens"], 64);
+}
+
+#[tokio::test]
+async fn google_generative_ai_client_rejects_image_urls_without_dropping_them() {
+    let server = MockServer::start(Vec::new());
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
+
+    let err = client
+        .stream_chat(image_request(
+            ApiKind::GoogleGenerativeAi,
+            ImageData::Url("https://example.test/cat.png".to_owned()),
+        ))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    assert!(err.to_string().contains("image URL"));
+    assert_eq!(server.requests().len(), 0);
 }

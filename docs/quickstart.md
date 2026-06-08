@@ -104,8 +104,9 @@ cargo run -p neo-agent -- extensions call echo tool.echo '{"value":42}'
 
 `skills show` uses `neo-sdk` skill loading, `sessions export-html` uses the
 safe HTML exporter, extension install/update commands persist local sources
-under `.neo/extensions-sources.toml`, lifecycle commands persist local
-enablement state, and `extensions call` uses the JSONL RPC stdio runner.
+under the project `.neo/extensions-sources.toml`, lifecycle commands persist
+local enablement state under the project `.neo/extensions-state.toml`, and
+`extensions call` uses the JSONL RPC stdio runner.
 
 ## Rust API Examples
 

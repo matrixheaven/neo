@@ -8,15 +8,15 @@ use neo_extensions::{
 use neo_sdk::{RpcOutcome, RpcRequest};
 use serde_json::Value;
 
-pub fn list(root: &Path) -> anyhow::Result<String> {
+pub fn list(root: &Path, state_path: &Path, registry_path: &Path) -> anyhow::Result<String> {
     let discovered = discover(root)?;
     if discovered.is_empty() {
         return Ok("no extensions\n".to_owned());
     }
 
     let mut output = String::new();
-    let store = lifecycle_store();
-    let installer = installer(root);
+    let store = lifecycle_store(state_path);
+    let installer = installer(root, state_path, registry_path);
     for extension in discovered {
         let lifecycle = store.status(root, &extension.manifest.id)?;
         let source = installer
@@ -37,11 +37,16 @@ pub fn list(root: &Path) -> anyhow::Result<String> {
     Ok(output)
 }
 
-pub fn install(root: &Path, source: &str) -> anyhow::Result<String> {
+pub fn install(
+    root: &Path,
+    state_path: &Path,
+    registry_path: &Path,
+    source: &str,
+) -> anyhow::Result<String> {
     let installed = if is_git_source(source) {
-        installer(root).install_git(source)?
+        installer(root, state_path, registry_path).install_git(source)?
     } else {
-        installer(root).install(source)?
+        installer(root, state_path, registry_path).install(source)?
     };
     Ok(format!(
         "{} installed {}\t{}\n",
@@ -49,16 +54,26 @@ pub fn install(root: &Path, source: &str) -> anyhow::Result<String> {
     ))
 }
 
-pub fn update(root: &Path, extension_id: &str) -> anyhow::Result<String> {
-    let updated = installer(root).update(extension_id)?;
+pub fn update(
+    root: &Path,
+    state_path: &Path,
+    registry_path: &Path,
+    extension_id: &str,
+) -> anyhow::Result<String> {
+    let updated = installer(root, state_path, registry_path).update(extension_id)?;
     Ok(format!(
         "{} updated {}\t{}\n",
         updated.manifest.id, updated.manifest.version, updated.source
     ))
 }
 
-pub fn uninstall(root: &Path, extension_id: &str) -> anyhow::Result<String> {
-    let uninstalled = installer(root).uninstall(extension_id)?;
+pub fn uninstall(
+    root: &Path,
+    state_path: &Path,
+    registry_path: &Path,
+    extension_id: &str,
+) -> anyhow::Result<String> {
+    let uninstalled = installer(root, state_path, registry_path).uninstall(extension_id)?;
     Ok(format!(
         "{} uninstalled\t{}\n",
         uninstalled.id,
@@ -66,13 +81,13 @@ pub fn uninstall(root: &Path, extension_id: &str) -> anyhow::Result<String> {
     ))
 }
 
-pub fn status(root: &Path, extension_id: &str) -> anyhow::Result<String> {
-    let status = lifecycle_store().status(root, extension_id)?;
+pub fn status(root: &Path, state_path: &Path, extension_id: &str) -> anyhow::Result<String> {
+    let status = lifecycle_store(state_path).status(root, extension_id)?;
     Ok(format_status(&status))
 }
 
-pub fn enable(root: &Path, extension_id: &str) -> anyhow::Result<String> {
-    let status = lifecycle_store().enable(root, extension_id)?;
+pub fn enable(root: &Path, state_path: &Path, extension_id: &str) -> anyhow::Result<String> {
+    let status = lifecycle_store(state_path).enable(root, extension_id)?;
     Ok(format!(
         "{} {}\n",
         status.id,
@@ -80,8 +95,8 @@ pub fn enable(root: &Path, extension_id: &str) -> anyhow::Result<String> {
     ))
 }
 
-pub fn disable(root: &Path, extension_id: &str) -> anyhow::Result<String> {
-    let status = lifecycle_store().disable(root, extension_id)?;
+pub fn disable(root: &Path, state_path: &Path, extension_id: &str) -> anyhow::Result<String> {
+    let status = lifecycle_store(state_path).disable(root, extension_id)?;
     Ok(format!(
         "{} {}\n",
         status.id,
@@ -91,13 +106,14 @@ pub fn disable(root: &Path, extension_id: &str) -> anyhow::Result<String> {
 
 pub async fn call(
     root: &Path,
+    state_path: &Path,
     extension_id: &str,
     method: &str,
     params: &str,
 ) -> anyhow::Result<String> {
     let params = serde_json::from_str::<Value>(params)
         .with_context(|| format!("failed to parse extension params JSON: {params}"))?;
-    lifecycle_store().ensure_enabled(root, extension_id)?;
+    lifecycle_store(state_path).ensure_enabled(root, extension_id)?;
     let extension = discover(root)?
         .into_iter()
         .find(|extension| extension.manifest.id == extension_id)
@@ -121,16 +137,12 @@ fn discover(root: &Path) -> anyhow::Result<Vec<neo_extensions::DiscoveredExtensi
         .with_context(|| format!("failed to discover extensions under {}", root.display()))
 }
 
-fn lifecycle_store() -> ExtensionLifecycleStore {
-    ExtensionLifecycleStore::new(".neo/extensions-state.toml")
+fn lifecycle_store(state_path: &Path) -> ExtensionLifecycleStore {
+    ExtensionLifecycleStore::new(state_path)
 }
 
-fn installer(root: &Path) -> ExtensionInstaller {
-    ExtensionInstaller::new(
-        root,
-        ".neo/extensions-state.toml",
-        ".neo/extensions-sources.toml",
-    )
+fn installer(root: &Path, state_path: &Path, registry_path: &Path) -> ExtensionInstaller {
+    ExtensionInstaller::new(root, state_path, registry_path)
 }
 
 fn is_git_source(source: &str) -> bool {

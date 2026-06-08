@@ -30,14 +30,15 @@
   to standalone HTML.
 - `skills show` loads TOML-frontmatter skill files through `neo-sdk`.
 - `extensions install` copies a local extension directory or clones an explicit
-  git URL into `.neo/extensions/<id>`, records its source in
-  `.neo/extensions-sources.toml`, and `extensions update` refreshes from that
-  recorded source without changing enable/disable state.
+  git URL into the project `.neo/extensions/<id>`, records its source in the
+  project `.neo/extensions-sources.toml`, and `extensions update` refreshes
+  from that recorded source without changing enable/disable state.
 - `extensions uninstall` removes the installed extension directory and source
   registry entry without mutating explicit enable/disable lifecycle state.
 - `extensions list`, `extensions status`, `extensions enable`, and
   `extensions disable` discover project-local extension manifests and persist
-  local enablement state under `.neo/extensions-state.toml`.
+  local enablement state under the project `.neo/extensions-state.toml`, even
+  when `--config` points at the project from a different invocation directory.
 - `extensions call` refuses disabled extensions and round-trips JSONL RPC over
   stdio for enabled local extension manifests.
 - `mcp list` reads project MCP server entries without starting servers.
