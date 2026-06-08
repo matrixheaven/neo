@@ -24,10 +24,11 @@
 - User-global config is merged below project config with `~` expansion for
   paths such as `sessions_dir`.
 - Session commands read project session files from `sessions_dir`, store local
-  tree/name metadata next to JSONL records, compact sessions with a local
-  deterministic transcript summary event, store deterministic local branch
-  summaries, render a local parent/child tree, and can export replayed messages
-  to standalone HTML.
+  tree/name metadata next to JSONL records, resolve exact ids, unique prefixes,
+  and in-directory JSONL paths, compact sessions with a deterministic transcript
+  summary event, store deterministic local branch summaries, render
+  a local parent/child tree, and can export replayed messages to standalone
+  HTML.
 - `skills show` loads TOML-frontmatter skill files through `neo-sdk`.
 - `extensions install` copies a local extension directory or clones an explicit
   git URL into the project `.neo/extensions/<id>`, records its source in the

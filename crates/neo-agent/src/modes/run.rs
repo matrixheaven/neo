@@ -26,8 +26,9 @@ pub async fn execute(prompt: &[String], config: &AppConfig) -> anyhow::Result<St
     Ok(output)
 }
 
-pub async fn resume(session_id: &str, config: &AppConfig) -> anyhow::Result<String> {
-    let transcript = session_commands::transcript(session_id, config).await?;
+pub async fn resume(session_ref: &str, config: &AppConfig) -> anyhow::Result<String> {
+    let session_id = session_commands::resolve_session_id(session_ref, config)?;
+    let transcript = session_commands::transcript(&session_id, config).await?;
     Ok(format!("session {session_id}\n{transcript}"))
 }
 

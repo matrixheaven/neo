@@ -44,12 +44,17 @@ The summary text is labeled as an algorithmic transcript summary.
 
 The current local replay flow is:
 
-1. `neo-agent resume <session-id>` resolves the session file from `sessions_dir`.
+1. `neo-agent resume <session-ref>` resolves the session file from `sessions_dir`.
 2. `JsonlSessionReader` loads event history.
 3. `replay_context` reconstructs `AgentContext`, including any stored
    `CompactionApplied` event.
 4. The CLI prints the replayed transcript, compaction summary, and stored local
    branch summary.
+
+CLI session references can be an exact session id, a unique id prefix, or a
+`.jsonl` path inside the configured `sessions_dir`. Ambiguous prefixes are
+rejected with the matching candidates, and paths outside `sessions_dir` remain
+invalid.
 
 In live interactive TTY mode, `ctrl+r` opens a local session picker backed by
 `SessionMetadataStore::list()` and the configured `sessions_dir`. Selecting a
@@ -84,13 +89,13 @@ The `neo-agent` binary exposes:
 ```bash
 neo sessions list
 neo sessions tree
-neo sessions show <session-id>
-neo sessions rename <session-id> <name>
-neo sessions fork <session-id> --name <name>
-neo sessions summarize <session-id>
-neo sessions compact <session-id> --keep-recent 20
-neo sessions export-html <session-id>
-neo resume <session-id>
+neo sessions show <session-ref>
+neo sessions rename <session-ref> <name>
+neo sessions fork <session-ref> --name <name>
+neo sessions summarize <session-ref>
+neo sessions compact <session-ref> --keep-recent 20
+neo sessions export-html <session-ref>
+neo resume <session-ref>
 ```
 
 Session directory defaults to `.neo/sessions` and can be changed with

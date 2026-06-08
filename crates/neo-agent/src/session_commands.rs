@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
-    path::PathBuf,
+    env, fs,
+    path::{Path, PathBuf},
 };
 
 use anyhow::Context;
@@ -69,10 +69,11 @@ pub fn tree(config: &AppConfig) -> anyhow::Result<String> {
     Ok(format!("{lines}\n"))
 }
 
-pub fn rename(session_id: &str, name: &str, config: &AppConfig) -> anyhow::Result<String> {
+pub fn rename(session_ref: &str, name: &str, config: &AppConfig) -> anyhow::Result<String> {
+    let session_id = resolve_session_id(session_ref, config)?;
     let session = metadata_store(config)
-        .rename(session_id, name.to_owned())
-        .with_context(|| format!("failed to rename session {session_id}"))?;
+        .rename(&session_id, name.to_owned())
+        .with_context(|| format!("failed to rename session {session_ref}"))?;
     Ok(format!(
         "renamed {} {}\n",
         session.id,
@@ -80,10 +81,11 @@ pub fn rename(session_id: &str, name: &str, config: &AppConfig) -> anyhow::Resul
     ))
 }
 
-pub fn fork(session_id: &str, name: Option<&str>, config: &AppConfig) -> anyhow::Result<String> {
+pub fn fork(session_ref: &str, name: Option<&str>, config: &AppConfig) -> anyhow::Result<String> {
+    let session_id = resolve_session_id(session_ref, config)?;
     let session = metadata_store(config)
-        .fork(session_id, name.map(str::to_owned))
-        .with_context(|| format!("failed to fork session {session_id}"))?;
+        .fork(&session_id, name.map(str::to_owned))
+        .with_context(|| format!("failed to fork session {session_ref}"))?;
     let mut output = format!("forked {session_id} -> {}", session.id);
     if let Some(name) = session.name {
         output.push(' ');
@@ -93,17 +95,18 @@ pub fn fork(session_id: &str, name: Option<&str>, config: &AppConfig) -> anyhow:
     Ok(output)
 }
 
-pub fn show(session_id: &str, config: &AppConfig) -> anyhow::Result<String> {
-    let path = session_path(session_id, config)?;
+pub fn show(session_ref: &str, config: &AppConfig) -> anyhow::Result<String> {
+    let path = session_path(session_ref, config)?;
     let content = fs::read_to_string(&path)
         .with_context(|| format!("failed to read session {}", path.display()))?;
     Ok(format!("{content}\n"))
 }
 
-pub async fn transcript(session_id: &str, config: &AppConfig) -> anyhow::Result<String> {
-    let context = JsonlSessionReader::replay_context(session_path(session_id, config)?)
+pub async fn transcript(session_ref: &str, config: &AppConfig) -> anyhow::Result<String> {
+    let session_id = resolve_session_id(session_ref, config)?;
+    let context = JsonlSessionReader::replay_context(session_path(&session_id, config)?)
         .await
-        .with_context(|| format!("failed to replay session {session_id}"))?;
+        .with_context(|| format!("failed to replay session {session_ref}"))?;
     let mut lines = Vec::new();
     if let Some(summary) = context.compaction_summary() {
         lines.push(format!("compaction: {}", summary.summary));
@@ -136,14 +139,15 @@ pub async fn transcript(session_id: &str, config: &AppConfig) -> anyhow::Result<
     }
 }
 
-pub async fn summarize(session_id: &str, config: &AppConfig) -> anyhow::Result<String> {
-    let messages = JsonlSessionReader::replay_messages(session_path(session_id, config)?)
+pub async fn summarize(session_ref: &str, config: &AppConfig) -> anyhow::Result<String> {
+    let session_id = resolve_session_id(session_ref, config)?;
+    let messages = JsonlSessionReader::replay_messages(session_path(&session_id, config)?)
         .await
-        .with_context(|| format!("failed to replay session {session_id}"))?;
+        .with_context(|| format!("failed to replay session {session_ref}"))?;
     let summary = summarize_messages(&messages);
     let session = metadata_store(config)
-        .summarize(session_id, summary.clone())
-        .with_context(|| format!("failed to store summary for session {session_id}"))?;
+        .summarize(&session_id, summary.clone())
+        .with_context(|| format!("failed to store summary for session {session_ref}"))?;
     Ok(format!(
         "summarized {}: {}\n",
         session.id,
@@ -152,18 +156,19 @@ pub async fn summarize(session_id: &str, config: &AppConfig) -> anyhow::Result<S
 }
 
 pub async fn compact(
-    session_id: &str,
+    session_ref: &str,
     keep_recent: usize,
     config: &AppConfig,
 ) -> anyhow::Result<String> {
+    let session_id = resolve_session_id(session_ref, config)?;
     let result = compact_jsonl_session(
-        session_path(session_id, config)?,
+        session_path(&session_id, config)?,
         SessionCompactionOptions {
             keep_recent_messages: keep_recent,
         },
     )
     .await
-    .with_context(|| format!("failed to compact session {session_id}"))?;
+    .with_context(|| format!("failed to compact session {session_ref}"))?;
 
     Ok(format!(
         "compacted {session_id}: compacted {}, kept {}\n{}\n",
@@ -171,10 +176,11 @@ pub async fn compact(
     ))
 }
 
-pub async fn export_html(session_id: &str, config: &AppConfig) -> anyhow::Result<String> {
-    let messages = JsonlSessionReader::replay_messages(session_path(session_id, config)?)
+pub async fn export_html(session_ref: &str, config: &AppConfig) -> anyhow::Result<String> {
+    let session_id = resolve_session_id(session_ref, config)?;
+    let messages = JsonlSessionReader::replay_messages(session_path(&session_id, config)?)
         .await
-        .with_context(|| format!("failed to replay session {session_id}"))?;
+        .with_context(|| format!("failed to replay session {session_ref}"))?;
     let export_messages = messages
         .iter()
         .map(|message| ExportMessage::new(message_role(message), message_text(message)))
@@ -184,10 +190,87 @@ pub async fn export_html(session_id: &str, config: &AppConfig) -> anyhow::Result
     render_html(&conversation, &HtmlExportOptions::default()).map_err(anyhow::Error::from)
 }
 
-pub fn session_path(session_id: &str, config: &AppConfig) -> anyhow::Result<PathBuf> {
+pub fn session_path(session_ref: &str, config: &AppConfig) -> anyhow::Result<PathBuf> {
+    let session_id = resolve_session_id(session_ref, config)?;
+    Ok(config.sessions_dir.join(format!("{session_id}.jsonl")))
+}
+
+pub fn resolve_session_id(session_ref: &str, config: &AppConfig) -> anyhow::Result<String> {
+    if let Some(session_id) = session_id_from_jsonl_path(session_ref, config)? {
+        return Ok(session_id);
+    }
+
+    let exact_id = validate_session_id(session_ref).is_ok();
+    if exact_id
+        && config
+            .sessions_dir
+            .join(format!("{session_ref}.jsonl"))
+            .is_file()
+    {
+        return Ok(session_ref.to_owned());
+    }
+
+    if exact_id {
+        let matches = metadata_store(config)
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|session| session.id.starts_with(session_ref))
+            .map(|session| session.id)
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [session_id] => return Ok(session_id.clone()),
+            [] => {}
+            _ => {
+                anyhow::bail!(
+                    "ambiguous session id {session_ref:?}: {}",
+                    matches.join(", ")
+                );
+            }
+        }
+    }
+
+    validate_session_id(session_ref)
+        .map_err(|_| anyhow::anyhow!("invalid session id {session_ref:?}"))?;
+    Ok(session_ref.to_owned())
+}
+
+fn session_id_from_jsonl_path(
+    session_ref: &str,
+    config: &AppConfig,
+) -> anyhow::Result<Option<String>> {
+    let raw = Path::new(session_ref);
+    if raw.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+        return Ok(None);
+    }
+
+    let path = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        env::current_dir()?.join(raw)
+    };
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve session path {}", raw.display()))?;
+    let sessions_dir = config.sessions_dir.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve sessions dir {}",
+            config.sessions_dir.display()
+        )
+    })?;
+    anyhow::ensure!(
+        path.starts_with(&sessions_dir),
+        "session path {} is outside sessions dir {}",
+        path.display(),
+        sessions_dir.display()
+    );
+    let session_id = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid session path {}", path.display()))?;
     validate_session_id(session_id)
         .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
-    Ok(config.sessions_dir.join(format!("{session_id}.jsonl")))
+    Ok(Some(session_id.to_owned()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

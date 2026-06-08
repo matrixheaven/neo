@@ -546,6 +546,60 @@ fn sessions_show_and_resume_read_jsonl_transcripts() {
 }
 
 #[test]
+fn sessions_accept_unique_prefixes_and_local_jsonl_paths() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    fs::create_dir_all(&sessions).expect("create sessions");
+    fs::write(
+        sessions.join("alpha-main.jsonl"),
+        "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"alpha prompt\"}}]}}}}\n",
+    )
+    .expect("write alpha session");
+    fs::write(
+        sessions.join("beta-main.jsonl"),
+        "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"beta prompt\"}}]}}}}\n",
+    )
+    .expect("write beta session");
+
+    let mut show_prefix = neo();
+    show_prefix
+        .current_dir(temp.path())
+        .args(["sessions", "show", "alp"]);
+    let prefix_stdout = run(show_prefix);
+    assert!(prefix_stdout.contains("alpha prompt"));
+
+    let mut resume_path = neo();
+    resume_path
+        .current_dir(temp.path())
+        .arg("resume")
+        .arg(sessions.join("alpha-main.jsonl"));
+    let path_stdout = run(resume_path);
+    assert!(path_stdout.contains("session alpha-main"));
+    assert!(path_stdout.contains("user: alpha prompt"));
+}
+
+#[test]
+fn sessions_reject_ambiguous_prefixes_without_guessing() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    fs::create_dir_all(&sessions).expect("create sessions");
+    fs::write(sessions.join("alpha-main.jsonl"), "{}\n").expect("write alpha");
+    fs::write(sessions.join("alpha-side.jsonl"), "{}\n").expect("write alpha side");
+
+    let output = neo()
+        .current_dir(temp.path())
+        .args(["sessions", "show", "alp"])
+        .output()
+        .expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ambiguous session id"));
+    assert!(stderr.contains("alpha-main"));
+    assert!(stderr.contains("alpha-side"));
+}
+
+#[test]
 fn sessions_compact_stores_algorithmic_summary_and_resume_replays_kept_context() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = temp.path().join(".neo/sessions");
