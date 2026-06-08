@@ -231,6 +231,29 @@ fn prompt_edit_tracks_undo_and_kill_ring_yank() {
 }
 
 #[test]
+fn prompt_completion_prefix_replaces_token_before_cursor() {
+    let mut prompt = PromptState::new("open src/ma").with_cursor(11);
+    let prefix = prompt
+        .completion_prefix()
+        .expect("cursor is inside a completable token");
+
+    assert_eq!(prefix.start, 5);
+    assert_eq!(prefix.end, 11);
+    assert_eq!(prefix.text, "src/ma");
+
+    assert_eq!(
+        prompt.replace_completion_prefix(&prefix, "src/main.rs"),
+        Some("src/main.rs".to_owned())
+    );
+    assert_eq!(prompt.text, "open src/main.rs");
+    assert_eq!(prompt.cursor, 16);
+
+    prompt.apply_edit(PromptEdit::Undo);
+    assert_eq!(prompt.text, "open src/ma");
+    assert_eq!(prompt.cursor, 11);
+}
+
+#[test]
 fn wrap_width_preserves_display_width_for_wide_text() {
     let lines = wrap_width("ab界cd🙂ef", 5);
 

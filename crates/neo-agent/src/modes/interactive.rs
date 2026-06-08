@@ -1,8 +1,10 @@
 use crate::config::AppConfig;
 use std::{
     collections::BTreeMap,
+    fs,
     future::{Future, Ready, ready},
     io::{IsTerminal as _, Stdout, stdout},
+    path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
     time::Duration,
@@ -73,6 +75,7 @@ pub(crate) struct InteractiveController {
     pending_approvals: BTreeMap<String, oneshot::Sender<PermissionDecision>>,
     resolved_approvals: BTreeMap<String, PermissionDecision>,
     always_approve: bool,
+    completion_root: PathBuf,
 }
 
 pub(crate) struct TurnChannels {
@@ -285,6 +288,7 @@ impl InteractiveController {
             pending_approvals: BTreeMap::new(),
             resolved_approvals: BTreeMap::new(),
             always_approve: false,
+            completion_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
     }
 
@@ -402,7 +406,7 @@ impl InteractiveController {
                 self.app.prompt_mut().apply_edit(PromptEdit::Insert("\n"));
             }
             KeybindingAction::InputTab => {
-                self.app.prompt_mut().apply_edit(PromptEdit::Insert("\t"));
+                self.complete_prompt_or_insert_tab();
             }
             KeybindingAction::InputCopy => {
                 let _ = self.app.copy_prompt_text();
@@ -442,6 +446,8 @@ impl InteractiveController {
                     self.load_selected_session().await?;
                 } else if self.app.selected_model().is_some() {
                     self.apply_selected_model()?;
+                } else if self.app.selected_prompt_completion().is_some() {
+                    let _ = self.app.confirm_prompt_completion();
                 } else if self.app.focused_overlay_id().is_none() {
                     self.submit_current_prompt().await?;
                 }
@@ -491,6 +497,47 @@ impl InteractiveController {
         }
 
         Ok(false)
+    }
+
+    fn complete_prompt_or_insert_tab(&mut self) {
+        let Some(prefix) = self.app.prompt().completion_prefix() else {
+            self.app.prompt_mut().apply_edit(PromptEdit::Insert("\t"));
+            return;
+        };
+        let completions = match filesystem_prompt_completions(&self.completion_root, &prefix.text) {
+            Ok(completions) => completions,
+            Err(error) => {
+                self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                    text: format!("Completion error: {error}"),
+                });
+                return;
+            }
+        };
+
+        if completions.is_empty() {
+            self.app.prompt_mut().apply_edit(PromptEdit::Insert("\t"));
+            return;
+        }
+
+        if let Some(common_prefix) = longest_common_completion_prefix(&completions)
+            && common_prefix.chars().count() > prefix.text.chars().count()
+        {
+            let _ = self
+                .app
+                .prompt_mut()
+                .replace_completion_prefix(&prefix, &common_prefix);
+            return;
+        }
+
+        if completions.len() == 1 {
+            let _ = self
+                .app
+                .prompt_mut()
+                .replace_completion_prefix(&prefix, &completions[0].value);
+            return;
+        }
+
+        self.app.open_prompt_completion_picker(prefix, completions);
     }
 
     fn handle_prompt_keybinding_action(&mut self, action: KeybindingAction) -> bool {
@@ -735,6 +782,126 @@ impl InteractiveController {
     }
 }
 
+fn filesystem_prompt_completions(root: &Path, prefix: &str) -> Result<Vec<PickerItem>> {
+    let Some(request) = FilesystemCompletionRequest::from_prefix(root, prefix) else {
+        return Ok(Vec::new());
+    };
+
+    let entries = match fs::read_dir(&request.search_dir) {
+        Ok(entries) => entries,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(Vec::new());
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read {}", request.search_dir.display()));
+        }
+    };
+
+    let mut completions = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("failed to inspect {}", request.search_dir.display()))?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if !request.name_prefix.starts_with('.') && name.starts_with('.') {
+            continue;
+        }
+        if !name.starts_with(&request.name_prefix) {
+            continue;
+        }
+
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", entry.path().display()))?;
+        let suffix = if file_type.is_dir() { "/" } else { "" };
+        let value = format!(
+            "{}{}{}{}",
+            request.mention_prefix, request.display_dir, name, suffix
+        );
+        let description = if file_type.is_dir() {
+            "directory"
+        } else {
+            "file"
+        };
+        completions.push(PickerItem::new(value.clone(), value, Some(description)));
+    }
+
+    completions.sort_by(|left, right| left.value.cmp(&right.value));
+    completions.truncate(100);
+    Ok(completions)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FilesystemCompletionRequest {
+    mention_prefix: &'static str,
+    display_dir: String,
+    name_prefix: String,
+    search_dir: PathBuf,
+}
+
+impl FilesystemCompletionRequest {
+    fn from_prefix(root: &Path, prefix: &str) -> Option<Self> {
+        if prefix.is_empty() {
+            return None;
+        }
+
+        let (mention_prefix, path_prefix) = if let Some(path_prefix) = prefix.strip_prefix('@') {
+            ("@", path_prefix)
+        } else {
+            ("", prefix)
+        };
+        let (display_dir, name_prefix) = split_completion_path(path_prefix);
+        let search_dir = if Path::new(&display_dir).is_absolute() {
+            PathBuf::from(&display_dir)
+        } else {
+            root.join(&display_dir)
+        };
+
+        Some(Self {
+            mention_prefix,
+            display_dir,
+            name_prefix,
+            search_dir,
+        })
+    }
+}
+
+fn split_completion_path(prefix: &str) -> (String, String) {
+    if prefix.ends_with('/') {
+        return (prefix.to_owned(), String::new());
+    }
+    match prefix.rsplit_once('/') {
+        Some((directory, name)) => (format!("{directory}/"), name.to_owned()),
+        None => (String::new(), prefix.to_owned()),
+    }
+}
+
+fn longest_common_completion_prefix(completions: &[PickerItem]) -> Option<String> {
+    let first = completions.first()?.value.clone();
+    let mut prefix = first.chars().collect::<Vec<_>>();
+    for completion in completions.iter().skip(1) {
+        let candidate = completion.value.chars().collect::<Vec<_>>();
+        let len = prefix
+            .iter()
+            .zip(candidate.iter())
+            .take_while(|(left, right)| left == right)
+            .count();
+        prefix.truncate(len);
+        if prefix.is_empty() {
+            break;
+        }
+    }
+    Some(prefix.into_iter().collect())
+}
+
 pub trait TerminalEvents {
     fn next_input_event(&mut self) -> Result<InputEvent>;
 
@@ -899,7 +1066,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         Box::pin(async move { fork_session_transcript(session_id, &config).await })
     });
 
-    InteractiveController::new_with_turn_driver(
+    let mut controller = InteractiveController::new_with_turn_driver(
         "neo",
         "new",
         format!("{}/{}", config.default_provider, config.default_model),
@@ -907,7 +1074,9 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         catalogs,
         load_session,
         fork_session,
-    )
+    );
+    controller.completion_root.clone_from(&config.project_dir);
+    controller
 }
 
 fn legacy_turn_driver<RunTurn, Fut>(run_turn: RunTurn) -> TurnDriver
@@ -1319,6 +1488,70 @@ mod tests {
         assert_eq!(controller.app().copy_buffer(), Some("hello brave world"));
         assert_eq!(controller.app().prompt().text, "hello \tworld");
         assert_eq!(controller.app().prompt().cursor, 7);
+    }
+
+    #[tokio::test]
+    async fn event_loop_tabs_through_real_filesystem_prompt_completions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(temp.path().join("src")).expect("create src");
+        fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").expect("write main");
+        fs::write(temp.path().join("src/matrix.rs"), "pub fn matrix() {}\n").expect("write matrix");
+
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.completion_root = temp.path().to_path_buf();
+
+        controller.type_text("open src/ma");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+            .await
+            .expect("tab opens completion picker");
+
+        assert!(matches!(
+            controller
+                .app()
+                .focused_overlay()
+                .map(|overlay| &overlay.kind),
+            Some(OverlayKind::PromptCompletion(_))
+        ));
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+            .await
+            .expect("completion confirms");
+
+        assert_eq!(controller.app().prompt().text, "open src/main.rs");
+        assert_eq!(controller.app().prompt().cursor, 16);
+        assert!(controller.app().focused_overlay().is_none());
+    }
+
+    #[tokio::test]
+    async fn event_loop_tab_extends_common_filesystem_completion_prefix() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("README.md"), "readme\n").expect("write readme");
+        fs::write(temp.path().join("RELEASE.md"), "release\n").expect("write release");
+
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.completion_root = temp.path().to_path_buf();
+
+        controller.type_text("open R");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+            .await
+            .expect("tab extends common prefix");
+
+        assert_eq!(controller.app().prompt().text, "open RE");
+        assert_eq!(controller.app().prompt().cursor, 7);
+        assert!(controller.app().focused_overlay().is_none());
     }
 
     #[tokio::test]

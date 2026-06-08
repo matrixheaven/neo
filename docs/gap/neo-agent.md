@@ -58,8 +58,9 @@
   dispatches real keybinding actions for prompt editing and approval overlays,
   routes approval overlay choices back to pending async runtime approval
   handlers, scrolls the transcript viewport with Up/Down/PageUp/PageDown in
-  editing mode, exits on Esc/Ctrl-C, and keeps the no-tty snapshot fallback for
-  command tests and redirected stdout. `ctrl+r` opens a local session picker backed by
+  editing mode, completes prompt file paths from `AppConfig.project_dir` on
+  Tab, exits on Esc/Ctrl-C, and keeps the no-tty snapshot fallback for command
+  tests and redirected stdout. `ctrl+r` opens a local session picker backed by
   `sessions_dir` metadata and JSONL files; the picker uses local tree ordering
   and indents child sessions. Selecting a session replays its compacted context
   into the TUI, and subsequent prompts use that context while appending new

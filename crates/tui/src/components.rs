@@ -438,6 +438,7 @@ fn overlay_title(overlay: &Overlay) -> &str {
         OverlayKind::CommandPalette(_) => "Command Palette",
         OverlayKind::SessionPicker(_) => "Sessions",
         OverlayKind::ModelPicker(_) => "Models",
+        OverlayKind::PromptCompletion(_) => "Completions",
         OverlayKind::Approval(_) => "Approval",
         OverlayKind::Message(_) => overlay.title.as_str(),
     }
@@ -449,6 +450,7 @@ fn overlay_lines(overlay: &Overlay, width: usize) -> Vec<String> {
         OverlayKind::SessionPicker(state) | OverlayKind::ModelPicker(state) => {
             state.render_lines(width)
         }
+        OverlayKind::PromptCompletion(state) => state.render_lines(width),
         OverlayKind::Approval(request) => wrap_width(&request.modal.body, width),
         OverlayKind::Message(message) => wrap_width(message, width),
     }

@@ -583,6 +583,41 @@ impl NeoTuiApp {
         ))
     }
 
+    pub fn open_prompt_completion_picker(
+        &mut self,
+        prefix: PromptCompletionPrefix,
+        items: impl IntoIterator<Item = PickerItem>,
+    ) -> OverlayId {
+        self.push_overlay(Overlay::new(
+            "prompt-completion",
+            OverlayKind::PromptCompletion(PromptCompletionState::new(prefix, items)),
+        ))
+    }
+
+    #[must_use]
+    pub fn selected_prompt_completion(&self) -> Option<PickerItem> {
+        let OverlayKind::PromptCompletion(completions) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        completions.selected_item()
+    }
+
+    pub fn confirm_prompt_completion(&mut self) -> Option<PickerItem> {
+        let id = self.focused_overlay;
+        let (prefix, item) = {
+            let OverlayKind::PromptCompletion(completions) = &self.focused_overlay()?.kind else {
+                return None;
+            };
+            (completions.prefix().clone(), completions.confirm()?)
+        };
+        self.prompt
+            .replace_completion_prefix(&prefix, &item.value)?;
+        if let Some(id) = id {
+            let _ = self.close_overlay(id);
+        }
+        Some(item)
+    }
+
     #[must_use]
     pub fn selected_model(&self) -> Option<PickerItem> {
         let OverlayKind::ModelPicker(picker) = &self.focused_overlay()?.kind else {
@@ -794,6 +829,7 @@ impl Overlay {
             OverlayKind::SessionPicker(state) | OverlayKind::ModelPicker(state) => {
                 state.move_down();
             }
+            OverlayKind::PromptCompletion(state) => state.move_down(),
             OverlayKind::Approval(request) => request.move_down(),
             OverlayKind::Message(_) => {}
         }
@@ -805,6 +841,7 @@ impl Overlay {
             OverlayKind::SessionPicker(state) | OverlayKind::ModelPicker(state) => {
                 state.move_up();
             }
+            OverlayKind::PromptCompletion(state) => state.move_up(),
             OverlayKind::Approval(request) => request.move_up(),
             OverlayKind::Message(_) => {}
         }
@@ -816,6 +853,7 @@ impl Overlay {
             OverlayKind::SessionPicker(state) | OverlayKind::ModelPicker(state) => {
                 state.page_down();
             }
+            OverlayKind::PromptCompletion(state) => state.page_down(),
             OverlayKind::Approval(_) | OverlayKind::Message(_) => {}
         }
     }
@@ -826,6 +864,7 @@ impl Overlay {
             OverlayKind::SessionPicker(state) | OverlayKind::ModelPicker(state) => {
                 state.page_up();
             }
+            OverlayKind::PromptCompletion(state) => state.page_up(),
             OverlayKind::Approval(_) | OverlayKind::Message(_) => {}
         }
     }
@@ -836,12 +875,68 @@ pub enum OverlayKind {
     CommandPalette(CommandPaletteState),
     SessionPicker(SessionPickerState),
     ModelPicker(ModelPickerState),
+    PromptCompletion(PromptCompletionState),
     Approval(ApprovalRequestModal),
     Message(String),
 }
 
 pub type SessionPickerState = PickerState;
 pub type ModelPickerState = PickerState;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptCompletionState {
+    prefix: PromptCompletionPrefix,
+    picker: PickerState,
+}
+
+impl PromptCompletionState {
+    #[must_use]
+    pub fn new(
+        prefix: PromptCompletionPrefix,
+        items: impl IntoIterator<Item = PickerItem>,
+    ) -> Self {
+        Self {
+            prefix,
+            picker: PickerState::new(items),
+        }
+    }
+
+    #[must_use]
+    pub const fn prefix(&self) -> &PromptCompletionPrefix {
+        &self.prefix
+    }
+
+    pub fn move_up(&mut self) {
+        self.picker.move_up();
+    }
+
+    pub fn move_down(&mut self) {
+        self.picker.move_down();
+    }
+
+    pub fn page_up(&mut self) {
+        self.picker.page_up();
+    }
+
+    pub fn page_down(&mut self) {
+        self.picker.page_down();
+    }
+
+    #[must_use]
+    pub fn selected_item(&self) -> Option<PickerItem> {
+        self.picker.selected_item()
+    }
+
+    #[must_use]
+    pub fn confirm(&self) -> Option<PickerItem> {
+        self.picker.confirm()
+    }
+
+    #[must_use]
+    pub fn render_lines(&self, width: usize) -> Vec<String> {
+        self.picker.render_lines(width)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PickerItem {
@@ -1600,6 +1695,49 @@ impl PromptState {
         (!self.text.is_empty()).then(|| self.text.clone())
     }
 
+    #[must_use]
+    pub fn completion_prefix(&self) -> Option<PromptCompletionPrefix> {
+        let chars = self.text.chars().collect::<Vec<_>>();
+        let cursor = self.cursor.min(chars.len());
+        let mut start = cursor;
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        if start == cursor {
+            return None;
+        }
+        Some(PromptCompletionPrefix {
+            start,
+            end: cursor,
+            text: chars[start..cursor].iter().collect(),
+        })
+    }
+
+    pub fn replace_completion_prefix(
+        &mut self,
+        prefix: &PromptCompletionPrefix,
+        replacement: &str,
+    ) -> Option<String> {
+        if replacement.is_empty() {
+            return None;
+        }
+        let len = self.char_len();
+        if prefix.start > prefix.end || prefix.end > len {
+            return None;
+        }
+        if self.slice_chars(prefix.start, prefix.end)? != prefix.text {
+            return None;
+        }
+
+        let before = self.snapshot();
+        let start_byte = self.byte_index(prefix.start);
+        let end_byte = self.byte_index(prefix.end);
+        self.text.replace_range(start_byte..end_byte, replacement);
+        self.cursor = prefix.start + replacement.chars().count();
+        self.push_undo(before);
+        Some(replacement.to_owned())
+    }
+
     fn byte_index(&self, char_index: usize) -> usize {
         if char_index == 0 {
             return 0;
@@ -1609,6 +1747,15 @@ impl PromptState {
             .char_indices()
             .nth(char_index)
             .map_or(self.text.len(), |(index, _)| index)
+    }
+
+    fn slice_chars(&self, start: usize, end: usize) -> Option<String> {
+        if start > end || end > self.char_len() {
+            return None;
+        }
+        let start_byte = self.byte_index(start);
+        let end_byte = self.byte_index(end);
+        Some(self.text[start_byte..end_byte].to_owned())
     }
 
     fn snapshot(&self) -> PromptSnapshot {
@@ -1663,6 +1810,13 @@ impl PromptState {
 
         Some(deleted)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptCompletionPrefix {
+    pub start: usize,
+    pub end: usize,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

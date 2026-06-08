@@ -386,6 +386,38 @@ fn command_palette_session_and_model_pickers_filter_and_select_values() {
 }
 
 #[test]
+fn prompt_completion_overlay_confirms_selected_replacement() {
+    let mut app = NeoTuiApp::new("neo", "new", "openai/gpt-4.1");
+    app.prompt_mut()
+        .apply_edit(neo_tui::PromptEdit::Insert("open src/ma"));
+    let prefix = app
+        .prompt()
+        .completion_prefix()
+        .expect("prompt has completion prefix");
+
+    app.open_prompt_completion_picker(
+        prefix,
+        [
+            PickerItem::new("src/main.rs", "src/main.rs", Some("file")),
+            PickerItem::new("src/modes/", "src/modes/", Some("directory")),
+        ],
+    );
+    assert_eq!(app.mode(), AppMode::Overlay);
+    assert!(matches!(
+        app.focused_overlay().map(|overlay| &overlay.kind),
+        Some(OverlayKind::PromptCompletion(_))
+    ));
+
+    let selected = app
+        .confirm_prompt_completion()
+        .expect("selected completion returned");
+    assert_eq!(selected.value, "src/main.rs");
+    assert_eq!(app.prompt().text, "open src/main.rs");
+    assert_eq!(app.prompt().cursor, 16);
+    assert!(app.focused_overlay().is_none());
+}
+
+#[test]
 fn command_palette_session_and_model_pickers_page_selection() {
     let mut palette = CommandPaletteState::new((0..10).map(|index| {
         CommandSpec::new(
