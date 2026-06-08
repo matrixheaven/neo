@@ -11,7 +11,10 @@
 - Runtime lifecycle events now include `RunStarted`, `MessageStarted`,
   `MessageFinished`, `TurnStarted`, `TurnFinished`, and `RunFinished`, so
   consumers can distinguish streamed provider message boundaries from whole-run
-  completion without inferring from transcript records.
+  completion without inferring from transcript records. Fast terminal paths
+  such as max-turns exhaustion and already-cancelled contexts still emit
+  `RunStarted` and `RunFinished` around their terminal `TurnFinished` barrier
+  without calling the model.
 - Runtime model-stream events also include `ThinkingStarted`,
   `ThinkingDelta`, and `ThinkingFinished`, so provider-neutral reasoning
   summaries can be persisted as assistant thinking content without mixing into

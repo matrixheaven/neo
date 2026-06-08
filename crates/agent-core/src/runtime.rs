@@ -441,19 +441,13 @@ impl AgentRuntime {
         cancel_token: CancellationToken,
     ) -> AgentEventStream<'a> {
         if context.is_cancelled() {
-            return stream::iter([Ok(AgentEvent::TurnFinished {
-                turn: context.turns.saturating_add(1),
-                stop_reason: StopReason::Cancelled,
-            })])
-            .boxed();
+            let turn = context.turns.saturating_add(1);
+            return terminal_lifecycle_stream(turn, StopReason::Cancelled);
         }
 
         if context.turns >= self.config.max_turns {
-            return stream::iter([Ok(AgentEvent::TurnFinished {
-                turn: context.turns.saturating_add(1),
-                stop_reason: StopReason::MaxTurns,
-            })])
-            .boxed();
+            let turn = context.turns.saturating_add(1);
+            return terminal_lifecycle_stream(turn, StopReason::MaxTurns);
         }
 
         let live_context = context.clone();
@@ -503,6 +497,15 @@ impl AgentRuntime {
         )
         .boxed()
     }
+}
+
+fn terminal_lifecycle_stream<'a>(turn: u32, stop_reason: StopReason) -> AgentEventStream<'a> {
+    stream::iter([
+        Ok(AgentEvent::RunStarted { turn }),
+        Ok(AgentEvent::TurnFinished { turn, stop_reason }),
+        Ok(AgentEvent::RunFinished { turn, stop_reason }),
+    ])
+    .boxed()
 }
 
 struct SpawnedRun<'a> {

@@ -597,10 +597,17 @@ async fn runtime_reports_max_turns_and_cancelled_without_calling_model() {
 
     assert_eq!(
         events,
-        vec![AgentEvent::TurnFinished {
-            turn: 1,
-            stop_reason: StopReason::MaxTurns,
-        }]
+        vec![
+            AgentEvent::RunStarted { turn: 1 },
+            AgentEvent::TurnFinished {
+                turn: 1,
+                stop_reason: StopReason::MaxTurns,
+            },
+            AgentEvent::RunFinished {
+                turn: 1,
+                stop_reason: StopReason::MaxTurns,
+            },
+        ]
     );
     assert!(harness.requests().is_empty());
 
@@ -615,10 +622,17 @@ async fn runtime_reports_max_turns_and_cancelled_without_calling_model() {
         .expect("cancel event");
     assert_eq!(
         events,
-        vec![AgentEvent::TurnFinished {
-            turn: 1,
-            stop_reason: StopReason::Cancelled,
-        }]
+        vec![
+            AgentEvent::RunStarted { turn: 1 },
+            AgentEvent::TurnFinished {
+                turn: 1,
+                stop_reason: StopReason::Cancelled,
+            },
+            AgentEvent::RunFinished {
+                turn: 1,
+                stop_reason: StopReason::Cancelled,
+            },
+        ]
     );
 }
 
