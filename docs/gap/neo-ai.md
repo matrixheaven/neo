@@ -28,9 +28,10 @@
   Completions also serialize typed `reasoning_effort` options into their
   provider-native payload shapes. Anthropic Messages and Google Generative AI
   serialize the same typed effort into explicit provider-native budget-based
-  thinking request payloads with local adapter tests. OpenAI Responses
-  also maps streamed reasoning-summary SSE events into provider-neutral
-  thinking start/delta/end events.
+  thinking request payloads with local adapter tests. OpenAI Responses maps
+  streamed reasoning-summary SSE events, Anthropic Messages maps
+  extended-thinking SSE chunks, and Google Generative AI maps streamed
+  `thought` parts into provider-neutral thinking start/delta/end events.
 - `schema_for<T>()` and `ToolSpec::from_schema<T>()` generate JSON Schema from
   Rust input types.
 - `providers::fake::FakeModelClient` supports tests.
@@ -56,15 +57,11 @@ unsupported surface area until the Rust contracts exist.
   Neo runtime contracts.
 - Keep provider credentials environment-only for now; auth-file and OAuth
   flows are future work.
-- Extend Google thinking beyond the current
-  `reasoning_effort`-to-budget request payload only after Neo has an explicit
-  provider-specific stream mapping contract. Anthropic Messages extended
-  thinking now maps provider-native `thinking_delta` and `signature_delta`
-  stream chunks into local thinking events, but adaptive-thinking controls,
+- Provider-native reasoning streams are normalized for OpenAI Responses,
+  Anthropic Messages, and Google Generative AI, including opaque signature
+  passthrough when providers send one. Adaptive-thinking controls,
   display/off-state handling, encrypted reasoning handoff, and signature replay
-  remain future work. OpenAI Responses reasoning summaries are streamed as
-  local thinking events, while provider-native encrypted reasoning handoff
-  remains out of scope.
+  remain future work.
 - Keep request metadata internal-facing. Do not expose provider-native chunk
   formats to `neo-agent-core`.
 

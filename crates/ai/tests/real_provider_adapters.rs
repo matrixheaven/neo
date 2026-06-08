@@ -1183,6 +1183,109 @@ async fn google_generative_ai_client_serializes_reasoning_effort_as_thinking_con
 }
 
 #[tokio::test]
+async fn google_generative_ai_client_streams_thought_parts_as_thinking_events() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{
+                        "text": "Checked inputs.",
+                        "thought": true,
+                        "thoughtSignature": "sig-google"
+                    }]
+                }
+            }]
+        }),
+        json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{ "text": "final answer" }]
+                },
+                "finishReason": "STOP"
+            }]
+        }),
+    ])]);
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::GoogleGenerativeAi))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "google-generative-ai".to_owned()
+            },
+            AiStreamEvent::ThinkingStart {
+                id: "google-thought:0".to_owned()
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "Checked inputs.".to_owned()
+            },
+            AiStreamEvent::ThinkingEnd {
+                signature: Some("sig-google".to_owned()),
+                redacted: false,
+            },
+            AiStreamEvent::TextDelta {
+                text: "final answer".to_owned()
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn google_generative_ai_client_does_not_treat_signature_only_parts_as_thinking() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{
+                    "text": "plain signed text",
+                    "thoughtSignature": "sig-not-thinking"
+                }]
+            },
+            "finishReason": "STOP"
+        }]
+    })])]);
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::GoogleGenerativeAi))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "google-generative-ai".to_owned()
+            },
+            AiStreamEvent::TextDelta {
+                text: "plain signed text".to_owned()
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn google_generative_ai_client_rejects_image_urls_without_dropping_them() {
     let server = MockServer::start(Vec::new());
     let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");

@@ -431,6 +431,7 @@ struct ParseState {
     started: bool,
     tool_args: BTreeMap<String, Value>,
     open_tool_ids: BTreeSet<String>,
+    next_thought_index: u64,
     last_stop_reason: StopReason,
     usage: Option<TokenUsage>,
     finished: bool,
@@ -443,6 +444,7 @@ impl Default for ParseState {
             started: false,
             tool_args: BTreeMap::new(),
             open_tool_ids: BTreeSet::new(),
+            next_thought_index: 0,
             last_stop_reason: StopReason::EndTurn,
             usage: None,
             finished: false,
@@ -509,6 +511,15 @@ impl ParseState {
     }
 
     fn ingest_part(&mut self, part: &Value) -> Result<(), AiError> {
+        if part
+            .get("thought")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            self.ingest_thought_part(part);
+            return Ok(());
+        }
+
         if let Some(text) = part.get("text").and_then(Value::as_str)
             && !text.is_empty()
         {
@@ -523,6 +534,27 @@ impl ParseState {
         }
 
         Ok(())
+    }
+
+    fn ingest_thought_part(&mut self, part: &Value) {
+        self.ensure_started();
+        let id = format!("google-thought:{}", self.next_thought_index);
+        self.next_thought_index = self.next_thought_index.saturating_add(1);
+        self.events.push(AiStreamEvent::ThinkingStart { id });
+        if let Some(text) = part.get("text").and_then(Value::as_str)
+            && !text.is_empty()
+        {
+            self.events.push(AiStreamEvent::ThinkingDelta {
+                text: text.to_owned(),
+            });
+        }
+        self.events.push(AiStreamEvent::ThinkingEnd {
+            signature: part
+                .get("thoughtSignature")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            redacted: false,
+        });
     }
 
     fn ingest_function_call(&mut self, function_call: &Value) -> Result<(), AiError> {
