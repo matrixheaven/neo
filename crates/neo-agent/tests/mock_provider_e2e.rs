@@ -425,6 +425,65 @@ fn run_output_json_emits_stable_typed_events_from_mock_provider() {
 }
 
 #[test]
+fn run_mode_json_emits_stable_typed_events_without_output_flag() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-mode-json", "mode json")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--mode", "json", "run", "stream", "events"]);
+
+    let stdout = run(command);
+
+    let values = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("line should be json"))
+        .collect::<Vec<_>>();
+    assert!(values.len() >= 7, "stdout was:\n{stdout}");
+    assert_eq!(values[0]["type"], "session");
+    assert!(values.iter().any(|value| value["type"] == "message_update"
+        && value["assistantMessageEvent"]["delta"] == "mode json"));
+    assert!(!stdout.contains("TextDelta"));
+    assert!(!stdout.contains("fake response"));
+    assert!(!stdout.contains("placeholder"));
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["content"], "stream events");
+}
+
+#[test]
+fn run_output_events_overrides_global_json_mode() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-events", "event mode")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args([
+            "--mode", "json", "run", "--output", "events", "stream", "events",
+        ]);
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("\"TextDelta\":{\"turn\":1,\"text\":\"event mode\"}"));
+    assert!(!stdout.contains("\"type\":\"session\""));
+    assert!(!stdout.contains("fake response"));
+    assert!(!stdout.contains("placeholder"));
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["content"], "stream events");
+}
+
+#[test]
 fn print_approve_allows_ask_file_write_tool_and_continues_agent_loop() {
     let temp = TempDir::new().expect("tempdir");
     std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");

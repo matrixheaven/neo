@@ -23,6 +23,7 @@ pub struct ConfigOverrides {
     pub provider: Option<String>,
     pub api_base: Option<String>,
     pub config_path: Option<PathBuf>,
+    pub mode: Option<String>,
     pub approve: bool,
     pub no_approve: bool,
 }
@@ -34,6 +35,7 @@ impl ConfigOverrides {
             provider: cli.provider.clone(),
             api_base: cli.api_base.clone(),
             config_path: cli.config.clone(),
+            mode: cli.mode.clone(),
             approve: cli.approve,
             no_approve: cli.no_approve,
         }
@@ -277,7 +279,9 @@ impl AppConfig {
         let runtime = runtime_from_file(file_config.runtime);
         validate_runtime_config(&runtime)?;
         let mcp = file_config.mcp.unwrap_or_default();
-        let mode = env_mode
+        let mode = overrides
+            .mode
+            .or(env_mode)
             .or(file_config.defaults.and_then(|defaults| defaults.mode))
             .unwrap_or_else(|| DEFAULT_MODE.to_owned());
 

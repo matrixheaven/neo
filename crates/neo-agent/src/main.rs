@@ -44,7 +44,12 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
         }
         Some(Command::Run { output, prompt }) => {
             let prompt = prepare_prompt(prompt, &config)?;
-            modes::run::execute(&prompt, &config, output).await
+            modes::run::execute(
+                &prompt,
+                &config,
+                output.unwrap_or_else(|| run_output_for_mode(&config)),
+            )
+            .await
         }
         Some(Command::Resume { session_id }) => modes::run::resume(&session_id, &config).await,
         Some(Command::Sessions { command }) => match command {
@@ -97,6 +102,14 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
         None => Ok(modes::interactive::execute_tty(&config)
             .await?
             .unwrap_or_default()),
+    }
+}
+
+fn run_output_for_mode(config: &AppConfig) -> cli::RunOutput {
+    if config.defaults.mode.eq_ignore_ascii_case("json") {
+        cli::RunOutput::Json
+    } else {
+        cli::RunOutput::Events
     }
 }
 

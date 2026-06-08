@@ -15,6 +15,9 @@ pub struct Cli {
     #[arg(long, global = true, env = "NEO_CONFIG")]
     pub config: Option<std::path::PathBuf>,
 
+    #[arg(long, global = true, env = "NEO_MODE")]
+    pub mode: Option<String>,
+
     #[arg(short = 'a', long, global = true, conflicts_with = "no_approve")]
     pub approve: bool,
 
@@ -31,8 +34,8 @@ pub enum Command {
         prompt: Vec<String>,
     },
     Run {
-        #[arg(long, value_enum, default_value = "events")]
-        output: RunOutput,
+        #[arg(long, value_enum)]
+        output: Option<RunOutput>,
         prompt: Vec<String>,
     },
     Resume {

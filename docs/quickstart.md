@@ -37,10 +37,12 @@ cargo run -p neo-agent -- print @docs/context.txt "summarize this"
 ```
 
 `run --output json` emits a stable typed JSONL event stream with a session
-header and Pi-style lifecycle event names:
+header and Pi-style lifecycle event names. The same stream is selected when
+the command runs under top-level `--mode json`:
 
 ```bash
 cargo run -p neo-agent -- run --output json "summarize this"
+cargo run -p neo-agent -- --mode json run "summarize this"
 ```
 
 Inspect the current project config view:
