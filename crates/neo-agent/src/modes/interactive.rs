@@ -3,9 +3,10 @@ use std::{
     collections::{BTreeMap, VecDeque},
     fs,
     future::{Future, Ready, ready},
-    io::{IsTerminal as _, Stdout, stdout},
+    io::{IsTerminal as _, Stdout, Write as _, stdout},
     path::{Path, PathBuf},
     pin::Pin,
+    process::{Command, Stdio},
     sync::Arc,
     time::Duration,
 };
@@ -41,6 +42,7 @@ type BoxedForkFuture = Pin<Box<dyn Future<Output = Result<ForkedSessionTranscrip
 type TurnDriver = Arc<dyn Fn(TurnRequest, TurnChannels) -> BoxedTurnFuture + Send + Sync>;
 type SessionLoader = Arc<dyn Fn(String) -> BoxedSessionFuture + Send + Sync>;
 type SessionForker = Arc<dyn Fn(String) -> BoxedForkFuture + Send + Sync>;
+type ClipboardWriter = Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
 
 pub fn execute(config: &AppConfig) -> String {
     let mut controller = controller_for_config(config);
@@ -76,6 +78,7 @@ pub(crate) struct InteractiveController {
     active_turn: Option<RunningTurn>,
     pending_approvals: BTreeMap<String, oneshot::Sender<PermissionDecision>>,
     resolved_approvals: BTreeMap<String, PermissionDecision>,
+    clipboard_writer: ClipboardWriter,
     always_approve: bool,
     completion_root: PathBuf,
 }
@@ -291,6 +294,7 @@ impl InteractiveController {
             active_turn: None,
             pending_approvals: BTreeMap::new(),
             resolved_approvals: BTreeMap::new(),
+            clipboard_writer: Arc::new(write_system_clipboard),
             always_approve: false,
             completion_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
@@ -299,6 +303,11 @@ impl InteractiveController {
     #[allow(dead_code)]
     pub fn type_text(&mut self, text: &str) {
         self.app.prompt_mut().apply_edit(PromptEdit::Insert(text));
+    }
+
+    #[cfg(test)]
+    fn set_clipboard_writer(&mut self, writer: ClipboardWriter) {
+        self.clipboard_writer = writer;
     }
 
     pub fn submit_empty_prompt(&mut self) -> Option<String> {
@@ -416,7 +425,7 @@ impl InteractiveController {
                 self.complete_prompt_or_insert_tab();
             }
             KeybindingAction::InputCopy => {
-                let _ = self.app.copy_prompt_text();
+                self.copy_prompt_to_clipboard();
             }
             KeybindingAction::SessionPickerOpen => {
                 self.open_session_picker();
@@ -568,6 +577,17 @@ impl InteractiveController {
         };
         self.app.prompt_mut().apply_edit(edit);
         true
+    }
+
+    fn copy_prompt_to_clipboard(&mut self) {
+        let Some(copied) = self.app.copy_prompt_text() else {
+            return;
+        };
+        if let Err(error) = (self.clipboard_writer)(&copied) {
+            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: format!("Clipboard copy failed: {error}"),
+            });
+        }
     }
 
     async fn submit_current_prompt(&mut self) -> Result<()> {
@@ -1041,6 +1061,59 @@ fn longest_common_completion_prefix(completions: &[PickerItem]) -> Option<String
     Some(prefix.into_iter().collect())
 }
 
+fn write_system_clipboard(text: &str) -> Result<()> {
+    let commands: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("pbcopy", &[])]
+    } else if cfg!(target_os = "windows") {
+        &[("clip.exe", &[])]
+    } else {
+        &[("wl-copy", &[]), ("xclip", &["-selection", "clipboard"])]
+    };
+    let mut errors = Vec::new();
+    for (program, args) in commands {
+        match write_clipboard_command(program, args, text) {
+            Ok(()) => return Ok(()),
+            Err(error) => errors.push(format!("{program}: {error}")),
+        }
+    }
+    anyhow::bail!(
+        "no system clipboard writer succeeded ({})",
+        errors.join("; ")
+    )
+}
+
+fn write_clipboard_command(program: &str, args: &[&str], text: &str) -> Result<()> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to start {program}"))?;
+    child
+        .stdin
+        .as_mut()
+        .context("clipboard command stdin was unavailable")?
+        .write_all(text.as_bytes())
+        .with_context(|| format!("failed to write to {program}"))?;
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("failed to wait for {program}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    anyhow::bail!(
+        "exited with {}{}",
+        output.status,
+        if stderr.is_empty() {
+            String::new()
+        } else {
+            format!(": {stderr}")
+        }
+    )
+}
+
 pub trait TerminalEvents {
     fn next_input_event(&mut self) -> Result<InputEvent>;
 
@@ -1092,6 +1165,7 @@ impl TerminalEvents for CrosstermEvents {
 const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::InputSubmit,
     KeybindingAction::InputNewLine,
+    KeybindingAction::InputCopy,
     KeybindingAction::SessionPickerOpen,
     KeybindingAction::ModelPickerOpen,
     KeybindingAction::EditorCursorLeft,
@@ -1660,12 +1734,26 @@ mod tests {
             }
         }
 
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_with_sessions(
             "neo",
             "test-session",
             "openai/gpt-4.1",
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+            PickerCatalogs {
+                session_items: vec![PickerItem::new("alpha", "Alpha", Some("session"))],
+                session_error: None,
+                model_items: Vec::new(),
+                model_error: None,
+            },
+            |session_id| async move {
+                Ok(LoadedSessionTranscript::new(
+                    session_id,
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            },
         );
+        controller.set_clipboard_writer(Arc::new(|_text| Ok(())));
 
         for character in "hello brave world".chars() {
             controller
@@ -1698,6 +1786,148 @@ mod tests {
         assert_eq!(controller.app().copy_buffer(), Some("hello brave world"));
         assert_eq!(controller.app().prompt().text, "hello \tworld");
         assert_eq!(controller.app().prompt().cursor, 7);
+    }
+
+    #[tokio::test]
+    async fn event_loop_copies_prompt_text_from_default_ctrl_c_keybinding() {
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.set_clipboard_writer(Arc::new(|_text| Ok(())));
+
+        controller.type_text("copy through keybinding");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
+            .await
+            .expect("copy keybinding handled");
+
+        assert_eq!(
+            controller.app().copy_buffer(),
+            Some("copy through keybinding")
+        );
+        assert_eq!(controller.app().prompt().text, "copy through keybinding");
+    }
+
+    #[tokio::test]
+    async fn event_loop_copy_action_writes_prompt_to_injected_clipboard() {
+        let copied = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = std::sync::Arc::clone(&copied);
+        let mut controller = InteractiveController::new_with_sessions(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+            PickerCatalogs {
+                session_items: vec![PickerItem::new("alpha", "Alpha", Some("session"))],
+                session_error: None,
+                model_items: Vec::new(),
+                model_error: None,
+            },
+            |session_id| async move {
+                Ok(LoadedSessionTranscript::new(
+                    session_id,
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            },
+        );
+        controller.set_clipboard_writer(Arc::new(move |text| {
+            recorded
+                .lock()
+                .expect("record clipboard text")
+                .push(text.to_owned());
+            Ok(())
+        }));
+
+        controller.type_text("copy to system clipboard");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputCopy))
+            .await
+            .expect("copy action succeeds");
+
+        assert_eq!(
+            copied.lock().expect("clipboard writes").as_slice(),
+            ["copy to system clipboard"]
+        );
+        assert_eq!(
+            controller.app().copy_buffer(),
+            Some("copy to system clipboard")
+        );
+    }
+
+    #[tokio::test]
+    async fn event_loop_clipboard_failure_keeps_internal_copy_buffer() {
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.set_clipboard_writer(Arc::new(|_text| {
+            Err(anyhow::anyhow!("clipboard unavailable"))
+        }));
+
+        controller.type_text("copy fallback");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputCopy))
+            .await
+            .expect("clipboard failure is non-fatal");
+
+        assert_eq!(controller.app().copy_buffer(), Some("copy fallback"));
+        assert!(matches!(
+            controller.app().transcript().items().last(),
+            Some(neo_tui::TranscriptItem::Notice { content })
+                if content.contains("Clipboard copy failed")
+                    && content.contains("clipboard unavailable")
+        ));
+    }
+
+    #[tokio::test]
+    async fn event_loop_ctrl_c_cancels_overlay_without_copying_prompt() {
+        let copied = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = std::sync::Arc::clone(&copied);
+        let mut controller = InteractiveController::new_with_sessions(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+            PickerCatalogs {
+                session_items: vec![PickerItem::new("alpha", "Alpha", Some("session"))],
+                session_error: None,
+                model_items: Vec::new(),
+                model_error: None,
+            },
+            |session_id| async move {
+                Ok(LoadedSessionTranscript::new(
+                    session_id,
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            },
+        );
+        controller.set_clipboard_writer(Arc::new(move |text| {
+            recorded
+                .lock()
+                .expect("record clipboard text")
+                .push(text.to_owned());
+            Ok(())
+        }));
+
+        controller.type_text("do not copy while overlay is focused");
+        controller.open_session_picker();
+        assert!(controller.app().focused_overlay().is_some());
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
+            .await
+            .expect("overlay cancel succeeds");
+
+        assert!(controller.app().focused_overlay().is_none());
+        assert_eq!(controller.app().copy_buffer(), None);
+        assert!(copied.lock().expect("clipboard writes").is_empty());
     }
 
     #[tokio::test]

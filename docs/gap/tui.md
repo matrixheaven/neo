@@ -28,8 +28,10 @@ Target: `crates/tui`.
   delete-to-line-start/end, submit/newline, approval selection up/down,
   overlay page-up/page-down selection, approval confirm, overlay cancel, exit
   cancel, filesystem-backed prompt Tab completion with literal-tab fallback,
-  prompt undo, kill-ring yank, and an internal prompt copy buffer. In editing
-  mode, Up/Down/PageUp/PageDown scroll the transcript viewport.
+  prompt undo, kill-ring yank, an internal prompt copy buffer, and live
+  prompt-text copy to the OS clipboard with internal-buffer fallback when the
+  system clipboard is unavailable. In editing mode,
+  Up/Down/PageUp/PageDown scroll the transcript viewport.
 - The live interactive loop opens a local session picker with `ctrl+r`, using
   real `SessionMetadataStore` records prepared by `neo-agent`, orders parent
   and child sessions as a local tree, and can load a selected JSONL transcript
@@ -67,8 +69,8 @@ Target: `crates/tui`.
 ## Remaining lower-priority gaps
 
 - The Rust crate does not implement Kitty/Sixel/OSC image protocols, command
-  autocomplete beyond local slash prompt templates, OS/terminal clipboard
-  integration, or the full TypeScript
+  autocomplete beyond local slash prompt templates, selected transcript-region
+  copy, or the full TypeScript
   renderer's advanced diff affordances beyond width-safe unified diff line
   classification and coloring.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.

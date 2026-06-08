@@ -42,8 +42,8 @@ implementation symbols are present, including claims that Neo still does not
 translate reasoning effort into Anthropic/Google thinking payloads once both
 budget-backed adapters exist. It still allows honest gaps for hosted MCP
 management, remote MCP servers that require alternate notification channels,
-hosted share, OAuth login, image protocols, OS clipboard integration, advanced
-diff affordances, and other surfaces that are not implemented.
+hosted share, OAuth login, image protocols, selected transcript-region copy,
+advanced diff affordances, and other surfaces that are not implemented.
 
 ## Pi Parity Pressure
 
