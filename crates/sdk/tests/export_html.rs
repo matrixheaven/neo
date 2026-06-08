@@ -1,4 +1,5 @@
 use neo_sdk::{ExportConversation, ExportMessage, HtmlExportOptions, export_html};
+use serde_json::json;
 
 #[test]
 fn export_html_escapes_content_and_renders_markdown() {
@@ -50,4 +51,45 @@ fn export_html_sanitizes_markdown_link_urls() {
     assert!(!html.contains("script:alert"));
     assert!(html.contains("https://example.test/&quot; onclick=&quot;alert(1)"));
     assert!(!html.contains("\" onclick=\"alert(1)"));
+}
+
+#[test]
+fn export_conversation_serializes_with_stable_shape() {
+    let conversation = ExportConversation::new(
+        "Stable",
+        vec![
+            ExportMessage::new("user", "Hello"),
+            ExportMessage::new("assistant", "Hi"),
+        ],
+    );
+
+    let value = serde_json::to_value(&conversation).unwrap();
+
+    assert_eq!(
+        value,
+        json!({
+            "title": "Stable",
+            "messages": [
+                { "role": "user", "content": "Hello" },
+                { "role": "assistant", "content": "Hi" }
+            ]
+        })
+    );
+}
+
+#[test]
+fn export_html_can_omit_default_css() {
+    let conversation = ExportConversation::new("Plain", vec![ExportMessage::new("user", "Hello")]);
+
+    let html = export_html(
+        &conversation,
+        &HtmlExportOptions {
+            include_default_css: false,
+        },
+    )
+    .unwrap();
+
+    assert!(!html.contains("<style>"));
+    assert!(!html.contains(":root { color-scheme: light dark;"));
+    assert!(html.contains("<main class=\"conversation\">"));
 }

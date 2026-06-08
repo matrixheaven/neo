@@ -109,8 +109,7 @@ pub fn load_skill(
     root: impl AsRef<Path>,
     options: SkillLoadOptions,
 ) -> Result<LoadedSkill, SkillLoadError> {
-    let root = root.as_ref().to_path_buf();
-    let skill_path = root.join("SKILL.md");
+    let (root, skill_path) = resolve_skill_path(root.as_ref());
     let source = fs::read_to_string(&skill_path).map_err(|source| SkillLoadError::ReadSkill {
         path: skill_path.clone(),
         source,
@@ -140,10 +139,37 @@ pub fn load_skill(
     })
 }
 
+fn resolve_skill_path(path: &Path) -> (PathBuf, PathBuf) {
+    if path.is_file() || path.file_name().is_some_and(|name| name == "SKILL.md") {
+        let skill_path = path.to_path_buf();
+        let root = path.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+        (root, skill_path)
+    } else {
+        let root = path.to_path_buf();
+        let skill_path = root.join("SKILL.md");
+        (root, skill_path)
+    }
+}
+
 fn split_frontmatter(source: &str) -> Option<(&str, &str)> {
-    let rest = source.strip_prefix("---\n")?;
-    let (frontmatter, body) = rest.split_once("\n---")?;
-    Some((frontmatter, body.strip_prefix('\n').unwrap_or(body)))
+    let rest = source
+        .strip_prefix("---\r\n")
+        .or_else(|| source.strip_prefix("---\n"))?;
+    let separator_start = rest.find("\n---")?;
+    let frontmatter = rest[..separator_start]
+        .strip_suffix('\r')
+        .unwrap_or(&rest[..separator_start]);
+    let after_separator = rest[separator_start + 1..].strip_prefix("---")?;
+    let body = if let Some(body) = after_separator.strip_prefix("\r\n") {
+        body
+    } else if let Some(body) = after_separator.strip_prefix('\n') {
+        body
+    } else if after_separator.is_empty() {
+        after_separator
+    } else {
+        return None;
+    };
+    Some((frontmatter, body))
 }
 
 fn load_resource(root: &Path, resource: &SkillResource) -> Result<LoadedResource, SkillLoadError> {
