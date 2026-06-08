@@ -74,6 +74,7 @@ pub(crate) struct InteractiveController {
     load_session: SessionLoader,
     fork_session: SessionForker,
     active_session_id: Option<String>,
+    local_config: Option<AppConfig>,
     active_model: Option<SelectedModel>,
     active_turn: Option<RunningTurn>,
     pending_approvals: BTreeMap<String, oneshot::Sender<PermissionDecision>>,
@@ -290,6 +291,7 @@ impl InteractiveController {
             load_session,
             fork_session,
             active_session_id: None,
+            local_config: None,
             active_model: None,
             active_turn: None,
             pending_approvals: BTreeMap::new(),
@@ -638,11 +640,34 @@ impl InteractiveController {
             "select-transcript" => self.app.select_visible_transcript_item(),
             "clear-transcript-selection" => self.app.clear_transcript_selection(),
             "copy-transcript-selection" => self.copy_transcript_selection_to_clipboard(),
+            "session.exportHtml" => self.export_active_session_to_html().await?,
             "submit" => self.submit_current_prompt().await?,
             unknown => self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
                 text: format!("Unknown command: {unknown}"),
             }),
         }
+        Ok(())
+    }
+
+    async fn export_active_session_to_html(&mut self) -> Result<()> {
+        let Some(session_id) = self.active_session_id.clone() else {
+            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: "No active session to export".to_owned(),
+            });
+            return Ok(());
+        };
+        let config = self
+            .local_config
+            .clone()
+            .context("session HTML export is unavailable")?;
+        let html = crate::session_commands::export_html(&session_id, &config).await?;
+        let output_path =
+            crate::session_commands::session_path(&session_id, &config)?.with_extension("html");
+        fs::write(&output_path, html)
+            .with_context(|| format!("failed to write {}", output_path.display()))?;
+        self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+            text: format!("Exported session {session_id} to {}", output_path.display()),
+        });
         Ok(())
     }
 
@@ -1175,6 +1200,11 @@ fn local_command_specs() -> Vec<CommandSpec> {
         CommandSpec::new("sessions", "Open sessions", Some("Browse local sessions")),
         CommandSpec::new("models", "Open models", Some("Switch active model")),
         CommandSpec::new(
+            "session.exportHtml",
+            "Export session to HTML",
+            Some("Write the active local session as sanitized HTML"),
+        ),
+        CommandSpec::new(
             "copy-prompt",
             "Copy prompt",
             Some("Copy current prompt text"),
@@ -1403,6 +1433,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         fork_session,
     );
     controller.completion_root.clone_from(&config.project_dir);
+    controller.local_config = Some(config);
     controller
 }
 
@@ -2598,6 +2629,117 @@ mod tests {
                 .map(|overlay| &overlay.kind),
             Some(OverlayKind::ModelPicker(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn command_palette_exports_active_session_to_html() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        fs::write(
+            sessions_dir.join("alpha.jsonl"),
+            concat!(
+                "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello <script>alert(1)</script>\"}}]}}}}\n",
+                "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"use **bold** safely\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
+            ),
+        )
+        .expect("write session jsonl");
+
+        let config = test_config(temp.path(), sessions_dir.clone());
+        let mut controller = controller_for_config(&config);
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SessionPickerOpen))
+            .await
+            .expect("session picker opens");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+            .await
+            .expect("session loads");
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::CommandPaletteOpen))
+            .await
+            .expect("command palette opens");
+        for _ in 0..32 {
+            let selected = controller
+                .app()
+                .selected_command()
+                .expect("selected command");
+            if selected.id == "session.exportHtml" {
+                break;
+            }
+            controller
+                .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+                .await
+                .expect("move to export command");
+        }
+        assert_eq!(
+            controller
+                .app()
+                .selected_command()
+                .expect("export command")
+                .id,
+            "session.exportHtml"
+        );
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+            .await
+            .expect("export command runs");
+
+        let export_path = sessions_dir.join("alpha.html");
+        let html = fs::read_to_string(&export_path).expect("read exported html");
+        assert!(html.contains("<title>neo session alpha</title>"));
+        assert!(html.contains("<strong>bold</strong>"));
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(!html.contains("<script>"));
+        assert!(controller.app().transcript().items().iter().any(|item| {
+            matches!(
+                item,
+                neo_tui::TranscriptItem::Notice { content }
+                    if content.contains("Exported session alpha to")
+                        && content.contains(&export_path.display().to_string())
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn command_palette_export_html_without_active_session_shows_local_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let config = test_config(temp.path(), sessions_dir);
+        let mut controller = controller_for_config(&config);
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::CommandPaletteOpen))
+            .await
+            .expect("command palette opens");
+        for _ in 0..32 {
+            let selected = controller
+                .app()
+                .selected_command()
+                .expect("selected command");
+            if selected.id == "session.exportHtml" {
+                break;
+            }
+            controller
+                .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+                .await
+                .expect("move to export command");
+        }
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+            .await
+            .expect("export command handles missing session locally");
+
+        assert!(controller.app().transcript().items().iter().any(|item| {
+            matches!(
+                item,
+                neo_tui::TranscriptItem::Notice { content }
+                    if content.contains("No active session to export")
+            )
+        }));
     }
 
     #[tokio::test]
