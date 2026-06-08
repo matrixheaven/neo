@@ -23,10 +23,12 @@ whole map.
   credential lookup and serializes supported chat image inputs instead of
   silently dropping image parts. Strict local JSON model catalogs can extend
   `ModelRegistry`, including a supported custom-model subset of Pi
-  `models.json`; Neo provider-specific base URLs and API key env names are
-  configured through `.neo/config.toml`, while Pi pricing metadata, generated
-  catalog sources, automatic provider-metadata migration, auth-file/OAuth
-  flows, image generation, and local APIs remain catalog/API gaps.
+  `models.json` that rejects request-affecting provider/model metadata until
+  Neo has explicit runtime contracts for those fields. Neo provider-specific
+  base URLs and API key env names are configured through `.neo/config.toml`,
+  while Pi pricing metadata, generated catalog sources, automatic
+  provider-metadata migration, auth-file/OAuth flows, image generation, and
+  local APIs remain catalog/API gaps.
 - MCP is documented as a runtime boundary. `neo-agent-core` now has the
   adapter/provider abstraction, stdio JSON-RPC process adapter, HTTP/SSE
   JSON-RPC adapter, discovery-to-`ToolSpec` bridge, namespaced `ToolRegistry`
@@ -61,7 +63,8 @@ whole map.
   fixtures as production defaults.
 - Providers docs now reflect `ModelSpec`, strict local model catalogs,
   `RequestOptions`, environment key helpers, production provider resolution,
-  real OpenAI/Anthropic-compatible clients, and the fake test provider.
+  real OpenAI/Anthropic-compatible clients, fail-closed Pi catalog metadata
+  import, and the fake test provider.
 - Tools docs now list the implemented built-in workspace tools and permissions.
 - Sessions docs now describe JSONL event persistence, local session metadata
   fork/rename, deterministic extractive compaction, and current CLI/session

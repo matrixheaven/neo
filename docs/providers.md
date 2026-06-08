@@ -156,14 +156,15 @@ Supported Pi API names are `openai-responses`, `openai-completions`,
 `openai-compatible`, `anthropic-messages`, `google-generative-ai`, and `local`.
 The loader maps Pi `id`, provider map key, `api`, `reasoning`, `input`, and
 `contextWindow` into `ModelSpec`. It rejects unsupported Pi APIs such as
-`bedrock-converse-stream` instead of silently downgrading them.
-
-Pi provider endpoint, credential, pricing, `maxTokens`, `headers`, `compat`,
-and `modelOverrides` metadata are not migrated into `ModelSpec`. Configure Neo
-provider credentials and base URLs through Neo provider config such as
-`providers.<provider-id>.api_base` and `providers.<provider-id>.api_key_env`;
-Pi catalog import still does not automatically migrate provider metadata into
-that config.
+`bedrock-converse-stream` instead of silently downgrading them. It also rejects
+Pi metadata that would affect requests, credentials, cost accounting, or
+provider compatibility if imported without a Neo runtime contract. Provider
+fields such as `baseUrl`, `apiKey`, `headers`, `authHeader`, `compat`, and
+`modelOverrides`, plus model fields such as `baseUrl`, `cost`, `maxTokens`,
+`headers`, `compat`, and `thinkingLevelMap`, must be represented through
+explicit Neo provider config or future Neo runtime fields before they can be
+accepted. Pure display metadata such as `name` is allowed and ignored by the
+current `ModelSpec` subset.
 
 ## Test Provider
 

@@ -228,6 +228,98 @@ fn model_registry_rejects_pi_models_json_with_unsupported_api() {
 }
 
 #[test]
+fn model_registry_rejects_unsupported_pi_provider_metadata() {
+    for (field, value) in [
+        ("baseUrl", r#""https://proxy.example.test/v1""#),
+        ("apiKey", r#""$CUSTOM_PROVIDER_KEY""#),
+        ("headers", r#"{"x-custom": "$CUSTOM_HEADER"}"#),
+        ("compat", r#"{"supportsDeveloperRole": false}"#),
+        ("authHeader", "true"),
+        (
+            "modelOverrides",
+            r#"{"gpt-4.1": {"headers": {"x-route": "bedrock"}}}"#,
+        ),
+    ] {
+        let mut registry = ModelRegistry::new();
+        let source = format!(
+            r#"
+{{
+  "providers": {{
+    "openrouter": {{
+      "api": "openai-completions",
+      "{field}": {value},
+      "models": [
+        {{ "id": "safe-model", "name": "Safe Model" }}
+      ]
+    }}
+  }}
+}}
+"#
+        );
+
+        let error = registry
+            .load_catalog_str(&source, "pi models.json")
+            .expect_err("unsupported provider metadata should be rejected");
+
+        assert!(error.to_string().contains("provider openrouter"));
+        assert!(error.to_string().contains(field));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported pi models.json provider metadata")
+        );
+    }
+}
+
+#[test]
+fn model_registry_rejects_unsupported_pi_model_metadata() {
+    for (field, value) in [
+        ("baseUrl", r#""https://model-route.example.test/v1""#),
+        (
+            "cost",
+            r#"{"input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0}"#,
+        ),
+        ("maxTokens", "8192"),
+        ("headers", r#"{"x-model": "$MODEL_HEADER"}"#),
+        ("compat", r#"{"maxTokensField": "max_tokens"}"#),
+        ("thinkingLevelMap", r#"{"minimal": null, "high": "max"}"#),
+    ] {
+        let mut registry = ModelRegistry::new();
+        let source = format!(
+            r#"
+{{
+  "providers": {{
+    "openrouter": {{
+      "api": "openai-completions",
+      "models": [
+        {{
+          "id": "routed-model",
+          "name": "Routed Model",
+          "{field}": {value}
+        }}
+      ]
+    }}
+  }}
+}}
+"#
+        );
+
+        let error = registry
+            .load_catalog_str(&source, "pi models.json")
+            .expect_err("unsupported model metadata should be rejected");
+
+        assert!(error.to_string().contains("provider openrouter"));
+        assert!(error.to_string().contains("model routed-model"));
+        assert!(error.to_string().contains(field));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported pi models.json model metadata")
+        );
+    }
+}
+
+#[test]
 fn model_registry_rejects_invalid_json_catalog_entries() {
     let mut registry = ModelRegistry::new();
 

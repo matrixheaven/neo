@@ -113,6 +113,7 @@ impl ModelRegistry {
                     "pi models.json {label} provider must not be empty"
                 )));
             }
+            validate_pi_provider_metadata(label, &provider, &config.metadata)?;
             for model in config.models {
                 models.push(pi_model_spec(
                     label,
@@ -196,6 +197,8 @@ struct PiProviderConfig {
     api: Option<String>,
     #[serde(default)]
     models: Vec<PiModelDefinition>,
+    #[serde(flatten)]
+    metadata: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -209,6 +212,8 @@ struct PiModelDefinition {
     input: Option<Vec<String>>,
     #[serde(default, rename = "contextWindow")]
     context_window: Option<u32>,
+    #[serde(flatten)]
+    metadata: BTreeMap<String, Value>,
 }
 
 fn pi_model_spec(
@@ -239,6 +244,26 @@ fn pi_model_spec(
     })
 }
 
+fn validate_pi_provider_metadata(
+    label: &str,
+    provider: &str,
+    metadata: &BTreeMap<String, Value>,
+) -> Result<(), AiError> {
+    if let Some(field) = metadata
+        .keys()
+        .find(|field| !is_allowed_pi_provider_metadata(field))
+    {
+        return Err(AiError::Configuration(format!(
+            "pi models.json {label} provider {provider}: unsupported pi models.json provider metadata {field}; configure Neo provider credentials, base URLs, headers, and compatibility explicitly in Neo config instead"
+        )));
+    }
+    Ok(())
+}
+
+fn is_allowed_pi_provider_metadata(field: &str) -> bool {
+    matches!(field, "name")
+}
+
 fn pi_api_kind(label: &str, provider: &str, model_id: &str, api: &str) -> Result<ApiKind, AiError> {
     match api {
         "openai-responses" => Ok(ApiKind::OpenAiResponses),
@@ -258,6 +283,8 @@ fn pi_model_capabilities(
     model_id: &str,
     model: &PiModelDefinition,
 ) -> Result<ModelCapabilities, AiError> {
+    validate_pi_model_metadata(label, provider, model_id, &model.metadata)?;
+
     if model.context_window == Some(0) {
         return Err(AiError::Configuration(format!(
             "pi models.json {label} provider {provider}, model {model_id}: contextWindow must be greater than 0"
@@ -287,6 +314,27 @@ fn pi_model_capabilities(
         embeddings: false,
         max_context_tokens: Some(model.context_window.unwrap_or(PI_DEFAULT_CONTEXT_WINDOW)),
     })
+}
+
+fn validate_pi_model_metadata(
+    label: &str,
+    provider: &str,
+    model_id: &str,
+    metadata: &BTreeMap<String, Value>,
+) -> Result<(), AiError> {
+    if let Some(field) = metadata
+        .keys()
+        .find(|field| !is_allowed_pi_model_metadata(field))
+    {
+        return Err(AiError::Configuration(format!(
+            "pi models.json {label} provider {provider}, model {model_id}: unsupported pi models.json model metadata {field}; configure Neo request options or provider-specific runtime support explicitly instead"
+        )));
+    }
+    Ok(())
+}
+
+fn is_allowed_pi_model_metadata(field: &str) -> bool {
+    matches!(field, "name")
 }
 
 fn validate_catalog_model(label: &str, model: &ModelSpec) -> Result<(), AiError> {

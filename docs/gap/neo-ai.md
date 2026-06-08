@@ -14,7 +14,8 @@
 - `ModelRegistry` stores configured models, a first-registered default, strict
   local JSON catalog loading for existing `ModelSpec` shapes, and a
   production-backed custom-model subset of Pi `models.json` that maps supported
-  Pi API names and capability fields into Neo `ModelSpec` values.
+  Pi API names and capability fields into Neo `ModelSpec` values while
+  rejecting request-affecting Pi metadata that Neo cannot safely migrate yet.
 - `ProviderRegistry::production()` stores built-in production provider metadata.
 - `ProviderResolver` resolves registered models to production clients when
   the provider supports the model API kind and credentials/base URLs are
@@ -44,8 +45,9 @@ until the Rust contracts exist.
 - Pi `models.json` pricing metadata, generated catalog sources,
   provider-metadata migration, and provider-native model override formats
   remain future work. Neo provider-specific base URLs and API key env names are
-  available through `neo-agent` config, but Pi catalog import does not migrate
-  those fields automatically.
+  available through `neo-agent` config. Pi catalog import rejects
+  request-affecting provider/model metadata until those fields have explicit
+  Neo runtime contracts.
 - Keep provider credentials environment-only for now; auth-file and OAuth
   flows are future work.
 - Keep request metadata internal-facing. Do not expose provider-native chunk
