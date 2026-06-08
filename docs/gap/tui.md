@@ -32,10 +32,11 @@ Target: `crates/tui`.
   prompt-text copy to the OS clipboard with internal-buffer fallback when the
   system clipboard is unavailable. In editing mode,
   Up/Down/PageUp/PageDown scroll the transcript viewport.
-- The live interactive loop opens a local session picker with `ctrl+r`, using
-  real `SessionMetadataStore` records prepared by `neo-agent`, orders parent
-  and child sessions as a local tree, and can load a selected JSONL transcript
-  into the TUI before continuing in that session.
+- The live interactive loop opens a local session picker with `ctrl+r` or the
+  exact `/tree` slash command, using real `SessionMetadataStore` records
+  prepared by `neo-agent`, orders parent and child sessions as a local tree,
+  and can load a selected JSONL transcript into the TUI before continuing in
+  that session.
 - With the session picker focused, the live interactive loop can fork the
   selected session with `ctrl+n`, load the child JSONL transcript, and continue
   subsequent prompts in the forked session.

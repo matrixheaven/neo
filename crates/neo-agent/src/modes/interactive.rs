@@ -697,6 +697,10 @@ impl InteractiveController {
         let Some(prompt) = self.app.submit_prompt() else {
             return Ok(());
         };
+        if prompt.trim() == "/tree" {
+            self.open_session_picker();
+            return Ok(());
+        }
         let PromptSubmission {
             prompt,
             model_override,
@@ -2263,6 +2267,56 @@ mod tests {
         assert_eq!(controller.app().prompt().text, "/review");
         assert_eq!(controller.app().prompt().cursor, 7);
         assert!(controller.app().focused_overlay().is_none());
+    }
+
+    #[tokio::test]
+    async fn event_loop_slash_tree_opens_local_session_picker() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let mut controller = InteractiveController::new_with_sessions(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("record request")
+                        .push(request);
+                    Ok(Vec::<AgentEvent>::new())
+                }
+            },
+            PickerCatalogs {
+                session_items: vec![PickerItem::new("alpha", "Alpha", Some("root"))],
+                session_error: None,
+                model_items: Vec::new(),
+                model_error: None,
+            },
+            |session_id| async move {
+                Ok(LoadedSessionTranscript::new(
+                    session_id,
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            },
+        );
+
+        controller.type_text("/tree");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("slash tree command runs locally");
+
+        assert!(matches!(
+            controller
+                .app()
+                .focused_overlay()
+                .map(|overlay| &overlay.kind),
+            Some(OverlayKind::SessionPicker(_))
+        ));
+        assert!(controller.app().prompt().text.is_empty());
+        assert!(requests.lock().expect("recorded requests").is_empty());
     }
 
     #[tokio::test]

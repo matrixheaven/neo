@@ -97,7 +97,8 @@
   `@provider/model` prefixes from the resolved model catalog, uses exact
   leading `@provider/model` tokens as per-turn model overrides, exits on
   Esc/Ctrl-C, and keeps the no-tty snapshot fallback for command tests and
-  redirected stdout. `ctrl+r` opens a local session picker backed by
+  redirected stdout. `ctrl+r` and the exact `/tree` slash command open a local
+  session picker backed by
   `sessions_dir` metadata and JSONL files; the picker uses local tree ordering
   and indents child sessions. Selecting a session replays its compacted context
   into the TUI, and subsequent prompts use that context while appending new
@@ -138,9 +139,10 @@ and platform-specific guidance.
   duplicate explicit selector names.
 - Keep config docs scoped to project/global TOML layering until profile sync or
   hosted settings exist.
-- Do not document `/login`, `/tree`, hosted sharing, hosted extension
-  marketplace catalog/search/install flows, or themes as available Neo features
-  yet.
+- Do not document `/login`, hosted sharing, hosted extension marketplace
+  catalog/search/install flows, or themes as available Neo features yet. Keep
+  `/tree` documented only as the local session picker slash command until
+  hosted tree/share backing exists.
 - Add hosted session tree navigation/share only when real hosted backing
   behavior exists.
 - Keep MCP runtime config limited to tools and explicit resource
