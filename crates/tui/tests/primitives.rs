@@ -3,7 +3,8 @@ use neo_tui::{
     ApprovalChoice, ApprovalModal, ApprovalOption, ChatTranscript, InputEvent, InputParser, KeyId,
     KeybindingAction, KeybindingsManager, NeoTuiApp, PromptEdit, PromptState, PromptWidget,
     SelectItem, SelectListState, StatusWidget, ToolStatus, ToolStatusKind, TranscriptItem,
-    TranscriptView, TranscriptWidget, truncate_width, visible_width, wrap_width,
+    TranscriptSelection, TranscriptView, TranscriptWidget, truncate_width, visible_width,
+    wrap_width,
 };
 use ratatui::{
     Terminal,
@@ -392,6 +393,18 @@ fn keybinding_manager_matches_defaults_overrides_and_conflicts() {
     assert!(manager.matches(
         &KeyId::new("ctrl+n").expect("valid key"),
         KeybindingAction::SessionFork
+    ));
+    assert!(manager.matches(
+        &KeyId::new("ctrl+space").expect("valid key"),
+        KeybindingAction::TranscriptSelectionStart
+    ));
+    assert!(manager.matches(
+        &KeyId::new("shift+up").expect("valid key"),
+        KeybindingAction::TranscriptSelectionExtendUp
+    ));
+    assert!(manager.matches(
+        &KeyId::new("ctrl+c").expect("valid key"),
+        KeybindingAction::TranscriptCopySelection
     ));
     assert!(!manager.matches(
         &KeyId::new("ctrl+c").expect("valid key"),
@@ -800,6 +813,51 @@ fn prompt_copy_uses_internal_buffer_without_mutating_editor_state() {
 }
 
 #[test]
+fn transcript_selection_copies_item_range_with_roles() {
+    let transcript = ChatTranscript::from_items([
+        TranscriptItem::user("first prompt"),
+        TranscriptItem::assistant("first answer"),
+        TranscriptItem::tool("shell.run", "exit 0", ToolStatusKind::Succeeded),
+        TranscriptItem::notice("done"),
+    ]);
+    let mut selection = TranscriptSelection::new(2);
+
+    selection.extend_up(&transcript, 1);
+    selection.extend_down(&transcript, 1);
+
+    assert_eq!(selection.range(&transcript), Some(1..4));
+    assert_eq!(
+        transcript.copy_selection(&selection).as_deref(),
+        Some("Assistant\nfirst answer\n\nTool\n+ shell.run (exit 0)\n\nNotice\ndone")
+    );
+}
+
+#[test]
+fn app_transcript_copy_uses_internal_buffer_and_clears_on_new_prompt() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    app.transcript_mut()
+        .push(TranscriptItem::user("copy selected prompt"));
+    app.transcript_mut()
+        .push(TranscriptItem::assistant("copy selected answer"));
+
+    app.select_visible_transcript_item();
+    app.extend_transcript_selection_up(1);
+
+    assert_eq!(
+        app.copy_selected_transcript_text().as_deref(),
+        Some("You\ncopy selected prompt\n\nAssistant\ncopy selected answer")
+    );
+    assert_eq!(
+        app.copy_buffer(),
+        Some("You\ncopy selected prompt\n\nAssistant\ncopy selected answer")
+    );
+
+    app.prompt_mut().apply_edit(PromptEdit::Insert("next turn"));
+    let _ = app.submit_prompt();
+    assert!(app.transcript_selection().is_none());
+}
+
+#[test]
 fn transcript_widget_renders_roles_tools_and_wraps_content() {
     let transcript = ChatTranscript::from_items([
         TranscriptItem::user("hello world from me"),
@@ -813,6 +871,25 @@ fn transcript_widget_renders_roles_tools_and_wraps_content() {
     assert!(lines.iter().any(|line| line.contains("Assistant")));
     assert!(lines.iter().any(|line| line.contains("shell.run")));
     assert!(lines.iter().any(|line| line.contains("test")));
+}
+
+#[test]
+fn transcript_widget_highlights_selected_items() {
+    let transcript = ChatTranscript::from_items([
+        TranscriptItem::user("first"),
+        TranscriptItem::assistant("second"),
+    ]);
+    let selection = TranscriptSelection::new(1);
+
+    let buffer = render_widget_buffer(
+        24,
+        6,
+        TranscriptWidget::new(&transcript).with_selection(Some(&selection)),
+    );
+
+    let selected_heading = &buffer.content[24 * 2];
+    assert_eq!(selected_heading.symbol(), "A");
+    assert_eq!(selected_heading.style().bg, Some(Color::DarkGray));
 }
 
 #[test]

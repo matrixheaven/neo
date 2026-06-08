@@ -17,6 +17,7 @@ pub struct NeoTuiApp {
     model_label: String,
     transcript: ChatTranscript,
     transcript_view: TranscriptView,
+    transcript_selection: Option<TranscriptSelection>,
     prompt: PromptState,
     copy_buffer: Option<String>,
     mode: AppMode,
@@ -43,6 +44,7 @@ impl NeoTuiApp {
             model_label: model_label.into(),
             transcript: ChatTranscript::default(),
             transcript_view: TranscriptView::new(),
+            transcript_selection: None,
             prompt: PromptState::default(),
             copy_buffer: None,
             mode: AppMode::Editing,
@@ -88,6 +90,11 @@ impl NeoTuiApp {
     }
 
     #[must_use]
+    pub const fn transcript_selection(&self) -> Option<&TranscriptSelection> {
+        self.transcript_selection.as_ref()
+    }
+
+    #[must_use]
     pub const fn prompt(&self) -> &PromptState {
         &self.prompt
     }
@@ -107,6 +114,15 @@ impl NeoTuiApp {
         Some(copied)
     }
 
+    pub fn copy_selected_transcript_text(&mut self) -> Option<String> {
+        let copied = self
+            .transcript_selection
+            .as_ref()
+            .and_then(|selection| self.transcript.copy_selection(selection))?;
+        self.copy_buffer = Some(copied.clone());
+        Some(copied)
+    }
+
     pub fn transcript_mut(&mut self) -> &mut ChatTranscript {
         &mut self.transcript
     }
@@ -118,6 +134,41 @@ impl NeoTuiApp {
 
     pub fn scroll_transcript_down(&mut self, lines: usize) {
         self.transcript_view.scroll_down_unbounded(lines);
+    }
+
+    pub fn select_visible_transcript_item(&mut self) {
+        let range = self.transcript_view.visible_range(&self.transcript, 1);
+        let Some(index) = range.end.checked_sub(1) else {
+            self.transcript_selection = None;
+            return;
+        };
+        if index < self.transcript.len() {
+            self.transcript_selection = Some(TranscriptSelection::new(index));
+        } else {
+            self.transcript_selection = None;
+        }
+    }
+
+    pub fn extend_transcript_selection_up(&mut self, lines: usize) {
+        if self.transcript_selection.is_none() {
+            self.select_visible_transcript_item();
+        }
+        if let Some(selection) = &mut self.transcript_selection {
+            selection.extend_up(&self.transcript, lines);
+        }
+    }
+
+    pub fn extend_transcript_selection_down(&mut self, lines: usize) {
+        if self.transcript_selection.is_none() {
+            self.select_visible_transcript_item();
+        }
+        if let Some(selection) = &mut self.transcript_selection {
+            selection.extend_down(&self.transcript, lines);
+        }
+    }
+
+    pub fn clear_transcript_selection(&mut self) {
+        self.transcript_selection = None;
     }
 
     pub fn set_session_label(&mut self, session_label: impl Into<String>) {
@@ -137,6 +188,7 @@ impl NeoTuiApp {
         self.set_session_label(session_label);
         self.transcript = ChatTranscript::default();
         self.transcript_view = TranscriptView::new();
+        self.transcript_selection = None;
         self.prompt = PromptState::default();
         self.active_assistant_id = None;
         self.active_assistant_buffer.clear();
@@ -198,6 +250,7 @@ impl NeoTuiApp {
 
         self.transcript
             .push(TranscriptItem::user(submitted.clone()));
+        self.transcript_selection = None;
         self.prompt = PromptState::default();
         self.mode = AppMode::Streaming;
         self.transcript_view.follow_bottom();
@@ -211,6 +264,7 @@ impl NeoTuiApp {
                 self.active_assistant_buffer.clear();
                 self.active_thinking_buffer.clear();
                 self.transcript.push(TranscriptItem::assistant(""));
+                self.transcript_selection = None;
                 self.mode = AppMode::Streaming;
             }
             StreamUpdate::TextDelta { text } => {
@@ -224,6 +278,7 @@ impl NeoTuiApp {
                     .update_last_assistant(self.active_assistant_buffer.clone());
             }
             StreamUpdate::ToolStarted { id, name, detail } => {
+                self.transcript_selection = None;
                 if let Some(tool) = self.active_tools.iter_mut().find(|tool| tool.id == id) {
                     tool.name = name;
                     tool.detail = detail;
@@ -262,6 +317,7 @@ impl NeoTuiApp {
             }
             StreamUpdate::Notice { text } => {
                 self.transcript.push(TranscriptItem::notice(text));
+                self.transcript_selection = None;
             }
             StreamUpdate::ThinkingStarted => {
                 self.active_thinking_buffer.clear();
@@ -276,12 +332,14 @@ impl NeoTuiApp {
                         "Thinking: {}",
                         self.active_thinking_buffer
                     )));
+                    self.transcript_selection = None;
                 }
                 self.active_thinking_buffer.clear();
             }
             StreamUpdate::Error { text } => {
                 self.transcript
                     .push(TranscriptItem::notice(format!("Error: {text}")));
+                self.transcript_selection = None;
                 self.mode = self.overlay_mode();
             }
             StreamUpdate::TurnFinished => {
@@ -441,6 +499,7 @@ impl NeoTuiApp {
                     ToolStatusKind::Failed
                 },
             ));
+            self.transcript_selection = None;
             self.transcript_view.follow_bottom();
         }
     }
@@ -533,6 +592,7 @@ impl NeoTuiApp {
                 self.transcript.push(TranscriptItem::notice(text));
             }
         }
+        self.transcript_selection = None;
         self.transcript_view.follow_bottom();
     }
 
@@ -1614,6 +1674,74 @@ impl ChatTranscript {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    #[must_use]
+    pub fn copy_selection(&self, selection: &TranscriptSelection) -> Option<String> {
+        let range = selection.range(self)?;
+        let mut copied = String::new();
+        for (offset, item) in self.items[range].iter().enumerate() {
+            if offset > 0 {
+                copied.push_str("\n\n");
+            }
+            let (label, content) = transcript_copy_parts(item);
+            copied.push_str(label);
+            copied.push('\n');
+            copied.push_str(&content);
+        }
+        Some(copied)
+    }
+}
+
+fn transcript_copy_parts(item: &TranscriptItem) -> (&'static str, String) {
+    match item {
+        TranscriptItem::User { content } => ("You", content.clone()),
+        TranscriptItem::Assistant { content } => ("Assistant", content.clone()),
+        TranscriptItem::Tool {
+            name,
+            detail,
+            status,
+        } => ("Tool", format!("{} {} ({})", status.marker(), name, detail)),
+        TranscriptItem::Notice { content } => ("Notice", content.clone()),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptSelection {
+    start: usize,
+    end: usize,
+}
+
+impl TranscriptSelection {
+    #[must_use]
+    pub const fn new(index: usize) -> Self {
+        Self {
+            start: index,
+            end: index,
+        }
+    }
+
+    pub fn extend_up(&mut self, transcript: &ChatTranscript, count: usize) {
+        let max_index = transcript.len().saturating_sub(1);
+        self.start = self.start.saturating_sub(count).min(max_index);
+        self.end = self.end.min(max_index);
+    }
+
+    pub fn extend_down(&mut self, transcript: &ChatTranscript, count: usize) {
+        let max_index = transcript.len().saturating_sub(1);
+        self.start = self.start.min(max_index);
+        self.end = self.end.saturating_add(count).min(max_index);
+    }
+
+    #[must_use]
+    pub fn range(&self, transcript: &ChatTranscript) -> Option<Range<usize>> {
+        if transcript.is_empty() {
+            return None;
+        }
+        let max_index = transcript.len() - 1;
+        let start = self.start.min(max_index).min(self.end.min(max_index));
+        let end = self.start.min(max_index).max(self.end.min(max_index)) + 1;
+        Some(start..end)
     }
 }
 

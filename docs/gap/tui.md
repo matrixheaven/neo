@@ -65,12 +65,18 @@ Target: `crates/tui`.
   sequences through a buffered `InputParser`. Pasted multiline text is inserted
   into the prompt without treating embedded newlines as submit; a subsequent
   Enter still submits normally.
+- Transcript item selection is exposed through live keybindings: Ctrl-Space
+  starts selection from the visible transcript item, Shift-Up/Down and
+  Shift-PageUp/PageDown extend the item range, Ctrl-C copies the selected
+  transcript text to the OS clipboard through `neo-agent`, and the TUI keeps
+  the same text in its internal copy buffer. Selected items are highlighted in
+  the transcript renderer, and ordinary prompt copy still works when no
+  transcript selection is active.
 
 ## Remaining lower-priority gaps
 
 - The Rust crate does not implement Kitty/Sixel/OSC image protocols, command
-  autocomplete beyond local slash prompt templates, selected transcript-region
-  copy, or the full TypeScript
+  autocomplete beyond local slash prompt templates, or the full TypeScript
   renderer's advanced diff affordances beyond width-safe unified diff line
-  classification and coloring.
+  classification, coloring, and item-range transcript selection.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.

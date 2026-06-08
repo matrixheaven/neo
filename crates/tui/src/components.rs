@@ -8,7 +8,8 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     ApprovalModal, ChatTranscript, NeoTuiApp, Overlay, OverlayKind, PromptState, ToolStatus,
-    ToolStatusKind, TranscriptItem, TranscriptLine, TranscriptRenderer, TranscriptView,
+    ToolStatusKind, TranscriptItem, TranscriptLine, TranscriptRenderer, TranscriptSelection,
+    TranscriptView,
 };
 
 #[must_use]
@@ -171,6 +172,7 @@ fn sgr_style_action(sequence: &str) -> SgrStyleAction {
 pub struct TranscriptWidget<'a> {
     transcript: &'a ChatTranscript,
     view: Option<&'a TranscriptView>,
+    selection: Option<&'a TranscriptSelection>,
 }
 
 impl<'a> TranscriptWidget<'a> {
@@ -179,12 +181,19 @@ impl<'a> TranscriptWidget<'a> {
         Self {
             transcript,
             view: None,
+            selection: None,
         }
     }
 
     #[must_use]
     pub const fn with_view(mut self, view: &'a TranscriptView) -> Self {
         self.view = Some(view);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_selection(mut self, selection: Option<&'a TranscriptSelection>) -> Self {
+        self.selection = selection;
         self
     }
 }
@@ -198,12 +207,20 @@ impl Widget for TranscriptWidget<'_> {
         let range = self.view.map_or(0..items.len(), |view| {
             view.visible_range(self.transcript, usize::from(area.height))
         });
-        for item in &items[range] {
+        let selected_range = self
+            .selection
+            .and_then(|selection| selection.range(self.transcript));
+        for (index, item) in items[range.clone()].iter().enumerate() {
             if y >= area.bottom() {
                 break;
             }
 
+            let item_index = range.start + index;
+            let selected = selected_range
+                .as_ref()
+                .is_some_and(|range| range.contains(&item_index));
             let (label, content, style) = transcript_row(item);
+            let style = selected_style(style, selected);
             write_line(area, buf, y, label, style.add_modifier(Modifier::BOLD));
             y = y.saturating_add(1);
 
@@ -216,11 +233,19 @@ impl Widget for TranscriptWidget<'_> {
                     buf,
                     y,
                     &format!("  {}", line.display_text()),
-                    transcript_line_style(&line, style),
+                    selected_style(transcript_line_style(&line, style), selected),
                 );
                 y = y.saturating_add(1);
             }
         }
+    }
+}
+
+fn selected_style(style: Style, selected: bool) -> Style {
+    if selected {
+        style.bg(Color::DarkGray)
+    } else {
+        style
     }
 }
 
@@ -427,6 +452,7 @@ impl Widget for &NeoTuiApp {
         };
         TranscriptWidget::new(self.transcript())
             .with_view(self.transcript_view())
+            .with_selection(self.transcript_selection())
             .render(body, buf);
 
         let status_y = body.y.saturating_add(body.height);

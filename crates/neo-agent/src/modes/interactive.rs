@@ -404,6 +404,11 @@ impl InteractiveController {
         };
 
         for action in priority {
+            if *action == KeybindingAction::TranscriptCopySelection
+                && self.app.transcript_selection().is_none()
+            {
+                continue;
+            }
             if actions.contains(action) {
                 return self.handle_keybinding_action(*action).await;
             }
@@ -416,17 +421,16 @@ impl InteractiveController {
         if self.handle_prompt_keybinding_action(action) {
             return Ok(false);
         }
+        if self.handle_transcript_keybinding_action(action) {
+            return Ok(false);
+        }
 
         match action {
             KeybindingAction::InputNewLine => {
                 self.app.prompt_mut().apply_edit(PromptEdit::Insert("\n"));
             }
-            KeybindingAction::InputTab => {
-                self.complete_prompt_or_insert_tab();
-            }
-            KeybindingAction::InputCopy => {
-                self.copy_prompt_to_clipboard();
-            }
+            KeybindingAction::InputTab => self.complete_prompt_or_insert_tab(),
+            KeybindingAction::InputCopy => self.copy_prompt_to_clipboard(),
             KeybindingAction::SessionPickerOpen => {
                 self.open_session_picker();
             }
@@ -441,18 +445,10 @@ impl InteractiveController {
             KeybindingAction::InputSubmit => {
                 self.submit_current_prompt().await?;
             }
-            KeybindingAction::SelectUp => {
-                self.app.move_overlay_selection_up();
-            }
-            KeybindingAction::SelectDown => {
-                self.app.move_overlay_selection_down();
-            }
-            KeybindingAction::SelectPageUp => {
-                self.app.move_overlay_selection_page_up();
-            }
-            KeybindingAction::SelectPageDown => {
-                self.app.move_overlay_selection_page_down();
-            }
+            KeybindingAction::SelectUp => self.app.move_overlay_selection_up(),
+            KeybindingAction::SelectDown => self.app.move_overlay_selection_down(),
+            KeybindingAction::SelectPageUp => self.app.move_overlay_selection_page_up(),
+            KeybindingAction::SelectPageDown => self.app.move_overlay_selection_page_down(),
             KeybindingAction::SelectConfirm => {
                 if self.app.approval_choice().is_some() {
                     if let Some(result) = self.app.confirm_approval() {
@@ -482,18 +478,10 @@ impl InteractiveController {
                     return Ok(true);
                 }
             }
-            KeybindingAction::EditorCursorUp => {
-                self.app.scroll_transcript_up(1);
-            }
-            KeybindingAction::EditorCursorDown => {
-                self.app.scroll_transcript_down(1);
-            }
-            KeybindingAction::EditorPageUp => {
-                self.app.scroll_transcript_up(8);
-            }
-            KeybindingAction::EditorPageDown => {
-                self.app.scroll_transcript_down(8);
-            }
+            KeybindingAction::EditorCursorUp => self.app.scroll_transcript_up(1),
+            KeybindingAction::EditorCursorDown => self.app.scroll_transcript_down(1),
+            KeybindingAction::EditorPageUp => self.app.scroll_transcript_up(8),
+            KeybindingAction::EditorPageDown => self.app.scroll_transcript_down(8),
             KeybindingAction::EditorCursorLeft
             | KeybindingAction::EditorCursorRight
             | KeybindingAction::EditorCursorWordLeft
@@ -507,7 +495,14 @@ impl InteractiveController {
             | KeybindingAction::EditorDeleteToLineStart
             | KeybindingAction::EditorDeleteToLineEnd
             | KeybindingAction::EditorYank
-            | KeybindingAction::EditorUndo => {
+            | KeybindingAction::EditorUndo
+            | KeybindingAction::TranscriptSelectionStart
+            | KeybindingAction::TranscriptSelectionClear
+            | KeybindingAction::TranscriptSelectionExtendUp
+            | KeybindingAction::TranscriptSelectionExtendDown
+            | KeybindingAction::TranscriptSelectionExtendPageUp
+            | KeybindingAction::TranscriptSelectionExtendPageDown
+            | KeybindingAction::TranscriptCopySelection => {
                 unreachable!("prompt edit actions are handled before overlay actions")
             }
         }
@@ -579,11 +574,46 @@ impl InteractiveController {
         true
     }
 
+    fn handle_transcript_keybinding_action(&mut self, action: KeybindingAction) -> bool {
+        match action {
+            KeybindingAction::TranscriptSelectionStart => self.app.select_visible_transcript_item(),
+            KeybindingAction::TranscriptSelectionClear => self.app.clear_transcript_selection(),
+            KeybindingAction::TranscriptSelectionExtendUp => {
+                self.app.extend_transcript_selection_up(1);
+            }
+            KeybindingAction::TranscriptSelectionExtendDown => {
+                self.app.extend_transcript_selection_down(1);
+            }
+            KeybindingAction::TranscriptSelectionExtendPageUp => {
+                self.app.extend_transcript_selection_up(8);
+            }
+            KeybindingAction::TranscriptSelectionExtendPageDown => {
+                self.app.extend_transcript_selection_down(8);
+            }
+            KeybindingAction::TranscriptCopySelection => {
+                self.copy_transcript_selection_to_clipboard();
+            }
+            _ => return false,
+        }
+        true
+    }
+
     fn copy_prompt_to_clipboard(&mut self) {
         let Some(copied) = self.app.copy_prompt_text() else {
             return;
         };
-        if let Err(error) = (self.clipboard_writer)(&copied) {
+        self.write_clipboard_text(&copied);
+    }
+
+    fn copy_transcript_selection_to_clipboard(&mut self) {
+        let Some(copied) = self.app.copy_selected_transcript_text() else {
+            return;
+        };
+        self.write_clipboard_text(&copied);
+    }
+
+    fn write_clipboard_text(&mut self, copied: &str) {
+        if let Err(error) = (self.clipboard_writer)(copied) {
             self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
                 text: format!("Clipboard copy failed: {error}"),
             });
@@ -1165,7 +1195,14 @@ impl TerminalEvents for CrosstermEvents {
 const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::InputSubmit,
     KeybindingAction::InputNewLine,
+    KeybindingAction::TranscriptCopySelection,
     KeybindingAction::InputCopy,
+    KeybindingAction::TranscriptSelectionStart,
+    KeybindingAction::TranscriptSelectionClear,
+    KeybindingAction::TranscriptSelectionExtendUp,
+    KeybindingAction::TranscriptSelectionExtendDown,
+    KeybindingAction::TranscriptSelectionExtendPageUp,
+    KeybindingAction::TranscriptSelectionExtendPageDown,
     KeybindingAction::SessionPickerOpen,
     KeybindingAction::ModelPickerOpen,
     KeybindingAction::EditorCursorLeft,
@@ -1844,7 +1881,7 @@ mod tests {
 
         controller.type_text("copy to system clipboard");
         controller
-            .handle_input_event(InputEvent::Action(KeybindingAction::InputCopy))
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
             .await
             .expect("copy action succeeds");
 
@@ -1855,6 +1892,66 @@ mod tests {
         assert_eq!(
             controller.app().copy_buffer(),
             Some("copy to system clipboard")
+        );
+    }
+
+    #[tokio::test]
+    async fn event_loop_ctrl_c_prefers_selected_transcript_region() {
+        let copied = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = std::sync::Arc::clone(&copied);
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.set_clipboard_writer(Arc::new(move |text| {
+            recorded
+                .lock()
+                .expect("record clipboard text")
+                .push(text.to_owned());
+            Ok(())
+        }));
+        controller
+            .app
+            .transcript_mut()
+            .push(neo_tui::TranscriptItem::user("selected user prompt"));
+        controller
+            .app
+            .transcript_mut()
+            .push(neo_tui::TranscriptItem::assistant(
+                "selected assistant reply",
+            ));
+        controller.type_text("prompt text stays out of clipboard");
+
+        controller
+            .handle_input_event(InputEvent::Action(
+                KeybindingAction::TranscriptSelectionStart,
+            ))
+            .await
+            .expect("selection starts");
+        controller
+            .handle_input_event(InputEvent::Action(
+                KeybindingAction::TranscriptSelectionExtendUp,
+            ))
+            .await
+            .expect("selection extends");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
+            .await
+            .expect("copy action succeeds");
+
+        assert_eq!(
+            copied.lock().expect("clipboard writes").as_slice(),
+            ["You\nselected user prompt\n\nAssistant\nselected assistant reply"]
+        );
+        assert_eq!(
+            controller.app().copy_buffer(),
+            Some("You\nselected user prompt\n\nAssistant\nselected assistant reply")
+        );
+        assert_eq!(
+            controller.app().prompt().text,
+            "prompt text stays out of clipboard"
         );
     }
 

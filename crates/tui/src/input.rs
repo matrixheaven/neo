@@ -324,6 +324,13 @@ pub enum KeybindingAction {
     InputSubmit,
     InputTab,
     InputCopy,
+    TranscriptSelectionStart,
+    TranscriptSelectionClear,
+    TranscriptSelectionExtendUp,
+    TranscriptSelectionExtendDown,
+    TranscriptSelectionExtendPageUp,
+    TranscriptSelectionExtendPageDown,
+    TranscriptCopySelection,
     SessionPickerOpen,
     SessionFork,
     ModelPickerOpen,
@@ -361,6 +368,13 @@ impl KeybindingAction {
             Self::InputSubmit => "tui.input.submit",
             Self::InputTab => "tui.input.tab",
             Self::InputCopy => "tui.input.copy",
+            Self::TranscriptSelectionStart => "tui.transcript.selection.start",
+            Self::TranscriptSelectionClear => "tui.transcript.selection.clear",
+            Self::TranscriptSelectionExtendUp => "tui.transcript.selection.extendUp",
+            Self::TranscriptSelectionExtendDown => "tui.transcript.selection.extendDown",
+            Self::TranscriptSelectionExtendPageUp => "tui.transcript.selection.extendPageUp",
+            Self::TranscriptSelectionExtendPageDown => "tui.transcript.selection.extendPageDown",
+            Self::TranscriptCopySelection => "tui.transcript.copySelection",
             Self::SessionPickerOpen => "tui.session.open",
             Self::SessionFork => "tui.session.fork",
             Self::ModelPickerOpen => "tui.model.open",
@@ -497,6 +511,15 @@ impl KeybindingsManager {
 }
 
 fn default_keybinding_definitions() -> Vec<KeybindingDefinition> {
+    let mut definitions = Vec::new();
+    definitions.extend(editor_keybinding_definitions());
+    definitions.extend(input_keybinding_definitions());
+    definitions.extend(transcript_keybinding_definitions());
+    definitions.extend(picker_keybinding_definitions());
+    definitions
+}
+
+fn editor_keybinding_definitions() -> Vec<KeybindingDefinition> {
     use KeybindingAction as Action;
 
     vec![
@@ -566,10 +589,66 @@ fn default_keybinding_definitions() -> Vec<KeybindingDefinition> {
         ),
         definition(Action::EditorYank, &["ctrl+y"], "Yank"),
         definition(Action::EditorUndo, &["ctrl+-"], "Undo"),
+    ]
+}
+
+fn input_keybinding_definitions() -> Vec<KeybindingDefinition> {
+    use KeybindingAction as Action;
+
+    vec![
         definition(Action::InputNewLine, &["shift+enter"], "Insert newline"),
         definition(Action::InputSubmit, &["enter"], "Submit input"),
         definition(Action::InputTab, &["tab"], "Tab"),
         definition(Action::InputCopy, &["ctrl+c"], "Copy selection"),
+    ]
+}
+
+fn transcript_keybinding_definitions() -> Vec<KeybindingDefinition> {
+    use KeybindingAction as Action;
+
+    vec![
+        definition(
+            Action::TranscriptSelectionStart,
+            &["ctrl+space"],
+            "Select transcript item",
+        ),
+        definition(
+            Action::TranscriptSelectionClear,
+            &["ctrl+shift+space"],
+            "Clear transcript selection",
+        ),
+        definition(
+            Action::TranscriptSelectionExtendUp,
+            &["shift+up"],
+            "Extend transcript selection up",
+        ),
+        definition(
+            Action::TranscriptSelectionExtendDown,
+            &["shift+down"],
+            "Extend transcript selection down",
+        ),
+        definition(
+            Action::TranscriptSelectionExtendPageUp,
+            &["shift+pageup"],
+            "Extend transcript selection page up",
+        ),
+        definition(
+            Action::TranscriptSelectionExtendPageDown,
+            &["shift+pagedown"],
+            "Extend transcript selection page down",
+        ),
+        definition(
+            Action::TranscriptCopySelection,
+            &["ctrl+c"],
+            "Copy transcript selection",
+        ),
+    ]
+}
+
+fn picker_keybinding_definitions() -> Vec<KeybindingDefinition> {
+    use KeybindingAction as Action;
+
+    vec![
         definition(Action::SessionPickerOpen, &["ctrl+r"], "Open sessions"),
         definition(Action::SessionFork, &["ctrl+n"], "Fork selected session"),
         definition(Action::ModelPickerOpen, &["ctrl+o"], "Open models"),
