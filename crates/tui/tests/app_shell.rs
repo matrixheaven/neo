@@ -345,6 +345,56 @@ fn app_loads_session_transcript_and_updates_label() {
 }
 
 #[test]
+fn app_shell_renders_agent_core_image_content_as_safe_metadata_summary() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let large_base64 = "a".repeat(256);
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageAppended {
+        message: neo_agent_core::AgentMessage::assistant(
+            [neo_agent_core::Content::Image {
+                mime_type: "image/png".to_owned(),
+                data: neo_agent_core::ImageRef::Url("https://example.test/cat.png".to_owned()),
+            }],
+            Vec::new(),
+            neo_agent_core::StopReason::EndTurn,
+        ),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageAppended {
+        message: neo_agent_core::AgentMessage::assistant(
+            [
+                neo_agent_core::Content::text("see attached"),
+                neo_agent_core::Content::Image {
+                    mime_type: "image/jpeg".to_owned(),
+                    data: neo_agent_core::ImageRef::Base64(large_base64.clone()),
+                },
+            ],
+            Vec::new(),
+            neo_agent_core::StopReason::EndTurn,
+        ),
+    });
+
+    assert_eq!(app.transcript().items().len(), 2);
+    assert!(matches!(
+        &app.transcript().items()[0],
+        neo_tui::TranscriptItem::Assistant { content }
+            if content == "[image: image/png url=https://example.test/cat.png]"
+    ));
+    assert!(matches!(
+        &app.transcript().items()[1],
+        neo_tui::TranscriptItem::Assistant { content }
+            if content.contains("see attached")
+                && content.contains("[image: image/jpeg data=256 bytes]")
+                && !content.contains(&large_base64)
+    ));
+
+    let rendered = render_app(80, 12, &app).join("\n");
+    assert!(rendered.contains("[image: image/png url=https://example.test/cat.png]"));
+    assert!(rendered.contains("see attached"));
+    assert!(rendered.contains("[image: image/jpeg data=256 bytes]"));
+    assert!(!rendered.contains(&large_base64));
+}
+
+#[test]
 fn modal_stack_tracks_focus_and_restores_previous_overlay() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
 

@@ -46,6 +46,9 @@ Target: `crates/tui`.
   and only falls back to abort when the runtime task does not finish.
 - Streamed assistant thinking events from `neo-agent-core` are reduced into a
   visible TUI notice while final assistant text remains a separate answer item.
+- Agent message image content is preserved in the transcript as stable text
+  metadata summaries: URL images render their URL, and base64 images render
+  MIME type plus payload size instead of raw image bytes.
 - Prompt Tab completion is backed by real local project data. `neo-tui`
   exposes prompt completion prefix/replacement primitives plus a completion
   picker overlay, and `neo-agent` reads matching files/directories from
@@ -61,9 +64,9 @@ Target: `crates/tui`.
 
 ## Remaining lower-priority gaps
 
-- The Rust crate does not implement image protocols, richer provider or command
-  autocomplete beyond local slash prompt templates, OS/terminal clipboard
-  integration, or the full TypeScript
+- The Rust crate does not implement Kitty/Sixel/OSC image protocols, richer
+  provider or command autocomplete beyond local slash prompt templates,
+  OS/terminal clipboard integration, or the full TypeScript
   renderer's advanced diff affordances beyond width-safe unified diff line
   classification and coloring.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.

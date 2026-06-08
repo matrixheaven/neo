@@ -1,6 +1,6 @@
 use std::{fmt::Write as _, ops::Range};
 
-use neo_agent_core::{AgentEvent, AgentMessage, Content};
+use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
@@ -742,9 +742,26 @@ fn message_text(message: &AgentMessage) -> String {
 
     content
         .iter()
-        .filter_map(Content::as_text)
-        .collect::<Vec<_>>()
-        .join("")
+        .filter_map(content_text)
+        .fold(String::new(), |mut message, content| {
+            message.push_str(&content);
+            message
+        })
+}
+
+fn content_text(content: &Content) -> Option<String> {
+    match content {
+        Content::Text { text } => Some(text.clone()),
+        Content::Thinking { .. } => None,
+        Content::Image { mime_type, data } => Some(image_summary(mime_type, data)),
+    }
+}
+
+fn image_summary(mime_type: &str, data: &ImageRef) -> String {
+    match data {
+        ImageRef::Url(url) => format!("[image: {mime_type} url={url}]"),
+        ImageRef::Base64(data) => format!("[image: {mime_type} data={} bytes]", data.len()),
+    }
 }
 
 fn tool_result_detail(result: &neo_agent_core::ToolResult) -> String {
