@@ -155,6 +155,89 @@ fn print_merges_piped_stdin_with_cli_prompt() {
 }
 
 #[test]
+fn print_expands_workspace_relative_file_prompt_args() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join("docs")).expect("create docs");
+    std::fs::write(
+        temp.path().join("docs/context.txt"),
+        "workspace context\nsecond line\n",
+    )
+    .expect("write prompt file");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-file", "expanded")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "@docs/context.txt", "summarize"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "expanded\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "workspace context\nsecond line\nsummarize"
+    );
+}
+
+#[test]
+fn run_expands_workspace_relative_file_prompt_args() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join("docs")).expect("create docs");
+    std::fs::write(temp.path().join("docs/context.txt"), "run context\n")
+        .expect("write prompt file");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-run-file", "jsonl file")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["run", "@docs/context.txt", "continue"]);
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("\"TextDelta\":{\"turn\":1,\"text\":\"jsonl file\"}"));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "run context\ncontinue"
+    );
+}
+
+#[test]
+fn print_rejects_prompt_file_args_outside_workspace() {
+    let temp = TempDir::new().expect("tempdir");
+    let outside = TempDir::new().expect("outside tempdir");
+    std::fs::write(outside.path().join("escape.txt"), "outside context\n")
+        .expect("write outside prompt file");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg("http://127.0.0.1:9")
+        .args([
+            "print",
+            &format!("@{}", outside.path().join("escape.txt").display()),
+            "summarize",
+        ]);
+
+    let output = command.output().expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
+    assert!(stderr.contains("prompt file must stay inside project directory"));
+}
+
+#[test]
 fn print_uses_provider_specific_api_base_from_project_config() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse(

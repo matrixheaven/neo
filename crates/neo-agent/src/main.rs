@@ -8,10 +8,12 @@ mod skill_commands;
 
 use std::{
     io::{self, IsTerminal as _, Read as _},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use clap::Parser;
+
+use anyhow::Context as _;
 
 use crate::{
     cli::{
@@ -37,11 +39,11 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
 
     match cli.command {
         Some(Command::Print { prompt }) => {
-            let prompt = prompt_with_piped_stdin(prompt)?;
+            let prompt = prepare_prompt(prompt, &config)?;
             modes::print::execute(&prompt, &config).await
         }
         Some(Command::Run { prompt }) => {
-            let prompt = prompt_with_piped_stdin(prompt)?;
+            let prompt = prepare_prompt(prompt, &config)?;
             modes::run::execute(&prompt, &config).await
         }
         Some(Command::Resume { session_id }) => modes::run::resume(&session_id, &config).await,
@@ -96,6 +98,75 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
             .await?
             .unwrap_or_default()),
     }
+}
+
+fn prepare_prompt(prompt: Vec<String>, config: &AppConfig) -> anyhow::Result<Vec<String>> {
+    prompt_with_piped_stdin(expand_prompt_files(prompt, &config.project_dir)?)
+}
+
+fn expand_prompt_files(prompt: Vec<String>, project_dir: &Path) -> anyhow::Result<Vec<String>> {
+    if prompt.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut blocks = Vec::new();
+    let mut text = Vec::new();
+    for arg in prompt {
+        let Some(path) = arg.strip_prefix('@').filter(|path| !path.is_empty()) else {
+            text.push(arg);
+            continue;
+        };
+        if !text.is_empty() {
+            blocks.push(std::mem::take(&mut text).join(" "));
+        }
+        let content = read_prompt_file(project_dir, Path::new(path))?;
+        if !content.is_empty() {
+            blocks.push(content);
+        }
+    }
+    if !text.is_empty() {
+        blocks.push(text.join(" "));
+    }
+    if blocks.is_empty() {
+        Ok(Vec::new())
+    } else {
+        Ok(vec![blocks.join("\n")])
+    }
+}
+
+fn read_prompt_file(project_dir: &Path, path: &Path) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        !path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir)),
+        "prompt file must stay inside project directory"
+    );
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_dir.join(path)
+    };
+    let project_dir = project_dir.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve project directory {}",
+            project_dir.display()
+        )
+    })?;
+    let candidate = candidate
+        .canonicalize()
+        .with_context(|| format!("failed to resolve prompt file {}", candidate.display()))?;
+    anyhow::ensure!(
+        candidate.starts_with(&project_dir),
+        "prompt file must stay inside project directory"
+    );
+    anyhow::ensure!(
+        candidate.is_file(),
+        "prompt file must be a regular file: {}",
+        candidate.display()
+    );
+    std::fs::read_to_string(&candidate)
+        .map(|content| content.trim_end_matches(['\r', '\n']).to_owned())
+        .with_context(|| format!("failed to read prompt file {}", candidate.display()))
 }
 
 fn prompt_with_piped_stdin(prompt: Vec<String>) -> anyhow::Result<Vec<String>> {

@@ -48,10 +48,10 @@
   transport adapters. `mcp resources <server-id> watch <uri>` subscribes to a
   stdio resource or a remote HTTP/SSE resource backed by a live SSE subscribe
   response, prints real update notifications, and unsubscribes.
-- `print` and `run` merge non-TTY piped stdin with CLI prompt arguments before
-  sending the provider request, then discover enabled project MCP servers with
-  `transport = "stdio"`, `transport = "http"`, or `transport = "sse"` and
-  register their tools in the runtime tool registry.
+- `print` and `run` merge non-TTY piped stdin with CLI prompt arguments, expand
+  project-relative `@file` text prompt arguments, then discover enabled project
+  MCP servers with `transport = "stdio"`, `transport = "http"`, or
+  `transport = "sse"` and register their tools in the runtime tool registry.
 - RPC mode supports `get_state`, `prompt`, JSONL-backed `get_messages`, and
   local `sessions.list` / `sessions.tree` metadata payloads; state reports real
   project/session counts and omits unsupported streaming state.

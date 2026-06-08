@@ -29,6 +29,13 @@ configuration error instead of returning a synthetic response.
 printf 'diff context\n' | cargo run -p neo-agent -- print "summarize this"
 ```
 
+Prompt arguments prefixed with `@` read project-relative text files before the
+turn is sent to the provider:
+
+```bash
+cargo run -p neo-agent -- print @docs/context.txt "summarize this"
+```
+
 Inspect the current project config view:
 
 ```bash
