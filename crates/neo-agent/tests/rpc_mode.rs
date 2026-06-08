@@ -206,6 +206,113 @@ fn rpc_get_messages_reports_missing_session_as_invalid_params() {
 }
 
 #[test]
+fn rpc_sessions_list_returns_local_session_metadata() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    std::fs::write(sessions.join("alpha.jsonl"), "{}\n").expect("write parent session");
+    std::fs::write(sessions.join("alpha-fork-1.jsonl"), "{}\n").expect("write child session");
+    std::fs::write(
+        sessions.join("sessions.metadata.json"),
+        json!({
+            "sessions": {
+                "alpha": {
+                    "name": "Main thread",
+                    "summary": "Local branch summary"
+                },
+                "alpha-fork-1": {
+                    "name": "Parser branch",
+                    "parent_id": "alpha"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write metadata");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"sessions-list","method":"sessions.list","params":{}}"#,
+    );
+
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "response");
+    assert_eq!(messages[0]["id"], "sessions-list");
+    let sessions = messages[0]["result"]["sessions"]
+        .as_array()
+        .expect("sessions array");
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0]["id"], "alpha");
+    assert_eq!(sessions[0]["name"], "Main thread");
+    assert_eq!(sessions[0]["summary"], "Local branch summary");
+    assert!(sessions[0]["parent_id"].is_null());
+    assert_eq!(sessions[0]["children"], json!(["alpha-fork-1"]));
+    assert_eq!(sessions[1]["id"], "alpha-fork-1");
+    assert_eq!(sessions[1]["name"], "Parser branch");
+    assert_eq!(sessions[1]["parent_id"], "alpha");
+}
+
+#[test]
+fn rpc_sessions_tree_returns_depth_ordered_local_session_tree() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    std::fs::write(sessions.join("alpha.jsonl"), "{}\n").expect("write parent session");
+    std::fs::write(sessions.join("alpha-fork-1.jsonl"), "{}\n").expect("write child session");
+    std::fs::write(sessions.join("orphan.jsonl"), "{}\n").expect("write orphan session");
+    std::fs::write(
+        sessions.join("sessions.metadata.json"),
+        json!({
+            "sessions": {
+                "alpha": {
+                    "name": "Main thread"
+                },
+                "alpha-fork-1": {
+                    "name": "Parser branch",
+                    "summary": "Investigates parser state",
+                    "parent_id": "alpha"
+                },
+                "orphan": {
+                    "parent_id": "missing-parent"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write metadata");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"sessions-tree","method":"sessions.tree","params":{}}"#,
+    );
+
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "response");
+    assert_eq!(messages[0]["id"], "sessions-tree");
+    let tree = messages[0]["result"]["tree"]
+        .as_array()
+        .expect("tree array");
+    let ids = tree
+        .iter()
+        .map(|record| record["record"]["id"].as_str().expect("id"))
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["alpha", "alpha-fork-1", "orphan"]);
+    assert_eq!(tree[0]["depth"], 0);
+    assert_eq!(tree[0]["record"]["name"], "Main thread");
+    assert_eq!(tree[1]["depth"], 1);
+    assert_eq!(tree[1]["record"]["parent_id"], "alpha");
+    assert_eq!(tree[1]["record"]["summary"], "Investigates parser state");
+    assert_eq!(tree[2]["depth"], 0);
+    assert_eq!(tree[2]["record"]["parent_id"], "missing-parent");
+}
+
+#[test]
 fn rpc_prompt_streams_agent_events_and_returns_assistant_text() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-rpc", "rpc answer")]);

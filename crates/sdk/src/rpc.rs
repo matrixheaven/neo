@@ -114,6 +114,35 @@ pub enum RpcErrorCode {
     InternalError,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RpcSessionRecord {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub children: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RpcSessionTreeRecord {
+    pub depth: usize,
+    pub record: RpcSessionRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RpcSessionsListResult {
+    pub sessions: Vec<RpcSessionRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RpcSessionsTreeResult {
+    pub tree: Vec<RpcSessionTreeRecord>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RpcCodecError {
     #[error("JSONL frame is empty")]

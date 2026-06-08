@@ -49,9 +49,9 @@
 - `print` and `run` discover enabled project MCP servers with
   `transport = "stdio"`, `transport = "http"`, or `transport = "sse"` and
   register their tools in the runtime tool registry.
-- RPC mode supports `get_state`, `prompt`, and JSONL-backed `get_messages`;
-  state reports real project/session counts and omits unsupported streaming
-  state.
+- RPC mode supports `get_state`, `prompt`, JSONL-backed `get_messages`, and
+  local `sessions.list` / `sessions.tree` metadata payloads; state reports real
+  project/session counts and omits unsupported streaming state.
 - Interactive mode has a testable controller and a live crossterm/raw-mode TTY
   loop slice. TTY execution renders `neo-tui`, accepts text input, submits
   prompts through a streaming runtime driver, redraws on terminal resize,

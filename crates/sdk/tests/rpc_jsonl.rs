@@ -1,6 +1,6 @@
 use neo_sdk::{
     JsonlCodec, RpcCodecError, RpcError, RpcErrorCode, RpcMessage, RpcNotification, RpcRequest,
-    RpcResponse,
+    RpcResponse, RpcSessionRecord, RpcSessionTreeRecord,
 };
 use serde_json::json;
 
@@ -76,4 +76,32 @@ fn parse_error_can_be_returned_as_structured_rpc_failure() {
     );
     assert!(line.contains("\"error\""));
     assert!(line.contains("\"code\":\"parse_error\""));
+}
+
+#[test]
+fn session_rpc_records_have_stable_json_shape() {
+    let record = RpcSessionRecord {
+        id: "alpha".to_owned(),
+        name: Some("Main thread".to_owned()),
+        summary: Some("Local branch summary".to_owned()),
+        parent_id: None,
+        children: vec!["alpha-fork-1".to_owned()],
+    };
+    let tree_record = RpcSessionTreeRecord {
+        depth: 1,
+        record: record.clone(),
+    };
+
+    let value = serde_json::to_value(&tree_record).expect("serialize tree record");
+
+    assert_eq!(value["depth"], 1);
+    assert_eq!(value["record"]["id"], "alpha");
+    assert_eq!(value["record"]["name"], "Main thread");
+    assert_eq!(value["record"]["summary"], "Local branch summary");
+    assert!(value["record"]["parent_id"].is_null());
+    assert_eq!(value["record"]["children"], json!(["alpha-fork-1"]));
+    assert_eq!(
+        serde_json::from_value::<RpcSessionTreeRecord>(value).expect("deserialize tree record"),
+        tree_record
+    );
 }

@@ -106,5 +106,22 @@ conversation with `neo-sdk`'s safe Markdown renderer.
 messages are omitted from the active message list, while the stored algorithmic
 summary is displayed separately.
 
+## RPC Surface
+
+`neo rpc` accepts JSONL request frames for local session clients:
+
+```json
+{"type":"request","id":"sessions","method":"sessions.list","params":{}}
+{"type":"request","id":"tree","method":"sessions.tree","params":{}}
+{"type":"request","id":"messages","method":"get_messages","params":{"session_id":"alpha"}}
+```
+
+`sessions.list` returns typed local metadata records with `id`, optional
+`name`, optional `summary`, optional `parent_id`, and `children`.
+`sessions.tree` returns the same records in local tree order with a `depth`
+field. These RPC payloads read only local `sessions_dir` JSONL and
+`sessions.metadata.json`; they do not create hosted continuation or share
+records.
+
 See [examples/rust/session_replay.rs](../examples/rust/session_replay.rs) for a
 JSONL replay snippet.

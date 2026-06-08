@@ -1,9 +1,10 @@
 use std::io::{self, BufRead};
 
 use anyhow::Context;
-use neo_agent_core::session::JsonlSessionReader;
+use neo_agent_core::session::{JsonlSessionReader, SessionMetadataStore, SessionRecord};
 use neo_sdk::{
     JsonlCodec, RpcError, RpcErrorCode, RpcMessage, RpcNotification, RpcRequest, RpcResponse,
+    RpcSessionRecord, RpcSessionTreeRecord, RpcSessionsListResult, RpcSessionsTreeResult,
 };
 use serde_json::{Value, json};
 
@@ -58,6 +59,8 @@ async fn handle_request(
             &RpcMessage::Response(RpcResponse::success(request.id, state_payload(config))),
         ),
         "get_messages" => handle_get_messages(config, request, output).await,
+        "sessions.list" => handle_sessions_list(config, request, output),
+        "sessions.tree" => handle_sessions_tree(config, request, output),
         "prompt" => handle_prompt(config, request, output).await,
         unknown => push_rpc_message(
             output,
@@ -71,6 +74,69 @@ async fn handle_request(
             )),
         ),
     }
+}
+
+fn handle_sessions_list(
+    config: &AppConfig,
+    request: RpcRequest,
+    output: &mut String,
+) -> anyhow::Result<()> {
+    let sessions = match session_store(config).list() {
+        Ok(sessions) => sessions,
+        Err(err) => {
+            return push_rpc_message(
+                output,
+                &RpcMessage::Response(RpcResponse::failure(
+                    request.id,
+                    RpcError::new(RpcErrorCode::InternalError, err.to_string(), None),
+                )),
+            );
+        }
+    };
+
+    push_rpc_message(
+        output,
+        &RpcMessage::Response(RpcResponse::success(
+            request.id,
+            serde_json::to_value(RpcSessionsListResult {
+                sessions: sessions.into_iter().map(rpc_session_record).collect(),
+            })?,
+        )),
+    )
+}
+
+fn handle_sessions_tree(
+    config: &AppConfig,
+    request: RpcRequest,
+    output: &mut String,
+) -> anyhow::Result<()> {
+    let sessions = match session_store(config).list() {
+        Ok(sessions) => sessions,
+        Err(err) => {
+            return push_rpc_message(
+                output,
+                &RpcMessage::Response(RpcResponse::failure(
+                    request.id,
+                    RpcError::new(RpcErrorCode::InternalError, err.to_string(), None),
+                )),
+            );
+        }
+    };
+    let tree = session_commands::tree_order_sessions(&sessions)
+        .into_iter()
+        .map(|tree_record| RpcSessionTreeRecord {
+            depth: tree_record.depth,
+            record: rpc_session_record(tree_record.record),
+        })
+        .collect();
+
+    push_rpc_message(
+        output,
+        &RpcMessage::Response(RpcResponse::success(
+            request.id,
+            serde_json::to_value(RpcSessionsTreeResult { tree })?,
+        )),
+    )
 }
 
 async fn handle_get_messages(
@@ -183,6 +249,20 @@ async fn handle_prompt(
             }),
         )),
     )
+}
+
+fn session_store(config: &AppConfig) -> SessionMetadataStore {
+    SessionMetadataStore::new(&config.sessions_dir)
+}
+
+fn rpc_session_record(record: SessionRecord) -> RpcSessionRecord {
+    RpcSessionRecord {
+        id: record.id,
+        name: record.name,
+        summary: record.summary,
+        parent_id: record.parent_id,
+        children: record.children,
+    }
 }
 
 fn state_payload(config: &AppConfig) -> Value {

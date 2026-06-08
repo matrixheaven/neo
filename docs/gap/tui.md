@@ -13,7 +13,8 @@ Target: `crates/tui`.
 - Rendering helpers now expose ANSI/OSC escape-aware terminal visible-width
   measurement, width-safe truncation with optional padding, and wrapping that
   preserves blank lines, splits long tokens, and does not split complete escape
-  sequences.
+  sequences. Wrapped continuation lines rehydrate active SGR styles so terminal
+  color/modifier state survives line boundaries.
 - Rendering tests cover prompt, transcript, status, modal, select-list, truncation, wrapping, and keybinding behavior.
 - `neo-agent` now owns a crossterm/raw-mode interactive loop slice that renders
   `NeoTuiApp` in a real terminal and uses `neo-tui` input events for text input,
@@ -48,7 +49,6 @@ Target: `crates/tui`.
 ## Remaining lower-priority gaps
 
 - The Rust crate does not implement the full TypeScript terminal diff renderer,
-  image protocols, active-style rehydration across wrapped lines, richer
-  provider or command autocomplete, stdin buffering, or OS/terminal clipboard
-  integration.
+  image protocols, richer provider or command autocomplete, stdin buffering, or
+  OS/terminal clipboard integration.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.

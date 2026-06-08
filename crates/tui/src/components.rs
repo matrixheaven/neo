@@ -90,11 +90,13 @@ pub fn wrap_width(text: &str, max_width: usize) -> Vec<String> {
 fn wrap_single_line(text: &str, max_width: usize, lines: &mut Vec<String>) {
     let mut current = String::new();
     let mut current_width = 0;
+    let mut active_sgr = String::new();
     let mut index = 0;
 
     while index < text.len() {
         if let Some(sequence) = ansi_escape_sequence(text, index) {
             current.push_str(sequence);
+            update_active_sgr(sequence, &mut active_sgr);
             index += sequence.len();
             continue;
         }
@@ -106,6 +108,7 @@ fn wrap_single_line(text: &str, max_width: usize, lines: &mut Vec<String>) {
         let character_width = character.width().unwrap_or(0);
         if current_width > 0 && current_width + character_width > max_width {
             lines.push(std::mem::take(&mut current));
+            current.push_str(&active_sgr);
             current_width = 0;
         }
 
@@ -117,6 +120,52 @@ fn wrap_single_line(text: &str, max_width: usize, lines: &mut Vec<String>) {
     if !current.is_empty() {
         lines.push(current);
     }
+}
+
+fn update_active_sgr(sequence: &str, active_sgr: &mut String) {
+    if !sequence.starts_with("\x1b[") || !sequence.ends_with('m') {
+        return;
+    }
+
+    let action = sgr_style_action(sequence);
+    if action.resets {
+        active_sgr.clear();
+    }
+    if action.sets_style {
+        active_sgr.push_str(sequence);
+    }
+}
+
+struct SgrStyleAction {
+    resets: bool,
+    sets_style: bool,
+}
+
+fn sgr_style_action(sequence: &str) -> SgrStyleAction {
+    let Some(parameters) = sequence
+        .strip_prefix("\x1b[")
+        .and_then(|sequence| sequence.strip_suffix('m'))
+    else {
+        return SgrStyleAction {
+            resets: false,
+            sets_style: false,
+        };
+    };
+
+    let mut action = SgrStyleAction {
+        resets: parameters.is_empty(),
+        sets_style: false,
+    };
+
+    for parameter in parameters.split(';') {
+        if parameter == "0" {
+            action.resets = true;
+        } else if !parameter.is_empty() {
+            action.sets_style = true;
+        }
+    }
+
+    action
 }
 
 pub struct TranscriptWidget<'a> {
