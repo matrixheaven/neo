@@ -158,6 +158,7 @@ fn model_registry_loads_pi_models_json_custom_models() {
 {
   "providers": {
     "ollama": {
+      "name": "Ollama Local",
       "api": "openai-completions",
       "models": [
         {
@@ -189,15 +190,109 @@ fn model_registry_loads_pi_models_json_custom_models() {
     assert!(!llama.capabilities.images);
     assert!(!llama.capabilities.reasoning);
     assert_eq!(llama.capabilities.max_context_tokens, Some(128_000));
+    let llama_display = registry
+        .display_metadata("ollama", "llama3.1:8b")
+        .expect("llama display metadata");
+    assert_eq!(llama_display.provider_name.as_deref(), Some("Ollama Local"));
+    assert_eq!(llama_display.model_name.as_deref(), Some("Llama 3.1 8B"));
 
     let vision_model = registry.get("ollama", "llava:latest").expect("llava");
     assert_eq!(vision_model.api, ApiKind::OpenAiCompatible);
     assert!(vision_model.capabilities.images);
     assert!(vision_model.capabilities.reasoning);
     assert_eq!(vision_model.capabilities.max_context_tokens, Some(65_536));
+    let vision_display = registry
+        .display_metadata("ollama", "llava:latest")
+        .expect("llava display metadata");
+    assert_eq!(
+        vision_display.provider_name.as_deref(),
+        Some("Ollama Local")
+    );
+    assert_eq!(vision_display.model_name, None);
     assert_eq!(
         registry.default_model().map(|model| model.model.as_str()),
         Some("llama3.1:8b")
+    );
+}
+
+#[test]
+fn model_registry_replaces_pi_display_metadata_with_native_catalog_model() {
+    let mut registry = ModelRegistry::new();
+
+    registry
+        .load_catalog_str(
+            r#"
+{
+  "providers": {
+    "ollama": {
+      "name": "Ollama Local",
+      "api": "openai-completions",
+      "models": [
+        { "id": "llama3.1:8b", "name": "Llama 3.1 8B" }
+      ]
+    }
+  }
+}
+"#,
+            "pi models.json",
+        )
+        .expect("load pi models.json");
+    assert!(registry.display_metadata("ollama", "llama3.1:8b").is_some());
+
+    registry
+        .load_catalog_str(
+            r#"
+{
+  "models": [
+    {
+      "provider": "ollama",
+      "model": "llama3.1:8b",
+      "api": "OpenAiCompatible",
+      "capabilities": {
+        "streaming": true,
+        "tools": true,
+        "images": false,
+        "reasoning": false,
+        "embeddings": false
+      }
+    }
+  ]
+}
+"#,
+            "native catalog",
+        )
+        .expect("load native catalog");
+
+    assert_eq!(registry.display_metadata("ollama", "llama3.1:8b"), None);
+}
+
+#[test]
+fn model_registry_rejects_non_string_pi_display_metadata() {
+    let mut registry = ModelRegistry::new();
+
+    let error = registry
+        .load_catalog_str(
+            r#"
+{
+  "providers": {
+    "ollama": {
+      "name": { "label": "Ollama Local" },
+      "api": "openai-completions",
+      "models": [
+        { "id": "llama3.1:8b", "name": "Llama 3.1 8B" }
+      ]
+    }
+  }
+}
+"#,
+            "pi models.json",
+        )
+        .expect_err("non-string display metadata should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("display metadata name must be a non-empty string")
     );
 }
 

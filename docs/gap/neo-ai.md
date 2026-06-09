@@ -50,11 +50,12 @@ unsupported surface area until the Rust contracts exist.
   `crates/ai/src/providers` implement network requests and production resolver
   support.
 - Pi `models.json` pricing metadata, generated catalog sources,
-  provider-metadata migration, and provider-native model override formats
-  remain future work. Neo provider-specific base URLs and API key env names are
-  available through `neo-agent` config. Pi catalog import rejects
-  request-affecting provider/model metadata until those fields have explicit
-  Neo runtime contracts.
+  request-affecting provider-metadata migration, and provider-native model
+  override formats remain future work. Neo provider-specific base URLs and API
+  key env names are available through `neo-agent` config. Pi catalog import
+  preserves provider/model `name` as display-only metadata, but rejects
+  request-affecting provider/model metadata until those fields have explicit Neo
+  runtime contracts.
 - Keep provider credentials environment-only for now; auth-file and OAuth
   flows are future work.
 - Provider-native reasoning streams are normalized for OpenAI Responses,

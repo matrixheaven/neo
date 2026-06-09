@@ -183,8 +183,9 @@ fields such as `baseUrl`, `apiKey`, `headers`, `authHeader`, `compat`, and
 `modelOverrides`, plus model fields such as `baseUrl`, `cost`, `maxTokens`,
 `headers`, `compat`, and `thinkingLevelMap`, must be represented through
 explicit Neo provider config or future Neo runtime fields before they can be
-accepted. Pure display metadata such as `name` is allowed and ignored by the
-current `ModelSpec` subset.
+accepted. Pure display metadata such as provider/model `name` is preserved as
+`ModelRegistry` display metadata and shown by `neo models list`; it is not part
+of `ModelSpec` and is never sent to provider request payloads.
 
 ## Test Provider
 

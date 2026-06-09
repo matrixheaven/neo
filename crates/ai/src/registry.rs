@@ -15,6 +15,7 @@ const PI_DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
 #[derive(Debug, Clone, Default)]
 pub struct ModelRegistry {
     models: Vec<ModelSpec>,
+    display_metadata: BTreeMap<(String, String), ModelDisplayMetadata>,
     default: Option<(String, String)>,
 }
 
@@ -23,6 +24,7 @@ impl ModelRegistry {
     pub const fn new() -> Self {
         Self {
             models: Vec::new(),
+            display_metadata: BTreeMap::new(),
             default: None,
         }
     }
@@ -106,6 +108,7 @@ impl ModelRegistry {
         }
 
         let mut models = Vec::new();
+        let mut display_metadata = BTreeMap::new();
         for (provider, config) in catalog.providers {
             let provider = provider.trim().to_owned();
             if provider.is_empty() {
@@ -114,13 +117,18 @@ impl ModelRegistry {
                 )));
             }
             validate_pi_provider_metadata(label, &provider, &config.metadata)?;
+            let provider_name = string_metadata(&config.metadata, "name")?;
             for model in config.models {
-                models.push(pi_model_spec(
-                    label,
-                    &provider,
-                    config.api.as_ref(),
-                    &model,
-                )?);
+                let spec = pi_model_spec(label, &provider, config.api.as_ref(), &model)?;
+                let model_name = string_metadata(&model.metadata, "name")?;
+                display_metadata.insert(
+                    model_key(&spec),
+                    ModelDisplayMetadata {
+                        provider_name: provider_name.clone(),
+                        model_name,
+                    },
+                );
+                models.push(spec);
             }
         }
         if models.is_empty() {
@@ -133,12 +141,16 @@ impl ModelRegistry {
         for model in models {
             candidate.register(model);
         }
+        for (key, metadata) in display_metadata {
+            candidate.display_metadata.insert(key, metadata);
+        }
         *self = candidate;
         Ok(())
     }
 
     pub fn register(&mut self, model: ModelSpec) {
         let key = model_key(&model);
+        self.display_metadata.remove(&key);
         if self.default.is_none() {
             self.default = Some(key.clone());
         }
@@ -171,6 +183,18 @@ impl ModelRegistry {
         let (provider, model) = self.default.as_ref()?;
         self.get(provider, model)
     }
+
+    #[must_use]
+    pub fn display_metadata(&self, provider: &str, model: &str) -> Option<&ModelDisplayMetadata> {
+        self.display_metadata
+            .get(&(provider.to_owned(), model.to_owned()))
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelDisplayMetadata {
+    pub provider_name: Option<String>,
+    pub model_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -335,6 +359,25 @@ fn validate_pi_model_metadata(
 
 fn is_allowed_pi_model_metadata(field: &str) -> bool {
     matches!(field, "name")
+}
+
+fn string_metadata(
+    metadata: &BTreeMap<String, Value>,
+    field: &str,
+) -> Result<Option<String>, AiError> {
+    metadata.get(field).map_or(Ok(None), |value| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .map(Some)
+            .ok_or_else(|| {
+                AiError::Configuration(format!(
+                    "pi models.json display metadata {field} must be a non-empty string"
+                ))
+            })
+    })
 }
 
 fn validate_catalog_model(label: &str, model: &ModelSpec) -> Result<(), AiError> {

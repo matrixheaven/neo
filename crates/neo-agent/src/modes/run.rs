@@ -536,7 +536,7 @@ pub fn list_models_filtered(config: &AppConfig, search: Option<&str>) -> anyhow:
     let listed_models = models
         .list()
         .into_iter()
-        .filter(|model| model_matches_search(model, search))
+        .filter(|model| model_matches_search(&models, model, search))
         .collect::<Vec<_>>();
     if let Some(search) = search
         && listed_models.is_empty()
@@ -559,9 +559,12 @@ pub fn list_models_filtered(config: &AppConfig, search: Option<&str>) -> anyhow:
             } else {
                 ""
             };
+        let display = model_display_suffix(&models, &model)
+            .map(|display| format!(" - {display}"))
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            "- {}/{} ({:?}{marker})",
+            "- {}/{} ({:?}{marker}){display}",
             model.provider.0, model.model, model.api
         );
     }
@@ -581,12 +584,26 @@ pub fn list_models_filtered(config: &AppConfig, search: Option<&str>) -> anyhow:
     Ok(out)
 }
 
-fn model_matches_search(model: &ModelSpec, search: Option<&str>) -> bool {
+fn model_matches_search(registry: &ModelRegistry, model: &ModelSpec, search: Option<&str>) -> bool {
     let Some(search) = search else {
         return true;
     };
-    let haystack = format!("{} {}", model.provider.0, model.model);
+    let display = model_display_suffix(registry, model).unwrap_or_default();
+    let haystack = format!("{} {} {}", model.provider.0, model.model, display);
     fuzzy_match(&haystack, search)
+}
+
+fn model_display_suffix(registry: &ModelRegistry, model: &ModelSpec) -> Option<String> {
+    let metadata = registry.display_metadata(&model.provider.0, &model.model)?;
+    match (
+        metadata.provider_name.as_deref(),
+        metadata.model_name.as_deref(),
+    ) {
+        (Some(provider), Some(model)) => Some(format!("{provider} / {model}")),
+        (Some(provider), None) => Some(provider.to_owned()),
+        (None, Some(model)) => Some(model.to_owned()),
+        (None, None) => None,
+    }
 }
 
 fn fuzzy_match(haystack: &str, needle: &str) -> bool {

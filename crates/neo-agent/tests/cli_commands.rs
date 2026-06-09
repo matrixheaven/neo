@@ -1685,6 +1685,56 @@ model_catalogs = [".neo/models.json"]
 }
 
 #[test]
+fn models_list_renders_pi_catalog_display_names() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        "model_catalogs = [\".neo/pi-models.json\"]\n",
+    )
+    .expect("write config");
+    fs::write(
+        temp.path().join(".neo/pi-models.json"),
+        r#"
+{
+  "providers": {
+    "ollama": {
+      "name": "Ollama Local",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "llama3.1:8b",
+          "name": "Llama 3.1 8B",
+          "input": ["text"],
+          "contextWindow": 128000
+        }
+      ]
+    }
+  }
+}
+"#,
+    )
+    .expect("write pi model catalog");
+
+    let mut models = neo();
+    models.current_dir(temp.path()).args(["models", "list"]);
+    let stdout = run(models);
+
+    assert!(stdout.contains("ollama/llama3.1:8b"));
+    assert!(stdout.contains("Ollama Local / Llama 3.1 8B"));
+
+    let mut filtered = neo();
+    filtered
+        .current_dir(temp.path())
+        .args(["--list-models", "Llama 3.1"]);
+    let stdout = run(filtered);
+
+    assert!(stdout.contains("ollama/llama3.1:8b"));
+    assert!(stdout.contains("Llama 3.1 8B"));
+    assert!(!stdout.contains("openai/gpt-4.1"));
+}
+
+#[test]
 fn models_list_applies_provider_specific_api_key_env_status() {
     let temp = TempDir::new().expect("tempdir");
     fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
