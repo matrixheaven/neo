@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fmt::Write as _, path::Path, sync::Arc};
 
 use anyhow::Context;
 use futures::StreamExt;
-use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter};
+use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionMetadataStore};
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, CompactionSettings, Content,
     McpHttpConfig, McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter,
@@ -24,12 +24,14 @@ pub async fn execute(
     config: &AppConfig,
     output: RunOutput,
     session_target: Option<SessionTarget<'_>>,
+    session_name: Option<&str>,
 ) -> anyhow::Result<String> {
     let turn = if let Some(session_target) = session_target {
         run_prompt_with_session_target(session_target, prompt, config).await?
     } else {
         run_prompt(prompt, config).await?
     };
+    apply_session_name(config, &turn.session_id, session_name)?;
     if matches!(output, RunOutput::Json) {
         return stable_json_output(&turn, config);
     }
@@ -827,6 +829,20 @@ pub async fn run_prompt_with_session_target(
             run_prompt_in_session(&session_id, prompt, config).await
         }
     }
+}
+
+pub fn apply_session_name(
+    config: &AppConfig,
+    session_id: &str,
+    session_name: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(session_name) = session_name else {
+        return Ok(());
+    };
+    SessionMetadataStore::new(&config.sessions_dir)
+        .rename(session_id, session_name.to_owned())
+        .with_context(|| format!("failed to name session {session_id}"))?;
+    Ok(())
 }
 
 async fn run_prompt_with_exact_session_id(

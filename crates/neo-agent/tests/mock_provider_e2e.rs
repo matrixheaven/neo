@@ -614,6 +614,97 @@ fn run_continue_flag_uses_latest_session_in_stable_json_output() {
 }
 
 #[test]
+fn print_name_flag_sets_session_display_name_for_new_exact_session() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-name", "named answer")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args([
+            "--session-id",
+            "named-session",
+            "--name",
+            "Main Thread",
+            "print",
+            "hello",
+        ]);
+
+    assert_eq!(run(command), "named answer\n");
+
+    let mut list = neo();
+    list.current_dir(temp.path()).args(["sessions", "list"]);
+    let stdout = run(list);
+    assert!(stdout.contains("named-session\tMain Thread"));
+}
+
+#[test]
+fn print_name_short_flag_renames_continued_latest_session() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![
+        openai_response_sse("resp-short-name-1", "first answer"),
+        openai_response_sse("resp-short-name-2", "second answer"),
+    ]);
+
+    let mut first = neo();
+    first
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--session-id", "rename-latest", "print", "first"]);
+    assert_eq!(run(first), "first answer\n");
+
+    let mut second = neo();
+    second
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["-c", "-n", "Renamed Latest", "print", "second"]);
+    assert_eq!(run(second), "second answer\n");
+
+    let mut list = neo();
+    list.current_dir(temp.path()).args(["sessions", "list"]);
+    let stdout = run(list);
+    assert!(stdout.contains("rename-latest\tRenamed Latest"));
+}
+
+#[test]
+fn run_name_flag_sets_session_display_name_for_exact_session() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-run-name", "named json")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args([
+            "--session-id",
+            "named-run",
+            "--name",
+            "Run Thread",
+            "run",
+            "--output",
+            "json",
+            "hello",
+        ]);
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("\"id\":\"named-run\""));
+    let mut list = neo();
+    list.current_dir(temp.path()).args(["sessions", "list"]);
+    let list_stdout = run(list);
+    assert!(list_stdout.contains("named-run\tRun Thread"));
+}
+
+#[test]
 fn print_no_tools_omits_all_model_tools() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-no-tools", "no tools")]);

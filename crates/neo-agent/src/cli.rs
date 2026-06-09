@@ -40,6 +40,9 @@ pub struct Cli {
     )]
     pub continue_latest: bool,
 
+    #[arg(short = 'n', long, global = true, value_name = "NAME")]
+    pub name: Option<String>,
+
     #[arg(long, global = true, env = "NEO_MODE")]
     pub mode: Option<String>,
 

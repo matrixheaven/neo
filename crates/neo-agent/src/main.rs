@@ -65,13 +65,14 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
     let session_id = cli.session_id.clone();
     let session = cli.session.clone();
     let continue_latest = cli.continue_latest;
+    let session_name = cli.name.clone();
 
     match cli.command {
         Some(Command::Print { prompt }) => {
             let prompt = prepare_prompt(prompt, &config)?;
             let session_target =
                 session_target_for_cli(session_id.as_deref(), session.as_deref(), continue_latest);
-            modes::print::execute(&prompt, &config, session_target).await
+            modes::print::execute(&prompt, &config, session_target, session_name.as_deref()).await
         }
         Some(Command::Run { output, prompt }) => {
             let prompt = prepare_prompt(prompt, &config)?;
@@ -82,6 +83,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
                 &config,
                 output.unwrap_or_else(|| run_output_for_mode(&config)),
                 session_target,
+                session_name.as_deref(),
             )
             .await
         }
