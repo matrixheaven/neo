@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     cli::RunOutput,
     config::{self, AppConfig, McpServerConfig, provider_api_base},
-    resources, session_commands,
+    extension_tools, resources, session_commands,
 };
 
 pub async fn execute(
@@ -1252,6 +1252,12 @@ async fn tool_registry_for_config(config: &AppConfig) -> anyhow::Result<ToolRegi
         ToolRegistry::with_builtin_tools()
     };
     if !(filters.no_tools && filters.allow.is_empty()) {
+        extension_tools::register_enabled_extension_tools(
+            &mut registry,
+            &extension_tools::default_extension_root(&config.project_dir),
+            &extension_tools::default_extension_state_path(&config.project_dir),
+        )
+        .await?;
         for server in config.mcp.servers.iter().filter(|server| server.enabled) {
             register_mcp_server(&mut registry, server).await?;
         }

@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod extension_commands;
+mod extension_tools;
 mod modes;
 mod prompt_templates;
 mod resources;

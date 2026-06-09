@@ -2890,6 +2890,174 @@ tool = "Allow"
     assert!(tool_output.contains("denied.txt"));
 }
 
+#[test]
+fn print_registers_enabled_extension_tool_and_executes_it_through_agent_loop() {
+    let temp = TempDir::new().expect("tempdir");
+    let log = write_echo_extension(temp.path());
+    let server = MockSseServer::start(vec![
+        openai_tool_call_sse(
+            "resp-extension-1",
+            "call-extension-1",
+            "extension__echo__echo",
+            &json!({"text": "from model"}),
+        ),
+        openai_response_sse("resp-extension-2", "extension completed"),
+    ]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "use extension"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "extension completed\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        model_tool_names(&requests[0].body).contains(&"extension__echo__echo"),
+        "model tools should include enabled extension tool"
+    );
+    let tool_output = requests[1].body["input"][2]["output"]
+        .as_str()
+        .expect("tool output");
+    assert!(tool_output.contains("extension echo: from model"));
+    let calls = std::fs::read_to_string(log).expect("read extension call log");
+    assert!(calls.contains(r#""method": "tools.list""#));
+    assert!(calls.contains(r#""method": "tool.echo""#));
+}
+
+#[test]
+fn print_pi_style_short_no_builtin_tools_keeps_extension_tools() {
+    let temp = TempDir::new().expect("tempdir");
+    write_echo_extension(temp.path());
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-extension-no-builtins",
+        "extension tools listed",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["-nbt", "print", "show tools"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "extension tools listed\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        model_tool_names(&requests[0].body),
+        vec!["extension__echo__echo"]
+    );
+}
+
+#[test]
+fn print_exclude_tools_removes_extension_tools() {
+    let temp = TempDir::new().expect("tempdir");
+    write_echo_extension(temp.path());
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-extension-excluded",
+        "extension excluded",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args([
+            "--tools",
+            "extension__echo__echo",
+            "--exclude-tools",
+            "extension__echo__echo",
+            "print",
+            "show tools",
+        ]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "extension excluded\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].body.get("tools").is_none());
+}
+
+fn write_echo_extension(root: &std::path::Path) -> std::path::PathBuf {
+    let extension = root.join(".neo/extensions/echo");
+    std::fs::create_dir_all(&extension).expect("create extension");
+    let log = root.join("extension-calls.jsonl");
+    let script = extension.join("echo.py");
+    std::fs::write(
+        &script,
+        format!(
+            r#"
+import json
+import sys
+
+log_path = {log_path}
+
+for line in sys.stdin:
+    message = json.loads(line)
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write(json.dumps(message, sort_keys=True) + "\n")
+    method = message["method"]
+    if method == "tools.list":
+        result = [{{
+            "name": "echo",
+            "description": "Echo text from the Neo extension",
+            "input_schema": {{
+                "type": "object",
+                "properties": {{"text": {{"type": "string"}}}},
+                "required": ["text"]
+            }},
+            "method": "tool.echo"
+        }}]
+    elif method == "tool.echo":
+        result = {{
+            "content": "extension echo: " + message["params"]["text"],
+            "details": {{"source": "extension-test"}}
+        }}
+    else:
+        print(json.dumps({{
+            "type": "response",
+            "id": message["id"],
+            "error": {{"code": "method_not_found", "message": method}}
+        }}), flush=True)
+        continue
+    print(json.dumps({{"type": "response", "id": message["id"], "result": result}}), flush=True)
+"#,
+            log_path =
+                serde_json::to_string(log.to_str().expect("utf8 log path")).expect("log path json")
+        ),
+    )
+    .expect("write extension script");
+    std::fs::write(
+        extension.join("neo-extension.toml"),
+        format!(
+            r#"
+id = "echo"
+name = "Echo"
+version = "0.1.0"
+
+[runner]
+command = "python3"
+args = [{}]
+"#,
+            serde_json::to_string(&script).expect("script path json")
+        ),
+    )
+    .expect("write extension manifest");
+    log
+}
+
 fn session_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     session_files_in(&root.join(".neo/sessions"))
 }
