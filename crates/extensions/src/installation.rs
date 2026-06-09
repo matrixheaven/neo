@@ -200,6 +200,7 @@ impl ExtensionInstaller {
         }
 
         let source_extension = single_discovered(source_dir)?;
+        validate_package_id(&source_extension.manifest.id, &self.root)?;
         let destination = self.root.join(&source_extension.manifest.id);
         replace_directory(source_dir, &destination)?;
 
@@ -299,6 +300,24 @@ fn single_discovered(source: &Path) -> Result<DiscoveredExtension, ExtensionInst
         });
     }
     Ok(discovered.into_iter().next().expect("length checked"))
+}
+
+fn validate_package_id(id: &str, root: &Path) -> Result<(), ExtensionInstallError> {
+    let is_safe_segment = !id.is_empty()
+        && id != "."
+        && id != ".."
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'));
+
+    if is_safe_segment {
+        Ok(())
+    } else {
+        Err(ExtensionInstallError::OutsideExtensionRoot {
+            id: id.to_owned(),
+            root: root.to_path_buf(),
+        })
+    }
 }
 
 fn replace_directory(from: &Path, to: &Path) -> Result<(), ExtensionInstallError> {

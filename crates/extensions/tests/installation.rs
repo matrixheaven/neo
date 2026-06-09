@@ -109,6 +109,46 @@ fn installation_uninstall_does_not_remove_paths_outside_extension_root() {
     assert!(outside.join("sentinel").exists());
 }
 
+#[test]
+fn installation_rejects_parent_directory_extension_id_without_creating_outside_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    write_manifest(&source, "../escape", "0.1.0");
+
+    let root = dir.path().join(".neo/extensions");
+    let state_path = dir.path().join(".neo/extensions-state.toml");
+    let registry_path = dir.path().join(".neo/extensions-sources.toml");
+    let installer = ExtensionInstaller::new(&root, &state_path, &registry_path);
+
+    let error = installer.install(&source).unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExtensionInstallError::OutsideExtensionRoot { id, .. } if id == "../escape"
+    ));
+    assert!(!dir.path().join(".neo/escape").exists());
+}
+
+#[test]
+fn installation_rejects_nested_extension_id_without_creating_outside_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    write_manifest(&source, "nested/escape", "0.1.0");
+
+    let root = dir.path().join(".neo/extensions");
+    let state_path = dir.path().join(".neo/extensions-state.toml");
+    let registry_path = dir.path().join(".neo/extensions-sources.toml");
+    let installer = ExtensionInstaller::new(&root, &state_path, &registry_path);
+
+    let error = installer.install(&source).unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExtensionInstallError::OutsideExtensionRoot { id, .. } if id == "nested/escape"
+    ));
+    assert!(!root.join("nested").exists());
+}
+
 fn write_manifest(root: &Path, id: &str, version: &str) {
     fs::create_dir_all(root).unwrap();
     fs::write(
