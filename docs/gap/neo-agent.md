@@ -61,7 +61,11 @@
   repeatable `--append-system-prompt <TEXT_OR_PATH>` CLI overrides that treat
   existing paths as UTF-8 files and other values as literal text, support
   `--thinking <off|minimal|low|medium|high|xhigh>` as a single-invocation
-  override for `runtime.reasoning_effort`, expand project-local
+  override for `runtime.reasoning_effort`, support Pi-style single-invocation
+  tool registry filters with `--no-tools`/`-nt`,
+  `--no-builtin-tools`/`-nbt`, `--tools`/`-t`, and
+  `--exclude-tools`/`-xt` across registered built-in and MCP tool names,
+  expand project-local
   `.neo/prompts/*.md` and user-global `~/.neo/prompts/*.md` slash prompt
   templates with project templates taking precedence, merge `prompt_templates`
   selectors from user-global and project TOML config, support repeatable

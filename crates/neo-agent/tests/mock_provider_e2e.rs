@@ -147,6 +147,110 @@ fn print_uses_production_openai_responses_adapter_against_mock_provider() {
 }
 
 #[test]
+fn print_no_tools_omits_all_model_tools() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-no-tools", "no tools")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--no-tools", "print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "no tools\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].body.get("tools").is_none(),
+        "model request should not include tools when --no-tools is set: {}",
+        requests[0].body
+    );
+}
+
+#[test]
+fn print_pi_style_short_no_tools_alias_omits_all_model_tools() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-short-no-tools",
+        "short no tools",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["-nt", "print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "short no tools\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].body.get("tools").is_none());
+}
+
+#[test]
+fn print_no_tools_with_tools_allowlist_reenables_only_named_model_tools() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-tools-allowlist",
+        "allowlisted tools",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--no-tools", "-t", "read,bash", "print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "allowlisted tools\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(model_tool_names(&requests[0].body), vec!["bash", "read"]);
+}
+
+#[test]
+fn print_exclude_tools_removes_named_model_tools_after_allowlist() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-tools-exclude",
+        "excluded tools",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args([
+            "--tools",
+            "read,bash,write",
+            "-xt",
+            "read,write",
+            "print",
+            "hello",
+        ]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "excluded tools\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(model_tool_names(&requests[0].body), vec!["bash"]);
+}
+
+#[test]
 fn print_includes_project_system_prompt_file_before_user_message() {
     let temp = TempDir::new().expect("tempdir");
     std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
@@ -1602,6 +1706,17 @@ fn session_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         .collect::<Vec<_>>();
     entries.sort();
     entries
+}
+
+fn model_tool_names(body: &Value) -> Vec<&str> {
+    let mut names = body["tools"]
+        .as_array()
+        .expect("model request tools")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names
 }
 
 fn openai_response_sse(id: &str, text: &str) -> String {

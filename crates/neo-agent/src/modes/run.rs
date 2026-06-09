@@ -1049,11 +1049,36 @@ fn agent_config_for_app(
 }
 
 async fn tool_registry_for_config(config: &AppConfig) -> anyhow::Result<ToolRegistry> {
-    let mut registry = ToolRegistry::with_builtin_tools();
-    for server in config.mcp.servers.iter().filter(|server| server.enabled) {
-        register_mcp_server(&mut registry, server).await?;
+    let filters = &config.tool_filters;
+    let mut registry = if filters.no_tools && filters.allow.is_empty()
+        || (filters.no_builtin_tools && filters.allow.is_empty())
+    {
+        ToolRegistry::new()
+    } else {
+        ToolRegistry::with_builtin_tools()
+    };
+    if !(filters.no_tools && filters.allow.is_empty()) {
+        for server in config.mcp.servers.iter().filter(|server| server.enabled) {
+            register_mcp_server(&mut registry, server).await?;
+        }
     }
+    apply_tool_filters(&mut registry, config);
     Ok(registry)
+}
+
+fn apply_tool_filters(registry: &mut ToolRegistry, config: &AppConfig) {
+    let filters = &config.tool_filters;
+    if filters.no_tools && filters.allow.is_empty() {
+        return;
+    }
+    if !filters.allow.is_empty() {
+        let allowed = filters.allow.iter().cloned().collect();
+        registry.retain_named(&allowed);
+    }
+    if !filters.exclude.is_empty() {
+        let excluded = filters.exclude.iter().cloned().collect();
+        registry.remove_named(&excluded);
+    }
 }
 
 async fn register_mcp_server(
@@ -1242,7 +1267,8 @@ mod tests {
 
     use super::{PromptApprovalRequest, agent_config_for_app, run_prompt_with_runtime};
     use crate::config::{
-        AppConfig, Defaults, McpConfig, RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
+        AppConfig, Defaults, McpConfig, RuntimeCompactionConfig, RuntimeConfig, ToolFilterConfig,
+        TuiConfig,
     };
 
     #[test]
@@ -1282,6 +1308,7 @@ mod tests {
             no_prompt_templates: false,
             system_prompt: None,
             append_system_prompt: Vec::new(),
+            tool_filters: ToolFilterConfig::default(),
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
         };
@@ -1342,6 +1369,7 @@ mod tests {
             no_prompt_templates: false,
             system_prompt: None,
             append_system_prompt: Vec::new(),
+            tool_filters: ToolFilterConfig::default(),
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
         };

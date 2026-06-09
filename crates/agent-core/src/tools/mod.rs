@@ -8,7 +8,7 @@ mod read;
 mod write;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     path::{Component, Path, PathBuf},
     pin::Pin,
@@ -247,6 +247,14 @@ impl ToolRegistry {
         T: Tool + 'static,
     {
         self.tools.insert(tool.name().to_owned(), Box::new(tool));
+    }
+
+    pub fn retain_named(&mut self, names: &BTreeSet<String>) {
+        self.tools.retain(|name, _| names.contains(name));
+    }
+
+    pub fn remove_named(&mut self, names: &BTreeSet<String>) {
+        self.tools.retain(|name, _| !names.contains(name));
     }
 
     #[must_use]

@@ -10,7 +10,7 @@ use neo_ai::ReasoningEffort;
 use neo_tui::{KeyId, KeybindingAction, KeybindingsManager};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{Cli, ThinkingLevel};
+use crate::cli::{Cli, ThinkingLevel, ToolFilterArgs};
 
 const CONFIG_DIR: &str = ".neo";
 const CONFIG_FILE: &str = "config.toml";
@@ -32,6 +32,7 @@ pub struct ConfigOverrides {
     pub system_prompt: Option<String>,
     pub append_system_prompt: Vec<String>,
     pub thinking: Option<ThinkingLevel>,
+    pub tool_filters: ToolFilterConfig,
 }
 
 impl ConfigOverrides {
@@ -49,8 +50,37 @@ impl ConfigOverrides {
             system_prompt: cli.system_prompt.clone(),
             append_system_prompt: cli.append_system_prompt.clone(),
             thinking: cli.thinking,
+            tool_filters: ToolFilterConfig::from_cli(&cli.tool_filters),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolFilterConfig {
+    pub no_tools: bool,
+    pub no_builtin_tools: bool,
+    pub allow: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+impl ToolFilterConfig {
+    fn from_cli(filters: &ToolFilterArgs) -> Self {
+        Self {
+            no_tools: filters.no_tools,
+            no_builtin_tools: filters.no_builtin_tools,
+            allow: clean_tool_names(&filters.tools),
+            exclude: clean_tool_names(&filters.exclude_tools),
+        }
+    }
+}
+
+fn clean_tool_names(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +109,8 @@ pub struct AppConfig {
     pub system_prompt: Option<String>,
     #[serde(skip)]
     pub append_system_prompt: Vec<String>,
+    #[serde(skip)]
+    pub tool_filters: ToolFilterConfig,
     pub project_dir: PathBuf,
 
     #[serde(skip)]
@@ -354,6 +386,7 @@ impl AppConfig {
             no_prompt_templates: overrides.no_prompt_templates,
             system_prompt: overrides.system_prompt,
             append_system_prompt: overrides.append_system_prompt,
+            tool_filters: overrides.tool_filters,
             project_dir,
             config_path,
         })

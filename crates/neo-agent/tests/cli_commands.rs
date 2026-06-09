@@ -27,6 +27,17 @@ fn run(mut command: Command) -> String {
     String::from_utf8(output.stdout).expect("stdout should be utf8")
 }
 
+fn model_tool_names(body: &Value) -> Vec<&str> {
+    let mut names = body["tools"]
+        .as_array()
+        .expect("model request tools")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names
+}
+
 #[test]
 fn root_command_reports_interactive_entrypoint_without_placeholders() {
     let command = neo();
@@ -1561,6 +1572,104 @@ url = "{}"
     assert!(mcp_requests.iter().all(
         |request| request.headers.get("x-neo-test").map(String::as_str) == Some("remote-mcp")
     ));
+}
+
+#[test]
+fn print_tool_filters_apply_to_mcp_tools() {
+    let temp = TempDir::new().expect("tempdir");
+    let provider = MockSseServer::start(vec![openai_response_sse(
+        "resp-mcp-filter",
+        "filtered tools listed",
+    )]);
+    let mcp_fixture = temp.path().join("mcp-fixture.py");
+    fs::write(&mcp_fixture, MCP_STDIO_FIXTURE).expect("write MCP fixture");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        format!(
+            r#"
+api_base = "{}"
+
+[[mcp.servers]]
+id = "docs-server"
+enabled = true
+transport = "stdio"
+command = "python3"
+args = ["-u", "{}"]
+"#,
+            provider.url,
+            mcp_fixture.display()
+        ),
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .args([
+            "--tools",
+            "read,mcp__docs_server__docs_search",
+            "--exclude-tools",
+            "read",
+            "print",
+            "show",
+            "tools",
+        ]);
+    let stdout = run(command);
+
+    assert_eq!(stdout, "filtered tools listed\n");
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        model_tool_names(&requests[0].body),
+        vec!["mcp__docs_server__docs_search"]
+    );
+}
+
+#[test]
+fn print_pi_style_short_no_builtin_tools_alias_keeps_mcp_tools() {
+    let temp = TempDir::new().expect("tempdir");
+    let provider = MockSseServer::start(vec![openai_response_sse(
+        "resp-no-builtin-tools",
+        "mcp only",
+    )]);
+    let mcp_fixture = temp.path().join("mcp-fixture.py");
+    fs::write(&mcp_fixture, MCP_STDIO_FIXTURE).expect("write MCP fixture");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        format!(
+            r#"
+api_base = "{}"
+
+[[mcp.servers]]
+id = "docs-server"
+enabled = true
+transport = "stdio"
+command = "python3"
+args = ["-u", "{}"]
+"#,
+            provider.url,
+            mcp_fixture.display()
+        ),
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .args(["-nbt", "print", "show", "tools"]);
+    let stdout = run(command);
+
+    assert_eq!(stdout, "mcp only\n");
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        model_tool_names(&requests[0].body),
+        vec!["mcp__docs_server__docs_search"]
+    );
 }
 
 #[test]

@@ -1730,7 +1730,7 @@ mod tests {
     use neo_tui::{KeybindingAction, OverlayKind};
 
     use super::*;
-    use crate::config::{Defaults, McpConfig, RuntimeConfig, TuiConfig};
+    use crate::config::{Defaults, McpConfig, RuntimeConfig, ToolFilterConfig, TuiConfig};
 
     #[tokio::test]
     async fn controller_submits_prompt_reduces_turn_events_and_renders_snapshot() {
@@ -3684,6 +3684,7 @@ mod tests {
             no_prompt_templates: false,
             system_prompt: None,
             append_system_prompt: Vec::new(),
+            tool_filters: ToolFilterConfig::default(),
             project_dir: project_dir.to_path_buf(),
             config_path: project_dir.join(".neo/config.toml"),
         }

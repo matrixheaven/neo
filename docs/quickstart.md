@@ -24,6 +24,20 @@ configured model through the production provider registry. The built-in CLI
 default is `openai/gpt-4.1`, so a missing `OPENAI_API_KEY` is reported as a
 configuration error instead of returning a synthetic response.
 
+Use Pi-style per-invocation tool filters to shape the model-facing tool
+registry for `print`, `run`, RPC prompts, and live TUI turns:
+
+```bash
+cargo run -p neo-agent -- --no-tools print "answer without tools"
+cargo run -p neo-agent -- --no-builtin-tools print "use configured MCP tools only"
+cargo run -p neo-agent -- --tools read,bash print "inspect with only read and bash"
+cargo run -p neo-agent -- --tools read,mcp__docs__search --exclude-tools read print "use docs search"
+```
+
+`--tools` is an allowlist across registered built-in and MCP tools, and
+`--exclude-tools` removes names after that allowlist. `-nt`, `-nbt`, `-t`, and
+`-xt` are accepted as Pi-style aliases for the same filters.
+
 `print` and `run` also merge piped stdin with the CLI prompt:
 
 ```bash

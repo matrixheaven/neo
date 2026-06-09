@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "neo", version, about = "Rust-native coding agent")]
@@ -39,8 +39,38 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "LEVEL")]
     pub thinking: Option<ThinkingLevel>,
 
+    #[command(flatten)]
+    pub tool_filters: ToolFilterArgs,
+
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+pub struct ToolFilterArgs {
+    #[arg(long = "no-tools", alias = "no_tools", global = true)]
+    pub no_tools: bool,
+
+    #[arg(long = "no-builtin-tools", alias = "no_builtin_tools", global = true)]
+    pub no_builtin_tools: bool,
+
+    #[arg(
+        short = 't',
+        long,
+        global = true,
+        value_name = "NAMES",
+        value_delimiter = ','
+    )]
+    pub tools: Vec<String>,
+
+    #[arg(
+        long = "exclude-tools",
+        alias = "exclude_tools",
+        global = true,
+        value_name = "NAMES",
+        value_delimiter = ','
+    )]
+    pub exclude_tools: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]

@@ -30,10 +30,23 @@ async fn main() -> anyhow::Result<()> {
     color_eyre::install().ok();
     tracing_subscriber::fmt().with_target(false).try_init().ok();
 
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalize_pi_style_args(std::env::args_os()));
     let output = dispatch(cli).await?;
     print!("{output}");
     Ok(())
+}
+
+fn normalize_pi_style_args(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Vec<std::ffi::OsString> {
+    args.into_iter()
+        .map(|arg| match arg.to_str() {
+            Some("-nt") => "--no-tools".into(),
+            Some("-nbt") => "--no-builtin-tools".into(),
+            Some("-xt") => "--exclude-tools".into(),
+            _ => arg,
+        })
+        .collect()
 }
 
 async fn dispatch(cli: Cli) -> anyhow::Result<String> {

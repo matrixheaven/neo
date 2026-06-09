@@ -135,6 +135,20 @@ For a single invocation, `--thinking <off|minimal|low|medium|high|xhigh>`
 overrides `runtime.reasoning_effort`; `off` removes the provider reasoning
 payload even when config sets a reasoning effort.
 
+For a single invocation, tool filters adjust the registry sent to the provider
+without persisting config:
+
+- `--no-tools` / `-nt` disables all built-in and MCP tools unless `--tools`
+  explicitly names tools to re-enable.
+- `--no-builtin-tools` / `-nbt` skips built-in defaults while preserving
+  configured MCP tools.
+- `--tools read,bash` / `-t read,bash` keeps only named registered tools.
+- `--exclude-tools read,bash` / `-xt read,bash` removes named registered tools
+  after any allowlist.
+
+Unknown tool names in an allowlist do not create tools; they are ignored unless
+a real built-in or MCP tool with that name is registered for the invocation.
+
 The `[tui.keybindings]` table maps `neo-tui` action IDs to arrays of normalized
 key IDs. TOML keys must be quoted because action IDs contain dots. Project
 bindings override user-global bindings per action, and each action's configured
