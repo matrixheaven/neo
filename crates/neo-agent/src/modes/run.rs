@@ -23,8 +23,13 @@ pub async fn execute(
     prompt: &[String],
     config: &AppConfig,
     output: RunOutput,
+    session_id: Option<&str>,
 ) -> anyhow::Result<String> {
-    let turn = run_prompt(prompt, config).await?;
+    let turn = if let Some(session_id) = session_id {
+        run_prompt_with_session_id(session_id, prompt, config).await?
+    } else {
+        run_prompt(prompt, config).await?
+    };
     if matches!(output, RunOutput::Json) {
         return stable_json_output(&turn, config);
     }
@@ -797,6 +802,33 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
     .await
 }
 
+pub async fn run_prompt_with_session_id(
+    session_id: &str,
+    prompt: &[String],
+    config: &AppConfig,
+) -> anyhow::Result<PromptTurn> {
+    let session_path = exact_session_path(session_id, config).await?;
+    if tokio::fs::metadata(&session_path).await.is_ok() {
+        return run_prompt_in_session(session_id, prompt, config).await;
+    }
+
+    let prompt = prompt.join(" ");
+    let mut writer = JsonlSessionWriter::create(&session_path)
+        .await
+        .with_context(|| format!("failed to create session {}", session_path.display()))?;
+    let (user_message, events) = append_user_event(prompt, &mut writer).await?;
+    let runtime = runtime_for_config(config, None).await?;
+    finish_prompt_turn(
+        user_message,
+        AgentContext::new(),
+        &mut writer,
+        runtime,
+        events,
+        session_id.to_owned(),
+    )
+    .await
+}
+
 #[allow(dead_code)]
 pub async fn run_prompt_in_session(
     session_id: &str,
@@ -1214,6 +1246,23 @@ async fn create_session_path(config: &AppConfig) -> anyhow::Result<std::path::Pa
         }
         counter = counter.saturating_add(1);
     }
+}
+
+async fn exact_session_path(
+    session_id: &str,
+    config: &AppConfig,
+) -> anyhow::Result<std::path::PathBuf> {
+    neo_agent_core::session::validate_session_id(session_id)
+        .with_context(|| format!("invalid session id {session_id:?}"))?;
+    tokio::fs::create_dir_all(&config.sessions_dir)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to create sessions directory {}",
+                config.sessions_dir.display()
+            )
+        })?;
+    Ok(config.sessions_dir.join(format!("{session_id}.jsonl")))
 }
 
 fn session_id_from_path(path: &Path) -> anyhow::Result<String> {

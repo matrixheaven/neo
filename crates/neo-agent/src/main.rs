@@ -65,7 +65,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
     match cli.command {
         Some(Command::Print { prompt }) => {
             let prompt = prepare_prompt(prompt, &config)?;
-            modes::print::execute(&prompt, &config).await
+            modes::print::execute(&prompt, &config, cli.session_id.as_deref()).await
         }
         Some(Command::Run { output, prompt }) => {
             let prompt = prepare_prompt(prompt, &config)?;
@@ -73,6 +73,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
                 &prompt,
                 &config,
                 output.unwrap_or_else(|| run_output_for_mode(&config)),
+                cli.session_id.as_deref(),
             )
             .await
         }

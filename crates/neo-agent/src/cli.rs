@@ -20,6 +20,9 @@ pub struct Cli {
     #[arg(long = "session-dir", global = true, value_name = "DIR")]
     pub session_dir: Option<std::path::PathBuf>,
 
+    #[arg(long = "session-id", global = true, value_name = "ID")]
+    pub session_id: Option<String>,
+
     #[arg(long, global = true, env = "NEO_MODE")]
     pub mode: Option<String>,
 
