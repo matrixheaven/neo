@@ -88,6 +88,43 @@ fn input_event_maps_printable_submit_escape_and_ctrl_c() {
 }
 
 #[test]
+fn input_event_with_keybindings_keeps_bare_printable_chars_as_text() {
+    let mut keybindings = KeybindingsManager::default();
+    keybindings.set_user_bindings([(
+        KeybindingAction::CommandPaletteOpen,
+        vec![KeyId::new("g").expect("valid key")],
+    )]);
+
+    let event =
+        KeyEvent::new_with_kind(KeyCode::Char('g'), KeyModifiers::NONE, KeyEventKind::Press);
+
+    assert_eq!(
+        InputEvent::from_key_event_with_keybindings(event, &keybindings),
+        Some(InputEvent::Insert('g'))
+    );
+}
+
+#[test]
+fn input_event_with_keybindings_maps_modified_chars_to_keys() {
+    let mut keybindings = KeybindingsManager::default();
+    keybindings.set_user_bindings([(
+        KeybindingAction::CommandPaletteOpen,
+        vec![KeyId::new("ctrl+g").expect("valid key")],
+    )]);
+
+    let event = KeyEvent::new_with_kind(
+        KeyCode::Char('g'),
+        KeyModifiers::CONTROL,
+        KeyEventKind::Press,
+    );
+
+    assert_eq!(
+        InputEvent::from_key_event_with_keybindings(event, &keybindings),
+        Some(InputEvent::Key(KeyId::new("ctrl+g").expect("valid key")))
+    );
+}
+
+#[test]
 fn input_event_maps_terminal_resize_events() {
     assert_eq!(
         InputEvent::from_crossterm_event(&Event::Resize(100, 30)),

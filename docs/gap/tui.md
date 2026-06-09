@@ -7,6 +7,10 @@ Target: `crates/tui`.
 
 - Prompt editor primitives now support insert, backspace/delete, character movement, word movement, word deletion, and delete-to-line-start/end.
 - Keybinding helpers now expose normalized key IDs, default TUI action mappings, user override resolution, and conflict detection.
+- `neo-agent` now reads `[tui.keybindings]` overrides from project/global
+  config, validates action IDs, key syntax, text-insertion reserved keys, and
+  same-context conflicts through `neo-tui`, and passes the resolved keybinding
+  manager into the live crossterm input parser.
 - Transcript state now has a scrollback-aware viewport model with bottom-follow
   behavior, and the live TUI render path applies that viewport.
 - Selection/list primitives now support prefix filtering, wrap-around selection, centered visible windows, scroll indicators, and width-safe line rendering.
@@ -81,8 +85,9 @@ Target: `crates/tui`.
 
 ## Remaining lower-priority gaps
 
-- The Rust crate does not implement Kitty/Sixel/OSC image protocols, command
-  autocomplete from hosted or extension command catalogs, or the full
-  TypeScript renderer's advanced diff affordances beyond width-safe unified
-  diff line classification, coloring, and item-range transcript selection.
+- The Rust crate does not implement Kitty/Sixel/OSC image protocols, hosted
+  keybinding/profile sync, command autocomplete from hosted or extension
+  command catalogs, or the full TypeScript renderer's advanced diff affordances
+  beyond width-safe unified diff line classification, coloring, and item-range
+  transcript selection.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.

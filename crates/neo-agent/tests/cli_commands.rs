@@ -393,6 +393,91 @@ fn config_set_writes_runtime_agent_options() {
 }
 
 #[test]
+fn config_show_reads_tui_keybinding_overrides() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+[tui.keybindings]
+"tui.command.open" = ["ctrl+g"]
+"tui.session.open" = ["ctrl+s"]
+"#,
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).args(["config", "show"]);
+    let stdout = run(command);
+
+    assert!(stdout.contains("[tui.keybindings]"));
+    assert!(stdout.contains("\"tui.command.open\" = [\"ctrl+g\"]"));
+    assert!(stdout.contains("\"tui.session.open\" = [\"ctrl+s\"]"));
+}
+
+#[test]
+fn config_set_writes_tui_keybinding_override() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut command = neo();
+    command.current_dir(temp.path()).args([
+        "config",
+        "set",
+        "tui.keybindings.tui.command.open",
+        "[\"ctrl+g\", \"ctrl+p\"]",
+    ]);
+    let stdout = run(command);
+
+    assert!(stdout.contains("set tui.keybindings.tui.command.open"));
+    let config = fs::read_to_string(temp.path().join(".neo/config.toml")).expect("read config");
+    let value: toml::Value = toml::from_str(&config).expect("config should be valid toml");
+    let keys = value["tui"]["keybindings"]["tui.command.open"]
+        .as_array()
+        .expect("keybinding override should be an array")
+        .iter()
+        .map(|value| value.as_str().expect("key should be a string").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(keys, vec!["ctrl+g", "ctrl+p"]);
+}
+
+#[test]
+fn config_set_rejects_tui_keybinding_default_conflicts() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut command = neo();
+    command.current_dir(temp.path()).args([
+        "config",
+        "set",
+        "tui.keybindings.tui.command.open",
+        "[\"enter\"]",
+    ]);
+
+    let output = command.output().expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("tui.keybindings"));
+    assert!(stderr.contains("enter"));
+}
+
+#[test]
+fn config_set_rejects_tui_keybinding_bare_printable_chars() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut command = neo();
+    command.current_dir(temp.path()).args([
+        "config",
+        "set",
+        "tui.keybindings.tui.command.open",
+        "[\"g\"]",
+    ]);
+
+    let output = command.output().expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("tui.keybindings"));
+    assert!(stderr.contains('g'));
+}
+
+#[test]
 fn config_set_writes_provider_specific_api_key_env_name() {
     let temp = TempDir::new().expect("tempdir");
     let mut command = neo();

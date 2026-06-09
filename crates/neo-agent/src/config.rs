@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
 };
@@ -7,6 +7,7 @@ use std::{
 use anyhow::{Context, bail};
 use neo_agent_core::{PermissionPolicy, QueueMode, ToolExecutionMode};
 use neo_ai::ReasoningEffort;
+use neo_tui::{KeyId, KeybindingAction, KeybindingsManager};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::Cli;
@@ -58,6 +59,7 @@ pub struct AppConfig {
     pub permissions: PermissionPolicy,
     pub defaults: Defaults,
     pub runtime: RuntimeConfig,
+    pub tui: TuiConfig,
     pub mcp: McpConfig,
     pub approve: bool,
     pub no_approve: bool,
@@ -108,6 +110,12 @@ pub struct RuntimeCompactionConfig {
     pub enabled: bool,
     pub max_estimated_tokens: usize,
     pub keep_recent_messages: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TuiConfig {
+    #[serde(default)]
+    pub keybindings: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for RuntimeCompactionConfig {
@@ -175,6 +183,7 @@ struct FileConfig {
     permissions: Option<PermissionPolicy>,
     defaults: Option<FileDefaults>,
     runtime: Option<FileRuntimeConfig>,
+    tui: Option<FileTuiConfig>,
     mcp: Option<McpConfig>,
 }
 
@@ -209,6 +218,20 @@ struct FileRuntimeCompactionConfig {
     max_estimated_tokens: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     keep_recent_messages: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct FileTuiConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keybindings: Option<BTreeMap<String, Vec<String>>>,
+}
+
+impl FileTuiConfig {
+    fn from_tui(tui: &TuiConfig) -> Self {
+        Self {
+            keybindings: (!tui.keybindings.is_empty()).then(|| tui.keybindings.clone()),
+        }
+    }
 }
 
 impl FileRuntimeConfig {
@@ -290,6 +313,8 @@ impl AppConfig {
         let permissions = file_config.permissions.unwrap_or_default();
         let runtime = runtime_from_file(file_config.runtime);
         validate_runtime_config(&runtime)?;
+        let tui = tui_from_file(file_config.tui);
+        validate_tui_config(&tui)?;
         let mcp = file_config.mcp.unwrap_or_default();
         let mode = overrides
             .mode
@@ -308,6 +333,7 @@ impl AppConfig {
             permissions,
             defaults: Defaults { mode },
             runtime,
+            tui,
             mcp,
             approve: overrides.approve,
             no_approve: overrides.no_approve,
@@ -354,6 +380,7 @@ pub fn show(config: &AppConfig) -> anyhow::Result<String> {
             mode: Some(config.defaults.mode.clone()),
         }),
         runtime: Some(FileRuntimeConfig::from_runtime(&config.runtime)),
+        tui: Some(FileTuiConfig::from_tui(&config.tui)),
         mcp: Some(config.mcp.clone()),
     };
 
@@ -423,42 +450,65 @@ pub fn set(key: &str, value: &str) -> anyhow::Result<String> {
             let defaults = config.defaults.get_or_insert_with(FileDefaults::default);
             defaults.mode = Some(value.to_owned());
         }
-        "runtime.temperature" | "temperature" => {
-            runtime_config_mut(&mut config).temperature = Some(value.parse()?);
-        }
-        "runtime.max_tokens" | "max_tokens" => {
-            runtime_config_mut(&mut config).max_tokens = Some(value.parse()?);
-        }
-        "runtime.reasoning_effort" | "reasoning_effort" => {
-            runtime_config_mut(&mut config).reasoning_effort = Some(parse_reasoning_effort(value)?);
-        }
-        "runtime.steering_queue_mode" | "steering_queue_mode" => {
-            runtime_config_mut(&mut config).steering_queue_mode = Some(parse_queue_mode(value)?);
-        }
-        "runtime.follow_up_queue_mode" | "follow_up_queue_mode" => {
-            runtime_config_mut(&mut config).follow_up_queue_mode = Some(parse_queue_mode(value)?);
-        }
-        "runtime.tool_execution_mode" | "tool_execution_mode" => {
-            runtime_config_mut(&mut config).tool_execution_mode =
-                Some(parse_tool_execution_mode(value)?);
-        }
-        "runtime.compaction.enabled" | "compaction.enabled" => {
-            compaction_config_mut(&mut config).enabled = Some(value.parse()?);
-        }
-        "runtime.compaction.max_estimated_tokens" | "compaction.max_estimated_tokens" => {
-            compaction_config_mut(&mut config).max_estimated_tokens = Some(value.parse()?);
-        }
-        "runtime.compaction.keep_recent_messages" | "compaction.keep_recent_messages" => {
-            compaction_config_mut(&mut config).keep_recent_messages = Some(value.parse()?);
-        }
+        key if set_runtime_config(&mut config, key, value)? => {}
+        key if set_tui_config(&mut config, key, value)? => {}
         unknown => bail!("unsupported config key: {unknown}"),
     }
 
     if let Some(runtime) = &config.runtime {
         validate_runtime_config(&runtime_from_file(Some(runtime.clone())))?;
     }
+    if let Some(tui) = &config.tui {
+        validate_tui_config(&tui_from_file(Some(tui.clone())))?;
+    }
     write_file_config(&config_path, &config)?;
     Ok(format!("set {key}\n"))
+}
+
+fn set_runtime_config(config: &mut FileConfig, key: &str, value: &str) -> anyhow::Result<bool> {
+    match key {
+        "runtime.temperature" | "temperature" => {
+            runtime_config_mut(config).temperature = Some(value.parse()?);
+        }
+        "runtime.max_tokens" | "max_tokens" => {
+            runtime_config_mut(config).max_tokens = Some(value.parse()?);
+        }
+        "runtime.reasoning_effort" | "reasoning_effort" => {
+            runtime_config_mut(config).reasoning_effort = Some(parse_reasoning_effort(value)?);
+        }
+        "runtime.steering_queue_mode" | "steering_queue_mode" => {
+            runtime_config_mut(config).steering_queue_mode = Some(parse_queue_mode(value)?);
+        }
+        "runtime.follow_up_queue_mode" | "follow_up_queue_mode" => {
+            runtime_config_mut(config).follow_up_queue_mode = Some(parse_queue_mode(value)?);
+        }
+        "runtime.tool_execution_mode" | "tool_execution_mode" => {
+            runtime_config_mut(config).tool_execution_mode =
+                Some(parse_tool_execution_mode(value)?);
+        }
+        "runtime.compaction.enabled" | "compaction.enabled" => {
+            compaction_config_mut(config).enabled = Some(value.parse()?);
+        }
+        "runtime.compaction.max_estimated_tokens" | "compaction.max_estimated_tokens" => {
+            compaction_config_mut(config).max_estimated_tokens = Some(value.parse()?);
+        }
+        "runtime.compaction.keep_recent_messages" | "compaction.keep_recent_messages" => {
+            compaction_config_mut(config).keep_recent_messages = Some(value.parse()?);
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn set_tui_config(config: &mut FileConfig, key: &str, value: &str) -> anyhow::Result<bool> {
+    let Some(action_id) = key.strip_prefix("tui.keybindings.") else {
+        return Ok(false);
+    };
+    tui_config_mut(config)
+        .keybindings
+        .get_or_insert_with(BTreeMap::new)
+        .insert(action_id.to_owned(), parse_string_list(value)?);
+    Ok(true)
 }
 
 fn parse_provider_key<'a>(key: &'a str, suffix: &str) -> anyhow::Result<&'a str> {
@@ -481,6 +531,7 @@ fn merge_file_configs(base: FileConfig, layer: FileConfig) -> FileConfig {
         permissions: layer.permissions.or(base.permissions),
         defaults: merge_defaults(base.defaults, layer.defaults),
         runtime: merge_runtime_configs(base.runtime, layer.runtime),
+        tui: merge_tui_configs(base.tui, layer.tui),
         mcp: merge_mcp_configs(base.mcp, layer.mcp),
     }
 }
@@ -593,6 +644,25 @@ fn merge_runtime_compaction_configs(
     }
 }
 
+fn merge_tui_configs(
+    base: Option<FileTuiConfig>,
+    layer: Option<FileTuiConfig>,
+) -> Option<FileTuiConfig> {
+    match (base, layer) {
+        (None, None) => None,
+        (Some(tui), None) | (None, Some(tui)) => Some(tui),
+        (Some(base), Some(layer)) => {
+            let mut keybindings = base.keybindings.unwrap_or_default();
+            for (action, keys) in layer.keybindings.unwrap_or_default() {
+                keybindings.insert(action, keys);
+            }
+            Some(FileTuiConfig {
+                keybindings: (!keybindings.is_empty()).then_some(keybindings),
+            })
+        }
+    }
+}
+
 fn merge_mcp_configs(base: Option<McpConfig>, layer: Option<McpConfig>) -> Option<McpConfig> {
     match (base, layer) {
         (None, None) => None,
@@ -634,6 +704,15 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
     }
 }
 
+fn tui_from_file(tui: Option<FileTuiConfig>) -> TuiConfig {
+    let Some(tui) = tui else {
+        return TuiConfig::default();
+    };
+    TuiConfig {
+        keybindings: tui.keybindings.unwrap_or_default(),
+    }
+}
+
 fn runtime_config_mut(config: &mut FileConfig) -> &mut FileRuntimeConfig {
     config
         .runtime
@@ -644,6 +723,10 @@ fn compaction_config_mut(config: &mut FileConfig) -> &mut FileRuntimeCompactionC
     runtime_config_mut(config)
         .compaction
         .get_or_insert_with(FileRuntimeCompactionConfig::default)
+}
+
+fn tui_config_mut(config: &mut FileConfig) -> &mut FileTuiConfig {
+    config.tui.get_or_insert_with(FileTuiConfig::default)
 }
 
 fn parse_queue_mode(value: &str) -> anyhow::Result<QueueMode> {
@@ -676,7 +759,13 @@ fn parse_reasoning_effort(value: &str) -> anyhow::Result<ReasoningEffort> {
 fn parse_string_list(value: &str) -> anyhow::Result<Vec<String>> {
     let trimmed = value.trim();
     if trimmed.starts_with('[') {
-        return toml::from_str::<Vec<String>>(trimmed)
+        #[derive(Deserialize)]
+        struct StringListValue {
+            value: Vec<String>,
+        }
+
+        return toml::from_str::<StringListValue>(&format!("value = {trimmed}"))
+            .map(|parsed| parsed.value)
             .with_context(|| format!("failed to parse string list: {value}"));
     }
     Ok(vec![value.to_owned()])
@@ -705,6 +794,135 @@ fn validate_runtime_config(config: &RuntimeConfig) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+fn validate_tui_config(config: &TuiConfig) -> anyhow::Result<()> {
+    let default_manager = KeybindingsManager::default();
+    let mut manager = KeybindingsManager::default();
+    let overrides = config.keybinding_overrides()?;
+    for (_action, keys) in &overrides {
+        for key in keys {
+            anyhow::ensure!(
+                !key.is_text_insertion_key(),
+                "tui.keybindings key {key} is reserved for prompt text insertion"
+            );
+        }
+    }
+    manager.set_user_bindings(overrides.iter().cloned());
+    anyhow::ensure!(
+        manager.conflicts().is_empty(),
+        "tui.keybindings contains conflicting key assignments"
+    );
+    validate_tui_context_conflicts(&default_manager, &manager, &overrides)?;
+    Ok(())
+}
+
+fn validate_tui_context_conflicts(
+    default_manager: &KeybindingsManager,
+    manager: &KeybindingsManager,
+    overrides: &[(KeybindingAction, Vec<KeyId>)],
+) -> anyhow::Result<()> {
+    for (action, keys) in overrides {
+        for context in [TUI_EDITING_ACTIONS, TUI_OVERLAY_ACTIONS] {
+            if !context.contains(action) {
+                continue;
+            }
+            for key in keys {
+                let current_actions = context_actions_for_key(manager, context, key);
+                if current_actions.len() <= 1 {
+                    continue;
+                }
+                let default_actions = context_actions_for_key(default_manager, context, key);
+                if current_actions != default_actions {
+                    let action_ids = current_actions
+                        .iter()
+                        .map(|action| action.id())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    anyhow::bail!(
+                        "tui.keybindings key {key} conflicts within a TUI input context: {action_ids}"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn context_actions_for_key(
+    manager: &KeybindingsManager,
+    context: &[KeybindingAction],
+    key: &KeyId,
+) -> BTreeSet<KeybindingAction> {
+    context
+        .iter()
+        .filter(|action| {
+            manager
+                .keys(**action)
+                .iter()
+                .any(|candidate| candidate == key)
+        })
+        .copied()
+        .collect()
+}
+
+const TUI_EDITING_ACTIONS: &[KeybindingAction] = &[
+    KeybindingAction::InputSubmit,
+    KeybindingAction::InputNewLine,
+    KeybindingAction::TranscriptCopySelection,
+    KeybindingAction::InputCopy,
+    KeybindingAction::TranscriptSelectionStart,
+    KeybindingAction::TranscriptSelectionClear,
+    KeybindingAction::TranscriptSelectionExtendUp,
+    KeybindingAction::TranscriptSelectionExtendDown,
+    KeybindingAction::TranscriptSelectionExtendPageUp,
+    KeybindingAction::TranscriptSelectionExtendPageDown,
+    KeybindingAction::CommandPaletteOpen,
+    KeybindingAction::SessionPickerOpen,
+    KeybindingAction::ModelPickerOpen,
+    KeybindingAction::EditorCursorLeft,
+    KeybindingAction::EditorCursorRight,
+    KeybindingAction::EditorCursorWordLeft,
+    KeybindingAction::EditorCursorWordRight,
+    KeybindingAction::EditorCursorLineStart,
+    KeybindingAction::EditorCursorLineEnd,
+    KeybindingAction::EditorDeleteCharBackward,
+    KeybindingAction::EditorDeleteCharForward,
+    KeybindingAction::EditorDeleteWordBackward,
+    KeybindingAction::EditorDeleteWordForward,
+    KeybindingAction::EditorDeleteToLineStart,
+    KeybindingAction::EditorDeleteToLineEnd,
+    KeybindingAction::EditorYank,
+    KeybindingAction::EditorUndo,
+    KeybindingAction::InputTab,
+    KeybindingAction::SelectCancel,
+];
+
+const TUI_OVERLAY_ACTIONS: &[KeybindingAction] = &[
+    KeybindingAction::SelectConfirm,
+    KeybindingAction::SelectCancel,
+    KeybindingAction::SessionFork,
+    KeybindingAction::SelectUp,
+    KeybindingAction::SelectDown,
+    KeybindingAction::SelectPageUp,
+    KeybindingAction::SelectPageDown,
+];
+
+impl TuiConfig {
+    pub fn keybinding_overrides(&self) -> anyhow::Result<Vec<(KeybindingAction, Vec<KeyId>)>> {
+        self.keybindings
+            .iter()
+            .map(|(action_id, keys)| {
+                let action = KeybindingAction::from_id(action_id)
+                    .with_context(|| format!("unsupported TUI keybinding action: {action_id}"))?;
+                let keys = keys
+                    .iter()
+                    .map(|key| KeyId::new(key).map_err(|err| anyhow::anyhow!(err.to_string())))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                Ok((action, keys))
+            })
+            .collect()
+    }
 }
 
 fn find_config_path() -> anyhow::Result<PathBuf> {

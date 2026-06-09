@@ -60,8 +60,9 @@ pub async fn execute_tty(config: &AppConfig) -> Result<Option<String>> {
 
     let mut terminal = RawTerminal::enter()?;
     let mut controller = controller_for_config(config);
+    let events = CrosstermEvents::new(controller.keybindings.clone());
     controller
-        .run_terminal_loop(|app| terminal.draw(app), CrosstermEvents::default())
+        .run_terminal_loop(|app| terminal.draw(app), events)
         .await?;
     Ok(None)
 }
@@ -1328,12 +1329,18 @@ struct CrosstermEvents {
     pending: VecDeque<InputEvent>,
 }
 
-impl Default for CrosstermEvents {
-    fn default() -> Self {
+impl CrosstermEvents {
+    fn new(keybindings: KeybindingsManager) -> Self {
         Self {
-            parser: InputParser::with_keybindings(KeybindingsManager::default()),
+            parser: InputParser::with_keybindings(keybindings),
             pending: VecDeque::new(),
         }
+    }
+}
+
+impl Default for CrosstermEvents {
+    fn default() -> Self {
+        Self::new(KeybindingsManager::default())
     }
 }
 
@@ -1518,6 +1525,14 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         load_session,
         fork_session,
     );
+    let mut keybindings = KeybindingsManager::default();
+    keybindings.set_user_bindings(
+        config
+            .tui
+            .keybinding_overrides()
+            .expect("AppConfig TUI keybindings should be validated before controller creation"),
+    );
+    controller.keybindings = keybindings;
     controller.completion_root.clone_from(&config.project_dir);
     controller.local_config = Some(config);
     controller
@@ -1715,7 +1730,7 @@ mod tests {
     use neo_tui::{KeybindingAction, OverlayKind};
 
     use super::*;
-    use crate::config::{Defaults, McpConfig, RuntimeConfig};
+    use crate::config::{Defaults, McpConfig, RuntimeConfig, TuiConfig};
 
     #[tokio::test]
     async fn controller_submits_prompt_reduces_turn_events_and_renders_snapshot() {
@@ -2237,6 +2252,32 @@ mod tests {
         assert_eq!(controller.app().prompt().text, "open src/main.rs");
         assert_eq!(controller.app().prompt().cursor, 16);
         assert!(controller.app().focused_overlay().is_none());
+    }
+
+    #[tokio::test]
+    async fn controller_for_config_applies_tui_keybinding_overrides() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        fs::create_dir_all(&sessions_dir).expect("create sessions");
+        let mut config = test_config(temp.path(), sessions_dir);
+        config
+            .tui
+            .keybindings
+            .insert("tui.command.open".to_owned(), vec!["ctrl+g".to_owned()]);
+        let mut controller = controller_for_config(&config);
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+g").expect("valid key")))
+            .await
+            .expect("configured keybinding runs");
+
+        assert!(matches!(
+            controller
+                .app()
+                .focused_overlay()
+                .map(|overlay| &overlay.kind),
+            Some(OverlayKind::CommandPalette(_))
+        ));
     }
 
     #[tokio::test]
@@ -3634,6 +3675,7 @@ mod tests {
                 mode: "interactive".to_owned(),
             },
             runtime: RuntimeConfig::default(),
+            tui: TuiConfig::default(),
             mcp: McpConfig::default(),
             approve: false,
             no_approve: false,

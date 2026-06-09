@@ -260,6 +260,18 @@ impl KeyId {
     }
 
     #[must_use]
+    pub fn is_text_insertion_key(&self) -> bool {
+        let mut parts = self.0.split('+').collect::<Vec<_>>();
+        let Some(base) = parts.pop() else {
+            return false;
+        };
+        let has_action_modifier = parts
+            .iter()
+            .any(|modifier| matches!(*modifier, "ctrl" | "alt" | "super"));
+        !has_action_modifier && (base == "space" || base.chars().count() == 1)
+    }
+
+    #[must_use]
     pub fn from_key_event(event: KeyEvent) -> Option<Self> {
         if event.kind != KeyEventKind::Press {
             return None;
@@ -387,6 +399,52 @@ impl KeybindingAction {
             Self::SelectConfirm => "tui.select.confirm",
             Self::SelectCancel => "tui.select.cancel",
         }
+    }
+
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "tui.editor.cursorUp" => Self::EditorCursorUp,
+            "tui.editor.cursorDown" => Self::EditorCursorDown,
+            "tui.editor.cursorLeft" => Self::EditorCursorLeft,
+            "tui.editor.cursorRight" => Self::EditorCursorRight,
+            "tui.editor.cursorWordLeft" => Self::EditorCursorWordLeft,
+            "tui.editor.cursorWordRight" => Self::EditorCursorWordRight,
+            "tui.editor.cursorLineStart" => Self::EditorCursorLineStart,
+            "tui.editor.cursorLineEnd" => Self::EditorCursorLineEnd,
+            "tui.editor.pageUp" => Self::EditorPageUp,
+            "tui.editor.pageDown" => Self::EditorPageDown,
+            "tui.editor.deleteCharBackward" => Self::EditorDeleteCharBackward,
+            "tui.editor.deleteCharForward" => Self::EditorDeleteCharForward,
+            "tui.editor.deleteWordBackward" => Self::EditorDeleteWordBackward,
+            "tui.editor.deleteWordForward" => Self::EditorDeleteWordForward,
+            "tui.editor.deleteToLineStart" => Self::EditorDeleteToLineStart,
+            "tui.editor.deleteToLineEnd" => Self::EditorDeleteToLineEnd,
+            "tui.editor.yank" => Self::EditorYank,
+            "tui.editor.undo" => Self::EditorUndo,
+            "tui.input.newLine" => Self::InputNewLine,
+            "tui.input.submit" => Self::InputSubmit,
+            "tui.input.tab" => Self::InputTab,
+            "tui.input.copy" => Self::InputCopy,
+            "tui.transcript.selection.start" => Self::TranscriptSelectionStart,
+            "tui.transcript.selection.clear" => Self::TranscriptSelectionClear,
+            "tui.transcript.selection.extendUp" => Self::TranscriptSelectionExtendUp,
+            "tui.transcript.selection.extendDown" => Self::TranscriptSelectionExtendDown,
+            "tui.transcript.selection.extendPageUp" => Self::TranscriptSelectionExtendPageUp,
+            "tui.transcript.selection.extendPageDown" => Self::TranscriptSelectionExtendPageDown,
+            "tui.transcript.copySelection" => Self::TranscriptCopySelection,
+            "tui.command.open" => Self::CommandPaletteOpen,
+            "tui.session.open" => Self::SessionPickerOpen,
+            "tui.session.fork" => Self::SessionFork,
+            "tui.model.open" => Self::ModelPickerOpen,
+            "tui.select.up" => Self::SelectUp,
+            "tui.select.down" => Self::SelectDown,
+            "tui.select.pageUp" => Self::SelectPageUp,
+            "tui.select.pageDown" => Self::SelectPageDown,
+            "tui.select.confirm" => Self::SelectConfirm,
+            "tui.select.cancel" => Self::SelectCancel,
+            _ => return None,
+        })
     }
 }
 

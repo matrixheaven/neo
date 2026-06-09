@@ -1234,7 +1234,9 @@ mod tests {
     };
 
     use super::{PromptApprovalRequest, agent_config_for_app, run_prompt_with_runtime};
-    use crate::config::{AppConfig, Defaults, McpConfig, RuntimeCompactionConfig, RuntimeConfig};
+    use crate::config::{
+        AppConfig, Defaults, McpConfig, RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
+    };
 
     #[test]
     fn agent_config_for_app_applies_runtime_config() {
@@ -1264,6 +1266,7 @@ mod tests {
                     keep_recent_messages: 24,
                 }),
             },
+            tui: TuiConfig::default(),
             mcp: McpConfig::default(),
             approve: false,
             no_approve: false,
@@ -1321,6 +1324,7 @@ mod tests {
                 mode: "interactive".to_owned(),
             },
             runtime: RuntimeConfig::default(),
+            tui: TuiConfig::default(),
             mcp: McpConfig::default(),
             approve: false,
             no_approve: false,

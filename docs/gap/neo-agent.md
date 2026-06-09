@@ -21,7 +21,8 @@
   `defaults.mode`,
   provider-specific API base URLs and API key env names, and runtime
   generation/agent options such as temperature, max tokens, queue modes, tool
-  execution mode, and compaction thresholds.
+  execution mode, compaction thresholds, and TUI keybinding overrides under
+  `[tui.keybindings]`.
 - User-global config is merged below project config with `~` expansion for
   paths such as `sessions_dir`.
 - Session commands read project session files from `sessions_dir`, store local
@@ -88,6 +89,9 @@
   loop slice. TTY execution renders `neo-tui`, accepts text input, submits
   prompts through a streaming runtime driver, redraws on terminal resize,
   dispatches real keybinding actions for prompt editing and approval overlays,
+  applies project/global `[tui.keybindings]` overrides to the live crossterm
+  parser after validating action IDs, key syntax, text-insertion reserved keys,
+  and same-context conflicts,
   routes approval overlay choices back to pending async runtime approval
   handlers, cancels the active runtime token on interruption, drains cooperative
   cancelled message/turn/run barriers before falling back to abort, scrolls the

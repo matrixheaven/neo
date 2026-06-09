@@ -56,6 +56,11 @@ enabled = true
 max_estimated_tokens = 32000
 keep_recent_messages = 20
 
+[tui.keybindings]
+"tui.command.open" = ["ctrl+p"]
+"tui.session.open" = ["ctrl+r"]
+"tui.model.open" = ["ctrl+o"]
+
 [[mcp.servers]]
 id = "filesystem"
 enabled = true
@@ -110,6 +115,14 @@ settings control the runtime's deterministic context compaction trigger.
 Supported reasoning effort values are `minimal`, `low`, `medium`, `high`, and
 `xhigh`. OpenAI Responses serializes this as a Responses `reasoning` object;
 OpenAI-compatible Chat Completions serializes it as `reasoning_effort`.
+
+The `[tui.keybindings]` table maps `neo-tui` action IDs to arrays of normalized
+key IDs. TOML keys must be quoted because action IDs contain dots. Project
+bindings override user-global bindings per action, and each action's configured
+array replaces that action's default key list. Config loading and `config set`
+validate action IDs, key syntax, text-insertion reserved keys, and same-context
+conflicts before the interactive controller receives the resolved keybinding
+manager.
 
 ## Environment Variables
 
@@ -195,7 +208,10 @@ Supported `config set` keys are:
 - `runtime.compaction.enabled` or `compaction.enabled`
 - `runtime.compaction.max_estimated_tokens` or `compaction.max_estimated_tokens`
 - `runtime.compaction.keep_recent_messages` or `compaction.keep_recent_messages`
+- `tui.keybindings.<tui-action-id>`
 
 Use TOML enum values `Allow`, `Ask`, or `Deny` for permission settings.
 Use `All` or `OneAtATime` for queue modes and `Parallel` or `Sequential` for
 tool execution mode.
+Use a TOML string array for keybinding overrides, for example
+`neo config set tui.keybindings.tui.command.open '["ctrl+g", "ctrl+p"]'`.
