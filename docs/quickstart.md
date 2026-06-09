@@ -36,6 +36,12 @@ turn is sent to the provider:
 cargo run -p neo-agent -- print @docs/context.txt "summarize this"
 ```
 
+Project system instructions can live in `.neo/SYSTEM.md`; Neo sends them as the
+provider system message before the user prompt. Use `.neo/APPEND_SYSTEM.md` for
+additional instructions that should be appended after the base system prompt.
+If the project files are absent, `~/.neo/SYSTEM.md` and
+`~/.neo/APPEND_SYSTEM.md` are used as user-global defaults.
+
 Project prompt templates live in `.neo/prompts/*.md`. Invoke `review.md` as
 `/review`; Neo expands `$1`, `$@`, `$ARGUMENTS`, and simple `${@:N}` slices
 before sending the turn:

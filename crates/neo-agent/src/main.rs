@@ -3,6 +3,7 @@ mod config;
 mod extension_commands;
 mod modes;
 mod prompt_templates;
+mod resources;
 mod rpc_mode;
 mod session_commands;
 mod skill_commands;

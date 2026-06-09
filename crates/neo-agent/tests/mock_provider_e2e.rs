@@ -4,7 +4,11 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::{Value, json};
@@ -53,7 +57,9 @@ impl MockSseServer {
 }
 
 fn neo() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_neo"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_neo"));
+    command.env("HOME", isolated_home_path());
+    command
 }
 
 fn run(mut command: Command) -> String {
@@ -88,6 +94,16 @@ fn run_with_stdin(mut command: Command, stdin: &str) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("stdout should be utf8")
+}
+
+fn isolated_home_path() -> std::path::PathBuf {
+    static NEXT_HOME_ID: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT_HOME_ID.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("neo-e2e-home-{nanos}-{id}"))
 }
 
 #[test]
@@ -128,6 +144,121 @@ fn print_uses_production_openai_responses_adapter_against_mock_provider() {
     assert!(content.contains("hello from mock"));
     assert!(!content.contains("fake response"));
     assert!(!content.contains("placeholder"));
+}
+
+#[test]
+fn print_includes_project_system_prompt_file_before_user_message() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        temp.path().join(".neo/SYSTEM.md"),
+        "Use the project system prompt.\n",
+    )
+    .expect("write system prompt");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-system", "system loaded")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "system loaded\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["role"], "system");
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Use the project system prompt."
+    );
+    assert_eq!(requests[0].body["input"][1]["role"], "user");
+    assert_eq!(requests[0].body["input"][1]["content"], "hello");
+}
+
+#[test]
+fn print_appends_project_append_system_prompt_file_to_system_message() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::write(temp.path().join(".neo/SYSTEM.md"), "Base instructions.\n")
+        .expect("write system prompt");
+    std::fs::write(
+        temp.path().join(".neo/APPEND_SYSTEM.md"),
+        "Additional instructions.\n",
+    )
+    .expect("write append system prompt");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-append-system",
+        "append loaded",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "append loaded\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["role"], "system");
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Base instructions.\n\nAdditional instructions."
+    );
+    assert_eq!(requests[0].body["input"][1]["content"], "hello");
+}
+
+#[test]
+fn print_prefers_project_system_resources_over_user_global_resources() {
+    let home = TempDir::new().expect("home tempdir");
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(home.path().join(".neo")).expect("create home .neo");
+    std::fs::create_dir_all(project.path().join(".neo")).expect("create project .neo");
+    std::fs::write(home.path().join(".neo/SYSTEM.md"), "Global system")
+        .expect("write global system");
+    std::fs::write(
+        home.path().join(".neo/APPEND_SYSTEM.md"),
+        "Global append should not win",
+    )
+    .expect("write global append system");
+    std::fs::write(project.path().join(".neo/SYSTEM.md"), "Project system")
+        .expect("write project system");
+    std::fs::write(
+        project.path().join(".neo/APPEND_SYSTEM.md"),
+        "Project append",
+    )
+    .expect("write project append system");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-precedence-system",
+        "precedence",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "precedence\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Project system\n\nProject append"
+    );
 }
 
 #[test]

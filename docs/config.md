@@ -95,6 +95,14 @@ overrides and take precedence over provider-specific config for that invocation.
 User defaults can live in `~/.neo/config.toml`; project `.neo/config.toml`
 overrides them for that workspace.
 
+System prompt resources are plain local Markdown files. `neo print`, `neo run`,
+RPC `prompt`, and live TUI turns read `.neo/SYSTEM.md` as the system message
+sent before the user prompt. If the project file is absent, Neo falls back to
+`~/.neo/SYSTEM.md`. `.neo/APPEND_SYSTEM.md` and then `~/.neo/APPEND_SYSTEM.md`
+follow the same project-over-global precedence and append a second paragraph to
+the system prompt. Empty files are ignored, and no hosted trust or marketplace
+state is inferred from these files.
+
 `prompt_templates` accepts the same local selector shape as repeatable
 `--prompt-template`: template names, project-contained `.md` files, or
 non-recursive directories of `.md` prompt templates. Selectors from user-global

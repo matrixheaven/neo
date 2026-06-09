@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     cli::RunOutput,
     config::{AppConfig, McpServerConfig, provider_api_base},
-    session_commands,
+    resources, session_commands,
 };
 
 pub async fn execute(
@@ -1011,6 +1011,9 @@ fn agent_config_for_app(
     agent_config.temperature = config.runtime.temperature;
     agent_config.max_tokens = config.runtime.max_tokens;
     agent_config.reasoning_effort = config.runtime.reasoning_effort;
+    if let Some(system_prompt) = resources::load_system_prompt(&config.project_dir)? {
+        agent_config = agent_config.with_system_prompt(system_prompt);
+    }
     if let Some(compaction) = &config.runtime.compaction {
         agent_config = agent_config.with_compaction(CompactionSettings {
             enabled: compaction.enabled,

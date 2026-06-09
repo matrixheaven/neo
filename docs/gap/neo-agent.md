@@ -54,7 +54,10 @@
   stdio resource or a remote HTTP/SSE resource backed by a live SSE subscribe
   response, prints real update notifications, and unsubscribes.
 - `print` and `run` merge non-TTY piped stdin with CLI prompt arguments, expand
-  project-relative `@file` text prompt arguments, expand project-local
+  project-relative `@file` text prompt arguments, load project `.neo/SYSTEM.md`
+  or user-global `~/.neo/SYSTEM.md` into the provider system message, append
+  project `.neo/APPEND_SYSTEM.md` or user-global `~/.neo/APPEND_SYSTEM.md`
+  after the base system prompt, expand project-local
   `.neo/prompts/*.md` and user-global `~/.neo/prompts/*.md` slash prompt
   templates with project templates taking precedence, merge `prompt_templates`
   selectors from user-global and project TOML config, support repeatable
@@ -140,11 +143,14 @@ and platform-specific guidance.
   Pi event family is backed by code.
 - Add package prompt-template discovery and trust-gated project prompt loading
   only when Neo has real local package and trust infrastructure. The current
-  implemented prompt-template scope is project `.neo/prompts`, user-global
-  `~/.neo/prompts`, user/project TOML `prompt_templates` selectors, and
-  explicit local name/file/directory selectors plus `-selector` filters for
-  auto-discovered local prompts, with collision diagnostics for duplicate
-  explicit selector names.
+  implemented local resource scope is project/user `SYSTEM.md` and
+  `APPEND_SYSTEM.md`, project `.neo/prompts`, user-global `~/.neo/prompts`,
+  user/project TOML `prompt_templates` selectors, and explicit local
+  name/file/directory selectors plus `-selector` filters for auto-discovered
+  local prompts, with collision diagnostics for duplicate explicit selector
+  names. `AGENTS.md`/`CLAUDE.md` project context loading remains a gap until
+  Neo has real local trust semantics instead of unconditional project-file
+  injection.
 - Keep config docs scoped to project/global TOML layering until profile sync or
   hosted settings exist.
 - Do not document `/login`, hosted sharing, hosted extension marketplace
