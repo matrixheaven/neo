@@ -490,6 +490,130 @@ fn run_session_flag_uses_existing_session_in_stable_json_output() {
 }
 
 #[test]
+fn print_continue_flag_replays_latest_session_and_appends_turn() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![
+        openai_response_sse("resp-continue-old", "old answer"),
+        openai_response_sse("resp-continue-latest", "latest answer"),
+        openai_response_sse("resp-continue-next", "continued latest"),
+    ]);
+
+    let mut old = neo();
+    old.current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--session-id", "old-session", "print", "old"]);
+    assert_eq!(run(old), "old answer\n");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    let mut latest = neo();
+    latest
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--session-id", "latest-session", "print", "latest"]);
+    assert_eq!(run(latest), "latest answer\n");
+
+    let mut continue_run = neo();
+    continue_run
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--continue", "print", "next"]);
+    assert_eq!(run(continue_run), "continued latest\n");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    let replayed = requests[2].body["input"]
+        .as_array()
+        .expect("continued request input");
+    assert!(replayed.iter().any(|message| {
+        message["role"] == "user" && message["content"].as_str() == Some("latest")
+    }));
+    assert!(replayed.iter().any(|message| {
+        message["role"] == "assistant" && message["content"].as_str() == Some("latest answer")
+    }));
+    assert!(replayed.iter().any(|message| {
+        message["role"] == "user" && message["content"].as_str() == Some("next")
+    }));
+    let old_content = std::fs::read_to_string(temp.path().join(".neo/sessions/old-session.jsonl"))
+        .expect("read old session");
+    assert!(!old_content.contains("continued latest"));
+    let latest_content =
+        std::fs::read_to_string(temp.path().join(".neo/sessions/latest-session.jsonl"))
+            .expect("read latest session");
+    assert!(latest_content.contains("continued latest"));
+}
+
+#[test]
+fn print_continue_short_flag_replays_latest_session_and_appends_turn() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![
+        openai_response_sse("resp-short-continue-1", "first answer"),
+        openai_response_sse("resp-short-continue-2", "second answer"),
+    ]);
+
+    let mut first = neo();
+    first
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--session-id", "short-continue", "print", "first"]);
+    assert_eq!(run(first), "first answer\n");
+
+    let mut second = neo();
+    second
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["-c", "print", "second"]);
+    assert_eq!(run(second), "second answer\n");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].body["input"][2]["content"], "second");
+}
+
+#[test]
+fn run_continue_flag_uses_latest_session_in_stable_json_output() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![
+        openai_response_sse("resp-run-continue-1", "first answer"),
+        openai_response_sse("resp-run-continue-2", "continued answer"),
+    ]);
+
+    let mut first = neo();
+    first
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--session-id", "run-continue", "print", "first"]);
+    assert_eq!(run(first), "first answer\n");
+
+    let mut second = neo();
+    second
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--continue", "run", "--output", "json", "second"]);
+
+    let stdout = run(second);
+
+    assert!(stdout.contains("\"type\":\"session\""));
+    assert!(stdout.contains("\"id\":\"run-continue\""));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].body["input"][2]["content"], "second");
+}
+
+#[test]
 fn print_no_tools_omits_all_model_tools() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-no-tools", "no tools")]);

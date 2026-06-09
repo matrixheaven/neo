@@ -3,6 +3,7 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 pub const LIST_MODELS_NO_SEARCH: &str = "__neo_list_models_no_search__";
 
 #[derive(Debug, Parser)]
+#[allow(clippy::struct_excessive_bools)]
 #[command(name = "neo", version, about = "Rust-native coding agent")]
 pub struct Cli {
     #[arg(long, global = true, env = "NEO_MODEL")]
@@ -30,6 +31,14 @@ pub struct Cli {
         conflicts_with = "session_id"
     )]
     pub session: Option<String>,
+
+    #[arg(
+        short = 'c',
+        long = "continue",
+        global = true,
+        conflicts_with_all = ["session_id", "session"]
+    )]
+    pub continue_latest: bool,
 
     #[arg(long, global = true, env = "NEO_MODE")]
     pub mode: Option<String>,

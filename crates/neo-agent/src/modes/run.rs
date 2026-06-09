@@ -781,6 +781,7 @@ pub struct PromptTurn {
 pub enum SessionTarget<'a> {
     ExactId(&'a str),
     Existing(&'a str),
+    Latest,
 }
 
 pub struct PromptApprovalRequest {
@@ -819,6 +820,10 @@ pub async fn run_prompt_with_session_target(
         }
         SessionTarget::Existing(session_ref) => {
             let session_id = session_commands::resolve_session_id(session_ref, config)?;
+            run_prompt_in_session(&session_id, prompt, config).await
+        }
+        SessionTarget::Latest => {
+            let session_id = latest_session_id(config)?;
             run_prompt_in_session(&session_id, prompt, config).await
         }
     }
@@ -1292,6 +1297,44 @@ fn session_id_from_path(path: &Path) -> anyhow::Result<String> {
         .and_then(std::ffi::OsStr::to_str)
         .map(str::to_owned)
         .with_context(|| format!("invalid session path {}", path.display()))
+}
+
+fn latest_session_id(config: &AppConfig) -> anyhow::Result<String> {
+    let mut latest: Option<(std::time::SystemTime, String)> = None;
+    let entries = std::fs::read_dir(&config.sessions_dir).with_context(|| {
+        format!(
+            "failed to read sessions directory {}",
+            config.sessions_dir.display()
+        )
+    })?;
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(std::ffi::OsStr::to_str) != Some("jsonl") {
+            continue;
+        }
+        let Ok(session_id) = session_id_from_path(&path) else {
+            continue;
+        };
+        if neo_agent_core::session::validate_session_id(&session_id).is_err() {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let should_replace = latest.as_ref().is_none_or(|(latest_modified, latest_id)| {
+            modified > *latest_modified || (modified == *latest_modified && session_id > *latest_id)
+        });
+        if should_replace {
+            latest = Some((modified, session_id));
+        }
+    }
+
+    latest
+        .map(|(_, session_id)| session_id)
+        .with_context(|| format!("no sessions found in {}", config.sessions_dir.display()))
 }
 
 fn resolve_model(config: &AppConfig) -> anyhow::Result<ModelSpec> {

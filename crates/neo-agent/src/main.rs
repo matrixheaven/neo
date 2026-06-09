@@ -64,16 +64,19 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
 
     let session_id = cli.session_id.clone();
     let session = cli.session.clone();
+    let continue_latest = cli.continue_latest;
 
     match cli.command {
         Some(Command::Print { prompt }) => {
             let prompt = prepare_prompt(prompt, &config)?;
-            let session_target = session_target_for_cli(session_id.as_deref(), session.as_deref());
+            let session_target =
+                session_target_for_cli(session_id.as_deref(), session.as_deref(), continue_latest);
             modes::print::execute(&prompt, &config, session_target).await
         }
         Some(Command::Run { output, prompt }) => {
             let prompt = prepare_prompt(prompt, &config)?;
-            let session_target = session_target_for_cli(session_id.as_deref(), session.as_deref());
+            let session_target =
+                session_target_for_cli(session_id.as_deref(), session.as_deref(), continue_latest);
             modes::run::execute(
                 &prompt,
                 &config,
@@ -142,10 +145,12 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
 fn session_target_for_cli<'a>(
     session_id: Option<&'a str>,
     session: Option<&'a str>,
+    continue_latest: bool,
 ) -> Option<modes::run::SessionTarget<'a>> {
     session_id
         .map(modes::run::SessionTarget::ExactId)
         .or_else(|| session.map(modes::run::SessionTarget::Existing))
+        .or(continue_latest.then_some(modes::run::SessionTarget::Latest))
 }
 
 fn run_output_for_mode(config: &AppConfig) -> cli::RunOutput {
