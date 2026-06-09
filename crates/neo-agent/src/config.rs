@@ -10,7 +10,7 @@ use neo_ai::ReasoningEffort;
 use neo_tui::{KeyId, KeybindingAction, KeybindingsManager};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::Cli;
+use crate::cli::{Cli, ThinkingLevel};
 
 const CONFIG_DIR: &str = ".neo";
 const CONFIG_FILE: &str = "config.toml";
@@ -31,6 +31,7 @@ pub struct ConfigOverrides {
     pub no_prompt_templates: bool,
     pub system_prompt: Option<String>,
     pub append_system_prompt: Vec<String>,
+    pub thinking: Option<ThinkingLevel>,
 }
 
 impl ConfigOverrides {
@@ -47,6 +48,7 @@ impl ConfigOverrides {
             no_prompt_templates: cli.no_prompt_templates,
             system_prompt: cli.system_prompt.clone(),
             append_system_prompt: cli.append_system_prompt.clone(),
+            thinking: cli.thinking,
         }
     }
 }
@@ -292,6 +294,7 @@ impl AppConfig {
             .map(PathBuf::from)
             .map(expand_user_path);
         let env_mode = env::var("NEO_MODE").ok();
+        let thinking_override = overrides.thinking;
 
         let default_model = overrides
             .model
@@ -320,6 +323,7 @@ impl AppConfig {
             .unwrap_or_else(|| project_dir.join(CONFIG_DIR).join("sessions"));
         let permissions = file_config.permissions.unwrap_or_default();
         let runtime = runtime_from_file(file_config.runtime);
+        let runtime = apply_runtime_overrides(runtime, thinking_override);
         validate_runtime_config(&runtime)?;
         let tui = tui_from_file(file_config.tui);
         validate_tui_config(&tui)?;
@@ -711,6 +715,27 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
                     .keep_recent_messages
                     .unwrap_or_else(default_runtime_compaction_keep_recent_messages),
             }),
+    }
+}
+
+fn apply_runtime_overrides(
+    mut runtime: RuntimeConfig,
+    thinking_override: Option<ThinkingLevel>,
+) -> RuntimeConfig {
+    if let Some(thinking) = thinking_override {
+        runtime.reasoning_effort = reasoning_effort_from_thinking(thinking);
+    }
+    runtime
+}
+
+const fn reasoning_effort_from_thinking(thinking: ThinkingLevel) -> Option<ReasoningEffort> {
+    match thinking {
+        ThinkingLevel::Off => None,
+        ThinkingLevel::Minimal => Some(ReasoningEffort::Minimal),
+        ThinkingLevel::Low => Some(ReasoningEffort::Low),
+        ThinkingLevel::Medium => Some(ReasoningEffort::Medium),
+        ThinkingLevel::High => Some(ReasoningEffort::High),
+        ThinkingLevel::XHigh => Some(ReasoningEffort::XHigh),
     }
 }
 

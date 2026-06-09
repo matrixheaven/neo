@@ -36,6 +36,9 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "TEXT_OR_PATH")]
     pub append_system_prompt: Vec<String>,
 
+    #[arg(long, global = true, value_name = "LEVEL")]
+    pub thinking: Option<ThinkingLevel>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -84,6 +87,17 @@ pub enum Command {
 pub enum RunOutput {
     Events,
     Json,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ThinkingLevel {
+    Off,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    #[value(name = "xhigh")]
+    XHigh,
 }
 
 #[derive(Debug, Subcommand)]

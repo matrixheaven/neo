@@ -1150,6 +1150,76 @@ reasoning_effort = "high"
 }
 
 #[test]
+fn print_cli_thinking_overrides_project_runtime_reasoning_effort() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+[runtime]
+reasoning_effort = "low"
+"#,
+    )
+    .expect("write config");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-cli-thinking",
+        "thinking configured",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--thinking")
+        .arg("high")
+        .args(["print", "runtime", "options"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "thinking configured\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["reasoning"]["effort"], "high");
+}
+
+#[test]
+fn print_cli_thinking_off_disables_project_runtime_reasoning_effort() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+[runtime]
+reasoning_effort = "high"
+"#,
+    )
+    .expect("write config");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-cli-thinking-off",
+        "thinking disabled",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--thinking")
+        .arg("off")
+        .args(["print", "runtime", "options"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "thinking disabled\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].body.get("reasoning").is_none());
+}
+
+#[test]
 fn run_merges_piped_stdin_with_cli_prompt() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-run-stdin", "jsonl merged")]);

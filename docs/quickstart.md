@@ -15,6 +15,7 @@ development slice.
 cargo metadata --no-deps
 export OPENAI_API_KEY=...
 cargo run -p neo-agent -- print "hello from neo"
+cargo run -p neo-agent -- --thinking high print "solve this carefully"
 ```
 
 The binary currently exposes `print`, `run`, `resume`, `sessions`, `skills`,

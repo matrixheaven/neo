@@ -131,6 +131,9 @@ settings control the runtime's deterministic context compaction trigger.
 Supported reasoning effort values are `minimal`, `low`, `medium`, `high`, and
 `xhigh`. OpenAI Responses serializes this as a Responses `reasoning` object;
 OpenAI-compatible Chat Completions serializes it as `reasoning_effort`.
+For a single invocation, `--thinking <off|minimal|low|medium|high|xhigh>`
+overrides `runtime.reasoning_effort`; `off` removes the provider reasoning
+payload even when config sets a reasoning effort.
 
 The `[tui.keybindings]` table maps `neo-tui` action IDs to arrays of normalized
 key IDs. TOML keys must be quoted because action IDs contain dots. Project

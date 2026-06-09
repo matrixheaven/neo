@@ -59,8 +59,9 @@
   project `.neo/APPEND_SYSTEM.md` or user-global `~/.neo/APPEND_SYSTEM.md`
   after the base system prompt, support `--system-prompt <TEXT_OR_PATH>` plus
   repeatable `--append-system-prompt <TEXT_OR_PATH>` CLI overrides that treat
-  existing paths as UTF-8 files and other values as literal text, expand
-  project-local
+  existing paths as UTF-8 files and other values as literal text, support
+  `--thinking <off|minimal|low|medium|high|xhigh>` as a single-invocation
+  override for `runtime.reasoning_effort`, expand project-local
   `.neo/prompts/*.md` and user-global `~/.neo/prompts/*.md` slash prompt
   templates with project templates taking precedence, merge `prompt_templates`
   selectors from user-global and project TOML config, support repeatable
