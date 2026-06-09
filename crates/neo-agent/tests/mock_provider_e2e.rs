@@ -1732,6 +1732,60 @@ tool = "Allow"
     );
 }
 
+#[test]
+fn print_pi_style_short_no_approve_alias_denies_ask_file_write_tool_and_continues_agent_loop() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+[permissions]
+file_read = "Allow"
+file_write = "Ask"
+shell = "Deny"
+tool = "Allow"
+"#,
+    )
+    .expect("write config");
+    let server = MockSseServer::start(vec![
+        openai_tool_call_sse(
+            "resp-no-approve-1",
+            "call-write-denied",
+            "write",
+            &json!({
+                "path": "denied.txt",
+                "content": "should not be written"
+            }),
+        ),
+        openai_response_sse("resp-no-approve-2", "write denied"),
+    ]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["-na", "print", "write", "file"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "write denied\n");
+    assert!(
+        !temp.path().join("denied.txt").exists(),
+        "denied file write should not create a file"
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].body["input"][2]["type"], "function_call_output");
+    assert_eq!(requests[1].body["input"][2]["call_id"], "call-write-denied");
+    let tool_output = requests[1].body["input"][2]["output"]
+        .as_str()
+        .expect("tool output");
+    assert!(tool_output.contains("approval denied"));
+    assert!(tool_output.contains("denied.txt"));
+}
+
 fn session_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut entries = std::fs::read_dir(root.join(".neo/sessions"))
         .expect("read sessions")
