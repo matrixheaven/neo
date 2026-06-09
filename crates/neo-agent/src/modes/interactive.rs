@@ -3724,6 +3724,7 @@ mod tests {
             approve: false,
             no_approve: false,
             prompt_templates: Vec::new(),
+            skill_paths: Vec::new(),
             configured_prompt_templates: Vec::new(),
             no_prompt_templates: false,
             system_prompt: None,

@@ -31,6 +31,7 @@ pub struct ConfigOverrides {
     pub approve: bool,
     pub no_approve: bool,
     pub prompt_templates: Vec<String>,
+    pub skill_paths: Vec<PathBuf>,
     pub no_prompt_templates: bool,
     pub system_prompt: Option<String>,
     pub append_system_prompt: Vec<String>,
@@ -52,6 +53,7 @@ impl ConfigOverrides {
             approve: cli.approve,
             no_approve: cli.no_approve,
             prompt_templates: cli.prompt_template.clone(),
+            skill_paths: cli.skill.clone(),
             no_prompt_templates: cli.no_prompt_templates,
             system_prompt: cli.system_prompt.clone(),
             append_system_prompt: cli.append_system_prompt.clone(),
@@ -218,6 +220,8 @@ pub struct AppConfig {
     #[serde(skip)]
     pub prompt_templates: Vec<String>,
     #[serde(skip)]
+    pub skill_paths: Vec<PathBuf>,
+    #[serde(skip)]
     pub configured_prompt_templates: Vec<String>,
     #[serde(skip)]
     pub no_prompt_templates: bool,
@@ -243,6 +247,16 @@ pub enum ModelSelection {
     #[default]
     Default,
     Explicit,
+}
+
+impl ModelSelection {
+    const fn from_explicit(explicit: bool) -> Self {
+        if explicit {
+            Self::Explicit
+        } else {
+            Self::Default
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -474,12 +488,13 @@ impl AppConfig {
             .map(|path| resolve_project_path(&project_dir, path))
             .collect();
         let model_scope = overrides.model_scope;
-        if !model_scope.is_empty() && !explicit_model {
-            let scoped_default = scoped_default_model(&model_catalogs, &model_scope)
-                .with_context(|| format!("failed to resolve --models {}", model_scope.join(",")))?;
-            default_provider = scoped_default.provider.0;
-            default_model = scoped_default.model;
-        }
+        apply_scoped_default_model(
+            &mut default_provider,
+            &mut default_model,
+            &model_catalogs,
+            &model_scope,
+            explicit_model,
+        )?;
         let configured_prompt_templates = file_config.prompt_templates.unwrap_or_default();
         let sessions_dir = overrides
             .sessions_dir
@@ -509,11 +524,7 @@ impl AppConfig {
             providers,
             model_catalogs,
             model_scope,
-            model_selection: if explicit_model {
-                ModelSelection::Explicit
-            } else {
-                ModelSelection::Default
-            },
+            model_selection: ModelSelection::from_explicit(explicit_model),
             sessions_dir,
             permissions,
             defaults: Defaults { mode },
@@ -523,6 +534,7 @@ impl AppConfig {
             approve: overrides.approve,
             no_approve: overrides.no_approve,
             prompt_templates: overrides.prompt_templates,
+            skill_paths: overrides.skill_paths,
             configured_prompt_templates,
             no_prompt_templates: overrides.no_prompt_templates,
             system_prompt: overrides.system_prompt,
@@ -549,6 +561,23 @@ fn scoped_default_model(catalogs: &[PathBuf], model_scope: &[String]) -> anyhow:
             model_scope.join(",")
         )
     })
+}
+
+fn apply_scoped_default_model(
+    default_provider: &mut String,
+    default_model: &mut String,
+    model_catalogs: &[PathBuf],
+    model_scope: &[String],
+    explicit_model: bool,
+) -> anyhow::Result<()> {
+    if model_scope.is_empty() || explicit_model {
+        return Ok(());
+    }
+    let scoped_default = scoped_default_model(model_catalogs, model_scope)
+        .with_context(|| format!("failed to resolve --models {}", model_scope.join(",")))?;
+    *default_provider = scoped_default.provider.0;
+    *default_model = scoped_default.model;
+    Ok(())
 }
 
 fn provider_api_key_env(

@@ -1268,6 +1268,47 @@ fn print_cli_append_system_prompt_overrides_discovered_append_file() {
 }
 
 #[test]
+fn print_skill_flag_injects_loaded_skill_body_into_system_prompt() {
+    let temp = TempDir::new().expect("tempdir");
+    let skill = temp.path().join("skills/reviewer");
+    std::fs::create_dir_all(&skill).expect("create skill dir");
+    std::fs::write(
+        skill.join("SKILL.md"),
+        r#"---
+name = "reviewer"
+description = "Review code changes"
+---
+Always mention the Neo skill marker: SKILL_MARKER_42.
+"#,
+    )
+    .expect("write skill");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-skill", "skill loaded")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--skill")
+        .arg(&skill)
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "skill loaded\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["role"], "system");
+    assert!(
+        requests[0].body["input"][0]["content"]
+            .as_str()
+            .expect("system content")
+            .contains("SKILL_MARKER_42")
+    );
+}
+
+#[test]
 fn print_merges_piped_stdin_with_cli_prompt() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-stdin", "merged")]);

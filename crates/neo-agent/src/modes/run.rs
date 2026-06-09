@@ -1206,6 +1206,7 @@ fn agent_config_for_app(
         &config.project_dir,
         config.system_prompt.as_deref(),
         &config.append_system_prompt,
+        &config.skill_paths,
     )? {
         agent_config = agent_config.with_system_prompt(system_prompt);
     }
@@ -1577,6 +1578,7 @@ mod tests {
             approve: false,
             no_approve: false,
             prompt_templates: Vec::new(),
+            skill_paths: Vec::new(),
             configured_prompt_templates: Vec::new(),
             no_prompt_templates: false,
             system_prompt: None,
@@ -1641,6 +1643,7 @@ mod tests {
             approve: false,
             no_approve: false,
             prompt_templates: Vec::new(),
+            skill_paths: Vec::new(),
             configured_prompt_templates: Vec::new(),
             no_prompt_templates: false,
             system_prompt: None,

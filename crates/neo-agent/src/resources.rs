@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::Context;
+use neo_sdk::{SkillLoadOptions, load_skill};
 
 const CONFIG_DIR: &str = ".neo";
 const SYSTEM_PROMPT_FILE: &str = "SYSTEM.md";
@@ -13,12 +14,13 @@ pub(crate) fn load_system_prompt(
     project_dir: &Path,
     explicit_system_prompt: Option<&str>,
     explicit_append_system_prompts: &[String],
+    explicit_skill_paths: &[PathBuf],
 ) -> anyhow::Result<Option<String>> {
     let system_prompt = match explicit_system_prompt {
         Some(prompt) => Some(resolve_prompt_input(prompt, "system prompt")?),
         None => read_first_existing(&system_prompt_candidates(project_dir), "system prompt")?,
     };
-    let append_prompts = if explicit_append_system_prompts.is_empty() {
+    let mut append_prompts = if explicit_append_system_prompts.is_empty() {
         read_first_existing(
             &append_system_prompt_candidates(project_dir),
             "append system prompt",
@@ -31,8 +33,30 @@ pub(crate) fn load_system_prompt(
             .map(|prompt| resolve_prompt_input(prompt, "append system prompt"))
             .collect::<anyhow::Result<Vec<_>>>()?
     };
+    append_prompts.extend(load_explicit_skill_prompts(explicit_skill_paths)?);
 
     Ok(join_system_prompt_parts(system_prompt, append_prompts))
+}
+
+fn load_explicit_skill_prompts(paths: &[PathBuf]) -> anyhow::Result<Vec<String>> {
+    paths
+        .iter()
+        .map(|path| {
+            let skill = load_skill(
+                path,
+                SkillLoadOptions {
+                    load_resources: false,
+                },
+            )
+            .with_context(|| format!("failed to load skill {}", path.display()))?;
+            Ok(format!(
+                "<skill name=\"{}\" description=\"{}\">\n{}\n</skill>",
+                skill.manifest.name,
+                skill.manifest.description,
+                skill.body.trim()
+            ))
+        })
+        .collect()
 }
 
 fn resolve_prompt_input(input: &str, description: &str) -> anyhow::Result<String> {

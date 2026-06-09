@@ -104,6 +104,9 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "NAME_OR_PATH")]
     pub prompt_template: Vec<String>,
 
+    #[arg(long = "skill", global = true, value_name = "PATH")]
+    pub skill: Vec<std::path::PathBuf>,
+
     #[arg(long, global = true)]
     pub no_prompt_templates: bool,
 
