@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt::Write as _, path::Path, sync::Arc};
+use std::{collections::BTreeMap, env, fmt::Write as _, path::Path, sync::Arc};
 
 use anyhow::Context;
 use futures::StreamExt;
@@ -1455,9 +1455,11 @@ fn resolve_model_client(
     config: &AppConfig,
     model: &ModelSpec,
 ) -> anyhow::Result<Arc<dyn ModelClient>> {
+    const CLI_API_KEY_ENV: &str = "__NEO_CLI_API_KEY";
     let mut registry = ProviderRegistry::production();
     apply_configured_provider_overrides(&mut registry, config);
     if config.api_base.is_some()
+        || config.api_key.is_some()
         || config.api_key_env.is_some()
         || provider_api_base(&config.providers, &model.provider.0).is_some()
     {
@@ -1473,12 +1475,19 @@ fn resolve_model_client(
         if let Some(env_name) = &config.api_key_env {
             provider.api_key_env_vars = vec![env_name.clone()];
         }
+        if config.api_key.is_some() {
+            provider.api_key_env_vars = vec![CLI_API_KEY_ENV.to_owned()];
+        }
         registry.register(provider);
     }
-    registry
-        .resolver()
-        .resolve(model)
-        .map_err(anyhow::Error::from)
+    let resolver = if let Some(api_key) = &config.api_key {
+        let mut env = env::vars().collect::<BTreeMap<_, _>>();
+        env.insert(CLI_API_KEY_ENV.to_owned(), api_key.clone());
+        registry.resolver_from(env)
+    } else {
+        registry.resolver()
+    };
+    resolver.resolve(model).map_err(anyhow::Error::from)
 }
 
 fn message_text(message: &AgentMessage) -> String {
@@ -1524,6 +1533,7 @@ mod tests {
             default_model: "test-model".to_owned(),
             default_provider: "openai".to_owned(),
             api_base: None,
+            api_key: None,
             api_key_env: None,
             providers: BTreeMap::new(),
             model_catalogs: Vec::new(),
@@ -1597,6 +1607,7 @@ mod tests {
             default_model: "test-model".to_owned(),
             default_provider: "openai".to_owned(),
             api_base: None,
+            api_key: None,
             api_key_env: None,
             providers: BTreeMap::new(),
             model_catalogs: Vec::new(),

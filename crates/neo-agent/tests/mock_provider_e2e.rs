@@ -283,6 +283,33 @@ fn print_no_session_flag_runs_without_creating_session_files() {
 }
 
 #[test]
+fn print_api_key_flag_supplies_runtime_provider_credential_without_env() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-cli-api-key", "cli key")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("NEO_API_KEY_ENV")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--api-key")
+        .arg("runtime-key")
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "cli key\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].headers.get("authorization").map(String::as_str),
+        Some("Bearer runtime-key")
+    );
+}
+
+#[test]
 fn run_no_session_flag_uses_ephemeral_stable_json_session_without_files() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse(

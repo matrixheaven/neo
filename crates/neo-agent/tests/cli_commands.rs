@@ -369,6 +369,21 @@ api_key_env = "PROJECT_OPENAI_KEY"
 }
 
 #[test]
+fn config_show_does_not_print_cli_api_key_value() {
+    let temp = TempDir::new().expect("tempdir");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .args(["--api-key", "runtime-secret", "config", "show"]);
+
+    let stdout = run(command);
+
+    assert!(!stdout.contains("runtime-secret"));
+    assert!(!stdout.contains("api_key"));
+}
+
+#[test]
 fn config_show_reads_provider_specific_api_base_without_secret_values() {
     let temp = TempDir::new().expect("tempdir");
     fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");

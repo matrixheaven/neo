@@ -15,6 +15,9 @@ pub struct Cli {
     #[arg(long, global = true, env = "NEO_API_BASE")]
     pub api_base: Option<String>,
 
+    #[arg(long = "api-key", global = true, value_name = "KEY")]
+    pub api_key: Option<String>,
+
     #[arg(long, global = true, env = "NEO_CONFIG")]
     pub config: Option<std::path::PathBuf>,
 
