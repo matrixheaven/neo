@@ -3728,6 +3728,7 @@ mod tests {
             extension_paths: Vec::new(),
             configured_prompt_templates: Vec::new(),
             no_prompt_templates: false,
+            no_skills: false,
             no_context_files: false,
             system_prompt: None,
             append_system_prompt: Vec::new(),

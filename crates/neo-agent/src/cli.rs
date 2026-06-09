@@ -113,6 +113,9 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_prompt_templates: bool,
 
+    #[arg(long = "no-skills", alias = "no_skills", global = true)]
+    pub no_skills: bool,
+
     #[arg(long = "no-context-files", alias = "no_context_files", global = true)]
     pub no_context_files: bool,
 

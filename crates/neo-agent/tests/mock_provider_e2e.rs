@@ -1544,6 +1544,138 @@ Always mention the Neo skill marker: SKILL_MARKER_42.
 }
 
 #[test]
+fn print_discovers_project_skill_into_system_prompt() {
+    let temp = TempDir::new().expect("tempdir");
+    let skill = temp.path().join(".neo/skills/reviewer");
+    std::fs::create_dir_all(&skill).expect("create skill dir");
+    std::fs::write(
+        skill.join("SKILL.md"),
+        r#"---
+name = "reviewer"
+description = "Project reviewer"
+---
+Always mention the auto skill marker: AUTO_SKILL_MARKER_53.
+"#,
+    )
+    .expect("write skill");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-auto-skill",
+        "auto skill loaded",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "auto skill loaded\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    let system = requests[0].body["input"][0]["content"]
+        .as_str()
+        .expect("system content");
+    assert!(system.contains("AUTO_SKILL_MARKER_53"));
+}
+
+#[test]
+fn print_no_skills_disables_discovered_skills_but_keeps_explicit_skill_flag() {
+    let temp = TempDir::new().expect("tempdir");
+    let auto_skill = temp.path().join(".neo/skills/auto");
+    std::fs::create_dir_all(&auto_skill).expect("create auto skill dir");
+    std::fs::write(
+        auto_skill.join("SKILL.md"),
+        r#"---
+name = "auto"
+description = "Auto skill"
+---
+AUTO_DISABLED_SKILL_MARKER_59
+"#,
+    )
+    .expect("write auto skill");
+    let explicit_skill = temp.path().join("explicit-skill");
+    std::fs::create_dir_all(&explicit_skill).expect("create explicit skill dir");
+    std::fs::write(
+        explicit_skill.join("SKILL.md"),
+        r#"---
+name = "explicit"
+description = "Explicit skill"
+---
+EXPLICIT_SKILL_MARKER_61
+"#,
+    )
+    .expect("write explicit skill");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-no-skills",
+        "explicit skill retained",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--no-skills")
+        .arg("--skill")
+        .arg(&explicit_skill)
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "explicit skill retained\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    let system = requests[0].body["input"][0]["content"]
+        .as_str()
+        .expect("system content");
+    assert!(system.contains("EXPLICIT_SKILL_MARKER_61"));
+    assert!(!system.contains("AUTO_DISABLED_SKILL_MARKER_59"));
+}
+
+#[test]
+fn print_pi_style_short_no_skills_alias_disables_discovered_skills() {
+    let temp = TempDir::new().expect("tempdir");
+    let auto_skill = temp.path().join(".neo/skills/auto");
+    std::fs::create_dir_all(&auto_skill).expect("create auto skill dir");
+    std::fs::write(
+        auto_skill.join("SKILL.md"),
+        r#"---
+name = "auto"
+description = "Auto skill"
+---
+SHORT_AUTO_DISABLED_SKILL_MARKER_67
+"#,
+    )
+    .expect("write auto skill");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-short-no-skills",
+        "short no skills",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("-ns")
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "short no skills\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["role"], "user");
+    assert_eq!(requests[0].body["input"][0]["content"], "hello");
+}
+
+#[test]
 fn print_merges_piped_stdin_with_cli_prompt() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-stdin", "merged")]);

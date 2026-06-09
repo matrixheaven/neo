@@ -48,6 +48,7 @@ pub struct ConfigOverrides {
     pub skill_paths: Vec<PathBuf>,
     pub extension_paths: Vec<PathBuf>,
     pub no_prompt_templates: bool,
+    pub no_skills: bool,
     pub no_context_files: bool,
     pub system_prompt: Option<String>,
     pub append_system_prompt: Vec<String>,
@@ -72,6 +73,7 @@ impl ConfigOverrides {
             skill_paths: cli.skill.clone(),
             extension_paths: cli.extension.clone(),
             no_prompt_templates: cli.no_prompt_templates,
+            no_skills: cli.no_skills,
             no_context_files: cli.no_context_files,
             system_prompt: cli.system_prompt.clone(),
             append_system_prompt: cli.append_system_prompt.clone(),
@@ -246,6 +248,8 @@ pub struct AppConfig {
     pub configured_prompt_templates: Vec<String>,
     #[serde(skip)]
     pub no_prompt_templates: bool,
+    #[serde(skip)]
+    pub no_skills: bool,
     #[serde(skip)]
     pub no_context_files: bool,
     #[serde(skip)]
@@ -561,6 +565,7 @@ impl AppConfig {
             extension_paths: overrides.extension_paths,
             configured_prompt_templates,
             no_prompt_templates: overrides.no_prompt_templates,
+            no_skills: overrides.no_skills,
             no_context_files: overrides.no_context_files,
             system_prompt: overrides.system_prompt,
             append_system_prompt: overrides.append_system_prompt,

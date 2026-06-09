@@ -19,6 +19,7 @@ pub(crate) fn load_system_prompt(
     explicit_system_prompt: Option<&str>,
     explicit_append_system_prompts: &[String],
     explicit_skill_paths: &[PathBuf],
+    no_skills: bool,
     no_context_files: bool,
     project_trusted: bool,
 ) -> anyhow::Result<Option<String>> {
@@ -39,7 +40,11 @@ pub(crate) fn load_system_prompt(
             .map(|prompt| resolve_prompt_input(prompt, "append system prompt"))
             .collect::<anyhow::Result<Vec<_>>>()?
     };
-    append_prompts.extend(load_explicit_skill_prompts(explicit_skill_paths)?);
+    append_prompts.extend(load_skill_prompts(
+        project_dir,
+        explicit_skill_paths,
+        no_skills,
+    )?);
     if !no_context_files
         && let Some(project_context) =
             format_project_context(&load_context_files(project_dir, project_trusted)?)
@@ -126,7 +131,16 @@ fn format_project_context(context_files: &[ContextFile]) -> Option<String> {
     Some(prompt)
 }
 
-fn load_explicit_skill_prompts(paths: &[PathBuf]) -> anyhow::Result<Vec<String>> {
+fn load_skill_prompts(
+    project_dir: &Path,
+    explicit_paths: &[PathBuf],
+    no_skills: bool,
+) -> anyhow::Result<Vec<String>> {
+    let mut paths = Vec::new();
+    if !no_skills {
+        paths.extend(discover_skill_paths(project_dir)?);
+    }
+    paths.extend(explicit_paths.iter().cloned());
     paths
         .iter()
         .map(|path| {
@@ -145,6 +159,48 @@ fn load_explicit_skill_prompts(paths: &[PathBuf]) -> anyhow::Result<Vec<String>>
             ))
         })
         .collect()
+}
+
+fn discover_skill_paths(project_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    if let Some(home) = home_dir() {
+        paths.extend(discover_skill_paths_in_dir(
+            &home.join(CONFIG_DIR).join("skills"),
+        )?);
+    }
+    paths.extend(discover_skill_paths_in_dir(
+        &project_dir.join(CONFIG_DIR).join("skills"),
+    )?);
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn discover_skill_paths_in_dir(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    collect_skill_paths(dir, &mut paths)?;
+    Ok(paths)
+}
+
+fn collect_skill_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    let direct_skill = dir.join("SKILL.md");
+    if direct_skill.is_file() {
+        paths.push(dir.to_path_buf());
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)
+        .with_context(|| format!("failed to read skills directory {}", dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to inspect {}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_skill_paths(&path, paths)?;
+        }
+    }
+    Ok(())
 }
 
 fn resolve_prompt_input(input: &str, description: &str) -> anyhow::Result<String> {
