@@ -705,6 +705,114 @@ fn run_name_flag_sets_session_display_name_for_exact_session() {
 }
 
 #[test]
+fn print_fork_flag_copies_existing_session_and_appends_turn_to_child() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![
+        openai_response_sse("resp-fork-1", "parent answer"),
+        openai_response_sse("resp-fork-2", "child answer"),
+    ]);
+
+    let mut parent = neo();
+    parent
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--session-id", "fork-parent", "print", "parent"]);
+    assert_eq!(run(parent), "parent answer\n");
+
+    let mut child = neo();
+    child
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--fork", "fork-parent", "print", "child"]);
+    assert_eq!(run(child), "child answer\n");
+
+    let mut list = neo();
+    list.current_dir(temp.path()).args(["sessions", "list"]);
+    let list_stdout = run(list);
+    let child_id = list_stdout
+        .lines()
+        .find(|line| line.contains("parent=fork-parent"))
+        .and_then(|line| line.split('\t').next())
+        .expect("forked child listed with parent")
+        .to_owned();
+    assert_ne!(child_id, "fork-parent");
+
+    let parent_content =
+        std::fs::read_to_string(temp.path().join(".neo/sessions/fork-parent.jsonl"))
+            .expect("read parent session");
+    assert!(!parent_content.contains("child answer"));
+    let child_content =
+        std::fs::read_to_string(temp.path().join(format!(".neo/sessions/{child_id}.jsonl")))
+            .expect("read child session");
+    assert!(child_content.contains("parent answer"));
+    assert!(child_content.contains("child answer"));
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let replayed = requests[1].body["input"]
+        .as_array()
+        .expect("fork request input");
+    assert!(replayed.iter().any(|message| {
+        message["role"] == "assistant" && message["content"].as_str() == Some("parent answer")
+    }));
+    assert!(replayed.iter().any(|message| {
+        message["role"] == "user" && message["content"].as_str() == Some("child")
+    }));
+}
+
+#[test]
+fn run_fork_flag_uses_child_session_in_stable_json_output_and_name_flag_names_child() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![
+        openai_response_sse("resp-run-fork-1", "parent answer"),
+        openai_response_sse("resp-run-fork-2", "child json"),
+    ]);
+
+    let mut parent = neo();
+    parent
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--session-id", "run-fork-parent", "print", "parent"]);
+    assert_eq!(run(parent), "parent answer\n");
+
+    let mut child = neo();
+    child
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args([
+            "--fork",
+            "run-fork-parent",
+            "--name",
+            "Child Branch",
+            "run",
+            "--output",
+            "json",
+            "child",
+        ]);
+    let stdout = run(child);
+
+    let mut list = neo();
+    list.current_dir(temp.path()).args(["sessions", "list"]);
+    let list_stdout = run(list);
+    let child_id = list_stdout
+        .lines()
+        .find(|line| line.contains("parent=run-fork-parent"))
+        .and_then(|line| line.split('\t').next())
+        .expect("forked child listed with parent")
+        .to_owned();
+    assert!(stdout.contains(&format!("\"id\":\"{child_id}\"")));
+    assert!(list_stdout.contains("Child Branch"));
+}
+
+#[test]
 fn print_no_tools_omits_all_model_tools() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-no-tools", "no tools")]);

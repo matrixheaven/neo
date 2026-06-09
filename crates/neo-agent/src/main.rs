@@ -65,19 +65,28 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
     let session_id = cli.session_id.clone();
     let session = cli.session.clone();
     let continue_latest = cli.continue_latest;
+    let fork = cli.fork.clone();
     let session_name = cli.name.clone();
 
     match cli.command {
         Some(Command::Print { prompt }) => {
             let prompt = prepare_prompt(prompt, &config)?;
-            let session_target =
-                session_target_for_cli(session_id.as_deref(), session.as_deref(), continue_latest);
+            let session_target = session_target_for_cli(
+                session_id.as_deref(),
+                session.as_deref(),
+                continue_latest,
+                fork.as_deref(),
+            );
             modes::print::execute(&prompt, &config, session_target, session_name.as_deref()).await
         }
         Some(Command::Run { output, prompt }) => {
             let prompt = prepare_prompt(prompt, &config)?;
-            let session_target =
-                session_target_for_cli(session_id.as_deref(), session.as_deref(), continue_latest);
+            let session_target = session_target_for_cli(
+                session_id.as_deref(),
+                session.as_deref(),
+                continue_latest,
+                fork.as_deref(),
+            );
             modes::run::execute(
                 &prompt,
                 &config,
@@ -148,11 +157,13 @@ fn session_target_for_cli<'a>(
     session_id: Option<&'a str>,
     session: Option<&'a str>,
     continue_latest: bool,
+    fork: Option<&'a str>,
 ) -> Option<modes::run::SessionTarget<'a>> {
     session_id
         .map(modes::run::SessionTarget::ExactId)
         .or_else(|| session.map(modes::run::SessionTarget::Existing))
         .or(continue_latest.then_some(modes::run::SessionTarget::Latest))
+        .or_else(|| fork.map(modes::run::SessionTarget::Fork))
 }
 
 fn run_output_for_mode(config: &AppConfig) -> cli::RunOutput {

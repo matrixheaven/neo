@@ -40,6 +40,14 @@ pub struct Cli {
     )]
     pub continue_latest: bool,
 
+    #[arg(
+        long,
+        global = true,
+        value_name = "ID_OR_PATH",
+        conflicts_with_all = ["session_id", "session", "continue_latest"]
+    )]
+    pub fork: Option<String>,
+
     #[arg(short = 'n', long, global = true, value_name = "NAME")]
     pub name: Option<String>,
 

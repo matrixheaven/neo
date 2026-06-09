@@ -784,6 +784,7 @@ pub enum SessionTarget<'a> {
     ExactId(&'a str),
     Existing(&'a str),
     Latest,
+    Fork(&'a str),
 }
 
 pub struct PromptApprovalRequest {
@@ -827,6 +828,13 @@ pub async fn run_prompt_with_session_target(
         SessionTarget::Latest => {
             let session_id = latest_session_id(config)?;
             run_prompt_in_session(&session_id, prompt, config).await
+        }
+        SessionTarget::Fork(session_ref) => {
+            let parent_id = session_commands::resolve_session_id(session_ref, config)?;
+            let child = SessionMetadataStore::new(&config.sessions_dir)
+                .fork(&parent_id, None)
+                .with_context(|| format!("failed to fork session {session_ref}"))?;
+            run_prompt_in_session(&child.id, prompt, config).await
         }
     }
 }
