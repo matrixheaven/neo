@@ -76,6 +76,7 @@ struct RunSessionOptions {
     continue_latest: bool,
     fork: Option<String>,
     name: Option<String>,
+    no_session: bool,
 }
 
 impl RunSessionOptions {
@@ -86,6 +87,7 @@ impl RunSessionOptions {
             continue_latest: cli.continue_latest,
             fork: cli.fork.clone(),
             name: cli.name.clone(),
+            no_session: cli.no_session,
         }
     }
 
@@ -112,6 +114,7 @@ async fn dispatch_command(
                 config,
                 session_options.target(),
                 session_options.name.as_deref(),
+                session_options.no_session,
             )
             .await
         }
@@ -123,6 +126,7 @@ async fn dispatch_command(
                 output.unwrap_or_else(|| run_output_for_mode(config)),
                 session_options.target(),
                 session_options.name.as_deref(),
+                session_options.no_session,
             )
             .await
         }

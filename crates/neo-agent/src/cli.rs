@@ -51,6 +51,15 @@ pub struct Cli {
     #[arg(short = 'n', long, global = true, value_name = "NAME")]
     pub name: Option<String>,
 
+    #[arg(long = "no-session", global = true, conflicts_with_all = [
+        "session_id",
+        "session",
+        "continue_latest",
+        "fork",
+        "name"
+    ])]
+    pub no_session: bool,
+
     #[arg(long, global = true, value_name = "SESSION_JSONL", num_args = 1..=2)]
     pub export: Vec<std::path::PathBuf>,
 

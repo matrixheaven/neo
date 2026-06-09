@@ -255,6 +255,63 @@ fn print_session_dir_flag_writes_session_to_explicit_directory() {
 }
 
 #[test]
+fn print_no_session_flag_runs_without_creating_session_files() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-no-session",
+        "ephemeral answer",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--no-session", "print", "ephemeral"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "ephemeral answer\n");
+    assert!(
+        !temp.path().join(".neo/sessions").exists(),
+        "--no-session should not create a session directory"
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["content"], "ephemeral");
+}
+
+#[test]
+fn run_no_session_flag_uses_ephemeral_stable_json_session_without_files() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-run-no-session",
+        "ephemeral json",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--no-session", "run", "--output", "json", "ephemeral"]);
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("\"type\":\"session\""));
+    assert!(stdout.contains("\"id\":\"ephemeral\""));
+    assert!(
+        !temp.path().join(".neo/sessions").exists(),
+        "--no-session should not create a session directory"
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["content"], "ephemeral");
+}
+
+#[test]
 fn print_session_id_flag_creates_exact_session_file() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse(

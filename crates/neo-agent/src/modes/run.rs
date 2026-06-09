@@ -25,13 +25,18 @@ pub async fn execute(
     output: RunOutput,
     session_target: Option<SessionTarget<'_>>,
     session_name: Option<&str>,
+    no_session: bool,
 ) -> anyhow::Result<String> {
-    let turn = if let Some(session_target) = session_target {
+    let turn = if no_session {
+        run_prompt_ephemeral(prompt, config).await?
+    } else if let Some(session_target) = session_target {
         run_prompt_with_session_target(session_target, prompt, config).await?
     } else {
         run_prompt(prompt, config).await?
     };
-    apply_session_name(config, &turn.session_id, session_name)?;
+    if !no_session {
+        apply_session_name(config, &turn.session_id, session_name)?;
+    }
     if matches!(output, RunOutput::Json) {
         return stable_json_output(&turn, config);
     }
@@ -799,6 +804,7 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
     let mut writer = JsonlSessionWriter::create(&session_path)
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
+    let mut writer = SessionEventWriter::jsonl(&mut writer);
     let (user_message, events) = append_user_event(prompt, &mut writer).await?;
     let runtime = runtime_for_config(config, None).await?;
     finish_prompt_turn(
@@ -808,6 +814,25 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
         runtime,
         events,
         session_id,
+    )
+    .await
+}
+
+pub async fn run_prompt_ephemeral(
+    prompt: &[String],
+    config: &AppConfig,
+) -> anyhow::Result<PromptTurn> {
+    let prompt = prompt.join(" ");
+    let mut writer = SessionEventWriter::memory();
+    let (user_message, events) = append_user_event(prompt, &mut writer).await?;
+    let runtime = runtime_for_config(config, None).await?;
+    finish_prompt_turn(
+        user_message,
+        AgentContext::new(),
+        &mut writer,
+        runtime,
+        events,
+        "ephemeral".to_owned(),
     )
     .await
 }
@@ -867,6 +892,7 @@ async fn run_prompt_with_exact_session_id(
     let mut writer = JsonlSessionWriter::create(&session_path)
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
+    let mut writer = SessionEventWriter::jsonl(&mut writer);
     let (user_message, events) = append_user_event(prompt, &mut writer).await?;
     let runtime = runtime_for_config(config, None).await?;
     finish_prompt_turn(
@@ -894,6 +920,7 @@ pub async fn run_prompt_in_session(
     let mut writer = JsonlSessionWriter::open_append(&session_path)
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
+    let mut writer = SessionEventWriter::jsonl(&mut writer);
     let (user_message, events) = append_user_event(prompt, &mut writer).await?;
     let runtime = runtime_for_config(config, None).await?;
     finish_prompt_turn(
@@ -920,7 +947,7 @@ pub async fn run_prompt_streaming(
     let mut writer = JsonlSessionWriter::create(&session_path)
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
-    let (user_message, events) = append_user_event(prompt, &mut writer).await?;
+    let (user_message, events) = append_user_event_jsonl(prompt, &mut writer).await?;
     let runtime = runtime_for_config(config, Some(approval_tx)).await?;
     let streaming = StreamingTurnIo {
         event_tx,
@@ -954,7 +981,7 @@ pub async fn run_prompt_in_session_streaming(
     let mut writer = JsonlSessionWriter::open_append(&session_path)
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
-    let (user_message, events) = append_user_event(prompt, &mut writer).await?;
+    let (user_message, events) = append_user_event_jsonl(prompt, &mut writer).await?;
     let runtime = runtime_for_config(config, Some(approval_tx)).await?;
     let streaming = StreamingTurnIo {
         event_tx,
@@ -993,11 +1020,12 @@ async fn run_prompt_with_runtime(
     writer: &mut JsonlSessionWriter,
     runtime: AgentRuntime,
 ) -> anyhow::Result<PromptTurn> {
-    let (user_message, events) = append_user_event(prompt, writer).await?;
+    let mut writer = SessionEventWriter::jsonl(writer);
+    let (user_message, events) = append_user_event(prompt, &mut writer).await?;
     finish_prompt_turn(
         user_message,
         context,
-        writer,
+        &mut writer,
         runtime,
         events,
         "test-session".to_owned(),
@@ -1007,7 +1035,7 @@ async fn run_prompt_with_runtime(
 
 async fn append_user_event(
     prompt: String,
-    writer: &mut JsonlSessionWriter,
+    writer: &mut SessionEventWriter<'_>,
 ) -> anyhow::Result<(AgentMessage, Vec<AgentEvent>)> {
     let user_message = AgentMessage::user_text(prompt);
     let user_event = AgentEvent::MessageAppended {
@@ -1018,10 +1046,18 @@ async fn append_user_event(
     Ok((user_message, vec![user_event]))
 }
 
+async fn append_user_event_jsonl(
+    prompt: String,
+    writer: &mut JsonlSessionWriter,
+) -> anyhow::Result<(AgentMessage, Vec<AgentEvent>)> {
+    let mut writer = SessionEventWriter::jsonl(writer);
+    append_user_event(prompt, &mut writer).await
+}
+
 async fn finish_prompt_turn(
     user_message: AgentMessage,
     mut context: AgentContext,
-    writer: &mut JsonlSessionWriter,
+    writer: &mut SessionEventWriter<'_>,
     runtime: AgentRuntime,
     mut events: Vec<AgentEvent>,
     session_id: String,
@@ -1058,6 +1094,38 @@ async fn finish_prompt_turn(
         events,
         assistant_text,
     })
+}
+
+enum SessionEventWriter<'a> {
+    Jsonl(&'a mut JsonlSessionWriter),
+    Memory,
+}
+
+impl<'a> SessionEventWriter<'a> {
+    fn jsonl(writer: &'a mut JsonlSessionWriter) -> Self {
+        Self::Jsonl(writer)
+    }
+
+    fn memory() -> Self {
+        Self::Memory
+    }
+
+    async fn append_event(&mut self, event: &AgentEvent) -> anyhow::Result<()> {
+        match self {
+            Self::Jsonl(writer) => writer
+                .append_event(event)
+                .await
+                .map_err(anyhow::Error::from),
+            Self::Memory => Ok(()),
+        }
+    }
+
+    async fn flush(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Jsonl(writer) => writer.flush().await.map_err(anyhow::Error::from),
+            Self::Memory => Ok(()),
+        }
+    }
 }
 
 struct StreamingTurnIo {
