@@ -1826,7 +1826,7 @@ mod tests {
             .iter()
             .filter_map(|part| match part {
                 ContentPart::Text { text } => Some(text.as_str()),
-                ContentPart::Image { .. } => None,
+                ContentPart::Thinking { .. } | ContentPart::Image { .. } => None,
             })
             .collect::<Vec<_>>()
             .join("")
