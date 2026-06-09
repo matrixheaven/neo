@@ -61,6 +61,9 @@
   explicit `--prompt-template <NAME_OR_PATH>` entries for template names,
   project-contained `.md` files, and non-recursive `.md` directories, fail
   explicit selector collisions with the duplicate template name and both paths,
+  support `-selector` prompt-template filters for auto-discovered local prompt
+  files without requiring the excluded file to exist or disabling explicitly
+  included positive selectors,
   preserve explicit template entries when `--no-prompt-templates` disables
   automatic discovery, expand `$1`, `$@`, `$ARGUMENTS`, and `${@:N}` / `${@:N:L}`
   argument placeholders, then discover enabled project MCP servers with
@@ -139,8 +142,9 @@ and platform-specific guidance.
   only when Neo has real local package and trust infrastructure. The current
   implemented prompt-template scope is project `.neo/prompts`, user-global
   `~/.neo/prompts`, user/project TOML `prompt_templates` selectors, and
-  explicit local name/file/directory selectors with collision diagnostics for
-  duplicate explicit selector names.
+  explicit local name/file/directory selectors plus `-selector` filters for
+  auto-discovered local prompts, with collision diagnostics for duplicate
+  explicit selector names.
 - Keep config docs scoped to project/global TOML layering until profile sync or
   hosted settings exist.
 - Do not document `/login`, hosted sharing, hosted extension marketplace

@@ -100,6 +100,10 @@ overrides them for that workspace.
 non-recursive directories of `.md` prompt templates. Selectors from user-global
 and project config are merged, with duplicate selector strings loaded once, and
 CLI `--prompt-template` selectors are added for the current invocation.
+Prefix a selector with `-` to filter an auto-discovered local prompt template,
+for example `"-prompts/review.md"` excludes `.neo/prompts/review.md` from slash
+discovery and RPC command listing without requiring the file to exist. Negative
+selectors do not disable explicitly included positive selectors.
 
 The default permissions mirror `neo_agent_core::PermissionPolicy::default()`:
 file reads are allowed, file writes ask, shell asks, and tools are allowed.

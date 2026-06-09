@@ -82,6 +82,9 @@ prompt_templates = ["prompts"]
 
 Config selectors are merged across `~/.neo/config.toml` and `.neo/config.toml`;
 CLI selectors are added for the current invocation.
+Use a leading `-` to exclude an auto-discovered local prompt, such as
+`prompt_templates = ["-prompts/review.md"]`, while keeping explicit positive
+selectors available.
 
 `run --output json` emits a stable typed JSONL event stream with a session
 header and Pi-style lifecycle event names. The same stream is selected when

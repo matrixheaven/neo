@@ -27,6 +27,17 @@ pub(crate) enum PromptTemplateLocation {
     User,
 }
 
+#[derive(Debug, Clone)]
+struct PromptTemplateSelectorSet {
+    includes: Vec<String>,
+    exclusions: Vec<PromptTemplateExclusion>,
+}
+
+#[derive(Debug, Clone)]
+struct PromptTemplateExclusion {
+    paths: Vec<PathBuf>,
+}
+
 pub(crate) fn expand_prompt_template_args(
     prompt: Vec<String>,
     project_dir: &Path,
@@ -34,8 +45,10 @@ pub(crate) fn expand_prompt_template_args(
     explicit_selectors: &[String],
     disabled: bool,
 ) -> anyhow::Result<Vec<String>> {
+    let selectors =
+        parse_prompt_template_selectors(explicit_selectors, project_dir, global_prompts_dir)?;
     let explicit_templates =
-        load_explicit_prompt_templates(explicit_selectors, project_dir, global_prompts_dir)?;
+        load_explicit_prompt_templates(&selectors.includes, project_dir, global_prompts_dir)?;
 
     let Some(invocation) = PromptInvocation::from_prompt_args(&prompt) else {
         if let [template] = explicit_templates.as_slice() {
@@ -52,8 +65,12 @@ pub(crate) fn expand_prompt_template_args(
     if disabled {
         return Ok(prompt);
     }
-    let Some(template) =
-        find_prompt_template_by_name(&invocation.name, project_dir, global_prompts_dir)?
+    let Some(template) = find_auto_prompt_template_by_name(
+        &invocation.name,
+        project_dir,
+        global_prompts_dir,
+        &selectors.exclusions,
+    )?
     else {
         return Ok(prompt);
     };
@@ -65,8 +82,10 @@ pub(crate) fn discover_prompt_template_commands(
     global_prompts_dir: Option<&Path>,
     configured_selectors: &[String],
 ) -> anyhow::Result<Vec<PromptTemplateCommand>> {
+    let selectors =
+        parse_prompt_template_selectors(configured_selectors, project_dir, global_prompts_dir)?;
     let mut commands = Vec::new();
-    for selector in configured_selectors {
+    for selector in &selectors.includes {
         commands.extend(
             load_selected_prompt_templates(selector, project_dir, global_prompts_dir)?
                 .into_iter()
@@ -79,6 +98,7 @@ pub(crate) fn discover_prompt_template_commands(
     commands.extend(
         load_project_prompt_templates(project_dir)?
             .into_iter()
+            .filter(|template| !is_prompt_template_excluded(template, &selectors.exclusions))
             .map(|template| PromptTemplateCommand {
                 template,
                 location: PromptTemplateLocation::Project,
@@ -88,6 +108,7 @@ pub(crate) fn discover_prompt_template_commands(
         commands.extend(
             load_user_prompt_templates(global_prompts_dir)?
                 .into_iter()
+                .filter(|template| !is_prompt_template_excluded(template, &selectors.exclusions))
                 .map(|template| PromptTemplateCommand {
                     template,
                     location: PromptTemplateLocation::User,
@@ -163,6 +184,55 @@ fn find_prompt_template_by_name(
         .find(|template| template.name == name))
 }
 
+fn find_auto_prompt_template_by_name(
+    name: &str,
+    project_dir: &Path,
+    global_prompts_dir: Option<&Path>,
+    exclusions: &[PromptTemplateExclusion],
+) -> anyhow::Result<Option<PromptTemplate>> {
+    if let Some(template) = load_project_prompt_templates(project_dir)?
+        .into_iter()
+        .filter(|template| !is_prompt_template_excluded(template, exclusions))
+        .find(|template| template.name == name)
+    {
+        return Ok(Some(template));
+    }
+    let Some(global_prompts_dir) = global_prompts_dir else {
+        return Ok(None);
+    };
+    Ok(load_user_prompt_templates(global_prompts_dir)?
+        .into_iter()
+        .filter(|template| !is_prompt_template_excluded(template, exclusions))
+        .find(|template| template.name == name))
+}
+
+fn parse_prompt_template_selectors(
+    selectors: &[String],
+    project_dir: &Path,
+    global_prompts_dir: Option<&Path>,
+) -> anyhow::Result<PromptTemplateSelectorSet> {
+    let mut includes = Vec::new();
+    let mut exclusions = Vec::new();
+    for selector in selectors {
+        if let Some(excluded) = selector.strip_prefix('-') {
+            if excluded.is_empty() {
+                anyhow::bail!("prompt template exclusion selector cannot be empty");
+            }
+            exclusions.push(PromptTemplateExclusion::new(
+                excluded,
+                project_dir,
+                global_prompts_dir,
+            ));
+        } else {
+            includes.push(selector.clone());
+        }
+    }
+    Ok(PromptTemplateSelectorSet {
+        includes,
+        exclusions,
+    })
+}
+
 fn load_explicit_prompt_templates(
     selectors: &[String],
     project_dir: &Path,
@@ -187,6 +257,51 @@ fn load_explicit_prompt_templates(
         }
     }
     Ok(templates)
+}
+
+impl PromptTemplateExclusion {
+    fn new(selector: &str, project_dir: &Path, global_prompts_dir: Option<&Path>) -> Self {
+        let path = Path::new(selector);
+        let mut paths = Vec::new();
+        if path.is_absolute() {
+            paths.push(path.to_path_buf());
+        } else {
+            paths.push(project_dir.join(path));
+            paths.push(project_dir.join(".neo").join(path));
+            if let Some(stripped) = selector.strip_prefix("prompts/") {
+                paths.push(project_dir.join(".neo/prompts").join(stripped));
+                if let Some(global_prompts_dir) = global_prompts_dir {
+                    paths.push(global_prompts_dir.join(stripped));
+                }
+            } else if let Some(global_prompts_dir) = global_prompts_dir {
+                paths.push(global_prompts_dir.join(path));
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        Self { paths }
+    }
+
+    fn matches(&self, template: &PromptTemplate) -> bool {
+        let template_path = comparable_path(&template.path);
+        self.paths
+            .iter()
+            .map(|path| comparable_path(path))
+            .any(|path| path == template_path)
+    }
+}
+
+fn is_prompt_template_excluded(
+    template: &PromptTemplate,
+    exclusions: &[PromptTemplateExclusion],
+) -> bool {
+    exclusions
+        .iter()
+        .any(|exclusion| exclusion.matches(template))
+}
+
+fn comparable_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn load_selected_prompt_templates(

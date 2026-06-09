@@ -487,6 +487,117 @@ prompt_templates = ["prompts"]
 }
 
 #[test]
+fn print_config_prompt_template_exclusion_skips_auto_discovered_project_prompt() {
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(project.path().join(".neo/prompts")).expect("create project prompts");
+    std::fs::write(
+        project.path().join(".neo/prompts/review.md"),
+        "Project review: $1\n",
+    )
+    .expect("write project prompt template");
+    std::fs::write(
+        project.path().join(".neo/config.toml"),
+        r#"
+prompt_templates = ["-prompts/review.md"]
+"#,
+    )
+    .expect("write config");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-excluded-template",
+        "excluded",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "/review", "src/lib.rs"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "excluded\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "/review src/lib.rs"
+    );
+}
+
+#[test]
+fn print_prompt_template_exclusion_does_not_require_existing_path() {
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(project.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        project.path().join(".neo/config.toml"),
+        r#"
+prompt_templates = ["-prompts/missing.md"]
+"#,
+    )
+    .expect("write config");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-missing-exclusion",
+        "missing exclusion ignored",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "missing exclusion ignored\n");
+    let requests = server.requests();
+    assert_eq!(requests[0].body["input"][0]["content"], "hello");
+}
+
+#[test]
+fn print_prompt_template_exclusion_keeps_explicit_positive_selector_enabled() {
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(project.path().join(".neo")).expect("create .neo");
+    std::fs::create_dir_all(project.path().join("prompts")).expect("create prompts");
+    std::fs::write(
+        project.path().join("prompts/review.md"),
+        "Explicit review remains: $1\n",
+    )
+    .expect("write explicit prompt template");
+    std::fs::write(
+        project.path().join(".neo/config.toml"),
+        r#"
+prompt_templates = ["prompts", "-prompts/review.md"]
+"#,
+    )
+    .expect("write config");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-explicit-with-exclusion",
+        "explicit retained",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "/review", "src/lib.rs"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "explicit retained\n");
+    let requests = server.requests();
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Explicit review remains: src/lib.rs"
+    );
+}
+
+#[test]
 fn print_deduplicates_cli_and_config_prompt_template_selectors() {
     let project = TempDir::new().expect("project tempdir");
     std::fs::create_dir_all(project.path().join(".neo")).expect("create .neo");

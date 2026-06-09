@@ -631,6 +631,43 @@ Review $1
 }
 
 #[test]
+fn rpc_get_commands_omits_excluded_auto_discovered_prompt_template() {
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(project.path().join(".neo/prompts")).expect("create project prompts");
+    std::fs::write(
+        project.path().join(".neo/prompts/review.md"),
+        "Review should be excluded\n",
+    )
+    .expect("write excluded prompt template");
+    std::fs::write(project.path().join(".neo/prompts/fix.md"), "Fix remains\n")
+        .expect("write kept prompt template");
+    std::fs::write(
+        project.path().join(".neo/config.toml"),
+        r#"
+prompt_templates = ["-prompts/review.md"]
+"#,
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command.current_dir(project.path()).arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"commands-1","method":"get_commands","params":{}}"#,
+    );
+
+    let messages = parse_jsonl(&stdout);
+    let commands = messages[0]["result"]["commands"]
+        .as_array()
+        .expect("commands array");
+    let names = commands
+        .iter()
+        .map(|command| command["name"].as_str().expect("name"))
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["/fix"]);
+}
+
+#[test]
 fn rpc_prompt_streams_agent_events_and_returns_assistant_text() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-rpc", "rpc answer")]);
