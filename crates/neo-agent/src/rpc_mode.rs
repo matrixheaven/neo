@@ -71,6 +71,7 @@ async fn handle_request(
         "sessions.tree" => handle_sessions_tree(config, request, output),
         "sessions.get" => handle_sessions_get(config, request, output).await,
         "sessions.export_html" => handle_sessions_export_html(config, request, output).await,
+        "set_session_name" => handle_set_session_name(config, request, output),
         "prompt" => handle_prompt(config, request, output).await,
         unknown => push_rpc_message(
             output,
@@ -364,6 +365,86 @@ async fn handle_sessions_export_html(
             serde_json::to_value(RpcSessionExportHtmlResult { session_id, html })?,
         )),
     )
+}
+
+fn handle_set_session_name(
+    config: &AppConfig,
+    request: RpcRequest,
+    output: &mut String,
+) -> anyhow::Result<()> {
+    let Some(session_ref) = request.params.get("session_id").and_then(Value::as_str) else {
+        return push_rpc_message(
+            output,
+            &RpcMessage::Response(RpcResponse::failure(
+                request.id,
+                RpcError::new(
+                    RpcErrorCode::InvalidParams,
+                    "set_session_name params.session_id must be a string",
+                    None,
+                ),
+            )),
+        );
+    };
+    let Some(name) = request.params.get("name").and_then(Value::as_str) else {
+        return push_rpc_message(
+            output,
+            &RpcMessage::Response(RpcResponse::failure(
+                request.id,
+                RpcError::new(
+                    RpcErrorCode::InvalidParams,
+                    "set_session_name params.name must be a string",
+                    None,
+                ),
+            )),
+        );
+    };
+
+    let session_id = match session_commands::resolve_session_id(session_ref, config) {
+        Ok(session_id) => session_id,
+        Err(err) => {
+            return push_rpc_message(
+                output,
+                &RpcMessage::Response(RpcResponse::failure(
+                    request.id,
+                    RpcError::new(RpcErrorCode::InvalidParams, err.to_string(), None),
+                )),
+            );
+        }
+    };
+    let path = config.sessions_dir.join(format!("{session_id}.jsonl"));
+    if !path.exists() {
+        return push_rpc_message(
+            output,
+            &RpcMessage::Response(RpcResponse::failure(
+                request.id,
+                RpcError::new(
+                    RpcErrorCode::InvalidParams,
+                    format!("session {session_ref:?} does not exist"),
+                    None,
+                ),
+            )),
+        );
+    }
+
+    match session_commands::rename(&session_id, name, config) {
+        Ok(_) => push_rpc_message(
+            output,
+            &RpcMessage::Response(RpcResponse::success(
+                request.id,
+                json!({
+                    "session_id": session_id,
+                    "name": name,
+                }),
+            )),
+        ),
+        Err(err) => push_rpc_message(
+            output,
+            &RpcMessage::Response(RpcResponse::failure(
+                request.id,
+                RpcError::new(RpcErrorCode::InternalError, err.to_string(), None),
+            )),
+        ),
+    }
 }
 
 async fn handle_get_messages(

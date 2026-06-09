@@ -547,6 +547,41 @@ fn rpc_sessions_export_html_returns_rendered_local_session() {
 }
 
 #[test]
+fn rpc_set_session_name_updates_local_session_metadata() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    std::fs::write(sessions.join("alpha-main.jsonl"), "{}\n").expect("write session");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"rename-1","method":"set_session_name","params":{"session_id":"alpha","name":"Feature branch"}}"#,
+    );
+
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "response");
+    assert_eq!(messages[0]["id"], "rename-1");
+    assert_eq!(messages[0]["result"]["session_id"], "alpha-main");
+    assert_eq!(messages[0]["result"]["name"], "Feature branch");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"sessions-list","method":"sessions.list","params":{}}"#,
+    );
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages[0]["result"]["sessions"][0]["id"], "alpha-main");
+    assert_eq!(
+        messages[0]["result"]["sessions"][0]["name"],
+        "Feature branch"
+    );
+}
+
+#[test]
 fn rpc_get_commands_returns_local_prompt_template_commands() {
     let home = TempDir::new().expect("home tempdir");
     let project = TempDir::new().expect("project tempdir");
