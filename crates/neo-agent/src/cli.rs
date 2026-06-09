@@ -110,6 +110,9 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_prompt_templates: bool,
 
+    #[arg(long = "no-context-files", alias = "no_context_files", global = true)]
+    pub no_context_files: bool,
+
     #[arg(long, global = true, value_name = "TEXT_OR_PATH")]
     pub system_prompt: Option<String>,
 

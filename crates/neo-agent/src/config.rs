@@ -19,6 +19,7 @@ const DEFAULT_PROVIDER: &str = "openai";
 const DEFAULT_MODE: &str = "interactive";
 
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ConfigOverrides {
     pub model: Option<String>,
     pub provider: Option<String>,
@@ -33,6 +34,7 @@ pub struct ConfigOverrides {
     pub prompt_templates: Vec<String>,
     pub skill_paths: Vec<PathBuf>,
     pub no_prompt_templates: bool,
+    pub no_context_files: bool,
     pub system_prompt: Option<String>,
     pub append_system_prompt: Vec<String>,
     pub thinking: Option<ThinkingLevel>,
@@ -55,6 +57,7 @@ impl ConfigOverrides {
             prompt_templates: cli.prompt_template.clone(),
             skill_paths: cli.skill.clone(),
             no_prompt_templates: cli.no_prompt_templates,
+            no_context_files: cli.no_context_files,
             system_prompt: cli.system_prompt.clone(),
             append_system_prompt: cli.append_system_prompt.clone(),
             thinking: cli.thinking,
@@ -196,6 +199,7 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct AppConfig {
     pub default_model: String,
     pub default_provider: String,
@@ -225,6 +229,8 @@ pub struct AppConfig {
     pub configured_prompt_templates: Vec<String>,
     #[serde(skip)]
     pub no_prompt_templates: bool,
+    #[serde(skip)]
+    pub no_context_files: bool,
     #[serde(skip)]
     pub system_prompt: Option<String>,
     #[serde(skip)]
@@ -537,6 +543,7 @@ impl AppConfig {
             skill_paths: overrides.skill_paths,
             configured_prompt_templates,
             no_prompt_templates: overrides.no_prompt_templates,
+            no_context_files: overrides.no_context_files,
             system_prompt: overrides.system_prompt,
             append_system_prompt: overrides.append_system_prompt,
             tool_filters: overrides.tool_filters,

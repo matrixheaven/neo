@@ -1149,6 +1149,119 @@ fn print_appends_project_append_system_prompt_file_to_system_message() {
 }
 
 #[test]
+fn print_approve_includes_agents_context_file_in_system_message() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::write(
+        temp.path().join("AGENTS.md"),
+        "Always mention the project marker CONTEXT_MARKER_17.\n",
+    )
+    .expect("write AGENTS.md");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-context-file",
+        "context loaded",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--approve")
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "context loaded\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["role"], "system");
+    let system = requests[0].body["input"][0]["content"]
+        .as_str()
+        .expect("system content");
+    assert!(system.contains("<project_context>"));
+    assert!(system.contains("Project-specific instructions and guidelines:"));
+    assert!(system.contains("<project_instructions path=\""));
+    assert!(system.contains("AGENTS.md"));
+    assert!(system.contains("CONTEXT_MARKER_17"));
+}
+
+#[test]
+fn print_no_context_files_disables_agents_files_without_disabling_system_prompt() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        temp.path().join(".neo/SYSTEM.md"),
+        "Base system survives.\n",
+    )
+    .expect("write system prompt");
+    std::fs::write(
+        temp.path().join("AGENTS.md"),
+        "This disabled marker must not appear: DISABLED_CONTEXT_MARKER_29.\n",
+    )
+    .expect("write AGENTS.md");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-no-context-files",
+        "context disabled",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--approve")
+        .arg("--no-context-files")
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "context disabled\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["role"], "system");
+    let system = requests[0].body["input"][0]["content"]
+        .as_str()
+        .expect("system content");
+    assert!(system.contains("Base system survives."));
+    assert!(!system.contains("DISABLED_CONTEXT_MARKER_29"));
+    assert!(!system.contains("<project_context>"));
+}
+
+#[test]
+fn print_pi_style_short_no_context_files_alias_disables_agents_files() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::write(
+        temp.path().join("AGENTS.md"),
+        "This disabled marker must not appear: SHORT_DISABLED_CONTEXT_MARKER_31.\n",
+    )
+    .expect("write AGENTS.md");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-short-no-context-files",
+        "short context disabled",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--approve")
+        .arg("-nc")
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "short context disabled\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["role"], "user");
+    assert_eq!(requests[0].body["input"][0]["content"], "hello");
+}
+
+#[test]
 fn print_prefers_project_system_resources_over_user_global_resources() {
     let home = TempDir::new().expect("home tempdir");
     let project = TempDir::new().expect("project tempdir");

@@ -1207,6 +1207,8 @@ fn agent_config_for_app(
         config.system_prompt.as_deref(),
         &config.append_system_prompt,
         &config.skill_paths,
+        config.no_context_files,
+        config.approve && !config.no_approve,
     )? {
         agent_config = agent_config.with_system_prompt(system_prompt);
     }
@@ -1581,6 +1583,7 @@ mod tests {
             skill_paths: Vec::new(),
             configured_prompt_templates: Vec::new(),
             no_prompt_templates: false,
+            no_context_files: false,
             system_prompt: None,
             append_system_prompt: Vec::new(),
             tool_filters: ToolFilterConfig::default(),
@@ -1646,6 +1649,7 @@ mod tests {
             skill_paths: Vec::new(),
             configured_prompt_templates: Vec::new(),
             no_prompt_templates: false,
+            no_context_files: false,
             system_prompt: None,
             append_system_prompt: Vec::new(),
             tool_filters: ToolFilterConfig::default(),
