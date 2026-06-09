@@ -23,10 +23,10 @@ pub async fn execute(
     prompt: &[String],
     config: &AppConfig,
     output: RunOutput,
-    session_id: Option<&str>,
+    session_target: Option<SessionTarget<'_>>,
 ) -> anyhow::Result<String> {
-    let turn = if let Some(session_id) = session_id {
-        run_prompt_with_session_id(session_id, prompt, config).await?
+    let turn = if let Some(session_target) = session_target {
+        run_prompt_with_session_target(session_target, prompt, config).await?
     } else {
         run_prompt(prompt, config).await?
     };
@@ -777,6 +777,12 @@ pub struct PromptTurn {
     pub assistant_text: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum SessionTarget<'a> {
+    ExactId(&'a str),
+    Existing(&'a str),
+}
+
 pub struct PromptApprovalRequest {
     pub id: String,
     pub decision_tx: oneshot::Sender<PermissionDecision>,
@@ -802,7 +808,23 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
     .await
 }
 
-pub async fn run_prompt_with_session_id(
+pub async fn run_prompt_with_session_target(
+    session_target: SessionTarget<'_>,
+    prompt: &[String],
+    config: &AppConfig,
+) -> anyhow::Result<PromptTurn> {
+    match session_target {
+        SessionTarget::ExactId(session_id) => {
+            run_prompt_with_exact_session_id(session_id, prompt, config).await
+        }
+        SessionTarget::Existing(session_ref) => {
+            let session_id = session_commands::resolve_session_id(session_ref, config)?;
+            run_prompt_in_session(&session_id, prompt, config).await
+        }
+    }
+}
+
+async fn run_prompt_with_exact_session_id(
     session_id: &str,
     prompt: &[String],
     config: &AppConfig,

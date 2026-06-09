@@ -23,6 +23,14 @@ pub struct Cli {
     #[arg(long = "session-id", global = true, value_name = "ID")]
     pub session_id: Option<String>,
 
+    #[arg(
+        long,
+        global = true,
+        value_name = "ID_OR_PATH",
+        conflicts_with = "session_id"
+    )]
+    pub session: Option<String>,
+
     #[arg(long, global = true, env = "NEO_MODE")]
     pub mode: Option<String>,
 

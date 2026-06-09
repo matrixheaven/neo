@@ -62,18 +62,23 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
         return modes::run::list_models_filtered(&config, search);
     }
 
+    let session_id = cli.session_id.clone();
+    let session = cli.session.clone();
+
     match cli.command {
         Some(Command::Print { prompt }) => {
             let prompt = prepare_prompt(prompt, &config)?;
-            modes::print::execute(&prompt, &config, cli.session_id.as_deref()).await
+            let session_target = session_target_for_cli(session_id.as_deref(), session.as_deref());
+            modes::print::execute(&prompt, &config, session_target).await
         }
         Some(Command::Run { output, prompt }) => {
             let prompt = prepare_prompt(prompt, &config)?;
+            let session_target = session_target_for_cli(session_id.as_deref(), session.as_deref());
             modes::run::execute(
                 &prompt,
                 &config,
                 output.unwrap_or_else(|| run_output_for_mode(&config)),
-                cli.session_id.as_deref(),
+                session_target,
             )
             .await
         }
@@ -132,6 +137,15 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
             .await?
             .unwrap_or_default()),
     }
+}
+
+fn session_target_for_cli<'a>(
+    session_id: Option<&'a str>,
+    session: Option<&'a str>,
+) -> Option<modes::run::SessionTarget<'a>> {
+    session_id
+        .map(modes::run::SessionTarget::ExactId)
+        .or_else(|| session.map(modes::run::SessionTarget::Existing))
 }
 
 fn run_output_for_mode(config: &AppConfig) -> cli::RunOutput {
