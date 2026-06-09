@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     cli::RunOutput,
-    config::{AppConfig, McpServerConfig, provider_api_base},
+    config::{self, AppConfig, McpServerConfig, provider_api_base},
     resources, session_commands,
 };
 
@@ -1430,9 +1430,24 @@ fn latest_session_id(config: &AppConfig) -> anyhow::Result<String> {
 }
 
 fn resolve_model(config: &AppConfig) -> anyhow::Result<ModelSpec> {
-    model_registry_for_config(config)?
-        .get(&config.default_provider, &config.default_model)
-        .cloned()
+    let registry = model_registry_for_config(config)?;
+    let models = registry.list();
+    let candidates = if matches!(config.model_selection, config::ModelSelection::Explicit) {
+        models
+    } else {
+        config::scoped_models(models.iter(), &config.model_scope)
+    };
+    if !config.model_scope.is_empty() && candidates.is_empty() {
+        anyhow::bail!(
+            "no models match --models {}; run `neo --list-models` for supported catalog entries",
+            config.model_scope.join(",")
+        );
+    }
+    candidates
+        .into_iter()
+        .find(|model| {
+            model.provider.0 == config.default_provider && model.model == config.default_model
+        })
         .with_context(|| {
             format!(
                 "unknown model {}/{}; run `neo models list` for supported catalog entries",
@@ -1522,8 +1537,8 @@ mod tests {
 
     use super::{PromptApprovalRequest, agent_config_for_app, run_prompt_with_runtime};
     use crate::config::{
-        AppConfig, Defaults, McpConfig, RuntimeCompactionConfig, RuntimeConfig, ToolFilterConfig,
-        TuiConfig,
+        AppConfig, Defaults, McpConfig, ModelSelection, RuntimeCompactionConfig, RuntimeConfig,
+        ToolFilterConfig, TuiConfig,
     };
 
     #[test]
@@ -1537,6 +1552,8 @@ mod tests {
             api_key_env: None,
             providers: BTreeMap::new(),
             model_catalogs: Vec::new(),
+            model_scope: Vec::new(),
+            model_selection: ModelSelection::Default,
             sessions_dir: temp.path().join(".neo/sessions"),
             permissions: PermissionPolicy::default(),
             defaults: Defaults {
@@ -1611,6 +1628,8 @@ mod tests {
             api_key_env: None,
             providers: BTreeMap::new(),
             model_catalogs: Vec::new(),
+            model_scope: Vec::new(),
+            model_selection: ModelSelection::Default,
             sessions_dir: temp.path().join(".neo/sessions"),
             permissions: PermissionPolicy::default(),
             defaults: Defaults {

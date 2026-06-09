@@ -1465,6 +1465,22 @@ fn root_list_models_flag_reports_empty_search_results() {
 }
 
 #[test]
+fn root_models_scope_selects_first_matching_model_for_interactive_start() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .args(["--models", "sonnet"]);
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("model: anthropic/claude-sonnet-4-5"));
+    assert!(!stdout.contains("model: openai/gpt-4.1"));
+    assert!(!stdout.contains("placeholder"));
+    assert!(!stdout.contains("fake"));
+}
+
+#[test]
 fn models_list_loads_project_model_catalogs() {
     let temp = TempDir::new().expect("tempdir");
     fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");

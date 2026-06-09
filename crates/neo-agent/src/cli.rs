@@ -87,6 +87,14 @@ pub struct Cli {
     #[arg(long, global = true, env = "NEO_MODE")]
     pub mode: Option<String>,
 
+    #[arg(
+        long = "models",
+        global = true,
+        value_name = "PATTERNS",
+        value_delimiter = ','
+    )]
+    pub models: Vec<String>,
+
     #[arg(short = 'a', long, global = true, conflicts_with = "no_approve")]
     pub approve: bool,
 

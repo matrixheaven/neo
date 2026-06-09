@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use neo_agent_core::{PermissionPolicy, QueueMode, ToolExecutionMode};
-use neo_ai::ReasoningEffort;
+use neo_ai::{ModelRegistry, ModelSpec, ReasoningEffort};
 use neo_tui::{KeyId, KeybindingAction, KeybindingsManager};
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +27,7 @@ pub struct ConfigOverrides {
     pub config_path: Option<PathBuf>,
     pub sessions_dir: Option<PathBuf>,
     pub mode: Option<String>,
+    pub model_scope: Vec<String>,
     pub approve: bool,
     pub no_approve: bool,
     pub prompt_templates: Vec<String>,
@@ -47,6 +48,7 @@ impl ConfigOverrides {
             config_path: cli.config.clone(),
             sessions_dir: cli.session_dir.clone(),
             mode: cli.mode.clone(),
+            model_scope: clean_model_scope(&cli.models),
             approve: cli.approve,
             no_approve: cli.no_approve,
             prompt_templates: cli.prompt_template.clone(),
@@ -87,6 +89,110 @@ fn clean_tool_names(values: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn clean_model_scope(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+pub(crate) fn scoped_models<'a>(
+    models: impl IntoIterator<Item = &'a ModelSpec>,
+    scope: &[String],
+) -> Vec<ModelSpec> {
+    let scope = scope
+        .iter()
+        .map(|pattern| pattern.trim())
+        .filter(|pattern| !pattern.is_empty())
+        .collect::<Vec<_>>();
+    models
+        .into_iter()
+        .filter(|model| {
+            scope.is_empty()
+                || scope
+                    .iter()
+                    .any(|pattern| model_matches_scope_pattern(model, pattern))
+        })
+        .cloned()
+        .collect()
+}
+
+fn model_matches_scope_pattern(model: &ModelSpec, pattern: &str) -> bool {
+    let pattern = strip_thinking_suffix(pattern).trim();
+    if pattern.is_empty() {
+        return false;
+    }
+    let qualified = format!("{}/{}", model.provider.0, model.model);
+    if pattern == qualified || pattern == model.model {
+        return true;
+    }
+    if has_glob_meta(pattern) {
+        return wildcard_match(pattern, &qualified) || wildcard_match(pattern, &model.model);
+    }
+    fuzzy_match(&qualified, pattern) || fuzzy_match(&model.model, pattern)
+}
+
+fn strip_thinking_suffix(pattern: &str) -> &str {
+    let Some((model, suffix)) = pattern.rsplit_once(':') else {
+        return pattern;
+    };
+    if matches!(
+        suffix,
+        "off" | "minimal" | "low" | "medium" | "high" | "xhigh"
+    ) {
+        model
+    } else {
+        pattern
+    }
+}
+
+fn has_glob_meta(pattern: &str) -> bool {
+    pattern
+        .chars()
+        .any(|character| matches!(character, '*' | '?' | '['))
+}
+
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let pattern = pattern.chars().collect::<Vec<_>>();
+    let text = text.chars().collect::<Vec<_>>();
+    let mut matched = vec![vec![false; text.len() + 1]; pattern.len() + 1];
+    matched[0][0] = true;
+    for index in 1..=pattern.len() {
+        if pattern[index - 1] == '*' {
+            matched[index][0] = matched[index - 1][0];
+        }
+    }
+    for pattern_index in 1..=pattern.len() {
+        for text_index in 1..=text.len() {
+            matched[pattern_index][text_index] = match pattern[pattern_index - 1] {
+                '*' => {
+                    matched[pattern_index - 1][text_index] || matched[pattern_index][text_index - 1]
+                }
+                '?' => matched[pattern_index - 1][text_index - 1],
+                character => {
+                    character == text[text_index - 1] && matched[pattern_index - 1][text_index - 1]
+                }
+            };
+        }
+    }
+    matched[pattern.len()][text.len()]
+}
+
+fn fuzzy_match(haystack: &str, needle: &str) -> bool {
+    let haystack = haystack.to_lowercase();
+    let needle = needle.to_lowercase();
+    if haystack.contains(&needle) {
+        return true;
+    }
+    let mut chars = haystack.chars();
+    needle
+        .chars()
+        .all(|needle_char| chars.any(|candidate| candidate == needle_char))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub default_model: String,
@@ -97,6 +203,10 @@ pub struct AppConfig {
     pub api_key_env: Option<String>,
     pub providers: BTreeMap<String, ProviderConfig>,
     pub model_catalogs: Vec<PathBuf>,
+    #[serde(skip)]
+    pub model_scope: Vec<String>,
+    #[serde(skip)]
+    pub model_selection: ModelSelection,
     pub sessions_dir: PathBuf,
     pub permissions: PermissionPolicy,
     pub defaults: Defaults,
@@ -126,6 +236,13 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Defaults {
     pub mode: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ModelSelection {
+    #[default]
+    Default,
+    Explicit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,12 +451,13 @@ impl AppConfig {
         let env_mode = env::var("NEO_MODE").ok();
         let thinking_override = overrides.thinking;
 
-        let default_model = overrides
+        let explicit_model = overrides.model.is_some();
+        let mut default_model = overrides
             .model
             .or(env_model)
             .or(file_config.default_model)
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
-        let default_provider = overrides
+        let mut default_provider = overrides
             .provider
             .or(env_provider)
             .or(file_config.default_provider)
@@ -349,12 +467,19 @@ impl AppConfig {
         let api_key_env = env_api_key
             .or(file_config.api_key_env)
             .or_else(|| provider_api_key_env(&providers, &default_provider));
-        let model_catalogs = file_config
+        let model_catalogs: Vec<PathBuf> = file_config
             .model_catalogs
             .unwrap_or_default()
             .into_iter()
             .map(|path| resolve_project_path(&project_dir, path))
             .collect();
+        let model_scope = overrides.model_scope;
+        if !model_scope.is_empty() && !explicit_model {
+            let scoped_default = scoped_default_model(&model_catalogs, &model_scope)
+                .with_context(|| format!("failed to resolve --models {}", model_scope.join(",")))?;
+            default_provider = scoped_default.provider.0;
+            default_model = scoped_default.model;
+        }
         let configured_prompt_templates = file_config.prompt_templates.unwrap_or_default();
         let sessions_dir = overrides
             .sessions_dir
@@ -383,6 +508,12 @@ impl AppConfig {
             api_key_env,
             providers,
             model_catalogs,
+            model_scope,
+            model_selection: if explicit_model {
+                ModelSelection::Explicit
+            } else {
+                ModelSelection::Default
+            },
             sessions_dir,
             permissions,
             defaults: Defaults { mode },
@@ -401,6 +532,23 @@ impl AppConfig {
             config_path,
         })
     }
+}
+
+fn scoped_default_model(catalogs: &[PathBuf], model_scope: &[String]) -> anyhow::Result<ModelSpec> {
+    let mut registry = ModelRegistry::seeded();
+    for path in catalogs {
+        registry
+            .load_catalog_path(path)
+            .map_err(anyhow::Error::from)?;
+    }
+    let models = registry.list();
+    let scoped = scoped_models(models.iter(), model_scope);
+    scoped.first().cloned().with_context(|| {
+        format!(
+            "no models match --models {}; run `neo --list-models` for supported catalog entries",
+            model_scope.join(",")
+        )
+    })
 }
 
 fn provider_api_key_env(

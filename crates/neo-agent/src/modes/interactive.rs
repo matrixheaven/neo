@@ -1627,10 +1627,14 @@ fn session_catalog_for_config(config: &AppConfig) -> SessionCatalog {
 
 fn model_catalog_for_config(config: &AppConfig) -> ModelCatalog {
     match crate::modes::run::model_registry_for_config(config) {
-        Ok(registry) => ModelCatalog {
-            items: registry.list().iter().map(model_to_picker_item).collect(),
-            error: None,
-        },
+        Ok(registry) => {
+            let models = registry.list();
+            let models = config::scoped_models(models.iter(), &config.model_scope);
+            ModelCatalog {
+                items: models.iter().map(model_to_picker_item).collect(),
+                error: None,
+            }
+        }
         Err(error) => ModelCatalog {
             items: Vec::new(),
             error: Some(error.to_string()),
@@ -3560,6 +3564,30 @@ mod tests {
         assert_eq!(requests[0].session_id, None);
     }
 
+    #[test]
+    fn model_catalog_for_config_applies_cli_models_scope() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+        config.model_scope = vec!["sonnet".to_owned()];
+
+        let catalog = model_catalog_for_config(&config);
+
+        assert_eq!(catalog.error, None);
+        assert!(!catalog.items.is_empty());
+        assert!(
+            catalog
+                .items
+                .iter()
+                .all(|item| item.value.contains("sonnet"))
+        );
+        assert!(
+            catalog
+                .items
+                .iter()
+                .all(|item| !item.value.contains("openai/gpt-4.1"))
+        );
+    }
+
     #[tokio::test]
     async fn session_catalog_and_loader_use_real_local_session_store() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -3683,6 +3711,8 @@ mod tests {
             api_key_env: None,
             providers: BTreeMap::new(),
             model_catalogs: Vec::new(),
+            model_scope: Vec::new(),
+            model_selection: config::ModelSelection::Default,
             sessions_dir,
             permissions: PermissionPolicy::default(),
             defaults: Defaults {

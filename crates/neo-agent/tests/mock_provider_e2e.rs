@@ -106,6 +106,40 @@ fn isolated_home_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("neo-e2e-home-{nanos}-{id}"))
 }
 
+fn write_scoped_openai_model_catalog(temp: &TempDir) {
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+model_catalogs = [".neo/models.json"]
+"#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join(".neo/models.json"),
+        r#"
+{
+  "models": [
+    {
+      "provider": "openai",
+      "model": "scoped-runtime-model",
+      "api": "OpenAiResponses",
+      "capabilities": {
+        "streaming": true,
+        "tools": true,
+        "images": false,
+        "reasoning": false,
+        "embeddings": false,
+        "max_context_tokens": 128000
+      }
+    }
+  ]
+}
+"#,
+    )
+    .expect("write model catalog");
+}
+
 #[test]
 fn print_uses_production_openai_responses_adapter_against_mock_provider() {
     let temp = TempDir::new().expect("tempdir");
@@ -144,6 +178,50 @@ fn print_uses_production_openai_responses_adapter_against_mock_provider() {
     assert!(content.contains("hello from mock"));
     assert!(!content.contains("fake response"));
     assert!(!content.contains("placeholder"));
+}
+
+#[test]
+fn print_models_scope_selects_first_matching_runtime_model() {
+    let temp = TempDir::new().expect("tempdir");
+    write_scoped_openai_model_catalog(&temp);
+    let server = MockSseServer::start(vec![openai_response_sse("resp-model-scope", "scoped")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--models", "scoped", "print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "scoped\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["model"], "scoped-runtime-model");
+}
+
+#[test]
+fn print_explicit_model_wins_over_models_scope_for_runtime_model() {
+    let temp = TempDir::new().expect("tempdir");
+    write_scoped_openai_model_catalog(&temp);
+    let server = MockSseServer::start(vec![openai_response_sse("resp-model-explicit", "explicit")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--model", "gpt-4.1", "--models", "scoped", "print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "explicit\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["model"], "gpt-4.1");
 }
 
 #[test]
