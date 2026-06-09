@@ -76,7 +76,17 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
     }
 
     let session_options = RunSessionOptions::from_cli(&cli);
-    dispatch_command(cli.command, &config, session_options, cli.resume_picker).await
+    let interactive_options = modes::interactive::InteractiveOptions {
+        verbose_startup: cli.verbose,
+    };
+    dispatch_command(
+        cli.command,
+        &config,
+        session_options,
+        cli.resume_picker,
+        interactive_options,
+    )
+    .await
 }
 
 #[derive(Clone)]
@@ -116,6 +126,7 @@ async fn dispatch_command(
     config: &AppConfig,
     session_options: RunSessionOptions,
     resume_picker: bool,
+    interactive_options: modes::interactive::InteractiveOptions,
 ) -> anyhow::Result<String> {
     match command {
         Some(Command::Print { prompt }) => {
@@ -206,7 +217,7 @@ async fn dispatch_command(
                 modes::interactive::StartupAction::None
             };
             Ok(
-                modes::interactive::execute_tty_with_startup(config, startup)
+                modes::interactive::execute_tty_with_startup(config, startup, interactive_options)
                     .await?
                     .unwrap_or_default(),
             )

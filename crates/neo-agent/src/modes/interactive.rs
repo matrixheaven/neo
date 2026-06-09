@@ -53,8 +53,18 @@ pub enum StartupAction {
     OpenSessionPicker,
 }
 
-pub fn execute_with_startup(config: &AppConfig, startup: StartupAction) -> String {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InteractiveOptions {
+    pub verbose_startup: bool,
+}
+
+pub fn execute_with_startup(
+    config: &AppConfig,
+    startup: StartupAction,
+    options: InteractiveOptions,
+) -> String {
     let mut controller = controller_for_config(config);
+    controller.apply_startup_options(config, options);
     controller.apply_startup_action(startup);
     controller.render_snapshot()
 }
@@ -62,13 +72,15 @@ pub fn execute_with_startup(config: &AppConfig, startup: StartupAction) -> Strin
 pub async fn execute_tty_with_startup(
     config: &AppConfig,
     startup: StartupAction,
+    options: InteractiveOptions,
 ) -> Result<Option<String>> {
     if !stdout().is_terminal() {
-        return Ok(Some(execute_with_startup(config, startup)));
+        return Ok(Some(execute_with_startup(config, startup, options)));
     }
 
     let mut terminal = RawTerminal::enter()?;
     let mut controller = controller_for_config(config);
+    controller.apply_startup_options(config, options);
     controller.apply_startup_action(startup);
     let events = CrosstermEvents::new(controller.keybindings.clone());
     controller
@@ -330,6 +342,17 @@ impl InteractiveController {
         match startup {
             StartupAction::None => {}
             StartupAction::OpenSessionPicker => self.open_session_picker(),
+        }
+    }
+
+    pub fn apply_startup_options(&mut self, config: &AppConfig, options: InteractiveOptions) {
+        if !options.verbose_startup {
+            return;
+        }
+        for notice in startup_notices(config) {
+            self.app
+                .transcript_mut()
+                .push(neo_tui::TranscriptItem::notice(notice));
         }
     }
 
@@ -1645,6 +1668,36 @@ fn model_catalog_for_config(config: &AppConfig) -> ModelCatalog {
 fn model_to_picker_item(model: &neo_ai::ModelSpec) -> PickerItem {
     let value = format!("{}/{}", model.provider.0, model.model);
     PickerItem::new(value.clone(), value, Some(format!("{:?}", model.api)))
+}
+
+fn startup_notices(config: &AppConfig) -> Vec<String> {
+    let model_scope = if config.model_scope.is_empty() {
+        "all".to_owned()
+    } else {
+        config.model_scope.join(",")
+    };
+    vec![
+        "Startup".to_owned(),
+        format!("project: {}", config.project_dir.display()),
+        format!("sessions: {}", config.sessions_dir.display()),
+        format!(
+            "model: {}/{}",
+            config.default_provider, config.default_model
+        ),
+        format!("model scope: {model_scope}"),
+        format!(
+            "resources: context_files={} skills={} extensions={} offline={}",
+            enabled_label(!config.no_context_files),
+            enabled_label(!config.no_skills),
+            enabled_label(!config.no_extensions),
+            enabled_label(config.offline),
+        ),
+        format!("trust: project={}", enabled_label(config.project_trusted)),
+    ]
+}
+
+fn enabled_label(enabled: bool) -> &'static str {
+    if enabled { "enabled" } else { "disabled" }
 }
 
 fn session_record_to_picker_item(

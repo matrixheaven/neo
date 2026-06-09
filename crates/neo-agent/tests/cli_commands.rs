@@ -77,6 +77,31 @@ default_model = "claude-sonnet"
 }
 
 #[test]
+fn root_verbose_flag_renders_real_startup_details() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .args(["--verbose", "--models", "sonnet"]);
+
+    let stdout = run(command);
+
+    let project_name = temp
+        .path()
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .expect("tempdir has utf8 basename");
+    assert!(stdout.contains("Startup"));
+    assert!(stdout.contains("project:"));
+    assert!(stdout.contains(project_name));
+    assert!(stdout.contains("sessions:"));
+    assert!(stdout.contains(".neo/sessions"));
+    assert!(stdout.contains("model scope: sonnet"));
+    assert!(!stdout.contains("placeholder"));
+    assert!(!stdout.contains("fake"));
+}
+
+#[test]
 fn root_resume_flag_opens_real_local_session_picker() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = temp.path().join(".neo/sessions");

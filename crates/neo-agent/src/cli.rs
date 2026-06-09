@@ -125,6 +125,9 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub offline: bool,
 
+    #[arg(long, global = true)]
+    pub verbose: bool,
+
     #[arg(long, global = true, value_name = "TEXT_OR_PATH")]
     pub system_prompt: Option<String>,
 
