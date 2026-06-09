@@ -27,6 +27,14 @@ configuration error instead of returning a synthetic response.
 Use `--list-models [search]` to print the resolved model catalog and exit
 without entering interactive mode; the optional search filters model entries
 while retaining provider credential status output.
+Use `--verbose` on the interactive root command to force a startup notice block
+with the resolved project, session directory, selected model, model scope,
+resource toggles, offline state, and project trust state. `--verbose` is a TUI
+startup display override; it does not change `print`, `run`, or RPC output.
+
+```bash
+cargo run -p neo-agent -- --verbose --models sonnet
+```
 
 Use Pi-style per-invocation tool filters to shape the model-facing tool
 registry for `print`, `run`, RPC prompts, and live TUI turns:
@@ -65,6 +73,20 @@ For one-off runs, pass literal text or an existing UTF-8 file path directly:
 ```bash
 cargo run -p neo-agent -- --system-prompt .neo/SYSTEM.md --append-system-prompt "Be concise." print "hello"
 ```
+
+Project context files can live in `AGENTS.md` or `CLAUDE.md` at the project or
+an ancestor directory. User-global `~/.neo/AGENTS.md` or `~/.neo/CLAUDE.md`
+always load, while project context files require project trust. Manage trust
+with:
+
+```bash
+cargo run -p neo-agent -- trust status
+cargo run -p neo-agent -- trust approve
+cargo run -p neo-agent -- trust deny
+```
+
+Use `--no-context-files` to disable `AGENTS.md` / `CLAUDE.md` loading for one
+invocation.
 
 Project prompt templates live in `.neo/prompts/*.md`. Invoke `review.md` as
 `/review`; Neo expands `$1`, `$@`, `$ARGUMENTS`, and simple `${@:N}` slices
@@ -194,21 +216,31 @@ provider-safe `mcp__<server>__<tool>` specs are sent to the configured model.
 ```bash
 cargo run -p neo-agent -- sessions export-html <session-id> > session.html
 cargo run -p neo-agent -- skills show path/to/skill
+cargo run -p neo-agent -- --skill path/to/skill print "use this skill"
+cargo run -p neo-agent -- --no-skills --skill path/to/skill print "only this skill"
 cargo run -p neo-agent -- extensions install path/to/extension
 cargo run -p neo-agent -- extensions install file:///path/to/git-extension
 cargo run -p neo-agent -- extensions update echo
+cargo run -p neo-agent -- --offline extensions update echo
 cargo run -p neo-agent -- extensions list
 cargo run -p neo-agent -- extensions status echo
 cargo run -p neo-agent -- extensions disable echo
 cargo run -p neo-agent -- extensions enable echo
 cargo run -p neo-agent -- extensions call echo tool.echo '{"value":42}'
+cargo run -p neo-agent -- --extension path/to/extension print "use explicit extension tools"
 ```
 
 `skills show` uses `neo-sdk` skill loading, `sessions export-html` uses the
-safe HTML exporter, extension install/update commands persist local sources
-under the project `.neo/extensions-sources.toml`, lifecycle commands persist
-local enablement state under the project `.neo/extensions-state.toml`, and
-`extensions call` uses the JSONL RPC stdio runner.
+safe HTML exporter, default skills are discovered from `~/.neo/skills` and
+project `.neo/skills`, explicit `--skill` paths are preserved when `--no-skills`
+disables default discovery, extension install/update commands persist local
+sources under the project `.neo/extensions-sources.toml`, `--offline` skips
+extension update refreshes with an explicit offline message, lifecycle commands
+persist local enablement state under the project `.neo/extensions-state.toml`,
+and `extensions call` uses the JSONL RPC stdio runner. Provider-backed turns
+also discover enabled project `.neo/extensions` tools through each extension's
+`tools.list` RPC; `--extension` adds explicit roots and `--no-extensions`
+disables only default project extension discovery.
 
 ## Rust API Examples
 

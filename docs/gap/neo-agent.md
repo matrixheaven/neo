@@ -3,8 +3,8 @@
 ## Implemented Surface
 
 - Global flags: `--model`/`NEO_MODEL`, `--provider`/`NEO_PROVIDER`,
-  `--api-base`/`NEO_API_BASE`, `--config`/`NEO_CONFIG`, and
-  `--mode`/`NEO_MODE`.
+  `--api-base`/`NEO_API_BASE`, `--config`/`NEO_CONFIG`,
+  `--mode`/`NEO_MODE`, `--offline`/`NEO_OFFLINE`, and `--verbose`.
 - Commands: `print`, `run`, `resume`, `sessions list`, `sessions show`,
   `sessions tree`, `sessions rename`, `sessions fork`, `sessions compact`,
   `sessions export-html`, `skills show`, `extensions list`,
@@ -34,10 +34,15 @@
   a local parent/child tree, and can export replayed messages to standalone
   HTML.
 - `skills show` loads TOML-frontmatter skill files through `neo-sdk`.
+  Provider-backed turns auto-discover project `.neo/skills` and user-global
+  `~/.neo/skills`, load explicit `--skill <PATH>` entries, and preserve
+  explicit skill paths when `--no-skills` disables automatic discovery.
 - `extensions install` copies a local extension directory or clones an explicit
   git URL into the project `.neo/extensions/<id>`, records its source in the
   project `.neo/extensions-sources.toml`, and `extensions update` refreshes
   from that recorded source without changing enable/disable state.
+  `--offline` or truthy `NEO_OFFLINE` skips extension updates with an explicit
+  offline message instead of pretending the source was refreshed.
 - `extensions uninstall` removes the installed extension directory and source
   registry entry without mutating explicit enable/disable lifecycle state.
 - `extensions list`, `extensions status`, `extensions enable`, and
@@ -46,6 +51,11 @@
   when `--config` points at the project from a different invocation directory.
 - `extensions call` refuses disabled extensions and round-trips JSONL RPC over
   stdio for enabled local extension manifests.
+- Provider-backed turns discover enabled project `.neo/extensions` and
+  explicit `--extension <PATH>` extension roots, call each extension's
+  `tools.list` RPC, and register returned tools as model-facing
+  `extension__<extension>__<tool>` functions. `--no-extensions` disables
+  automatic project extension discovery while keeping explicit extension paths.
 - `mcp list` reads project MCP server entries without starting servers.
 - `mcp tools <server-id>` discovers a configured enabled MCP server over its
   real stdio or HTTP/SSE adapter, then prints model-facing tool names,
@@ -82,6 +92,14 @@
   argument placeholders, then discover enabled project MCP servers with
   `transport = "stdio"`, `transport = "http"`, or `transport = "sse"` and
   register their tools in the runtime tool registry.
+- Provider-backed turns load user-global `~/.neo/AGENTS.md`/`CLAUDE.md`
+  context files unconditionally and trust-gated project/ancestor
+  `AGENTS.md`/`CLAUDE.md` files into a Pi-shaped `<project_context>` system
+  prompt section. `--no-context-files` disables these context files without
+  disabling `SYSTEM.md` or explicit prompt overrides. Project trust decisions
+  are stored under `~/.neo/trust.json` and managed with `neo trust
+  status|approve|deny|clear`; `--approve` and `--no-approve` override the
+  stored decision for one invocation.
 - `run --output json` and top-level `--mode json run ...` emit stable typed
   JSONL with a session header, Pi-style lifecycle event names, and assistant
   thinking start/delta/end content events when the provider streams reasoning
@@ -117,7 +135,10 @@
   `@provider/model` prefixes from the resolved model catalog, uses exact
   leading `@provider/model` tokens as per-turn model overrides, exits on
   Esc/Ctrl-C, and keeps the no-tty snapshot fallback for command tests and
-  redirected stdout. `ctrl+r` and the exact `/tree` slash command open a local
+  redirected stdout. `--verbose` forces a real startup notice block in the TUI
+  transcript with project, session directory, selected model, scoped models,
+  resource toggles, offline state, and project trust state. `ctrl+r` and the
+  exact `/tree` slash command open a local
   session picker backed by
   `sessions_dir` metadata and JSONL files; the picker uses local tree ordering
   and indents child sessions. Selecting a session replays its compacted context
@@ -146,21 +167,19 @@ and platform-specific guidance.
 
 ## High-Priority Gaps
 
-- Keep quickstart scoped to currently wired commands until interactive mode has
-  full controls beyond the current raw-terminal prompt/edit/approval/session/model
-  slice.
+- Keep quickstart scoped to currently wired commands and local interactive
+  controls until hosted or profile-synced surfaces exist.
 - Keep stable JSONL docs scoped to the current typed event family until the full
   Pi event family is backed by code.
-- Add package prompt-template discovery and trust-gated project prompt loading
-  only when Neo has real local package and trust infrastructure. The current
-  implemented local resource scope is project/user `SYSTEM.md` and
-  `APPEND_SYSTEM.md`, project `.neo/prompts`, user-global `~/.neo/prompts`,
-  user/project TOML `prompt_templates` selectors, and explicit local
-  name/file/directory selectors plus `-selector` filters for auto-discovered
-  local prompts, with collision diagnostics for duplicate explicit selector
-  names. `AGENTS.md`/`CLAUDE.md` project context loading remains a gap until
-  Neo has real local trust semantics instead of unconditional project-file
-  injection.
+- Add package prompt-template discovery only when Neo has real local package
+  infrastructure. The current implemented local resource scope is project/user
+  `SYSTEM.md` and `APPEND_SYSTEM.md`, trust-gated user/project/ancestor
+  `AGENTS.md`/`CLAUDE.md` context files, project `.neo/prompts`,
+  user-global `~/.neo/prompts`, user/project TOML `prompt_templates`
+  selectors, default plus explicit local skills, enabled plus explicit local
+  extension tool roots, and explicit local name/file/directory selectors plus
+  `-selector` filters for auto-discovered local prompts, with collision
+  diagnostics for duplicate explicit selector names.
 - Keep config docs scoped to project/global TOML layering until profile sync or
   hosted settings exist.
 - Do not document `/login`, hosted sharing, hosted extension marketplace

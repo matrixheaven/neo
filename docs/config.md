@@ -100,12 +100,21 @@ RPC `prompt`, and live TUI turns read `.neo/SYSTEM.md` as the system message
 sent before the user prompt. If the project file is absent, Neo falls back to
 `~/.neo/SYSTEM.md`. `.neo/APPEND_SYSTEM.md` and then `~/.neo/APPEND_SYSTEM.md`
 follow the same project-over-global precedence and append a second paragraph to
-the system prompt. Empty files are ignored, and no hosted trust or marketplace
-state is inferred from these files.
+the system prompt. Empty files are ignored, and no hosted marketplace state is
+inferred from these files.
 For a single invocation, `--system-prompt <TEXT_OR_PATH>` replaces discovered
 `SYSTEM.md`, and repeatable `--append-system-prompt <TEXT_OR_PATH>` replaces
 discovered `APPEND_SYSTEM.md` entries. If a CLI value is an existing path, Neo
 reads it as UTF-8; otherwise the value is treated as literal prompt text.
+
+Project context files follow the Pi-shaped `AGENTS.md` / `CLAUDE.md` contract.
+Neo always permits user-global `~/.neo/AGENTS.md` or `~/.neo/CLAUDE.md`; project
+and ancestor context files are loaded only when the project is trusted. Trust is
+stored in `~/.neo/trust.json` and managed with `neo trust
+status|approve|deny|clear`. `--approve` and `--no-approve` override the stored
+decision for one invocation, and `--no-context-files` disables these context
+files without disabling `SYSTEM.md`, `APPEND_SYSTEM.md`, or explicit prompt
+overrides.
 
 `prompt_templates` accepts the same local selector shape as repeatable
 `--prompt-template`: template names, project-contained `.md` files, or
@@ -168,6 +177,7 @@ manager.
 | `NEO_SESSIONS_DIR` | `sessions_dir` |
 | `NEO_MODE` | `defaults.mode` |
 | `NEO_CONFIG` | config file path |
+| `NEO_OFFLINE` | skip network-like extension update refreshes |
 
 ## MCP Config
 
