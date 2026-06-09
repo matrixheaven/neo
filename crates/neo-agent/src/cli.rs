@@ -39,15 +39,32 @@ pub struct Cli {
         short = 'c',
         long = "continue",
         global = true,
-        conflicts_with_all = ["session_id", "session"]
+        conflicts_with_all = ["session_id", "session", "resume_picker"]
     )]
     pub continue_latest: bool,
+
+    #[arg(
+        short = 'r',
+        long = "resume",
+        global = true,
+        conflicts_with_all = [
+            "session_id",
+            "session",
+            "continue_latest",
+            "fork",
+            "name",
+            "no_session",
+            "export",
+            "list_models"
+        ]
+    )]
+    pub resume_picker: bool,
 
     #[arg(
         long,
         global = true,
         value_name = "ID_OR_PATH",
-        conflicts_with_all = ["session_id", "session", "continue_latest"]
+        conflicts_with_all = ["session_id", "session", "continue_latest", "resume_picker"]
     )]
     pub fork: Option<String>,
 
@@ -58,6 +75,7 @@ pub struct Cli {
         "session_id",
         "session",
         "continue_latest",
+        "resume_picker",
         "fork",
         "name"
     ])]

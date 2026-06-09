@@ -47,19 +47,29 @@ type SessionLoader = Arc<dyn Fn(String) -> BoxedSessionFuture + Send + Sync>;
 type SessionForker = Arc<dyn Fn(String) -> BoxedForkFuture + Send + Sync>;
 type ClipboardWriter = Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
 
-pub fn execute(config: &AppConfig) -> String {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupAction {
+    None,
+    OpenSessionPicker,
+}
+
+pub fn execute_with_startup(config: &AppConfig, startup: StartupAction) -> String {
     let mut controller = controller_for_config(config);
-    let _ = controller.submit_empty_prompt();
+    controller.apply_startup_action(startup);
     controller.render_snapshot()
 }
 
-pub async fn execute_tty(config: &AppConfig) -> Result<Option<String>> {
+pub async fn execute_tty_with_startup(
+    config: &AppConfig,
+    startup: StartupAction,
+) -> Result<Option<String>> {
     if !stdout().is_terminal() {
-        return Ok(Some(execute(config)));
+        return Ok(Some(execute_with_startup(config, startup)));
     }
 
     let mut terminal = RawTerminal::enter()?;
     let mut controller = controller_for_config(config);
+    controller.apply_startup_action(startup);
     let events = CrosstermEvents::new(controller.keybindings.clone());
     controller
         .run_terminal_loop(|app| terminal.draw(app), events)
@@ -316,8 +326,11 @@ impl InteractiveController {
         self.clipboard_writer = writer;
     }
 
-    pub fn submit_empty_prompt(&mut self) -> Option<String> {
-        self.app.submit_prompt()
+    pub fn apply_startup_action(&mut self, startup: StartupAction) {
+        match startup {
+            StartupAction::None => {}
+            StartupAction::OpenSessionPicker => self.open_session_picker(),
+        }
     }
 
     #[allow(dead_code)]

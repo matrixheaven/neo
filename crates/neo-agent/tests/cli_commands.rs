@@ -77,6 +77,67 @@ default_model = "claude-sonnet"
 }
 
 #[test]
+fn root_resume_flag_opens_real_local_session_picker() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    fs::create_dir_all(&sessions).expect("create sessions");
+    fs::write(
+        sessions.join("alpha.jsonl"),
+        "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
+    )
+    .expect("write session");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("-r");
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("Sessions"));
+    assert!(stdout.contains("alpha"));
+    assert!(stdout.contains("session"));
+    assert!(!stdout.contains("placeholder"));
+    assert!(!stdout.contains("fake"));
+}
+
+#[test]
+fn root_resume_flag_rejects_subcommands_instead_of_being_ignored() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .args(["-r", "config", "show"]);
+
+    let output = command.output().expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--resume/-r starts the interactive session picker"));
+}
+
+#[test]
+fn root_resume_flag_rejects_options_that_would_bypass_or_rename_the_picker() {
+    let temp = TempDir::new().expect("tempdir");
+    for args in [
+        vec!["-r", "--list-models"],
+        vec!["-r", "--name", "ignored"],
+        vec!["-r", "--no-session"],
+    ] {
+        let mut command = neo();
+        command.current_dir(temp.path()).args(args);
+
+        let output = command.output().expect("neo command should run");
+
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("cannot be used with")
+                || stderr.contains("--resume/-r starts the interactive session picker"),
+            "stderr did not explain resume conflict:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn config_show_defaults_to_real_catalog_model() {
     let temp = TempDir::new().expect("tempdir");
     let mut command = neo();

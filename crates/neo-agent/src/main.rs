@@ -64,9 +64,14 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
                 .then_some(search);
         return modes::run::list_models_filtered(&config, search);
     }
+    if cli.resume_picker && cli.command.is_some() {
+        anyhow::bail!(
+            "--resume/-r starts the interactive session picker and cannot be combined with a subcommand"
+        );
+    }
 
     let session_options = RunSessionOptions::from_cli(&cli);
-    dispatch_command(cli.command, &config, session_options).await
+    dispatch_command(cli.command, &config, session_options, cli.resume_picker).await
 }
 
 #[derive(Clone)]
@@ -105,6 +110,7 @@ async fn dispatch_command(
     command: Option<Command>,
     config: &AppConfig,
     session_options: RunSessionOptions,
+    resume_picker: bool,
 ) -> anyhow::Result<String> {
     match command {
         Some(Command::Print { prompt }) => {
@@ -179,9 +185,18 @@ async fn dispatch_command(
             },
         },
         Some(Command::Rpc) => rpc_mode::execute(config).await,
-        None => Ok(modes::interactive::execute_tty(config)
-            .await?
-            .unwrap_or_default()),
+        None => {
+            let startup = if resume_picker {
+                modes::interactive::StartupAction::OpenSessionPicker
+            } else {
+                modes::interactive::StartupAction::None
+            };
+            Ok(
+                modes::interactive::execute_tty_with_startup(config, startup)
+                    .await?
+                    .unwrap_or_default(),
+            )
+        }
     }
 }
 
