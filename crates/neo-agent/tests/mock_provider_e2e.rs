@@ -2990,10 +2990,49 @@ fn print_exclude_tools_removes_extension_tools() {
     assert!(requests[0].body.get("tools").is_none());
 }
 
+#[test]
+fn print_extension_flag_registers_explicit_extension_path_without_installing_it() {
+    let temp = TempDir::new().expect("tempdir");
+    let explicit = temp.path().join("external-extension");
+    let log = write_echo_extension_at(&explicit);
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-explicit-extension",
+        "explicit extension loaded",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--extension")
+        .arg(&explicit)
+        .args(["print", "show tools"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "explicit extension loaded\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        model_tool_names(&requests[0].body).contains(&"extension__echo__echo"),
+        "explicit extension path should register runtime tool"
+    );
+    assert!(log.exists(), "explicit extension should be queried");
+    assert!(
+        !temp.path().join(".neo/extensions/echo").exists(),
+        "explicit --extension should not install into the project extension store"
+    );
+}
+
 fn write_echo_extension(root: &std::path::Path) -> std::path::PathBuf {
-    let extension = root.join(".neo/extensions/echo");
-    std::fs::create_dir_all(&extension).expect("create extension");
-    let log = root.join("extension-calls.jsonl");
+    write_echo_extension_at(&root.join(".neo/extensions/echo"))
+}
+
+fn write_echo_extension_at(extension: &std::path::Path) -> std::path::PathBuf {
+    std::fs::create_dir_all(extension).expect("create extension");
+    let log = extension.join("extension-calls.jsonl");
     let script = extension.join("echo.py");
     std::fs::write(
         &script,
