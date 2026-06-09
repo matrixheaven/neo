@@ -19,8 +19,8 @@ use anyhow::Context as _;
 
 use crate::{
     cli::{
-        Cli, Command, ConfigCommand, ExtensionCommand, McpCommand, ModelCommand, SessionCommand,
-        SkillCommand,
+        Cli, Command, ConfigCommand, ExtensionCommand, LIST_MODELS_NO_SEARCH, McpCommand,
+        ModelCommand, SessionCommand, SkillCommand,
     },
     config::{AppConfig, ConfigOverrides},
 };
@@ -51,6 +51,13 @@ fn normalize_pi_style_args(
 
 async fn dispatch(cli: Cli) -> anyhow::Result<String> {
     let config = AppConfig::load(ConfigOverrides::from_cli(&cli))?;
+    if let Some(search) = &cli.list_models {
+        let search = search.trim();
+        let search =
+            (!search.is_empty() && search != LIST_MODELS_NO_SEARCH && !search.starts_with('@'))
+                .then_some(search);
+        return modes::run::list_models_filtered(&config, search);
+    }
 
     match cli.command {
         Some(Command::Print { prompt }) => {

@@ -201,6 +201,7 @@ The `neo-agent` binary exposes:
 ```bash
 neo config show
 neo config set <key> <value>
+neo --list-models [search]
 neo models list
 neo mcp list
 neo mcp resources <server-id> list

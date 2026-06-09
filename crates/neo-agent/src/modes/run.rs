@@ -514,13 +514,33 @@ fn current_unix_timestamp() -> String {
 }
 
 pub fn list_models(config: &AppConfig) -> anyhow::Result<String> {
+    list_models_filtered(config, None)
+}
+
+pub fn list_models_filtered(config: &AppConfig, search: Option<&str>) -> anyhow::Result<String> {
     let providers = provider_registry_for_config(config);
     let models = model_registry_for_config(config)?;
-    let mut out = format!(
-        "models:\n- {}/{} (configured default)\n",
-        config.default_provider, config.default_model
-    );
-    for model in models.list() {
+    let search = search.map(str::trim).filter(|search| !search.is_empty());
+    let listed_models = models
+        .list()
+        .into_iter()
+        .filter(|model| model_matches_search(model, search))
+        .collect::<Vec<_>>();
+    if let Some(search) = search
+        && listed_models.is_empty()
+    {
+        return Ok(format!("no models matching \"{search}\"\n"));
+    }
+
+    let mut out = "models:\n".to_owned();
+    if search.is_none() {
+        let _ = writeln!(
+            out,
+            "- {}/{} (configured default)",
+            config.default_provider, config.default_model
+        );
+    }
+    for model in listed_models {
         let marker =
             if model.provider.0 == config.default_provider && model.model == config.default_model {
                 " default"
@@ -547,6 +567,26 @@ pub fn list_models(config: &AppConfig) -> anyhow::Result<String> {
         let _ = writeln!(out, "- {} ({:?}, {status})", provider.id, provider.api);
     }
     Ok(out)
+}
+
+fn model_matches_search(model: &ModelSpec, search: Option<&str>) -> bool {
+    let Some(search) = search else {
+        return true;
+    };
+    let haystack = format!("{} {}", model.provider.0, model.model);
+    fuzzy_match(&haystack, search)
+}
+
+fn fuzzy_match(haystack: &str, needle: &str) -> bool {
+    let haystack = haystack.to_lowercase();
+    let needle = needle.to_lowercase();
+    if haystack.contains(&needle) {
+        return true;
+    }
+    let mut chars = haystack.chars();
+    needle
+        .chars()
+        .all(|needle_char| chars.any(|candidate| candidate == needle_char))
 }
 
 fn provider_registry_for_config(config: &AppConfig) -> ProviderRegistry {

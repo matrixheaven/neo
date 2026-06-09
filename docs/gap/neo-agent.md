@@ -12,6 +12,8 @@
   `extensions status`, `extensions enable`, `extensions disable`,
   `extensions call`, `config show`, `config set`,
   `models list`, `mcp list`, and `mcp tools`.
+- Root `--list-models [search]` lists the resolved model catalog with optional
+  search filtering, then exits without entering interactive mode.
 - Project config defaults to `.neo/config.toml`.
 - Config loading merges CLI overrides, environment overrides, project config,
   user-global `~/.neo/config.toml`, and built-in defaults.

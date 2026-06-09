@@ -1,4 +1,6 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+
+pub const LIST_MODELS_NO_SEARCH: &str = "__neo_list_models_no_search__";
 
 #[derive(Debug, Parser)]
 #[command(name = "neo", version, about = "Rust-native coding agent")]
@@ -38,6 +40,16 @@ pub struct Cli {
 
     #[arg(long, global = true, value_name = "LEVEL")]
     pub thinking: Option<ThinkingLevel>,
+
+    #[arg(
+        long = "list-models",
+        global = true,
+        num_args = 0..=1,
+        value_name = "SEARCH",
+        default_missing_value = LIST_MODELS_NO_SEARCH,
+        action = ArgAction::Set
+    )]
+    pub list_models: Option<String>,
 
     #[command(flatten)]
     pub tool_filters: ToolFilterArgs,

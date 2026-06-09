@@ -14,6 +14,7 @@ development slice.
 ```bash
 cargo metadata --no-deps
 export OPENAI_API_KEY=...
+cargo run -p neo-agent -- --list-models sonnet
 cargo run -p neo-agent -- print "hello from neo"
 cargo run -p neo-agent -- --thinking high print "solve this carefully"
 ```
@@ -23,6 +24,9 @@ The binary currently exposes `print`, `run`, `resume`, `sessions`, `skills`,
 configured model through the production provider registry. The built-in CLI
 default is `openai/gpt-4.1`, so a missing `OPENAI_API_KEY` is reported as a
 configuration error instead of returning a synthetic response.
+Use `--list-models [search]` to print the resolved model catalog and exit
+without entering interactive mode; the optional search filters model entries
+while retaining provider credential status output.
 
 Use Pi-style per-invocation tool filters to shape the model-facing tool
 registry for `print`, `run`, RPC prompts, and live TUI turns:

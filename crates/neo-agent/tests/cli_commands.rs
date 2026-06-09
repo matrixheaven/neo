@@ -1266,6 +1266,43 @@ fn models_list_uses_seeded_catalog_without_local_fake() {
 }
 
 #[test]
+fn root_list_models_flag_lists_seeded_catalog_without_entering_interactive_mode() {
+    let mut command = neo();
+    command.arg("--list-models");
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("models:"));
+    assert!(stdout.contains("openai/gpt-4.1"));
+    assert!(stdout.contains("anthropic/claude-sonnet-4-5"));
+    assert!(stdout.contains("providers:"));
+    assert!(!stdout.contains("neo | session:"));
+}
+
+#[test]
+fn root_list_models_flag_filters_models_by_search_pattern() {
+    let mut command = neo();
+    command.args(["--list-models", "sonnet"]);
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("anthropic/claude-sonnet-4-5"));
+    assert!(!stdout.contains("openai/gpt-4.1 ("));
+    assert!(stdout.contains("providers:"));
+    assert!(!stdout.contains("neo | session:"));
+}
+
+#[test]
+fn root_list_models_flag_reports_empty_search_results() {
+    let mut command = neo();
+    command.args(["--list-models", "definitely-not-a-model"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "no models matching \"definitely-not-a-model\"\n");
+}
+
+#[test]
 fn models_list_loads_project_model_catalogs() {
     let temp = TempDir::new().expect("tempdir");
     fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
