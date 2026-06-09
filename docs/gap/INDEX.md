@@ -44,10 +44,10 @@ whole map.
   and async call delegation. `neo-agent print` and `neo-agent run` load enabled
   stdio, HTTP, and SSE MCP entries from project config; `neo mcp tools ...`
   prints the same model-facing tool specs discovered from a configured MCP
-  server, and `neo mcp resources ... watch` exposes stdio and live remote SSE
-  resource updates without injecting them into model context. Hosted MCP
-  management and remote servers that require a separate event channel remain
-  gaps.
+  server, and `neo mcp resources ... watch` exposes stdio, live remote SSE
+  subscribe streams, and same-endpoint HTTP SSE event-channel updates without
+  injecting them into model context. Hosted MCP management and provider-specific
+  event-channel discovery beyond the configured HTTP endpoint remain gaps.
 - Session storage is implemented as JSONL event persistence in
   `neo-agent-core`; local tree fork/rename metadata, deterministic extractive
   compaction, schema metadata, local branch summaries, and HTML export are

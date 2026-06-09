@@ -70,9 +70,10 @@
   endpoints, applies configured headers, accepts JSON and SSE `data:`
   JSON-RPC responses, and supports `initialize`, `tools/list`, and
   `tools/call` without local fallback behavior. It also sends
-  `resources/subscribe` and `resources/unsubscribe`; JSON subscribe responses
-  are acknowledged, and live SSE subscribe responses are read in the background
-  so real `notifications/resources/updated` messages are queued for watchers.
+  `resources/subscribe` and `resources/unsubscribe`; live SSE subscribe
+  responses are read in the background, and JSON subscribe acknowledgements open
+  the configured HTTP endpoint as an SSE event channel so real
+  `notifications/resources/updated` messages are queued for watchers.
 - Stdio and HTTP/SSE MCP adapters also support explicit `resources/list` and
   `resources/read` requests without injecting resource content into model
   context.

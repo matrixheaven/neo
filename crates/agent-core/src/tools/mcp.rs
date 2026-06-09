@@ -357,6 +357,42 @@ impl McpHttpToolAdapter {
         let mut update_rx = self.resource_update_rx.lock().await;
         while update_rx.try_recv().is_ok() {}
     }
+
+    async fn start_resource_event_reader(&self) -> Result<(), McpError> {
+        let mut request = self
+            .client
+            .get(&self.config.url)
+            .header("accept", "text/event-stream");
+        for (key, value) in &self.config.headers {
+            request = request.header(key, value);
+        }
+        let response = request.send().await.map_err(|err| {
+            McpError::protocol(format!("failed to open MCP HTTP event stream: {err}"))
+        })?;
+        let status = response.status();
+        let is_sse = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|content_type| content_type.contains("text/event-stream"));
+        if !status.is_success() {
+            let body = response.text().await.map_err(|err| {
+                McpError::protocol(format!("failed to read MCP HTTP event response: {err}"))
+            })?;
+            return Err(McpError::protocol(format!(
+                "MCP HTTP event stream returned {status}: {body}"
+            )));
+        }
+        if !is_sse {
+            return Err(McpError::protocol(
+                "MCP HTTP event stream did not return text/event-stream",
+            ));
+        }
+        let update_tx = self.resource_update_tx.clone();
+        let reader = tokio::spawn(read_http_sse_messages(response, None, None, update_tx));
+        *self.resource_sse_reader.lock().await = Some(reader);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -457,6 +493,7 @@ impl McpToolAdapter for McpHttpToolAdapter {
             let response_value: serde_json::Value =
                 serde_json::from_str(&body).map_err(|err| McpError::protocol(err.to_string()))?;
             validate_json_rpc_result(&response_value, id)?;
+            self.start_resource_event_reader().await?;
             return Ok(());
         }
 
@@ -464,7 +501,7 @@ impl McpToolAdapter for McpHttpToolAdapter {
         let update_tx = self.resource_update_tx.clone();
         let reader = tokio::spawn(read_http_sse_messages(
             response,
-            id,
+            Some(id),
             Some(response_tx),
             update_tx,
         ));
@@ -1057,7 +1094,7 @@ fn parse_sse_json_rpc_response(body: &str) -> Result<serde_json::Value, McpError
 
 async fn read_http_sse_messages(
     response: reqwest::Response,
-    expected_response_id: u64,
+    expected_response_id: Option<u64>,
     mut response_tx: Option<oneshot::Sender<Result<(), McpError>>>,
     resource_update_tx: mpsc::UnboundedSender<Result<McpResourceUpdate, McpError>>,
 ) {
@@ -1103,8 +1140,11 @@ async fn read_http_sse_messages(
                     return;
                 }
             };
-            if message.get("id").and_then(serde_json::Value::as_u64) == Some(expected_response_id) {
-                let result = validate_json_rpc_result(&message, expected_response_id).map(|_| ());
+            if expected_response_id
+                .is_some_and(|id| message.get("id").and_then(serde_json::Value::as_u64) == Some(id))
+            {
+                let expected_id = expected_response_id.expect("checked expected id");
+                let result = validate_json_rpc_result(&message, expected_id).map(|_| ());
                 if let Some(tx) = response_tx.take() {
                     let _ = tx.send(result);
                 }

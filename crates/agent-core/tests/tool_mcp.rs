@@ -490,13 +490,15 @@ async fn mcp_http_adapter_subscribes_to_sse_resource_updates() {
 }
 
 #[tokio::test]
-async fn mcp_http_adapter_requires_live_sse_stream_for_resource_updates() {
+async fn mcp_http_adapter_reads_resource_updates_from_event_channel_after_json_subscribe_ack() {
     let server = MockMcpHttpServer::start(vec![
         mcp_json_response(json!({
             "protocolVersion": "2024-11-05",
             "serverInfo": {"name": "http-resource-fixture", "version": "0.1.0"},
             "capabilities": {"resources": {"subscribe": true}}
         })),
+        mcp_json_response(json!({})),
+        mcp_sse_notification_response("file://docs/readme.md"),
         mcp_json_response(json!({})),
     ]);
     let adapter = McpHttpToolAdapter::new(McpHttpConfig {
@@ -508,22 +510,79 @@ async fn mcp_http_adapter_requires_live_sse_stream_for_resource_updates() {
         .subscribe_resource("file://docs/readme.md")
         .await
         .expect("JSON subscribe response is acknowledged");
-    let error = tokio::time::timeout(Duration::from_millis(250), adapter.next_resource_update())
+    let update = adapter
+        .next_resource_update()
         .await
-        .expect("next_resource_update should not hang")
-        .expect_err("JSON subscribe response does not provide update stream");
+        .expect("receive resource update from alternate event channel");
+    adapter
+        .unsubscribe_resource("file://docs/readme.md")
+        .await
+        .expect("unsubscribe over HTTP");
+
+    assert_eq!(update.uri, "file://docs/readme.md");
+    let requests = server.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .filter_map(|request| request.body["method"].as_str())
+            .collect::<Vec<_>>(),
+        vec!["initialize", "resources/subscribe", "resources/unsubscribe"]
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.method.as_str())
+            .collect::<Vec<_>>(),
+        vec!["POST", "POST", "GET", "POST"]
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["/", "/", "/", "/"]
+    );
+}
+
+#[tokio::test]
+async fn mcp_http_adapter_requires_sse_event_channel_after_json_subscribe_ack() {
+    let server = MockMcpHttpServer::start(vec![
+        mcp_json_response(json!({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {"name": "http-resource-fixture", "version": "0.1.0"},
+            "capabilities": {"resources": {"subscribe": true}}
+        })),
+        mcp_json_response(json!({})),
+        mcp_json_response(json!({})),
+    ]);
+    let adapter = McpHttpToolAdapter::new(McpHttpConfig {
+        url: server.url.clone(),
+        headers: BTreeMap::new(),
+    });
+
+    let error = adapter
+        .subscribe_resource("file://docs/readme.md")
+        .await
+        .expect_err("JSON subscribe ack needs an SSE event channel");
 
     assert_eq!(
         error.message(),
-        "MCP HTTP resource updates require a live SSE subscribe response"
+        "MCP HTTP event stream did not return text/event-stream"
     );
+    let requests = server.requests();
     assert_eq!(
-        server
-            .requests()
+        requests
             .iter()
-            .map(|request| request.body["method"].as_str().expect("method"))
+            .filter_map(|request| request.body["method"].as_str())
             .collect::<Vec<_>>(),
         vec!["initialize", "resources/subscribe"]
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.method.as_str())
+            .collect::<Vec<_>>(),
+        vec!["POST", "POST", "GET"]
     );
 }
 
@@ -887,6 +946,8 @@ impl McpToolAdapter for MockMcpAdapter {
 
 #[derive(Debug, Clone)]
 struct McpHttpRecordedRequest {
+    method: String,
+    path: String,
     headers: BTreeMap<String, String>,
     body: Value,
 }
@@ -909,7 +970,7 @@ impl MockMcpHttpServer {
             for response in responses {
                 let (mut socket, _) = listener.accept().expect("accept MCP HTTP request");
                 let request = read_http_json_request(&mut socket);
-                let id = request.body["id"].clone();
+                let id = request.body.get("id").cloned().unwrap_or(Value::Null);
                 captured_requests
                     .lock()
                     .expect("requests lock")
@@ -933,6 +994,7 @@ enum MockMcpHttpResponse {
     Json(Value),
     Sse(Value),
     SseResourceUpdate { result: Value, uri: String },
+    SseNotification { uri: String },
 }
 
 impl MockMcpHttpResponse {
@@ -969,6 +1031,15 @@ impl MockMcpHttpResponse {
                 let body = format!("data: {rpc}\n\ndata: {notification}\n\n");
                 http_response("text/event-stream", &body)
             }
+            Self::SseNotification { uri } => {
+                let notification = json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/resources/updated",
+                    "params": { "uri": uri },
+                });
+                let body = format!("data: {notification}\n\n");
+                http_response("text/event-stream", &body)
+            }
         }
     }
 }
@@ -986,6 +1057,10 @@ fn mcp_sse_resource_update_response(result: Value, uri: impl Into<String>) -> Mo
         result,
         uri: uri.into(),
     }
+}
+
+fn mcp_sse_notification_response(uri: impl Into<String>) -> MockMcpHttpResponse {
+    MockMcpHttpResponse::SseNotification { uri: uri.into() }
 }
 
 fn http_response(content_type: &str, body: &str) -> String {
@@ -1010,6 +1085,18 @@ fn read_http_json_request(socket: &mut TcpStream) -> McpHttpRecordedRequest {
     }
 
     let headers_text = String::from_utf8(buffer[..header_end].to_vec()).expect("headers utf8");
+    let path = headers_text
+        .lines()
+        .next()
+        .and_then(|request_line| request_line.split_whitespace().nth(1))
+        .unwrap_or("/")
+        .to_owned();
+    let method = headers_text
+        .lines()
+        .next()
+        .and_then(|request_line| request_line.split_whitespace().next())
+        .unwrap_or("GET")
+        .to_owned();
     let headers = headers_text
         .lines()
         .skip(1)
@@ -1019,16 +1106,25 @@ fn read_http_json_request(socket: &mut TcpStream) -> McpHttpRecordedRequest {
     let content_length = headers
         .get("content-length")
         .and_then(|value| value.parse::<usize>().ok())
-        .expect("content-length");
+        .unwrap_or(0);
     let body_start = header_end + 4;
     while buffer.len() < body_start + content_length {
         let read = socket.read(&mut temp).expect("read body");
         assert_ne!(read, 0, "client closed before sending body");
         buffer.extend_from_slice(&temp[..read]);
     }
-    let body = serde_json::from_slice(&buffer[body_start..body_start + content_length])
-        .expect("MCP request body json");
-    McpHttpRecordedRequest { headers, body }
+    let body = if content_length == 0 {
+        Value::Null
+    } else {
+        serde_json::from_slice(&buffer[body_start..body_start + content_length])
+            .expect("MCP request body json")
+    };
+    McpHttpRecordedRequest {
+        method,
+        path,
+        headers,
+        body,
+    }
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {

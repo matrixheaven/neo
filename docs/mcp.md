@@ -58,7 +58,10 @@ local fallback behavior. `resources/subscribe` and `resources/unsubscribe` use
 the same JSON-RPC transport. A JSON subscribe response is acknowledged as the
 server's result; when the subscribe response is a live SSE stream, the adapter
 keeps reading it in the background and queues real
-`notifications/resources/updated` messages as `McpResourceUpdate` values.
+`notifications/resources/updated` messages as `McpResourceUpdate` values. When
+the subscribe response is a JSON acknowledgement, the adapter opens the same
+HTTP endpoint as an SSE event channel and reads resource update notifications
+from that stream.
 
 ## Runtime Placement
 
@@ -96,7 +99,8 @@ async call delegation. It also supports explicit MCP `resources/list` and
 stdio adapter also supports `resources/subscribe`,
 `resources/unsubscribe`, and queued `notifications/resources/updated` delivery;
 the HTTP/SSE adapter does the same when a remote `resources/subscribe` response
-is backed by a live SSE stream.
+is backed by either a live SSE response stream or a JSON acknowledgement plus a
+separate SSE event stream on the same endpoint.
 `neo-agent print` and `neo-agent run` load enabled `transport = "stdio"`,
 `transport = "http"`, and `transport = "sse"` servers from project config and
 advertise their tools to the configured model. `neo mcp resources <server>
@@ -106,6 +110,6 @@ stdio resource or a remote HTTP/SSE resource backed by a live SSE subscribe
 response, waits for real `notifications/resources/updated` messages, prints
 updated URIs, and unsubscribes before exiting.
 
-Current limitation: remote servers that require a separate event channel beyond
-the subscribe response stream, OAuth/hosted server lifecycle, and hosted MCP
-management remain future work.
+Current limitation: remote servers that require OAuth/hosted server lifecycle,
+hosted MCP management, or provider-specific event-channel discovery beyond the
+configured HTTP endpoint remain future work.
