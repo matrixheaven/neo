@@ -147,6 +147,81 @@ fn print_uses_production_openai_responses_adapter_against_mock_provider() {
 }
 
 #[test]
+fn root_print_flag_uses_production_print_mode_against_mock_provider() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-root-print", "root print")]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--print", "hello", "neo"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "root print\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["content"], "hello neo");
+}
+
+#[test]
+fn root_print_short_flag_uses_production_print_mode_against_mock_provider() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-root-short-print",
+        "short root print",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["-p", "hello", "neo"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "short root print\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["content"], "hello neo");
+}
+
+#[test]
+fn root_print_flag_expands_workspace_relative_file_prompt_args() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join("docs")).expect("create docs");
+    std::fs::write(temp.path().join("docs/context.txt"), "root file context\n")
+        .expect("write prompt file");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-root-print-file",
+        "root file",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["--print", "@docs/context.txt", "summarize"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "root file\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "root file context\nsummarize"
+    );
+}
+
+#[test]
 fn print_no_tools_omits_all_model_tools() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-no-tools", "no tools")]);

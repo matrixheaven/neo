@@ -41,6 +41,7 @@ fn normalize_pi_style_args(
 ) -> Vec<std::ffi::OsString> {
     args.into_iter()
         .map(|arg| match arg.to_str() {
+            Some("--print" | "-p") => "print".into(),
             Some("-na") => "--no-approve".into(),
             Some("-nt") => "--no-tools".into(),
             Some("-nbt") => "--no-builtin-tools".into(),
