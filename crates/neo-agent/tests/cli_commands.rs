@@ -848,6 +848,52 @@ fn sessions_export_html_renders_replayed_messages() {
 }
 
 #[test]
+fn root_export_flag_writes_default_html_file_from_session_jsonl() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::write(
+        temp.path().join("alpha.jsonl"),
+        concat!(
+            "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello <neo>\"}}]}}}}\n",
+            "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"use **bold**\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
+        ),
+    )
+    .expect("write session");
+
+    let mut export = neo();
+    export
+        .current_dir(temp.path())
+        .args(["--export", "alpha.jsonl"]);
+    let stdout = run(export);
+
+    assert!(stdout.contains("Exported to: neo-session-alpha.html"));
+    let html = fs::read_to_string(temp.path().join("neo-session-alpha.html")).expect("read html");
+    assert!(html.contains("<!doctype html>"));
+    assert!(html.contains("hello &lt;neo&gt;"));
+    assert!(html.contains("<strong>bold</strong>"));
+    assert!(!html.contains("fake"));
+}
+
+#[test]
+fn root_export_flag_writes_explicit_html_output_path() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::write(
+        temp.path().join("alpha.jsonl"),
+        "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"export me\"}}]}}}}\n",
+    )
+    .expect("write session");
+
+    let mut export = neo();
+    export
+        .current_dir(temp.path())
+        .args(["--export", "alpha.jsonl", "out.html"]);
+    let stdout = run(export);
+
+    assert!(stdout.contains("Exported to: out.html"));
+    let html = fs::read_to_string(temp.path().join("out.html")).expect("read html");
+    assert!(html.contains("export me"));
+}
+
+#[test]
 fn sessions_reject_path_traversal_ids() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = temp.path().join(".neo/sessions");

@@ -51,6 +51,9 @@ pub struct Cli {
     #[arg(short = 'n', long, global = true, value_name = "NAME")]
     pub name: Option<String>,
 
+    #[arg(long, global = true, value_name = "SESSION_JSONL", num_args = 1..=2)]
+    pub export: Vec<std::path::PathBuf>,
+
     #[arg(long, global = true, env = "NEO_MODE")]
     pub mode: Option<String>,
 

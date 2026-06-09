@@ -54,6 +54,9 @@ fn normalize_pi_style_args(
 
 async fn dispatch(cli: Cli) -> anyhow::Result<String> {
     let config = AppConfig::load(ConfigOverrides::from_cli(&cli))?;
+    if !cli.export.is_empty() {
+        return dispatch_export(&cli.export).await;
+    }
     if let Some(search) = &cli.list_models {
         let search = search.trim();
         let search =
@@ -62,95 +65,142 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
         return modes::run::list_models_filtered(&config, search);
     }
 
-    let session_id = cli.session_id.clone();
-    let session = cli.session.clone();
-    let continue_latest = cli.continue_latest;
-    let fork = cli.fork.clone();
-    let session_name = cli.name.clone();
+    let session_options = RunSessionOptions::from_cli(&cli);
+    dispatch_command(cli.command, &config, session_options).await
+}
 
-    match cli.command {
-        Some(Command::Print { prompt }) => {
-            let prompt = prepare_prompt(prompt, &config)?;
-            let session_target = session_target_for_cli(
-                session_id.as_deref(),
-                session.as_deref(),
-                continue_latest,
-                fork.as_deref(),
-            );
-            modes::print::execute(&prompt, &config, session_target, session_name.as_deref()).await
+#[derive(Clone)]
+struct RunSessionOptions {
+    session_id: Option<String>,
+    session: Option<String>,
+    continue_latest: bool,
+    fork: Option<String>,
+    name: Option<String>,
+}
+
+impl RunSessionOptions {
+    fn from_cli(cli: &Cli) -> Self {
+        Self {
+            session_id: cli.session_id.clone(),
+            session: cli.session.clone(),
+            continue_latest: cli.continue_latest,
+            fork: cli.fork.clone(),
+            name: cli.name.clone(),
         }
-        Some(Command::Run { output, prompt }) => {
-            let prompt = prepare_prompt(prompt, &config)?;
-            let session_target = session_target_for_cli(
-                session_id.as_deref(),
-                session.as_deref(),
-                continue_latest,
-                fork.as_deref(),
-            );
-            modes::run::execute(
+    }
+
+    fn target(&self) -> Option<modes::run::SessionTarget<'_>> {
+        session_target_for_cli(
+            self.session_id.as_deref(),
+            self.session.as_deref(),
+            self.continue_latest,
+            self.fork.as_deref(),
+        )
+    }
+}
+
+async fn dispatch_command(
+    command: Option<Command>,
+    config: &AppConfig,
+    session_options: RunSessionOptions,
+) -> anyhow::Result<String> {
+    match command {
+        Some(Command::Print { prompt }) => {
+            let prompt = prepare_prompt(prompt, config)?;
+            modes::print::execute(
                 &prompt,
-                &config,
-                output.unwrap_or_else(|| run_output_for_mode(&config)),
-                session_target,
-                session_name.as_deref(),
+                config,
+                session_options.target(),
+                session_options.name.as_deref(),
             )
             .await
         }
-        Some(Command::Resume { session_id }) => modes::run::resume(&session_id, &config).await,
+        Some(Command::Run { output, prompt }) => {
+            let prompt = prepare_prompt(prompt, config)?;
+            modes::run::execute(
+                &prompt,
+                config,
+                output.unwrap_or_else(|| run_output_for_mode(config)),
+                session_options.target(),
+                session_options.name.as_deref(),
+            )
+            .await
+        }
+        Some(Command::Resume { session_id }) => modes::run::resume(&session_id, config).await,
         Some(Command::Sessions { command }) => match command {
-            SessionCommand::List => session_commands::list(&config),
-            SessionCommand::Tree => session_commands::tree(&config),
-            SessionCommand::Show { session_id } => session_commands::show(&session_id, &config),
+            SessionCommand::List => session_commands::list(config),
+            SessionCommand::Tree => session_commands::tree(config),
+            SessionCommand::Show { session_id } => session_commands::show(&session_id, config),
             SessionCommand::Rename { session_id, name } => {
-                session_commands::rename(&session_id, &name, &config)
+                session_commands::rename(&session_id, &name, config)
             }
             SessionCommand::Fork { session_id, name } => {
-                session_commands::fork(&session_id, name.as_deref(), &config)
+                session_commands::fork(&session_id, name.as_deref(), config)
             }
             SessionCommand::Summarize { session_id } => {
-                session_commands::summarize(&session_id, &config).await
+                session_commands::summarize(&session_id, config).await
             }
             SessionCommand::Compact {
                 session_id,
                 keep_recent,
-            } => session_commands::compact(&session_id, keep_recent, &config).await,
+            } => session_commands::compact(&session_id, keep_recent, config).await,
             SessionCommand::ExportHtml { session_id } => {
-                session_commands::export_html(&session_id, &config).await
+                session_commands::export_html(&session_id, config).await
             }
         },
         Some(Command::Skills { command }) => match command {
             SkillCommand::Show { path } => skill_commands::show(&path),
         },
-        Some(Command::Extensions { command }) => dispatch_extensions(&config, command).await,
+        Some(Command::Extensions { command }) => dispatch_extensions(config, command).await,
         Some(Command::Config { command }) => match command {
-            ConfigCommand::Show => config::show(&config),
+            ConfigCommand::Show => config::show(config),
             ConfigCommand::Set { key, value } => config::set(&key, &value),
         },
         Some(Command::Models { command }) => match command {
-            ModelCommand::List => modes::run::list_models(&config),
+            ModelCommand::List => modes::run::list_models(config),
         },
         Some(Command::Mcp { command }) => match command {
-            McpCommand::List => Ok(modes::run::list_mcp_servers(&config)),
-            McpCommand::Tools { server_id } => {
-                modes::run::list_mcp_tools(&config, &server_id).await
-            }
+            McpCommand::List => Ok(modes::run::list_mcp_servers(config)),
+            McpCommand::Tools { server_id } => modes::run::list_mcp_tools(config, &server_id).await,
             McpCommand::Resources { server_id, command } => match command {
                 cli::McpResourceCommand::List => {
-                    modes::run::list_mcp_resources(&config, &server_id).await
+                    modes::run::list_mcp_resources(config, &server_id).await
                 }
                 cli::McpResourceCommand::Read { uri } => {
-                    modes::run::read_mcp_resource(&config, &server_id, &uri).await
+                    modes::run::read_mcp_resource(config, &server_id, &uri).await
                 }
                 cli::McpResourceCommand::Watch { uri, count } => {
-                    modes::run::watch_mcp_resource(&config, &server_id, &uri, count).await
+                    modes::run::watch_mcp_resource(config, &server_id, &uri, count).await
                 }
             },
         },
-        Some(Command::Rpc) => rpc_mode::execute(&config).await,
-        None => Ok(modes::interactive::execute_tty(&config)
+        Some(Command::Rpc) => rpc_mode::execute(config).await,
+        None => Ok(modes::interactive::execute_tty(config)
             .await?
             .unwrap_or_default()),
     }
+}
+
+async fn dispatch_export(paths: &[PathBuf]) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        paths.len() <= 2,
+        "--export accepts a session JSONL path and optional output path"
+    );
+    let input_path = paths
+        .first()
+        .expect("non-empty export paths checked by caller");
+    let output_path = paths.get(1).cloned().unwrap_or_else(|| {
+        let stem = input_path
+            .file_stem()
+            .and_then(std::ffi::OsStr::to_str)
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or("session");
+        PathBuf::from(format!("neo-session-{stem}.html"))
+    });
+    session_commands::export_html_file(input_path, &output_path)
+        .await
+        .with_context(|| format!("failed to export session {}", input_path.display()))?;
+    Ok(format!("Exported to: {}\n", output_path.display()))
 }
 
 fn session_target_for_cli<'a>(

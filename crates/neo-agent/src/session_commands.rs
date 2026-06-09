@@ -181,12 +181,32 @@ pub async fn export_html(session_ref: &str, config: &AppConfig) -> anyhow::Resul
     let messages = JsonlSessionReader::replay_messages(session_path(&session_id, config)?)
         .await
         .with_context(|| format!("failed to replay session {session_ref}"))?;
+    render_messages_html(format!("neo session {session_id}"), &messages)
+}
+
+pub async fn export_html_file(input_path: &Path, output_path: &Path) -> anyhow::Result<()> {
+    let messages = JsonlSessionReader::replay_messages(input_path)
+        .await
+        .with_context(|| format!("failed to replay session {}", input_path.display()))?;
+    let title = input_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map_or_else(
+            || "neo session".to_owned(),
+            |stem| format!("neo session {stem}"),
+        );
+    let html = render_messages_html(title, &messages)?;
+    std::fs::write(output_path, html)
+        .with_context(|| format!("failed to write export {}", output_path.display()))?;
+    Ok(())
+}
+
+fn render_messages_html(title: String, messages: &[AgentMessage]) -> anyhow::Result<String> {
     let export_messages = messages
         .iter()
         .map(|message| ExportMessage::new(message_role(message), message_text(message)))
         .collect();
-    let conversation =
-        ExportConversation::new(format!("neo session {session_id}"), export_messages);
+    let conversation = ExportConversation::new(title, export_messages);
     render_html(&conversation, &HtmlExportOptions::default()).map_err(anyhow::Error::from)
 }
 
