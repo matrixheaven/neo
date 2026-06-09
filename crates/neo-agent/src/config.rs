@@ -29,6 +29,8 @@ pub struct ConfigOverrides {
     pub no_approve: bool,
     pub prompt_templates: Vec<String>,
     pub no_prompt_templates: bool,
+    pub system_prompt: Option<String>,
+    pub append_system_prompt: Vec<String>,
 }
 
 impl ConfigOverrides {
@@ -43,6 +45,8 @@ impl ConfigOverrides {
             no_approve: cli.no_approve,
             prompt_templates: cli.prompt_template.clone(),
             no_prompt_templates: cli.no_prompt_templates,
+            system_prompt: cli.system_prompt.clone(),
+            append_system_prompt: cli.append_system_prompt.clone(),
         }
     }
 }
@@ -69,6 +73,10 @@ pub struct AppConfig {
     pub configured_prompt_templates: Vec<String>,
     #[serde(skip)]
     pub no_prompt_templates: bool,
+    #[serde(skip)]
+    pub system_prompt: Option<String>,
+    #[serde(skip)]
+    pub append_system_prompt: Vec<String>,
     pub project_dir: PathBuf,
 
     #[serde(skip)]
@@ -340,6 +348,8 @@ impl AppConfig {
             prompt_templates: overrides.prompt_templates,
             configured_prompt_templates,
             no_prompt_templates: overrides.no_prompt_templates,
+            system_prompt: overrides.system_prompt,
+            append_system_prompt: overrides.append_system_prompt,
             project_dir,
             config_path,
         })

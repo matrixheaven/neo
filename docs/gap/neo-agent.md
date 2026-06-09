@@ -57,7 +57,10 @@
   project-relative `@file` text prompt arguments, load project `.neo/SYSTEM.md`
   or user-global `~/.neo/SYSTEM.md` into the provider system message, append
   project `.neo/APPEND_SYSTEM.md` or user-global `~/.neo/APPEND_SYSTEM.md`
-  after the base system prompt, expand project-local
+  after the base system prompt, support `--system-prompt <TEXT_OR_PATH>` plus
+  repeatable `--append-system-prompt <TEXT_OR_PATH>` CLI overrides that treat
+  existing paths as UTF-8 files and other values as literal text, expand
+  project-local
   `.neo/prompts/*.md` and user-global `~/.neo/prompts/*.md` slash prompt
   templates with project templates taking precedence, merge `prompt_templates`
   selectors from user-global and project TOML config, support repeatable

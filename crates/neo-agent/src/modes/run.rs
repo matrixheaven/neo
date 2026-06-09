@@ -1011,7 +1011,11 @@ fn agent_config_for_app(
     agent_config.temperature = config.runtime.temperature;
     agent_config.max_tokens = config.runtime.max_tokens;
     agent_config.reasoning_effort = config.runtime.reasoning_effort;
-    if let Some(system_prompt) = resources::load_system_prompt(&config.project_dir)? {
+    if let Some(system_prompt) = resources::load_system_prompt(
+        &config.project_dir,
+        config.system_prompt.as_deref(),
+        &config.append_system_prompt,
+    )? {
         agent_config = agent_config.with_system_prompt(system_prompt);
     }
     if let Some(compaction) = &config.runtime.compaction {
@@ -1276,6 +1280,8 @@ mod tests {
             prompt_templates: Vec::new(),
             configured_prompt_templates: Vec::new(),
             no_prompt_templates: false,
+            system_prompt: None,
+            append_system_prompt: Vec::new(),
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
         };
@@ -1334,6 +1340,8 @@ mod tests {
             prompt_templates: Vec::new(),
             configured_prompt_templates: Vec::new(),
             no_prompt_templates: false,
+            system_prompt: None,
+            append_system_prompt: Vec::new(),
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
         };

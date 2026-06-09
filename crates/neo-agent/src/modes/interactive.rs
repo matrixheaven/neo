@@ -3682,6 +3682,8 @@ mod tests {
             prompt_templates: Vec::new(),
             configured_prompt_templates: Vec::new(),
             no_prompt_templates: false,
+            system_prompt: None,
+            append_system_prompt: Vec::new(),
             project_dir: project_dir.to_path_buf(),
             config_path: project_dir.join(".neo/config.toml"),
         }

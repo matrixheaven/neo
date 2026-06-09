@@ -9,25 +9,52 @@ const CONFIG_DIR: &str = ".neo";
 const SYSTEM_PROMPT_FILE: &str = "SYSTEM.md";
 const APPEND_SYSTEM_PROMPT_FILE: &str = "APPEND_SYSTEM.md";
 
-pub(crate) fn load_system_prompt(project_dir: &Path) -> anyhow::Result<Option<String>> {
-    let system_prompt =
-        read_first_existing(&system_prompt_candidates(project_dir), "system prompt")?;
-    let append_prompt = read_first_existing(
-        &append_system_prompt_candidates(project_dir),
-        "append system prompt",
-    )?;
+pub(crate) fn load_system_prompt(
+    project_dir: &Path,
+    explicit_system_prompt: Option<&str>,
+    explicit_append_system_prompts: &[String],
+) -> anyhow::Result<Option<String>> {
+    let system_prompt = match explicit_system_prompt {
+        Some(prompt) => Some(resolve_prompt_input(prompt, "system prompt")?),
+        None => read_first_existing(&system_prompt_candidates(project_dir), "system prompt")?,
+    };
+    let append_prompts = if explicit_append_system_prompts.is_empty() {
+        read_first_existing(
+            &append_system_prompt_candidates(project_dir),
+            "append system prompt",
+        )?
+        .into_iter()
+        .collect()
+    } else {
+        explicit_append_system_prompts
+            .iter()
+            .map(|prompt| resolve_prompt_input(prompt, "append system prompt"))
+            .collect::<anyhow::Result<Vec<_>>>()?
+    };
 
-    Ok(join_system_prompt_parts([system_prompt, append_prompt]))
+    Ok(join_system_prompt_parts(system_prompt, append_prompts))
+}
+
+fn resolve_prompt_input(input: &str, description: &str) -> anyhow::Result<String> {
+    let path = Path::new(input);
+    if path.exists() {
+        return fs::read_to_string(path)
+            .with_context(|| format!("failed to read {description} {}", path.display()));
+    }
+    Ok(input.to_owned())
 }
 
 fn normalize_prompt(prompt: &str) -> String {
     prompt.trim().to_owned()
 }
 
-fn join_system_prompt_parts(parts: [Option<String>; 2]) -> Option<String> {
-    let parts = parts
+fn join_system_prompt_parts(
+    system_prompt: Option<String>,
+    append_prompts: Vec<String>,
+) -> Option<String> {
+    let parts = system_prompt
         .into_iter()
-        .flatten()
+        .chain(append_prompts)
         .map(|part| normalize_prompt(&part))
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
@@ -74,10 +101,10 @@ mod tests {
 
     #[test]
     fn join_system_prompt_parts_trims_and_separates_non_empty_parts() {
-        let prompt = join_system_prompt_parts([
+        let prompt = join_system_prompt_parts(
             Some(" base instructions\n".to_owned()),
-            Some("\nappend instructions ".to_owned()),
-        ]);
+            vec!["\nappend instructions ".to_owned()],
+        );
 
         assert_eq!(
             prompt.as_deref(),
@@ -87,7 +114,7 @@ mod tests {
 
     #[test]
     fn join_system_prompt_parts_omits_empty_parts() {
-        let prompt = join_system_prompt_parts([Some(" \n".to_owned()), Some("append".to_owned())]);
+        let prompt = join_system_prompt_parts(Some(" \n".to_owned()), vec!["append".to_owned()]);
 
         assert_eq!(prompt.as_deref(), Some("append"));
     }

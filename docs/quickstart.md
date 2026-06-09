@@ -41,6 +41,11 @@ provider system message before the user prompt. Use `.neo/APPEND_SYSTEM.md` for
 additional instructions that should be appended after the base system prompt.
 If the project files are absent, `~/.neo/SYSTEM.md` and
 `~/.neo/APPEND_SYSTEM.md` are used as user-global defaults.
+For one-off runs, pass literal text or an existing UTF-8 file path directly:
+
+```bash
+cargo run -p neo-agent -- --system-prompt .neo/SYSTEM.md --append-system-prompt "Be concise." print "hello"
+```
 
 Project prompt templates live in `.neo/prompts/*.md`. Invoke `review.md` as
 `/review`; Neo expands `$1`, `$@`, `$ARGUMENTS`, and simple `${@:N}` slices

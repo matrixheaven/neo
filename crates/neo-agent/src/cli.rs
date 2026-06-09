@@ -30,6 +30,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_prompt_templates: bool,
 
+    #[arg(long, global = true, value_name = "TEXT_OR_PATH")]
+    pub system_prompt: Option<String>,
+
+    #[arg(long, global = true, value_name = "TEXT_OR_PATH")]
+    pub append_system_prompt: Vec<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

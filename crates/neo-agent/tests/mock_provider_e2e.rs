@@ -262,6 +262,80 @@ fn print_prefers_project_system_resources_over_user_global_resources() {
 }
 
 #[test]
+fn print_cli_system_prompt_overrides_discovered_system_prompt_file() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        temp.path().join(".neo/SYSTEM.md"),
+        "Discovered instructions should not win",
+    )
+    .expect("write system prompt");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-cli-system",
+        "cli system loaded",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--system-prompt")
+        .arg("Use explicit CLI instructions.")
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "cli system loaded\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Use explicit CLI instructions."
+    );
+}
+
+#[test]
+fn print_cli_append_system_prompt_overrides_discovered_append_file() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::write(temp.path().join(".neo/SYSTEM.md"), "Base instructions.")
+        .expect("write system prompt");
+    std::fs::write(
+        temp.path().join(".neo/APPEND_SYSTEM.md"),
+        "Discovered append should not win",
+    )
+    .expect("write append system prompt");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-cli-append-system",
+        "cli append loaded",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--append-system-prompt")
+        .arg("CLI append one.")
+        .arg("--append-system-prompt")
+        .arg("CLI append two.")
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "cli append loaded\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "Base instructions.\n\nCLI append one.\n\nCLI append two."
+    );
+}
+
+#[test]
 fn print_merges_piped_stdin_with_cli_prompt() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-stdin", "merged")]);

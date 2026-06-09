@@ -102,6 +102,10 @@ sent before the user prompt. If the project file is absent, Neo falls back to
 follow the same project-over-global precedence and append a second paragraph to
 the system prompt. Empty files are ignored, and no hosted trust or marketplace
 state is inferred from these files.
+For a single invocation, `--system-prompt <TEXT_OR_PATH>` replaces discovered
+`SYSTEM.md`, and repeatable `--append-system-prompt <TEXT_OR_PATH>` replaces
+discovered `APPEND_SYSTEM.md` entries. If a CLI value is an existing path, Neo
+reads it as UTF-8; otherwise the value is treated as literal prompt text.
 
 `prompt_templates` accepts the same local selector shape as repeatable
 `--prompt-template`: template names, project-contained `.md` files, or
