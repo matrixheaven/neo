@@ -3,7 +3,7 @@ use neo_tui::{
     ApprovalChoice, ApprovalModal, ApprovalOption, ChatTranscript, InputEvent, InputParser, KeyId,
     KeybindingAction, KeybindingsManager, NeoTuiApp, PromptEdit, PromptState, PromptWidget,
     SelectItem, SelectListState, StatusWidget, ToolStatus, ToolStatusKind, TranscriptItem,
-    TranscriptSelection, TranscriptView, TranscriptWidget, truncate_width, visible_width,
+    TranscriptSelection, TranscriptView, TranscriptWidget, TuiTheme, truncate_width, visible_width,
     wrap_width,
 };
 use ratatui::{
@@ -912,6 +912,28 @@ fn transcript_widget_renders_roles_tools_and_wraps_content() {
     assert!(lines.iter().any(|line| line.contains("Assistant")));
     assert!(lines.iter().any(|line| line.contains("shell.run")));
     assert!(lines.iter().any(|line| line.contains("test")));
+}
+
+#[test]
+fn transcript_widget_uses_supplied_theme_colors() {
+    let transcript = ChatTranscript::from_items([
+        TranscriptItem::user("hello"),
+        TranscriptItem::assistant("answer"),
+        TranscriptItem::notice("heads up"),
+    ]);
+    let theme = TuiTheme::default()
+        .with_user(Color::Magenta)
+        .with_assistant(Color::Blue)
+        .with_notice(Color::Yellow);
+
+    let buffer = render_widget_buffer(24, 8, TranscriptWidget::new(&transcript).with_theme(theme));
+
+    let user = buffer.cell((0, 0)).expect("user label cell");
+    let assistant = buffer.cell((0, 2)).expect("assistant label cell");
+    let notice = buffer.cell((0, 4)).expect("notice label cell");
+    assert_eq!(user.fg, Color::Magenta);
+    assert_eq!(assistant.fg, Color::Blue);
+    assert_eq!(notice.fg, Color::Yellow);
 }
 
 #[test]

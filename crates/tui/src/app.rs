@@ -1,6 +1,88 @@
 use std::{fmt::Write as _, ops::Range};
 
 use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef};
+use ratatui::style::Color;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TuiTheme {
+    pub header: Color,
+    pub prompt: Color,
+    pub user: Color,
+    pub assistant: Color,
+    pub notice: Color,
+    pub diff_added: Color,
+    pub diff_removed: Color,
+    pub diff_hunk: Color,
+    pub diff_context: Color,
+    pub selection_bg: Color,
+    pub pending: Color,
+    pub running: Color,
+    pub succeeded: Color,
+    pub failed: Color,
+    pub cancelled: Color,
+    pub approval_border: Color,
+    pub selected_fg: Color,
+    pub selected_bg: Color,
+    pub overlay_border: Color,
+}
+
+impl Default for TuiTheme {
+    fn default() -> Self {
+        Self {
+            header: Color::White,
+            prompt: Color::White,
+            user: Color::Cyan,
+            assistant: Color::Green,
+            notice: Color::Gray,
+            diff_added: Color::Green,
+            diff_removed: Color::Red,
+            diff_hunk: Color::Yellow,
+            diff_context: Color::DarkGray,
+            selection_bg: Color::DarkGray,
+            pending: Color::Gray,
+            running: Color::Yellow,
+            succeeded: Color::Green,
+            failed: Color::Red,
+            cancelled: Color::DarkGray,
+            approval_border: Color::Yellow,
+            selected_fg: Color::Black,
+            selected_bg: Color::Yellow,
+            overlay_border: Color::Blue,
+        }
+    }
+}
+
+impl TuiTheme {
+    #[must_use]
+    pub const fn with_header(mut self, color: Color) -> Self {
+        self.header = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_prompt(mut self, color: Color) -> Self {
+        self.prompt = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_user(mut self, color: Color) -> Self {
+        self.user = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_assistant(mut self, color: Color) -> Self {
+        self.assistant = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_notice(mut self, color: Color) -> Self {
+        self.notice = color;
+        self
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
@@ -29,6 +111,7 @@ pub struct NeoTuiApp {
     active_thinking_buffer: String,
     active_tools: Vec<ActiveTool>,
     completed_tool_result_ids: Vec<String>,
+    theme: TuiTheme,
 }
 
 impl NeoTuiApp {
@@ -56,6 +139,7 @@ impl NeoTuiApp {
             active_thinking_buffer: String::new(),
             active_tools: Vec::new(),
             completed_tool_result_ids: Vec::new(),
+            theme: TuiTheme::default(),
         }
     }
 
@@ -77,6 +161,15 @@ impl NeoTuiApp {
     #[must_use]
     pub const fn mode(&self) -> AppMode {
         self.mode
+    }
+
+    #[must_use]
+    pub const fn theme(&self) -> TuiTheme {
+        self.theme
+    }
+
+    pub const fn set_theme(&mut self, theme: TuiTheme) {
+        self.theme = theme;
     }
 
     #[must_use]

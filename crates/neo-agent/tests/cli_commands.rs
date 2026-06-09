@@ -102,6 +102,68 @@ fn root_verbose_flag_renders_real_startup_details() {
 }
 
 #[test]
+fn root_theme_flag_loads_theme_for_verbose_startup() {
+    let temp = TempDir::new().expect("tempdir");
+    let theme_path = temp.path().join("solarized-neo.json");
+    fs::write(
+        &theme_path,
+        r##"
+{
+  "name": "Solarized Neo",
+  "colors": {
+    "header": "#268bd2",
+    "prompt": "yellow",
+    "user": "magenta",
+    "assistant": "blue",
+    "notice": "gray"
+  }
+}
+"##,
+    )
+    .expect("write theme");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .arg("--theme")
+        .arg(&theme_path)
+        .args(["--verbose"]);
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("theme: Solarized Neo"));
+}
+
+#[test]
+fn root_no_themes_disables_project_theme_discovery() {
+    let temp = TempDir::new().expect("tempdir");
+    let themes = temp.path().join(".neo/themes");
+    fs::create_dir_all(&themes).expect("create themes");
+    fs::write(
+        themes.join("auto.json"),
+        r#"
+{
+  "name": "Auto Theme",
+  "colors": {
+    "notice": "yellow"
+  }
+}
+"#,
+    )
+    .expect("write auto theme");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .args(["--no-themes", "--verbose"]);
+
+    let stdout = run(command);
+
+    assert!(stdout.contains("theme: default"));
+    assert!(!stdout.contains("Auto Theme"));
+}
+
+#[test]
 fn root_resume_flag_opens_real_local_session_picker() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = temp.path().join(".neo/sessions");

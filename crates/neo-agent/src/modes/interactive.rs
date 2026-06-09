@@ -346,6 +346,7 @@ impl InteractiveController {
     }
 
     pub fn apply_startup_options(&mut self, config: &AppConfig, options: InteractiveOptions) {
+        self.app.set_theme(config.theme.theme);
         if !options.verbose_startup {
             return;
         }
@@ -1685,6 +1686,7 @@ fn startup_notices(config: &AppConfig) -> Vec<String> {
             config.default_provider, config.default_model
         ),
         format!("model scope: {model_scope}"),
+        format!("theme: {}", config.theme.name),
         format!(
             "resources: context_files={} skills={} extensions={} offline={}",
             enabled_label(!config.no_context_files),
@@ -3773,6 +3775,7 @@ mod tests {
             },
             runtime: RuntimeConfig::default(),
             tui: TuiConfig::default(),
+            theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
             approve: false,
             no_approve: false,

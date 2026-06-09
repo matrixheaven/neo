@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::{
     ApprovalModal, ChatTranscript, NeoTuiApp, Overlay, OverlayKind, PromptState, ToolStatus,
     ToolStatusKind, TranscriptItem, TranscriptLine, TranscriptRenderer, TranscriptSelection,
-    TranscriptView,
+    TranscriptView, TuiTheme,
 };
 
 #[must_use]
@@ -173,15 +173,17 @@ pub struct TranscriptWidget<'a> {
     transcript: &'a ChatTranscript,
     view: Option<&'a TranscriptView>,
     selection: Option<&'a TranscriptSelection>,
+    theme: TuiTheme,
 }
 
 impl<'a> TranscriptWidget<'a> {
     #[must_use]
-    pub const fn new(transcript: &'a ChatTranscript) -> Self {
+    pub fn new(transcript: &'a ChatTranscript) -> Self {
         Self {
             transcript,
             view: None,
             selection: None,
+            theme: TuiTheme::default(),
         }
     }
 
@@ -194,6 +196,12 @@ impl<'a> TranscriptWidget<'a> {
     #[must_use]
     pub const fn with_selection(mut self, selection: Option<&'a TranscriptSelection>) -> Self {
         self.selection = selection;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_theme(mut self, theme: TuiTheme) -> Self {
+        self.theme = theme;
         self
     }
 }
@@ -219,8 +227,8 @@ impl Widget for TranscriptWidget<'_> {
             let selected = selected_range
                 .as_ref()
                 .is_some_and(|range| range.contains(&item_index));
-            let (label, content, style) = transcript_row(item);
-            let style = selected_style(style, selected);
+            let (label, content, style) = transcript_row(item, self.theme);
+            let style = selected_style(style, selected, self.theme);
             write_line(area, buf, y, label, style.add_modifier(Modifier::BOLD));
             y = y.saturating_add(1);
 
@@ -233,7 +241,11 @@ impl Widget for TranscriptWidget<'_> {
                     buf,
                     y,
                     &format!("  {}", line.display_text()),
-                    selected_style(transcript_line_style(&line, style), selected),
+                    selected_style(
+                        transcript_line_style(&line, style, self.theme),
+                        selected,
+                        self.theme,
+                    ),
                 );
                 y = y.saturating_add(1);
             }
@@ -241,23 +253,23 @@ impl Widget for TranscriptWidget<'_> {
     }
 }
 
-fn selected_style(style: Style, selected: bool) -> Style {
+fn selected_style(style: Style, selected: bool, theme: TuiTheme) -> Style {
     if selected {
-        style.bg(Color::DarkGray)
+        style.bg(theme.selection_bg)
     } else {
         style
     }
 }
 
-fn transcript_row(item: &TranscriptItem) -> (&'static str, String, Style) {
+fn transcript_row(item: &TranscriptItem, theme: TuiTheme) -> (&'static str, String, Style) {
     match item {
         TranscriptItem::User { content } => {
-            ("You", content.clone(), Style::default().fg(Color::Cyan))
+            ("You", content.clone(), Style::default().fg(theme.user))
         }
         TranscriptItem::Assistant { content } => (
             "Assistant",
             content.clone(),
-            Style::default().fg(Color::Green),
+            Style::default().fg(theme.assistant),
         ),
         TranscriptItem::Tool {
             name,
@@ -266,38 +278,48 @@ fn transcript_row(item: &TranscriptItem) -> (&'static str, String, Style) {
         } => (
             "Tool",
             format!("{} {} ({})", status.marker(), name, detail),
-            status_style(*status),
+            status_style(*status, theme),
         ),
         TranscriptItem::Notice { content } => {
-            ("Notice", content.clone(), Style::default().fg(Color::Gray))
+            ("Notice", content.clone(), Style::default().fg(theme.notice))
         }
     }
 }
 
-fn transcript_line_style(line: &TranscriptLine, base: Style) -> Style {
+fn transcript_line_style(line: &TranscriptLine, base: Style, theme: TuiTheme) -> Style {
     match line {
         TranscriptLine::DiffFileHeader { marker: '+', .. } | TranscriptLine::DiffAdded { .. } => {
-            Style::default().fg(Color::Green)
+            Style::default().fg(theme.diff_added)
         }
         TranscriptLine::DiffFileHeader { marker: '-', .. } | TranscriptLine::DiffRemoved { .. } => {
-            Style::default().fg(Color::Red)
+            Style::default().fg(theme.diff_removed)
         }
         TranscriptLine::DiffHunk { .. } => Style::default()
-            .fg(Color::Yellow)
+            .fg(theme.diff_hunk)
             .add_modifier(Modifier::BOLD),
-        TranscriptLine::DiffContext { .. } => Style::default().fg(Color::DarkGray),
+        TranscriptLine::DiffContext { .. } => Style::default().fg(theme.diff_context),
         _ => base,
     }
 }
 
 pub struct StatusWidget<'a> {
     statuses: &'a [ToolStatus],
+    theme: TuiTheme,
 }
 
 impl<'a> StatusWidget<'a> {
     #[must_use]
-    pub const fn new(statuses: &'a [ToolStatus]) -> Self {
-        Self { statuses }
+    pub fn new(statuses: &'a [ToolStatus]) -> Self {
+        Self {
+            statuses,
+            theme: TuiTheme::default(),
+        }
+    }
+
+    #[must_use]
+    pub const fn with_theme(mut self, theme: TuiTheme) -> Self {
+        self.theme = theme;
+        self
     }
 }
 
@@ -322,19 +344,35 @@ impl Widget for StatusWidget<'_> {
                 separator,
                 detail
             );
-            write_line(area, buf, area.y + row, &line, status_style(status.kind));
+            write_line(
+                area,
+                buf,
+                area.y + row,
+                &line,
+                status_style(status.kind, self.theme),
+            );
         }
     }
 }
 
 pub struct PromptWidget<'a> {
     prompt: &'a PromptState,
+    theme: TuiTheme,
 }
 
 impl<'a> PromptWidget<'a> {
     #[must_use]
-    pub const fn new(prompt: &'a PromptState) -> Self {
-        Self { prompt }
+    pub fn new(prompt: &'a PromptState) -> Self {
+        Self {
+            prompt,
+            theme: TuiTheme::default(),
+        }
+    }
+
+    #[must_use]
+    pub const fn with_theme(mut self, theme: TuiTheme) -> Self {
+        self.theme = theme;
+        self
     }
 }
 
@@ -365,7 +403,7 @@ impl Widget for PromptWidget<'_> {
                 buf,
                 area.y + row,
                 &line,
-                Style::default().fg(Color::White),
+                Style::default().fg(self.theme.prompt),
             );
         }
     }
@@ -429,7 +467,7 @@ impl Widget for &NeoTuiApp {
             area.y,
             &header,
             Style::default()
-                .fg(Color::White)
+                .fg(self.theme().header)
                 .add_modifier(Modifier::BOLD),
         );
 
@@ -453,31 +491,36 @@ impl Widget for &NeoTuiApp {
         TranscriptWidget::new(self.transcript())
             .with_view(self.transcript_view())
             .with_selection(self.transcript_selection())
+            .with_theme(self.theme())
             .render(body, buf);
 
         let status_y = body.y.saturating_add(body.height);
         let statuses = self.tool_statuses();
         if status_height > 0 {
-            StatusWidget::new(&statuses).render(
+            StatusWidget::new(&statuses)
+                .with_theme(self.theme())
+                .render(
+                    Rect {
+                        x: area.x,
+                        y: status_y,
+                        width: area.width,
+                        height: status_height,
+                    },
+                    buf,
+                );
+        }
+
+        PromptWidget::new(self.prompt())
+            .with_theme(self.theme())
+            .render(
                 Rect {
                     x: area.x,
-                    y: status_y,
+                    y: status_y.saturating_add(status_height),
                     width: area.width,
-                    height: status_height,
+                    height: prompt_height,
                 },
                 buf,
             );
-        }
-
-        PromptWidget::new(self.prompt()).render(
-            Rect {
-                x: area.x,
-                y: status_y.saturating_add(status_height),
-                width: area.width,
-                height: prompt_height,
-            },
-            buf,
-        );
 
         if let Some(overlay) = self.focused_overlay() {
             render_overlay(overlay, area, buf);
@@ -553,13 +596,13 @@ fn overlay_lines(overlay: &Overlay, width: usize) -> Vec<String> {
     }
 }
 
-fn status_style(kind: ToolStatusKind) -> Style {
+fn status_style(kind: ToolStatusKind, theme: TuiTheme) -> Style {
     match kind {
-        ToolStatusKind::Pending => Style::default().fg(Color::Gray),
-        ToolStatusKind::Running => Style::default().fg(Color::Yellow),
-        ToolStatusKind::Succeeded => Style::default().fg(Color::Green),
-        ToolStatusKind::Failed => Style::default().fg(Color::Red),
-        ToolStatusKind::Cancelled => Style::default().fg(Color::DarkGray),
+        ToolStatusKind::Pending => Style::default().fg(theme.pending),
+        ToolStatusKind::Running => Style::default().fg(theme.running),
+        ToolStatusKind::Succeeded => Style::default().fg(theme.succeeded),
+        ToolStatusKind::Failed => Style::default().fg(theme.failed),
+        ToolStatusKind::Cancelled => Style::default().fg(theme.cancelled),
     }
 }
 

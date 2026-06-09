@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     cli::{Cli, ThinkingLevel, ToolFilterArgs},
+    themes::{self, ResolvedTheme},
     trust,
 };
 
@@ -48,7 +49,9 @@ pub struct ConfigOverrides {
     pub prompt_templates: Vec<String>,
     pub skill_paths: Vec<PathBuf>,
     pub extension_paths: Vec<PathBuf>,
+    pub theme_paths: Vec<PathBuf>,
     pub no_extensions: bool,
+    pub no_themes: bool,
     pub no_prompt_templates: bool,
     pub no_skills: bool,
     pub no_context_files: bool,
@@ -75,7 +78,9 @@ impl ConfigOverrides {
             prompt_templates: cli.prompt_template.clone(),
             skill_paths: cli.skill.clone(),
             extension_paths: cli.extension.clone(),
+            theme_paths: cli.theme.clone(),
             no_extensions: cli.no_extensions,
+            no_themes: cli.no_themes,
             no_prompt_templates: cli.no_prompt_templates,
             no_skills: cli.no_skills,
             no_context_files: cli.no_context_files,
@@ -240,6 +245,8 @@ pub struct AppConfig {
     pub defaults: Defaults,
     pub runtime: RuntimeConfig,
     pub tui: TuiConfig,
+    #[serde(skip)]
+    pub theme: ResolvedTheme,
     pub mcp: McpConfig,
     pub approve: bool,
     pub no_approve: bool,
@@ -545,6 +552,8 @@ impl AppConfig {
         validate_runtime_config(&runtime)?;
         let tui = tui_from_file(file_config.tui);
         validate_tui_config(&tui)?;
+        let theme =
+            themes::resolve_theme(&project_dir, &overrides.theme_paths, overrides.no_themes)?;
         let mcp = file_config.mcp.unwrap_or_default();
         let mode = overrides
             .mode
@@ -567,6 +576,7 @@ impl AppConfig {
             defaults: Defaults { mode },
             runtime,
             tui,
+            theme,
             mcp,
             approve: overrides.approve,
             no_approve: overrides.no_approve,

@@ -8,6 +8,7 @@ mod resources;
 mod rpc_mode;
 mod session_commands;
 mod skill_commands;
+mod themes;
 mod trust;
 
 use std::{
