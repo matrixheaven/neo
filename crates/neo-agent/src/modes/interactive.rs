@@ -3731,6 +3731,7 @@ mod tests {
             no_prompt_templates: false,
             no_skills: false,
             no_context_files: false,
+            offline: false,
             system_prompt: None,
             append_system_prompt: Vec::new(),
             tool_filters: ToolFilterConfig::default(),

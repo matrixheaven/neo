@@ -29,6 +29,7 @@ struct EnvOverrides {
     api_key_env: Option<String>,
     sessions_dir: Option<PathBuf>,
     mode: Option<String>,
+    offline: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +52,7 @@ pub struct ConfigOverrides {
     pub no_prompt_templates: bool,
     pub no_skills: bool,
     pub no_context_files: bool,
+    pub offline: bool,
     pub system_prompt: Option<String>,
     pub append_system_prompt: Vec<String>,
     pub thinking: Option<ThinkingLevel>,
@@ -77,6 +79,7 @@ impl ConfigOverrides {
             no_prompt_templates: cli.no_prompt_templates,
             no_skills: cli.no_skills,
             no_context_files: cli.no_context_files,
+            offline: cli.offline,
             system_prompt: cli.system_prompt.clone(),
             append_system_prompt: cli.append_system_prompt.clone(),
             thinking: cli.thinking,
@@ -256,6 +259,8 @@ pub struct AppConfig {
     pub no_skills: bool,
     #[serde(skip)]
     pub no_context_files: bool,
+    #[serde(skip)]
+    pub offline: bool,
     #[serde(skip)]
     pub system_prompt: Option<String>,
     #[serde(skip)]
@@ -573,6 +578,7 @@ impl AppConfig {
             no_prompt_templates: overrides.no_prompt_templates,
             no_skills: overrides.no_skills,
             no_context_files: overrides.no_context_files,
+            offline: overrides.offline || env_overrides.offline,
             system_prompt: overrides.system_prompt,
             append_system_prompt: overrides.append_system_prompt,
             tool_filters: overrides.tool_filters,
@@ -594,7 +600,15 @@ fn env_overrides() -> EnvOverrides {
             .map(PathBuf::from)
             .map(expand_user_path),
         mode: env::var("NEO_MODE").ok(),
+        offline: env::var("NEO_OFFLINE").is_ok_and(|value| truthy_env_flag(&value)),
     }
+}
+
+fn truthy_env_flag(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes"
+    )
 }
 
 fn project_trusted_from_overrides(

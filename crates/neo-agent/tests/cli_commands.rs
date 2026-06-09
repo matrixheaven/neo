@@ -1237,6 +1237,78 @@ fn extensions_install_and_update_from_local_git_repo_without_marketplace_catalog
 }
 
 #[test]
+fn extensions_update_skips_git_source_when_offline_env_is_enabled() {
+    let temp = TempDir::new().expect("tempdir");
+    let repo = temp.path().join("repo");
+    write_extension_manifest(&repo, "git_echo", "Git Echo", "0.1.0");
+    init_git_repo(&repo);
+
+    let source_url = format!("file://{}", repo.display());
+    let mut install = neo();
+    install
+        .current_dir(temp.path())
+        .args(["extensions", "install"])
+        .arg(&source_url);
+    run(install);
+
+    write_extension_manifest(&repo, "git_echo", "Git Echo", "0.2.0");
+    commit_git_repo(&repo, "update extension");
+
+    let mut update = neo();
+    update
+        .current_dir(temp.path())
+        .env("NEO_OFFLINE", "1")
+        .args(["extensions", "update", "git_echo"]);
+    let skipped = run(update);
+    assert!(skipped.contains("offline: skipped extension update git_echo"));
+
+    let manifest = fs::read_to_string(
+        temp.path()
+            .join(".neo/extensions/git_echo/neo-extension.toml"),
+    )
+    .expect("read installed extension manifest");
+    assert!(manifest.contains("version = \"0.1.0\""));
+
+    let mut list = neo();
+    list.current_dir(temp.path()).args(["extensions", "list"]);
+    let listed = run(list);
+    assert!(listed.contains("git_echo"));
+    assert!(listed.contains("0.1.0"));
+    assert!(!listed.contains("0.2.0"));
+}
+
+#[test]
+fn extensions_update_skips_local_source_when_offline_flag_is_set() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.path().join("source");
+    write_extension_manifest(&source, "echo", "Echo", "0.1.0");
+    let root = temp.path().join("extensions");
+
+    let mut install = neo();
+    install
+        .current_dir(temp.path())
+        .args(["extensions", "install"])
+        .arg(&source)
+        .arg("--root")
+        .arg(&root);
+    run(install);
+
+    write_extension_manifest(&source, "echo", "Echo", "0.2.0");
+
+    let mut update = neo();
+    update
+        .current_dir(temp.path())
+        .args(["--offline", "extensions", "update", "echo", "--root"])
+        .arg(&root);
+    let skipped = run(update);
+    assert!(skipped.contains("offline: skipped extension update echo"));
+
+    let manifest = fs::read_to_string(root.join("echo/neo-extension.toml"))
+        .expect("read installed extension manifest");
+    assert!(manifest.contains("version = \"0.1.0\""));
+}
+
+#[test]
 fn extensions_call_round_trips_json_rpc() {
     let temp = TempDir::new().expect("tempdir");
     let extension = temp.path().join("extensions/echo");

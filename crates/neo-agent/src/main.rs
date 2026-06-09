@@ -385,6 +385,7 @@ async fn dispatch_extensions(
                 &paths.state_path,
                 &paths.registry_path,
                 &extension_id,
+                config.offline,
             )
         }
         ExtensionCommand::Uninstall { extension_id, root } => {
