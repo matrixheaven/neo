@@ -1262,6 +1262,128 @@ fn print_pi_style_short_no_context_files_alias_disables_agents_files() {
 }
 
 #[test]
+fn print_loads_project_context_after_persisted_trust_without_approve() {
+    let home = TempDir::new().expect("home tempdir");
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::write(
+        project.path().join("AGENTS.md"),
+        "Always mention persisted trust marker TRUSTED_CONTEXT_MARKER_43.\n",
+    )
+    .expect("write AGENTS.md");
+
+    let mut trust = neo();
+    trust
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["trust", "approve"]);
+    let stdout = run(trust);
+    assert!(stdout.contains("trusted"));
+
+    let trust_store =
+        std::fs::read_to_string(home.path().join(".neo/trust.json")).expect("read trust store");
+    assert!(trust_store.contains("true"));
+
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-persisted-trust",
+        "trusted context loaded",
+    )]);
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "trusted context loaded\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    let system = requests[0].body["input"][0]["content"]
+        .as_str()
+        .expect("system content");
+    assert!(system.contains("TRUSTED_CONTEXT_MARKER_43"));
+}
+
+#[test]
+fn print_no_approve_skips_project_context_even_after_persisted_trust() {
+    let home = TempDir::new().expect("home tempdir");
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::write(
+        project.path().join("AGENTS.md"),
+        "This trusted marker is overridden: OVERRIDDEN_TRUST_MARKER_47.\n",
+    )
+    .expect("write AGENTS.md");
+
+    let mut trust = neo();
+    trust
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["trust", "approve"]);
+    run(trust);
+
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-no-approve-trust",
+        "trust overridden",
+    )]);
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--no-approve")
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "trust overridden\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["input"][0]["role"], "user");
+    assert_eq!(requests[0].body["input"][0]["content"], "hello");
+}
+
+#[test]
+fn trust_status_deny_and_clear_update_project_trust_store() {
+    let home = TempDir::new().expect("home tempdir");
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::write(project.path().join("AGENTS.md"), "rules").expect("write AGENTS.md");
+
+    let mut status = neo();
+    status
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["trust", "status"]);
+    let stdout = run(status);
+    assert!(stdout.contains("untrusted"));
+
+    let mut deny = neo();
+    deny.current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["trust", "deny"]);
+    let stdout = run(deny);
+    assert!(stdout.contains("untrusted"));
+    let trust_store =
+        std::fs::read_to_string(home.path().join(".neo/trust.json")).expect("read trust store");
+    assert!(trust_store.contains("false"));
+
+    let mut clear = neo();
+    clear
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["trust", "clear"]);
+    let stdout = run(clear);
+    assert!(stdout.contains("cleared trust"));
+    let trust_store =
+        std::fs::read_to_string(home.path().join(".neo/trust.json")).expect("read trust store");
+    assert_eq!(trust_store.trim(), "{}");
+}
+
+#[test]
 fn print_prefers_project_system_resources_over_user_global_resources() {
     let home = TempDir::new().expect("home tempdir");
     let project = TempDir::new().expect("project tempdir");

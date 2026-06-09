@@ -3731,6 +3731,7 @@ mod tests {
             system_prompt: None,
             append_system_prompt: Vec::new(),
             tool_filters: ToolFilterConfig::default(),
+            project_trusted: true,
             project_dir: project_dir.to_path_buf(),
             config_path: project_dir.join(".neo/config.toml"),
         }

@@ -7,6 +7,7 @@ mod resources;
 mod rpc_mode;
 mod session_commands;
 mod skill_commands;
+mod trust;
 
 use std::{
     io::{self, IsTerminal as _, Read as _},
@@ -20,7 +21,7 @@ use anyhow::Context as _;
 use crate::{
     cli::{
         Cli, Command, ConfigCommand, ExtensionCommand, LIST_MODELS_NO_SEARCH, McpCommand,
-        ModelCommand, SessionCommand, SkillCommand,
+        ModelCommand, SessionCommand, SkillCommand, TrustCommand,
     },
     config::{AppConfig, ConfigOverrides},
 };
@@ -163,6 +164,12 @@ async fn dispatch_command(
             SkillCommand::Show { path } => skill_commands::show(&path),
         },
         Some(Command::Extensions { command }) => dispatch_extensions(config, command).await,
+        Some(Command::Trust { command }) => match command {
+            TrustCommand::Status => trust::status(&config.project_dir),
+            TrustCommand::Approve => trust::approve(&config.project_dir),
+            TrustCommand::Deny => trust::deny(&config.project_dir),
+            TrustCommand::Clear => trust::clear(&config.project_dir),
+        },
         Some(Command::Config { command }) => match command {
             ConfigCommand::Show => config::show(config),
             ConfigCommand::Set { key, value } => config::set(&key, &value),

@@ -191,6 +191,10 @@ pub enum Command {
         #[command(subcommand)]
         command: ExtensionCommand,
     },
+    Trust {
+        #[command(subcommand)]
+        command: TrustCommand,
+    },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -256,6 +260,14 @@ pub enum SessionCommand {
 pub enum ConfigCommand {
     Show,
     Set { key: String, value: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TrustCommand {
+    Status,
+    Approve,
+    Deny,
+    Clear,
 }
 
 #[derive(Debug, Subcommand)]

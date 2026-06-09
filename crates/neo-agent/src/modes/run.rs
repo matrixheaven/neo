@@ -1208,7 +1208,7 @@ fn agent_config_for_app(
         &config.append_system_prompt,
         &config.skill_paths,
         config.no_context_files,
-        config.approve && !config.no_approve,
+        config.project_trusted,
     )? {
         agent_config = agent_config.with_system_prompt(system_prompt);
     }
@@ -1587,6 +1587,7 @@ mod tests {
             system_prompt: None,
             append_system_prompt: Vec::new(),
             tool_filters: ToolFilterConfig::default(),
+            project_trusted: true,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
         };
@@ -1653,6 +1654,7 @@ mod tests {
             system_prompt: None,
             append_system_prompt: Vec::new(),
             tool_filters: ToolFilterConfig::default(),
+            project_trusted: true,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
         };

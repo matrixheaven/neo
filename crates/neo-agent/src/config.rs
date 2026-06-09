@@ -10,13 +10,26 @@ use neo_ai::{ModelRegistry, ModelSpec, ReasoningEffort};
 use neo_tui::{KeyId, KeybindingAction, KeybindingsManager};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{Cli, ThinkingLevel, ToolFilterArgs};
+use crate::{
+    cli::{Cli, ThinkingLevel, ToolFilterArgs},
+    trust,
+};
 
 const CONFIG_DIR: &str = ".neo";
 const CONFIG_FILE: &str = "config.toml";
 const DEFAULT_MODEL: &str = "gpt-4.1";
 const DEFAULT_PROVIDER: &str = "openai";
 const DEFAULT_MODE: &str = "interactive";
+
+#[derive(Debug, Default)]
+struct EnvOverrides {
+    model: Option<String>,
+    provider: Option<String>,
+    api_base: Option<String>,
+    api_key_env: Option<String>,
+    sessions_dir: Option<PathBuf>,
+    mode: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)]
@@ -237,6 +250,8 @@ pub struct AppConfig {
     pub append_system_prompt: Vec<String>,
     #[serde(skip)]
     pub tool_filters: ToolFilterConfig,
+    #[serde(skip)]
+    pub project_trusted: bool,
     pub project_dir: PathBuf,
 
     #[serde(skip)]
@@ -460,31 +475,29 @@ impl AppConfig {
             .unwrap_or_default();
         let project_config = read_file_config(&config_path)?;
         let file_config = merge_file_configs(global_config, project_config);
-        let env_model = env::var("NEO_MODEL").ok();
-        let env_provider = env::var("NEO_PROVIDER").ok();
-        let env_api_base = env::var("NEO_API_BASE").ok();
-        let env_api_key = env::var("NEO_API_KEY_ENV").ok();
-        let env_sessions_dir = env::var("NEO_SESSIONS_DIR")
-            .ok()
-            .map(PathBuf::from)
-            .map(expand_user_path);
-        let env_mode = env::var("NEO_MODE").ok();
+        let env_overrides = env_overrides();
         let thinking_override = overrides.thinking;
+        let project_trusted =
+            project_trusted_from_overrides(&project_dir, overrides.approve, overrides.no_approve)?;
 
         let explicit_model = overrides.model.is_some();
         let mut default_model = overrides
             .model
-            .or(env_model)
+            .or(env_overrides.model)
             .or(file_config.default_model)
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
         let mut default_provider = overrides
             .provider
-            .or(env_provider)
+            .or(env_overrides.provider)
             .or(file_config.default_provider)
             .unwrap_or_else(|| DEFAULT_PROVIDER.to_owned());
         let providers = file_config.providers.unwrap_or_default();
-        let api_base = overrides.api_base.or(env_api_base).or(file_config.api_base);
-        let api_key_env = env_api_key
+        let api_base = overrides
+            .api_base
+            .or(env_overrides.api_base)
+            .or(file_config.api_base);
+        let api_key_env = env_overrides
+            .api_key_env
             .or(file_config.api_key_env)
             .or_else(|| provider_api_key_env(&providers, &default_provider));
         let model_catalogs: Vec<PathBuf> = file_config
@@ -505,7 +518,7 @@ impl AppConfig {
         let sessions_dir = overrides
             .sessions_dir
             .map(expand_user_path)
-            .or(env_sessions_dir)
+            .or(env_overrides.sessions_dir)
             .or_else(|| file_config.sessions_dir.map(expand_user_path))
             .unwrap_or_else(|| project_dir.join(CONFIG_DIR).join("sessions"));
         let permissions = file_config.permissions.unwrap_or_default();
@@ -517,7 +530,7 @@ impl AppConfig {
         let mcp = file_config.mcp.unwrap_or_default();
         let mode = overrides
             .mode
-            .or(env_mode)
+            .or(env_overrides.mode)
             .or(file_config.defaults.and_then(|defaults| defaults.mode))
             .unwrap_or_else(|| DEFAULT_MODE.to_owned());
 
@@ -547,10 +560,33 @@ impl AppConfig {
             system_prompt: overrides.system_prompt,
             append_system_prompt: overrides.append_system_prompt,
             tool_filters: overrides.tool_filters,
+            project_trusted,
             project_dir,
             config_path,
         })
     }
+}
+
+fn env_overrides() -> EnvOverrides {
+    EnvOverrides {
+        model: env::var("NEO_MODEL").ok(),
+        provider: env::var("NEO_PROVIDER").ok(),
+        api_base: env::var("NEO_API_BASE").ok(),
+        api_key_env: env::var("NEO_API_KEY_ENV").ok(),
+        sessions_dir: env::var("NEO_SESSIONS_DIR")
+            .ok()
+            .map(PathBuf::from)
+            .map(expand_user_path),
+        mode: env::var("NEO_MODE").ok(),
+    }
+}
+
+fn project_trusted_from_overrides(
+    project_dir: &Path,
+    approve: bool,
+    no_approve: bool,
+) -> anyhow::Result<bool> {
+    trust::resolve_project_trust(project_dir, approve, no_approve)
 }
 
 fn scoped_default_model(catalogs: &[PathBuf], model_scope: &[String]) -> anyhow::Result<ModelSpec> {
