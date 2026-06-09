@@ -92,12 +92,68 @@ async fn discover_extension_tools(
             extension.manifest.id
         );
     };
-    serde_json::from_value(result).with_context(|| {
+    let tools = serde_json::from_value::<Vec<ExtensionToolSpec>>(result).with_context(|| {
         format!(
             "extension {} returned invalid tools.list result",
             extension.manifest.id
         )
-    })
+    })?;
+    for tool in &tools {
+        validate_input_schema(&extension.manifest.id, tool)?;
+    }
+    Ok(tools)
+}
+
+fn validate_input_schema(extension_id: &str, tool: &ExtensionToolSpec) -> anyhow::Result<()> {
+    let object = tool.input_schema.as_object().with_context(|| {
+        format!(
+            "extension {extension_id} tool {} input_schema must be a JSON Schema object",
+            tool.name
+        )
+    })?;
+    if let Some(schema_type) = object.get("type") {
+        validate_schema_type(schema_type).with_context(|| {
+            format!(
+                "extension {extension_id} tool {} input_schema has invalid JSON Schema type",
+                tool.name
+            )
+        })?;
+    }
+    for key in ["properties", "patternProperties", "$defs", "definitions"] {
+        if object.get(key).is_some_and(|value| !value.is_object()) {
+            anyhow::bail!(
+                "extension {extension_id} tool {} input_schema `{key}` must be an object",
+                tool.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_schema_type(value: &Value) -> anyhow::Result<()> {
+    match value {
+        Value::String(schema_type) => validate_schema_type_name(schema_type),
+        Value::Array(schema_types) => {
+            if schema_types.is_empty() {
+                anyhow::bail!("type array must not be empty");
+            }
+            for schema_type in schema_types {
+                let Some(schema_type) = schema_type.as_str() else {
+                    anyhow::bail!("type array entries must be strings");
+                };
+                validate_schema_type_name(schema_type)?;
+            }
+            Ok(())
+        }
+        _ => anyhow::bail!("type must be a string or string array"),
+    }
+}
+
+fn validate_schema_type_name(schema_type: &str) -> anyhow::Result<()> {
+    match schema_type {
+        "null" | "boolean" | "object" | "array" | "number" | "string" | "integer" => Ok(()),
+        _ => anyhow::bail!("unsupported JSON Schema type `{schema_type}`"),
+    }
 }
 
 #[derive(Clone)]

@@ -3150,6 +3150,62 @@ fn print_registers_enabled_extension_tool_and_executes_it_through_agent_loop() {
 }
 
 #[test]
+fn print_fails_closed_when_extension_tool_schema_is_not_an_object() {
+    let temp = TempDir::new().expect("tempdir");
+    write_extension_with_input_schema(temp.path(), &json!("anything"));
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-invalid-extension-schema",
+        "should not reach provider",
+    )]);
+
+    let output = neo()
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "show tools"])
+        .output()
+        .expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("extension invalid_schema tool bad_tool"));
+    assert!(stderr.contains("input_schema must be a JSON Schema object"));
+    assert!(
+        server.requests().is_empty(),
+        "invalid extension tools must fail before provider calls"
+    );
+}
+
+#[test]
+fn print_fails_closed_when_extension_tool_schema_has_invalid_object_shape() {
+    let temp = TempDir::new().expect("tempdir");
+    write_extension_with_input_schema(temp.path(), &json!({"type": "definitely-not-a-json-type"}));
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-invalid-extension-schema-object",
+        "should not reach provider",
+    )]);
+
+    let output = neo()
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["print", "show tools"])
+        .output()
+        .expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("extension invalid_schema tool bad_tool"));
+    assert!(stderr.contains("input_schema has invalid JSON Schema type"));
+    assert!(
+        server.requests().is_empty(),
+        "invalid extension tools must fail before provider calls"
+    );
+}
+
+#[test]
 fn print_pi_style_short_no_builtin_tools_keeps_extension_tools() {
     let temp = TempDir::new().expect("tempdir");
     write_echo_extension(temp.path());
@@ -3305,6 +3361,54 @@ fn print_pi_style_short_no_extensions_alias_disables_project_extensions() {
 
 fn write_echo_extension(root: &std::path::Path) -> std::path::PathBuf {
     write_echo_extension_at(&root.join(".neo/extensions/echo"))
+}
+
+fn write_extension_with_input_schema(root: &std::path::Path, input_schema: &Value) {
+    let extension = root.join(".neo/extensions/invalid-schema");
+    std::fs::create_dir_all(&extension).expect("create extension");
+    let script = extension.join("invalid_schema.py");
+    std::fs::write(
+        &script,
+        format!(
+            r#"
+import json
+import sys
+
+input_schema = {input_schema}
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message["method"]
+    if method == "tools.list":
+        result = [{{
+            "name": "bad_tool",
+            "description": "Tool with an invalid schema",
+            "input_schema": input_schema,
+            "method": "tool.bad"
+        }}]
+    else:
+        result = {{"content": "unexpected"}}
+    print(json.dumps({{"type": "response", "id": message["id"], "result": result}}), flush=True)
+"#
+        ),
+    )
+    .expect("write extension script");
+    std::fs::write(
+        extension.join("neo-extension.toml"),
+        format!(
+            r#"
+id = "invalid_schema"
+name = "Invalid Schema"
+version = "0.1.0"
+
+[runner]
+command = "python3"
+args = [{script}]
+"#,
+            script = serde_json::to_string(&script).expect("script path json")
+        ),
+    )
+    .expect("write extension manifest");
 }
 
 fn write_echo_extension_at(extension: &std::path::Path) -> std::path::PathBuf {
