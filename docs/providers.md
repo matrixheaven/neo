@@ -101,19 +101,21 @@ does not implement image generation.
 
 OpenAI reasoning controls use the typed `RequestOptions::reasoning_effort`
 field. OpenAI Responses sends `reasoning: { effort, summary: "auto" }` and
-maps streamed reasoning-summary events into local thinking events. Neo does
-not request `reasoning.encrypted_content` yet because encrypted reasoning
-items must be persisted and replayed as provider-native Responses input items
-to provide real multi-turn reasoning continuity. OpenAI-compatible Chat
-Completions sends the flat `reasoning_effort` string. Anthropic Messages
-maps the same typed effort into an explicit budget-based `thinking` payload
-with summarized display and omits `temperature` while extended thinking is
-enabled. Google Generative AI maps it into `generationConfig.thinkingConfig`
-with `includeThoughts` and a deterministic thinking budget. Neo still does not
-implement adaptive/off-state thinking controls, encrypted/signature replay, or
-provider-specific non-OpenAI thinking stream mapping; those contracts remain
-future work until they can be represented without silently changing model
-behavior.
+requests `reasoning.encrypted_content` so streamed reasoning items can be
+persisted as signed `ContentPart::Thinking` blocks and replayed as provider
+native Responses reasoning input items. OpenAI-compatible Chat Completions
+sends the flat `reasoning_effort` string and replays thinking blocks as plain
+assistant text. Anthropic Messages maps the same typed effort into an explicit
+budget-based `thinking` payload with summarized display, omits `temperature`
+while extended thinking is enabled, and replays signed or redacted thinking
+blocks using Anthropic's native content block shapes. Google Generative AI maps
+reasoning effort into `generationConfig.thinkingConfig` with `includeThoughts`
+and a deterministic thinking budget, and replays signed thinking as
+`thought`/`thoughtSignature` parts. Neo still does not implement adaptive or
+off-state thinking controls, model-aware cross-provider thinking conversion, or
+provider-specific non-OpenAI-compatible thinking stream mapping; those
+contracts remain future work until they can be represented without silently
+changing model behavior.
 
 `AgentRuntime` checks `ModelCapabilities` before issuing a provider request.
 Requests that include image content, tool schemas, or reasoning effort fail

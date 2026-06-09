@@ -60,9 +60,11 @@ unsupported surface area until the Rust contracts exist.
   flows are future work.
 - Provider-native reasoning streams are normalized for OpenAI Responses,
   Anthropic Messages, and Google Generative AI, including opaque signature
-  passthrough when providers send one. Adaptive-thinking controls,
-  display/off-state handling, encrypted reasoning handoff, and signature replay
-  remain future work.
+  passthrough when providers send one. Signed thinking blocks can be explicitly
+  replayed through OpenAI Responses reasoning input items, Anthropic native
+  thinking/redacted-thinking blocks, and Google `thoughtSignature` parts.
+  Adaptive-thinking controls, display/off-state handling, and model-aware
+  cross-provider thinking conversion remain future work.
 - Keep request metadata internal-facing. Do not expose provider-native chunk
   formats to `neo-agent-core`.
 

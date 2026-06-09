@@ -145,17 +145,17 @@ impl AgentMessage {
     pub fn to_chat_message(&self) -> ChatMessage {
         match self {
             Self::System { content } => ChatMessage::System {
-                content: content.iter().filter_map(to_content_part).collect(),
+                content: content.iter().map(to_content_part).collect(),
             },
             Self::User { content } => ChatMessage::User {
-                content: content.iter().filter_map(to_content_part).collect(),
+                content: content.iter().map(to_content_part).collect(),
             },
             Self::Assistant {
                 content,
                 tool_calls,
                 stop_reason: _,
             } => ChatMessage::Assistant {
-                content: content.iter().filter_map(to_content_part).collect(),
+                content: content.iter().map(to_content_part).collect(),
                 tool_calls: tool_calls.iter().cloned().map(Into::into).collect(),
             },
             Self::ToolResult {
@@ -165,23 +165,31 @@ impl AgentMessage {
                 is_error,
             } => ChatMessage::ToolResult {
                 tool_call_id: tool_call_id.clone(),
-                content: content.iter().filter_map(to_content_part).collect(),
+                content: content.iter().map(to_content_part).collect(),
                 is_error: *is_error,
             },
         }
     }
 }
 
-fn to_content_part(content: &Content) -> Option<ContentPart> {
+fn to_content_part(content: &Content) -> ContentPart {
     match content {
-        Content::Text { text } => Some(ContentPart::Text { text: text.clone() }),
-        Content::Thinking { .. } => None,
-        Content::Image { mime_type, data } => Some(ContentPart::Image {
+        Content::Text { text } => ContentPart::Text { text: text.clone() },
+        Content::Thinking {
+            text,
+            signature,
+            redacted,
+        } => ContentPart::Thinking {
+            text: text.clone(),
+            signature: signature.clone(),
+            redacted: *redacted,
+        },
+        Content::Image { mime_type, data } => ContentPart::Image {
             mime_type: mime_type.clone(),
             data: match data {
                 ImageRef::Base64(value) => ImageData::Base64(value.clone()),
                 ImageRef::Url(value) => ImageData::Url(value.clone()),
             },
-        }),
+        },
     }
 }

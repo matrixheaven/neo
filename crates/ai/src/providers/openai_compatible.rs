@@ -241,7 +241,7 @@ fn text_content(content: &[ContentPart]) -> String {
     content
         .iter()
         .filter_map(|part| match part {
-            ContentPart::Text { text } => Some(text.as_str()),
+            ContentPart::Text { text } | ContentPart::Thinking { text, .. } => Some(text.as_str()),
             ContentPart::Image { .. } => None,
         })
         .collect::<Vec<_>>()
@@ -261,7 +261,7 @@ fn user_content(content: &[ContentPart]) -> Value {
 
 fn content_part_body(part: &ContentPart) -> Value {
     match part {
-        ContentPart::Text { text } => json!({
+        ContentPart::Text { text } | ContentPart::Thinking { text, .. } => json!({
             "type": "text",
             "text": text,
         }),

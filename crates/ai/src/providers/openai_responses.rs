@@ -148,11 +148,7 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     let mut body = json!({
         "model": request.model.model,
         "stream": true,
-        "input": request
-            .messages
-            .iter()
-            .map(message_body)
-            .collect::<Result<Vec<_>, _>>()?,
+        "input": request_input(&request.messages)?,
     });
 
     if !request.tools.is_empty() {
@@ -169,6 +165,7 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
             "effort": reasoning_effort.as_str(),
             "summary": "auto",
         });
+        body["include"] = json!(["reasoning.encrypted_content"]);
     }
     if !request.options.metadata.is_empty() {
         body["metadata"] = json!(request.options.metadata.as_map());
@@ -189,34 +186,51 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     Ok(body)
 }
 
-fn message_body(message: &ChatMessage) -> Result<Value, ProviderError> {
+fn request_input(messages: &[ChatMessage]) -> Result<Vec<Value>, ProviderError> {
+    let mut input = Vec::new();
+    for message in messages {
+        input.extend(message_body(message)?);
+    }
+    Ok(input)
+}
+
+fn message_body(message: &ChatMessage) -> Result<Vec<Value>, ProviderError> {
     match message {
         ChatMessage::System { content } => {
             let content = content_text(content, "system")?;
-            Ok(json!({
+            Ok(vec![json!({
                 "role": "system",
                 "content": content,
-            }))
+            })])
         }
-        ChatMessage::User { content } => Ok(json!({
+        ChatMessage::User { content } => Ok(vec![json!({
                 "role": "user",
                 "content": user_content(content),
-        })),
+        })]),
         ChatMessage::Assistant {
             content,
             tool_calls,
         } => {
-            let content = content_text(content, "assistant")?;
-            Ok(json!({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": tool_calls.iter().map(|tool_call| json!({
+            let mut output = Vec::new();
+            output.extend(reasoning_items(content));
+            let text = content_text(content, "assistant")?;
+            if !text.is_empty() {
+                output.push(json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": text, "annotations": [] }],
+                    "status": "completed",
+                }));
+            }
+            output.extend(tool_calls.iter().map(|tool_call| {
+                json!({
                     "type": "function_call",
                     "call_id": tool_call.id,
                     "name": tool_call.name,
                     "arguments": tool_call.arguments,
-                })).collect::<Vec<_>>(),
-            }))
+                })
+            }));
+            Ok(output)
         }
         ChatMessage::ToolResult {
             tool_call_id,
@@ -224,13 +238,30 @@ fn message_body(message: &ChatMessage) -> Result<Value, ProviderError> {
             is_error: _,
         } => {
             let output = content_text(content, "tool result")?;
-            Ok(json!({
+            Ok(vec![json!({
                 "type": "function_call_output",
                 "call_id": tool_call_id,
                 "output": output,
-            }))
+            })])
         }
     }
+}
+
+fn reasoning_items(content: &[ContentPart]) -> Vec<Value> {
+    content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Thinking { signature, .. } => {
+                signature.as_deref().and_then(openai_reasoning_signature)
+            }
+            ContentPart::Text { .. } | ContentPart::Image { .. } => None,
+        })
+        .collect()
+}
+
+fn openai_reasoning_signature(signature: &str) -> Option<Value> {
+    let item = serde_json::from_str::<Value>(signature).ok()?;
+    (item.get("type").and_then(Value::as_str) == Some("reasoning")).then_some(item)
 }
 
 fn content_part_body(part: &ContentPart) -> Value {
@@ -238,6 +269,10 @@ fn content_part_body(part: &ContentPart) -> Value {
         ContentPart::Text { text } => json!({
             "type": "input_text",
             "text": text,
+        }),
+        ContentPart::Thinking { .. } => json!({
+            "type": "input_text",
+            "text": "",
         }),
         ContentPart::Image { mime_type, data } => {
             let image_url = image_url(mime_type, data);
@@ -266,7 +301,18 @@ fn text_content(content: &[ContentPart]) -> String {
         .iter()
         .filter_map(|part| match part {
             ContentPart::Text { text } => Some(text.as_str()),
-            ContentPart::Image { .. } => None,
+            ContentPart::Thinking {
+                text,
+                signature,
+                redacted: false,
+            } if signature
+                .as_deref()
+                .and_then(openai_reasoning_signature)
+                .is_none() =>
+            {
+                Some(text.as_str())
+            }
+            ContentPart::Thinking { .. } | ContentPart::Image { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -452,6 +498,7 @@ struct ThinkingPart {
     // whole-string appends, so slicing at this boundary is valid UTF-8.
     emitted_len: usize,
     done: bool,
+    signature: Option<String>,
 }
 
 impl Default for ParseState {
@@ -498,6 +545,7 @@ impl ParseState {
             Some("response.reasoning_summary_text.delta") => self.ingest_thinking_delta(value),
             Some("response.reasoning_summary_text.done") => self.ingest_thinking_text_done(value),
             Some("response.reasoning_summary_part.done") => self.ingest_thinking_done(value),
+            Some("response.output_item.done") => self.ingest_output_item_done(value),
             Some("response.output_item.added") => self.ingest_item_added(value),
             Some("response.function_call_arguments.delta") => self.ingest_tool_delta(value),
             Some("response.completed") => {
@@ -615,6 +663,49 @@ impl ParseState {
             .get_mut(&id)
             .expect("thinking part should exist")
             .done = true;
+        if let Some(item) = value.get("item") {
+            self.thinking_parts
+                .get_mut(&id)
+                .expect("thinking part should exist")
+                .signature = Some(item.to_string());
+        }
+        self.flush_thinking_ready();
+    }
+
+    fn ingest_output_item_done(&mut self, value: &Value) {
+        let item = value.get("item").unwrap_or(&Value::Null);
+        if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+            return;
+        }
+        let item_id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("reasoning")
+            .to_owned();
+        let id = self
+            .thinking_order
+            .iter()
+            .find(|candidate| {
+                candidate.as_str() == item_id
+                    || candidate.starts_with(&format!("{item_id}:summary:"))
+                    || candidate.contains(&format!(":{item_id}:summary:"))
+            })
+            .cloned()
+            .unwrap_or(item_id);
+        self.ensure_thinking_part(id.clone());
+        if let Some(text) = reasoning_item_text(item) {
+            let part = self
+                .thinking_parts
+                .get_mut(&id)
+                .expect("thinking part should exist");
+            merge_final_thinking_text(part, &text);
+        }
+        let part = self
+            .thinking_parts
+            .get_mut(&id)
+            .expect("thinking part should exist");
+        part.signature = Some(item.to_string());
+        part.done = true;
         self.flush_thinking_ready();
     }
 
@@ -717,7 +808,10 @@ impl ParseState {
             }
 
             self.events.push(AiStreamEvent::ThinkingEnd {
-                signature: None,
+                signature: self
+                    .thinking_parts
+                    .get(&id)
+                    .and_then(|part| part.signature.clone()),
                 redacted: false,
             });
             self.active_thinking_id = None;
@@ -749,6 +843,18 @@ fn merge_final_thinking_text(part: &mut ThinkingPart, text: &str) {
     } else if part.emitted_len == 0 {
         text.clone_into(&mut part.text);
     }
+}
+
+fn reasoning_item_text(item: &Value) -> Option<String> {
+    let values = item
+        .get("summary")
+        .and_then(Value::as_array)
+        .or_else(|| item.get("content").and_then(Value::as_array))?
+        .iter()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.join("\n\n"))
 }
 
 fn token_usage(value: &Value) -> Option<TokenUsage> {

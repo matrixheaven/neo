@@ -106,8 +106,18 @@ pub enum ImageData {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ContentPart {
-    Text { text: String },
-    Image { mime_type: String, data: ImageData },
+    Text {
+        text: String,
+    },
+    Thinking {
+        text: String,
+        signature: Option<String>,
+        redacted: bool,
+    },
+    Image {
+        mime_type: String,
+        data: ImageData,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

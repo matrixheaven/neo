@@ -425,7 +425,7 @@ async fn openai_responses_client_retries_retryable_http_responses() {
 }
 
 #[tokio::test]
-async fn openai_responses_client_serializes_reasoning_effort_without_encrypted_handoff() {
+async fn openai_responses_client_serializes_reasoning_effort_with_encrypted_handoff() {
     let server = MockServer::start(vec![sse_response(&[
         json!({ "type": "response.created", "response": { "id": "resp-reasoning" } }),
         json!({
@@ -448,9 +448,110 @@ async fn openai_responses_client_serializes_reasoning_effort_without_encrypted_h
     let sent = server.requests().pop().unwrap();
     assert_eq!(sent.body["reasoning"]["effort"], "high");
     assert_eq!(sent.body["reasoning"]["summary"], "auto");
-    assert!(
-        sent.body.get("include").is_none(),
-        "Neo must not request encrypted reasoning continuity until it can persist and replay it"
+    assert_eq!(sent.body["include"], json!(["reasoning.encrypted_content"]));
+}
+
+#[tokio::test]
+async fn openai_responses_client_replays_signed_reasoning_items() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-replay" } }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::OpenAiResponses);
+    request.messages.insert(
+        1,
+        ChatMessage::Assistant {
+            content: vec![ContentPart::Thinking {
+                text: "stored reasoning".to_owned(),
+                signature: Some(
+                    json!({
+                        "type": "reasoning",
+                        "id": "rs_1",
+                        "summary": [{ "type": "summary_text", "text": "stored reasoning" }],
+                        "encrypted_content": "opaque-reasoning"
+                    })
+                    .to_string(),
+                ),
+                redacted: false,
+            }],
+            tool_calls: Vec::new(),
+        },
+    );
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["input"][1]["type"], "reasoning");
+    assert_eq!(sent.body["input"][1]["id"], "rs_1");
+    assert_eq!(
+        sent.body["input"][1]["encrypted_content"],
+        "opaque-reasoning"
+    );
+}
+
+#[tokio::test]
+async fn openai_responses_client_persists_reasoning_item_signature_from_stream() {
+    let reasoning_item = json!({
+        "type": "reasoning",
+        "id": "rs_1",
+        "summary": [{ "type": "summary_text", "text": "stored reasoning" }],
+        "encrypted_content": "opaque-reasoning"
+    });
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-thinking-item" } }),
+        json!({
+            "type": "response.reasoning_summary_part.added",
+            "item_id": "rs_1",
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "" }
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "summary_index": 0,
+            "delta": "stored reasoning"
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "item": reasoning_item.clone()
+        }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::OpenAiResponses))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let Some(AiStreamEvent::ThinkingEnd {
+        signature: Some(signature),
+        redacted: false,
+    }) = events
+        .iter()
+        .find(|event| matches!(event, AiStreamEvent::ThinkingEnd { .. }))
+    else {
+        panic!("expected signed thinking end event, got {events:?}");
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(signature).expect("signature JSON"),
+        reasoning_item
     );
 }
 
@@ -1287,6 +1388,58 @@ async fn anthropic_messages_client_serializes_reasoning_effort_as_budget_thinkin
 }
 
 #[tokio::test]
+async fn anthropic_messages_client_replays_signed_thinking_blocks() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "message_start", "message": { "id": "msg-replay" } }),
+        json!({ "type": "message_stop" }),
+    ])]);
+    let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::AnthropicMessages);
+    request.messages.insert(
+        1,
+        ChatMessage::Assistant {
+            content: vec![
+                ContentPart::Thinking {
+                    text: "stored reasoning".to_owned(),
+                    signature: Some("sig-anthropic".to_owned()),
+                    redacted: false,
+                },
+                ContentPart::Thinking {
+                    text: "[Reasoning redacted]".to_owned(),
+                    signature: Some("opaque-redacted".to_owned()),
+                    redacted: true,
+                },
+            ],
+            tool_calls: Vec::new(),
+        },
+    );
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["messages"][1]["role"], "assistant");
+    assert_eq!(sent.body["messages"][1]["content"][0]["type"], "thinking");
+    assert_eq!(
+        sent.body["messages"][1]["content"][0]["thinking"],
+        "stored reasoning"
+    );
+    assert_eq!(
+        sent.body["messages"][1]["content"][0]["signature"],
+        "sig-anthropic"
+    );
+    assert_eq!(
+        sent.body["messages"][1]["content"][1],
+        json!({ "type": "redacted_thinking", "data": "opaque-redacted" })
+    );
+}
+
+#[tokio::test]
 async fn anthropic_messages_client_streams_extended_thinking_events() {
     let server = MockServer::start(vec![sse_response(&[
         json!({ "type": "message_start", "message": { "id": "msg-thinking-stream" } }),
@@ -1596,6 +1749,51 @@ async fn google_generative_ai_client_serializes_reasoning_effort_as_thinking_con
     assert_eq!(
         sent.body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
         2048
+    );
+}
+
+#[tokio::test]
+async fn google_generative_ai_client_replays_signed_thought_parts() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{ "text": "done" }]
+            },
+            "finishReason": "STOP"
+        }]
+    })])]);
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::GoogleGenerativeAi);
+    request.messages.insert(
+        1,
+        ChatMessage::Assistant {
+            content: vec![ContentPart::Thinking {
+                text: "stored reasoning".to_owned(),
+                signature: Some("sig-google".to_owned()),
+                redacted: false,
+            }],
+            tool_calls: Vec::new(),
+        },
+    );
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["contents"][1]["role"], "model");
+    assert_eq!(
+        sent.body["contents"][1]["parts"][0],
+        json!({
+            "text": "stored reasoning",
+            "thought": true,
+            "thoughtSignature": "sig-google"
+        })
     );
 }
 

@@ -243,9 +243,48 @@ fn assistant_content(
     tool_calls: &[crate::ToolCall],
 ) -> Result<Value, ProviderError> {
     let mut parts = Vec::new();
-    let text = content_text(content, "assistant")?;
-    if !text.is_empty() {
-        parts.push(json!({ "type": "text", "text": text }));
+    for part in content {
+        match part {
+            ContentPart::Thinking {
+                text,
+                signature,
+                redacted: true,
+            } => {
+                let Some(signature) = signature.as_deref().filter(|value| !value.is_empty()) else {
+                    return Err(ProviderError::Stream(
+                        "Anthropic redacted thinking replay requires a signature".to_owned(),
+                    ));
+                };
+                parts.push(json!({ "type": "redacted_thinking", "data": signature }));
+                let _ = text;
+            }
+            ContentPart::Thinking {
+                text,
+                signature: Some(signature),
+                redacted: false,
+            } if !text.is_empty() && !signature.is_empty() => {
+                parts.push(json!({
+                    "type": "thinking",
+                    "thinking": text,
+                    "signature": signature,
+                }));
+            }
+            ContentPart::Text { text }
+            | ContentPart::Thinking {
+                text,
+                signature: _,
+                redacted: false,
+            } if !text.is_empty() => {
+                parts.push(json!({ "type": "text", "text": text }));
+            }
+            ContentPart::Image { .. } => {
+                return Err(ProviderError::Stream(
+                    "Anthropic image content is only supported in user messages, not assistant messages"
+                        .to_owned(),
+                ));
+            }
+            ContentPart::Text { .. } | ContentPart::Thinking { .. } => {}
+        }
     }
     for tool_call in tool_calls {
         parts.push(json!({
@@ -260,7 +299,7 @@ fn assistant_content(
 
 fn content_part_body(part: &ContentPart) -> Result<Value, ProviderError> {
     Ok(match part {
-        ContentPart::Text { text } => json!({
+        ContentPart::Text { text } | ContentPart::Thinking { text, .. } => json!({
             "type": "text",
             "text": text,
         }),
@@ -293,7 +332,7 @@ fn text_content(content: &[ContentPart]) -> String {
         .iter()
         .filter_map(|part| match part {
             ContentPart::Text { text } => Some(text.as_str()),
-            ContentPart::Image { .. } => None,
+            ContentPart::Thinking { .. } | ContentPart::Image { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")

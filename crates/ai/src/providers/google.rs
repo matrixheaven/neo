@@ -252,7 +252,25 @@ fn content_parts(content: &[ContentPart]) -> Result<Vec<Value>, ProviderError> {
     content
         .iter()
         .map(|part| match part {
-            ContentPart::Text { text } => Ok(json!({ "text": text })),
+        ContentPart::Text { text } => Ok(json!({ "text": text })),
+            ContentPart::Thinking {
+                text,
+                signature,
+                redacted,
+            } => {
+                if *redacted {
+                    return Err(ProviderError::Unsupported(
+                        "Google Generative AI cannot replay redacted thinking blocks".to_owned(),
+                    ));
+                }
+                let mut part = json!({ "text": text, "thought": true });
+                if let Some(signature) = signature
+                    && !signature.is_empty()
+                {
+                    part["thoughtSignature"] = json!(signature);
+                }
+                Ok(part)
+            }
             ContentPart::Image { mime_type, data } => match data {
                 ImageData::Base64(data) => Ok(json!({
                     "inlineData": {
@@ -273,7 +291,9 @@ fn text_parts(content: &[ContentPart]) -> Result<Vec<Value>, ProviderError> {
     content
         .iter()
         .map(|part| match part {
-            ContentPart::Text { text } => Ok(json!({ "text": text })),
+            ContentPart::Text { text } | ContentPart::Thinking { text, .. } => {
+                Ok(json!({ "text": text }))
+            }
             ContentPart::Image { .. } => Err(ProviderError::Unsupported(
                 "Google Generative AI image content is only supported in user/model messages, not system messages"
                     .to_owned(),
@@ -287,7 +307,7 @@ fn content_text(content: &[ContentPart]) -> String {
         .iter()
         .filter_map(|part| match part {
             ContentPart::Text { text } => Some(text.as_str()),
-            ContentPart::Image { .. } => None,
+            ContentPart::Thinking { .. } | ContentPart::Image { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")

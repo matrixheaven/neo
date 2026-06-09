@@ -554,7 +554,7 @@ async fn runtime_preserves_multiple_thinking_parts_and_text_order() {
 }
 
 #[tokio::test]
-async fn runtime_does_not_send_persisted_thinking_content_back_to_model() {
+async fn runtime_sends_persisted_thinking_content_back_to_model() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
@@ -619,9 +619,16 @@ async fn runtime_does_not_send_persisted_thinking_content_back_to_model() {
     assert_eq!(
         assistant_message,
         &neo_ai::ChatMessage::Assistant {
-            content: vec![neo_ai::ContentPart::Text {
-                text: "answer".to_owned(),
-            }],
+            content: vec![
+                neo_ai::ContentPart::Thinking {
+                    text: "local reasoning summary".to_owned(),
+                    signature: Some("sig-1".to_owned()),
+                    redacted: false,
+                },
+                neo_ai::ContentPart::Text {
+                    text: "answer".to_owned(),
+                },
+            ],
             tool_calls: Vec::new(),
         }
     );
