@@ -24,6 +24,7 @@ pub struct ConfigOverrides {
     pub provider: Option<String>,
     pub api_base: Option<String>,
     pub config_path: Option<PathBuf>,
+    pub sessions_dir: Option<PathBuf>,
     pub mode: Option<String>,
     pub approve: bool,
     pub no_approve: bool,
@@ -42,6 +43,7 @@ impl ConfigOverrides {
             provider: cli.provider.clone(),
             api_base: cli.api_base.clone(),
             config_path: cli.config.clone(),
+            sessions_dir: cli.session_dir.clone(),
             mode: cli.mode.clone(),
             approve: cli.approve,
             no_approve: cli.no_approve,
@@ -350,7 +352,10 @@ impl AppConfig {
             .map(|path| resolve_project_path(&project_dir, path))
             .collect();
         let configured_prompt_templates = file_config.prompt_templates.unwrap_or_default();
-        let sessions_dir = env_sessions_dir
+        let sessions_dir = overrides
+            .sessions_dir
+            .map(expand_user_path)
+            .or(env_sessions_dir)
             .or_else(|| file_config.sessions_dir.map(expand_user_path))
             .unwrap_or_else(|| project_dir.join(CONFIG_DIR).join("sessions"));
         let permissions = file_config.permissions.unwrap_or_default();

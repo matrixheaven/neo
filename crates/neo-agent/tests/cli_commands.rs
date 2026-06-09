@@ -229,6 +229,46 @@ reasoning_effort = "high"
 }
 
 #[test]
+fn config_show_session_dir_cli_override_takes_precedence_over_env_and_files() {
+    let home = TempDir::new().expect("home tempdir");
+    let project = TempDir::new().expect("project tempdir");
+    let cli_sessions = project.path().join("cli-sessions");
+    let env_sessions = project.path().join("env-sessions");
+    fs::create_dir_all(home.path().join(".neo")).expect("create global .neo");
+    fs::write(
+        home.path().join(".neo/config.toml"),
+        r#"
+sessions_dir = "~/.neo/global-sessions"
+"#,
+    )
+    .expect("write global config");
+    fs::create_dir_all(project.path().join(".neo")).expect("create project .neo");
+    fs::write(
+        project.path().join(".neo/config.toml"),
+        r#"
+sessions_dir = ".neo/project-sessions"
+"#,
+    )
+    .expect("write project config");
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("NEO_SESSIONS_DIR", &env_sessions)
+        .args(["--session-dir"])
+        .arg(&cli_sessions)
+        .args(["config", "show"]);
+
+    let stdout = run(command);
+
+    assert!(stdout.contains(&format!("sessions_dir = \"{}\"", cli_sessions.display())));
+    assert!(!stdout.contains(&env_sessions.display().to_string()));
+    assert!(!stdout.contains("project-sessions"));
+    assert!(!stdout.contains("global-sessions"));
+}
+
+#[test]
 fn config_show_merges_provider_config_fields_across_global_and_project_layers() {
     let home = TempDir::new().expect("home tempdir");
     let project = TempDir::new().expect("project tempdir");

@@ -222,6 +222,39 @@ fn root_print_flag_expands_workspace_relative_file_prompt_args() {
 }
 
 #[test]
+fn print_session_dir_flag_writes_session_to_explicit_directory() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions_dir = temp.path().join("custom-sessions");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-session-dir",
+        "custom session",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--session-dir")
+        .arg(&sessions_dir)
+        .args(["print", "remember", "this"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "custom session\n");
+    let custom_sessions = session_files_in(&sessions_dir);
+    assert_eq!(custom_sessions.len(), 1);
+    assert!(
+        !temp.path().join(".neo/sessions").exists(),
+        "default session directory should not be created when --session-dir is set"
+    );
+    let content = std::fs::read_to_string(&custom_sessions[0]).expect("read custom session");
+    assert!(content.contains("remember this"));
+    assert!(content.contains("custom session"));
+}
+
+#[test]
 fn print_no_tools_omits_all_model_tools() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-no-tools", "no tools")]);
@@ -1862,7 +1895,11 @@ tool = "Allow"
 }
 
 fn session_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut entries = std::fs::read_dir(root.join(".neo/sessions"))
+    session_files_in(&root.join(".neo/sessions"))
+}
+
+fn session_files_in(sessions_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut entries = std::fs::read_dir(sessions_dir)
         .expect("read sessions")
         .map(|entry| entry.expect("session entry").path())
         .collect::<Vec<_>>();

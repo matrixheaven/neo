@@ -17,6 +17,9 @@ pub struct Cli {
     #[arg(long, global = true, env = "NEO_CONFIG")]
     pub config: Option<std::path::PathBuf>,
 
+    #[arg(long = "session-dir", global = true, value_name = "DIR")]
+    pub session_dir: Option<std::path::PathBuf>,
+
     #[arg(long, global = true, env = "NEO_MODE")]
     pub mode: Option<String>,
 
