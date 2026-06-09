@@ -43,6 +43,7 @@ fn normalize_pi_style_args(
         .map(|arg| match arg.to_str() {
             Some("-nt") => "--no-tools".into(),
             Some("-nbt") => "--no-builtin-tools".into(),
+            Some("-np") => "--no-prompt-templates".into(),
             Some("-xt") => "--exclude-tools".into(),
             _ => arg,
         })

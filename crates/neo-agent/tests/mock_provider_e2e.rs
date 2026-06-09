@@ -1079,6 +1079,39 @@ fn print_no_prompt_templates_keeps_matching_slash_prompt_unchanged() {
 }
 
 #[test]
+fn print_pi_style_short_no_prompt_templates_alias_keeps_matching_slash_prompt_unchanged() {
+    let project = TempDir::new().expect("project tempdir");
+    std::fs::create_dir_all(project.path().join(".neo/prompts")).expect("create project prompts");
+    std::fs::write(
+        project.path().join(".neo/prompts/review.md"),
+        "Review target: $1\n",
+    )
+    .expect("write project prompt template");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-short-disabled-template",
+        "short template disabled",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(project.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .args(["-np", "print", "/review", "src/lib.rs"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "short template disabled\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["input"][0]["content"],
+        "/review src/lib.rs"
+    );
+}
+
+#[test]
 fn run_expands_project_prompt_template_before_json_output() {
     let temp = TempDir::new().expect("tempdir");
     std::fs::create_dir_all(temp.path().join(".neo/prompts")).expect("create prompts");
