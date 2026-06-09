@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::Context;
-use neo_sdk::{SkillLoadOptions, load_skill};
+use neo_sdk::{ResourceContent, ResourceKind, SkillLoadOptions, load_skill};
 
 const CONFIG_DIR: &str = ".neo";
 const SYSTEM_PROMPT_FILE: &str = "SYSTEM.md";
@@ -147,18 +147,51 @@ fn load_skill_prompts(
             let skill = load_skill(
                 path,
                 SkillLoadOptions {
-                    load_resources: false,
+                    load_resources: true,
                 },
             )
             .with_context(|| format!("failed to load skill {}", path.display()))?;
-            Ok(format!(
-                "<skill name=\"{}\" description=\"{}\">\n{}\n</skill>",
+            let mut prompt = format!(
+                "<skill name=\"{}\" description=\"{}\">\n{}",
                 skill.manifest.name,
                 skill.manifest.description,
                 skill.body.trim()
-            ))
+            );
+            for resource in &skill.resources {
+                match &resource.content {
+                    ResourceContent::Text(content) => {
+                        write!(
+                            prompt,
+                            "\n\n<skill_resource path=\"{}\" kind=\"{}\">\n{}\n</skill_resource>",
+                            resource.spec.path,
+                            resource_kind_label(resource.spec.kind),
+                            content.trim()
+                        )
+                        .expect("writing to String should not fail");
+                    }
+                    ResourceContent::Binary(_) => {
+                        write!(
+                            prompt,
+                            "\n\n<skill_resource path=\"{}\" kind=\"{}\" content=\"binary\" />",
+                            resource.spec.path,
+                            resource_kind_label(resource.spec.kind)
+                        )
+                        .expect("writing to String should not fail");
+                    }
+                }
+            }
+            prompt.push_str("\n</skill>");
+            Ok(prompt)
         })
         .collect()
+}
+
+fn resource_kind_label(kind: ResourceKind) -> &'static str {
+    match kind {
+        ResourceKind::Text => "text",
+        ResourceKind::Binary => "binary",
+        ResourceKind::Executable => "executable",
+    }
 }
 
 fn discover_skill_paths(project_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {

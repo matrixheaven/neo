@@ -1544,6 +1544,93 @@ Always mention the Neo skill marker: SKILL_MARKER_42.
 }
 
 #[test]
+fn print_skill_flag_injects_declared_text_resource_into_system_prompt() {
+    let temp = TempDir::new().expect("tempdir");
+    let skill = temp.path().join("skills/reviewer");
+    std::fs::create_dir_all(skill.join("references")).expect("create skill resources");
+    std::fs::write(
+        skill.join("SKILL.md"),
+        r#"---
+name = "reviewer"
+description = "Review code changes"
+resources = [{ path = "references/policy.md", kind = "text" }]
+---
+Skill body marker: RESOURCE_SKILL_BODY_71.
+"#,
+    )
+    .expect("write skill");
+    std::fs::write(
+        skill.join("references/policy.md"),
+        "Resource marker: RESOURCE_TEXT_MARKER_73.\n",
+    )
+    .expect("write skill resource");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-skill-resource",
+        "skill resource loaded",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--skill")
+        .arg(&skill)
+        .args(["print", "hello"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "skill resource loaded\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    let system = requests[0].body["input"][0]["content"]
+        .as_str()
+        .expect("system content");
+    assert!(system.contains("RESOURCE_SKILL_BODY_71"));
+    assert!(system.contains("<skill_resource path=\"references/policy.md\" kind=\"text\">"));
+    assert!(system.contains("RESOURCE_TEXT_MARKER_73"));
+    assert!(system.contains("</skill_resource>"));
+}
+
+#[test]
+fn print_skill_flag_fails_clearly_when_declared_resource_is_missing() {
+    let temp = TempDir::new().expect("tempdir");
+    let skill = temp.path().join("skills/reviewer");
+    std::fs::create_dir_all(&skill).expect("create skill dir");
+    std::fs::write(
+        skill.join("SKILL.md"),
+        r#"---
+name = "reviewer"
+description = "Review code changes"
+resources = [{ path = "references/missing.md", kind = "text" }]
+---
+Skill body marker: MISSING_RESOURCE_BODY_79.
+"#,
+    )
+    .expect("write skill");
+    let server = MockSseServer::start(Vec::new());
+
+    let output = neo()
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--skill")
+        .arg(&skill)
+        .args(["print", "hello"])
+        .output()
+        .expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("failed to load skill"));
+    assert!(stderr.contains("references/missing.md"));
+    assert!(stderr.contains("failed to read skill resource"));
+    assert!(server.requests().is_empty());
+}
+
+#[test]
 fn print_discovers_project_skill_into_system_prompt() {
     let temp = TempDir::new().expect("tempdir");
     let skill = temp.path().join(".neo/skills/reviewer");
