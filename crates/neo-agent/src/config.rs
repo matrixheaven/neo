@@ -309,6 +309,7 @@ pub struct RuntimeConfig {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub replay_reasoning: bool,
     pub steering_queue_mode: QueueMode,
     pub follow_up_queue_mode: QueueMode,
     pub tool_execution_mode: ToolExecutionMode,
@@ -321,6 +322,7 @@ impl Default for RuntimeConfig {
             temperature: None,
             max_tokens: None,
             reasoning_effort: None,
+            replay_reasoning: true,
             steering_queue_mode: QueueMode::All,
             follow_up_queue_mode: QueueMode::All,
             tool_execution_mode: ToolExecutionMode::Parallel,
@@ -425,6 +427,8 @@ struct FileRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    replay_reasoning: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     steering_queue_mode: Option<QueueMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     follow_up_queue_mode: Option<QueueMode>,
@@ -464,6 +468,7 @@ impl FileRuntimeConfig {
             temperature: runtime.temperature,
             max_tokens: runtime.max_tokens,
             reasoning_effort: runtime.reasoning_effort,
+            replay_reasoning: Some(runtime.replay_reasoning),
             steering_queue_mode: Some(runtime.steering_queue_mode),
             follow_up_queue_mode: Some(runtime.follow_up_queue_mode),
             tool_execution_mode: Some(runtime.tool_execution_mode),
@@ -938,6 +943,7 @@ fn merge_runtime_configs(
             temperature: layer.temperature.or(base.temperature),
             max_tokens: layer.max_tokens.or(base.max_tokens),
             reasoning_effort: layer.reasoning_effort.or(base.reasoning_effort),
+            replay_reasoning: layer.replay_reasoning.or(base.replay_reasoning),
             steering_queue_mode: layer.steering_queue_mode.or(base.steering_queue_mode),
             follow_up_queue_mode: layer.follow_up_queue_mode.or(base.follow_up_queue_mode),
             tool_execution_mode: layer.tool_execution_mode.or(base.tool_execution_mode),
@@ -1002,6 +1008,7 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
         temperature: runtime.temperature,
         max_tokens: runtime.max_tokens,
         reasoning_effort: runtime.reasoning_effort,
+        replay_reasoning: runtime.replay_reasoning.unwrap_or(true),
         steering_queue_mode: runtime.steering_queue_mode.unwrap_or(QueueMode::All),
         follow_up_queue_mode: runtime.follow_up_queue_mode.unwrap_or(QueueMode::All),
         tool_execution_mode: runtime
@@ -1027,6 +1034,9 @@ fn apply_runtime_overrides(
 ) -> RuntimeConfig {
     if let Some(thinking) = thinking_override {
         runtime.reasoning_effort = reasoning_effort_from_thinking(thinking);
+        if matches!(thinking, ThinkingLevel::Off) {
+            runtime.replay_reasoning = false;
+        }
     }
     runtime
 }

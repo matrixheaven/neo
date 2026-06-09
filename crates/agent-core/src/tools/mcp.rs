@@ -358,10 +358,10 @@ impl McpHttpToolAdapter {
         while update_rx.try_recv().is_ok() {}
     }
 
-    async fn start_resource_event_reader(&self) -> Result<(), McpError> {
+    async fn start_resource_event_reader(&self, event_stream_url: &str) -> Result<(), McpError> {
         let mut request = self
             .client
-            .get(&self.config.url)
+            .get(event_stream_url)
             .header("accept", "text/event-stream");
         for (key, value) in &self.config.headers {
             request = request.header(key, value);
@@ -492,8 +492,10 @@ impl McpToolAdapter for McpHttpToolAdapter {
             })?;
             let response_value: serde_json::Value =
                 serde_json::from_str(&body).map_err(|err| McpError::protocol(err.to_string()))?;
-            validate_json_rpc_result(&response_value, id)?;
-            self.start_resource_event_reader().await?;
+            let result = validate_json_rpc_result(&response_value, id)?;
+            let event_stream_url = resource_event_stream_url(&self.config.url, &result)?;
+            self.start_resource_event_reader(event_stream_url.as_str())
+                .await?;
             return Ok(());
         }
 
@@ -1231,6 +1233,44 @@ fn validate_json_rpc_result(
         .get("result")
         .cloned()
         .ok_or_else(|| McpError::protocol("MCP HTTP response missing result"))
+}
+
+fn resource_event_stream_url(
+    configured_url: &str,
+    subscribe_result: &serde_json::Value,
+) -> Result<reqwest::Url, McpError> {
+    let configured_url = reqwest::Url::parse(configured_url).map_err(|err| {
+        McpError::protocol(format!(
+            "configured MCP HTTP endpoint URL is invalid: {err}"
+        ))
+    })?;
+    let Some((field, raw_value)) = ["eventStreamUrl", "event_stream_url", "event_url"]
+        .into_iter()
+        .find_map(|field| subscribe_result.get(field).map(|value| (field, value)))
+    else {
+        return Ok(configured_url);
+    };
+    let value = raw_value.as_str().ok_or_else(|| {
+        McpError::protocol(format!(
+            "MCP HTTP subscribe result {field} must be a string event stream URL"
+        ))
+    })?;
+    if value.trim().is_empty() {
+        return Err(McpError::protocol(format!(
+            "MCP HTTP subscribe result {field} must not be empty"
+        )));
+    }
+    let event_stream_url = configured_url.join(value).map_err(|err| {
+        McpError::protocol(format!(
+            "MCP HTTP subscribe result {field} is not a valid event stream URL: {value}: {err}"
+        ))
+    })?;
+    match event_stream_url.scheme() {
+        "http" | "https" => Ok(event_stream_url),
+        scheme => Err(McpError::protocol(format!(
+            "MCP HTTP subscribe result {field} must be an http or https event stream URL, got {scheme}: {value}"
+        ))),
+    }
 }
 
 #[cfg(test)]

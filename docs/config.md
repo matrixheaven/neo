@@ -191,9 +191,12 @@ accept JSON or SSE `data:` JSON-RPC responses. `neo mcp resources <server>
 list` and `neo mcp resources <server> read <uri>` explicitly fetch resource
 catalogs and content from a configured enabled server. `neo mcp resources
 <server> watch <uri>` subscribes over stdio or over remote HTTP/SSE servers that
-return a live SSE subscribe response, waits for real
-`notifications/resources/updated` messages, prints updated URIs, and
-unsubscribes before exiting. The current shape includes:
+return a live SSE subscribe response or a JSON subscribe ACK with an alternate
+SSE event-channel URL in `eventStreamUrl`, `event_stream_url`, or `event_url`,
+waits for real `notifications/resources/updated` messages, prints updated URIs,
+and unsubscribes before exiting. Relative event-channel URLs are resolved
+against the configured remote endpoint; malformed or non-HTTP(S) URLs are MCP
+protocol errors. The current shape includes:
 
 - Server id.
 - Transport type: `stdio`, `http`, or `sse`.

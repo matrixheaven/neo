@@ -1219,6 +1219,7 @@ fn agent_config_for_app(
     agent_config.temperature = config.runtime.temperature;
     agent_config.max_tokens = config.runtime.max_tokens;
     agent_config.reasoning_effort = config.runtime.reasoning_effort;
+    agent_config.replay_reasoning = config.runtime.replay_reasoning;
     if let Some(system_prompt) = resources::load_system_prompt(
         &config.project_dir,
         config.system_prompt.as_deref(),
@@ -1592,6 +1593,7 @@ mod tests {
                 temperature: Some(0.35),
                 max_tokens: Some(512),
                 reasoning_effort: Some(neo_ai::ReasoningEffort::High),
+                replay_reasoning: true,
                 steering_queue_mode: QueueMode::OneAtATime,
                 follow_up_queue_mode: QueueMode::OneAtATime,
                 tool_execution_mode: ToolExecutionMode::Sequential,

@@ -78,6 +78,7 @@ pub struct RequestOptions {
     #[schemars(skip)]
     pub timeout: Option<Duration>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub replay_reasoning: bool,
     pub retries: Option<u32>,
     pub cache: CacheRetention,
     pub session_id: Option<String>,
@@ -92,6 +93,7 @@ impl Default for RequestOptions {
             headers: BTreeMap::new(),
             timeout: None,
             reasoning_effort: None,
+            replay_reasoning: true,
             retries: Some(0),
             cache: CacheRetention::Short,
             session_id: None,

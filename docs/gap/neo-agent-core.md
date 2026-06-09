@@ -72,8 +72,11 @@
   `tools/call` without local fallback behavior. It also sends
   `resources/subscribe` and `resources/unsubscribe`; live SSE subscribe
   responses are read in the background, and JSON subscribe acknowledgements open
-  the configured HTTP endpoint as an SSE event channel so real
-  `notifications/resources/updated` messages are queued for watchers.
+  an SSE event channel so real `notifications/resources/updated` messages are
+  queued for watchers. JSON subscribe acknowledgements may provide an alternate
+  event channel URL with `eventStreamUrl`, `event_stream_url`, or `event_url`;
+  relative URLs are resolved against the configured endpoint, and non-HTTP(S)
+  or malformed URLs fail as MCP protocol errors instead of falling back.
 - Stdio and HTTP/SSE MCP adapters also support explicit `resources/list` and
   `resources/read` requests without injecting resource content into model
   context.
@@ -102,9 +105,10 @@ or hosted lifecycle behavior.
 
 ## High-Priority Gaps
 
-- Add richer hosted or alternate-channel remote MCP lifecycle support once Neo
-  has backing behavior for servers that do not deliver updates on the subscribe
-  response SSE stream.
+- Add richer hosted remote MCP lifecycle support once Neo has backing behavior
+  for server management, authorization, and provider-specific connection flows
+  beyond configured HTTP/SSE endpoints and JSON subscribe ACK event-channel
+  discovery.
 - Add richer hook lifecycle docs only when Neo exposes additional hook phases
   beyond the current synchronous and async before/after tool-call callbacks.
 - Add broader process cleanup only when Neo grows a contract for commands that

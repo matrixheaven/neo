@@ -71,6 +71,7 @@ async fn handle_request(
         "sessions.tree" => handle_sessions_tree(config, request, output),
         "sessions.get" => handle_sessions_get(config, request, output).await,
         "sessions.export_html" => handle_sessions_export_html(config, request, output).await,
+        "sessions.export_json" => handle_sessions_export_json(config, request, output).await,
         "set_session_name" => handle_set_session_name(config, request, output),
         "prompt" => handle_prompt(config, request, output).await,
         unknown => push_rpc_message(
@@ -363,6 +364,57 @@ async fn handle_sessions_export_html(
         &RpcMessage::Response(RpcResponse::success(
             request.id,
             serde_json::to_value(RpcSessionExportHtmlResult { session_id, html })?,
+        )),
+    )
+}
+
+async fn handle_sessions_export_json(
+    config: &AppConfig,
+    request: RpcRequest,
+    output: &mut String,
+) -> anyhow::Result<()> {
+    let Some(session_ref) = request.params.get("session_id").and_then(Value::as_str) else {
+        return push_rpc_message(
+            output,
+            &RpcMessage::Response(RpcResponse::failure(
+                request.id,
+                RpcError::new(
+                    RpcErrorCode::InvalidParams,
+                    "sessions.export_json params.session_id must be a string",
+                    None,
+                ),
+            )),
+        );
+    };
+
+    if let Err(err) = session_commands::resolve_session_id(session_ref, config) {
+        return push_rpc_message(
+            output,
+            &RpcMessage::Response(RpcResponse::failure(
+                request.id,
+                RpcError::new(RpcErrorCode::InvalidParams, err.to_string(), None),
+            )),
+        );
+    }
+
+    let artifact = match session_commands::export_json_artifact(session_ref, config).await {
+        Ok(artifact) => artifact,
+        Err(err) => {
+            return push_rpc_message(
+                output,
+                &RpcMessage::Response(RpcResponse::failure(
+                    request.id,
+                    RpcError::new(RpcErrorCode::InternalError, err.to_string(), None),
+                )),
+            );
+        }
+    };
+
+    push_rpc_message(
+        output,
+        &RpcMessage::Response(RpcResponse::success(
+            request.id,
+            serde_json::to_value(artifact)?,
         )),
     )
 }

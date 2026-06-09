@@ -206,6 +206,7 @@ async fn openai_compatible_client_posts_typed_options_and_normalizes_sse_events(
         headers,
         timeout: Some(Duration::from_secs(5)),
         reasoning_effort: Some(ReasoningEffort::Medium),
+        replay_reasoning: true,
         retries: Some(0),
         cache: CacheRetention::Long,
         session_id: Some("session-1".to_owned()),

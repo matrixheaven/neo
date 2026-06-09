@@ -547,6 +547,80 @@ fn rpc_sessions_export_html_returns_rendered_local_session() {
 }
 
 #[test]
+fn rpc_sessions_export_json_returns_sanitized_replayed_session_artifact() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    std::fs::write(
+        sessions.join("alpha-main.jsonl"),
+        concat!(
+            "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello rpc json export\"}}]}}}}\n",
+            "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"rpc portable reply\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
+        ),
+    )
+    .expect("write session");
+    std::fs::write(sessions.join("alpha-main-fork-1.jsonl"), "{}\n").expect("write child session");
+    std::fs::write(
+        sessions.join("sessions.metadata.json"),
+        json!({
+            "sessions": {
+                "alpha-main": {
+                    "name": "Main thread",
+                    "summary": "Resolved local branch summary"
+                },
+                "alpha-main-fork-1": {
+                    "parent_id": "alpha-main"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write metadata");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).arg("rpc");
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"export-json-1","method":"sessions.export_json","params":{"session_id":"alpha-main"}}"#,
+    );
+
+    assert!(
+        !stdout.contains(temp.path().to_str().expect("temp path")),
+        "export JSON should not leak absolute paths: {stdout}"
+    );
+    assert!(!stdout.contains("share_url"));
+    assert!(!stdout.contains("hosted"));
+
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "response");
+    assert_eq!(messages[0]["id"], "export-json-1");
+    let artifact = &messages[0]["result"];
+    assert_eq!(artifact["format"], "neo.session.export_json");
+    assert_eq!(artifact["schema_version"], 1);
+    assert_eq!(artifact["metadata"]["id"], "alpha-main");
+    assert_eq!(artifact["metadata"]["name"], "Main thread");
+    assert_eq!(
+        artifact["metadata"]["summary"],
+        "Resolved local branch summary"
+    );
+    assert!(artifact["metadata"]["parent_id"].is_null());
+    assert_eq!(
+        artifact["metadata"]["children"],
+        json!(["alpha-main-fork-1"])
+    );
+    assert_eq!(artifact["metadata"]["message_count"], 2);
+    assert_eq!(
+        artifact["messages"][0]["User"]["content"][0]["Text"]["text"],
+        "hello rpc json export"
+    );
+    assert_eq!(
+        artifact["messages"][1]["Assistant"]["content"][0]["Text"]["text"],
+        "rpc portable reply"
+    );
+}
+
+#[test]
 fn rpc_set_session_name_updates_local_session_metadata() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = temp.path().join(".neo/sessions");

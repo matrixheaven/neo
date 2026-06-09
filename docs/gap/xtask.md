@@ -9,8 +9,9 @@
   local Markdown link validation for `README.md`, `docs/**/*.md`, and
   `examples/**/*.md`; production fake/local/placeholder guidance scans; and
   stale gap-claim scans for implemented MCP/session/extension, runtime hook,
-  HTTP MCP JSON subscribe event-reader, TUI diff/paste/terminal image protocol,
-  provider thinking-payload surfaces, and stale
+  HTTP MCP JSON subscribe event-reader and subscribe ACK event-channel URLs,
+  TUI diff/paste/terminal image/Sixel protocol, local session export-json,
+  provider thinking-payload surfaces, reasoning replay controls, and stale
   Anthropic/Google thinking-translation claims; TOML, JSON, and Rust
   example harness validation for the documented example artifacts; and
   `cargo check --manifest-path examples/rust/Cargo.toml
@@ -46,10 +47,13 @@ gap claims once `TranscriptSelection`, transcript copy keybindings, renderer
 highlighting, and live clipboard routing are present, stale HTTP MCP JSON
 subscribe ACK claims once `start_resource_event_reader` exists, and stale
 terminal image-protocol claims once real terminal image protocol symbols land.
-It still allows honest gaps for hosted MCP management, remote MCP servers that
-require alternate notification channels, hosted share, OAuth login, image
-protocols, advanced diff affordances, and other surfaces that are not
-implemented.
+It also rejects stale claims for MCP subscribe ACK event-channel URL discovery,
+local `sessions export-json` / `sessions.export_json`, Sixel output primitives,
+and `--thinking off` signed-reasoning replay suppression once their symbols
+land. It still allows honest gaps for hosted MCP management, Link-header or
+provider-specific MCP discovery beyond configured endpoints and subscribe ACK
+URLs, hosted share, OAuth login, runtime image-protocol detection/negotiation,
+advanced diff affordances, and other surfaces that are not implemented.
 
 ## Pi Parity Pressure
 

@@ -545,6 +545,63 @@ async fn mcp_http_adapter_reads_resource_updates_from_event_channel_after_json_s
 }
 
 #[tokio::test]
+async fn mcp_http_adapter_uses_event_stream_url_from_json_subscribe_ack() {
+    let server = MockMcpHttpServer::start(vec![
+        mcp_json_response(json!({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {"name": "http-resource-fixture", "version": "0.1.0"},
+            "capabilities": {"resources": {"subscribe": true}}
+        })),
+        mcp_json_response(json!({
+            "eventStreamUrl": "/events"
+        })),
+        mcp_sse_notification_response_for_path("/events", "file://docs/readme.md"),
+        mcp_json_response(json!({})),
+    ]);
+    let adapter = McpHttpToolAdapter::new(McpHttpConfig {
+        url: server.url.clone(),
+        headers: BTreeMap::new(),
+    });
+
+    adapter
+        .subscribe_resource("file://docs/readme.md")
+        .await
+        .expect("JSON subscribe response can provide alternate event stream URL");
+    let update = adapter
+        .next_resource_update()
+        .await
+        .expect("receive resource update from alternate event stream URL");
+    adapter
+        .unsubscribe_resource("file://docs/readme.md")
+        .await
+        .expect("unsubscribe over HTTP");
+
+    assert_eq!(update.uri, "file://docs/readme.md");
+    let requests = server.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .filter_map(|request| request.body["method"].as_str())
+            .collect::<Vec<_>>(),
+        vec!["initialize", "resources/subscribe", "resources/unsubscribe"]
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.method.as_str())
+            .collect::<Vec<_>>(),
+        vec!["POST", "POST", "GET", "POST"]
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["/", "/", "/events", "/"]
+    );
+}
+
+#[tokio::test]
 async fn mcp_http_adapter_requires_sse_event_channel_after_json_subscribe_ack() {
     let server = MockMcpHttpServer::start(vec![
         mcp_json_response(json!({
@@ -583,6 +640,49 @@ async fn mcp_http_adapter_requires_sse_event_channel_after_json_subscribe_ack() 
             .map(|request| request.method.as_str())
             .collect::<Vec<_>>(),
         vec!["POST", "POST", "GET"]
+    );
+}
+
+#[tokio::test]
+async fn mcp_http_adapter_rejects_non_http_event_stream_url_from_json_subscribe_ack() {
+    let server = MockMcpHttpServer::start(vec![
+        mcp_json_response(json!({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {"name": "http-resource-fixture", "version": "0.1.0"},
+            "capabilities": {"resources": {"subscribe": true}}
+        })),
+        mcp_json_response(json!({
+            "eventStreamUrl": "file:///tmp/events"
+        })),
+    ]);
+    let adapter = McpHttpToolAdapter::new(McpHttpConfig {
+        url: server.url.clone(),
+        headers: BTreeMap::new(),
+    });
+
+    let error = adapter
+        .subscribe_resource("file://docs/readme.md")
+        .await
+        .expect_err("subscribe ACK event stream URL must be http or https");
+
+    assert_eq!(
+        error.message(),
+        "MCP HTTP subscribe result eventStreamUrl must be an http or https event stream URL, got file: file:///tmp/events"
+    );
+    let requests = server.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .filter_map(|request| request.body["method"].as_str())
+            .collect::<Vec<_>>(),
+        vec!["initialize", "resources/subscribe"]
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.method.as_str())
+            .collect::<Vec<_>>(),
+        vec!["POST", "POST"]
     );
 }
 
@@ -974,9 +1074,9 @@ impl MockMcpHttpServer {
                 captured_requests
                     .lock()
                     .expect("requests lock")
-                    .push(request);
+                    .push(request.clone());
                 socket
-                    .write_all(response.render(&id).as_bytes())
+                    .write_all(response.render(&id, &request.path).as_bytes())
                     .expect("write MCP HTTP response");
             }
         });
@@ -995,10 +1095,11 @@ enum MockMcpHttpResponse {
     Sse(Value),
     SseResourceUpdate { result: Value, uri: String },
     SseNotification { uri: String },
+    ExpectedPathSseNotification { expected_path: String, uri: String },
 }
 
 impl MockMcpHttpResponse {
-    fn render(self, id: &Value) -> String {
+    fn render(self, id: &Value, request_path: &str) -> String {
         match self {
             Self::Json(result) => {
                 let rpc = json!({
@@ -1040,6 +1141,16 @@ impl MockMcpHttpResponse {
                 let body = format!("data: {notification}\n\n");
                 http_response("text/event-stream", &body)
             }
+            Self::ExpectedPathSseNotification { expected_path, uri } => {
+                assert_eq!(request_path, expected_path);
+                let notification = json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/resources/updated",
+                    "params": { "uri": uri },
+                });
+                let body = format!("data: {notification}\n\n");
+                http_response("text/event-stream", &body)
+            }
         }
     }
 }
@@ -1055,6 +1166,16 @@ fn mcp_sse_response(result: Value) -> MockMcpHttpResponse {
 fn mcp_sse_resource_update_response(result: Value, uri: impl Into<String>) -> MockMcpHttpResponse {
     MockMcpHttpResponse::SseResourceUpdate {
         result,
+        uri: uri.into(),
+    }
+}
+
+fn mcp_sse_notification_response_for_path(
+    expected_path: impl Into<String>,
+    uri: impl Into<String>,
+) -> MockMcpHttpResponse {
+    MockMcpHttpResponse::ExpectedPathSseNotification {
+        expected_path: expected_path.into(),
         uri: uri.into(),
     }
 }

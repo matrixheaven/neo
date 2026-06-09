@@ -57,9 +57,11 @@ Target: `crates/tui`.
   metadata summaries: URL images render their URL, and base64 images render
   MIME type plus payload size instead of raw image bytes.
 - `neo-tui` exposes production image escape encoding primitives for Kitty
-  graphics direct-transfer sequences and iTerm2/OSC 1337 inline image
-  sequences, including payload base64 encoding, Kitty continuation chunks, and
-  validation for empty payloads and invalid dimensions.
+  graphics direct-transfer sequences, iTerm2/OSC 1337 inline image sequences,
+  and Sixel indexed-pixel output, including payload base64 encoding, Kitty
+  continuation chunks, Sixel palette/plane encoding, and validation for empty
+  payloads, invalid dimensions, invalid Sixel palette values, mismatched pixel
+  data length, and out-of-range Sixel color indexes.
 - Prompt Tab completion is backed by real local project/runtime data. `neo-tui`
   exposes prompt completion prefix/replacement primitives plus a completion
   picker overlay, and `neo-agent` reads matching files/directories from
@@ -89,9 +91,10 @@ Target: `crates/tui`.
 
 ## Remaining lower-priority gaps
 
-- The Rust crate does not yet implement Sixel image output, runtime terminal
-  image-protocol capability detection/negotiation, hosted keybinding/profile
-  sync, command autocomplete from hosted or extension command catalogs, or the
-  full TypeScript renderer's advanced diff affordances beyond width-safe unified
-  diff line classification, coloring, and item-range transcript selection.
+- The Rust crate does not yet implement runtime terminal image-protocol
+  capability detection/negotiation, live transcript inline image rendering
+  integration, hosted keybinding/profile sync, command autocomplete from hosted
+  or extension command catalogs, or the full TypeScript renderer's advanced
+  diff affordances beyond width-safe unified diff line classification,
+  coloring, and item-range transcript selection.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.

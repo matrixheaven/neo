@@ -1011,6 +1011,72 @@ fn sessions_export_html_renders_replayed_messages() {
 }
 
 #[test]
+fn sessions_export_json_returns_sanitized_replayed_session_artifact() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    fs::create_dir_all(&sessions).expect("create sessions");
+    fs::write(
+        sessions.join("alpha-main.jsonl"),
+        concat!(
+            "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello json export\"}}]}}}}\n",
+            "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"portable local reply\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
+        ),
+    )
+    .expect("write session");
+    fs::write(sessions.join("alpha-main-fork-1.jsonl"), "{}\n").expect("write child session");
+    fs::write(
+        sessions.join("sessions.metadata.json"),
+        json!({
+            "sessions": {
+                "alpha-main": {
+                    "name": "Main thread",
+                    "summary": "Local branch summary"
+                },
+                "alpha-main-fork-1": {
+                    "parent_id": "alpha-main"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write metadata");
+
+    let mut export = neo();
+    export
+        .current_dir(temp.path())
+        .args(["sessions", "export-json", "alpha-main"]);
+    let stdout = run(export);
+
+    assert!(
+        !stdout.contains(temp.path().to_str().expect("temp path")),
+        "export JSON should not leak absolute paths: {stdout}"
+    );
+    assert!(!stdout.contains("share_url"));
+    assert!(!stdout.contains("hosted"));
+
+    let artifact: Value = serde_json::from_str(&stdout).expect("export artifact JSON");
+    assert_eq!(artifact["format"], "neo.session.export_json");
+    assert_eq!(artifact["schema_version"], 1);
+    assert_eq!(artifact["metadata"]["id"], "alpha-main");
+    assert_eq!(artifact["metadata"]["name"], "Main thread");
+    assert_eq!(artifact["metadata"]["summary"], "Local branch summary");
+    assert!(artifact["metadata"]["parent_id"].is_null());
+    assert_eq!(
+        artifact["metadata"]["children"],
+        json!(["alpha-main-fork-1"])
+    );
+    assert_eq!(artifact["metadata"]["message_count"], 2);
+    assert_eq!(
+        artifact["messages"][0]["User"]["content"][0]["Text"]["text"],
+        "hello json export"
+    );
+    assert_eq!(
+        artifact["messages"][1]["Assistant"]["content"][0]["Text"]["text"],
+        "portable local reply"
+    );
+}
+
+#[test]
 fn root_export_flag_writes_default_html_file_from_session_jsonl() {
     let temp = TempDir::new().expect("tempdir");
     fs::write(

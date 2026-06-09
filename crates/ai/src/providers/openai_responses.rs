@@ -148,7 +148,7 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     let mut body = json!({
         "model": request.model.model,
         "stream": true,
-        "input": request_input(&request.messages)?,
+        "input": request_input(&request.messages, request.options.replay_reasoning)?,
     });
 
     if !request.tools.is_empty() {
@@ -186,15 +186,21 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     Ok(body)
 }
 
-fn request_input(messages: &[ChatMessage]) -> Result<Vec<Value>, ProviderError> {
+fn request_input(
+    messages: &[ChatMessage],
+    replay_reasoning: bool,
+) -> Result<Vec<Value>, ProviderError> {
     let mut input = Vec::new();
     for message in messages {
-        input.extend(message_body(message)?);
+        input.extend(message_body(message, replay_reasoning)?);
     }
     Ok(input)
 }
 
-fn message_body(message: &ChatMessage) -> Result<Vec<Value>, ProviderError> {
+fn message_body(
+    message: &ChatMessage,
+    replay_reasoning: bool,
+) -> Result<Vec<Value>, ProviderError> {
     match message {
         ChatMessage::System { content } => {
             let content = content_text(content, "system")?;
@@ -212,8 +218,10 @@ fn message_body(message: &ChatMessage) -> Result<Vec<Value>, ProviderError> {
             tool_calls,
         } => {
             let mut output = Vec::new();
-            output.extend(reasoning_items(content));
-            let text = content_text(content, "assistant")?;
+            if replay_reasoning {
+                output.extend(reasoning_items(content));
+            }
+            let text = content_text_with_reasoning_replay(content, "assistant", replay_reasoning)?;
             if !text.is_empty() {
                 output.push(json!({
                     "type": "message",
@@ -292,11 +300,26 @@ fn image_url(mime_type: &str, data: &ImageData) -> String {
 }
 
 fn content_text(content: &[ContentPart], role: &str) -> Result<String, ProviderError> {
+    content_text_with_reasoning_replay(content, role, true)
+}
+
+fn content_text_with_reasoning_replay(
+    content: &[ContentPart],
+    role: &str,
+    replay_reasoning: bool,
+) -> Result<String, ProviderError> {
     reject_images(content, role)?;
-    Ok(text_content(content))
+    Ok(text_content_with_reasoning_replay(
+        content,
+        replay_reasoning,
+    ))
 }
 
 fn text_content(content: &[ContentPart]) -> String {
+    text_content_with_reasoning_replay(content, true)
+}
+
+fn text_content_with_reasoning_replay(content: &[ContentPart], replay_reasoning: bool) -> String {
     content
         .iter()
         .filter_map(|part| match part {
@@ -305,10 +328,11 @@ fn text_content(content: &[ContentPart]) -> String {
                 text,
                 signature,
                 redacted: false,
-            } if signature
-                .as_deref()
-                .and_then(openai_reasoning_signature)
-                .is_none() =>
+            } if replay_reasoning
+                && signature
+                    .as_deref()
+                    .and_then(openai_reasoning_signature)
+                    .is_none() =>
             {
                 Some(text.as_str())
             }

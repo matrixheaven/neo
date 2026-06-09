@@ -1,6 +1,7 @@
 use neo_tui::{
     ImageProtocolError, Iterm2Dimension, Iterm2InlineImageOptions, KittyGraphicsOptions,
-    KittyImageFormat, encode_iterm2_inline_image, encode_kitty_graphics,
+    KittyImageFormat, SixelImageOptions, SixelPaletteColor, encode_iterm2_inline_image,
+    encode_kitty_graphics, encode_sixel_image,
 };
 
 #[test]
@@ -50,6 +51,38 @@ fn iterm2_inline_image_encodes_metadata_and_payload_as_osc_1337() {
 }
 
 #[test]
+fn sixel_image_encodes_indexed_pixels_as_dcs_sixel_payload() {
+    let encoded = encode_sixel_image(
+        &[0, 1, 1, 0],
+        &SixelImageOptions::new(
+            2,
+            2,
+            vec![
+                SixelPaletteColor::rgb_percent(100, 0, 0),
+                SixelPaletteColor::rgb_percent(0, 0, 100),
+            ],
+        ),
+    )
+    .expect("valid sixel image sequence");
+
+    assert_eq!(
+        encoded,
+        "\x1bPq\"1;1;2;2#0;2;100;0;0#1;2;0;0;100#0@A$#1A@\x1b\\"
+    );
+}
+
+#[test]
+fn sixel_image_encodes_pixels_across_six_row_bands() {
+    let encoded = encode_sixel_image(
+        &[0, 0, 0, 0, 0, 0, 0],
+        &SixelImageOptions::new(1, 7, vec![SixelPaletteColor::rgb_percent(0, 100, 0)]),
+    )
+    .expect("valid multi-band sixel image sequence");
+
+    assert_eq!(encoded, "\x1bPq\"1;1;1;7#0;2;0;100;0#0~-#0@\x1b\\");
+}
+
+#[test]
 fn image_protocol_encoders_reject_empty_payloads_and_invalid_options() {
     assert_eq!(
         encode_kitty_graphics(b"", &KittyGraphicsOptions::new(KittyImageFormat::Png)),
@@ -65,5 +98,40 @@ fn image_protocol_encoders_reject_empty_payloads_and_invalid_options() {
     assert_eq!(
         encode_iterm2_inline_image(b"", &Iterm2InlineImageOptions::new()),
         Err(ImageProtocolError::EmptyImageData)
+    );
+    assert_eq!(
+        encode_sixel_image(
+            &[],
+            &SixelImageOptions::new(1, 1, vec![SixelPaletteColor::rgb_percent(0, 0, 0)]),
+        ),
+        Err(ImageProtocolError::EmptyImageData)
+    );
+    assert_eq!(
+        encode_sixel_image(
+            &[0],
+            &SixelImageOptions::new(0, 1, vec![SixelPaletteColor::rgb_percent(0, 0, 0)]),
+        ),
+        Err(ImageProtocolError::InvalidDimension)
+    );
+    assert_eq!(
+        encode_sixel_image(
+            &[0, 0],
+            &SixelImageOptions::new(1, 1, vec![SixelPaletteColor::rgb_percent(0, 0, 0)]),
+        ),
+        Err(ImageProtocolError::InvalidPixelDataLength)
+    );
+    assert_eq!(
+        encode_sixel_image(
+            &[1],
+            &SixelImageOptions::new(1, 1, vec![SixelPaletteColor::rgb_percent(0, 0, 0)]),
+        ),
+        Err(ImageProtocolError::InvalidColorIndex)
+    );
+    assert_eq!(
+        encode_sixel_image(
+            &[0],
+            &SixelImageOptions::new(1, 1, vec![SixelPaletteColor::rgb_percent(101, 0, 0)]),
+        ),
+        Err(ImageProtocolError::InvalidPalette)
     );
 }

@@ -32,7 +32,11 @@ Session tree metadata is stored next to JSONL records in
 session files. Local branch summaries are stored in the same metadata file and
 can be regenerated from replayed JSONL messages with `sessions summarize`.
 `sessions tree` renders the local parent/child metadata as an indented tree.
-These records do not create hosted or remote share records.
+`sessions export-json` replays the same local JSONL events and combines them
+with `sessions.metadata.json` into a portable JSON artifact. The artifact
+contains session metadata and replayed messages, but intentionally omits local
+session file paths. These records and exports do not create hosted or remote
+share records.
 
 `compact_jsonl_session` replays the JSONL file into an `AgentContext`, builds a
 deterministic extractive transcript summary from messages that will no longer be
@@ -72,10 +76,12 @@ The current constraints are:
 - Append-only event records for auditability.
 - Human-inspectable data where practical.
 - No secrets in session logs; store provider/config references, not raw keys.
+- Local exports must not leak absolute session paths unless an existing API is
+  explicitly returning a local path.
 
 Still missing from pi parity:
 
-- Hosted share targets beyond local HTML export.
+- Hosted share targets beyond local HTML and JSON export.
 - Hosted or model-generated branch summaries beyond local metadata summaries.
 - Model-generated compaction summaries; current compaction is deterministic
   local transcript extraction only.
@@ -95,6 +101,7 @@ neo sessions fork <session-ref> --name <name>
 neo sessions summarize <session-ref>
 neo sessions compact <session-ref> --keep-recent 20
 neo sessions export-html <session-ref>
+neo sessions export-json <session-ref>
 neo resume <session-ref>
 ```
 
@@ -103,6 +110,25 @@ Session directory defaults to `.neo/sessions` and can be changed with
 
 `export-html` replays `MessageAppended` events and renders a standalone HTML
 conversation with `neo-sdk`'s safe Markdown renderer.
+`export-json` replays the same events and emits a stable local-only artifact:
+
+```json
+{
+  "format": "neo.session.export_json",
+  "schema_version": 1,
+  "metadata": {
+    "id": "alpha",
+    "parent_id": null,
+    "children": [],
+    "message_count": 2
+  },
+  "messages": []
+}
+```
+
+The JSON export is a portable local replacement for hosted share while Neo has
+no hosted share backing. It does not include a share URL or absolute session
+path.
 
 `sessions summarize` stores a deterministic local branch summary in
 `sessions.metadata.json` and surfaces it in `sessions list` and `resume`.
@@ -120,6 +146,7 @@ summary is displayed separately.
 {"type":"request","id":"sessions","method":"sessions.list","params":{}}
 {"type":"request","id":"tree","method":"sessions.tree","params":{}}
 {"type":"request","id":"messages","method":"get_messages","params":{"session_id":"alpha"}}
+{"type":"request","id":"export","method":"sessions.export_json","params":{"session_id":"alpha"}}
 ```
 
 `get_commands` returns local prompt-template slash commands discovered from
@@ -136,6 +163,10 @@ user-global templates.
 field. These RPC payloads read only local `sessions_dir` JSONL and
 `sessions.metadata.json`; they do not create hosted continuation or share
 records.
+`sessions.export_json` returns the same local-only artifact as
+`neo sessions export-json <session-ref>`, with metadata and replayed messages
+but without an absolute JSONL path. `sessions.get` remains the RPC method that
+returns an explicit local path.
 
 See [examples/rust/session_replay.rs](../examples/rust/session_replay.rs) for a
 JSONL replay snippet.

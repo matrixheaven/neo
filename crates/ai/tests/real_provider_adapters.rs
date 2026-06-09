@@ -500,6 +500,67 @@ async fn openai_responses_client_replays_signed_reasoning_items() {
 }
 
 #[tokio::test]
+async fn openai_responses_client_can_disable_reasoning_replay() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "response.created", "response": { "id": "resp-replay-off" } }),
+        json!({
+            "type": "response.completed",
+            "response": { "status": "completed" }
+        }),
+    ])]);
+    let client = OpenAiResponsesClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::OpenAiResponses);
+    request.options.replay_reasoning = false;
+    request.messages.insert(
+        1,
+        ChatMessage::Assistant {
+            content: vec![
+                ContentPart::Thinking {
+                    text: "stored reasoning".to_owned(),
+                    signature: Some(
+                        json!({
+                            "type": "reasoning",
+                            "id": "rs_1",
+                            "summary": [{ "type": "summary_text", "text": "stored reasoning" }],
+                            "encrypted_content": "opaque-reasoning"
+                        })
+                        .to_string(),
+                    ),
+                    redacted: false,
+                },
+                ContentPart::Text {
+                    text: "visible answer".to_owned(),
+                },
+            ],
+            tool_calls: Vec::new(),
+        },
+    );
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["input"][1]["type"], "message");
+    assert_eq!(
+        sent.body["input"][1]["content"][0]["text"],
+        "visible answer"
+    );
+    assert!(
+        sent.body["input"]
+            .as_array()
+            .expect("input array")
+            .iter()
+            .all(|item| item["type"] != "reasoning"),
+        "reasoning replay should be fully suppressed when replay_reasoning is false"
+    );
+}
+
+#[tokio::test]
 async fn openai_responses_client_persists_reasoning_item_signature_from_stream() {
     let reasoning_item = json!({
         "type": "reasoning",
@@ -1440,6 +1501,47 @@ async fn anthropic_messages_client_replays_signed_thinking_blocks() {
 }
 
 #[tokio::test]
+async fn anthropic_messages_client_can_disable_thinking_replay() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "message_start", "message": { "id": "msg-replay-off" } }),
+        json!({ "type": "message_stop" }),
+    ])]);
+    let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::AnthropicMessages);
+    request.options.replay_reasoning = false;
+    request.messages.insert(
+        1,
+        ChatMessage::Assistant {
+            content: vec![
+                ContentPart::Thinking {
+                    text: "stored reasoning".to_owned(),
+                    signature: Some("sig-anthropic".to_owned()),
+                    redacted: false,
+                },
+                ContentPart::Text {
+                    text: "visible answer".to_owned(),
+                },
+            ],
+            tool_calls: Vec::new(),
+        },
+    );
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(
+        sent.body["messages"][1]["content"],
+        json!([{ "type": "text", "text": "visible answer" }])
+    );
+}
+
+#[tokio::test]
 async fn anthropic_messages_client_streams_extended_thinking_events() {
     let server = MockServer::start(vec![sse_response(&[
         json!({ "type": "message_start", "message": { "id": "msg-thinking-stream" } }),
@@ -1794,6 +1896,53 @@ async fn google_generative_ai_client_replays_signed_thought_parts() {
             "thought": true,
             "thoughtSignature": "sig-google"
         })
+    );
+}
+
+#[tokio::test]
+async fn google_generative_ai_client_can_disable_thought_replay() {
+    let server = MockServer::start(vec![sse_response(&[json!({
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{ "text": "done" }]
+            },
+            "finishReason": "STOP"
+        }]
+    })])]);
+    let client = GoogleGenerativeAiClient::new(server.url.clone(), "test-key");
+    let mut request = request(ApiKind::GoogleGenerativeAi);
+    request.options.replay_reasoning = false;
+    request.messages.insert(
+        1,
+        ChatMessage::Assistant {
+            content: vec![
+                ContentPart::Thinking {
+                    text: "stored reasoning".to_owned(),
+                    signature: Some("sig-google".to_owned()),
+                    redacted: false,
+                },
+                ContentPart::Text {
+                    text: "visible answer".to_owned(),
+                },
+            ],
+            tool_calls: Vec::new(),
+        },
+    );
+
+    client
+        .stream_chat(request)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["contents"][1]["role"], "model");
+    assert_eq!(
+        sent.body["contents"][1]["parts"],
+        json!([{ "text": "visible answer" }])
     );
 }
 

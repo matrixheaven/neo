@@ -635,6 +635,82 @@ async fn runtime_sends_persisted_thinking_content_back_to_model() {
 }
 
 #[tokio::test]
+async fn runtime_can_disable_persisted_thinking_replay() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_thinking".to_owned(),
+            },
+            AiStreamEvent::ThinkingStart {
+                id: "thinking_1".to_owned(),
+            },
+            AiStreamEvent::ThinkingDelta {
+                text: "local reasoning summary".to_owned(),
+            },
+            AiStreamEvent::ThinkingEnd {
+                signature: Some("sig-1".to_owned()),
+                redacted: false,
+            },
+            AiStreamEvent::TextDelta {
+                text: "answer".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_followup".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "followup".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let mut config = AgentConfig::for_model(harness.model());
+    config.replay_reasoning = false;
+    let runtime = AgentRuntime::new(config, harness.client());
+    let mut context = AgentContext::new();
+
+    runtime
+        .run_turn(&mut context, AgentMessage::user_text("think"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("first turn should succeed");
+    runtime
+        .run_turn(&mut context, AgentMessage::user_text("continue"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("second turn should succeed");
+
+    let requests = harness.requests();
+    let assistant_message = requests[1]
+        .messages
+        .iter()
+        .find(|message| matches!(message, neo_ai::ChatMessage::Assistant { .. }))
+        .expect("previous assistant message should be sent");
+    assert_eq!(
+        assistant_message,
+        &neo_ai::ChatMessage::Assistant {
+            content: vec![neo_ai::ContentPart::Text {
+                text: "answer".to_owned(),
+            }],
+            tool_calls: Vec::new(),
+        }
+    );
+    assert!(!requests[1].options.replay_reasoning);
+}
+
+#[tokio::test]
 async fn runtime_compaction_estimate_ignores_unsent_thinking_content() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {

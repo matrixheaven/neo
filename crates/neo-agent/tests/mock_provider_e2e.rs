@@ -96,6 +96,16 @@ fn run_with_stdin(mut command: Command, stdin: &str) -> String {
     String::from_utf8(output.stdout).expect("stdout should be utf8")
 }
 
+fn contains_responses_assistant_text(messages: &[Value], text: &str) -> bool {
+    messages.iter().any(|message| {
+        message["type"] == "message"
+            && message["role"] == "assistant"
+            && message["content"]
+                .as_array()
+                .is_some_and(|content| content.iter().any(|part| part["text"] == text))
+    })
+}
+
 fn isolated_home_path() -> std::path::PathBuf {
     static NEXT_HOME_ID: AtomicU64 = AtomicU64::new(0);
     let id = NEXT_HOME_ID.fetch_add(1, Ordering::Relaxed);
@@ -129,6 +139,43 @@ model_catalogs = [".neo/models.json"]
         "tools": true,
         "images": false,
         "reasoning": false,
+        "embeddings": false,
+        "max_context_tokens": 128000
+      }
+    }
+  ]
+}
+"#,
+    )
+    .expect("write model catalog");
+}
+
+fn write_openai_reasoning_model_catalog(temp: &TempDir) {
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+default_provider = "openai"
+default_model = "reasoning-model"
+model_catalogs = [".neo/models.json"]
+"#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join(".neo/models.json"),
+        r#"
+{
+  "default": { "provider": "openai", "model": "reasoning-model" },
+  "models": [
+    {
+      "provider": "openai",
+      "model": "reasoning-model",
+      "api": "OpenAiResponses",
+      "capabilities": {
+        "streaming": true,
+        "tools": true,
+        "images": false,
+        "reasoning": true,
         "embeddings": false,
         "max_context_tokens": 128000
       }
@@ -476,14 +523,82 @@ fn print_session_id_flag_replays_existing_session_and_appends_turn() {
     assert!(replayed.iter().any(|message| {
         message["role"] == "user" && message["content"].as_str() == Some("first")
     }));
-    assert!(replayed.iter().any(|message| {
-        message["role"] == "assistant" && message["content"].as_str() == Some("first answer")
-    }));
+    assert!(contains_responses_assistant_text(replayed, "first answer"));
     assert!(replayed.iter().any(|message| {
         message["role"] == "user" && message["content"].as_str() == Some("second")
     }));
     let sessions = session_files(temp.path());
     assert_eq!(sessions.len(), 1);
+}
+
+#[test]
+fn print_thinking_off_suppresses_signed_reasoning_replay_from_existing_session() {
+    let temp = TempDir::new().expect("tempdir");
+    let sessions = temp.path().join(".neo/sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    let signed_reasoning = serde_json::json!({
+        "type": "reasoning",
+        "id": "rs_session",
+        "summary": [{ "type": "summary_text", "text": "stored reasoning" }],
+        "encrypted_content": "opaque-reasoning"
+    })
+    .to_string();
+    let session = serde_json::json!({
+        "MessageAppended": {
+            "message": {
+                "Assistant": {
+                    "content": [
+                        {
+                            "Thinking": {
+                                "text": "stored reasoning",
+                                "signature": signed_reasoning,
+                                "redacted": false
+                            }
+                        },
+                        { "Text": { "text": "visible answer" } }
+                    ],
+                    "tool_calls": [],
+                    "stop_reason": "EndTurn"
+                }
+            }
+        }
+    });
+    std::fs::write(sessions.join("alpha-123.jsonl"), format!("{session}\n"))
+        .expect("write session");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-thinking-off-session",
+        "continued",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--thinking")
+        .arg("off")
+        .args(["--session-id", "alpha-123", "print", "continue"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "continued\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    let input = requests[0].body["input"].as_array().expect("input array");
+    assert!(
+        input.iter().all(|item| item["type"] != "reasoning"),
+        "thinking off must not replay encrypted reasoning items"
+    );
+    assert!(input.iter().any(|item| {
+        item["type"] == "message"
+            && item["role"] == "assistant"
+            && item["content"][0]["text"] == "visible answer"
+    }));
+    assert!(
+        requests[0].body.get("reasoning").is_none(),
+        "thinking off should also avoid requesting new reasoning"
+    );
 }
 
 #[test]
@@ -558,9 +673,7 @@ fn print_session_flag_replays_existing_session_by_local_id_and_appends_turn() {
     assert!(replayed.iter().any(|message| {
         message["role"] == "user" && message["content"].as_str() == Some("first")
     }));
-    assert!(replayed.iter().any(|message| {
-        message["role"] == "assistant" && message["content"].as_str() == Some("first answer")
-    }));
+    assert!(contains_responses_assistant_text(replayed, "first answer"));
     assert!(replayed.iter().any(|message| {
         message["role"] == "user" && message["content"].as_str() == Some("continue")
     }));
@@ -643,9 +756,10 @@ fn run_session_flag_uses_existing_session_in_stable_json_output() {
     let replayed = requests[1].body["input"]
         .as_array()
         .expect("second request input");
-    assert!(replayed.iter().any(|message| {
-        message["role"] == "assistant" && message["content"].as_str() == Some("first run answer")
-    }));
+    assert!(contains_responses_assistant_text(
+        replayed,
+        "first run answer"
+    ));
     assert!(replayed.iter().any(|message| {
         message["role"] == "user" && message["content"].as_str() == Some("continue")
     }));
@@ -695,9 +809,7 @@ fn print_continue_flag_replays_latest_session_and_appends_turn() {
     assert!(replayed.iter().any(|message| {
         message["role"] == "user" && message["content"].as_str() == Some("latest")
     }));
-    assert!(replayed.iter().any(|message| {
-        message["role"] == "assistant" && message["content"].as_str() == Some("latest answer")
-    }));
+    assert!(contains_responses_assistant_text(replayed, "latest answer"));
     assert!(replayed.iter().any(|message| {
         message["role"] == "user" && message["content"].as_str() == Some("next")
     }));
@@ -918,9 +1030,7 @@ fn print_fork_flag_copies_existing_session_and_appends_turn_to_child() {
     let replayed = requests[1].body["input"]
         .as_array()
         .expect("fork request input");
-    assert!(replayed.iter().any(|message| {
-        message["role"] == "assistant" && message["content"].as_str() == Some("parent answer")
-    }));
+    assert!(contains_responses_assistant_text(replayed, "parent answer"));
     assert!(replayed.iter().any(|message| {
         message["role"] == "user" && message["content"].as_str() == Some("child")
     }));
@@ -2578,17 +2688,21 @@ api_key_env = "PROJECT_OPENAI_KEY"
 #[test]
 fn print_applies_project_runtime_generation_options_to_provider_request() {
     let temp = TempDir::new().expect("tempdir");
-    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    std::fs::write(
-        temp.path().join(".neo/config.toml"),
-        r#"
+    write_openai_reasoning_model_catalog(&temp);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(temp.path().join(".neo/config.toml"))
+        .expect("open config")
+        .write_all(
+            br#"
+
 [runtime]
 temperature = 0.25
 max_tokens = 321
 reasoning_effort = "high"
 "#,
-    )
-    .expect("write config");
+        )
+        .expect("append config");
     let server = MockSseServer::start(vec![openai_response_sse("resp-runtime", "configured")]);
 
     let mut command = neo();
@@ -2612,15 +2726,19 @@ reasoning_effort = "high"
 #[test]
 fn print_cli_thinking_overrides_project_runtime_reasoning_effort() {
     let temp = TempDir::new().expect("tempdir");
-    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    std::fs::write(
-        temp.path().join(".neo/config.toml"),
-        r#"
+    write_openai_reasoning_model_catalog(&temp);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(temp.path().join(".neo/config.toml"))
+        .expect("open config")
+        .write_all(
+            br#"
+
 [runtime]
 reasoning_effort = "low"
 "#,
-    )
-    .expect("write config");
+        )
+        .expect("append config");
     let server = MockSseServer::start(vec![openai_response_sse(
         "resp-cli-thinking",
         "thinking configured",
@@ -2647,15 +2765,19 @@ reasoning_effort = "low"
 #[test]
 fn print_cli_thinking_off_disables_project_runtime_reasoning_effort() {
     let temp = TempDir::new().expect("tempdir");
-    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    std::fs::write(
-        temp.path().join(".neo/config.toml"),
-        r#"
+    write_openai_reasoning_model_catalog(&temp);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(temp.path().join(".neo/config.toml"))
+        .expect("open config")
+        .write_all(
+            br#"
+
 [runtime]
 reasoning_effort = "high"
 "#,
-    )
-    .expect("write config");
+        )
+        .expect("append config");
     let server = MockSseServer::start(vec![openai_response_sse(
         "resp-cli-thinking-off",
         "thinking disabled",

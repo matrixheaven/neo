@@ -174,6 +174,9 @@ async fn dispatch_command(
             SessionCommand::ExportHtml { session_id } => {
                 session_commands::export_html(&session_id, config).await
             }
+            SessionCommand::ExportJson { session_id } => {
+                session_commands::export_json(&session_id, config).await
+            }
         },
         Some(Command::Skills { command }) => match command {
             SkillCommand::Show { path } => skill_commands::show(&path),

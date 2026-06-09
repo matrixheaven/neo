@@ -43,6 +43,7 @@ fn request_options_have_typed_defaults_and_preserve_metadata() {
         headers: BTreeMap::from([("x-neo-trace".to_owned(), "trace-1".to_owned())]),
         timeout: Some(Duration::from_secs(15)),
         reasoning_effort: Some(ReasoningEffort::High),
+        replay_reasoning: false,
         retries: Some(2),
         cache: CacheRetention::Long,
         session_id: Some("session-123".to_owned()),
@@ -53,6 +54,7 @@ fn request_options_have_typed_defaults_and_preserve_metadata() {
     assert_eq!(options.max_tokens, Some(4096));
     assert_eq!(options.timeout, Some(Duration::from_secs(15)));
     assert_eq!(options.reasoning_effort, Some(ReasoningEffort::High));
+    assert!(!options.replay_reasoning);
     assert_eq!(options.retries, Some(2));
     assert_eq!(options.cache, CacheRetention::Long);
     assert_eq!(options.session_id.as_deref(), Some("session-123"));
@@ -81,6 +83,7 @@ fn request_options_default_to_short_cache_without_transport_overrides() {
     assert!(options.headers.is_empty());
     assert_eq!(options.timeout, None);
     assert_eq!(options.reasoning_effort, None);
+    assert!(options.replay_reasoning);
     assert_eq!(options.retries, Some(0));
     assert_eq!(options.cache, CacheRetention::Short);
     assert_eq!(options.session_id, None);

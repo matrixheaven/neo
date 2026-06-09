@@ -143,7 +143,7 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
         "contents": request
             .messages
             .iter()
-            .filter_map(content_body)
+            .filter_map(|message| content_body(message, request.options.replay_reasoning))
             .collect::<Result<Vec<_>, _>>()?,
     });
 
@@ -198,10 +198,13 @@ const fn thinking_budget_tokens(effort: ReasoningEffort) -> i32 {
     }
 }
 
-fn content_body(message: &ChatMessage) -> Option<Result<Value, ProviderError>> {
+fn content_body(
+    message: &ChatMessage,
+    replay_reasoning: bool,
+) -> Option<Result<Value, ProviderError>> {
     match message {
         ChatMessage::System { .. } => None,
-        ChatMessage::User { content } => Some(content_parts(content).map(|parts| {
+        ChatMessage::User { content } => Some(content_parts(content, true).map(|parts| {
             json!({
                 "role": "user",
                 "parts": parts,
@@ -212,20 +215,22 @@ fn content_body(message: &ChatMessage) -> Option<Result<Value, ProviderError>> {
             tool_calls,
         } => {
             let tool_calls = tool_calls.clone();
-            Some(content_parts(content).map(move |mut parts| {
-                for tool_call in &tool_calls {
-                    parts.push(json!({
-                        "functionCall": {
-                            "name": tool_call.name,
-                            "args": tool_call.arguments,
-                        },
-                    }));
-                }
-                json!({
-                    "role": "model",
-                    "parts": parts,
-                })
-            }))
+            Some(
+                content_parts(content, replay_reasoning).map(move |mut parts| {
+                    for tool_call in &tool_calls {
+                        parts.push(json!({
+                            "functionCall": {
+                                "name": tool_call.name,
+                                "args": tool_call.arguments,
+                            },
+                        }));
+                    }
+                    json!({
+                        "role": "model",
+                        "parts": parts,
+                    })
+                }),
+            )
         }
         ChatMessage::ToolResult {
             tool_call_id,
@@ -248,43 +253,57 @@ fn content_body(message: &ChatMessage) -> Option<Result<Value, ProviderError>> {
     }
 }
 
-fn content_parts(content: &[ContentPart]) -> Result<Vec<Value>, ProviderError> {
-    content
-        .iter()
-        .map(|part| match part {
-        ContentPart::Text { text } => Ok(json!({ "text": text })),
-            ContentPart::Thinking {
-                text,
-                signature,
-                redacted,
-            } => {
-                if *redacted {
-                    return Err(ProviderError::Unsupported(
-                        "Google Generative AI cannot replay redacted thinking blocks".to_owned(),
-                    ));
-                }
-                let mut part = json!({ "text": text, "thought": true });
-                if let Some(signature) = signature
-                    && !signature.is_empty()
-                {
-                    part["thoughtSignature"] = json!(signature);
-                }
-                Ok(part)
+fn content_parts(
+    content: &[ContentPart],
+    replay_reasoning: bool,
+) -> Result<Vec<Value>, ProviderError> {
+    let mut parts = Vec::new();
+    for part in content {
+        if let Some(part) = content_part(part, replay_reasoning) {
+            parts.push(part?);
+        }
+    }
+    Ok(parts)
+}
+
+fn content_part(
+    part: &ContentPart,
+    replay_reasoning: bool,
+) -> Option<Result<Value, ProviderError>> {
+    match part {
+        ContentPart::Thinking { .. } if !replay_reasoning => None,
+        ContentPart::Text { text } => Some(Ok(json!({ "text": text }))),
+        ContentPart::Thinking {
+            text,
+            signature,
+            redacted,
+        } => {
+            if *redacted {
+                return Some(Err(ProviderError::Unsupported(
+                    "Google Generative AI cannot replay redacted thinking blocks".to_owned(),
+                )));
             }
-            ContentPart::Image { mime_type, data } => match data {
-                ImageData::Base64(data) => Ok(json!({
-                    "inlineData": {
-                        "mimeType": mime_type,
-                        "data": data,
-                    },
-                })),
-                ImageData::Url(_) => Err(ProviderError::Unsupported(
-                    "Google Generative AI image URL content is unsupported; provide base64 image data"
-                        .to_owned(),
-                )),
-            },
-        })
-        .collect()
+            let mut part = json!({ "text": text, "thought": true });
+            if let Some(signature) = signature
+                && !signature.is_empty()
+            {
+                part["thoughtSignature"] = json!(signature);
+            }
+            Some(Ok(part))
+        }
+        ContentPart::Image { mime_type, data } => Some(match data {
+            ImageData::Base64(data) => Ok(json!({
+                "inlineData": {
+                    "mimeType": mime_type,
+                    "data": data,
+                },
+            })),
+            ImageData::Url(_) => Err(ProviderError::Unsupported(
+                "Google Generative AI image URL content is unsupported; provide base64 image data"
+                    .to_owned(),
+            )),
+        }),
+    }
 }
 
 fn text_parts(content: &[ContentPart]) -> Result<Vec<Value>, ProviderError> {

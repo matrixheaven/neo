@@ -11,6 +11,7 @@ use neo_agent_core::session::{
 };
 use neo_agent_core::{AgentMessage, Content};
 use neo_sdk::{ExportConversation, ExportMessage, HtmlExportOptions, export_html as render_html};
+use serde::Serialize;
 
 use crate::config::AppConfig;
 
@@ -184,6 +185,51 @@ pub async fn export_html(session_ref: &str, config: &AppConfig) -> anyhow::Resul
     render_messages_html(format!("neo session {session_id}"), &messages)
 }
 
+pub async fn export_json(session_ref: &str, config: &AppConfig) -> anyhow::Result<String> {
+    let artifact = export_json_artifact(session_ref, config).await?;
+    let mut json = serde_json::to_string_pretty(&artifact)?;
+    json.push('\n');
+    Ok(json)
+}
+
+pub(crate) async fn export_json_artifact(
+    session_ref: &str,
+    config: &AppConfig,
+) -> anyhow::Result<SessionExportJsonArtifact> {
+    let session_id = resolve_session_id(session_ref, config)?;
+    let path = session_path(&session_id, config)?;
+    anyhow::ensure!(path.exists(), "session {session_ref:?} does not exist");
+
+    let record = metadata_store(config)
+        .list()
+        .with_context(|| {
+            format!(
+                "failed to read sessions directory {}",
+                config.sessions_dir.display()
+            )
+        })?
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .ok_or_else(|| anyhow::anyhow!("session {session_ref:?} does not exist"))?;
+    let messages = JsonlSessionReader::replay_messages(path)
+        .await
+        .with_context(|| format!("failed to replay session {session_ref}"))?;
+
+    Ok(SessionExportJsonArtifact {
+        format: "neo.session.export_json",
+        schema_version: 1,
+        metadata: SessionExportJsonMetadata {
+            id: record.id,
+            name: record.name,
+            summary: record.summary,
+            parent_id: record.parent_id,
+            children: record.children,
+            message_count: messages.len(),
+        },
+        messages,
+    })
+}
+
 pub async fn export_html_file(input_path: &Path, output_path: &Path) -> anyhow::Result<()> {
     let messages = JsonlSessionReader::replay_messages(input_path)
         .await
@@ -297,6 +343,27 @@ fn session_id_from_jsonl_path(
 pub(crate) struct SessionTreeRecord {
     pub record: SessionRecord,
     pub depth: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SessionExportJsonArtifact {
+    pub format: &'static str,
+    pub schema_version: u32,
+    pub metadata: SessionExportJsonMetadata,
+    pub messages: Vec<AgentMessage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SessionExportJsonMetadata {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub children: Vec<String>,
+    pub message_count: usize,
 }
 
 pub(crate) fn tree_order_sessions(sessions: &[SessionRecord]) -> Vec<SessionTreeRecord> {

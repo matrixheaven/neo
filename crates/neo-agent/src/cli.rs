@@ -275,6 +275,9 @@ pub enum SessionCommand {
     ExportHtml {
         session_id: String,
     },
+    ExportJson {
+        session_id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

@@ -145,7 +145,7 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
         "messages": request
             .messages
             .iter()
-            .filter_map(message_body)
+            .filter_map(|message| message_body(message, request.options.replay_reasoning))
             .collect::<Result<Vec<_>, _>>()?,
     });
 
@@ -194,7 +194,10 @@ const fn thinking_budget_tokens(effort: ReasoningEffort) -> u32 {
     }
 }
 
-fn message_body(message: &ChatMessage) -> Option<Result<Value, ProviderError>> {
+fn message_body(
+    message: &ChatMessage,
+    replay_reasoning: bool,
+) -> Option<Result<Value, ProviderError>> {
     match message {
         ChatMessage::System { .. } => None,
         ChatMessage::User { content } => Some(user_content(content).map(|content| {
@@ -206,12 +209,14 @@ fn message_body(message: &ChatMessage) -> Option<Result<Value, ProviderError>> {
         ChatMessage::Assistant {
             content,
             tool_calls,
-        } => Some(assistant_content(content, tool_calls).map(|content| {
-            json!({
-                "role": "assistant",
-                "content": content,
-            })
-        })),
+        } => Some(
+            assistant_content(content, tool_calls, replay_reasoning).map(|content| {
+                json!({
+                    "role": "assistant",
+                    "content": content,
+                })
+            }),
+        ),
         ChatMessage::ToolResult {
             tool_call_id,
             content,
@@ -241,6 +246,7 @@ fn user_content(content: &[ContentPart]) -> Result<Value, ProviderError> {
 fn assistant_content(
     content: &[ContentPart],
     tool_calls: &[crate::ToolCall],
+    replay_reasoning: bool,
 ) -> Result<Value, ProviderError> {
     let mut parts = Vec::new();
     for part in content {
@@ -249,7 +255,7 @@ fn assistant_content(
                 text,
                 signature,
                 redacted: true,
-            } => {
+            } if replay_reasoning => {
                 let Some(signature) = signature.as_deref().filter(|value| !value.is_empty()) else {
                     return Err(ProviderError::Stream(
                         "Anthropic redacted thinking replay requires a signature".to_owned(),
@@ -262,7 +268,7 @@ fn assistant_content(
                 text,
                 signature: Some(signature),
                 redacted: false,
-            } if !text.is_empty() && !signature.is_empty() => {
+            } if replay_reasoning && !text.is_empty() && !signature.is_empty() => {
                 parts.push(json!({
                     "type": "thinking",
                     "thinking": text,
@@ -272,7 +278,7 @@ fn assistant_content(
             ContentPart::Text { text }
             | ContentPart::Thinking {
                 text,
-                signature: _,
+                signature: None,
                 redacted: false,
             } if !text.is_empty() => {
                 parts.push(json!({ "type": "text", "text": text }));

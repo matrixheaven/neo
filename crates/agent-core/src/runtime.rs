@@ -69,6 +69,7 @@ pub struct AgentConfig {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub replay_reasoning: bool,
     pub tools: Vec<ToolSpec>,
     pub steering_queue_mode: QueueMode,
     pub follow_up_queue_mode: QueueMode,
@@ -109,6 +110,7 @@ impl AgentConfig {
             temperature: None,
             max_tokens: None,
             reasoning_effort: None,
+            replay_reasoning: true,
             tools: Vec::new(),
             steering_queue_mode: QueueMode::All,
             follow_up_queue_mode: QueueMode::All,
@@ -525,7 +527,13 @@ fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {
     } else {
         context.messages.clone()
     };
-    messages.extend(context_messages.iter().map(AgentMessage::to_chat_message));
+    messages.extend(context_messages.iter().map(|message| {
+        if config.replay_reasoning {
+            message.to_chat_message()
+        } else {
+            without_reasoning_content(message.to_chat_message())
+        }
+    }));
     ChatRequest {
         model: config.model.clone(),
         messages,
@@ -534,9 +542,44 @@ fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {
             temperature: config.temperature,
             max_tokens: config.max_tokens,
             reasoning_effort: config.reasoning_effort,
+            replay_reasoning: config.replay_reasoning,
             ..RequestOptions::default()
         },
     }
+}
+
+fn without_reasoning_content(message: ChatMessage) -> ChatMessage {
+    match message {
+        ChatMessage::System { content } => ChatMessage::System {
+            content: filter_reasoning(content),
+        },
+        ChatMessage::User { content } => ChatMessage::User {
+            content: filter_reasoning(content),
+        },
+        ChatMessage::Assistant {
+            content,
+            tool_calls,
+        } => ChatMessage::Assistant {
+            content: filter_reasoning(content),
+            tool_calls,
+        },
+        ChatMessage::ToolResult {
+            tool_call_id,
+            content,
+            is_error,
+        } => ChatMessage::ToolResult {
+            tool_call_id,
+            content: filter_reasoning(content),
+            is_error,
+        },
+    }
+}
+
+fn filter_reasoning(content: Vec<neo_ai::ContentPart>) -> Vec<neo_ai::ContentPart> {
+    content
+        .into_iter()
+        .filter(|part| !matches!(part, neo_ai::ContentPart::Thinking { .. }))
+        .collect()
 }
 
 fn validate_model_capabilities(request: &ChatRequest) -> Result<(), AiError> {

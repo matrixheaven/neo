@@ -256,8 +256,10 @@ enum ImplementedSurface {
     McpToolAdapterBoundary,
     StdioMcpProcessAdapter,
     HttpMcpJsonSubscribeEventReader,
+    McpSubscribeEventStreamUrl,
     ExtensionLifecycleCommands,
     SessionMetadataBranching,
+    SessionExportJson,
     InteractiveSessionPicker,
     InteractiveModelPicker,
     InteractiveSessionFork,
@@ -266,7 +268,9 @@ enum ImplementedSurface {
     TuiPasteBuffering,
     TuiTranscriptSelectionCopy,
     TerminalImageProtocol,
+    TuiSixelImageProtocol,
     AiAnthropicGoogleThinkingPayloads,
+    AiReasoningReplayControl,
 }
 
 #[derive(Debug, Clone)]
@@ -285,8 +289,10 @@ struct ParitySources {
     tui_app: String,
     tui_components: String,
     tui_image: String,
+    ai_options: String,
     anthropic: String,
     google: String,
+    session_commands: String,
 }
 
 impl ParitySources {
@@ -301,8 +307,10 @@ impl ParitySources {
             tui_app: read_tui_source(root, &["app.rs"])?,
             tui_components: read_tui_source(root, &["components.rs"])?,
             tui_image: read_tui_source(root, &["image.rs"])?,
+            ai_options: read_crate_source(root, "ai", &["options.rs"])?,
             anthropic: read_ai_provider_source(root, "anthropic.rs")?,
             google: read_ai_provider_source(root, "google.rs")?,
+            session_commands: read_neo_agent_source(root, &["session_commands.rs"])?,
         })
     }
 }
@@ -311,106 +319,149 @@ impl ParityCodeTruth {
     fn load(root: &Path) -> Result<Self> {
         let sources = ParitySources::load(root)?;
         let mut implemented = BTreeSet::new();
-
-        if sources.mcp.contains("trait McpToolAdapter") && sources.mcp.contains("McpToolProvider") {
-            implemented.insert(ImplementedSurface::McpToolAdapterBoundary);
-        }
-        if sources.mcp.contains("McpStdioToolAdapter")
-            && sources.mcp.contains("tools/list")
-            && sources.mcp.contains("tools/call")
-        {
-            implemented.insert(ImplementedSurface::StdioMcpProcessAdapter);
-        }
-        if sources.mcp.contains("start_resource_event_reader") {
-            implemented.insert(ImplementedSurface::HttpMcpJsonSubscribeEventReader);
-        }
-        if sources.cli.contains("Status")
-            && sources.cli.contains("Enable")
-            && sources.cli.contains("Disable")
-            && sources.cli.contains("ExtensionCommand")
-        {
-            implemented.insert(ImplementedSurface::ExtensionLifecycleCommands);
-        }
-        if sources.session.contains("SessionMetadataStore")
-            && sources.session.contains("pub fn fork")
-            && sources.session.contains("pub fn rename")
-        {
-            implemented.insert(ImplementedSurface::SessionMetadataBranching);
-        }
-        if sources.interactive.contains("open_session_picker")
-            && sources.interactive.contains("load_selected_session")
-            && sources.interactive.contains("session_catalog_for_config")
-            && sources.input.contains("SessionPickerOpen")
-        {
-            implemented.insert(ImplementedSurface::InteractiveSessionPicker);
-        }
-        if sources.interactive.contains("open_model_picker")
-            && sources.interactive.contains("apply_selected_model")
-            && sources.interactive.contains("model_catalog_for_config")
-            && sources.input.contains("ModelPickerOpen")
-        {
-            implemented.insert(ImplementedSurface::InteractiveModelPicker);
-        }
-        if sources.interactive.contains("fork_selected_session")
-            && sources.interactive.contains("fork_session_transcript")
-            && sources.input.contains("SessionFork")
-            && sources.input.contains("tui.session.fork")
-        {
-            implemented.insert(ImplementedSurface::InteractiveSessionFork);
-        }
-        if sources.runtime.contains("with_before_tool_call")
-            && sources.runtime.contains("with_after_tool_call")
-            && sources.runtime.contains("with_queue_modes")
-            && sources.runtime.contains("queue_steering_message")
-        {
-            implemented.insert(ImplementedSurface::RuntimeHooksAndQueues);
-        }
-        if sources.tui_app.contains("DiffAdded")
-            && sources.tui_app.contains("DiffRemoved")
-            && sources.tui_components.contains("transcript_line_style")
-        {
-            implemented.insert(ImplementedSurface::TuiUnifiedDiffRenderer);
-        }
-        if sources.input.contains("InputParser")
-            && sources.input.contains("BRACKETED_PASTE_START")
-            && sources.input.contains("BRACKETED_PASTE_END")
-        {
-            implemented.insert(ImplementedSurface::TuiPasteBuffering);
-        }
-        if sources.tui_app.contains("TranscriptSelection")
-            && sources.tui_app.contains("copy_selection")
-            && sources.tui_app.contains("copy_selected_transcript_text")
-            && sources.tui_components.contains("with_selection")
-            && sources.input.contains("TranscriptSelectionStart")
-            && sources.input.contains("TranscriptCopySelection")
-            && sources.input.contains("tui.transcript.copySelection")
-            && sources
-                .interactive
-                .contains("copy_transcript_selection_to_clipboard")
-        {
-            implemented.insert(ImplementedSurface::TuiTranscriptSelectionCopy);
-        }
-        if terminal_image_protocol_symbols_exist(&[
-            &sources.input,
-            &sources.tui_app,
-            &sources.tui_components,
-            &sources.tui_image,
-        ]) {
-            implemented.insert(ImplementedSurface::TerminalImageProtocol);
-        }
-        if sources.anthropic.contains("thinking_budget_tokens")
-            && sources.anthropic.contains("\"budget_tokens\"")
-            && sources.google.contains("thinking_budget_tokens")
-            && sources.google.contains("\"thinkingConfig\"")
-        {
-            implemented.insert(ImplementedSurface::AiAnthropicGoogleThinkingPayloads);
-        }
+        insert_backend_surfaces(&sources, &mut implemented);
+        insert_interactive_surfaces(&sources, &mut implemented);
+        insert_tui_surfaces(&sources, &mut implemented);
+        insert_ai_surfaces(&sources, &mut implemented);
 
         Ok(Self { implemented })
     }
 
     fn has(&self, surface: ImplementedSurface) -> bool {
         self.implemented.contains(&surface)
+    }
+}
+
+fn insert_backend_surfaces(
+    sources: &ParitySources,
+    implemented: &mut BTreeSet<ImplementedSurface>,
+) {
+    if sources.mcp.contains("trait McpToolAdapter") && sources.mcp.contains("McpToolProvider") {
+        implemented.insert(ImplementedSurface::McpToolAdapterBoundary);
+    }
+    if sources.mcp.contains("McpStdioToolAdapter")
+        && sources.mcp.contains("tools/list")
+        && sources.mcp.contains("tools/call")
+    {
+        implemented.insert(ImplementedSurface::StdioMcpProcessAdapter);
+    }
+    if sources.mcp.contains("start_resource_event_reader") {
+        implemented.insert(ImplementedSurface::HttpMcpJsonSubscribeEventReader);
+    }
+    if sources.mcp.contains("resource_event_stream_url")
+        && sources.mcp.contains("eventStreamUrl")
+        && sources.mcp.contains("event_stream_url")
+        && sources.mcp.contains("event_url")
+    {
+        implemented.insert(ImplementedSurface::McpSubscribeEventStreamUrl);
+    }
+    if sources.cli.contains("Status")
+        && sources.cli.contains("Enable")
+        && sources.cli.contains("Disable")
+        && sources.cli.contains("ExtensionCommand")
+    {
+        implemented.insert(ImplementedSurface::ExtensionLifecycleCommands);
+    }
+    if sources.session.contains("SessionMetadataStore")
+        && sources.session.contains("pub fn fork")
+        && sources.session.contains("pub fn rename")
+    {
+        implemented.insert(ImplementedSurface::SessionMetadataBranching);
+    }
+    if sources.session_commands.contains("export_json")
+        && sources.session_commands.contains("export_json_artifact")
+        && sources.session_commands.contains("neo.session.export_json")
+    {
+        implemented.insert(ImplementedSurface::SessionExportJson);
+    }
+    if sources.runtime.contains("with_before_tool_call")
+        && sources.runtime.contains("with_after_tool_call")
+        && sources.runtime.contains("with_queue_modes")
+        && sources.runtime.contains("queue_steering_message")
+    {
+        implemented.insert(ImplementedSurface::RuntimeHooksAndQueues);
+    }
+}
+
+fn insert_interactive_surfaces(
+    sources: &ParitySources,
+    implemented: &mut BTreeSet<ImplementedSurface>,
+) {
+    if sources.interactive.contains("open_session_picker")
+        && sources.interactive.contains("load_selected_session")
+        && sources.interactive.contains("session_catalog_for_config")
+        && sources.input.contains("SessionPickerOpen")
+    {
+        implemented.insert(ImplementedSurface::InteractiveSessionPicker);
+    }
+    if sources.interactive.contains("open_model_picker")
+        && sources.interactive.contains("apply_selected_model")
+        && sources.interactive.contains("model_catalog_for_config")
+        && sources.input.contains("ModelPickerOpen")
+    {
+        implemented.insert(ImplementedSurface::InteractiveModelPicker);
+    }
+    if sources.interactive.contains("fork_selected_session")
+        && sources.interactive.contains("fork_session_transcript")
+        && sources.input.contains("SessionFork")
+        && sources.input.contains("tui.session.fork")
+    {
+        implemented.insert(ImplementedSurface::InteractiveSessionFork);
+    }
+}
+
+fn insert_tui_surfaces(sources: &ParitySources, implemented: &mut BTreeSet<ImplementedSurface>) {
+    if sources.tui_app.contains("DiffAdded")
+        && sources.tui_app.contains("DiffRemoved")
+        && sources.tui_components.contains("transcript_line_style")
+    {
+        implemented.insert(ImplementedSurface::TuiUnifiedDiffRenderer);
+    }
+    if sources.input.contains("InputParser")
+        && sources.input.contains("BRACKETED_PASTE_START")
+        && sources.input.contains("BRACKETED_PASTE_END")
+    {
+        implemented.insert(ImplementedSurface::TuiPasteBuffering);
+    }
+    if sources.tui_app.contains("TranscriptSelection")
+        && sources.tui_app.contains("copy_selection")
+        && sources.tui_app.contains("copy_selected_transcript_text")
+        && sources.tui_components.contains("with_selection")
+        && sources.input.contains("TranscriptSelectionStart")
+        && sources.input.contains("TranscriptCopySelection")
+        && sources.input.contains("tui.transcript.copySelection")
+        && sources
+            .interactive
+            .contains("copy_transcript_selection_to_clipboard")
+    {
+        implemented.insert(ImplementedSurface::TuiTranscriptSelectionCopy);
+    }
+    if terminal_image_protocol_symbols_exist(&[
+        &sources.input,
+        &sources.tui_app,
+        &sources.tui_components,
+        &sources.tui_image,
+    ]) {
+        implemented.insert(ImplementedSurface::TerminalImageProtocol);
+    }
+    if sources.tui_image.contains("encode_sixel_image")
+        && sources.tui_image.contains("SixelImageOptions")
+        && sources.tui_image.contains("SixelPaletteColor")
+    {
+        implemented.insert(ImplementedSurface::TuiSixelImageProtocol);
+    }
+}
+
+fn insert_ai_surfaces(sources: &ParitySources, implemented: &mut BTreeSet<ImplementedSurface>) {
+    if sources.anthropic.contains("thinking_budget_tokens")
+        && sources.anthropic.contains("\"budget_tokens\"")
+        && sources.google.contains("thinking_budget_tokens")
+        && sources.google.contains("\"thinkingConfig\"")
+    {
+        implemented.insert(ImplementedSurface::AiAnthropicGoogleThinkingPayloads);
+    }
+    if sources.ai_options.contains("replay_reasoning") {
+        implemented.insert(ImplementedSurface::AiReasoningReplayControl);
     }
 }
 
@@ -693,6 +744,26 @@ fn stale_backend_gap_claim_violation(
         return Some("stale HTTP MCP JSON subscribe event gap claim");
     }
 
+    if code_truth.has(ImplementedSurface::McpSubscribeEventStreamUrl)
+        && normalized.contains("mcp")
+        && normalized.contains("subscribe")
+        && (normalized.contains("event stream url")
+            || normalized.contains("event-stream url")
+            || normalized.contains("event-channel url")
+            || normalized.contains("event channel url")
+            || normalized.contains("eventstreamurl")
+            || normalized.contains("event_stream_url")
+            || normalized.contains("event_url"))
+        && (normalized.contains("cannot")
+            || normalized.contains("can't")
+            || normalized.contains("not implemented")
+            || normalized.contains("future work")
+            || normalized.contains("missing")
+            || normalized.contains("yet"))
+    {
+        return Some("stale MCP subscribe event URL gap claim");
+    }
+
     if code_truth.has(ImplementedSurface::ExtensionLifecycleCommands)
         && normalized.contains("extension lifecycle")
         && (normalized.contains("do not document")
@@ -713,6 +784,17 @@ fn stale_backend_gap_claim_violation(
             || normalized.contains("not implemented"))
     {
         return Some("stale session branching gap claim");
+    }
+
+    if code_truth.has(ImplementedSurface::SessionExportJson)
+        && normalized.contains("session")
+        && (normalized.contains("export-json") || normalized.contains("export json"))
+        && (normalized.contains("future work")
+            || normalized.contains("missing")
+            || normalized.contains("not implemented")
+            || normalized.contains("remain"))
+    {
+        return Some("stale session export-json gap claim");
     }
 
     if code_truth.has(ImplementedSurface::RuntimeHooksAndQueues)
@@ -802,6 +884,12 @@ fn stale_tui_gap_claim_violation(
         return Some("stale terminal image protocol gap claim");
     }
 
+    if code_truth.has(ImplementedSurface::TuiSixelImageProtocol)
+        && stale_sixel_image_protocol_claim(normalized)
+    {
+        return Some("stale Sixel image protocol gap claim");
+    }
+
     None
 }
 
@@ -849,6 +937,16 @@ fn stale_tui_transcript_selection_copy_claim(normalized: &str) -> bool {
 }
 
 fn stale_terminal_image_protocol_claim(normalized: &str) -> bool {
+    if normalized.contains("runtime detection")
+        || normalized.contains("runtime image-protocol detection")
+        || normalized.contains("detection/negotiation")
+        || normalized.contains("detection and negotiation")
+        || normalized.contains("capability detection")
+        || normalized.contains("capability negotiation")
+    {
+        return false;
+    }
+
     (normalized.contains("terminal image protocol")
         || normalized.contains("terminal image protocols")
         || (normalized.contains("image protocol")
@@ -869,6 +967,20 @@ fn stale_terminal_image_protocol_claim(normalized: &str) -> bool {
             || normalized.contains("unsupported"))
 }
 
+fn stale_sixel_image_protocol_claim(normalized: &str) -> bool {
+    normalized.contains("sixel")
+        && (normalized.contains("not implement")
+            || normalized.contains("not implemented")
+            || normalized.contains("missing")
+            || normalized.contains("future work")
+            || normalized.contains("remain"))
+        && !(normalized.contains("runtime")
+            || normalized.contains("detection")
+            || normalized.contains("negotiation")
+            || normalized.contains("integration")
+            || normalized.contains("renderer"))
+}
+
 fn stale_ai_gap_claim_violation(
     normalized: &str,
     code_truth: &ParityCodeTruth,
@@ -885,6 +997,21 @@ fn stale_ai_gap_claim_violation(
             || normalized.contains("not translate"))
     {
         return Some("stale Anthropic/Google thinking payload gap claim");
+    }
+
+    if code_truth.has(ImplementedSurface::AiReasoningReplayControl)
+        && (normalized.contains("reasoning replay")
+            || normalized.contains("replay signed reasoning")
+            || normalized.contains("signed reasoning replay")
+            || normalized.contains("thinking off"))
+        && (normalized.contains("cannot")
+            || normalized.contains("can't")
+            || normalized.contains("not implemented")
+            || normalized.contains("future work")
+            || normalized.contains("missing")
+            || normalized.contains("yet"))
+    {
+        return Some("stale reasoning replay-control gap claim");
     }
 
     None
@@ -1670,6 +1797,48 @@ mod tests {
     }
 
     #[test]
+    fn parity_validation_rejects_stale_mcp_event_stream_url_gap_after_symbols_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_dir = dir
+            .path()
+            .join("crates")
+            .join("agent-core")
+            .join("src")
+            .join("tools");
+        std::fs::create_dir_all(&source_dir).expect("mcp source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            source_dir.join("mcp.rs"),
+            concat!(
+                "fn start_resource_event_reader() {}\n",
+                "fn resource_event_stream_url() {",
+                " let _ = \"eventStreamUrl\";",
+                " let _ = \"event_stream_url\";",
+                " let _ = \"event_url\";",
+                " }\n",
+            ),
+        )
+        .expect("write mcp source");
+        std::fs::write(
+            dir.path()
+                .join("docs")
+                .join("gap")
+                .join("neo-agent-core.md"),
+            "MCP JSON subscribe ACK cannot provide alternate event-channel URLs yet.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/neo-agent-core.md:1 contains stale MCP subscribe event URL gap claim: MCP JSON subscribe ACK cannot provide alternate event-channel URLs yet.".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn parity_validation_rejects_stale_extension_lifecycle_gap_after_commands_exist() {
         let dir = tempfile::tempdir().expect("tempdir");
         let source_dir = dir.path().join("crates").join("neo-agent").join("src");
@@ -2081,6 +2250,95 @@ mod tests {
         let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
 
         assert_eq!(errors, Vec::<String>::new());
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_sixel_gap_after_encoder_symbols_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tui_src = dir.path().join("crates").join("tui").join("src");
+        std::fs::create_dir_all(&tui_src).expect("tui source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            tui_src.join("image.rs"),
+            concat!(
+                "pub struct SixelImageOptions;\n",
+                "pub struct SixelPaletteColor;\n",
+                "pub fn encode_sixel_image() {}\n",
+            ),
+        )
+        .expect("write tui image source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("tui.md"),
+            "Sixel output remains not implemented.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/tui.md:1 contains stale Sixel image protocol gap claim: Sixel output remains not implemented.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_session_export_json_gap_after_symbols_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let agent_src = dir.path().join("crates").join("neo-agent").join("src");
+        std::fs::create_dir_all(&agent_src).expect("neo-agent source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            agent_src.join("session_commands.rs"),
+            concat!(
+                "pub async fn export_json() {}\n",
+                "pub async fn export_json_artifact() {}\n",
+                "const FORMAT: &str = \"neo.session.export_json\";\n",
+            ),
+        )
+        .expect("write session commands source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("neo-agent.md"),
+            "Local session export-json remains future work.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/neo-agent.md:1 contains stale session export-json gap claim: Local session export-json remains future work.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_reasoning_replay_control_gap_after_symbols_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ai_src = dir.path().join("crates").join("ai").join("src");
+        std::fs::create_dir_all(&ai_src).expect("ai source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            ai_src.join("options.rs"),
+            "pub struct RequestOptions { pub replay_reasoning: bool }\n",
+        )
+        .expect("write ai options source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("neo-ai.md"),
+            "Thinking off cannot suppress signed reasoning replay yet.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/neo-ai.md:1 contains stale reasoning replay-control gap claim: Thinking off cannot suppress signed reasoning replay yet.".to_string()
+            ]
+        );
     }
 
     #[test]

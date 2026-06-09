@@ -7,7 +7,7 @@
   `--mode`/`NEO_MODE`, `--offline`/`NEO_OFFLINE`, and `--verbose`.
 - Commands: `print`, `run`, `resume`, `sessions list`, `sessions show`,
   `sessions tree`, `sessions rename`, `sessions fork`, `sessions compact`,
-  `sessions export-html`, `skills show`, `extensions list`,
+  `sessions export-html`, `sessions export-json`, `skills show`, `extensions list`,
   `extensions install`, `extensions update`, `extensions uninstall`,
   `extensions status`, `extensions enable`, `extensions disable`,
   `extensions call`, `config show`, `config set`,
@@ -32,7 +32,7 @@
   and in-directory JSONL paths, compact sessions with a deterministic transcript
   summary event, store deterministic local branch summaries, render
   a local parent/child tree, and can export replayed messages to standalone
-  HTML.
+  HTML or a stable local JSON artifact without leaking absolute session paths.
 - `skills show` loads TOML-frontmatter skill files through `neo-sdk`.
   Provider-backed turns auto-discover project `.neo/skills` and user-global
   `~/.neo/skills`, load explicit `--skill <PATH>` entries, and preserve
@@ -108,7 +108,8 @@
   capabilities grow.
 - RPC mode supports `get_state`, local prompt-template `get_commands`,
   `prompt`, JSONL-backed `get_messages`, and local `sessions.list`,
-  `sessions.tree`, `sessions.get`, `sessions.export_html`, and
+  `sessions.tree`, `sessions.get`, `sessions.export_html`,
+  `sessions.export_json`, and
   `set_session_name` payloads.
   `get_commands`
   exposes configured, project, and user-global prompt-template slash commands
@@ -118,7 +119,9 @@
   session resolver. `sessions.get` returns the session metadata, child ids,
   JSONL path, and replayed messages; `sessions.export_html` returns the
   resolved session id plus the same standalone sanitized HTML used by
-  `sessions export-html`; `set_session_name` updates the same local session
+  `sessions export-html`; `sessions.export_json` returns a local-only portable
+  JSON artifact with session metadata and replayed messages but no hosted share
+  URL or absolute JSONL path; `set_session_name` updates the same local session
   metadata used by `sessions rename` after resolving an existing session.
   State reports real project/session counts and omits unsupported streaming
   state.
