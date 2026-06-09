@@ -117,6 +117,27 @@ default_model = "claude-sonnet-4-5"
 }
 
 #[test]
+fn mode_rpc_flag_uses_the_real_rpc_loop_without_subcommand() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join(".neo/sessions")).expect("create sessions");
+    std::fs::write(temp.path().join(".neo/sessions/alpha.jsonl"), "{}\n").expect("write session");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).args(["--mode", "rpc"]);
+    let stdout = run_with_stdin(
+        command,
+        r#"{"type":"request","id":"state-mode-rpc","method":"get_state","params":{}}"#,
+    );
+
+    let messages = parse_jsonl(&stdout);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["type"], "response");
+    assert_eq!(messages[0]["id"], "state-mode-rpc");
+    assert_eq!(messages[0]["result"]["session_count"], 1);
+    assert_eq!(messages[0]["result"]["mode"], "rpc");
+}
+
+#[test]
 fn rpc_get_messages_replays_session_jsonl_messages() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = temp.path().join(".neo/sessions");

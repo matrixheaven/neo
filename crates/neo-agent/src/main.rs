@@ -186,6 +186,9 @@ async fn dispatch_command(
         },
         Some(Command::Rpc) => rpc_mode::execute(config).await,
         None => {
+            if config.defaults.mode.eq_ignore_ascii_case("rpc") {
+                return rpc_mode::execute(config).await;
+            }
             let startup = if resume_picker {
                 modes::interactive::StartupAction::OpenSessionPicker
             } else {
