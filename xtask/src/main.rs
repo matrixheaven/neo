@@ -255,6 +255,7 @@ fn production_scan_files(root: &Path) -> Result<Vec<PathBuf>> {
 enum ImplementedSurface {
     McpToolAdapterBoundary,
     StdioMcpProcessAdapter,
+    HttpMcpJsonSubscribeEventReader,
     ExtensionLifecycleCommands,
     SessionMetadataBranching,
     InteractiveSessionPicker,
@@ -264,6 +265,7 @@ enum ImplementedSurface {
     TuiUnifiedDiffRenderer,
     TuiPasteBuffering,
     TuiTranscriptSelectionCopy,
+    TerminalImageProtocol,
     AiAnthropicGoogleThinkingPayloads,
 }
 
@@ -282,6 +284,7 @@ struct ParitySources {
     input: String,
     tui_app: String,
     tui_components: String,
+    tui_image: String,
     anthropic: String,
     google: String,
 }
@@ -297,6 +300,7 @@ impl ParitySources {
             input: read_tui_source(root, &["input.rs"])?,
             tui_app: read_tui_source(root, &["app.rs"])?,
             tui_components: read_tui_source(root, &["components.rs"])?,
+            tui_image: read_tui_source(root, &["image.rs"])?,
             anthropic: read_ai_provider_source(root, "anthropic.rs")?,
             google: read_ai_provider_source(root, "google.rs")?,
         })
@@ -316,6 +320,9 @@ impl ParityCodeTruth {
             && sources.mcp.contains("tools/call")
         {
             implemented.insert(ImplementedSurface::StdioMcpProcessAdapter);
+        }
+        if sources.mcp.contains("start_resource_event_reader") {
+            implemented.insert(ImplementedSurface::HttpMcpJsonSubscribeEventReader);
         }
         if sources.cli.contains("Status")
             && sources.cli.contains("Enable")
@@ -383,6 +390,14 @@ impl ParityCodeTruth {
         {
             implemented.insert(ImplementedSurface::TuiTranscriptSelectionCopy);
         }
+        if terminal_image_protocol_symbols_exist(&[
+            &sources.input,
+            &sources.tui_app,
+            &sources.tui_components,
+            &sources.tui_image,
+        ]) {
+            implemented.insert(ImplementedSurface::TerminalImageProtocol);
+        }
         if sources.anthropic.contains("thinking_budget_tokens")
             && sources.anthropic.contains("\"budget_tokens\"")
             && sources.google.contains("thinking_budget_tokens")
@@ -397,6 +412,25 @@ impl ParityCodeTruth {
     fn has(&self, surface: ImplementedSurface) -> bool {
         self.implemented.contains(&surface)
     }
+}
+
+fn terminal_image_protocol_symbols_exist(sources: &[&str]) -> bool {
+    sources.iter().any(|source| {
+        source.contains("ImageProtocolError")
+            || source.contains("KittyGraphicsOptions")
+            || source.contains("Iterm2InlineImageOptions")
+            || source.contains("encode_kitty_graphics")
+            || source.contains("encode_iterm2_inline_image")
+            || source.contains("TerminalImageProtocol")
+            || source.contains("InlineImageProtocol")
+            || source.contains("KittyGraphicsProtocol")
+            || source.contains("Sixel")
+            || source.contains("Iterm2InlineImage")
+            || source.contains("render_inline_image_protocol")
+            || source.contains("terminal_image_protocol")
+            || source.contains("kitty_graphics_protocol")
+            || source.contains("sixel_protocol")
+    })
 }
 
 fn read_agent_core_source(root: &Path, parts: &[&str]) -> Result<String> {
@@ -642,6 +676,23 @@ fn stale_backend_gap_claim_violation(
         return Some("stale MCP process adapter gap claim");
     }
 
+    if code_truth.has(ImplementedSurface::HttpMcpJsonSubscribeEventReader)
+        && normalized.contains("mcp")
+        && normalized.contains("json")
+        && normalized.contains("subscribe")
+        && (normalized.contains("ack") || normalized.contains("resource update"))
+        && (normalized.contains("cannot receive")
+            || normalized.contains("can't receive")
+            || normalized.contains("does not receive")
+            || normalized.contains("not receive")
+            || normalized.contains("no update")
+            || normalized.contains("missing")
+            || normalized.contains("not implemented")
+            || normalized.contains("future work"))
+    {
+        return Some("stale HTTP MCP JSON subscribe event gap claim");
+    }
+
     if code_truth.has(ImplementedSurface::ExtensionLifecycleCommands)
         && normalized.contains("extension lifecycle")
         && (normalized.contains("do not document")
@@ -745,6 +796,12 @@ fn stale_tui_gap_claim_violation(
         return Some("stale TUI transcript selection copy gap claim");
     }
 
+    if code_truth.has(ImplementedSurface::TerminalImageProtocol)
+        && stale_terminal_image_protocol_claim(normalized)
+    {
+        return Some("stale terminal image protocol gap claim");
+    }
+
     None
 }
 
@@ -789,6 +846,27 @@ fn stale_tui_transcript_selection_copy_claim(normalized: &str) -> bool {
             || context.contains("future work")
             || context.contains("remain")
             || context.contains("gap"))
+}
+
+fn stale_terminal_image_protocol_claim(normalized: &str) -> bool {
+    (normalized.contains("terminal image protocol")
+        || normalized.contains("terminal image protocols")
+        || (normalized.contains("image protocol")
+            && (normalized.contains("no ")
+                || normalized.contains("without ")
+                || normalized.contains("not implement")
+                || normalized.contains("not implemented")))
+        || (normalized.contains("image protocols")
+            && (normalized.contains("no ")
+                || normalized.contains("without ")
+                || normalized.contains("not implement")
+                || normalized.contains("not implemented"))))
+        && (normalized.contains("not implement")
+            || normalized.contains("not implemented")
+            || normalized.contains("missing")
+            || normalized.contains("future work")
+            || normalized.contains("gap")
+            || normalized.contains("unsupported"))
 }
 
 fn stale_ai_gap_claim_violation(
@@ -1556,6 +1634,42 @@ mod tests {
     }
 
     #[test]
+    fn parity_validation_rejects_stale_http_mcp_json_subscribe_gap_after_event_reader_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_dir = dir
+            .path()
+            .join("crates")
+            .join("agent-core")
+            .join("src")
+            .join("tools");
+        std::fs::create_dir_all(&source_dir).expect("mcp source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            source_dir.join("mcp.rs"),
+            concat!(
+                "impl McpHttpToolAdapter {\n",
+                "  async fn start_resource_event_reader(&self) {}\n",
+                "}\n",
+            ),
+        )
+        .expect("write mcp source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("INDEX.md"),
+            "HTTP MCP JSON subscribe ACK cannot receive resource updates yet.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/INDEX.md:1 contains stale HTTP MCP JSON subscribe event gap claim: HTTP MCP JSON subscribe ACK cannot receive resource updates yet.".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn parity_validation_rejects_stale_extension_lifecycle_gap_after_commands_exist() {
         let dir = tempfile::tempdir().expect("tempdir");
         let source_dir = dir.path().join("crates").join("neo-agent").join("src");
@@ -1909,6 +2023,64 @@ mod tests {
                 "docs/gap/tui.md:1 contains stale TUI transcript selection copy gap claim: Selected transcript-region copy remains future work.".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_terminal_image_protocol_gap_after_symbols_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tui_src = dir.path().join("crates").join("tui").join("src");
+        std::fs::create_dir_all(&tui_src).expect("tui source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            tui_src.join("image.rs"),
+            concat!(
+                "pub enum ImageProtocolError {}\n",
+                "pub struct KittyGraphicsOptions;\n",
+                "pub fn encode_kitty_graphics() {}\n",
+                "pub fn encode_iterm2_inline_image() {}\n",
+            ),
+        )
+        .expect("write tui image source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("tui.md"),
+            "Terminal image protocols remain not implemented.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/tui.md:1 contains stale terminal image protocol gap claim: Terminal image protocols remain not implemented.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_allows_specific_unimplemented_image_protocol_gaps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tui_src = dir.path().join("crates").join("tui").join("src");
+        std::fs::create_dir_all(&tui_src).expect("tui source dir");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
+        std::fs::write(
+            tui_src.join("image.rs"),
+            concat!(
+                "pub enum ImageProtocolError {}\n",
+                "pub struct KittyGraphicsOptions;\n",
+                "pub fn encode_kitty_graphics() {}\n",
+            ),
+        )
+        .expect("write tui image source");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("tui.md"),
+            "Sixel and full renderer integration remain explicit image protocol gaps.\n",
+        )
+        .expect("write gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(errors, Vec::<String>::new());
     }
 
     #[test]

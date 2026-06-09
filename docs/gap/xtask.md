@@ -9,7 +9,8 @@
   local Markdown link validation for `README.md`, `docs/**/*.md`, and
   `examples/**/*.md`; production fake/local/placeholder guidance scans; and
   stale gap-claim scans for implemented MCP/session/extension, runtime hook,
-  TUI diff/paste, provider thinking-payload surfaces, and stale
+  HTTP MCP JSON subscribe event-reader, TUI diff/paste/terminal image protocol,
+  provider thinking-payload surfaces, and stale
   Anthropic/Google thinking-translation claims; TOML, JSON, and Rust
   example harness validation for the documented example artifacts; and
   `cargo check --manifest-path examples/rust/Cargo.toml
@@ -42,10 +43,13 @@ implementation symbols are present, including claims that Neo still does not
 translate reasoning effort into Anthropic/Google thinking payloads once both
 budget-backed adapters exist. It also rejects stale selected-transcript copy
 gap claims once `TranscriptSelection`, transcript copy keybindings, renderer
-highlighting, and live clipboard routing are present. It still allows honest
-gaps for hosted MCP management, remote MCP servers that require alternate
-notification channels, hosted share, OAuth login, image protocols, advanced
-diff affordances, and other surfaces that are not implemented.
+highlighting, and live clipboard routing are present, stale HTTP MCP JSON
+subscribe ACK claims once `start_resource_event_reader` exists, and stale
+terminal image-protocol claims once real terminal image protocol symbols land.
+It still allows honest gaps for hosted MCP management, remote MCP servers that
+require alternate notification channels, hosted share, OAuth login, image
+protocols, advanced diff affordances, and other surfaces that are not
+implemented.
 
 ## Pi Parity Pressure
 
