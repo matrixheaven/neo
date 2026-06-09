@@ -1258,6 +1258,7 @@ async fn tool_registry_for_config(config: &AppConfig) -> anyhow::Result<ToolRegi
             &extension_tools::default_extension_root(&config.project_dir),
             &extension_tools::default_extension_state_path(&config.project_dir),
             &config.extension_paths,
+            config.no_extensions,
         )
         .await?;
         for server in config.mcp.servers.iter().filter(|server| server.enabled) {
@@ -1590,6 +1591,7 @@ mod tests {
             prompt_templates: Vec::new(),
             skill_paths: Vec::new(),
             extension_paths: Vec::new(),
+            no_extensions: false,
             configured_prompt_templates: Vec::new(),
             no_prompt_templates: false,
             no_skills: false,
@@ -1659,6 +1661,7 @@ mod tests {
             prompt_templates: Vec::new(),
             skill_paths: Vec::new(),
             extension_paths: Vec::new(),
+            no_extensions: false,
             configured_prompt_templates: Vec::new(),
             no_prompt_templates: false,
             no_skills: false,

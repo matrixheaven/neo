@@ -3726,6 +3726,7 @@ mod tests {
             prompt_templates: Vec::new(),
             skill_paths: Vec::new(),
             extension_paths: Vec::new(),
+            no_extensions: false,
             configured_prompt_templates: Vec::new(),
             no_prompt_templates: false,
             no_skills: false,

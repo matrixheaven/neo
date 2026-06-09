@@ -47,6 +47,7 @@ pub struct ConfigOverrides {
     pub prompt_templates: Vec<String>,
     pub skill_paths: Vec<PathBuf>,
     pub extension_paths: Vec<PathBuf>,
+    pub no_extensions: bool,
     pub no_prompt_templates: bool,
     pub no_skills: bool,
     pub no_context_files: bool,
@@ -72,6 +73,7 @@ impl ConfigOverrides {
             prompt_templates: cli.prompt_template.clone(),
             skill_paths: cli.skill.clone(),
             extension_paths: cli.extension.clone(),
+            no_extensions: cli.no_extensions,
             no_prompt_templates: cli.no_prompt_templates,
             no_skills: cli.no_skills,
             no_context_files: cli.no_context_files,
@@ -244,6 +246,8 @@ pub struct AppConfig {
     pub skill_paths: Vec<PathBuf>,
     #[serde(skip)]
     pub extension_paths: Vec<PathBuf>,
+    #[serde(skip)]
+    pub no_extensions: bool,
     #[serde(skip)]
     pub configured_prompt_templates: Vec<String>,
     #[serde(skip)]
@@ -470,6 +474,7 @@ impl FileRuntimeCompactionConfig {
 }
 
 impl AppConfig {
+    #[allow(clippy::too_many_lines)]
     pub fn load(overrides: ConfigOverrides) -> anyhow::Result<Self> {
         let config_path = overrides.config_path.unwrap_or(find_config_path()?);
         let project_dir = config_path
@@ -563,6 +568,7 @@ impl AppConfig {
             prompt_templates: overrides.prompt_templates,
             skill_paths: overrides.skill_paths,
             extension_paths: overrides.extension_paths,
+            no_extensions: overrides.no_extensions,
             configured_prompt_templates,
             no_prompt_templates: overrides.no_prompt_templates,
             no_skills: overrides.no_skills,

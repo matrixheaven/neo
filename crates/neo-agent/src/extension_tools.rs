@@ -23,30 +23,28 @@ pub(crate) async fn register_enabled_extension_tools(
     root: &Path,
     state_path: &Path,
     explicit_paths: &[PathBuf],
+    no_extensions: bool,
 ) -> anyhow::Result<()> {
-    if !root.exists() {
-        register_explicit_extension_tools(registry, explicit_paths).await?;
-        return Ok(());
-    }
-
-    let lifecycle_store = ExtensionLifecycleStore::new(state_path);
-    for extension in ExtensionDiscovery::new(root)
-        .discover()
-        .with_context(|| format!("failed to discover extensions under {}", root.display()))?
-    {
-        let lifecycle = lifecycle_store.status(root, &extension.manifest.id)?;
-        if lifecycle.status == ExtensionStatus::Disabled {
-            continue;
-        }
-        for tool in discover_extension_tools(&extension).await? {
-            registry.register(ExtensionTool {
-                name: extension_tool_name(&extension.manifest.id, &tool.name),
-                description: tool.description,
-                input_schema: tool.input_schema,
-                extension_id: extension.manifest.id.clone(),
-                transport: extension.manifest.transport.clone(),
-                method: tool.method,
-            });
+    if !no_extensions && root.exists() {
+        let lifecycle_store = ExtensionLifecycleStore::new(state_path);
+        for extension in ExtensionDiscovery::new(root)
+            .discover()
+            .with_context(|| format!("failed to discover extensions under {}", root.display()))?
+        {
+            let lifecycle = lifecycle_store.status(root, &extension.manifest.id)?;
+            if lifecycle.status == ExtensionStatus::Disabled {
+                continue;
+            }
+            for tool in discover_extension_tools(&extension).await? {
+                registry.register(ExtensionTool {
+                    name: extension_tool_name(&extension.manifest.id, &tool.name),
+                    description: tool.description,
+                    input_schema: tool.input_schema,
+                    extension_id: extension.manifest.id.clone(),
+                    transport: extension.manifest.transport.clone(),
+                    method: tool.method,
+                });
+            }
         }
     }
     register_explicit_extension_tools(registry, explicit_paths).await?;

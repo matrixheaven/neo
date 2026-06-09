@@ -110,6 +110,9 @@ pub struct Cli {
     #[arg(short = 'e', long = "extension", global = true, value_name = "PATH")]
     pub extension: Vec<std::path::PathBuf>,
 
+    #[arg(long = "no-extensions", alias = "no_extensions", global = true)]
+    pub no_extensions: bool,
+
     #[arg(long, global = true)]
     pub no_prompt_templates: bool,
 

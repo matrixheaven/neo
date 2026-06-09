@@ -50,6 +50,7 @@ fn normalize_pi_style_args(
             Some("-np") => "--no-prompt-templates".into(),
             Some("-nc") => "--no-context-files".into(),
             Some("-ns") => "--no-skills".into(),
+            Some("-ne") => "--no-extensions".into(),
             Some("-xt") => "--exclude-tools".into(),
             _ => arg,
         })

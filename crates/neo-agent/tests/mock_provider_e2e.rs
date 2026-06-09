@@ -3158,11 +3158,76 @@ fn print_extension_flag_registers_explicit_extension_path_without_installing_it(
     );
 }
 
+#[test]
+fn print_no_extensions_disables_project_extensions_but_keeps_explicit_extension_flag() {
+    let temp = TempDir::new().expect("tempdir");
+    write_echo_extension(temp.path());
+    let explicit = temp.path().join("external-extension");
+    write_named_echo_extension_at(&explicit, "explicit_echo");
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-no-extensions",
+        "explicit extension only",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("--no-extensions")
+        .arg("--extension")
+        .arg(&explicit)
+        .args(["print", "show tools"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "explicit extension only\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    let tools = model_tool_names(&requests[0].body);
+    assert!(tools.contains(&"extension__explicit_echo__echo"));
+    assert!(!tools.contains(&"extension__echo__echo"));
+}
+
+#[test]
+fn print_pi_style_short_no_extensions_alias_disables_project_extensions() {
+    let temp = TempDir::new().expect("tempdir");
+    write_echo_extension(temp.path());
+    let server = MockSseServer::start(vec![openai_response_sse(
+        "resp-short-no-extensions",
+        "extensions disabled",
+    )]);
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .arg("--api-base")
+        .arg(&server.url)
+        .arg("-ne")
+        .args(["print", "show tools"]);
+
+    let stdout = run(command);
+
+    assert_eq!(stdout, "extensions disabled\n");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(!model_tool_names(&requests[0].body).contains(&"extension__echo__echo"));
+}
+
 fn write_echo_extension(root: &std::path::Path) -> std::path::PathBuf {
     write_echo_extension_at(&root.join(".neo/extensions/echo"))
 }
 
 fn write_echo_extension_at(extension: &std::path::Path) -> std::path::PathBuf {
+    write_named_echo_extension_at(extension, "echo")
+}
+
+fn write_named_echo_extension_at(
+    extension: &std::path::Path,
+    extension_id: &str,
+) -> std::path::PathBuf {
     std::fs::create_dir_all(extension).expect("create extension");
     let log = extension.join("extension-calls.jsonl");
     let script = extension.join("echo.py");
@@ -3214,15 +3279,16 @@ for line in sys.stdin:
         extension.join("neo-extension.toml"),
         format!(
             r#"
-id = "echo"
+id = "{extension_id}"
 name = "Echo"
 version = "0.1.0"
 
 [runner]
 command = "python3"
-args = [{}]
+args = [{script}]
 "#,
-            serde_json::to_string(&script).expect("script path json")
+            extension_id = extension_id,
+            script = serde_json::to_string(&script).expect("script path json")
         ),
     )
     .expect("write extension manifest");
