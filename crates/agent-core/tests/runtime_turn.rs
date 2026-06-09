@@ -305,12 +305,105 @@ async fn runtime_records_tool_calls_and_sends_tool_specs_to_model() {
 }
 
 #[tokio::test]
-async fn runtime_passes_reasoning_effort_into_chat_request_options() {
+async fn runtime_rejects_tools_when_model_lacks_tools_before_request() {
+    let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
+        stop_reason: neo_ai::StopReason::EndTurn,
+        usage: None,
+    }]);
+    let tool = ToolSpec::string_arg("read", "read file", "path", "file path");
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(model_with_capabilities(ModelCapabilities::chat()))
+            .with_tools(vec![tool]),
+        harness.client(),
+    );
+    let mut context = AgentContext::new();
+
+    let error = runtime
+        .run_turn(&mut context, AgentMessage::user_text("read README"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect_err("unsupported tools should fail before provider request");
+
+    assert!(matches!(
+        error,
+        AgentRuntimeError::Model(AiError::Configuration(_))
+    ));
+    assert!(error.to_string().contains("does not support tools"));
+    assert!(harness.requests().is_empty());
+}
+
+#[tokio::test]
+async fn runtime_rejects_image_content_when_model_lacks_images_before_request() {
+    let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
+        stop_reason: neo_ai::StopReason::EndTurn,
+        usage: None,
+    }]);
+    let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
+    let mut context = AgentContext::new();
+
+    let error = runtime
+        .run_turn(
+            &mut context,
+            AgentMessage::User {
+                content: vec![Content::Image {
+                    mime_type: "image/png".to_owned(),
+                    data: neo_agent_core::ImageRef::Url("https://example.test/cat.png".to_owned()),
+                }],
+            },
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect_err("unsupported images should fail before provider request");
+
+    assert!(matches!(
+        error,
+        AgentRuntimeError::Model(AiError::Configuration(_))
+    ));
+    assert!(error.to_string().contains("does not support image input"));
+    assert!(harness.requests().is_empty());
+}
+
+#[tokio::test]
+async fn runtime_rejects_reasoning_effort_when_model_lacks_reasoning_before_request() {
     let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
         stop_reason: neo_ai::StopReason::EndTurn,
         usage: None,
     }]);
     let mut config = AgentConfig::for_model(harness.model());
+    config.reasoning_effort = Some(ReasoningEffort::Low);
+    let runtime = AgentRuntime::new(config, harness.client());
+    let mut context = AgentContext::new();
+
+    let error = runtime
+        .run_turn(&mut context, AgentMessage::user_text("think lightly"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect_err("unsupported reasoning should fail before provider request");
+
+    assert!(matches!(
+        error,
+        AgentRuntimeError::Model(AiError::Configuration(_))
+    ));
+    assert!(error.to_string().contains("does not support reasoning"));
+    assert!(harness.requests().is_empty());
+}
+
+#[tokio::test]
+async fn runtime_passes_reasoning_effort_into_chat_request_options() {
+    let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
+        stop_reason: neo_ai::StopReason::EndTurn,
+        usage: None,
+    }]);
+    let mut config = AgentConfig::for_model(model_with_capabilities(ModelCapabilities {
+        reasoning: true,
+        ..ModelCapabilities::tool_chat()
+    }));
     config.reasoning_effort = Some(ReasoningEffort::Low);
     let runtime = AgentRuntime::new(config, harness.client());
     let mut context = AgentContext::new();
@@ -2788,6 +2881,15 @@ impl Tool for SleepEchoTool {
 struct DelayedHarness {
     model: ModelSpec,
     client: Arc<DelayedModelClient>,
+}
+
+fn model_with_capabilities(capabilities: ModelCapabilities) -> ModelSpec {
+    ModelSpec {
+        provider: ProviderId("capability-test".to_owned()),
+        model: "capability-test-model".to_owned(),
+        api: ApiKind::Local,
+        capabilities,
+    }
 }
 
 impl DelayedHarness {

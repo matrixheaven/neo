@@ -2,7 +2,8 @@ use std::{future::Future, path::PathBuf, sync::Arc};
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream, stream::FuturesUnordered};
 use neo_ai::{
-    AiStreamEvent, ChatRequest, ModelClient, ModelSpec, ReasoningEffort, RequestOptions, ToolSpec,
+    AiError, AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ModelClient, ModelSpec,
+    ReasoningEffort, RequestOptions, ToolSpec,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -538,6 +539,43 @@ fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {
     }
 }
 
+fn validate_model_capabilities(request: &ChatRequest) -> Result<(), AiError> {
+    let capabilities = &request.model.capabilities;
+    if !request.tools.is_empty() && !capabilities.tools {
+        return Err(AiError::Configuration(format!(
+            "model {}/{} does not support tools",
+            request.model.provider.0, request.model.model
+        )));
+    }
+    if request.options.reasoning_effort.is_some() && !capabilities.reasoning {
+        return Err(AiError::Configuration(format!(
+            "model {}/{} does not support reasoning",
+            request.model.provider.0, request.model.model
+        )));
+    }
+    if request_messages_contain_image(&request.messages) && !capabilities.images {
+        return Err(AiError::Configuration(format!(
+            "model {}/{} does not support image input",
+            request.model.provider.0, request.model.model
+        )));
+    }
+    Ok(())
+}
+
+fn request_messages_contain_image(messages: &[ChatMessage]) -> bool {
+    messages.iter().any(|message| {
+        let content = match message {
+            ChatMessage::System { content }
+            | ChatMessage::User { content }
+            | ChatMessage::Assistant { content, .. }
+            | ChatMessage::ToolResult { content, .. } => content,
+        };
+        content
+            .iter()
+            .any(|part| matches!(part, ContentPart::Image { .. }))
+    })
+}
+
 struct EventEmitter {
     sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
     context: AgentContext,
@@ -649,6 +687,7 @@ async fn run_agent_turn(
 
         let turn = emitter.context.turns.saturating_add(1);
         let request = chat_request(&config, &emitter.context);
+        validate_model_capabilities(&request)?;
         let assistant = run_model_turn(
             Arc::clone(&model),
             request,

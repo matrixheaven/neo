@@ -8,6 +8,9 @@
 - `AgentRuntime` consumes a `ModelClient`, converts context into
   `neo_ai::ChatRequest`, emits `AgentEvent` values, appends assistant/tool
   messages, and loops after `StopReason::ToolUse` when tools are registered.
+- Before calling a provider, `AgentRuntime` validates the selected
+  `ModelCapabilities` against the pending request and fails closed for image
+  input, tool schemas, or reasoning effort that the model does not advertise.
 - Runtime lifecycle events now include `RunStarted`, `MessageStarted`,
   `MessageFinished`, `TurnStarted`, `TurnFinished`, and `RunFinished`, so
   consumers can distinguish streamed provider message boundaries from whole-run

@@ -115,6 +115,11 @@ provider-specific non-OpenAI thinking stream mapping; those contracts remain
 future work until they can be represented without silently changing model
 behavior.
 
+`AgentRuntime` checks `ModelCapabilities` before issuing a provider request.
+Requests that include image content, tool schemas, or reasoning effort fail
+locally when the selected model does not advertise the matching capability, so
+unsupported combinations do not become provider-specific transport failures.
+
 ## Local Model Catalogs
 
 Neo supports strict local JSON model catalogs. They extend or replace
