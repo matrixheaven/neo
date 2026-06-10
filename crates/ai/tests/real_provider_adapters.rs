@@ -112,20 +112,20 @@ fn sse_response(events: &[Value]) -> String {
         write!(&mut body, "data: {event}\n\n").unwrap();
     }
     format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
         body.len(),
         body
     )
 }
 
 fn status_response(status: u16) -> String {
-    format!("HTTP/1.1 {status} Test\r\ncontent-length: 0\r\n\r\n")
+    format!("HTTP/1.1 {status} Test\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
 }
 
 fn json_response(value: &Value) -> String {
     let body = value.to_string();
     format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
         body.len(),
         body
     )

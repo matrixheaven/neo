@@ -1,4 +1,4 @@
-use std::net::TcpListener;
+use std::{net::TcpListener, path::Path};
 
 use neo_agent_core::{AgentEvent, AgentMessage};
 use neo_cloud::{CloudServer, Store};
@@ -16,7 +16,7 @@ async fn bootstrap_device_token_login_and_profile_sync_persist_in_sqlite() {
     let temp = TempDir::new().expect("tempdir");
     let database_path = temp.path().join("neo-cloud.sqlite");
     let store = Store::open(&database_path).await.expect("open store");
-    let server = spawn_server(store).await;
+    let server = spawn_server(store);
     let client = reqwest::Client::new();
 
     let bootstrap = client
@@ -87,7 +87,7 @@ async fn bootstrap_device_token_login_and_profile_sync_persist_in_sqlite() {
 
     drop(server);
     let store = Store::open(&database_path).await.expect("reopen store");
-    let server = spawn_server(store).await;
+    let server = spawn_server(store);
     let pulled = client
         .get(format!("{}/v1/profile", server.base_url))
         .bearer_auth(&device_login.access_token)
@@ -110,7 +110,7 @@ async fn profile_endpoints_require_a_valid_bearer_token() {
     let store = Store::open(&temp.path().join("neo-cloud.sqlite"))
         .await
         .expect("open store");
-    let server = spawn_server(store).await;
+    let server = spawn_server(store);
 
     let status = reqwest::Client::new()
         .get(format!("{}/v1/profile/status", server.base_url))
@@ -129,7 +129,7 @@ async fn hosted_sessions_share_and_public_artifacts_are_persisted_and_sanitized(
     let store = Store::open(&temp.path().join("neo-cloud.sqlite"))
         .await
         .expect("open store");
-    let server = spawn_server(store).await;
+    let server = spawn_server(store);
     let client = reqwest::Client::new();
     let token = bootstrap_access_token(&client, &server.base_url).await;
     let secret = "sk-test-secret-token";
@@ -145,9 +145,44 @@ async fn hosted_sessions_share_and_public_artifacts_are_persisted_and_sanitized(
         .expect("event json")
     );
 
-    let imported = client
-        .post(format!("{}/v1/sessions/import", server.base_url))
-        .bearer_auth(&token)
+    let imported = import_cloud_session(&client, &server.base_url, &token, jsonl).await;
+    assert!(imported.record.id.starts_with("cs_"));
+    assert_eq!(imported.record.local_session_id.as_deref(), Some("alpha"));
+    assert_eq!(imported.record.message_count, 1);
+
+    assert_listed_session_payload_is_sanitized(
+        &client,
+        &server.base_url,
+        &token,
+        &imported,
+        secret,
+        temp.path(),
+    )
+    .await;
+
+    let forked = fork_cloud_session(&client, &server.base_url, &token, &imported.record.id).await;
+    assert_eq!(
+        forked.record.remote_parent_id.as_deref(),
+        Some(imported.record.id.as_str())
+    );
+
+    let share = create_public_share(&client, &server.base_url, &token, &imported.record.id).await;
+    assert!(share.record.public);
+    assert!(share.html.contains("<!doctype html>"));
+    assert!(!share.html.contains(secret));
+
+    assert_public_share_artifacts(&client, &server.base_url, &share.record.id, secret).await;
+}
+
+async fn import_cloud_session(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    jsonl: String,
+) -> CloudImportSessionResponse {
+    client
+        .post(format!("{base_url}/v1/sessions/import"))
+        .bearer_auth(token)
         .json(&CloudImportSessionRequest {
             local_session_id: "alpha".to_owned(),
             jsonl,
@@ -161,14 +196,20 @@ async fn hosted_sessions_share_and_public_artifacts_are_persisted_and_sanitized(
         .expect("import success")
         .json::<CloudImportSessionResponse>()
         .await
-        .expect("import json");
-    assert!(imported.record.id.starts_with("cs_"));
-    assert_eq!(imported.record.local_session_id.as_deref(), Some("alpha"));
-    assert_eq!(imported.record.message_count, 1);
+        .expect("import json")
+}
 
+async fn assert_listed_session_payload_is_sanitized(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    imported: &CloudImportSessionResponse,
+    secret: &str,
+    temp_path: &Path,
+) {
     let listed = client
-        .get(format!("{}/v1/sessions", server.base_url))
-        .bearer_auth(&token)
+        .get(format!("{base_url}/v1/sessions"))
+        .bearer_auth(token)
         .send()
         .await
         .expect("list response")
@@ -180,11 +221,8 @@ async fn hosted_sessions_share_and_public_artifacts_are_persisted_and_sanitized(
     assert_eq!(listed.sessions, vec![imported.record.clone()]);
 
     let fetched = client
-        .get(format!(
-            "{}/v1/sessions/{}",
-            server.base_url, imported.record.id
-        ))
-        .bearer_auth(&token)
+        .get(format!("{base_url}/v1/sessions/{}", imported.record.id))
+        .bearer_auth(token)
         .send()
         .await
         .expect("get response")
@@ -196,14 +234,18 @@ async fn hosted_sessions_share_and_public_artifacts_are_persisted_and_sanitized(
     let fetched_json = serde_json::to_string(&fetched).expect("fetched json");
     assert!(fetched_json.contains("keep hosted session"));
     assert!(!fetched_json.contains(secret));
-    assert!(!fetched_json.contains(temp.path().to_str().expect("temp path")));
+    assert!(!fetched_json.contains(temp_path.to_str().expect("temp path")));
+}
 
-    let forked = client
-        .post(format!(
-            "{}/v1/sessions/{}/fork",
-            server.base_url, imported.record.id
-        ))
-        .bearer_auth(&token)
+async fn fork_cloud_session(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    session_id: &str,
+) -> neo_cloud_protocol::CloudForkSessionResponse {
+    client
+        .post(format!("{base_url}/v1/sessions/{session_id}/fork"))
+        .bearer_auth(token)
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -212,18 +254,18 @@ async fn hosted_sessions_share_and_public_artifacts_are_persisted_and_sanitized(
         .expect("fork success")
         .json::<neo_cloud_protocol::CloudForkSessionResponse>()
         .await
-        .expect("fork json");
-    assert_eq!(
-        forked.record.remote_parent_id.as_deref(),
-        Some(imported.record.id.as_str())
-    );
+        .expect("fork json")
+}
 
-    let share = client
-        .post(format!(
-            "{}/v1/sessions/{}/shares",
-            server.base_url, imported.record.id
-        ))
-        .bearer_auth(&token)
+async fn create_public_share(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    session_id: &str,
+) -> CloudSharePayload {
+    client
+        .post(format!("{base_url}/v1/sessions/{session_id}/shares"))
+        .bearer_auth(token)
         .json(&CloudCreateShareRequest { public: true })
         .send()
         .await
@@ -232,13 +274,17 @@ async fn hosted_sessions_share_and_public_artifacts_are_persisted_and_sanitized(
         .expect("share success")
         .json::<CloudSharePayload>()
         .await
-        .expect("share json");
-    assert!(share.record.public);
-    assert!(share.html.contains("<!doctype html>"));
-    assert!(!share.html.contains(secret));
+        .expect("share json")
+}
 
+async fn assert_public_share_artifacts(
+    client: &reqwest::Client,
+    base_url: &str,
+    share_id: &str,
+    secret: &str,
+) {
     let public_json = client
-        .get(format!("{}/v1/shares/{}", server.base_url, share.record.id))
+        .get(format!("{base_url}/v1/shares/{share_id}"))
         .send()
         .await
         .expect("public json response")
@@ -247,13 +293,10 @@ async fn hosted_sessions_share_and_public_artifacts_are_persisted_and_sanitized(
         .json::<CloudSharePayload>()
         .await
         .expect("public json");
-    assert_eq!(public_json.record.id, share.record.id);
+    assert_eq!(public_json.record.id, share_id);
 
     let html = client
-        .get(format!(
-            "{}/v1/shares/{}.html",
-            server.base_url, share.record.id
-        ))
+        .get(format!("{base_url}/v1/shares/{share_id}.html"))
         .send()
         .await
         .expect("html response")
@@ -294,7 +337,7 @@ impl Drop for TestServer {
     }
 }
 
-async fn spawn_server(store: Store) -> TestServer {
+fn spawn_server(store: Store) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind server");
     let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
     let server = CloudServer::new(store);

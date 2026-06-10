@@ -55,8 +55,8 @@
   `neo-tui` approval overlay, so explicit user choices resume pending tool
   calls using user-provided allow/deny decisions.
 - `ToolRegistry::with_builtin_tools()` registers `read`, `list`, `grep`,
-  `find`, `write`, `edit`, and `bash`; `edit` returns structured details with
-  a stable unified diff for TUI/export consumers.
+  `find`, `write`, `edit`, `bash`, and `terminal`; `edit` returns structured
+  details with a stable unified diff for TUI/export consumers.
 - `McpToolAdapter` and `McpToolProvider` can discover configured MCP tools as
   namespaced `ToolSpec` values and execute them through an async adapter
   registered in `ToolRegistry`.
@@ -85,6 +85,11 @@
   cancellation terminates the shell process group on Unix, and compact non-PTY
   background `bash` handles support real `start`, `poll`, and terminal `stop`
   operations backed by child processes and shell process-group cleanup.
+- The `terminal` tool operates real PTY sessions with `start`, `write`, `read`,
+  `resize`, and `stop` modes. Terminal handles are registered with
+  `ProcessSupervisor`, cleanup removes active PTY sessions, and capped terminal
+  output is applied consistently to user-visible content, tool details,
+  lifecycle events, and JSONL persistence.
 - `session::JsonlSessionWriter`, `session::JsonlSessionReader`, and
   `session::replay_messages` persist and replay `AgentEvent::MessageAppended`
   history. JSONL schema metadata is validated when present: event-only legacy
@@ -117,9 +122,9 @@ or hosted lifecycle behavior.
   futures at the runtime scheduling boundary, foreground/background bash shell
   process groups on Unix, and live TUI interruption that drains cooperative
   cancelled message/turn/run barriers before falling back to abort.
-- Decide whether Neo needs full PTY/interactivity later. Current `bash`
-  background support is intentionally compact start/poll/stop process
-  management.
+- Add richer terminal ergonomics only after Neo defines product requirements
+  beyond the current provider-neutral PTY `start`/`write`/`read`/`resize`/`stop`
+  contract.
 - Decide whether JSONL event persistence remains the durable session format or
   becomes a compatibility layer over a richer store with hosted shares and
   richer branch-level summary metadata.

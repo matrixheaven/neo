@@ -4,7 +4,7 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use serde_json::{Value, json};
@@ -21,6 +21,8 @@ struct MockSseServer {
     url: String,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
 }
+
+static ISOLATED_HOMES: OnceLock<Mutex<Vec<TempDir>>> = OnceLock::new();
 
 impl MockSseServer {
     fn start(responses: Vec<String>) -> Self {
@@ -52,7 +54,20 @@ impl MockSseServer {
 }
 
 fn neo() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_neo"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_neo"));
+    command.env("HOME", isolated_home());
+    command
+}
+
+fn isolated_home() -> std::path::PathBuf {
+    let home = TempDir::new().expect("isolated home");
+    let path = home.path().to_path_buf();
+    ISOLATED_HOMES
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .expect("isolated home lock")
+        .push(home);
+    path
 }
 
 fn run_with_stdin(mut command: Command, stdin: &str) -> String {

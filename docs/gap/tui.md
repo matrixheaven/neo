@@ -62,6 +62,11 @@ Target: `crates/tui`.
   continuation chunks, Sixel palette/plane encoding, and validation for empty
   payloads, invalid dimensions, invalid Sixel palette values, mismatched pixel
   data length, and out-of-range Sixel color indexes.
+- The live TUI can render byte-backed transcript image payloads inline through
+  `ImageRenderPolicy` when a selected terminal protocol is supported. `neo-agent`
+  config exposes `[tui] image_protocol = "auto|kitty|iterm2|sixel|none"` and
+  `fetch_remote_images`; `auto` stays conservative until runtime negotiation is
+  implemented, while explicit protocols use matching static terminal hints.
 - Prompt Tab completion is backed by real local project/runtime data. `neo-tui`
   exposes prompt completion prefix/replacement primitives plus a completion
   picker overlay, and `neo-agent` reads matching files/directories from
@@ -91,10 +96,9 @@ Target: `crates/tui`.
 
 ## Remaining lower-priority gaps
 
-- The Rust crate does not yet implement runtime terminal image-protocol
-  capability detection/negotiation, live transcript inline image rendering
-  integration, hosted keybinding/profile sync, command autocomplete from hosted
-  or extension command catalogs, or the full TypeScript renderer's advanced
-  diff affordances beyond width-safe unified diff line classification,
+- The Rust crate does not yet implement runtime detection/negotiation for active
+  terminal image support, hosted keybinding/profile sync, command autocomplete from
+  hosted or extension command catalogs, or the full TypeScript renderer's
+  advanced diff affordances beyond width-safe unified diff line classification,
   coloring, and item-range transcript selection.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.

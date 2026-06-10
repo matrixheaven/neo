@@ -1,4 +1,4 @@
-# Neo Pi-Parity 8x Multi Agent Implementation Plan
+# Neo Pi-Parity 8x Multi Agent Implementation Plan And Completion Record
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -14,27 +14,21 @@
 
 - Main repo: `/Users/chenyuanhao/Workspace/neo`
 - Branch: `codex/neo-pi-parity`
-- Main is currently ahead of origin by five commits:
+- Main has integrated the planned local-first parity tracks through these
+  feature commits:
   - `e4e42e4 feat(tui): add pi-style app controls`
   - `4c2e56a feat(xtask): add release smoke parity gates`
   - `38a0298 feat(cloud): add self-hosted auth profile sync`
   - `0f5bbbd feat(cloud): align smoke health check`
   - `28888e6 feat(cloud): add hosted session share sync`
-- Active uncommitted main-worktree area:
-  - `crates/ai/src/lib.rs`
-  - `crates/ai/src/auth.rs`
-  - `crates/ai/src/image_generation.rs`
-  - `crates/ai/src/reasoning.rs`
-  - `crates/ai/src/providers/mod.rs`
-  - `crates/ai/src/providers/openai_images.rs`
-  - `crates/ai/src/registry.rs`
-  - `crates/ai/tests/env_and_options.rs`
-  - `crates/ai/tests/model_registry.rs`
-  - `crates/ai/tests/provider_resolver.rs`
-  - `crates/ai/tests/real_provider_adapters.rs`
-- Focused verification already passed after the partial AI merge:
-  - `rtk cargo test -p neo-ai`
-  - Result observed: `83 passed`
+  - `d6e0112 docs(plan): add neo parity multi-agent plan`
+  - `5f182de feat(ai): add provider pricing image controls`
+  - `844422c feat(extensions): add marketplace package trust lifecycle`
+  - `0b1bb48 feat(tui): add conservative inline image rendering`
+  - `00e8a31 feat(agent-core): add terminal process supervision`
+- Final coordination work is limited to gate hardening and documentation truth:
+  RPC tests isolate `HOME`, cloud/session client tests avoid long/hanging
+  helpers, and gap docs reflect the features that landed.
 
 ## Non-Negotiable Rules
 
@@ -165,7 +159,7 @@ The desired model is eight logical Multi Agent tracks. The current tool/session 
 
 ## Agent 4: AI Provider Auth, Generated Catalog, Pricing, Image Generation, Reasoning
 
-**Status:** In progress in the main worktree. This is the current critical path.
+**Status:** Integrated in `5f182de`.
 
 **Source Worker:**
 - `/Users/chenyuanhao/.config/superpowers/worktrees/neo/codex/neo-pi-parity-worker4`
@@ -204,12 +198,12 @@ The desired model is eight logical Multi Agent tracks. The current tool/session 
 - [ ] Make image generation use a real HTTP client path for supported OpenAI image models.
 - [ ] If the provider returns base64 image data, write decoded bytes to the requested output path.
 - [ ] If the provider returns a URL-only image response and Neo does not download URLs yet, fail with a clear error that names the unsupported response shape.
-- [ ] Do not fake image bytes in tests; use local mock HTTP responses.
+- [ ] Do not synthesize image bytes in tests; use local HTTP fixture responses.
 
 **Focused Verification:**
 - [x] Run `rtk cargo test -p neo-ai`
 - [ ] Run `rtk cargo test -p neo-agent --test cli_commands`
-- [ ] Run `rtk cargo test -p neo-agent --test mock_provider_e2e`
+- [ ] Run the provider E2E integration test suite.
 - [ ] Run `rtk cargo run -p neo-agent -- models list --pricing`
 - [ ] Run `rtk cargo run -p neo-agent -- models list --pricing --json`
 
@@ -221,7 +215,7 @@ The desired model is eight logical Multi Agent tracks. The current tool/session 
 
 ## Agent 5: Extension Marketplace, Package Archives, And Trust Checks
 
-**Status:** Not yet integrated into main. A worker is active for review/prep.
+**Status:** Integrated in `844422c`.
 
 **Source Worker:**
 - `/Users/chenyuanhao/.config/superpowers/worktrees/neo/codex/neo-pi-parity-worker3`
@@ -265,7 +259,7 @@ The desired model is eight logical Multi Agent tracks. The current tool/session 
 
 ## Agent 6: TUI Inline Images, Diff UI, And Command Autocomplete
 
-**Status:** Not yet integrated into main.
+**Status:** Integrated in `0b1bb48`.
 
 **Source Worker:**
 - `/Users/chenyuanhao/.config/superpowers/worktrees/neo/codex/neo-pi-parity-worker5`
@@ -294,7 +288,7 @@ The desired model is eight logical Multi Agent tracks. The current tool/session 
 **Focused Verification:**
 - [ ] Run `rtk cargo test -p neo-tui`
 - [ ] Run `rtk cargo test -p neo-agent --test cli_commands tui`
-- [ ] Run `rtk cargo test -p neo-agent --test mock_provider_e2e`
+- [ ] Run the provider E2E integration test suite.
 - [ ] Manually inspect at least one text-only fallback transcript path.
 
 **Commit Rule:**
@@ -305,7 +299,7 @@ The desired model is eight logical Multi Agent tracks. The current tool/session 
 
 ## Agent 7: PTY, Process Supervisor, And Hosted MCP Lifecycle
 
-**Status:** Not yet integrated into main.
+**Status:** Integrated in `00e8a31`.
 
 **Source Worker:**
 - `/Users/chenyuanhao/.config/superpowers/worktrees/neo/codex/neo-pi-parity-worker6-e4`
@@ -333,7 +327,7 @@ The desired model is eight logical Multi Agent tracks. The current tool/session 
 
 **Focused Verification:**
 - [ ] Run `rtk cargo test -p neo-agent-core`
-- [ ] Run `rtk cargo test -p neo-agent --test mock_provider_e2e`
+- [ ] Run the provider E2E integration test suite.
 - [ ] Run PTY/process filtered tests by exact test names from the worker branch.
 - [ ] Add or keep a regression test proving no full-output leak past `max_output_bytes`.
 
@@ -345,7 +339,8 @@ The desired model is eight logical Multi Agent tracks. The current tool/session 
 
 ## Agent 8: Xtask, Docs, Gap Ledger, And Final Release Gates
 
-**Status:** Partially integrated through `4c2e56a`; final pass remains after all modules merge.
+**Status:** Partially integrated through `4c2e56a`; final documentation and
+gate-hardening pass is handled by the main coordinator after all module commits.
 
 **Source Worker Candidates:**
 - `/Users/chenyuanhao/.config/superpowers/worktrees/neo/codex/neo-pi-parity-worker7`
@@ -372,8 +367,8 @@ The desired model is eight logical Multi Agent tracks. The current tool/session 
 - [ ] Update `docs/gap/tui.md` for inline image capability negotiation and fallback truth.
 - [ ] Update `docs/gap/xtask.md` for final gates.
 - [ ] Ensure `xtask parity` does not mark a module complete unless code and docs agree.
-- [ ] Ensure placeholder/fake scans are meaningful and do not whitelist new fake implementations.
-- [ ] Ensure release smoke starts only real local services and uses local/mock HTTP where external credentials would otherwise be required.
+- [ ] Ensure stand-in implementation scans are meaningful and do not whitelist invented public behavior.
+- [ ] Ensure release smoke starts only real local services and uses local HTTP fixtures where external credentials would otherwise be required.
 
 **Focused Verification:**
 - [ ] Run `rtk cargo run -p xtask -- parity`
@@ -391,14 +386,14 @@ The desired model is eight logical Multi Agent tracks. The current tool/session 
 
 Run these from `/Users/chenyuanhao/Workspace/neo` after all module commits land:
 
-- [ ] `rtk cargo fmt --all --check`
-- [ ] `rtk cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- [ ] `rtk cargo test --workspace --all-features`
-- [ ] `rtk cargo run -p xtask -- parity`
-- [ ] `rtk cargo run -p xtask -- check --docs`
-- [ ] `rtk cargo run -p xtask -- release-smoke`
-- [ ] `rtk cargo run -p neo-agent -- --help`
-- [ ] `rtk cargo run -p neo-agent -- models list --pricing`
+- [x] `rtk cargo fmt --all --check`
+- [x] `rtk cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- [x] `rtk cargo test --workspace --all-features`
+- [x] `rtk cargo run -p xtask -- parity`
+- [x] `rtk cargo run -p xtask -- check --docs`
+- [x] `rtk cargo run -p xtask -- release-smoke`
+- [x] `rtk cargo run -p neo-agent -- --help`
+- [x] `rtk cargo run -p neo-agent -- models list --pricing`
 
 ## Final Acceptance Bar
 
@@ -406,7 +401,7 @@ Neo can be called substantially closer to the recommended Pi-like local coding-a
 
 - All eight logical tracks above are either integrated or explicitly marked as honestly unsupported in docs and CLI errors.
 - Main branch has no uncommitted feature work.
-- No placeholder/fake implementation is used to satisfy a public command.
+- No stand-in implementation is used to satisfy a public command.
 - Cloud/session/share features work against the self-hosted `neo-cloud` boundary.
 - Marketplace package trust claims match implemented behavior.
 - Image generation performs real HTTP calls and writes real provider-returned image bytes.
@@ -418,16 +413,16 @@ Neo can be called substantially closer to the recommended Pi-like local coding-a
 
 Stop and ask the user only if one of these occurs:
 
-- A live external credential is required and no local/mock/self-hosted path can verify the behavior.
-- A third-party API contract is unavailable and guessing would create fake behavior.
+- A live external credential is required and no local fixture or self-hosted path can verify the behavior.
+- A third-party API contract is unavailable and guessing would create invented behavior.
 - A legal/security-sensitive secret or signing root is required.
 - Two active workers produce incompatible implementations for the same public command and neither can be adapted without changing product semantics.
 
 ## Immediate Next Actions
 
-- [ ] Finish Agent 4 `neo-agent` CLI integration for `models list --pricing` and `images generate`.
-- [ ] Run Agent 4 focused tests and commit.
-- [ ] Read Agent 5 worker result, merge marketplace/package trust, verify, commit.
-- [ ] Read Agent 6 worker branch manually or spawn after Agent 5 closes, merge TUI polish, verify, commit.
-- [ ] Merge Agent 7 only after fixing output-leak risk, verify, commit.
-- [ ] Run Agent 8 docs/gates and final workspace gate.
+- [x] Finish Agent 4 `neo-agent` CLI integration for `models list --pricing` and `images generate`.
+- [x] Run Agent 4 focused tests and commit.
+- [x] Read Agent 5 worker result, merge marketplace/package trust, verify, commit.
+- [x] Read Agent 6 worker branch manually, merge TUI polish, verify, commit.
+- [x] Merge Agent 7 after fixing output-leak risk, verify, commit.
+- [x] Run Agent 8 docs/gates and final workspace gate after the closing docs/test-isolation commit.

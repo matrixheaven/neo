@@ -1,8 +1,10 @@
 use std::{
     collections::BTreeMap,
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
 };
 
 use neo_sdk::CloudClient;
@@ -10,45 +12,7 @@ use serde_json::{Value, json};
 
 #[tokio::test]
 async fn cloud_client_uses_hosted_session_share_api_with_bearer_auth() {
-    let server = MockHttpServer::start(vec![
-        json_response(&json!({
-            "record": session_record("cs_alpha", Value::Null)
-        })),
-        json_response(&json!({
-            "sessions": [session_record("cs_alpha", Value::Null)]
-        })),
-        json_response(&json!({
-            "record": session_record("cs_alpha", Value::Null),
-            "messages": [{"User": {"content": [{"Text": {"text": "hello"}}]}}]
-        })),
-        json_response(&json!({
-            "record": session_record("cs_fork", json!("cs_alpha"))
-        })),
-        json_response(&json!({
-            "record": {
-                "id": "sh_alpha",
-                "session_id": "cs_alpha",
-                "public": true,
-                "html_url": "/v1/shares/sh_alpha.html",
-                "json_url": "/v1/shares/sh_alpha.json",
-                "created_at": "1"
-            },
-            "html": "<!doctype html>",
-            "json": {"format": "neo.cloud.session.share"}
-        })),
-        json_response(&json!({
-            "record": {
-                "id": "sh_alpha",
-                "session_id": "cs_alpha",
-                "public": true,
-                "html_url": "/v1/shares/sh_alpha.html",
-                "json_url": "/v1/shares/sh_alpha.json",
-                "created_at": "1"
-            },
-            "html": "<!doctype html>",
-            "json": {"format": "neo.cloud.session.share"}
-        })),
-    ]);
+    let server = MockHttpServer::start(hosted_session_share_api_responses());
     let client = CloudClient::new(&server.url);
     let token = "neo_at_test";
 
@@ -102,6 +66,45 @@ async fn cloud_client_uses_hosted_session_share_api_with_bearer_auth() {
     );
 
     let requests = server.requests();
+    assert_hosted_session_requests(&requests);
+}
+
+fn hosted_session_share_api_responses() -> Vec<String> {
+    vec![
+        json_response(&json!({
+            "record": session_record("cs_alpha", None)
+        })),
+        json_response(&json!({
+            "sessions": [session_record("cs_alpha", None)]
+        })),
+        json_response(&json!({
+            "record": session_record("cs_alpha", None),
+            "messages": [{"User": {"content": [{"Text": {"text": "hello"}}]}}]
+        })),
+        json_response(&json!({
+            "record": session_record("cs_fork", Some("cs_alpha"))
+        })),
+        json_response(&share_payload_response()),
+        json_response(&share_payload_response()),
+    ]
+}
+
+fn share_payload_response() -> Value {
+    json!({
+        "record": {
+            "id": "sh_alpha",
+            "session_id": "cs_alpha",
+            "public": true,
+            "html_url": "/v1/shares/sh_alpha.html",
+            "json_url": "/v1/shares/sh_alpha.json",
+            "created_at": "1"
+        },
+        "html": "<!doctype html>",
+        "json": {"format": "neo.cloud.session.share"}
+    })
+}
+
+fn assert_hosted_session_requests(requests: &[RecordedRequest]) {
     assert_eq!(
         requests
             .iter()
@@ -128,7 +131,7 @@ async fn cloud_client_uses_hosted_session_share_api_with_bearer_auth() {
     assert!(!requests[5].headers.contains_key("authorization"));
 }
 
-fn session_record(id: &str, remote_parent_id: Value) -> Value {
+fn session_record(id: &str, remote_parent_id: Option<&str>) -> Value {
     json!({
         "id": id,
         "local_session_id": "alpha",
@@ -158,13 +161,22 @@ struct MockHttpServer {
 impl MockHttpServer {
     fn start(responses: Vec<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        listener
+            .set_nonblocking(true)
+            .expect("set mock server nonblocking");
         let url = format!("http://{}", listener.local_addr().expect("local addr"));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured_requests = Arc::clone(&requests);
 
         std::thread::spawn(move || {
             for response in responses {
-                let (mut socket, _) = listener.accept().expect("accept request");
+                let (mut socket, _) = accept_request(&listener);
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("set read timeout");
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .expect("set write timeout");
                 captured_requests
                     .lock()
                     .expect("lock requests")
@@ -180,6 +192,19 @@ impl MockHttpServer {
 
     fn requests(&self) -> Vec<RecordedRequest> {
         self.requests.lock().expect("lock requests").clone()
+    }
+}
+
+fn accept_request(listener: &TcpListener) -> (TcpStream, std::net::SocketAddr) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match listener.accept() {
+            Ok(accepted) => return accepted,
+            Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("accept request: {error}"),
+        }
     }
 }
 
