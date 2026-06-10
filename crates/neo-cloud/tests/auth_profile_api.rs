@@ -1,9 +1,12 @@
 use std::net::TcpListener;
 
+use neo_agent_core::{AgentEvent, AgentMessage};
 use neo_cloud::{CloudServer, Store};
 use neo_cloud_protocol::{
-    BootstrapRequest, BootstrapResponse, CloudProfile, DeviceTokenLoginRequest,
-    ProfilePullResponse, ProfilePushRequest, ProfileStatusResponse,
+    BootstrapRequest, BootstrapResponse, CloudCreateShareRequest, CloudImportSessionRequest,
+    CloudImportSessionResponse, CloudProfile, CloudSessionListResponse, CloudSessionPayload,
+    CloudSharePayload, DeviceTokenLoginRequest, ProfilePullResponse, ProfilePushRequest,
+    ProfileStatusResponse,
 };
 use reqwest::StatusCode;
 use tempfile::TempDir;
@@ -118,6 +121,166 @@ async fn profile_endpoints_require_a_valid_bearer_token() {
         .status();
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn hosted_sessions_share_and_public_artifacts_are_persisted_and_sanitized() {
+    let temp = TempDir::new().expect("tempdir");
+    let store = Store::open(&temp.path().join("neo-cloud.sqlite"))
+        .await
+        .expect("open store");
+    let server = spawn_server(store).await;
+    let client = reqwest::Client::new();
+    let token = bootstrap_access_token(&client, &server.base_url).await;
+    let secret = "sk-test-secret-token";
+    let local_path = temp.path().join("alpha.jsonl");
+    let jsonl = format!(
+        "{}\n",
+        serde_json::to_string(&AgentEvent::MessageAppended {
+            message: AgentMessage::user_text(format!(
+                "keep hosted session but redact {secret} and {}",
+                local_path.display()
+            )),
+        })
+        .expect("event json")
+    );
+
+    let imported = client
+        .post(format!("{}/v1/sessions/import", server.base_url))
+        .bearer_auth(&token)
+        .json(&CloudImportSessionRequest {
+            local_session_id: "alpha".to_owned(),
+            jsonl,
+            name: Some("Main thread".to_owned()),
+            remote_parent_id: None,
+        })
+        .send()
+        .await
+        .expect("import response")
+        .error_for_status()
+        .expect("import success")
+        .json::<CloudImportSessionResponse>()
+        .await
+        .expect("import json");
+    assert!(imported.record.id.starts_with("cs_"));
+    assert_eq!(imported.record.local_session_id.as_deref(), Some("alpha"));
+    assert_eq!(imported.record.message_count, 1);
+
+    let listed = client
+        .get(format!("{}/v1/sessions", server.base_url))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("list response")
+        .error_for_status()
+        .expect("list success")
+        .json::<CloudSessionListResponse>()
+        .await
+        .expect("list json");
+    assert_eq!(listed.sessions, vec![imported.record.clone()]);
+
+    let fetched = client
+        .get(format!(
+            "{}/v1/sessions/{}",
+            server.base_url, imported.record.id
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("get response")
+        .error_for_status()
+        .expect("get success")
+        .json::<CloudSessionPayload>()
+        .await
+        .expect("get json");
+    let fetched_json = serde_json::to_string(&fetched).expect("fetched json");
+    assert!(fetched_json.contains("keep hosted session"));
+    assert!(!fetched_json.contains(secret));
+    assert!(!fetched_json.contains(temp.path().to_str().expect("temp path")));
+
+    let forked = client
+        .post(format!(
+            "{}/v1/sessions/{}/fork",
+            server.base_url, imported.record.id
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("fork response")
+        .error_for_status()
+        .expect("fork success")
+        .json::<neo_cloud_protocol::CloudForkSessionResponse>()
+        .await
+        .expect("fork json");
+    assert_eq!(
+        forked.record.remote_parent_id.as_deref(),
+        Some(imported.record.id.as_str())
+    );
+
+    let share = client
+        .post(format!(
+            "{}/v1/sessions/{}/shares",
+            server.base_url, imported.record.id
+        ))
+        .bearer_auth(&token)
+        .json(&CloudCreateShareRequest { public: true })
+        .send()
+        .await
+        .expect("share response")
+        .error_for_status()
+        .expect("share success")
+        .json::<CloudSharePayload>()
+        .await
+        .expect("share json");
+    assert!(share.record.public);
+    assert!(share.html.contains("<!doctype html>"));
+    assert!(!share.html.contains(secret));
+
+    let public_json = client
+        .get(format!("{}/v1/shares/{}", server.base_url, share.record.id))
+        .send()
+        .await
+        .expect("public json response")
+        .error_for_status()
+        .expect("public json success")
+        .json::<CloudSharePayload>()
+        .await
+        .expect("public json");
+    assert_eq!(public_json.record.id, share.record.id);
+
+    let html = client
+        .get(format!(
+            "{}/v1/shares/{}.html",
+            server.base_url, share.record.id
+        ))
+        .send()
+        .await
+        .expect("html response")
+        .error_for_status()
+        .expect("html success")
+        .text()
+        .await
+        .expect("html text");
+    assert!(html.contains("<!doctype html>"));
+    assert!(!html.contains(secret));
+}
+
+async fn bootstrap_access_token(client: &reqwest::Client, base_url: &str) -> String {
+    client
+        .post(format!("{base_url}/v1/auth/bootstrap"))
+        .json(&BootstrapRequest {
+            device_name: "workstation".to_owned(),
+        })
+        .send()
+        .await
+        .expect("bootstrap response")
+        .error_for_status()
+        .expect("bootstrap success")
+        .json::<BootstrapResponse>()
+        .await
+        .expect("bootstrap json")
+        .access_token
 }
 
 struct TestServer {

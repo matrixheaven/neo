@@ -291,6 +291,25 @@ pub enum SessionCommand {
     ExportJson {
         session_id: String,
     },
+    Share {
+        session_id: String,
+        #[arg(long)]
+        public: bool,
+    },
+    Sync {
+        #[command(subcommand)]
+        command: SessionSyncCommand,
+    },
+    Import {
+        share_ref: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionSyncCommand {
+    Push,
+    Pull,
+    Status,
 }
 
 #[derive(Debug, Subcommand)]

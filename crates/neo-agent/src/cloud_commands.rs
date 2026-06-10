@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 use crate::config::{self, AppConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AuthFile {
-    server_url: String,
+pub(crate) struct AuthFile {
+    pub(crate) server_url: String,
     user_id: String,
     device_id: String,
-    access_token: String,
+    pub(crate) access_token: String,
     device_token: String,
     token_type: String,
 }
@@ -121,7 +121,7 @@ pub async fn sync_status(config: &AppConfig) -> anyhow::Result<String> {
     Ok(format!("remote revision {}\n", status.revision))
 }
 
-fn require_auth(auth_file: &Path) -> anyhow::Result<AuthFile> {
+pub(crate) fn require_auth(auth_file: &Path) -> anyhow::Result<AuthFile> {
     read_auth(auth_file)?
         .with_context(|| format!("not logged in; run `neo login cloud --server <url>` first"))
 }

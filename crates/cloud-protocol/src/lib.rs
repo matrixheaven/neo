@@ -1,5 +1,6 @@
 //! Shared wire types for the self-hosted Neo cloud API.
 
+use neo_agent_core::AgentMessage;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +66,77 @@ pub struct ProfileStatusResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudSessionRecord {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_parent_id: Option<String>,
+    #[serde(default)]
+    pub share_ids: Vec<String>,
+    pub message_count: usize,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudSessionPayload {
+    pub record: CloudSessionRecord,
+    pub messages: Vec<AgentMessage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudImportSessionRequest {
+    pub local_session_id: String,
+    pub jsonl: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_parent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudImportSessionResponse {
+    pub record: CloudSessionRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudSessionListResponse {
+    pub sessions: Vec<CloudSessionRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudForkSessionResponse {
+    pub record: CloudSessionRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudCreateShareRequest {
+    pub public: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudShareRecord {
+    pub id: String,
+    pub session_id: String,
+    pub public: bool,
+    pub html_url: String,
+    pub json_url: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudSharePayload {
+    pub record: CloudShareRecord,
+    pub html: String,
+    pub json: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

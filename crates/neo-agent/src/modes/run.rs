@@ -50,6 +50,9 @@ pub async fn execute(
 }
 
 pub async fn resume(session_ref: &str, config: &AppConfig) -> anyhow::Result<String> {
+    if let Some(remote) = crate::session_cloud::resume_remote(session_ref, config).await? {
+        return Ok(remote);
+    }
     let session_id = session_commands::resolve_session_id(session_ref, config)?;
     let transcript = session_commands::transcript(&session_id, config).await?;
     Ok(format!("session {session_id}\n{transcript}"))

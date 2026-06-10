@@ -54,6 +54,21 @@ fn model_tool_names(body: &Value) -> Vec<&str> {
     names
 }
 
+fn output_value(output: &str, key: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{key}: ")))
+        .unwrap_or_else(|| panic!("missing {key} in output:\n{output}"))
+        .trim()
+        .to_owned()
+}
+
+fn read_session_metadata(root: &Path) -> Value {
+    let content = fs::read_to_string(root.join(".neo/sessions/sessions.metadata.json"))
+        .expect("read session metadata");
+    serde_json::from_str(&content).expect("session metadata json")
+}
+
 #[test]
 fn root_command_reports_interactive_entrypoint_without_placeholders() {
     let command = neo();
@@ -1121,6 +1136,112 @@ fn sessions_show_and_resume_read_jsonl_transcripts() {
     assert!(resume_stdout.contains("user: hello"));
     assert!(resume_stdout.contains("assistant: hi back"));
     assert!(!resume_stdout.contains("placeholder"));
+}
+
+#[test]
+fn sessions_share_import_resume_and_sync_use_self_hosted_cloud() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let temp = TempDir::new().expect("tempdir");
+    let server = runtime.block_on(start_cloud_server(temp.path().join("cloud.sqlite")));
+    let sessions = temp.path().join(".neo/sessions");
+    fs::create_dir_all(&sessions).expect("create sessions");
+    let session_path = sessions.join("alpha.jsonl");
+    let secret = "sk-test-secret-token";
+    fs::write(
+        &session_path,
+        format!(
+            "{}\n",
+            json!({
+                "MessageAppended": {
+                    "message": {
+                        "User": {
+                            "content": [{
+                                "Text": {
+                                    "text": format!(
+                                        "please replay this, but not {secret} or {}",
+                                        session_path.display()
+                                    )
+                                }
+                            }]
+                        }
+                    }
+                }
+            })
+        ),
+    )
+    .expect("write session");
+
+    let mut login = neo();
+    login
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .args(["login", "cloud", "--server", &server.base_url]);
+    run(login);
+
+    let mut push = neo();
+    push.current_dir(temp.path())
+        .env("HOME", temp.path())
+        .args(["sessions", "sync", "push"]);
+    let push_stdout = run(push);
+    assert!(push_stdout.contains("pushed alpha"));
+    assert!(push_stdout.contains("cloud_id=cs_"));
+
+    let mut share = neo();
+    share
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .args(["sessions", "share", "alpha", "--public"]);
+    let share_stdout = run(share);
+    let cloud_id = output_value(&share_stdout, "cloud_id");
+    let share_id = output_value(&share_stdout, "share_id");
+    assert!(cloud_id.starts_with("cs_"));
+    assert!(share_id.starts_with("sh_"));
+    assert!(share_stdout.contains(&format!("{}/v1/shares/{share_id}.html", server.base_url)));
+    assert!(!share_stdout.contains(secret));
+    assert!(!share_stdout.contains(temp.path().to_str().expect("temp path")));
+
+    let metadata = read_session_metadata(temp.path());
+    assert_eq!(metadata["sessions"]["alpha"]["cloud_id"], cloud_id);
+    assert_eq!(
+        metadata["sessions"]["alpha"]["share_ids"],
+        json!([share_id])
+    );
+
+    let mut status = neo();
+    status
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .args(["sessions", "sync", "status"]);
+    let status_stdout = run(status);
+    assert!(status_stdout.contains("alpha"));
+    assert!(status_stdout.contains(&cloud_id));
+    assert!(status_stdout.contains(&share_id));
+
+    let mut import = neo();
+    import
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .args(["sessions", "import", &share_id]);
+    let import_stdout = run(import);
+    let imported_id = output_value(&import_stdout, "session_id");
+    let imported_jsonl =
+        fs::read_to_string(sessions.join(format!("{imported_id}.jsonl"))).expect("read import");
+    assert!(imported_jsonl.contains("please replay this"));
+    assert!(!imported_jsonl.contains(secret));
+    assert!(!imported_jsonl.contains(temp.path().to_str().expect("temp path")));
+
+    let mut resume = neo();
+    resume
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .args(["resume", &cloud_id]);
+    let resume_stdout = run(resume);
+    assert!(resume_stdout.contains("remote_parent_id:"));
+    assert!(resume_stdout.contains("please replay this"));
+    assert!(!resume_stdout.contains(secret));
+    assert!(!resume_stdout.contains(temp.path().to_str().expect("temp path")));
+
+    drop(server);
 }
 
 #[test]

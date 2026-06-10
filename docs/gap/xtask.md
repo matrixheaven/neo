@@ -27,10 +27,8 @@
   docs/example paths.
 - `cargo run -p xtask -- release-smoke` runs the docs/examples parity gate,
   validates generated catalog schemas if present, chooses a random loopback
-  port, and is wired to start self-hosted `neo-cloud` before CLI smoke flows.
-  Because this checkout does not yet contain `crates/neo-cloud/Cargo.toml`, the
-  command fails with a clear dependency error unless
-  `NEO_RELEASE_SMOKE_CLOUD_CMD` supplies an explicit cloud start command.
+  port, starts self-hosted `neo-cloud`, and then exercises CLI smoke flows
+  including `neo --help`, `neo models list`, and `neo cloud status --api-base`.
 - `cargo run -p xtask -- check --workspace` opts into full workspace fmt,
   clippy, and tests.
 - `--quick` remains an xtask-only compatibility alias.
@@ -66,7 +64,7 @@ local `sessions export-json` / `sessions.export_json`, Sixel output primitives,
 `neo-cloud` release-smoke coverage once their symbols or packages land. It
 still allows honest gaps for hosted MCP management, Link-header or
 provider-specific MCP discovery beyond configured endpoints and subscribe ACK
-URLs, hosted share, OAuth login, cloud package/runtime work that has not
+URLs, managed collaboration, OAuth login, cloud package/runtime work that has not
 landed, runtime image-protocol detection/negotiation, advanced diff
 affordances, and other surfaces that are not implemented.
 
@@ -82,8 +80,7 @@ not inherit those Node-specific gates.
   implemented" gap language and provider-rejection documentation remain allowed.
 - Land a generated model catalog schema artifact so `xtask catalog check` can
   become part of the required gate instead of reporting the missing artifact.
-- Land `crates/neo-cloud` and the matching CLI cloud smoke command shape, or
-  document an explicit `NEO_RELEASE_SMOKE_CLOUD_CMD`, before treating
-  `release-smoke` as a passing release gate.
+- Keep `release-smoke` aligned with the real self-hosted `neo-cloud` CLI
+  command shape as cloud APIs expand.
 - Keep the default gate narrow while independent crate workers are making API
   migrations.

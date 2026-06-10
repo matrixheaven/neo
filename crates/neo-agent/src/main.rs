@@ -7,6 +7,7 @@ mod modes;
 mod prompt_templates;
 mod resources;
 mod rpc_mode;
+mod session_cloud;
 mod session_commands;
 mod skill_commands;
 mod themes;
@@ -178,6 +179,17 @@ async fn dispatch_command(
             }
             SessionCommand::ExportJson { session_id } => {
                 session_commands::export_json(&session_id, config).await
+            }
+            SessionCommand::Share { session_id, public } => {
+                session_cloud::share(&session_id, public, config).await
+            }
+            SessionCommand::Sync { command } => match command {
+                cli::SessionSyncCommand::Push => session_cloud::sync_push(config).await,
+                cli::SessionSyncCommand::Pull => session_cloud::sync_pull(config).await,
+                cli::SessionSyncCommand::Status => session_cloud::sync_status(config),
+            },
+            SessionCommand::Import { share_ref } => {
+                session_cloud::import_share(&share_ref, config).await
             }
         },
         Some(Command::Skills { command }) => match command {

@@ -7,7 +7,9 @@
   `--mode`/`NEO_MODE`, `--offline`/`NEO_OFFLINE`, and `--verbose`.
 - Commands: `print`, `run`, `resume`, `sessions list`, `sessions show`,
   `sessions tree`, `sessions rename`, `sessions fork`, `sessions compact`,
-  `sessions export-html`, `sessions export-json`, `skills show`, `extensions list`,
+  `sessions export-html`, `sessions export-json`, `sessions share`,
+  `sessions sync push|pull|status`, `sessions import`, `skills show`, `login cloud`,
+  `logout`, `auth status`, `cloud status`, `config sync push|pull|status`, `extensions list`,
   `extensions install`, `extensions update`, `extensions uninstall`,
   `extensions status`, `extensions enable`, `extensions disable`,
   `extensions call`, `config show`, `config set`,
@@ -33,6 +35,11 @@
   summary event, store deterministic local branch summaries, render
   a local parent/child tree, and can export replayed messages to standalone
   HTML or a stable local JSON artifact without leaking absolute session paths.
+- Self-hosted cloud commands bootstrap and refresh device tokens against a
+  user-run `neo-cloud`, store auth tokens in the configured auth file without
+  printing them, sync profile config, upload sanitized session JSONL to
+  `neo-cloud`, create public HTML/JSON share artifacts, import public shares
+  back into local JSONL, and fork remote `cs_...` sessions before local resume.
 - `skills show` loads TOML-frontmatter skill files through `neo-sdk`.
   Provider-backed turns auto-discover project `.neo/skills` and user-global
   `~/.neo/skills`, load explicit `--skill <PATH>` entries, and preserve
@@ -120,8 +127,8 @@
   JSONL path, and replayed messages; `sessions.export_html` returns the
   resolved session id plus the same standalone sanitized HTML used by
   `sessions export-html`; `sessions.export_json` returns a local-only portable
-  JSON artifact with session metadata and replayed messages but no hosted share
-  URL or absolute JSONL path; `set_session_name` updates the same local session
+  JSON artifact with session metadata and replayed messages but no self-hosted
+  cloud share URL or absolute JSONL path; `set_session_name` updates the same local session
   metadata used by `sessions rename` after resolving an existing session.
   State reports real project/session counts and omits unsupported streaming
   state.
@@ -173,8 +180,9 @@ and platform-specific guidance.
 
 ## High-Priority Gaps
 
-- Keep quickstart scoped to currently wired commands and local interactive
-  controls until hosted or profile-synced surfaces exist.
+- Keep quickstart scoped to currently wired commands, self-hosted cloud
+  surfaces, and local interactive controls until managed hosted product
+  surfaces exist.
 - Keep stable JSONL docs scoped to the current typed event family until the full
   Pi event family is backed by code.
 - Add package prompt-template discovery only when Neo has real local package
@@ -186,14 +194,13 @@ and platform-specific guidance.
   extension tool roots, and explicit local name/file/directory selectors plus
   `-selector` filters for auto-discovered local prompts, with collision
   diagnostics for duplicate explicit selector names.
-- Keep config docs scoped to project/global TOML layering until profile sync or
-  hosted settings exist.
-- Do not document `/login`, hosted sharing, hosted extension marketplace
+- Keep config docs scoped to project/global TOML layering and implemented
+  self-hosted profile sync until managed hosted settings exist.
+- Do not document slash `/login`, managed hosted extension marketplace
   catalog/search/install flows, or themes as available Neo features yet. Keep
-  `/tree` documented only as the local session picker slash command until
-  hosted tree/share backing exists.
-- Add hosted session tree navigation/share only when real hosted backing
-  behavior exists.
+  `/tree` documented only as the local session picker slash command until a
+  managed remote tree UI exists.
+- Add managed session collaboration UI only when real backing behavior exists.
 - Keep MCP runtime config limited to tools and explicit resource
   subscription/watch flows until hosted server lifecycle, OAuth/trust flows, or
   remote servers requiring alternate notification channels are implemented.

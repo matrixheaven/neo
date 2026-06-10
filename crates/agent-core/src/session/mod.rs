@@ -244,8 +244,13 @@ pub struct SessionRecord {
     pub name: Option<String>,
     pub summary: Option<String>,
     pub parent_id: Option<String>,
+    pub cloud_id: Option<String>,
+    pub synced_at: Option<String>,
+    pub remote_parent_id: Option<String>,
     #[serde(default)]
     pub children: Vec<String>,
+    #[serde(default)]
+    pub share_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -267,6 +272,14 @@ struct StoredSessionMetadata {
     summary: Option<String>,
     #[serde(default)]
     parent_id: Option<String>,
+    #[serde(default)]
+    cloud_id: Option<String>,
+    #[serde(default)]
+    synced_at: Option<String>,
+    #[serde(default)]
+    remote_parent_id: Option<String>,
+    #[serde(default)]
+    share_ids: Vec<String>,
 }
 
 impl SessionMetadataStore {
@@ -325,6 +338,58 @@ impl SessionMetadataStore {
             .expect("summarized session should be listable"))
     }
 
+    pub fn record_cloud_sync(
+        &self,
+        session_id: &str,
+        cloud_id: String,
+        synced_at: String,
+        remote_parent_id: Option<String>,
+    ) -> Result<SessionRecord, SessionError> {
+        validate_session_id(session_id)?;
+        self.ensure_session_exists(session_id)?;
+
+        let mut metadata = self.read_metadata()?;
+        let stored = metadata.sessions.entry(session_id.to_owned()).or_default();
+        stored.cloud_id = Some(cloud_id);
+        stored.synced_at = Some(synced_at);
+        if remote_parent_id.is_some() {
+            stored.remote_parent_id = remote_parent_id;
+        }
+        self.write_metadata(&metadata)?;
+
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .expect("synced session should be listable"))
+    }
+
+    pub fn record_share(
+        &self,
+        session_id: &str,
+        cloud_id: String,
+        share_id: String,
+        synced_at: String,
+    ) -> Result<SessionRecord, SessionError> {
+        validate_session_id(session_id)?;
+        self.ensure_session_exists(session_id)?;
+
+        let mut metadata = self.read_metadata()?;
+        let stored = metadata.sessions.entry(session_id.to_owned()).or_default();
+        stored.cloud_id = Some(cloud_id);
+        stored.synced_at = Some(synced_at);
+        if !stored.share_ids.contains(&share_id) {
+            stored.share_ids.push(share_id);
+        }
+        self.write_metadata(&metadata)?;
+
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .expect("shared session should be listable"))
+    }
+
     pub fn fork(
         &self,
         parent_id: &str,
@@ -345,6 +410,7 @@ impl SessionMetadataStore {
                 name,
                 summary: None,
                 parent_id: Some(parent_id.to_owned()),
+                ..StoredSessionMetadata::default()
             },
         );
         self.write_metadata(&metadata)?;
@@ -445,6 +511,12 @@ fn records_from_metadata(
                 name: stored.and_then(|record| record.name.clone()),
                 summary: stored.and_then(|record| record.summary.clone()),
                 parent_id: stored.and_then(|record| record.parent_id.clone()),
+                cloud_id: stored.and_then(|record| record.cloud_id.clone()),
+                synced_at: stored.and_then(|record| record.synced_at.clone()),
+                remote_parent_id: stored.and_then(|record| record.remote_parent_id.clone()),
+                share_ids: stored
+                    .map(|record| record.share_ids.clone())
+                    .unwrap_or_default(),
             }
         })
         .collect()

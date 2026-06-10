@@ -1372,7 +1372,10 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "neo-agent-core",
  "neo-cloud-protocol",
+ "neo-sdk",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",
@@ -1387,6 +1390,7 @@ dependencies = [
 name = "neo-cloud-protocol"
 version = "0.1.0"
 dependencies = [
+ "neo-agent-core",
  "serde",
  "serde_json",
 ]

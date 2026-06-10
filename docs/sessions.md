@@ -20,6 +20,8 @@ resumable from local JSONL history.
 - `SessionMetadataStore::fork(parent_id, name)`
 - `SessionMetadataStore::rename(session_id, name)`
 - `SessionMetadataStore::summarize(session_id, summary)`
+- `SessionMetadataStore::record_cloud_sync(session_id, cloud_id, synced_at, parent)`
+- `SessionMetadataStore::record_share(session_id, cloud_id, share_id, synced_at)`
 
 New JSONL files start with a `session_metadata` record containing the
 `neo.session.jsonl` format name, schema version, and creation timestamp.
@@ -35,8 +37,9 @@ can be regenerated from replayed JSONL messages with `sessions summarize`.
 `sessions export-json` replays the same local JSONL events and combines them
 with `sessions.metadata.json` into a portable JSON artifact. The artifact
 contains session metadata and replayed messages, but intentionally omits local
-session file paths. These records and exports do not create hosted or remote
-share records.
+session file paths. Self-hosted cloud commands store remote ids, sync
+timestamps, and share ids in the same metadata file without changing the local
+JSONL format.
 
 `compact_jsonl_session` replays the JSONL file into an `AgentContext`, builds a
 deterministic extractive transcript summary from messages that will no longer be
@@ -54,6 +57,13 @@ The current local replay flow is:
    `CompactionApplied` event.
 4. The CLI prints the replayed transcript, compaction summary, and stored local
    branch summary.
+
+When `<session-ref>` is a self-hosted cloud session id such as `cs_...`, and a
+cloud login is available, `neo-agent resume <session-ref>` first asks
+`neo-cloud` to fork the remote session, writes the forked messages into a new
+local JSONL session, records the remote parent id, and prints the replayed
+transcript. Share ids and share URLs resolve through the same cloud client when
+importing public share artifacts.
 
 CLI session references can be an exact session id, a unique id prefix, or a
 `.jsonl` path inside the configured `sessions_dir`. Ambiguous prefixes are
@@ -81,12 +91,13 @@ The current constraints are:
 
 Still missing from pi parity:
 
-- Hosted share targets beyond local HTML and JSON export.
+- Pi-style managed collaboration, remote continuation services, and share URLs
+  beyond a user-run self-hosted `neo-cloud`.
 - Hosted or model-generated branch summaries beyond local metadata summaries.
 - Model-generated compaction summaries; current compaction is deterministic
   local transcript extraction only.
-- Hosted session tree continuation and share flows beyond local JSONL
-  fork-before-continue controls.
+- Rich hosted session tree UI beyond local JSONL fork-before-continue controls
+  and self-hosted cloud ids.
 
 ## CLI Surface
 
@@ -102,6 +113,11 @@ neo sessions summarize <session-ref>
 neo sessions compact <session-ref> --keep-recent 20
 neo sessions export-html <session-ref>
 neo sessions export-json <session-ref>
+neo sessions share <session-ref> --public
+neo sessions sync push
+neo sessions sync pull
+neo sessions sync status
+neo sessions import <share-id-or-url>
 neo resume <session-ref>
 ```
 
@@ -126,9 +142,14 @@ conversation with `neo-sdk`'s safe Markdown renderer.
 }
 ```
 
-The JSON export is a portable local replacement for hosted share while Neo has
-no hosted share backing. It does not include a share URL or absolute session
-path.
+The JSON export remains local-only and does not include an absolute session
+path. For a self-hosted share URL, use `neo login cloud --server <URL>` followed
+by `neo sessions share <session-ref> --public`. The CLI uploads sanitized
+replayed messages to `neo-cloud`, creates public HTML and JSON share artifacts,
+and records `cloud_id`, `synced_at`, and `share_ids` in
+`sessions.metadata.json`. `neo sessions import <share-id-or-url>` writes a
+public share back into a local JSONL session, and `neo sessions sync push|pull`
+syncs local JSONL-backed sessions with the self-hosted cloud account.
 
 `sessions summarize` stores a deterministic local branch summary in
 `sessions.metadata.json` and surfaces it in `sessions list` and `resume`.
@@ -161,7 +182,7 @@ user-global templates.
 `name`, optional `summary`, optional `parent_id`, and `children`.
 `sessions.tree` returns the same records in local tree order with a `depth`
 field. These RPC payloads read only local `sessions_dir` JSONL and
-`sessions.metadata.json`; they do not create hosted continuation or share
+`sessions.metadata.json`; they do not create remote continuation or share
 records.
 `sessions.export_json` returns the same local-only artifact as
 `neo sessions export-json <session-ref>`, with metadata and replayed messages

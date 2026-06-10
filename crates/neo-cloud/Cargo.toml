@@ -14,7 +14,10 @@ path = "src/main.rs"
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
+neo-agent-core = { path = "../agent-core" }
 neo-cloud-protocol = { path = "../cloud-protocol" }
+neo-sdk = { path = "../sdk" }
+regex.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
