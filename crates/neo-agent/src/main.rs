@@ -27,8 +27,8 @@ use crate::{
     cli::{
         AuthCommand, Cli, CloudCommand, Command, ConfigCommand, ConfigSyncCommand,
         ExtensionCommand, ImageCommand, LIST_MODELS_NO_SEARCH, LoginCommand, McpCommand,
-        ModelCommand, PackageSource, PromptPackageCommand, SessionCommand, SkillCommand,
-        ThemePackageCommand, TrustCommand,
+        ModelCommand, PackageSource, PromptPackageCommand, PublisherTrustCommand, SessionCommand,
+        SkillCommand, ThemePackageCommand, TrustCommand,
     },
     config::{AppConfig, ConfigOverrides},
 };
@@ -206,6 +206,38 @@ async fn dispatch_command(
             TrustCommand::Approve => trust::approve(&config.project_dir),
             TrustCommand::Deny => trust::deny(&config.project_dir),
             TrustCommand::Clear => trust::clear(&config.project_dir),
+            TrustCommand::Publishers { command } => match command {
+                PublisherTrustCommand::Add {
+                    publisher_id,
+                    name,
+                    root,
+                    key_id,
+                    public_key,
+                    account_id,
+                } => trust::add_publisher(
+                    &config.project_dir,
+                    &publisher_id,
+                    &name,
+                    &root,
+                    &key_id,
+                    &public_key,
+                    account_id,
+                ),
+                PublisherTrustCommand::Remove { publisher_id } => {
+                    trust::remove_publisher(&config.project_dir, &publisher_id)
+                }
+                PublisherTrustCommand::List => trust::list_publishers(&config.project_dir),
+                PublisherTrustCommand::RevokeKey {
+                    publisher_id,
+                    key_id,
+                    reason,
+                } => trust::revoke_publisher_key(
+                    &config.project_dir,
+                    &publisher_id,
+                    &key_id,
+                    &reason,
+                ),
+            },
         },
         Some(Command::Login { command }) => match command {
             LoginCommand::Cloud { server } => cloud_commands::login_cloud(config, &server).await,
@@ -470,6 +502,7 @@ async fn dispatch_extensions(
                         neo_extensions::PackageInstallKind::Extension,
                         &source,
                         &paths.root,
+                        &config.project_dir,
                     )
                     .await?;
                     Ok(installed)
@@ -553,6 +586,7 @@ async fn dispatch_prompts(
                     neo_extensions::PackageInstallKind::PromptPack,
                     &package,
                     &config.project_dir.join(".neo/prompts"),
+                    &config.project_dir,
                 )
                 .await
             }
@@ -575,6 +609,18 @@ async fn dispatch_prompts(
                 &name,
             )
         }
+        PromptPackageCommand::Update { package } => {
+            package_commands::update_from_marketplace(
+                neo_extensions::PackageInstallKind::PromptPack,
+                &package,
+                &config.project_dir.join(".neo/prompts"),
+                &config.project_dir,
+            )
+            .await
+        }
+        PromptPackageCommand::Uninstall { package } => {
+            package_commands::uninstall_package(&package, &config.project_dir.join(".neo/prompts"))
+        }
     }
 }
 
@@ -592,6 +638,7 @@ async fn dispatch_themes(
                     neo_extensions::PackageInstallKind::Theme,
                     &package,
                     &config.project_dir.join(".neo/themes"),
+                    &config.project_dir,
                 )
                 .await
             }
@@ -606,6 +653,18 @@ async fn dispatch_themes(
         ThemePackageCommand::List => themes::list_project_themes(&config.project_dir),
         ThemePackageCommand::Preview { name } => {
             themes::preview_project_theme(&config.project_dir, &name)
+        }
+        ThemePackageCommand::Update { package } => {
+            package_commands::update_from_marketplace(
+                neo_extensions::PackageInstallKind::Theme,
+                &package,
+                &config.project_dir.join(".neo/themes"),
+                &config.project_dir,
+            )
+            .await
+        }
+        ThemePackageCommand::Uninstall { package } => {
+            package_commands::uninstall_package(&package, &config.project_dir.join(".neo/themes"))
         }
     }
 }

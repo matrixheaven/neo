@@ -343,6 +343,38 @@ pub enum TrustCommand {
     Approve,
     Deny,
     Clear,
+    Publishers {
+        #[command(subcommand)]
+        command: PublisherTrustCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PublisherTrustCommand {
+    Add {
+        publisher_id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        root: String,
+        #[arg(long = "key-id")]
+        key_id: String,
+        #[arg(long = "public-key")]
+        public_key: String,
+        #[arg(long = "account-id")]
+        account_id: Option<String>,
+    },
+    Remove {
+        publisher_id: String,
+    },
+    List,
+    #[command(alias = "revoke")]
+    RevokeKey {
+        publisher_id: String,
+        key_id: String,
+        #[arg(long, default_value = "")]
+        reason: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -540,6 +572,12 @@ pub enum PromptPackageCommand {
     Publish {
         path: std::path::PathBuf,
     },
+    Update {
+        package: String,
+    },
+    Uninstall {
+        package: String,
+    },
     List,
     Preview {
         name: String,
@@ -558,6 +596,12 @@ pub enum ThemePackageCommand {
     },
     Publish {
         path: std::path::PathBuf,
+    },
+    Update {
+        package: String,
+    },
+    Uninstall {
+        package: String,
     },
     List,
     Preview {

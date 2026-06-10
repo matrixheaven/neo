@@ -2043,12 +2043,15 @@ fn extensions_search_reads_real_marketplace_catalog() {
 fn extensions_marketplace_install_downloads_and_validates_package() {
     let temp = TempDir::new().expect("tempdir");
     let package_dir = TempDir::new().expect("package tempdir");
-    let package = write_signed_neo_package(
+    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
+    trust_test_publisher(temp.path(), &publisher_key);
+    let package = write_trusted_neo_package(
         package_dir.path(),
         "extension",
         "echo",
         "0.1.0",
         "neo-extension.toml",
+        &publisher_key,
         &[PackageFixtureEntry::file(
             "neo-extension.toml",
             r#"
@@ -2113,6 +2116,186 @@ command = "python3"
 }
 
 #[test]
+fn trust_publishers_add_list_remove_and_revoke_use_local_store() {
+    let temp = TempDir::new().expect("tempdir");
+    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
+    let public_key = STANDARD.encode(publisher_key.verifying_key().to_bytes());
+
+    let mut add = neo();
+    add.current_dir(temp.path()).args([
+        "trust",
+        "publishers",
+        "add",
+        "neo-test",
+        "--name",
+        "Neo Test",
+        "--root",
+        "local-root",
+        "--key-id",
+        "ed25519:2026-a",
+        "--public-key",
+        &public_key,
+        "--account-id",
+        "acct_neo_test",
+    ]);
+    let added = run(add);
+    assert!(added.contains("trusted publisher neo-test"));
+    assert!(temp.path().join(".neo/package-trust.toml").exists());
+
+    let mut list = neo();
+    list.current_dir(temp.path())
+        .args(["trust", "publishers", "list"]);
+    let listed = run(list);
+    assert!(listed.contains("neo-test"));
+    assert!(listed.contains("local-root"));
+    assert!(listed.contains("ed25519:2026-a"));
+    assert!(listed.contains("trusted"));
+
+    let mut revoke = neo();
+    revoke.current_dir(temp.path()).args([
+        "trust",
+        "publishers",
+        "revoke-key",
+        "neo-test",
+        "ed25519:2026-a",
+        "--reason",
+        "rotated",
+    ]);
+    let revoked = run(revoke);
+    assert!(revoked.contains("revoked publisher neo-test key ed25519:2026-a"));
+
+    let mut remove = neo();
+    remove
+        .current_dir(temp.path())
+        .args(["trust", "publishers", "remove", "neo-test"]);
+    let removed = run(remove);
+    assert!(removed.contains("removed publisher neo-test"));
+}
+
+#[test]
+fn marketplace_install_requires_trusted_publisher_before_extracting_archive() {
+    let temp = TempDir::new().expect("tempdir");
+    let package_dir = TempDir::new().expect("package tempdir");
+    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
+    let package = write_trusted_neo_package(
+        package_dir.path(),
+        "extension",
+        "echo",
+        "0.1.0",
+        "neo-extension.toml",
+        &publisher_key,
+        &[PackageFixtureEntry::file(
+            "neo-extension.toml",
+            r#"
+id = "echo"
+name = "Echo"
+version = "0.1.0"
+
+[runner]
+command = "python3"
+"#,
+        )],
+    );
+    let manifest = fs::read_to_string(&package).expect("read package manifest");
+    let archive = fs::read(package_dir.path().join("echo-0.1.0.tar")).expect("read archive");
+    let marketplace = MockSseServer::start(vec![
+        json_response(&json!({
+            "package": {
+                "kind": "extension",
+                "id": "echo",
+                "version": "0.1.0",
+                "manifest_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/.neo-package.toml",
+                "archive_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/echo-0.1.0.tar"
+            }
+        })),
+        text_response("application/toml", &manifest),
+        binary_response("application/x-tar", &archive),
+    ]);
+
+    let output = neo()
+        .current_dir(temp.path())
+        .env("NEO_MARKETPLACE_URL", &marketplace.url)
+        .args([
+            "extensions",
+            "install",
+            "echo@0.1.0",
+            "--from",
+            "marketplace",
+        ])
+        .output()
+        .expect("neo command should run");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not trusted"));
+    assert!(!temp.path().join(".neo/extensions/echo").exists());
+}
+
+#[test]
+fn marketplace_install_succeeds_for_trusted_publisher_and_reports_trust_state() {
+    let temp = TempDir::new().expect("tempdir");
+    let package_dir = TempDir::new().expect("package tempdir");
+    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
+    trust_test_publisher(temp.path(), &publisher_key);
+    let package = write_trusted_neo_package(
+        package_dir.path(),
+        "extension",
+        "echo",
+        "0.1.0",
+        "neo-extension.toml",
+        &publisher_key,
+        &[PackageFixtureEntry::file(
+            "neo-extension.toml",
+            r#"
+id = "echo"
+name = "Echo"
+version = "0.1.0"
+
+[runner]
+command = "python3"
+"#,
+        )],
+    );
+    let manifest = fs::read_to_string(&package).expect("read package manifest");
+    let archive = fs::read(package_dir.path().join("echo-0.1.0.tar")).expect("read archive");
+    let marketplace = MockSseServer::start(vec![
+        json_response(&json!({
+            "package": {
+                "kind": "extension",
+                "id": "echo",
+                "version": "0.1.0",
+                "manifest_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/.neo-package.toml",
+                "archive_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/echo-0.1.0.tar"
+            }
+        })),
+        text_response("application/toml", &manifest),
+        binary_response("application/x-tar", &archive),
+    ]);
+
+    let mut install = neo();
+    install
+        .current_dir(temp.path())
+        .env("NEO_MARKETPLACE_URL", &marketplace.url)
+        .args([
+            "extensions",
+            "install",
+            "echo@0.1.0",
+            "--from",
+            "marketplace",
+        ]);
+    let stdout = run(install);
+
+    assert!(stdout.contains("echo installed 0.1.0"));
+    assert!(stdout.contains("marketplace"));
+    assert!(stdout.contains("neo-test"));
+    assert!(stdout.contains("trusted"));
+    assert!(
+        temp.path()
+            .join(".neo/extensions/echo/neo-extension.toml")
+            .exists()
+    );
+}
+
+#[test]
 fn extensions_marketplace_install_rejects_cross_origin_package_urls() {
     let temp = TempDir::new().expect("tempdir");
     let marketplace = MockSseServer::start(vec![json_response(&json!({
@@ -2142,6 +2325,66 @@ fn extensions_marketplace_install_rejects_cross_origin_package_urls() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("configured marketplace origin"));
     assert_eq!(marketplace.requests().len(), 1);
     assert!(!temp.path().join(".neo/extensions/echo").exists());
+}
+
+#[test]
+fn extensions_marketplace_install_allows_cross_origin_only_with_explicit_policy() {
+    let temp = TempDir::new().expect("tempdir");
+    let package_dir = TempDir::new().expect("package tempdir");
+    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
+    trust_test_publisher(temp.path(), &publisher_key);
+    let package = write_trusted_neo_package(
+        package_dir.path(),
+        "extension",
+        "echo",
+        "0.1.0",
+        "neo-extension.toml",
+        &publisher_key,
+        &[PackageFixtureEntry::file(
+            "neo-extension.toml",
+            r#"
+id = "echo"
+name = "Echo"
+version = "0.1.0"
+
+[runner]
+command = "python3"
+"#,
+        )],
+    );
+    let manifest = fs::read_to_string(&package).expect("read package manifest");
+    let archive = fs::read(package_dir.path().join("echo-0.1.0.tar")).expect("read archive");
+    let asset_server = MockSseServer::start(vec![
+        text_response("application/toml", &manifest),
+        binary_response("application/x-tar", &archive),
+    ]);
+    let marketplace = MockSseServer::start(vec![json_response(&json!({
+        "package": {
+            "kind": "extension",
+            "id": "echo",
+            "version": "0.1.0",
+            "manifest_url": format!("{}/manifest.toml", asset_server.url),
+            "archive_url": format!("{}/echo-0.1.0.tar", asset_server.url)
+        }
+    }))]);
+
+    let mut install = neo();
+    install
+        .current_dir(temp.path())
+        .env("NEO_MARKETPLACE_URL", &marketplace.url)
+        .env("NEO_MARKETPLACE_ALLOW_CROSS_ORIGIN", "1")
+        .args([
+            "extensions",
+            "install",
+            "echo@0.1.0",
+            "--from",
+            "marketplace",
+        ]);
+    let stdout = run(install);
+
+    assert!(stdout.contains("echo installed 0.1.0"));
+    assert_eq!(marketplace.requests().len(), 1);
+    assert_eq!(asset_server.requests().len(), 2);
 }
 
 #[test]
@@ -2297,12 +2540,15 @@ fn theme_packages_publish_validates_package_and_posts_to_marketplace() {
 fn prompt_packages_install_list_and_preview_from_marketplace() {
     let temp = TempDir::new().expect("tempdir");
     let package_dir = TempDir::new().expect("package tempdir");
-    let package = write_signed_neo_package(
+    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
+    trust_test_publisher(temp.path(), &publisher_key);
+    let package = write_trusted_neo_package(
         package_dir.path(),
         "prompt-pack",
         "review-pack",
         "1.0.0",
         "review.md",
+        &publisher_key,
         &[PackageFixtureEntry::file(
             "review.md",
             "---\ndescription: Review code\n---\nReview $ARGUMENTS\n",
@@ -2378,15 +2624,136 @@ fn prompt_packages_install_list_and_preview_from_marketplace() {
 }
 
 #[test]
+fn prompt_packages_update_uninstall_and_metadata_from_marketplace() {
+    let temp = TempDir::new().expect("tempdir");
+    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
+    trust_test_publisher(temp.path(), &publisher_key);
+    let v1_dir = TempDir::new().expect("package tempdir");
+    let v1 = write_trusted_neo_package(
+        v1_dir.path(),
+        "prompt-pack",
+        "review-pack",
+        "1.0.0",
+        "review.md",
+        &publisher_key,
+        &[PackageFixtureEntry::file(
+            "review.md",
+            "---\ndescription: Review code\n---\nReview v1\n",
+        )],
+    );
+    let v2_dir = TempDir::new().expect("package tempdir");
+    let v2 = write_trusted_neo_package(
+        v2_dir.path(),
+        "prompt-pack",
+        "review-pack",
+        "1.1.0",
+        "review.md",
+        &publisher_key,
+        &[PackageFixtureEntry::file(
+            "review.md",
+            "---\ndescription: Review code\n---\nReview v2\n",
+        )],
+    );
+    let marketplace = MockSseServer::start(vec![
+        json_response(&json!({
+            "package": {
+                "kind": "prompt-pack",
+                "id": "review-pack",
+                "version": "1.0.0",
+                "manifest_url": "/p/review-pack/1.0.0/.neo-package.toml",
+                "archive_url": "/p/review-pack/1.0.0/review-pack-1.0.0.tar"
+            }
+        })),
+        text_response(
+            "application/toml",
+            &fs::read_to_string(&v1).expect("manifest v1"),
+        ),
+        binary_response(
+            "application/x-tar",
+            &fs::read(v1_dir.path().join("review-pack-1.0.0.tar")).expect("archive v1"),
+        ),
+        json_response(&json!({
+            "package": {
+                "kind": "prompt-pack",
+                "id": "review-pack",
+                "version": "1.1.0",
+                "manifest_url": "/p/review-pack/latest/.neo-package.toml",
+                "archive_url": "/p/review-pack/latest/review-pack-1.1.0.tar"
+            }
+        })),
+        text_response(
+            "application/toml",
+            &fs::read_to_string(&v2).expect("manifest v2"),
+        ),
+        binary_response(
+            "application/x-tar",
+            &fs::read(v2_dir.path().join("review-pack-1.1.0.tar")).expect("archive v2"),
+        ),
+    ]);
+
+    let mut install = neo();
+    install
+        .current_dir(temp.path())
+        .env("NEO_MARKETPLACE_URL", &marketplace.url)
+        .args([
+            "prompts",
+            "install",
+            "review-pack@1.0.0",
+            "--from",
+            "marketplace",
+        ]);
+    run(install);
+
+    let mut update = neo();
+    update
+        .current_dir(temp.path())
+        .env("NEO_MARKETPLACE_URL", &marketplace.url)
+        .args(["prompts", "update", "review-pack"]);
+    let updated = run(update);
+    assert!(updated.contains("review-pack updated 1.1.0"));
+    assert!(updated.contains("trusted"));
+
+    let mut list = neo();
+    list.current_dir(temp.path()).args(["prompts", "list"]);
+    let listed = run(list);
+    assert!(listed.contains("review-pack"));
+    assert!(listed.contains("1.1.0"));
+    assert!(listed.contains("marketplace"));
+    assert!(listed.contains("neo-test"));
+    assert!(listed.contains("trusted"));
+
+    let mut preview = neo();
+    preview
+        .current_dir(temp.path())
+        .args(["prompts", "preview", "review"]);
+    let previewed = run(preview);
+    assert!(previewed.contains("source: marketplace"));
+    assert!(previewed.contains("publisher: neo-test"));
+    assert!(previewed.contains("trust: trusted"));
+    assert!(previewed.contains("Review v2"));
+
+    let mut uninstall = neo();
+    uninstall
+        .current_dir(temp.path())
+        .args(["prompts", "uninstall", "review-pack"]);
+    let uninstalled = run(uninstall);
+    assert!(uninstalled.contains("review-pack uninstalled"));
+    assert!(!temp.path().join(".neo/prompts/review-pack").exists());
+}
+
+#[test]
 fn theme_packages_install_list_and_preview_from_marketplace() {
     let temp = TempDir::new().expect("tempdir");
     let package_dir = TempDir::new().expect("package tempdir");
-    let package = write_signed_neo_package(
+    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
+    trust_test_publisher(temp.path(), &publisher_key);
+    let package = write_trusted_neo_package(
         package_dir.path(),
         "theme",
         "night-owl",
         "2.0.0",
         "night-owl.json",
+        &publisher_key,
         &[PackageFixtureEntry::file(
             "night-owl.json",
             r##"{"name":"Night Owl","colors":{"prompt":"#82aaff"}}"##,
@@ -2440,6 +2807,124 @@ fn theme_packages_install_list_and_preview_from_marketplace() {
             .join(".neo/themes/night-owl/night-owl.json")
             .exists()
     );
+}
+
+#[test]
+fn theme_packages_update_uninstall_and_metadata_from_marketplace() {
+    let temp = TempDir::new().expect("tempdir");
+    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
+    trust_test_publisher(temp.path(), &publisher_key);
+    let v1_dir = TempDir::new().expect("package tempdir");
+    let v1 = write_trusted_neo_package(
+        v1_dir.path(),
+        "theme",
+        "night-owl",
+        "2.0.0",
+        "night-owl.json",
+        &publisher_key,
+        &[PackageFixtureEntry::file(
+            "night-owl.json",
+            r##"{"name":"Night Owl","colors":{"prompt":"#82aaff"}}"##,
+        )],
+    );
+    let v2_dir = TempDir::new().expect("package tempdir");
+    let v2 = write_trusted_neo_package(
+        v2_dir.path(),
+        "theme",
+        "night-owl",
+        "2.1.0",
+        "night-owl.json",
+        &publisher_key,
+        &[PackageFixtureEntry::file(
+            "night-owl.json",
+            r##"{"name":"Night Owl","colors":{"prompt":"#c792ea"}}"##,
+        )],
+    );
+    let marketplace = MockSseServer::start(vec![
+        json_response(&json!({
+            "package": {
+                "kind": "theme",
+                "id": "night-owl",
+                "version": "2.0.0",
+                "manifest_url": "/t/night-owl/2.0.0/.neo-package.toml",
+                "archive_url": "/t/night-owl/2.0.0/night-owl-2.0.0.tar"
+            }
+        })),
+        text_response(
+            "application/toml",
+            &fs::read_to_string(&v1).expect("manifest v1"),
+        ),
+        binary_response(
+            "application/x-tar",
+            &fs::read(v1_dir.path().join("night-owl-2.0.0.tar")).expect("archive v1"),
+        ),
+        json_response(&json!({
+            "package": {
+                "kind": "theme",
+                "id": "night-owl",
+                "version": "2.1.0",
+                "manifest_url": "/t/night-owl/latest/.neo-package.toml",
+                "archive_url": "/t/night-owl/latest/night-owl-2.1.0.tar"
+            }
+        })),
+        text_response(
+            "application/toml",
+            &fs::read_to_string(&v2).expect("manifest v2"),
+        ),
+        binary_response(
+            "application/x-tar",
+            &fs::read(v2_dir.path().join("night-owl-2.1.0.tar")).expect("archive v2"),
+        ),
+    ]);
+
+    let mut install = neo();
+    install
+        .current_dir(temp.path())
+        .env("NEO_MARKETPLACE_URL", &marketplace.url)
+        .args([
+            "themes",
+            "install",
+            "night-owl@2.0.0",
+            "--from",
+            "marketplace",
+        ]);
+    run(install);
+
+    let mut update = neo();
+    update
+        .current_dir(temp.path())
+        .env("NEO_MARKETPLACE_URL", &marketplace.url)
+        .args(["themes", "update", "night-owl"]);
+    let updated = run(update);
+    assert!(updated.contains("night-owl updated 2.1.0"));
+    assert!(updated.contains("trusted"));
+
+    let mut list = neo();
+    list.current_dir(temp.path()).args(["themes", "list"]);
+    let listed = run(list);
+    assert!(listed.contains("night-owl"));
+    assert!(listed.contains("2.1.0"));
+    assert!(listed.contains("marketplace"));
+    assert!(listed.contains("neo-test"));
+    assert!(listed.contains("trusted"));
+
+    let mut preview = neo();
+    preview
+        .current_dir(temp.path())
+        .args(["themes", "preview", "night-owl"]);
+    let previewed = run(preview);
+    assert!(previewed.contains("source: marketplace"));
+    assert!(previewed.contains("publisher: neo-test"));
+    assert!(previewed.contains("trust: trusted"));
+    assert!(previewed.contains("#c792ea"));
+
+    let mut uninstall = neo();
+    uninstall
+        .current_dir(temp.path())
+        .args(["themes", "uninstall", "night-owl"]);
+    let uninstalled = run(uninstall);
+    assert!(uninstalled.contains("night-owl uninstalled"));
+    assert!(!temp.path().join(".neo/themes/night-owl").exists());
 }
 
 fn write_extension_manifest(root: &std::path::Path, id: &str, name: &str, version: &str) {
@@ -2543,6 +3028,81 @@ signature = "{}"
     )
     .expect("write package manifest");
     manifest_path
+}
+
+fn write_trusted_neo_package(
+    root: &Path,
+    kind: &str,
+    id: &str,
+    version: &str,
+    entry: &str,
+    signing_key: &SigningKey,
+    entries: &[PackageFixtureEntry],
+) -> PathBuf {
+    fs::create_dir_all(root).expect("create package root");
+    let archive_name = format!("{id}-{version}.tar");
+    let archive_path = root.join(&archive_name);
+    write_package_archive(&archive_path, entries);
+    let archive_bytes = fs::read(&archive_path).expect("read package archive");
+    let digest = hex_sha256(&archive_bytes);
+    let verifying_key = signing_key.verifying_key();
+    let signature = signing_key.sign(&archive_bytes);
+    let manifest_path = root.join(".neo-package.toml");
+    fs::write(
+        &manifest_path,
+        format!(
+            r#"
+kind = "{kind}"
+id = "{id}"
+version = "{version}"
+entry = "{entry}"
+
+[publisher]
+id = "neo-test"
+name = "Neo Test"
+account_id = "acct_neo_test"
+
+[archive]
+path = "{archive_name}"
+sha256 = "{digest}"
+
+[signature]
+algorithm = "ed25519"
+root = "local-root"
+public_key_id = "ed25519:2026-a"
+public_key = "{}"
+signature = "{}"
+"#,
+            STANDARD.encode(verifying_key.to_bytes()),
+            STANDARD.encode(signature.to_bytes()),
+        ),
+    )
+    .expect("write package manifest");
+    manifest_path
+}
+
+fn trust_test_publisher(project: &Path, signing_key: &SigningKey) {
+    let trust_dir = project.join(".neo");
+    fs::create_dir_all(&trust_dir).expect("create trust dir");
+    fs::write(
+        trust_dir.join("package-trust.toml"),
+        format!(
+            r#"
+[publishers.neo-test]
+id = "neo-test"
+name = "Neo Test"
+root = "local-root"
+account_id = "acct_neo_test"
+
+[publishers.neo-test.keys."ed25519:2026-a"]
+id = "ed25519:2026-a"
+public_key = "{}"
+revoked = false
+"#,
+            STANDARD.encode(signing_key.verifying_key().to_bytes()),
+        ),
+    )
+    .expect("write trust store");
 }
 
 fn write_package_archive(path: &Path, entries: &[PackageFixtureEntry]) {

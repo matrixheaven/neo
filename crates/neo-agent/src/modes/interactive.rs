@@ -1246,6 +1246,8 @@ fn extension_command_completion_items(root: &Path) -> Result<Vec<PickerItem>> {
         })
         .collect::<Vec<_>>();
     items.sort_by(|left, right| left.value.cmp(&right.value));
+    items.dedup_by(|left, right| left.value == right.value);
+    items.truncate(100);
     Ok(items)
 }
 
@@ -3253,6 +3255,36 @@ command = "echo"
         assert_eq!(models[0].value, "@anthropic/claude-sonnet");
         assert_eq!(models[0].source, CompletionSource::ProviderModel);
         assert_eq!(models[0].source_label, "provider model");
+    }
+
+    #[test]
+    fn prompt_completions_include_installed_extension_commands() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let extension = temp.path().join(".neo/extensions/review-extension");
+        fs::create_dir_all(&extension).expect("create extension");
+        fs::write(
+            extension.join("neo-extension.toml"),
+            r#"
+id = "review-extension"
+name = "Review Extension"
+version = "0.1.0"
+description = "Run extension review"
+
+[runner]
+command = "python3"
+"#,
+        )
+        .expect("write manifest");
+
+        let completions = prompt_completions(temp.path(), "/rev", &[]).expect("prompt completions");
+
+        assert!(completions.iter().any(|item| {
+            item.value == "/review-extension"
+                && item
+                    .description
+                    .as_deref()
+                    .is_some_and(|description| description.contains("source: extension command"))
+        }));
     }
 
     #[tokio::test]

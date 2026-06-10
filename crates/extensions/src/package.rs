@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env,
     fmt::Write as _,
     fs,
@@ -47,8 +48,19 @@ pub struct PackageManifest {
     pub id: String,
     pub version: String,
     pub entry: PathBuf,
+    #[serde(default)]
+    pub publisher: PackagePublisher,
     pub archive: PackageArchive,
     pub signature: PackageSignature,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackagePublisher {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +72,10 @@ pub struct PackageArchive {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageSignature {
     pub algorithm: String,
+    #[serde(default)]
+    pub root: String,
+    #[serde(default)]
+    pub public_key_id: String,
     pub public_key: String,
     pub signature: String,
 }
@@ -69,6 +85,27 @@ pub struct ValidatedPackage {
     pub manifest_path: PathBuf,
     pub archive_path: PathBuf,
     pub manifest: PackageManifest,
+    pub trust_state: PublisherTrustState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublisherTrustState {
+    SelfSigned,
+    Trusted {
+        publisher_id: String,
+        root: String,
+        key_id: String,
+    },
+}
+
+impl PublisherTrustState {
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::SelfSigned => "self-signed",
+            Self::Trusted { .. } => "trusted",
+        }
+    }
 }
 
 pub struct DownloadedPackage {
@@ -133,6 +170,27 @@ pub enum PackageValidationError {
     UnsupportedSignatureAlgorithm { algorithm: String },
     #[error("invalid package signature metadata: {message}")]
     InvalidSignatureMetadata { message: String },
+    #[error("package publisher metadata is required for trusted package validation")]
+    MissingPublisher,
+    #[error("package publisher {publisher_id:?} key {key_id:?} is not trusted")]
+    UntrustedPublisher {
+        publisher_id: String,
+        key_id: String,
+    },
+    #[error("package publisher {publisher_id:?} key {key_id:?} is revoked")]
+    RevokedPublisherKey {
+        publisher_id: String,
+        key_id: String,
+    },
+    #[error(
+        "package publisher {publisher_id:?} key {key_id:?} does not match the local trust store"
+    )]
+    PublisherKeyMismatch {
+        publisher_id: String,
+        key_id: String,
+    },
+    #[error("failed to read package trust store: {source}")]
+    TrustStore { source: PackageTrustError },
     #[error("invalid package signature for {path}")]
     InvalidSignature { path: PathBuf },
     #[error("failed to read package archive entries {path}: {source}")]
@@ -169,6 +227,196 @@ pub enum PackageValidationError {
         destination: PathBuf,
         source: std::io::Error,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct PackageTrustStore {
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageTrustData {
+    #[serde(default)]
+    pub publishers: BTreeMap<String, TrustedPublisher>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedPublisher {
+    pub id: String,
+    pub name: String,
+    pub root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub keys: BTreeMap<String, TrustedPublisherKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedPublisherKey {
+    pub id: String,
+    pub public_key: String,
+    #[serde(default)]
+    pub revoked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_reason: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PackageTrustError {
+    #[error("failed to read package trust store {path}: {source}")]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to parse package trust store {path}: {source}")]
+    Parse {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
+    #[error("failed to write package trust store {path}: {source}")]
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("publisher id cannot be empty")]
+    EmptyPublisherId,
+    #[error("publisher key id cannot be empty")]
+    EmptyKeyId,
+    #[error("publisher {publisher_id:?} key {key_id:?} is not trusted")]
+    UnknownPublisherKey {
+        publisher_id: String,
+        key_id: String,
+    },
+}
+
+impl PackageTrustStore {
+    #[must_use]
+    pub fn new(path: impl AsRef<Path>) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+        }
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn trust_publisher(
+        &mut self,
+        publisher_id: &str,
+        name: &str,
+        root: &str,
+        key_id: &str,
+        public_key: &str,
+        account_id: Option<String>,
+    ) -> Result<(), PackageTrustError> {
+        ensure_non_empty_publisher(publisher_id)?;
+        ensure_non_empty_key(key_id)?;
+        let mut data = self.read()?;
+        let publisher = data
+            .publishers
+            .entry(publisher_id.to_owned())
+            .or_insert_with(|| TrustedPublisher {
+                id: publisher_id.to_owned(),
+                name: name.to_owned(),
+                root: root.to_owned(),
+                account_id: account_id.clone(),
+                keys: BTreeMap::new(),
+            });
+        publisher.name = name.to_owned();
+        publisher.root = root.to_owned();
+        publisher.account_id = account_id;
+        publisher.keys.insert(
+            key_id.to_owned(),
+            TrustedPublisherKey {
+                id: key_id.to_owned(),
+                public_key: public_key.to_owned(),
+                revoked: false,
+                revoked_reason: None,
+            },
+        );
+        self.write(&data)
+    }
+
+    pub fn remove_publisher(&mut self, publisher_id: &str) -> Result<bool, PackageTrustError> {
+        let mut data = self.read()?;
+        let removed = data.publishers.remove(publisher_id).is_some();
+        self.write(&data)?;
+        Ok(removed)
+    }
+
+    pub fn revoke_publisher_key(
+        &mut self,
+        publisher_id: &str,
+        key_id: &str,
+        reason: &str,
+    ) -> Result<(), PackageTrustError> {
+        let mut data = self.read()?;
+        let key = data
+            .publishers
+            .get_mut(publisher_id)
+            .and_then(|publisher| publisher.keys.get_mut(key_id))
+            .ok_or_else(|| PackageTrustError::UnknownPublisherKey {
+                publisher_id: publisher_id.to_owned(),
+                key_id: key_id.to_owned(),
+            })?;
+        key.revoked = true;
+        key.revoked_reason = (!reason.trim().is_empty()).then(|| reason.to_owned());
+        self.write(&data)
+    }
+
+    pub fn list_publishers(&self) -> Result<Vec<TrustedPublisher>, PackageTrustError> {
+        Ok(self.read()?.publishers.into_values().collect())
+    }
+
+    fn publisher_key(
+        &self,
+        publisher_id: &str,
+        key_id: &str,
+    ) -> Result<Option<(TrustedPublisher, TrustedPublisherKey)>, PackageTrustError> {
+        let data = self.read()?;
+        Ok(data.publishers.get(publisher_id).and_then(|publisher| {
+            publisher
+                .keys
+                .get(key_id)
+                .map(|key| (publisher.clone(), key.clone()))
+        }))
+    }
+
+    fn read(&self) -> Result<PackageTrustData, PackageTrustError> {
+        if !self.path.exists() {
+            return Ok(PackageTrustData::default());
+        }
+        let content = fs::read_to_string(&self.path).map_err(|source| PackageTrustError::Read {
+            path: self.path.clone(),
+            source,
+        })?;
+        if content.trim().is_empty() {
+            return Ok(PackageTrustData::default());
+        }
+        toml::from_str(&content).map_err(|source| PackageTrustError::Parse {
+            path: self.path.clone(),
+            source,
+        })
+    }
+
+    fn write(&self, data: &PackageTrustData) -> Result<(), PackageTrustError> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).map_err(|source| PackageTrustError::Write {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let content = toml::to_string_pretty(data).map_err(|source| PackageTrustError::Write {
+            path: self.path.clone(),
+            source: std::io::Error::other(source),
+        })?;
+        fs::write(&self.path, content).map_err(|source| PackageTrustError::Write {
+            path: self.path.clone(),
+            source,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -399,7 +647,7 @@ impl MarketplaceClient {
                 path: path.to_owned(),
                 message: source.to_string(),
             })?;
-        if same_origin(&self.base_url, &url) {
+        if same_origin(&self.base_url, &url) || allow_cross_origin_marketplace_packages() {
             Ok(url)
         } else {
             Err(MarketplaceError::ExternalPackageUrl {
@@ -438,6 +686,12 @@ fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
     left.scheme() == right.scheme()
         && left.host_str() == right.host_str()
         && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn allow_cross_origin_marketplace_packages() -> bool {
+    env::var("NEO_MARKETPLACE_ALLOW_CROSS_ORIGIN")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 #[derive(Debug, Clone)]
@@ -507,7 +761,20 @@ impl PackageInstaller {
 pub fn validate_package(
     manifest_path: impl AsRef<Path>,
 ) -> Result<ValidatedPackage, PackageValidationError> {
-    let manifest_path = manifest_path.as_ref();
+    validate_package_inner(manifest_path.as_ref(), None)
+}
+
+pub fn validate_package_with_trust(
+    manifest_path: impl AsRef<Path>,
+    trust_store: &PackageTrustStore,
+) -> Result<ValidatedPackage, PackageValidationError> {
+    validate_package_inner(manifest_path.as_ref(), Some(trust_store))
+}
+
+fn validate_package_inner(
+    manifest_path: &Path,
+    trust_store: Option<&PackageTrustStore>,
+) -> Result<ValidatedPackage, PackageValidationError> {
     let manifest_text = fs::read_to_string(manifest_path).map_err(|source| {
         PackageValidationError::ReadManifest {
             path: manifest_path.to_path_buf(),
@@ -532,12 +799,17 @@ pub fn validate_package(
         })?;
     verify_archive_digest(&archive_path, &manifest.archive.sha256, &archive_bytes)?;
     verify_archive_signature(&archive_path, &manifest.signature, &archive_bytes)?;
+    let trust_state = match trust_store {
+        Some(store) => verify_publisher_trust(&manifest, store)?,
+        None => PublisherTrustState::SelfSigned,
+    };
     validate_archive_entries(&archive_path, &archive_bytes, &manifest.entry)?;
 
     Ok(ValidatedPackage {
         manifest_path: manifest_path.to_path_buf(),
         archive_path,
         manifest,
+        trust_state,
     })
 }
 
@@ -631,6 +903,47 @@ fn verify_archive_signature(
         .map_err(|_| PackageValidationError::InvalidSignature {
             path: archive_path.to_path_buf(),
         })
+}
+
+fn verify_publisher_trust(
+    manifest: &PackageManifest,
+    trust_store: &PackageTrustStore,
+) -> Result<PublisherTrustState, PackageValidationError> {
+    if manifest.publisher.id.trim().is_empty()
+        || manifest.signature.root.trim().is_empty()
+        || manifest.signature.public_key_id.trim().is_empty()
+    {
+        return Err(PackageValidationError::MissingPublisher);
+    }
+    let publisher_id = manifest.publisher.id.clone();
+    let key_id = manifest.signature.public_key_id.clone();
+    let Some((publisher, key)) = trust_store
+        .publisher_key(&publisher_id, &key_id)
+        .map_err(|source| PackageValidationError::TrustStore { source })?
+    else {
+        return Err(PackageValidationError::UntrustedPublisher {
+            publisher_id,
+            key_id,
+        });
+    };
+    if key.revoked {
+        return Err(PackageValidationError::RevokedPublisherKey {
+            publisher_id,
+            key_id,
+        });
+    }
+    if publisher.root != manifest.signature.root || key.public_key != manifest.signature.public_key
+    {
+        return Err(PackageValidationError::PublisherKeyMismatch {
+            publisher_id,
+            key_id,
+        });
+    }
+    Ok(PublisherTrustState::Trusted {
+        publisher_id,
+        root: publisher.root,
+        key_id,
+    })
 }
 
 fn validate_archive_entries(
@@ -785,4 +1098,20 @@ fn hex_sha256(bytes: &[u8]) -> String {
         let _ = write!(&mut output, "{byte:02x}");
     }
     output
+}
+
+fn ensure_non_empty_publisher(publisher_id: &str) -> Result<(), PackageTrustError> {
+    if publisher_id.trim().is_empty() {
+        Err(PackageTrustError::EmptyPublisherId)
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_non_empty_key(key_id: &str) -> Result<(), PackageTrustError> {
+    if key_id.trim().is_empty() {
+        Err(PackageTrustError::EmptyKeyId)
+    } else {
+        Ok(())
+    }
 }

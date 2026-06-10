@@ -8,7 +8,8 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signer as _, SigningKey};
 use neo_extensions::{
-    PackageInstallKind, PackageInstaller, PackageKind, PackageValidationError, validate_package,
+    PackageInstallKind, PackageInstaller, PackageKind, PackageTrustStore, PackageValidationError,
+    PublisherTrustState, validate_package, validate_package_with_trust,
 };
 use sha2::{Digest as _, Sha256};
 use tar::{Builder, EntryType, Header};
@@ -48,6 +49,152 @@ command = "python3"
 
     assert_eq!(installed.id, "echo");
     assert!(install_root.join("echo/neo-extension.toml").exists());
+}
+
+#[test]
+fn validates_package_against_local_trusted_publisher_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let publisher_key = SigningKey::from_bytes(&[7_u8; 32]);
+    let package = write_trusted_package(
+        dir.path(),
+        PackageKind::Extension,
+        "echo",
+        "0.1.0",
+        "neo-extension.toml",
+        &publisher_key,
+        &[PackageEntry::file(
+            "neo-extension.toml",
+            r#"
+id = "echo"
+name = "Echo"
+version = "0.1.0"
+
+[runner]
+command = "python3"
+"#,
+        )],
+    );
+    let trust_path = dir.path().join("package-trust.toml");
+    let mut store = PackageTrustStore::new(&trust_path);
+    store
+        .trust_publisher(
+            "neo-test",
+            "Neo Test",
+            "local-root",
+            "ed25519:2026-a",
+            &STANDARD.encode(publisher_key.verifying_key().to_bytes()),
+            Some("acct_neo_test".to_owned()),
+        )
+        .unwrap();
+
+    let validated = validate_package_with_trust(&package, &store).unwrap();
+
+    assert_eq!(validated.manifest.publisher.id, "neo-test");
+    assert_eq!(validated.manifest.signature.public_key_id, "ed25519:2026-a");
+    assert_eq!(
+        validated.trust_state,
+        PublisherTrustState::Trusted {
+            publisher_id: "neo-test".to_owned(),
+            root: "local-root".to_owned(),
+            key_id: "ed25519:2026-a".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn rejects_package_signed_by_untrusted_publisher_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let publisher_key = SigningKey::from_bytes(&[7_u8; 32]);
+    let package = write_trusted_package(
+        dir.path(),
+        PackageKind::Theme,
+        "theme",
+        "0.1.0",
+        "theme.json",
+        &publisher_key,
+        &[PackageEntry::file("theme.json", r#"{"name":"Theme"}"#)],
+    );
+    let store = PackageTrustStore::new(dir.path().join("package-trust.toml"));
+
+    let error = validate_package_with_trust(&package, &store).unwrap_err();
+
+    assert!(matches!(
+        error,
+        PackageValidationError::UntrustedPublisher {
+            publisher_id,
+            key_id
+        } if publisher_id == "neo-test" && key_id == "ed25519:2026-a"
+    ));
+}
+
+#[test]
+fn rejects_package_signed_by_revoked_publisher_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let publisher_key = SigningKey::from_bytes(&[7_u8; 32]);
+    let package = write_trusted_package(
+        dir.path(),
+        PackageKind::Theme,
+        "theme",
+        "0.1.0",
+        "theme.json",
+        &publisher_key,
+        &[PackageEntry::file("theme.json", r#"{"name":"Theme"}"#)],
+    );
+    let mut store = PackageTrustStore::new(dir.path().join("package-trust.toml"));
+    store
+        .trust_publisher(
+            "neo-test",
+            "Neo Test",
+            "local-root",
+            "ed25519:2026-a",
+            &STANDARD.encode(publisher_key.verifying_key().to_bytes()),
+            Some("acct_neo_test".to_owned()),
+        )
+        .unwrap();
+    store
+        .revoke_publisher_key("neo-test", "ed25519:2026-a", "compromised")
+        .unwrap();
+
+    let error = validate_package_with_trust(&package, &store).unwrap_err();
+
+    assert!(matches!(
+        error,
+        PackageValidationError::RevokedPublisherKey {
+            publisher_id,
+            key_id
+        } if publisher_id == "neo-test" && key_id == "ed25519:2026-a"
+    ));
+}
+
+#[test]
+fn package_manifest_binds_publisher_identity_key_signature_and_archive_digest() {
+    let dir = tempfile::tempdir().unwrap();
+    let publisher_key = SigningKey::from_bytes(&[7_u8; 32]);
+    let package = write_trusted_package(
+        dir.path(),
+        PackageKind::PromptPack,
+        "review-pack",
+        "1.0.0",
+        "review.md",
+        &publisher_key,
+        &[PackageEntry::file("review.md", "Review\n")],
+    );
+
+    let validated = validate_package(&package).unwrap();
+
+    assert_eq!(validated.manifest.publisher.id, "neo-test");
+    assert_eq!(validated.manifest.publisher.name, "Neo Test");
+    assert_eq!(
+        validated.manifest.publisher.account_id.as_deref(),
+        Some("acct_neo_test")
+    );
+    assert_eq!(validated.manifest.signature.root, "local-root");
+    assert_eq!(validated.manifest.signature.public_key_id, "ed25519:2026-a");
+    assert!(!validated.manifest.signature.signature.is_empty());
+    assert_eq!(
+        validated.manifest.archive.sha256,
+        hex_sha256(&fs::read(dir.path().join("review-pack-1.0.0.tar")).unwrap())
+    );
 }
 
 #[test]
@@ -318,6 +465,57 @@ sha256 = "{digest}"
 
 [signature]
 algorithm = "ed25519"
+public_key = "{}"
+signature = "{}"
+"#,
+            STANDARD.encode(verifying_key.to_bytes()),
+            STANDARD.encode(signature.to_bytes()),
+        ),
+    )
+    .unwrap();
+    manifest_path
+}
+
+fn write_trusted_package(
+    root: &Path,
+    kind: PackageKind,
+    id: &str,
+    version: &str,
+    entry: &str,
+    signing_key: &SigningKey,
+    entries: &[PackageEntry],
+) -> PathBuf {
+    fs::create_dir_all(root).unwrap();
+    let archive_path = root.join(format!("{id}-{version}.tar"));
+    write_archive(&archive_path, entries);
+    let archive_bytes = fs::read(&archive_path).unwrap();
+    let digest = hex_sha256(&archive_bytes);
+    let verifying_key = signing_key.verifying_key();
+    let signature = signing_key.sign(&archive_bytes);
+
+    let manifest_path = root.join(".neo-package.toml");
+    fs::write(
+        &manifest_path,
+        format!(
+            r#"
+kind = "{kind}"
+id = "{id}"
+version = "{version}"
+entry = "{entry}"
+
+[publisher]
+id = "neo-test"
+name = "Neo Test"
+account_id = "acct_neo_test"
+
+[archive]
+path = "{id}-{version}.tar"
+sha256 = "{digest}"
+
+[signature]
+algorithm = "ed25519"
+root = "local-root"
+public_key_id = "ed25519:2026-a"
 public_key = "{}"
 signature = "{}"
 "#,
