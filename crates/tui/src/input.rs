@@ -343,6 +343,9 @@ pub enum KeybindingAction {
     TranscriptSelectionExtendPageUp,
     TranscriptSelectionExtendPageDown,
     TranscriptCopySelection,
+    AppClear,
+    AppExit,
+    AppSuspend,
     CommandPaletteOpen,
     SessionPickerOpen,
     SessionFork,
@@ -388,6 +391,9 @@ impl KeybindingAction {
             Self::TranscriptSelectionExtendPageUp => "tui.transcript.selection.extendPageUp",
             Self::TranscriptSelectionExtendPageDown => "tui.transcript.selection.extendPageDown",
             Self::TranscriptCopySelection => "tui.transcript.copySelection",
+            Self::AppClear => "app.clear",
+            Self::AppExit => "app.exit",
+            Self::AppSuspend => "app.suspend",
             Self::CommandPaletteOpen => "tui.command.open",
             Self::SessionPickerOpen => "tui.session.open",
             Self::SessionFork => "tui.session.fork",
@@ -433,6 +439,9 @@ impl KeybindingAction {
             "tui.transcript.selection.extendPageUp" => Self::TranscriptSelectionExtendPageUp,
             "tui.transcript.selection.extendPageDown" => Self::TranscriptSelectionExtendPageDown,
             "tui.transcript.copySelection" => Self::TranscriptCopySelection,
+            "app.clear" => Self::AppClear,
+            "app.exit" => Self::AppExit,
+            "app.suspend" => Self::AppSuspend,
             "tui.command.open" => Self::CommandPaletteOpen,
             "tui.session.open" => Self::SessionPickerOpen,
             "tui.session.fork" => Self::SessionFork,
@@ -575,6 +584,7 @@ fn default_keybinding_definitions() -> Vec<KeybindingDefinition> {
     definitions.extend(editor_keybinding_definitions());
     definitions.extend(input_keybinding_definitions());
     definitions.extend(transcript_keybinding_definitions());
+    definitions.extend(app_keybinding_definitions());
     definitions.extend(picker_keybinding_definitions());
     definitions
 }
@@ -648,7 +658,7 @@ fn editor_keybinding_definitions() -> Vec<KeybindingDefinition> {
             "Delete to line end",
         ),
         definition(Action::EditorYank, &["ctrl+y"], "Yank"),
-        definition(Action::EditorUndo, &["ctrl+-"], "Undo"),
+        definition(Action::EditorUndo, &["ctrl+-", "ctrl+_"], "Undo"),
     ]
 }
 
@@ -702,6 +712,16 @@ fn transcript_keybinding_definitions() -> Vec<KeybindingDefinition> {
             &["ctrl+c"],
             "Copy transcript selection",
         ),
+    ]
+}
+
+fn app_keybinding_definitions() -> Vec<KeybindingDefinition> {
+    use KeybindingAction as Action;
+
+    vec![
+        definition(Action::AppClear, &["ctrl+c"], "Clear editor"),
+        definition(Action::AppExit, &["ctrl+d"], "Exit when prompt is empty"),
+        definition(Action::AppSuspend, &["ctrl+z"], "Suspend to background"),
     ]
 }
 

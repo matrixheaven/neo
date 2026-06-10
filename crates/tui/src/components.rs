@@ -222,6 +222,12 @@ impl Widget for TranscriptWidget<'_> {
             if y >= area.bottom() {
                 break;
             }
+            if index > 0 {
+                y = y.saturating_add(1);
+                if y >= area.bottom() {
+                    break;
+                }
+            }
 
             let item_index = range.start + index;
             let selected = selected_range
@@ -266,9 +272,9 @@ fn transcript_row(item: &TranscriptItem, theme: TuiTheme) -> (&'static str, Stri
         TranscriptItem::User { content } => {
             ("You", content.clone(), Style::default().fg(theme.user))
         }
-        TranscriptItem::Assistant { content } => (
+        TranscriptItem::Assistant { thinking, content } => (
             "Assistant",
-            content.clone(),
+            assistant_display_text(thinking.as_deref(), content),
             Style::default().fg(theme.assistant),
         ),
         TranscriptItem::Tool {
@@ -283,6 +289,14 @@ fn transcript_row(item: &TranscriptItem, theme: TuiTheme) -> (&'static str, Stri
         TranscriptItem::Notice { content } => {
             ("Notice", content.clone(), Style::default().fg(theme.notice))
         }
+    }
+}
+
+fn assistant_display_text(thinking: Option<&str>, content: &str) -> String {
+    match thinking {
+        Some(thinking) if !content.is_empty() => format!("{thinking}\n\n{content}"),
+        Some(thinking) => thinking.to_owned(),
+        None => content.to_owned(),
     }
 }
 

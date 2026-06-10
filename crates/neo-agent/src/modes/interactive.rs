@@ -3,6 +3,7 @@ use crate::{
     prompt_templates::{expand_prompt_template_args, load_project_prompt_templates},
 };
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, VecDeque},
     fs,
     future::{Future, Ready, ready},
@@ -11,7 +12,7 @@ use std::{
     pin::Pin,
     process::{Command, Stdio},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -78,13 +79,17 @@ pub async fn execute_tty_with_startup(
         return Ok(Some(execute_with_startup(config, startup, options)));
     }
 
-    let mut terminal = RawTerminal::enter()?;
+    let terminal = RefCell::new(RawTerminal::enter()?);
     let mut controller = controller_for_config(config);
     controller.apply_startup_options(config, options);
     controller.apply_startup_action(startup);
     let events = CrosstermEvents::new(controller.keybindings.clone());
     controller
-        .run_terminal_loop(|app| terminal.draw(app), events)
+        .run_terminal_loop_with_suspend(
+            |app| terminal.borrow_mut().draw(app),
+            || terminal.borrow_mut().suspend(),
+            events,
+        )
         .await?;
     Ok(None)
 }
@@ -108,6 +113,8 @@ pub(crate) struct InteractiveController {
     clipboard_writer: ClipboardWriter,
     always_approve: bool,
     completion_root: PathBuf,
+    pending_exit_confirmation: Option<ExitConfirmation>,
+    suspend_requested: bool,
 }
 
 pub(crate) struct TurnChannels {
@@ -127,6 +134,33 @@ struct RunningTurn {
     approvals: mpsc::UnboundedReceiver<crate::modes::run::PromptApprovalRequest>,
     task: JoinHandle<Result<()>>,
     cancel_token: CancellationToken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitGesture {
+    CtrlC,
+    CtrlD,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExitConfirmation {
+    gesture: ExitGesture,
+    timestamp: Instant,
+}
+
+impl ExitConfirmation {
+    const WINDOW: Duration = Duration::from_millis(500);
+
+    fn new(gesture: ExitGesture) -> Self {
+        Self {
+            gesture,
+            timestamp: Instant::now(),
+        }
+    }
+
+    fn matches(self, gesture: ExitGesture) -> bool {
+        self.gesture == gesture && self.timestamp.elapsed() <= Self::WINDOW
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -325,6 +359,8 @@ impl InteractiveController {
             clipboard_writer: Arc::new(write_system_clipboard),
             always_approve: false,
             completion_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            pending_exit_confirmation: None,
+            suspend_requested: false,
         }
     }
 
@@ -364,9 +400,20 @@ impl InteractiveController {
         Ok(self.render_snapshot())
     }
 
+    #[cfg(test)]
     pub async fn run_terminal_loop(
         &mut self,
+        render: impl FnMut(&NeoTuiApp) -> Result<()>,
+        events: impl TerminalEvents,
+    ) -> Result<()> {
+        self.run_terminal_loop_with_suspend(render, || Ok(()), events)
+            .await
+    }
+
+    async fn run_terminal_loop_with_suspend(
+        &mut self,
         mut render: impl FnMut(&NeoTuiApp) -> Result<()>,
+        mut suspend: impl FnMut() -> Result<()>,
         mut events: impl TerminalEvents,
     ) -> Result<()> {
         render(&self.app)?;
@@ -386,6 +433,10 @@ impl InteractiveController {
                         }
                         break;
                     }
+                    if self.take_suspend_requested() {
+                        suspend()?;
+                        render(&self.app)?;
+                    }
                 }
                 None => tokio::task::yield_now().await,
             }
@@ -398,41 +449,57 @@ impl InteractiveController {
     async fn handle_input_event(&mut self, event: InputEvent) -> Result<bool> {
         match event {
             InputEvent::Insert(character) => {
+                self.clear_pending_exit_confirmation();
                 self.app
                     .prompt_mut()
                     .apply_edit(PromptEdit::Insert(&character.to_string()));
             }
             InputEvent::Paste(text) => {
+                self.clear_pending_exit_confirmation();
                 self.app.prompt_mut().apply_edit(PromptEdit::Insert(&text));
             }
             InputEvent::Key(key) => return self.handle_keybinding_key(&key).await,
             InputEvent::Action(action) => return self.handle_keybinding_action(action).await,
             InputEvent::Backspace => {
+                self.clear_pending_exit_confirmation();
                 self.app.prompt_mut().apply_edit(PromptEdit::Backspace);
             }
             InputEvent::Delete => {
+                self.clear_pending_exit_confirmation();
                 self.app.prompt_mut().apply_edit(PromptEdit::Delete);
             }
             InputEvent::MoveLeft => {
+                self.clear_pending_exit_confirmation();
                 self.app.prompt_mut().apply_edit(PromptEdit::MoveLeft);
             }
             InputEvent::MoveRight => {
+                self.clear_pending_exit_confirmation();
                 self.app.prompt_mut().apply_edit(PromptEdit::MoveRight);
             }
             InputEvent::MoveHome => {
+                self.clear_pending_exit_confirmation();
                 self.app.prompt_mut().apply_edit(PromptEdit::MoveHome);
             }
             InputEvent::MoveEnd => {
+                self.clear_pending_exit_confirmation();
                 self.app.prompt_mut().apply_edit(PromptEdit::MoveEnd);
             }
             InputEvent::NewLine => {
+                self.clear_pending_exit_confirmation();
                 self.app.prompt_mut().apply_edit(PromptEdit::Insert("\n"));
             }
             InputEvent::Submit => {
+                self.clear_pending_exit_confirmation();
                 self.submit_current_prompt().await?;
             }
             InputEvent::Resize { .. } => {}
-            InputEvent::Cancel | InputEvent::Interrupt => return Ok(true),
+            InputEvent::Cancel => return Ok(true),
+            InputEvent::Interrupt => {
+                if self.active_turn.is_some() {
+                    return Ok(true);
+                }
+                return self.handle_app_clear();
+            }
         }
 
         Ok(false)
@@ -470,10 +537,16 @@ impl InteractiveController {
 
         match action {
             KeybindingAction::InputNewLine => {
+                self.clear_pending_exit_confirmation();
                 self.app.prompt_mut().apply_edit(PromptEdit::Insert("\n"));
             }
             KeybindingAction::InputTab => self.complete_prompt_or_insert_tab(),
             KeybindingAction::InputCopy => self.copy_prompt_to_clipboard(),
+            KeybindingAction::AppClear => return self.handle_app_clear(),
+            KeybindingAction::AppExit => return self.handle_app_exit(),
+            KeybindingAction::AppSuspend => {
+                self.suspend_requested = true;
+            }
             KeybindingAction::CommandPaletteOpen => self.open_command_palette(),
             KeybindingAction::SessionPickerOpen => {
                 self.open_session_picker();
@@ -487,6 +560,7 @@ impl InteractiveController {
                 self.open_model_picker();
             }
             KeybindingAction::InputSubmit => {
+                self.clear_pending_exit_confirmation();
                 self.submit_current_prompt().await?;
             }
             KeybindingAction::SelectUp => self.app.move_overlay_selection_up(),
@@ -557,6 +631,7 @@ impl InteractiveController {
     }
 
     fn complete_prompt_or_insert_tab(&mut self) {
+        self.clear_pending_exit_confirmation();
         let Some(prefix) = self.app.prompt().completion_prefix() else {
             self.app.prompt_mut().apply_edit(PromptEdit::Insert("\t"));
             return;
@@ -616,6 +691,7 @@ impl InteractiveController {
             KeybindingAction::EditorUndo => PromptEdit::Undo,
             _ => return false,
         };
+        self.clear_pending_exit_confirmation();
         self.app.prompt_mut().apply_edit(edit);
         true
     }
@@ -664,6 +740,58 @@ impl InteractiveController {
                 text: format!("Clipboard copy failed: {error}"),
             });
         }
+    }
+
+    fn handle_app_clear(&mut self) -> Result<bool> {
+        if self.app.transcript_selection().is_some() {
+            self.copy_transcript_selection_to_clipboard();
+            self.clear_pending_exit_confirmation();
+            return Ok(false);
+        }
+        if !self.app.prompt().text.is_empty() {
+            self.app.prompt_mut().apply_edit(PromptEdit::Clear);
+            self.show_notice("Press Ctrl-C again to exit");
+            self.pending_exit_confirmation = Some(ExitConfirmation::new(ExitGesture::CtrlC));
+            return Ok(false);
+        }
+        self.handle_exit_confirmation(ExitGesture::CtrlC)
+    }
+
+    fn handle_app_exit(&mut self) -> Result<bool> {
+        if self.app.prompt().text.is_empty() {
+            return self.handle_exit_confirmation(ExitGesture::CtrlD);
+        }
+        self.clear_pending_exit_confirmation();
+        self.app.prompt_mut().apply_edit(PromptEdit::Delete);
+        Ok(false)
+    }
+
+    fn handle_exit_confirmation(&mut self, gesture: ExitGesture) -> Result<bool> {
+        if self
+            .pending_exit_confirmation
+            .as_ref()
+            .is_some_and(|confirmation| confirmation.matches(gesture))
+        {
+            self.pending_exit_confirmation = None;
+            return Ok(true);
+        }
+        let message = match gesture {
+            ExitGesture::CtrlC => "Press Ctrl-C again to exit",
+            ExitGesture::CtrlD => "Press Ctrl-D again to exit",
+        };
+        self.show_notice(message);
+        self.pending_exit_confirmation = Some(ExitConfirmation::new(gesture));
+        Ok(false)
+    }
+
+    fn show_notice(&mut self, message: impl Into<String>) {
+        self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+            text: message.into(),
+        });
+    }
+
+    fn clear_pending_exit_confirmation(&mut self) {
+        self.pending_exit_confirmation = None;
     }
 
     fn open_command_palette(&mut self) {
@@ -968,6 +1096,13 @@ impl InteractiveController {
     #[must_use]
     pub const fn app(&self) -> &NeoTuiApp {
         &self.app
+    }
+
+    #[must_use]
+    pub fn take_suspend_requested(&mut self) -> bool {
+        let requested = self.suspend_requested;
+        self.suspend_requested = false;
+        requested
     }
 
     #[must_use]
@@ -1411,7 +1546,9 @@ const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::InputSubmit,
     KeybindingAction::InputNewLine,
     KeybindingAction::TranscriptCopySelection,
-    KeybindingAction::InputCopy,
+    KeybindingAction::AppClear,
+    KeybindingAction::AppExit,
+    KeybindingAction::AppSuspend,
     KeybindingAction::TranscriptSelectionStart,
     KeybindingAction::TranscriptSelectionClear,
     KeybindingAction::TranscriptSelectionExtendUp,
@@ -1436,6 +1573,7 @@ const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::EditorYank,
     KeybindingAction::EditorUndo,
     KeybindingAction::InputTab,
+    KeybindingAction::InputCopy,
     KeybindingAction::SelectCancel,
 ];
 
@@ -1470,10 +1608,8 @@ impl RawTerminal {
             .draw(|frame| frame.render_widget(app, frame.area()))?;
         Ok(())
     }
-}
 
-impl Drop for RawTerminal {
-    fn drop(&mut self) {
+    fn leave(&mut self) {
         let _ = execute!(
             self.terminal.backend_mut(),
             DisableBracketedPaste,
@@ -1481,6 +1617,38 @@ impl Drop for RawTerminal {
         );
         let _ = self.terminal.show_cursor();
         self.raw_mode.disable();
+    }
+
+    fn reenter(&mut self) -> Result<()> {
+        self.raw_mode.enable_raw()?;
+        execute!(
+            self.terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableBracketedPaste
+        )?;
+        self.terminal.clear()?;
+        Ok(())
+    }
+}
+
+impl Drop for RawTerminal {
+    fn drop(&mut self) {
+        self.leave();
+    }
+}
+
+impl RawTerminal {
+    fn suspend(&mut self) -> Result<()> {
+        self.leave();
+        #[cfg(unix)]
+        {
+            rustix::process::kill_current_process_group(rustix::process::Signal::TSTP)?;
+        }
+        #[cfg(not(unix))]
+        {
+            eprintln!("Suspend to background is not supported on this platform");
+        }
+        self.reenter()
     }
 }
 
@@ -1492,6 +1660,14 @@ impl RawModeGuard {
     fn enable() -> Result<Self> {
         enable_raw_mode()?;
         Ok(Self { active: true })
+    }
+
+    fn enable_raw(&mut self) -> Result<()> {
+        if !self.active {
+            enable_raw_mode()?;
+            self.active = true;
+        }
+        Ok(())
     }
 
     fn disable(&mut self) {
@@ -2086,7 +2262,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn event_loop_copies_prompt_text_from_default_ctrl_c_keybinding() {
+    async fn event_loop_default_ctrl_c_clears_prompt_instead_of_copying() {
         let mut controller = InteractiveController::new(
             "neo",
             "test-session",
@@ -2099,13 +2275,10 @@ mod tests {
         controller
             .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
             .await
-            .expect("copy keybinding handled");
+            .expect("clear keybinding handled");
 
-        assert_eq!(
-            controller.app().copy_buffer(),
-            Some("copy through keybinding")
-        );
-        assert_eq!(controller.app().prompt().text, "copy through keybinding");
+        assert_eq!(controller.app().copy_buffer(), None);
+        assert_eq!(controller.app().prompt().text, "");
     }
 
     #[tokio::test]
@@ -2141,7 +2314,7 @@ mod tests {
 
         controller.type_text("copy to system clipboard");
         controller
-            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputCopy))
             .await
             .expect("copy action succeeds");
 
@@ -2285,6 +2458,112 @@ mod tests {
         assert!(controller.app().focused_overlay().is_none());
         assert_eq!(controller.app().copy_buffer(), None);
         assert!(copied.lock().expect("clipboard writes").is_empty());
+    }
+
+    #[tokio::test]
+    async fn event_loop_ctrl_c_clears_prompt_before_confirming_exit() {
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+
+        controller.type_text("draft prompt");
+        let should_exit = controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
+            .await
+            .expect("ctrl-c handles prompt clear");
+
+        assert!(!should_exit);
+        assert_eq!(controller.app().prompt().text, "");
+        assert!(matches!(
+            controller.app().transcript().items().last(),
+            Some(neo_tui::TranscriptItem::Notice { content })
+                if content == "Press Ctrl-C again to exit"
+        ));
+    }
+
+    #[tokio::test]
+    async fn event_loop_ctrl_c_requires_second_press_to_exit_when_prompt_is_empty() {
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+
+        let first = controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
+            .await
+            .expect("first ctrl-c prompts");
+        let second = controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
+            .await
+            .expect("second ctrl-c exits");
+
+        assert!(!first);
+        assert!(second);
+    }
+
+    #[tokio::test]
+    async fn event_loop_ctrl_d_deletes_forward_until_prompt_is_empty_then_confirms_exit() {
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+
+        controller.type_text("ab");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::EditorCursorLineStart))
+            .await
+            .expect("move cursor to start");
+        let delete = controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+d").expect("valid key")))
+            .await
+            .expect("ctrl-d deletes while prompt has text");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+d").expect("valid key")))
+            .await
+            .expect("ctrl-d deletes final char");
+        let first_exit = controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+d").expect("valid key")))
+            .await
+            .expect("first empty ctrl-d prompts");
+        let second_exit = controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+d").expect("valid key")))
+            .await
+            .expect("second empty ctrl-d exits");
+
+        assert!(!delete);
+        assert_eq!(controller.app().prompt().text, "");
+        assert!(!first_exit);
+        assert!(second_exit);
+        assert!(matches!(
+            controller.app().transcript().items().last(),
+            Some(neo_tui::TranscriptItem::Notice { content })
+                if content == "Press Ctrl-D again to exit"
+        ));
+    }
+
+    #[tokio::test]
+    async fn event_loop_ctrl_z_reports_suspend_request() {
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+
+        let should_exit = controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+z").expect("valid key")))
+            .await
+            .expect("ctrl-z is handled");
+
+        assert!(!should_exit);
+        assert!(controller.take_suspend_requested());
     }
 
     #[tokio::test]
@@ -3407,7 +3686,7 @@ mod tests {
         ));
         assert!(matches!(
             &controller.app().transcript().items()[2],
-            neo_tui::TranscriptItem::Assistant { content } if content == "hi back"
+            neo_tui::TranscriptItem::Assistant { content, .. } if content == "hi back"
         ));
 
         controller.type_text("continue");
@@ -3425,7 +3704,7 @@ mod tests {
         assert_eq!(requests[0].session_id.as_deref(), Some("alpha"));
         assert_eq!(requests[0].model, None);
         assert!(controller.app().transcript().items().iter().any(|item| {
-            matches!(item, neo_tui::TranscriptItem::Assistant { content } if content == "continued")
+            matches!(item, neo_tui::TranscriptItem::Assistant { content, .. } if content == "continued")
         }));
     }
 

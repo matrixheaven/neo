@@ -444,6 +444,22 @@ fn keybinding_manager_matches_defaults_overrides_and_conflicts() {
         KeybindingAction::TranscriptCopySelection
     ));
     assert!(manager.matches(
+        &KeyId::new("ctrl+c").expect("valid key"),
+        KeybindingAction::AppClear
+    ));
+    assert!(manager.matches(
+        &KeyId::new("ctrl+d").expect("valid key"),
+        KeybindingAction::AppExit
+    ));
+    assert!(manager.matches(
+        &KeyId::new("ctrl+z").expect("valid key"),
+        KeybindingAction::AppSuspend
+    ));
+    assert!(manager.matches(
+        &KeyId::new("ctrl+_").expect("valid key"),
+        KeybindingAction::EditorUndo
+    ));
+    assert!(manager.matches(
         &KeyId::new("ctrl+p").expect("valid key"),
         KeybindingAction::CommandPaletteOpen
     ));
@@ -596,6 +612,22 @@ fn prompt_edit_tracks_undo_and_kill_ring_yank() {
     assert_eq!(prompt.apply_edit(PromptEdit::Undo), None);
     assert_eq!(prompt.text, "hello brave world");
     assert_eq!(prompt.cursor, 6);
+}
+
+#[test]
+fn prompt_edit_clear_removes_text_and_can_be_undone() {
+    let mut prompt = PromptState::new("draft text");
+
+    assert_eq!(
+        prompt.apply_edit(PromptEdit::Clear).as_deref(),
+        Some("draft text")
+    );
+    assert_eq!(prompt.text, "");
+    assert_eq!(prompt.cursor, 0);
+
+    prompt.apply_edit(PromptEdit::Undo);
+    assert_eq!(prompt.text, "draft text");
+    assert_eq!(prompt.cursor, 10);
 }
 
 #[test]
@@ -906,12 +938,33 @@ fn transcript_widget_renders_roles_tools_and_wraps_content() {
         TranscriptItem::tool("shell.run", "cargo test", ToolStatusKind::Succeeded),
     ]);
 
-    let lines = render_widget(18, 9, TranscriptWidget::new(&transcript));
+    let lines = render_widget(18, 11, TranscriptWidget::new(&transcript));
 
     assert!(lines.iter().any(|line| line.contains("You")));
     assert!(lines.iter().any(|line| line.contains("Assistant")));
     assert!(lines.iter().any(|line| line.contains("shell.run")));
     assert!(lines.iter().any(|line| line.contains("test")));
+}
+
+#[test]
+fn transcript_widget_adds_space_between_adjacent_messages() {
+    let transcript = ChatTranscript::from_items([
+        TranscriptItem::user("你好"),
+        TranscriptItem::assistant("你好，有什么可以帮你？"),
+    ]);
+
+    let lines = render_widget(32, 6, TranscriptWidget::new(&transcript));
+    let you_row = lines
+        .iter()
+        .position(|line| line.contains("You"))
+        .expect("user label renders");
+    let assistant_row = lines
+        .iter()
+        .position(|line| line.contains("Assistant"))
+        .expect("assistant label renders");
+
+    assert!(assistant_row >= you_row + 3);
+    assert!(lines[assistant_row - 1].trim().is_empty());
 }
 
 #[test]
@@ -929,8 +982,8 @@ fn transcript_widget_uses_supplied_theme_colors() {
     let buffer = render_widget_buffer(24, 8, TranscriptWidget::new(&transcript).with_theme(theme));
 
     let user = buffer.cell((0, 0)).expect("user label cell");
-    let assistant = buffer.cell((0, 2)).expect("assistant label cell");
-    let notice = buffer.cell((0, 4)).expect("notice label cell");
+    let assistant = buffer.cell((0, 3)).expect("assistant label cell");
+    let notice = buffer.cell((0, 6)).expect("notice label cell");
     assert_eq!(user.fg, Color::Magenta);
     assert_eq!(assistant.fg, Color::Blue);
     assert_eq!(notice.fg, Color::Yellow);
@@ -950,7 +1003,7 @@ fn transcript_widget_highlights_selected_items() {
         TranscriptWidget::new(&transcript).with_selection(Some(&selection)),
     );
 
-    let selected_heading = &buffer.content[24 * 2];
+    let selected_heading = &buffer.content[24 * 3];
     assert_eq!(selected_heading.symbol(), "A");
     assert_eq!(selected_heading.style().bg, Some(Color::DarkGray));
 }

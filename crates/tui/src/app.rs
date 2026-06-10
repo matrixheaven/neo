@@ -107,6 +107,7 @@ pub struct NeoTuiApp {
     next_overlay_id: OverlayId,
     focused_overlay: Option<OverlayId>,
     active_assistant_id: Option<String>,
+    active_user_prompt: Option<String>,
     active_assistant_buffer: String,
     active_thinking_buffer: String,
     active_tools: Vec<ActiveTool>,
@@ -135,6 +136,7 @@ impl NeoTuiApp {
             next_overlay_id: OverlayId::default(),
             focused_overlay: None,
             active_assistant_id: None,
+            active_user_prompt: None,
             active_assistant_buffer: String::new(),
             active_thinking_buffer: String::new(),
             active_tools: Vec::new(),
@@ -284,6 +286,7 @@ impl NeoTuiApp {
         self.transcript_selection = None;
         self.prompt = PromptState::default();
         self.active_assistant_id = None;
+        self.active_user_prompt = None;
         self.active_assistant_buffer.clear();
         self.active_thinking_buffer.clear();
         self.active_tools.clear();
@@ -343,6 +346,7 @@ impl NeoTuiApp {
 
         self.transcript
             .push(TranscriptItem::user(submitted.clone()));
+        self.active_user_prompt = Some(submitted.clone());
         self.transcript_selection = None;
         self.prompt = PromptState::default();
         self.mode = AppMode::Streaming;
@@ -366,9 +370,14 @@ impl NeoTuiApp {
                     self.transcript.push(TranscriptItem::assistant(""));
                 }
                 self.active_assistant_buffer.push_str(&text);
-                let _ = self
+                if !self
                     .transcript
-                    .update_last_assistant(self.active_assistant_buffer.clone());
+                    .update_last_assistant(self.active_assistant_buffer.clone())
+                {
+                    self.transcript.push(TranscriptItem::assistant(
+                        self.active_assistant_buffer.clone(),
+                    ));
+                }
             }
             StreamUpdate::ToolStarted { id, name, detail } => {
                 self.transcript_selection = None;
@@ -413,19 +422,35 @@ impl NeoTuiApp {
                 self.transcript_selection = None;
             }
             StreamUpdate::ThinkingStarted => {
+                if self.active_assistant_id.is_none() {
+                    self.active_assistant_id = Some(String::new());
+                    self.transcript.push(TranscriptItem::assistant(""));
+                }
                 self.active_thinking_buffer.clear();
                 self.mode = AppMode::Streaming;
             }
             StreamUpdate::ThinkingDelta { text } => {
+                if self.active_assistant_id.is_none() {
+                    self.active_assistant_id = Some(String::new());
+                    self.transcript.push(TranscriptItem::assistant(""));
+                }
                 self.active_thinking_buffer.push_str(&text);
+                if !self
+                    .transcript
+                    .update_last_assistant_thinking(Some(self.active_thinking_buffer.clone()))
+                {
+                    self.transcript
+                        .push(TranscriptItem::assistant_with_thinking(
+                            self.active_thinking_buffer.clone(),
+                            "",
+                        ));
+                }
             }
             StreamUpdate::ThinkingFinished => {
                 if !self.active_thinking_buffer.is_empty() {
-                    self.transcript.push(TranscriptItem::notice(format!(
-                        "Thinking: {}",
-                        self.active_thinking_buffer
-                    )));
-                    self.transcript_selection = None;
+                    let _ = self
+                        .transcript
+                        .update_last_assistant_thinking(Some(self.active_thinking_buffer.clone()));
                 }
                 self.active_thinking_buffer.clear();
             }
@@ -433,10 +458,12 @@ impl NeoTuiApp {
                 self.transcript
                     .push(TranscriptItem::notice(format!("Error: {text}")));
                 self.transcript_selection = None;
+                self.active_user_prompt = None;
                 self.mode = self.overlay_mode();
             }
             StreamUpdate::TurnFinished => {
                 self.active_assistant_id = None;
+                self.active_user_prompt = None;
                 self.active_assistant_buffer.clear();
                 self.active_thinking_buffer.clear();
                 self.active_tools.clear();
@@ -648,26 +675,46 @@ impl NeoTuiApp {
     }
 
     fn apply_message(&mut self, message: AgentMessage) {
-        let text = message_text(&message);
-        if text.is_empty() {
-            return;
-        }
-
         match message {
-            AgentMessage::User { .. } => self.transcript.push(TranscriptItem::user(text)),
-            AgentMessage::Assistant { .. } => {
+            AgentMessage::User { content } => {
+                let text = content_display_text(&content);
+                if text.is_empty() {
+                    return;
+                }
+                if self.active_user_prompt.as_deref() == Some(text.as_str()) {
+                    return;
+                }
+                self.transcript.push(TranscriptItem::user(text));
+            }
+            AgentMessage::Assistant { content, .. } => {
+                let (thinking, text) = assistant_transcript_parts(&content);
+                if thinking.is_none() && text.is_empty() {
+                    return;
+                }
                 if self.active_assistant_id.is_some() {
-                    let _ = self.transcript.update_last_assistant(text);
+                    if !self
+                        .transcript
+                        .update_last_assistant_message(thinking.clone(), text.clone())
+                    {
+                        self.transcript
+                            .push(TranscriptItem::assistant_parts(thinking, text));
+                    }
                 } else {
-                    self.transcript.push(TranscriptItem::assistant(text));
+                    self.transcript
+                        .push(TranscriptItem::assistant_parts(thinking, text));
                 }
             }
             AgentMessage::ToolResult {
                 tool_call_id,
                 tool_name,
                 is_error,
+                content,
                 ..
             } => {
+                let text = content_display_text(&content);
+                if text.is_empty() {
+                    return;
+                }
                 if take_completed_tool_result(&mut self.completed_tool_result_ids, &tool_call_id) {
                     return;
                 }
@@ -681,7 +728,11 @@ impl NeoTuiApp {
                     },
                 ));
             }
-            AgentMessage::System { .. } => {
+            AgentMessage::System { content } => {
+                let text = content_display_text(&content);
+                if text.is_empty() {
+                    return;
+                }
                 self.transcript.push(TranscriptItem::notice(text));
             }
         }
@@ -922,14 +973,42 @@ fn message_text(message: &AgentMessage) -> String {
 
     content
         .iter()
-        .filter_map(content_text)
-        .fold(String::new(), |mut message, content| {
-            message.push_str(&content);
-            message
-        })
+        .filter_map(content_visible_text)
+        .collect::<String>()
 }
 
-fn content_text(content: &Content) -> Option<String> {
+fn content_display_text(content: &[Content]) -> String {
+    content.iter().filter_map(content_visible_text).collect()
+}
+
+fn assistant_transcript_parts(content: &[Content]) -> (Option<String>, String) {
+    let mut thinking_blocks = Vec::new();
+    let mut text = String::new();
+    for part in content {
+        match part {
+            Content::Thinking {
+                text,
+                redacted,
+                signature: _,
+            } => {
+                if !text.is_empty() {
+                    thinking_blocks.push(text.clone());
+                } else if *redacted {
+                    thinking_blocks.push("[Reasoning redacted]".to_owned());
+                }
+            }
+            Content::Text { .. } | Content::Image { .. } => {
+                if let Some(visible) = content_visible_text(part) {
+                    text.push_str(&visible);
+                }
+            }
+        }
+    }
+    let thinking = (!thinking_blocks.is_empty()).then(|| thinking_blocks.join("\n\n"));
+    (thinking, text)
+}
+
+fn content_visible_text(content: &Content) -> Option<String> {
     match content {
         Content::Text { text } => Some(text.clone()),
         Content::Thinking { .. } => None,
@@ -1414,6 +1493,7 @@ pub enum TranscriptItem {
         content: String,
     },
     Assistant {
+        thinking: Option<String>,
         content: String,
     },
     Tool {
@@ -1719,7 +1799,22 @@ impl TranscriptItem {
 
     #[must_use]
     pub fn assistant(content: impl Into<String>) -> Self {
+        Self::assistant_parts(None, content)
+    }
+
+    #[must_use]
+    pub fn assistant_with_thinking(
+        thinking: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self::assistant_parts(Some(thinking.into()), content)
+    }
+
+    #[must_use]
+    pub fn assistant_parts(thinking: Option<String>, content: impl Into<String>) -> Self {
+        let thinking = thinking.filter(|thinking| !thinking.is_empty());
         Self::Assistant {
+            thinking,
             content: content.into(),
         }
     }
@@ -1768,7 +1863,13 @@ impl ChatTranscript {
     }
 
     pub fn update_last_assistant(&mut self, content: impl Into<String>) -> bool {
-        let Some(TranscriptItem::Assistant { content: existing }) = self
+        self.update_last_assistant_content(content)
+    }
+
+    pub fn update_last_assistant_content(&mut self, content: impl Into<String>) -> bool {
+        let Some(TranscriptItem::Assistant {
+            content: existing, ..
+        }) = self
             .items
             .iter_mut()
             .rev()
@@ -1778,6 +1879,44 @@ impl ChatTranscript {
         };
 
         *existing = content.into();
+        true
+    }
+
+    pub fn update_last_assistant_thinking(&mut self, thinking: Option<String>) -> bool {
+        let Some(TranscriptItem::Assistant {
+            thinking: existing, ..
+        }) = self
+            .items
+            .iter_mut()
+            .rev()
+            .find(|item| matches!(item, TranscriptItem::Assistant { .. }))
+        else {
+            return false;
+        };
+
+        *existing = thinking.filter(|thinking| !thinking.is_empty());
+        true
+    }
+
+    pub fn update_last_assistant_message(
+        &mut self,
+        thinking: Option<String>,
+        content: impl Into<String>,
+    ) -> bool {
+        let Some(TranscriptItem::Assistant {
+            thinking: existing_thinking,
+            content: existing_content,
+        }) = self
+            .items
+            .iter_mut()
+            .rev()
+            .find(|item| matches!(item, TranscriptItem::Assistant { .. }))
+        else {
+            return false;
+        };
+
+        *existing_thinking = thinking.filter(|thinking| !thinking.is_empty());
+        *existing_content = content.into();
         true
     }
 
@@ -1816,13 +1955,24 @@ impl ChatTranscript {
 fn transcript_copy_parts(item: &TranscriptItem) -> (&'static str, String) {
     match item {
         TranscriptItem::User { content } => ("You", content.clone()),
-        TranscriptItem::Assistant { content } => ("Assistant", content.clone()),
+        TranscriptItem::Assistant { thinking, content } => (
+            "Assistant",
+            assistant_copy_text(thinking.as_deref(), content),
+        ),
         TranscriptItem::Tool {
             name,
             detail,
             status,
         } => ("Tool", format!("{} {} ({})", status.marker(), name, detail)),
         TranscriptItem::Notice { content } => ("Notice", content.clone()),
+    }
+}
+
+fn assistant_copy_text(thinking: Option<&str>, content: &str) -> String {
+    match thinking {
+        Some(thinking) if !content.is_empty() => format!("{thinking}\n\n{content}"),
+        Some(thinking) => thinking.to_owned(),
+        None => content.to_owned(),
     }
 }
 
@@ -2022,6 +2172,16 @@ impl PromptState {
                 self.cursor += inserted.chars().count();
                 self.push_undo(before);
                 Some(inserted)
+            }
+            PromptEdit::Clear => {
+                if self.text.is_empty() {
+                    return None;
+                }
+                let before = self.snapshot();
+                let cleared = std::mem::take(&mut self.text);
+                self.cursor = 0;
+                self.push_undo(before);
+                Some(cleared)
             }
             PromptEdit::Backspace => self.apply_delete(
                 self.cursor.saturating_sub(1),
@@ -2235,6 +2395,7 @@ enum DeleteDirection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptEdit<'a> {
     Insert(&'a str),
+    Clear,
     Backspace,
     Delete,
     MoveLeft,

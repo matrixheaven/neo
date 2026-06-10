@@ -199,7 +199,7 @@ fn app_shell_reduces_agent_core_streaming_message_and_turn_events() {
     assert_eq!(app.active_assistant_id(), None);
     assert!(matches!(
         app.transcript().items().last(),
-        Some(neo_tui::TranscriptItem::Assistant { content }) if content == "Hello"
+        Some(neo_tui::TranscriptItem::Assistant { content, .. }) if content == "Hello"
     ));
 }
 
@@ -240,14 +240,42 @@ fn app_shell_reduces_agent_core_thinking_events_without_polluting_answer_text() 
     assert_eq!(app.mode(), AppMode::Editing);
     assert!(matches!(
         &app.transcript().items()[0],
-        neo_tui::TranscriptItem::Assistant { content } if content == "Final answer"
+        neo_tui::TranscriptItem::Assistant { thinking, content }
+            if thinking.as_deref() == Some("Checked the plan.") && content == "Final answer"
     ));
-    assert!(matches!(
-        &app.transcript().items()[1],
-        neo_tui::TranscriptItem::Notice { content }
-            if content.contains("Thinking")
-                && content.contains("Checked the plan.")
-    ));
+    assert_eq!(app.transcript().items().len(), 1);
+    assert!(!app.transcript().items().iter().any(|item| matches!(
+        item,
+        neo_tui::TranscriptItem::Notice { content } if content.contains("Thinking")
+    )));
+}
+
+#[test]
+fn app_shell_deduplicates_echoed_user_messages_for_active_turn() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "anthropic/deepseek-v4-pro[1m]");
+
+    app.prompt_mut()
+        .apply_edit(neo_tui::PromptEdit::Insert("你好"));
+    assert_eq!(app.submit_prompt(), Some("你好".to_owned()));
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageAppended {
+        message: neo_agent_core::AgentMessage::user_text("你好"),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageAppended {
+        message: neo_agent_core::AgentMessage::user_text("你好"),
+    });
+
+    let user_messages = app
+        .transcript()
+        .items()
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                neo_tui::TranscriptItem::User { content } if content == "你好"
+            )
+        })
+        .count();
+    assert_eq!(user_messages, 1);
 }
 
 #[test]
@@ -287,7 +315,7 @@ fn app_shell_records_submissions_and_streaming_updates() {
     assert!(app.tool_statuses().is_empty());
     assert!(matches!(
         &app.transcript().items()[1],
-        neo_tui::TranscriptItem::Assistant { content } if content == "Hello"
+        neo_tui::TranscriptItem::Assistant { content, .. } if content == "Hello"
     ));
     assert!(matches!(
         &app.transcript().items()[2],
@@ -340,7 +368,7 @@ fn app_loads_session_transcript_and_updates_label() {
     ));
     assert!(matches!(
         &app.transcript().items()[2],
-        neo_tui::TranscriptItem::Assistant { content } if content == "hi back"
+        neo_tui::TranscriptItem::Assistant { content, .. } if content == "hi back"
     ));
 }
 
@@ -376,12 +404,12 @@ fn app_shell_renders_agent_core_image_content_as_safe_metadata_summary() {
     assert_eq!(app.transcript().items().len(), 2);
     assert!(matches!(
         &app.transcript().items()[0],
-        neo_tui::TranscriptItem::Assistant { content }
+        neo_tui::TranscriptItem::Assistant { content, .. }
             if content == "[image: image/png url=https://example.test/cat.png]"
     ));
     assert!(matches!(
         &app.transcript().items()[1],
-        neo_tui::TranscriptItem::Assistant { content }
+        neo_tui::TranscriptItem::Assistant { content, .. }
             if content.contains("see attached")
                 && content.contains("[image: image/jpeg data=256 bytes]")
                 && !content.contains(&large_base64)

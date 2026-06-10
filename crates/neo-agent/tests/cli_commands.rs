@@ -4,16 +4,31 @@ use std::{
     fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+static ISOLATED_HOMES: OnceLock<Mutex<Vec<TempDir>>> = OnceLock::new();
+
 fn neo() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_neo"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_neo"));
+    command.env("HOME", isolated_home());
+    command
+}
+
+fn isolated_home() -> PathBuf {
+    let home = TempDir::new().expect("isolated home");
+    let path = home.path().to_path_buf();
+    ISOLATED_HOMES
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .expect("isolated home lock")
+        .push(home);
+    path
 }
 
 fn run(mut command: Command) -> String {
@@ -651,6 +666,30 @@ fn config_set_writes_tui_keybinding_override() {
         .map(|value| value.as_str().expect("key should be a string").to_owned())
         .collect::<Vec<_>>();
     assert_eq!(keys, vec!["ctrl+g", "ctrl+p"]);
+}
+
+#[test]
+fn config_set_writes_app_keybinding_override() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut command = neo();
+    command.current_dir(temp.path()).args([
+        "config",
+        "set",
+        "tui.keybindings.app.exit",
+        "[\"ctrl+x\"]",
+    ]);
+    let stdout = run(command);
+
+    assert!(stdout.contains("set tui.keybindings.app.exit"));
+    let config = fs::read_to_string(temp.path().join(".neo/config.toml")).expect("read config");
+    let value: toml::Value = toml::from_str(&config).expect("config should be valid toml");
+    let keys = value["tui"]["keybindings"]["app.exit"]
+        .as_array()
+        .expect("keybinding override should be an array")
+        .iter()
+        .map(|value| value.as_str().expect("key should be a string").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(keys, vec!["ctrl+x"]);
 }
 
 #[test]
