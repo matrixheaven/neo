@@ -8,11 +8,15 @@
 - Commands: `print`, `run`, `resume`, `sessions list`, `sessions show`,
   `sessions tree`, `sessions rename`, `sessions fork`, `sessions compact`,
   `sessions export-html`, `sessions export-json`, `sessions share`,
-  `sessions sync push|pull|status`, `sessions import`, `skills show`, `login cloud`,
-  `logout`, `auth status`, `cloud status`, `config sync push|pull|status`, `extensions list`,
-  `extensions install`, `extensions update`, `extensions uninstall`,
+  `sessions sync push|pull|status`, `sessions import`, `skills show`,
+  `login cloud`, `logout`, `auth status`, `cloud status`,
+  `config sync push|pull|status`, `extensions search`, `extensions list`,
+  `extensions install`, `extensions publish`,
+  `extensions update`, `extensions uninstall`,
   `extensions status`, `extensions enable`, `extensions disable`,
-  `extensions call`, `config show`, `config set`,
+  `extensions call`, `prompts search`, `prompts install`, `prompts publish`,
+  `prompts list`, `prompts preview`, `themes search`, `themes install`,
+  `themes publish`, `themes list`, `themes preview`, `config show`, `config set`,
   `models list`, `mcp list`, and `mcp tools`.
 - Root `--list-models [search]` lists the resolved model catalog with optional
   search filtering, then exits without entering interactive mode.
@@ -63,6 +67,17 @@
   `tools.list` RPC, and register returned tools as model-facing
   `extension__<extension>__<tool>` functions. `--no-extensions` disables
   automatic project extension discovery while keeping explicit extension paths.
+- `extensions search`, `prompts search`, and `themes search` query a real
+  marketplace catalog configured by `NEO_MARKETPLACE_URL`; marketplace install
+  and publish commands fail closed when the server/catalog is unavailable.
+  `.neo-package.toml` packages support `extension`, `prompt-pack`, and `theme`
+  kinds, validate sha256 archive digests, verify Ed25519 package signatures,
+  reject absolute paths, `..`, and escaping symlink/hard-link metadata, and
+  install under project `.neo/extensions`, `.neo/prompts`, and `.neo/themes`.
+  Current trust scope is manifest self-sign only, with no publisher/root trust
+  anchor.
+  `prompts list/preview` and `themes list/preview` inspect those local package
+  install roots.
 - `mcp list` reads project MCP server entries without starting servers.
 - `mcp tools <server-id>` discovers a configured enabled MCP server over its
   real stdio or HTTP/SSE adapter, then prints model-facing tool names,
@@ -185,22 +200,16 @@ and platform-specific guidance.
   surfaces exist.
 - Keep stable JSONL docs scoped to the current typed event family until the full
   Pi event family is backed by code.
-- Add package prompt-template discovery only when Neo has real local package
-  infrastructure. The current implemented local resource scope is project/user
-  `SYSTEM.md` and `APPEND_SYSTEM.md`, trust-gated user/project/ancestor
-  `AGENTS.md`/`CLAUDE.md` context files, project `.neo/prompts`,
-  user-global `~/.neo/prompts`, user/project TOML `prompt_templates`
-  selectors, default plus explicit local skills, enabled plus explicit local
-  extension tool roots, and explicit local name/file/directory selectors plus
-  `-selector` filters for auto-discovered local prompts, with collision
-  diagnostics for duplicate explicit selector names.
 - Keep config docs scoped to project/global TOML layering and implemented
   self-hosted profile sync until managed hosted settings exist.
-- Do not document slash `/login`, managed hosted extension marketplace
-  catalog/search/install flows, or themes as available Neo features yet. Keep
-  `/tree` documented only as the local session picker slash command until a
-  managed remote tree UI exists.
-- Add managed session collaboration UI only when real backing behavior exists.
+- Keep package docs scoped to the configured marketplace HTTP API and local
+  package install roots. Do not describe package account flows, publisher/root
+  trust chains, package update/uninstall lifecycle for prompt/theme packages, or
+  hosted marketplace UX until those are backed by real code.
+- Do not document slash `/login` or managed hosted collaboration as available
+  Neo features. Keep `/tree` documented only as the local session picker slash
+  command until hosted tree/share backing exists.
+- Add hosted session collaboration UI only when real backing behavior exists.
 - Keep MCP runtime config limited to tools and explicit resource
   subscription/watch flows until hosted server lifecycle, OAuth/trust flows, or
   remote servers requiring alternate notification channels are implemented.

@@ -4,6 +4,7 @@ mod config;
 mod extension_commands;
 mod extension_tools;
 mod modes;
+mod package_commands;
 mod prompt_templates;
 mod resources;
 mod rpc_mode;
@@ -26,7 +27,8 @@ use crate::{
     cli::{
         AuthCommand, Cli, CloudCommand, Command, ConfigCommand, ConfigSyncCommand,
         ExtensionCommand, ImageCommand, LIST_MODELS_NO_SEARCH, LoginCommand, McpCommand,
-        ModelCommand, SessionCommand, SkillCommand, TrustCommand,
+        ModelCommand, PackageSource, PromptPackageCommand, SessionCommand, SkillCommand,
+        ThemePackageCommand, TrustCommand,
     },
     config::{AppConfig, ConfigOverrides},
 };
@@ -197,6 +199,8 @@ async fn dispatch_command(
             SkillCommand::Show { path } => skill_commands::show(&path),
         },
         Some(Command::Extensions { command }) => dispatch_extensions(config, command).await,
+        Some(Command::Prompts { command }) => dispatch_prompts(config, command).await,
+        Some(Command::Themes { command }) => dispatch_themes(config, command).await,
         Some(Command::Trust { command }) => match command {
             TrustCommand::Status => trust::status(&config.project_dir),
             TrustCommand::Approve => trust::approve(&config.project_dir),
@@ -420,18 +424,39 @@ async fn dispatch_extensions(
     command: ExtensionCommand,
 ) -> anyhow::Result<String> {
     match command {
+        ExtensionCommand::Search { query } => {
+            package_commands::search(neo_extensions::PackageKind::Extension, &query).await
+        }
         ExtensionCommand::List { root } => {
             let paths = extension_paths(config, root);
             extension_commands::list(&paths.root, &paths.state_path, &paths.registry_path)
         }
-        ExtensionCommand::Install { source, root } => {
+        ExtensionCommand::Install { source, from, root } => {
             let paths = extension_paths(config, root);
-            extension_commands::install(
-                &paths.root,
-                &paths.state_path,
-                &paths.registry_path,
-                &source,
+            match from {
+                Some(PackageSource::Marketplace) => {
+                    let installed = package_commands::install_from_marketplace(
+                        neo_extensions::PackageInstallKind::Extension,
+                        &source,
+                        &paths.root,
+                    )
+                    .await?;
+                    Ok(installed)
+                }
+                None => extension_commands::install(
+                    &paths.root,
+                    &paths.state_path,
+                    &paths.registry_path,
+                    &source,
+                ),
+            }
+        }
+        ExtensionCommand::Publish { path } => {
+            package_commands::publish(
+                neo_extensions::PackageKind::Extension,
+                &resolve_package_path(config, path),
             )
+            .await
         }
         ExtensionCommand::Update { extension_id, root } => {
             let paths = extension_paths(config, root);
@@ -483,6 +508,77 @@ async fn dispatch_extensions(
     }
 }
 
+async fn dispatch_prompts(
+    config: &AppConfig,
+    command: PromptPackageCommand,
+) -> anyhow::Result<String> {
+    match command {
+        PromptPackageCommand::Search { query } => {
+            package_commands::search(neo_extensions::PackageKind::PromptPack, &query).await
+        }
+        PromptPackageCommand::Install { package, from } => match from {
+            PackageSource::Marketplace => {
+                package_commands::install_from_marketplace(
+                    neo_extensions::PackageInstallKind::PromptPack,
+                    &package,
+                    &config.project_dir.join(".neo/prompts"),
+                )
+                .await
+            }
+        },
+        PromptPackageCommand::Publish { path } => {
+            package_commands::publish(
+                neo_extensions::PackageKind::PromptPack,
+                &resolve_package_path(config, path),
+            )
+            .await
+        }
+        PromptPackageCommand::List => prompt_templates::list_project_prompt_templates(
+            &config.project_dir,
+            config::global_prompts_dir().as_deref(),
+        ),
+        PromptPackageCommand::Preview { name } => {
+            prompt_templates::preview_project_prompt_template(
+                &config.project_dir,
+                config::global_prompts_dir().as_deref(),
+                &name,
+            )
+        }
+    }
+}
+
+async fn dispatch_themes(
+    config: &AppConfig,
+    command: ThemePackageCommand,
+) -> anyhow::Result<String> {
+    match command {
+        ThemePackageCommand::Search { query } => {
+            package_commands::search(neo_extensions::PackageKind::Theme, &query).await
+        }
+        ThemePackageCommand::Install { package, from } => match from {
+            PackageSource::Marketplace => {
+                package_commands::install_from_marketplace(
+                    neo_extensions::PackageInstallKind::Theme,
+                    &package,
+                    &config.project_dir.join(".neo/themes"),
+                )
+                .await
+            }
+        },
+        ThemePackageCommand::Publish { path } => {
+            package_commands::publish(
+                neo_extensions::PackageKind::Theme,
+                &resolve_package_path(config, path),
+            )
+            .await
+        }
+        ThemePackageCommand::List => themes::list_project_themes(&config.project_dir),
+        ThemePackageCommand::Preview { name } => {
+            themes::preview_project_theme(&config.project_dir, &name)
+        }
+    }
+}
+
 struct ExtensionPaths {
     root: PathBuf,
     state_path: PathBuf,
@@ -503,5 +599,13 @@ fn resolve_default_extension_root(config: &AppConfig, root: PathBuf) -> PathBuf 
         config.project_dir.join(root)
     } else {
         root
+    }
+}
+
+fn resolve_package_path(config: &AppConfig, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        config.project_dir.join(path)
     }
 }

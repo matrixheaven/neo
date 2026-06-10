@@ -27,6 +27,7 @@ base64 = "0.22.1"
 clap = { version = "4.5.53", features = ["derive", "env"] }
 color-eyre = "0.6.5"
 crossterm = "0.29.0"
+ed25519-dalek = "2.2.0"
 futures = "0.3.31"
 ignore = "0.4.25"
 jsonschema = "0.37.4"
@@ -41,6 +42,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
 syntect = "5.3.0"
+tar = "0.4.46"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "process", "fs", "signal", "time", "io-util", "sync", "net"] }

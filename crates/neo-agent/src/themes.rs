@@ -91,21 +91,29 @@ fn discover_theme_dir(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
         return Ok(Vec::new());
     }
     let mut paths = Vec::new();
+    collect_theme_paths(dir, &mut paths)?;
+    paths.sort();
+    Ok(paths)
+}
+
+fn collect_theme_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     for entry in
         fs::read_dir(dir).with_context(|| format!("failed to read theme dir {}", dir.display()))?
     {
         let entry =
             entry.with_context(|| format!("failed to read theme dir entry {}", dir.display()))?;
         let path = entry.path();
-        if path
+        if path.is_dir() {
+            collect_theme_paths(&path, paths)?;
+        } else if path
             .extension()
             .is_some_and(|extension| extension == "json")
+            && path.is_file()
         {
             paths.push(path);
         }
     }
-    paths.sort();
-    Ok(paths)
+    Ok(())
 }
 
 fn load_theme(path: &Path, project_dir: &Path) -> anyhow::Result<ResolvedTheme> {
@@ -172,6 +180,67 @@ fn load_theme_file(path: &Path) -> anyhow::Result<ResolvedTheme> {
         theme,
         source: Some(path.to_path_buf()),
     })
+}
+
+pub fn list_project_themes(project_dir: &Path) -> anyhow::Result<String> {
+    let themes = load_project_theme_files(project_dir)?;
+    if themes.is_empty() {
+        return Ok("no themes\n".to_owned());
+    }
+
+    let mut output = String::new();
+    for theme in themes {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            output,
+            "{}\t{}",
+            theme.name,
+            theme
+                .source
+                .as_ref()
+                .map_or_else(|| "-".to_owned(), |path| path.display().to_string())
+        );
+    }
+    Ok(output)
+}
+
+pub fn preview_project_theme(project_dir: &Path, name: &str) -> anyhow::Result<String> {
+    let theme = load_project_theme_files(project_dir)?
+        .into_iter()
+        .find(|theme| {
+            theme.name == name
+                || theme.source.as_ref().is_some_and(|path| {
+                    path.file_stem()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .is_some_and(|stem| stem == name)
+                })
+        })
+        .ok_or_else(|| anyhow::anyhow!("theme {name:?} not found"))?;
+    let source = theme
+        .source
+        .as_ref()
+        .with_context(|| format!("theme {name:?} has no source"))?;
+    let content = fs::read_to_string(source)
+        .with_context(|| format!("failed to read theme {}", source.display()))?;
+    Ok(format!(
+        "{}\t{}\n{}\n",
+        theme.name,
+        source.display(),
+        content
+    ))
+}
+
+fn load_project_theme_files(project_dir: &Path) -> anyhow::Result<Vec<ResolvedTheme>> {
+    let mut themes = Vec::new();
+    for path in discover_project_themes(project_dir)? {
+        themes.push(load_theme_file(&path)?);
+    }
+    themes.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.source.cmp(&right.source))
+    });
+    Ok(themes)
 }
 
 fn apply_colors(theme: &mut TuiTheme, colors: &ThemeColors, path: &Path) -> anyhow::Result<()> {

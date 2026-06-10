@@ -11,6 +11,7 @@ Neo is a Rust-native coding-agent workspace. The repository is intentionally spl
 - [Tools](tools.md) - implemented built-in tools, schemas, permissions, and runtime boundary.
 - [Sessions](sessions.md) - JSONL event persistence and current resume expectations.
 - [MCP](mcp.md) - conceptual Model Context Protocol interface.
+- [Packages](packages.md) - signed extension, prompt-pack, theme package format and marketplace DTOs.
 - [Gap Map](gap/INDEX.md) - module-by-module pi parity map.
 
 ## Repository Map

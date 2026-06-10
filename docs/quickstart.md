@@ -242,6 +242,29 @@ also discover enabled project `.neo/extensions` tools through each extension's
 `tools.list` RPC; `--extension` adds explicit roots and `--no-extensions`
 disables only default project extension discovery.
 
+Marketplace package commands require `NEO_MARKETPLACE_URL` and fail closed when
+the catalog/server is unavailable. Signed packages use `.neo-package.toml` plus
+a sha256-verified, Ed25519-signed tar archive. This is manifest self-sign only,
+not a publisher/root trust chain; see [Packages and Marketplace](packages.md)
+for the manifest, trust scope, and DTO shape.
+
+```bash
+export NEO_MARKETPLACE_URL=http://localhost:8080
+cargo run -p neo-agent -- extensions search echo
+cargo run -p neo-agent -- extensions install echo@0.1.0 --from marketplace
+cargo run -p neo-agent -- extensions publish path/to/.neo-package.toml
+cargo run -p neo-agent -- prompts search review
+cargo run -p neo-agent -- prompts install review-pack@1.0.0 --from marketplace
+cargo run -p neo-agent -- prompts publish path/to/.neo-package.toml
+cargo run -p neo-agent -- prompts list
+cargo run -p neo-agent -- prompts preview review
+cargo run -p neo-agent -- themes search night
+cargo run -p neo-agent -- themes install night-owl@2.0.0 --from marketplace
+cargo run -p neo-agent -- themes publish path/to/.neo-package.toml
+cargo run -p neo-agent -- themes list
+cargo run -p neo-agent -- themes preview night-owl
+```
+
 ## Rust API Examples
 
 The Rust examples are Cargo targets under

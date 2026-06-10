@@ -138,11 +138,50 @@ pub(crate) fn load_project_prompt_templates(
     project_dir: &Path,
 ) -> anyhow::Result<Vec<PromptTemplate>> {
     let prompts_dir = project_dir.join(".neo/prompts");
-    load_prompt_templates_from_dir(&prompts_dir)
+    load_prompt_templates_from_tree(&prompts_dir)
+}
+
+pub(crate) fn list_project_prompt_templates(
+    project_dir: &Path,
+    global_prompts_dir: Option<&Path>,
+) -> anyhow::Result<String> {
+    let commands = discover_prompt_template_commands(project_dir, global_prompts_dir, &[])?;
+    if commands.is_empty() {
+        return Ok("no prompts\n".to_owned());
+    }
+
+    let mut output = String::new();
+    for command in commands {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            output,
+            "{}\t{}\t{}",
+            command.template.name,
+            command.template.description,
+            command.template.path.display()
+        );
+    }
+    Ok(output)
+}
+
+pub(crate) fn preview_project_prompt_template(
+    project_dir: &Path,
+    global_prompts_dir: Option<&Path>,
+    name: &str,
+) -> anyhow::Result<String> {
+    let template = find_prompt_template_by_name(name, project_dir, global_prompts_dir)?
+        .ok_or_else(|| anyhow::anyhow!("prompt {name:?} not found"))?;
+    Ok(format!(
+        "{}\t{}\t{}\n{}\n",
+        template.name,
+        template.description,
+        template.path.display(),
+        template.content
+    ))
 }
 
 fn load_user_prompt_templates(prompts_dir: &Path) -> anyhow::Result<Vec<PromptTemplate>> {
-    load_prompt_templates_from_dir(prompts_dir)
+    load_prompt_templates_from_tree(prompts_dir)
 }
 
 fn load_prompt_templates_from_dir(prompts_dir: &Path) -> anyhow::Result<Vec<PromptTemplate>> {
@@ -150,19 +189,65 @@ fn load_prompt_templates_from_dir(prompts_dir: &Path) -> anyhow::Result<Vec<Prom
         return Ok(Vec::new());
     };
     let mut templates = Vec::new();
+    collect_direct_prompt_templates(entries, &mut templates)?;
+    templates.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(templates)
+}
+
+fn load_prompt_templates_from_tree(prompts_dir: &Path) -> anyhow::Result<Vec<PromptTemplate>> {
+    let Ok(entries) = fs::read_dir(prompts_dir) else {
+        return Ok(Vec::new());
+    };
+    let mut templates = Vec::new();
+    collect_prompt_templates(entries, &mut templates)?;
+    templates.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(templates)
+}
+
+fn collect_direct_prompt_templates(
+    entries: fs::ReadDir,
+    templates: &mut Vec<PromptTemplate>,
+) -> anyhow::Result<()> {
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
         if path.extension() != Some(OsStr::new("md")) {
             continue;
         }
-        if !path.is_file() {
+        if path.is_file() {
+            templates.push(load_template_from_file(&path)?);
+        }
+    }
+    Ok(())
+}
+
+fn collect_prompt_templates(
+    entries: fs::ReadDir,
+    templates: &mut Vec<PromptTemplate>,
+) -> anyhow::Result<()> {
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_prompt_templates(fs::read_dir(&path)?, templates)?;
             continue;
         }
-        templates.push(load_template_from_file(&path)?);
+        if path.extension() != Some(OsStr::new("md")) {
+            continue;
+        }
+        if path.is_file() {
+            templates.push(load_template_from_file(&path)?);
+        }
     }
-    templates.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(templates)
+    Ok(())
 }
 
 fn find_prompt_template_by_name(

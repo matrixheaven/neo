@@ -212,6 +212,14 @@ pub enum Command {
         #[command(subcommand)]
         command: ExtensionCommand,
     },
+    Prompts {
+        #[command(subcommand)]
+        command: PromptPackageCommand,
+    },
+    Themes {
+        #[command(subcommand)]
+        command: ThemePackageCommand,
+    },
     Trust {
         #[command(subcommand)]
         command: TrustCommand,
@@ -421,14 +429,22 @@ pub enum SkillCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ExtensionCommand {
+    Search {
+        query: String,
+    },
     List {
         #[arg(default_value = ".neo/extensions")]
         root: std::path::PathBuf,
     },
     Install {
         source: String,
+        #[arg(long = "from", value_enum)]
+        from: Option<PackageSource>,
         #[arg(long, default_value = ".neo/extensions")]
         root: std::path::PathBuf,
+    },
+    Publish {
+        path: std::path::PathBuf,
     },
     Update {
         extension_id: String,
@@ -462,5 +478,48 @@ pub enum ExtensionCommand {
         params: String,
         #[arg(long, default_value = ".neo/extensions")]
         root: std::path::PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PackageSource {
+    Marketplace,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PromptPackageCommand {
+    Search {
+        query: String,
+    },
+    Install {
+        package: String,
+        #[arg(long = "from", value_enum)]
+        from: PackageSource,
+    },
+    Publish {
+        path: std::path::PathBuf,
+    },
+    List,
+    Preview {
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ThemePackageCommand {
+    Search {
+        query: String,
+    },
+    Install {
+        package: String,
+        #[arg(long = "from", value_enum)]
+        from: PackageSource,
+    },
+    Publish {
+        path: std::path::PathBuf,
+    },
+    List,
+    Preview {
+        name: String,
     },
 }
