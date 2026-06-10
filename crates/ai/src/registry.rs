@@ -185,7 +185,8 @@ impl ModelRegistry {
             let provider_name = string_metadata(&config.metadata, "name")?;
             for model in config.models {
                 let spec = pi_model_spec(label, &provider, config.api.as_ref(), &model)?;
-                let model_pricing = pi_model_pricing(label, &provider, &spec.model, &model.cost)?;
+                let model_pricing =
+                    pi_model_pricing(label, &provider, &spec.model, model.cost.as_ref())?;
                 let model_name = string_metadata(&model.metadata, "name")?;
                 let key = model_key(&spec);
                 display_metadata.insert(
@@ -695,7 +696,7 @@ fn pi_model_pricing(
     label: &str,
     provider: &str,
     model_id: &str,
-    cost: &Option<PiModelCost>,
+    cost: Option<&PiModelCost>,
 ) -> Result<Option<ModelPricing>, AiError> {
     let Some(cost) = cost else {
         return Ok(None);

@@ -289,6 +289,16 @@ pub struct SessionShareRecord {
     pub created_at: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionShareUpdate {
+    pub cloud_id: String,
+    pub share_id: String,
+    pub public: bool,
+    pub html_url: Option<String>,
+    pub json_url: Option<String>,
+    pub synced_at: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionMetadataStore {
     sessions_dir: PathBuf,
@@ -421,39 +431,34 @@ impl SessionMetadataStore {
     pub fn record_share(
         &self,
         session_id: &str,
-        cloud_id: String,
-        share_id: String,
-        public: bool,
-        html_url: Option<String>,
-        json_url: Option<String>,
-        synced_at: String,
+        share: SessionShareUpdate,
     ) -> Result<SessionRecord, SessionError> {
         validate_session_id(session_id)?;
         self.ensure_session_exists(session_id)?;
 
         let mut metadata = self.read_metadata()?;
         let stored = metadata.sessions.entry(session_id.to_owned()).or_default();
-        stored.cloud_id = Some(cloud_id);
-        stored.synced_at = Some(synced_at);
-        if !stored.share_ids.contains(&share_id) {
-            stored.share_ids.push(share_id.clone());
+        stored.cloud_id = Some(share.cloud_id.clone());
+        stored.synced_at = Some(share.synced_at.clone());
+        if !stored.share_ids.contains(&share.share_id) {
+            stored.share_ids.push(share.share_id.clone());
         }
-        let share = SessionShareRecord {
-            id: share_id,
+        let record = SessionShareRecord {
+            id: share.share_id,
             cloud_id: stored.cloud_id.clone(),
-            public: Some(public),
-            html_url,
-            json_url,
+            public: Some(share.public),
+            html_url: share.html_url,
+            json_url: share.json_url,
             created_at: stored.synced_at.clone(),
         };
         if let Some(existing) = stored
             .shares
             .iter_mut()
-            .find(|stored| stored.id == share.id)
+            .find(|stored| stored.id == record.id)
         {
-            *existing = share;
+            *existing = record;
         } else {
-            stored.shares.push(share);
+            stored.shares.push(record);
         }
         self.write_metadata(&metadata)?;
 
@@ -467,7 +472,7 @@ impl SessionMetadataStore {
     pub fn record_remote_metadata(
         &self,
         session_id: &str,
-        cloud_id: String,
+        cloud_id: &str,
         synced_at: String,
         remote_parent_id: Option<String>,
         summary: Option<SessionSummaryRecord>,
@@ -478,7 +483,7 @@ impl SessionMetadataStore {
 
         let mut metadata = self.read_metadata()?;
         let stored = metadata.sessions.entry(session_id.to_owned()).or_default();
-        stored.cloud_id = Some(cloud_id.clone());
+        stored.cloud_id = Some(cloud_id.to_owned());
         stored.synced_at = Some(synced_at);
         if remote_parent_id.is_some() {
             stored.remote_parent_id = remote_parent_id;
@@ -494,7 +499,7 @@ impl SessionMetadataStore {
             if !stored.shares.iter().any(|share| share.id == share_id) {
                 stored.shares.push(SessionShareRecord {
                     id: share_id,
-                    cloud_id: Some(cloud_id.clone()),
+                    cloud_id: Some(cloud_id.to_owned()),
                     public: None,
                     html_url: None,
                     json_url: None,

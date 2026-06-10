@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
-    env, fs,
+    env,
+    fmt::Write as _,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -172,15 +174,16 @@ pub(crate) fn list_publishers(project_dir: &Path) -> anyhow::Result<String> {
     for publisher in publishers {
         for key in publisher.keys.values() {
             let state = if key.revoked { "revoked" } else { "trusted" };
-            output.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{}\t{}\n",
+            let _ = writeln!(
+                output,
+                "{}\t{}\t{}\t{}\t{}\t{}",
                 publisher.id,
                 publisher.name,
                 publisher.root,
                 key.id,
                 state,
                 publisher.account_id.as_deref().unwrap_or("-")
-            ));
+            );
         }
     }
     Ok(output)

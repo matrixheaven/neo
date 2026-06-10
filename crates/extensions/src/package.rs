@@ -324,8 +324,8 @@ impl PackageTrustStore {
                 account_id: account_id.clone(),
                 keys: BTreeMap::new(),
             });
-        publisher.name = name.to_owned();
-        publisher.root = root.to_owned();
+        name.clone_into(&mut publisher.name);
+        root.clone_into(&mut publisher.root);
         publisher.account_id = account_id;
         publisher.keys.insert(
             key_id.to_owned(),

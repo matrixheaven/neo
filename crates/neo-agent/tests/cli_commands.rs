@@ -2628,68 +2628,7 @@ fn prompt_packages_update_uninstall_and_metadata_from_marketplace() {
     let temp = TempDir::new().expect("tempdir");
     let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
     trust_test_publisher(temp.path(), &publisher_key);
-    let v1_dir = TempDir::new().expect("package tempdir");
-    let v1 = write_trusted_neo_package(
-        v1_dir.path(),
-        "prompt-pack",
-        "review-pack",
-        "1.0.0",
-        "review.md",
-        &publisher_key,
-        &[PackageFixtureEntry::file(
-            "review.md",
-            "---\ndescription: Review code\n---\nReview v1\n",
-        )],
-    );
-    let v2_dir = TempDir::new().expect("package tempdir");
-    let v2 = write_trusted_neo_package(
-        v2_dir.path(),
-        "prompt-pack",
-        "review-pack",
-        "1.1.0",
-        "review.md",
-        &publisher_key,
-        &[PackageFixtureEntry::file(
-            "review.md",
-            "---\ndescription: Review code\n---\nReview v2\n",
-        )],
-    );
-    let marketplace = MockSseServer::start(vec![
-        json_response(&json!({
-            "package": {
-                "kind": "prompt-pack",
-                "id": "review-pack",
-                "version": "1.0.0",
-                "manifest_url": "/p/review-pack/1.0.0/.neo-package.toml",
-                "archive_url": "/p/review-pack/1.0.0/review-pack-1.0.0.tar"
-            }
-        })),
-        text_response(
-            "application/toml",
-            &fs::read_to_string(&v1).expect("manifest v1"),
-        ),
-        binary_response(
-            "application/x-tar",
-            &fs::read(v1_dir.path().join("review-pack-1.0.0.tar")).expect("archive v1"),
-        ),
-        json_response(&json!({
-            "package": {
-                "kind": "prompt-pack",
-                "id": "review-pack",
-                "version": "1.1.0",
-                "manifest_url": "/p/review-pack/latest/.neo-package.toml",
-                "archive_url": "/p/review-pack/latest/review-pack-1.1.0.tar"
-            }
-        })),
-        text_response(
-            "application/toml",
-            &fs::read_to_string(&v2).expect("manifest v2"),
-        ),
-        binary_response(
-            "application/x-tar",
-            &fs::read(v2_dir.path().join("review-pack-1.1.0.tar")).expect("archive v2"),
-        ),
-    ]);
+    let marketplace = prompt_update_marketplace(&publisher_key);
 
     let mut install = neo();
     install
@@ -2739,6 +2678,71 @@ fn prompt_packages_update_uninstall_and_metadata_from_marketplace() {
     let uninstalled = run(uninstall);
     assert!(uninstalled.contains("review-pack uninstalled"));
     assert!(!temp.path().join(".neo/prompts/review-pack").exists());
+}
+
+fn prompt_update_marketplace(publisher_key: &SigningKey) -> MockSseServer {
+    let v1_dir = TempDir::new().expect("package tempdir");
+    let v1 = write_trusted_neo_package(
+        v1_dir.path(),
+        "prompt-pack",
+        "review-pack",
+        "1.0.0",
+        "review.md",
+        publisher_key,
+        &[PackageFixtureEntry::file(
+            "review.md",
+            "---\ndescription: Review code\n---\nReview v1\n",
+        )],
+    );
+    let v2_dir = TempDir::new().expect("package tempdir");
+    let v2 = write_trusted_neo_package(
+        v2_dir.path(),
+        "prompt-pack",
+        "review-pack",
+        "1.1.0",
+        "review.md",
+        publisher_key,
+        &[PackageFixtureEntry::file(
+            "review.md",
+            "---\ndescription: Review code\n---\nReview v2\n",
+        )],
+    );
+    MockSseServer::start(vec![
+        json_response(&json!({
+            "package": {
+                "kind": "prompt-pack",
+                "id": "review-pack",
+                "version": "1.0.0",
+                "manifest_url": "/p/review-pack/1.0.0/.neo-package.toml",
+                "archive_url": "/p/review-pack/1.0.0/review-pack-1.0.0.tar"
+            }
+        })),
+        text_response(
+            "application/toml",
+            &fs::read_to_string(&v1).expect("manifest v1"),
+        ),
+        binary_response(
+            "application/x-tar",
+            &fs::read(v1_dir.path().join("review-pack-1.0.0.tar")).expect("archive v1"),
+        ),
+        json_response(&json!({
+            "package": {
+                "kind": "prompt-pack",
+                "id": "review-pack",
+                "version": "1.1.0",
+                "manifest_url": "/p/review-pack/latest/.neo-package.toml",
+                "archive_url": "/p/review-pack/latest/review-pack-1.1.0.tar"
+            }
+        })),
+        text_response(
+            "application/toml",
+            &fs::read_to_string(&v2).expect("manifest v2"),
+        ),
+        binary_response(
+            "application/x-tar",
+            &fs::read(v2_dir.path().join("review-pack-1.1.0.tar")).expect("archive v2"),
+        ),
+    ])
 }
 
 #[test]
@@ -2814,68 +2818,7 @@ fn theme_packages_update_uninstall_and_metadata_from_marketplace() {
     let temp = TempDir::new().expect("tempdir");
     let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
     trust_test_publisher(temp.path(), &publisher_key);
-    let v1_dir = TempDir::new().expect("package tempdir");
-    let v1 = write_trusted_neo_package(
-        v1_dir.path(),
-        "theme",
-        "night-owl",
-        "2.0.0",
-        "night-owl.json",
-        &publisher_key,
-        &[PackageFixtureEntry::file(
-            "night-owl.json",
-            r##"{"name":"Night Owl","colors":{"prompt":"#82aaff"}}"##,
-        )],
-    );
-    let v2_dir = TempDir::new().expect("package tempdir");
-    let v2 = write_trusted_neo_package(
-        v2_dir.path(),
-        "theme",
-        "night-owl",
-        "2.1.0",
-        "night-owl.json",
-        &publisher_key,
-        &[PackageFixtureEntry::file(
-            "night-owl.json",
-            r##"{"name":"Night Owl","colors":{"prompt":"#c792ea"}}"##,
-        )],
-    );
-    let marketplace = MockSseServer::start(vec![
-        json_response(&json!({
-            "package": {
-                "kind": "theme",
-                "id": "night-owl",
-                "version": "2.0.0",
-                "manifest_url": "/t/night-owl/2.0.0/.neo-package.toml",
-                "archive_url": "/t/night-owl/2.0.0/night-owl-2.0.0.tar"
-            }
-        })),
-        text_response(
-            "application/toml",
-            &fs::read_to_string(&v1).expect("manifest v1"),
-        ),
-        binary_response(
-            "application/x-tar",
-            &fs::read(v1_dir.path().join("night-owl-2.0.0.tar")).expect("archive v1"),
-        ),
-        json_response(&json!({
-            "package": {
-                "kind": "theme",
-                "id": "night-owl",
-                "version": "2.1.0",
-                "manifest_url": "/t/night-owl/latest/.neo-package.toml",
-                "archive_url": "/t/night-owl/latest/night-owl-2.1.0.tar"
-            }
-        })),
-        text_response(
-            "application/toml",
-            &fs::read_to_string(&v2).expect("manifest v2"),
-        ),
-        binary_response(
-            "application/x-tar",
-            &fs::read(v2_dir.path().join("night-owl-2.1.0.tar")).expect("archive v2"),
-        ),
-    ]);
+    let marketplace = theme_update_marketplace(&publisher_key);
 
     let mut install = neo();
     install
@@ -2925,6 +2868,71 @@ fn theme_packages_update_uninstall_and_metadata_from_marketplace() {
     let uninstalled = run(uninstall);
     assert!(uninstalled.contains("night-owl uninstalled"));
     assert!(!temp.path().join(".neo/themes/night-owl").exists());
+}
+
+fn theme_update_marketplace(publisher_key: &SigningKey) -> MockSseServer {
+    let v1_dir = TempDir::new().expect("package tempdir");
+    let v1 = write_trusted_neo_package(
+        v1_dir.path(),
+        "theme",
+        "night-owl",
+        "2.0.0",
+        "night-owl.json",
+        publisher_key,
+        &[PackageFixtureEntry::file(
+            "night-owl.json",
+            r##"{"name":"Night Owl","colors":{"prompt":"#82aaff"}}"##,
+        )],
+    );
+    let v2_dir = TempDir::new().expect("package tempdir");
+    let v2 = write_trusted_neo_package(
+        v2_dir.path(),
+        "theme",
+        "night-owl",
+        "2.1.0",
+        "night-owl.json",
+        publisher_key,
+        &[PackageFixtureEntry::file(
+            "night-owl.json",
+            r##"{"name":"Night Owl","colors":{"prompt":"#c792ea"}}"##,
+        )],
+    );
+    MockSseServer::start(vec![
+        json_response(&json!({
+            "package": {
+                "kind": "theme",
+                "id": "night-owl",
+                "version": "2.0.0",
+                "manifest_url": "/t/night-owl/2.0.0/.neo-package.toml",
+                "archive_url": "/t/night-owl/2.0.0/night-owl-2.0.0.tar"
+            }
+        })),
+        text_response(
+            "application/toml",
+            &fs::read_to_string(&v1).expect("manifest v1"),
+        ),
+        binary_response(
+            "application/x-tar",
+            &fs::read(v1_dir.path().join("night-owl-2.0.0.tar")).expect("archive v1"),
+        ),
+        json_response(&json!({
+            "package": {
+                "kind": "theme",
+                "id": "night-owl",
+                "version": "2.1.0",
+                "manifest_url": "/t/night-owl/latest/.neo-package.toml",
+                "archive_url": "/t/night-owl/latest/night-owl-2.1.0.tar"
+            }
+        })),
+        text_response(
+            "application/toml",
+            &fs::read_to_string(&v2).expect("manifest v2"),
+        ),
+        binary_response(
+            "application/x-tar",
+            &fs::read(v2_dir.path().join("night-owl-2.1.0.tar")).expect("archive v2"),
+        ),
+    ])
 }
 
 fn write_extension_manifest(root: &std::path::Path, id: &str, name: &str, version: &str) {

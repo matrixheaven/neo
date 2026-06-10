@@ -6,7 +6,7 @@ use std::{
 use anyhow::Context;
 use neo_agent_core::{
     AgentEvent, AgentMessage,
-    session::{JsonlSessionWriter, SessionMetadataStore, validate_session_id},
+    session::{JsonlSessionWriter, SessionMetadataStore, SessionShareUpdate, validate_session_id},
 };
 use neo_sdk::{CloudClient, CloudSharePayload};
 use std::collections::BTreeMap;
@@ -44,12 +44,14 @@ pub async fn share(session_ref: &str, public: bool, config: &AppConfig) -> anyho
         .context("failed to create cloud share")?;
     metadata_store(config).record_share(
         &session_id,
-        record.id.clone(),
-        share.record.id.clone(),
-        share.record.public,
-        Some(format!("{}{}", auth.server_url, share.record.html_url)),
-        Some(format!("{}{}", auth.server_url, share.record.json_url)),
-        current_unix_timestamp(),
+        SessionShareUpdate {
+            cloud_id: record.id.clone(),
+            share_id: share.record.id.clone(),
+            public: share.record.public,
+            html_url: Some(format!("{}{}", auth.server_url, share.record.html_url)),
+            json_url: Some(format!("{}{}", auth.server_url, share.record.json_url)),
+            synced_at: current_unix_timestamp(),
+        },
     )?;
 
     Ok(format!(

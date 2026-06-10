@@ -1,4 +1,4 @@
-use std::net::TcpListener;
+use std::{net::TcpListener, path::Path};
 
 use neo_agent_core::{AgentEvent, AgentMessage};
 use neo_cloud::{CloudServer, Store};
@@ -214,14 +214,46 @@ async fn self_hosted_collaboration_apis_expose_tree_metadata_records_continuatio
     );
 
     let imported = import_cloud_session(&client, &server.base_url, &token, jsonl).await;
+    let continued = update_branch_and_continue_session(
+        &client,
+        &server.base_url,
+        &token,
+        &imported,
+        secret,
+        &absolute_path,
+        &leak_values,
+    )
+    .await;
+    assert_cloud_session_tree(&client, &server.base_url, &token, &imported, &continued).await;
+    assert_cloud_share_records(
+        &client,
+        &server.base_url,
+        &token,
+        &continued.record.id,
+        &leak_values,
+    )
+    .await;
+    assert_settings_sync(&client, &server.base_url, &token).await;
+    assert_cloud_command_catalog(&client, &server.base_url, &token).await;
+}
+
+async fn update_branch_and_continue_session(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    imported: &CloudImportSessionResponse,
+    secret: &str,
+    absolute_path: &Path,
+    leak_values: &[&str],
+) -> CloudContinueSessionResponse {
     let branch_name = format!("Feature branch {secret} {}", absolute_path.display());
     let branch_summary = format!("Summary hides {secret} {}", absolute_path.display());
     let updated = client
         .put(format!(
-            "{}/v1/sessions/{}/branch",
-            server.base_url, imported.record.id
+            "{base_url}/v1/sessions/{}/branch",
+            imported.record.id
         ))
-        .bearer_auth(&token)
+        .bearer_auth(token)
         .json(&CloudUpdateBranchRequest {
             name: Some(branch_name),
             summary: Some(branch_summary),
@@ -236,8 +268,7 @@ async fn self_hosted_collaboration_apis_expose_tree_metadata_records_continuatio
         .await
         .expect("branch update json");
     let updated_json = serde_json::to_string(&updated).expect("updated json");
-    assert!(!updated_json.contains(secret));
-    assert!(!updated_json.contains(absolute_path.to_str().expect("absolute path")));
+    assert_no_leaks(&updated_json, leak_values);
     assert_eq!(
         updated.record.summary.as_deref(),
         Some("Summary hides [REDACTED] [REDACTED_PATH]")
@@ -245,10 +276,10 @@ async fn self_hosted_collaboration_apis_expose_tree_metadata_records_continuatio
 
     let continued = client
         .post(format!(
-            "{}/v1/sessions/{}/continue",
-            server.base_url, imported.record.id
+            "{base_url}/v1/sessions/{}/continue",
+            imported.record.id
         ))
-        .bearer_auth(&token)
+        .bearer_auth(token)
         .json(&CloudContinueSessionRequest {
             local_session_id: Some("remote-child".to_owned()),
             name: Some(format!("Child {secret} {}", absolute_path.display())),
@@ -271,12 +302,20 @@ async fn self_hosted_collaboration_apis_expose_tree_metadata_records_continuatio
     );
     assert_eq!(continued.messages.len(), 1);
     let continued_json = serde_json::to_string(&continued).expect("continued json");
-    assert!(!continued_json.contains(secret));
-    assert!(!continued_json.contains(absolute_path.to_str().expect("absolute path")));
+    assert_no_leaks(&continued_json, leak_values);
+    continued
+}
 
+async fn assert_cloud_session_tree(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    imported: &CloudImportSessionResponse,
+    continued: &CloudContinueSessionResponse,
+) {
     let tree = client
-        .get(format!("{}/v1/sessions/tree", server.base_url))
-        .bearer_auth(&token)
+        .get(format!("{base_url}/v1/sessions/tree"))
+        .bearer_auth(token)
         .send()
         .await
         .expect("tree response")
@@ -291,14 +330,19 @@ async fn self_hosted_collaboration_apis_expose_tree_metadata_records_continuatio
     assert_eq!(tree.tree[0].children, vec![continued.record.id.clone()]);
     assert_eq!(tree.tree[1].depth, 1);
     assert_eq!(tree.tree[1].record.id, continued.record.id);
+}
 
-    let share = create_public_share(&client, &server.base_url, &token, &continued.record.id).await;
+async fn assert_cloud_share_records(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    session_id: &str,
+    leak_values: &[&str],
+) {
+    let share = create_public_share(client, base_url, token, session_id).await;
     let session_shares = client
-        .get(format!(
-            "{}/v1/sessions/{}/shares",
-            server.base_url, continued.record.id
-        ))
-        .bearer_auth(&token)
+        .get(format!("{base_url}/v1/sessions/{session_id}/shares"))
+        .bearer_auth(token)
         .send()
         .await
         .expect("session share records response")
@@ -310,11 +354,8 @@ async fn self_hosted_collaboration_apis_expose_tree_metadata_records_continuatio
     assert_eq!(session_shares.shares, vec![share.record.clone()]);
 
     let share_record = client
-        .get(format!(
-            "{}/v1/share-records/{}",
-            server.base_url, share.record.id
-        ))
-        .bearer_auth(&token)
+        .get(format!("{base_url}/v1/share-records/{}", share.record.id))
+        .bearer_auth(token)
         .send()
         .await
         .expect("share record response")
@@ -324,8 +365,10 @@ async fn self_hosted_collaboration_apis_expose_tree_metadata_records_continuatio
         .await
         .expect("share record json");
     assert_eq!(share_record.record, share.record);
-    assert_public_share_artifacts(&client, &server.base_url, &share.record.id, &leak_values).await;
+    assert_public_share_artifacts(client, base_url, &share.record.id, leak_values).await;
+}
 
+async fn assert_settings_sync(client: &reqwest::Client, base_url: &str, token: &str) {
     let settings = CloudProfile {
         default_provider: Some("anthropic".to_owned()),
         default_model: Some("deepseek-v4-pro".to_owned()),
@@ -334,8 +377,8 @@ async fn self_hosted_collaboration_apis_expose_tree_metadata_records_continuatio
         ..CloudProfile::default()
     };
     let settings_status = client
-        .put(format!("{}/v1/settings", server.base_url))
-        .bearer_auth(&token)
+        .put(format!("{base_url}/v1/settings"))
+        .bearer_auth(token)
         .json(&SettingsPushRequest {
             settings: settings.clone(),
         })
@@ -349,8 +392,8 @@ async fn self_hosted_collaboration_apis_expose_tree_metadata_records_continuatio
         .expect("settings status json");
     assert_eq!(settings_status.revision, 1);
     let pulled_settings = client
-        .get(format!("{}/v1/settings", server.base_url))
-        .bearer_auth(&token)
+        .get(format!("{base_url}/v1/settings"))
+        .bearer_auth(token)
         .send()
         .await
         .expect("settings pull response")
@@ -360,10 +403,12 @@ async fn self_hosted_collaboration_apis_expose_tree_metadata_records_continuatio
         .await
         .expect("settings pull json");
     assert_eq!(pulled_settings.settings, settings);
+}
 
+async fn assert_cloud_command_catalog(client: &reqwest::Client, base_url: &str, token: &str) {
     let catalog = client
-        .get(format!("{}/v1/commands", server.base_url))
-        .bearer_auth(&token)
+        .get(format!("{base_url}/v1/commands"))
+        .bearer_auth(token)
         .send()
         .await
         .expect("catalog response")

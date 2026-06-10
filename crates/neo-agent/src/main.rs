@@ -298,7 +298,7 @@ async fn dispatch_command(
                     modes::run::mcp_server_health(config, &server_id).await
                 }
                 cli::McpServersCommand::Start { server_id } => {
-                    modes::run::start_mcp_server(config, &server_id).await
+                    modes::run::start_mcp_server(config, &server_id)
                 }
                 cli::McpServersCommand::Stop { server_id } => {
                     modes::run::stop_mcp_server(config, &server_id)

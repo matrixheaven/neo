@@ -780,8 +780,8 @@ pub fn show(config: &AppConfig) -> anyhow::Result<String> {
     ))
 }
 
-pub fn upsert_mcp_server(server: McpServerConfig) -> anyhow::Result<String> {
-    validate_mcp_server(&server)?;
+pub fn upsert_mcp_server(server: &McpServerConfig) -> anyhow::Result<String> {
+    validate_mcp_server(server)?;
     let config_path = find_config_path()?;
     let mut config = read_file_config(&config_path)?;
     let mcp = config.mcp.get_or_insert_with(McpConfig::default);

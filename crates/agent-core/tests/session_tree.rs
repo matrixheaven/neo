@@ -1,6 +1,6 @@
 use neo_agent_core::session::{
-    SessionMetadataStore, SessionRecord, SessionShareRecord, SessionSummaryRecord,
-    SessionSummarySource,
+    SessionMetadataStore, SessionRecord, SessionShareRecord, SessionShareUpdate,
+    SessionSummaryRecord, SessionSummarySource,
 };
 
 #[test]
@@ -76,12 +76,14 @@ fn session_metadata_records_cloud_sync_and_share_state() {
     let shared = store
         .record_share(
             "alpha",
-            "cs_alpha".to_owned(),
-            "sh_alpha".to_owned(),
-            true,
-            Some("/v1/shares/sh_alpha.html".to_owned()),
-            Some("/v1/shares/sh_alpha.json".to_owned()),
-            "124.0Z".to_owned(),
+            SessionShareUpdate {
+                cloud_id: "cs_alpha".to_owned(),
+                share_id: "sh_alpha".to_owned(),
+                public: true,
+                html_url: Some("/v1/shares/sh_alpha.html".to_owned()),
+                json_url: Some("/v1/shares/sh_alpha.json".to_owned()),
+                synced_at: "124.0Z".to_owned(),
+            },
         )
         .expect("record share");
 

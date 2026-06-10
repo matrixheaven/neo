@@ -1106,7 +1106,7 @@ pub fn add_mcp_server(
     env: Vec<String>,
     headers: Vec<String>,
 ) -> anyhow::Result<String> {
-    config::upsert_mcp_server(McpServerConfig {
+    config::upsert_mcp_server(&McpServerConfig {
         id: server_id,
         enabled: true,
         transport,
@@ -1135,7 +1135,7 @@ pub async fn mcp_server_health(config: &AppConfig, server_id: &str) -> anyhow::R
     ))
 }
 
-pub async fn start_mcp_server(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
+pub fn start_mcp_server(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
     let server = enabled_mcp_server(config, server_id)?;
     if server.transport == "cloud" {
         anyhow::bail!("cloud MCP server {server_id} requires self-hosted neo-cloud auth");
@@ -1167,7 +1167,7 @@ pub async fn start_mcp_server(config: &AppConfig, server_id: &str) -> anyhow::Re
         .spawn()
         .with_context(|| format!("failed to start MCP server {server_id}"))?;
     let child_pid = child.id();
-    let server_pid = wait_for_mcp_server_pid(server, Duration::from_secs(2));
+    let reported_pid = wait_for_mcp_server_pid(server, Duration::from_secs(2));
     let mut state = read_mcp_process_state(config)?;
     state.servers.retain(|record| record.id != server_id);
     state.servers.push(McpProcessRecord {
@@ -1177,7 +1177,7 @@ pub async fn start_mcp_server(config: &AppConfig, server_id: &str) -> anyhow::Re
         process_group_id: Some(child_pid),
         #[cfg(not(unix))]
         process_group_id: None,
-        server_pid,
+        server_pid: reported_pid,
     });
     write_mcp_process_state(config, &state)?;
     Ok(format!("started MCP server {server_id}\tpid={child_pid}\n"))
@@ -1987,8 +1987,7 @@ fn terminate_mcp_process(record: &McpProcessRecord) {
     #[cfg(unix)]
     let target = record
         .process_group_id
-        .map(|pgid| format!("-{pgid}"))
-        .unwrap_or_else(|| record.child_pid.to_string());
+        .map_or_else(|| record.child_pid.to_string(), |pgid| format!("-{pgid}"));
     #[cfg(not(unix))]
     let target = record.child_pid.to_string();
 
