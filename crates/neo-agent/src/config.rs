@@ -8,7 +8,7 @@ use anyhow::{Context, bail};
 use neo_agent_core::{PermissionPolicy, QueueMode, ToolExecutionMode};
 use neo_ai::{ModelRegistry, ModelSpec, ReasoningEffort};
 use neo_cloud_protocol::CloudProfile;
-use neo_tui::{KeyId, KeybindingAction, KeybindingsManager};
+use neo_tui::{ImageProtocolPreference, KeyId, KeybindingAction, KeybindingsManager};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -342,6 +342,10 @@ pub struct RuntimeCompactionConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TuiConfig {
     #[serde(default)]
+    pub image_protocol: ImageProtocolPreference,
+    #[serde(default)]
+    pub fetch_remote_images: bool,
+    #[serde(default)]
     pub keybindings: BTreeMap<String, Vec<String>>,
 }
 
@@ -467,11 +471,19 @@ struct FileRuntimeCompactionConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct FileTuiConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    image_protocol: Option<ImageProtocolPreference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fetch_remote_images: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     keybindings: Option<BTreeMap<String, Vec<String>>>,
 }
 
 #[derive(Deserialize)]
 struct ProfileTuiConfig {
+    #[serde(default)]
+    image_protocol: Option<ImageProtocolPreference>,
+    #[serde(default)]
+    fetch_remote_images: Option<bool>,
     #[serde(default)]
     keybindings: Option<BTreeMap<String, Vec<String>>>,
 }
@@ -485,6 +497,9 @@ struct FileCloudConfig {
 impl FileTuiConfig {
     fn from_tui(tui: &TuiConfig) -> Self {
         Self {
+            image_protocol: (tui.image_protocol != ImageProtocolPreference::Auto)
+                .then_some(tui.image_protocol),
+            fetch_remote_images: tui.fetch_remote_images.then_some(tui.fetch_remote_images),
             keybindings: (!tui.keybindings.is_empty()).then(|| tui.keybindings.clone()),
         }
     }
@@ -851,6 +866,18 @@ fn set_runtime_config(config: &mut FileConfig, key: &str, value: &str) -> anyhow
 }
 
 fn set_tui_config(config: &mut FileConfig, key: &str, value: &str) -> anyhow::Result<bool> {
+    match key {
+        "tui.image_protocol" | "image_protocol" => {
+            tui_config_mut(config).image_protocol = Some(parse_image_protocol(value)?);
+            return Ok(true);
+        }
+        "tui.fetch_remote_images" | "fetch_remote_images" => {
+            tui_config_mut(config).fetch_remote_images = Some(value.parse()?);
+            return Ok(true);
+        }
+        _ => {}
+    }
+
     let Some(action_id) = key.strip_prefix("tui.keybindings.") else {
         return Ok(false);
     };
@@ -1023,6 +1050,8 @@ fn merge_tui_configs(
                 keybindings.insert(action, keys);
             }
             Some(FileTuiConfig {
+                image_protocol: layer.image_protocol.or(base.image_protocol),
+                fetch_remote_images: layer.fetch_remote_images.or(base.fetch_remote_images),
                 keybindings: (!keybindings.is_empty()).then_some(keybindings),
             })
         }
@@ -1100,6 +1129,8 @@ fn tui_from_file(tui: Option<FileTuiConfig>) -> TuiConfig {
         return TuiConfig::default();
     };
     TuiConfig {
+        image_protocol: tui.image_protocol.unwrap_or_default(),
+        fetch_remote_images: tui.fetch_remote_images.unwrap_or(false),
         keybindings: tui.keybindings.unwrap_or_default(),
     }
 }
@@ -1215,8 +1246,13 @@ fn profile_tui_config(value: &serde_json::Value) -> anyhow::Result<Option<FileTu
     }
     serde_json::from_value::<ProfileTuiConfig>(value.clone())
         .map(|tui| {
-            tui.keybindings.map(|keybindings| FileTuiConfig {
-                keybindings: Some(keybindings),
+            (tui.image_protocol.is_some()
+                || tui.fetch_remote_images.is_some()
+                || tui.keybindings.is_some())
+            .then_some(FileTuiConfig {
+                image_protocol: tui.image_protocol,
+                fetch_remote_images: tui.fetch_remote_images,
+                keybindings: tui.keybindings,
             })
         })
         .with_context(|| "failed to parse cloud profile TUI config")
@@ -1293,6 +1329,17 @@ fn parse_reasoning_effort(value: &str) -> anyhow::Result<ReasoningEffort> {
         "xhigh" | "XHigh" => Ok(ReasoningEffort::XHigh),
         other => bail!("unsupported reasoning effort: {other}"),
     }
+}
+
+fn parse_image_protocol(value: &str) -> anyhow::Result<ImageProtocolPreference> {
+    #[derive(Deserialize)]
+    struct ImageProtocolValue {
+        value: ImageProtocolPreference,
+    }
+
+    toml::from_str::<ImageProtocolValue>(&format!("value = \"{value}\""))
+        .map(|parsed| parsed.value)
+        .with_context(|| format!("unsupported TUI image protocol: {value}"))
 }
 
 fn parse_string_list(value: &str) -> anyhow::Result<Vec<String>> {

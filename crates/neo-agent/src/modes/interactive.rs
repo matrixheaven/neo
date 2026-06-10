@@ -4,8 +4,8 @@ use crate::{
 };
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, VecDeque},
-    fs,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    env, fs,
     future::{Future, Ready, ready},
     io::{IsTerminal as _, Stdout, Write as _, stdout},
     path::{Path, PathBuf},
@@ -26,8 +26,9 @@ use neo_agent_core::{
     session::{JsonlSessionReader, SessionMetadataStore},
 };
 use neo_tui::{
-    ApprovalChoice, ApprovalResult, CommandSpec, InputEvent, InputParser, KeyId, KeybindingAction,
-    KeybindingsManager, NeoTuiApp, PickerItem, PromptEdit,
+    ApprovalChoice, ApprovalResult, CommandSpec, ImageProtocolPreference, ImageRenderPolicy,
+    InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager, NeoTuiApp, PickerItem,
+    PromptEdit, TerminalImageCapabilities,
 };
 use ratatui::{
     Terminal,
@@ -383,6 +384,15 @@ impl InteractiveController {
 
     pub fn apply_startup_options(&mut self, config: &AppConfig, options: InteractiveOptions) {
         self.app.set_theme(config.theme.theme);
+        self.app.set_image_render_policy(ImageRenderPolicy::new(
+            config.tui.image_protocol,
+            config.tui.fetch_remote_images,
+        ));
+        self.app
+            .set_image_capabilities(terminal_image_capabilities_for_policy(
+                config.tui.image_protocol,
+                |name| env::var(name),
+            ));
         if !options.verbose_startup {
             return;
         }
@@ -1111,23 +1121,71 @@ impl InteractiveController {
     }
 }
 
+fn terminal_image_capabilities_for_policy(
+    protocol: ImageProtocolPreference,
+    env_var: impl Fn(&str) -> std::result::Result<String, env::VarError>,
+) -> TerminalImageCapabilities {
+    if matches!(
+        protocol,
+        ImageProtocolPreference::Auto | ImageProtocolPreference::None
+    ) {
+        return TerminalImageCapabilities::default();
+    }
+
+    let term = env_var("TERM").unwrap_or_default().to_ascii_lowercase();
+    let term_program = env_var("TERM_PROGRAM")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let has_env = |name: &str| env_var(name).is_ok();
+
+    let static_hints = TerminalImageCapabilities::default()
+        .with_kitty(
+            has_env("KITTY_WINDOW_ID")
+                || has_env("WEZTERM_PANE")
+                || term.contains("kitty")
+                || term_program.contains("wezterm"),
+        )
+        .with_iterm2(term_program.contains("iterm"))
+        .with_sixel(term.contains("sixel") || has_env("SIXEL"));
+
+    match protocol {
+        ImageProtocolPreference::Kitty => {
+            TerminalImageCapabilities::default().with_kitty(static_hints.kitty())
+        }
+        ImageProtocolPreference::Iterm2 => {
+            TerminalImageCapabilities::default().with_iterm2(static_hints.iterm2())
+        }
+        ImageProtocolPreference::Sixel => {
+            TerminalImageCapabilities::default().with_sixel(static_hints.sixel())
+        }
+        ImageProtocolPreference::Auto | ImageProtocolPreference::None => {
+            TerminalImageCapabilities::default()
+        }
+    }
+}
+
 fn prompt_completions(
     root: &Path,
     prefix: &str,
     model_items: &[PickerItem],
 ) -> Result<Vec<PickerItem>> {
-    if let Some(completions) = slash_prompt_template_completions(root, prefix)? {
-        return Ok(completions);
-    }
-    if let Some(completions) = model_prompt_completions(prefix, model_items)
-        && !completions.is_empty()
-    {
-        return Ok(completions);
-    }
-    filesystem_prompt_completions(root, prefix)
+    let catalog = CompletionCatalog {
+        slash_prompts: slash_prompt_template_completion_items(root, prefix)?.unwrap_or_default(),
+        prompt_packages: Vec::new(),
+        extension_commands: Vec::new(),
+        cloud_commands: Vec::new(),
+        model_items: model_items.to_vec(),
+    };
+    Ok(completion_source_candidates(root, prefix, &catalog)?
+        .into_iter()
+        .map(|candidate| candidate.to_picker_item())
+        .collect())
 }
 
-fn slash_prompt_template_completions(root: &Path, prefix: &str) -> Result<Option<Vec<PickerItem>>> {
+fn slash_prompt_template_completion_items(
+    root: &Path,
+    prefix: &str,
+) -> Result<Option<Vec<PickerItem>>> {
     let Some(name_prefix) = prefix.strip_prefix('/') else {
         return Ok(None);
     };
@@ -1149,7 +1207,7 @@ fn slash_prompt_template_completions(root: &Path, prefix: &str) -> Result<Option
     Ok(Some(completions))
 }
 
-fn filesystem_prompt_completions(root: &Path, prefix: &str) -> Result<Vec<PickerItem>> {
+fn filesystem_completion_candidates(root: &Path, prefix: &str) -> Result<Vec<CompletionCandidate>> {
     let Some(request) = FilesystemCompletionRequest::from_prefix(root, prefix) else {
         return Ok(Vec::new());
     };
@@ -1198,7 +1256,12 @@ fn filesystem_prompt_completions(root: &Path, prefix: &str) -> Result<Vec<Picker
         } else {
             "file"
         };
-        completions.push(PickerItem::new(value.clone(), value, Some(description)));
+        completions.push(CompletionCandidate::new(
+            value.clone(),
+            value,
+            Some(description.to_owned()),
+            CompletionSource::LocalFile,
+        ));
     }
 
     completions.sort_by(|left, right| left.value.cmp(&right.value));
@@ -1206,7 +1269,10 @@ fn filesystem_prompt_completions(root: &Path, prefix: &str) -> Result<Vec<Picker
     Ok(completions)
 }
 
-fn model_prompt_completions(prefix: &str, model_items: &[PickerItem]) -> Option<Vec<PickerItem>> {
+fn model_completion_candidates(
+    prefix: &str,
+    model_items: &[PickerItem],
+) -> Option<Vec<CompletionCandidate>> {
     let model_prefix = prefix.strip_prefix('@')?;
     if model_items.is_empty() {
         return None;
@@ -1217,12 +1283,153 @@ fn model_prompt_completions(prefix: &str, model_items: &[PickerItem]) -> Option<
         .filter(|item| item.value.starts_with(model_prefix))
         .map(|item| {
             let value = format!("@{}", item.value);
-            PickerItem::new(value.clone(), value, item.description.clone())
+            CompletionCandidate::new(
+                value.clone(),
+                value,
+                item.description.clone(),
+                CompletionSource::ProviderModel,
+            )
         })
         .collect::<Vec<_>>();
     completions.sort_by(|left, right| left.value.cmp(&right.value));
     completions.truncate(100);
     Some(completions)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CompletionCatalog {
+    slash_prompts: Vec<PickerItem>,
+    prompt_packages: Vec<PickerItem>,
+    extension_commands: Vec<PickerItem>,
+    cloud_commands: Vec<PickerItem>,
+    model_items: Vec<PickerItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionSource {
+    LocalFile,
+    SlashPrompt,
+    PromptPackage,
+    ExtensionCommand,
+    CloudCommand,
+    ProviderModel,
+}
+
+impl CompletionSource {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::LocalFile => "local file",
+            Self::SlashPrompt => "slash prompt",
+            Self::PromptPackage => "prompt package",
+            Self::ExtensionCommand => "extension command",
+            Self::CloudCommand => "cloud command",
+            Self::ProviderModel => "provider model",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompletionCandidate {
+    value: String,
+    label: String,
+    description: Option<String>,
+    source: CompletionSource,
+    source_label: &'static str,
+}
+
+impl CompletionCandidate {
+    fn new(
+        value: impl Into<String>,
+        label: impl Into<String>,
+        description: Option<String>,
+        source: CompletionSource,
+    ) -> Self {
+        Self {
+            value: value.into(),
+            label: label.into(),
+            description,
+            source,
+            source_label: source.label(),
+        }
+    }
+
+    fn from_picker(item: PickerItem, source: CompletionSource) -> Self {
+        Self::new(item.value, item.label, item.description, source)
+    }
+
+    fn to_picker_item(&self) -> PickerItem {
+        PickerItem::new(
+            self.value.clone(),
+            self.label.clone(),
+            Some(completion_description(
+                self.description.as_deref(),
+                self.source_label,
+            )),
+        )
+    }
+}
+
+fn completion_source_candidates(
+    root: &Path,
+    prefix: &str,
+    catalog: &CompletionCatalog,
+) -> Result<Vec<CompletionCandidate>> {
+    let mut candidates = if prefix.starts_with('/') {
+        slash_source_candidates(prefix, catalog)
+    } else if prefix.starts_with('@') {
+        model_completion_candidates(prefix, &catalog.model_items).unwrap_or_default()
+    } else {
+        filesystem_completion_candidates(root, prefix)?
+    };
+    candidates.sort_by(|left, right| {
+        completion_source_rank(left.source)
+            .cmp(&completion_source_rank(right.source))
+            .then_with(|| left.value.cmp(&right.value))
+    });
+    candidates.truncate(100);
+    Ok(candidates)
+}
+
+fn slash_source_candidates(prefix: &str, catalog: &CompletionCatalog) -> Vec<CompletionCandidate> {
+    let sources = [
+        (&catalog.slash_prompts, CompletionSource::SlashPrompt),
+        (&catalog.prompt_packages, CompletionSource::PromptPackage),
+        (
+            &catalog.extension_commands,
+            CompletionSource::ExtensionCommand,
+        ),
+        (&catalog.cloud_commands, CompletionSource::CloudCommand),
+    ];
+    sources
+        .into_iter()
+        .flat_map(|(items, source)| {
+            items
+                .iter()
+                .filter(move |item| item.value.starts_with(prefix))
+                .cloned()
+                .map(move |item| CompletionCandidate::from_picker(item, source))
+        })
+        .collect()
+}
+
+const fn completion_source_rank(source: CompletionSource) -> u8 {
+    match source {
+        CompletionSource::LocalFile => 0,
+        CompletionSource::SlashPrompt => 1,
+        CompletionSource::PromptPackage => 2,
+        CompletionSource::ExtensionCommand => 3,
+        CompletionSource::CloudCommand => 4,
+        CompletionSource::ProviderModel => 5,
+    }
+}
+
+fn completion_description(description: Option<&str>, source_label: &str) -> String {
+    match description {
+        Some(description) if !description.is_empty() => {
+            format!("{description} | source: {source_label}")
+        }
+        _ => format!("source: {source_label}"),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1590,6 +1797,7 @@ const OVERLAY_ACTION_PRIORITY: &[KeybindingAction] = &[
 struct RawTerminal {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     raw_mode: RawModeGuard,
+    rendered_inline_images: BTreeSet<String>,
 }
 
 impl RawTerminal {
@@ -1600,12 +1808,24 @@ impl RawTerminal {
         let backend = CrosstermBackend::new(output);
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
-        Ok(Self { terminal, raw_mode })
+        Ok(Self {
+            terminal,
+            raw_mode,
+            rendered_inline_images: BTreeSet::new(),
+        })
     }
 
     fn draw(&mut self, app: &NeoTuiApp) -> Result<()> {
         self.terminal
             .draw(|frame| frame.render_widget(app, frame.area()))?;
+        for render in app.inline_image_renders() {
+            if self.rendered_inline_images.insert(render.id) {
+                self.terminal
+                    .backend_mut()
+                    .write_all(render.escape_sequence.as_bytes())?;
+            }
+        }
+        self.terminal.backend_mut().flush()?;
         Ok(())
     }
 
@@ -1627,6 +1847,7 @@ impl RawTerminal {
             EnableBracketedPaste
         )?;
         self.terminal.clear()?;
+        self.rendered_inline_images.clear();
         Ok(())
     }
 }
@@ -2631,6 +2852,39 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn auto_image_protocol_ignores_static_terminal_hints_without_runtime_negotiation() {
+        let env = |name: &str| match name {
+            "TERM" => Ok("xterm-kitty".to_owned()),
+            "TERM_PROGRAM" => Ok("WezTerm".to_owned()),
+            "KITTY_WINDOW_ID" | "SIXEL" => Ok("1".to_owned()),
+            "WEZTERM_PANE" => Ok("2".to_owned()),
+            _ => Err(env::VarError::NotPresent),
+        };
+
+        let capabilities =
+            terminal_image_capabilities_for_policy(ImageProtocolPreference::Auto, env);
+
+        assert_eq!(capabilities, TerminalImageCapabilities::default());
+    }
+
+    #[test]
+    fn explicit_image_protocol_uses_matching_static_terminal_hints() {
+        let env = |name: &str| match name {
+            "TERM" => Ok("xterm-kitty".to_owned()),
+            "TERM_PROGRAM" => Ok("WezTerm".to_owned()),
+            "KITTY_WINDOW_ID" => Ok("1".to_owned()),
+            _ => Err(env::VarError::NotPresent),
+        };
+
+        let capabilities =
+            terminal_image_capabilities_for_policy(ImageProtocolPreference::Kitty, env);
+
+        assert!(capabilities.kitty());
+        assert!(!capabilities.iterm2());
+        assert!(!capabilities.sixel());
+    }
+
     #[tokio::test]
     async fn event_loop_tabs_through_local_slash_prompt_template_completions() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2659,6 +2913,74 @@ mod tests {
         assert_eq!(controller.app().prompt().text, "/review");
         assert_eq!(controller.app().prompt().cursor, 7);
         assert!(controller.app().focused_overlay().is_none());
+    }
+
+    #[test]
+    fn autocomplete_source_model_merges_local_commands_and_provider_models_with_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(temp.path().join("src")).expect("create src");
+        fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").expect("write main");
+
+        let catalog = CompletionCatalog {
+            slash_prompts: vec![PickerItem::new(
+                "/review",
+                "/review",
+                Some("Review project changes"),
+            )],
+            prompt_packages: vec![PickerItem::new(
+                "/review-package",
+                "/review-package",
+                Some("Packaged review prompt"),
+            )],
+            extension_commands: vec![PickerItem::new(
+                "/review-extension",
+                "/review-extension",
+                Some("Extension command"),
+            )],
+            cloud_commands: vec![PickerItem::new(
+                "/review-cloud",
+                "/review-cloud",
+                Some("Cloud command"),
+            )],
+            model_items: vec![PickerItem::new(
+                "anthropic/claude-sonnet",
+                "anthropic/claude-sonnet",
+                Some("Messages"),
+            )],
+        };
+
+        let files = completion_source_candidates(temp.path(), "src/ma", &catalog)
+            .expect("file completions");
+        assert!(files.iter().any(|candidate| {
+            candidate.value == "src/main.rs"
+                && candidate.source == CompletionSource::LocalFile
+                && candidate.source_label == "local file"
+        }));
+
+        let slash =
+            completion_source_candidates(temp.path(), "/rev", &catalog).expect("slash completions");
+        let slash_sources = slash
+            .iter()
+            .map(|candidate| candidate.source)
+            .collect::<Vec<_>>();
+        assert!(slash_sources.contains(&CompletionSource::SlashPrompt));
+        assert!(slash_sources.contains(&CompletionSource::PromptPackage));
+        assert!(slash_sources.contains(&CompletionSource::ExtensionCommand));
+        assert!(slash_sources.contains(&CompletionSource::CloudCommand));
+        assert!(slash.iter().any(|candidate| {
+            candidate
+                .to_picker_item()
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("source: extension command"))
+        }));
+
+        let models = completion_source_candidates(temp.path(), "@anth", &catalog)
+            .expect("model completions");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].value, "@anthropic/claude-sonnet");
+        assert_eq!(models[0].source, CompletionSource::ProviderModel);
+        assert_eq!(models[0].source_label, "provider model");
     }
 
     #[tokio::test]

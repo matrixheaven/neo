@@ -862,6 +862,53 @@ fn config_show_reads_tui_keybinding_overrides() {
 }
 
 #[test]
+fn config_show_reads_tui_image_protocol_and_remote_fetch_policy() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+[tui]
+image_protocol = "kitty"
+fetch_remote_images = true
+"#,
+    )
+    .expect("write config");
+
+    let mut command = neo();
+    command.current_dir(temp.path()).args(["config", "show"]);
+    let stdout = run(command);
+
+    assert!(stdout.contains("[tui]"));
+    assert!(stdout.contains("image_protocol = \"kitty\""));
+    assert!(stdout.contains("fetch_remote_images = true"));
+}
+
+#[test]
+fn config_set_writes_tui_image_protocol_and_remote_fetch_policy() {
+    let temp = TempDir::new().expect("tempdir");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .args(["config", "set", "tui.image_protocol", "sixel"]);
+    let stdout = run(command);
+    assert!(stdout.contains("set tui.image_protocol"));
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .args(["config", "set", "tui.fetch_remote_images", "true"]);
+    let stdout = run(command);
+    assert!(stdout.contains("set tui.fetch_remote_images"));
+
+    let config = fs::read_to_string(temp.path().join(".neo/config.toml")).expect("read config");
+    let value: toml::Value = toml::from_str(&config).expect("config should be valid toml");
+    assert_eq!(value["tui"]["image_protocol"].as_str(), Some("sixel"));
+    assert_eq!(value["tui"]["fetch_remote_images"].as_bool(), Some(true));
+}
+
+#[test]
 fn config_set_writes_tui_keybinding_override() {
     let temp = TempDir::new().expect("tempdir");
     let mut command = neo();

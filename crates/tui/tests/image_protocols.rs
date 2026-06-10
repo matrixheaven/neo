@@ -1,7 +1,8 @@
 use neo_tui::{
-    ImageProtocolError, Iterm2Dimension, Iterm2InlineImageOptions, KittyGraphicsOptions,
-    KittyImageFormat, SixelImageOptions, SixelPaletteColor, encode_iterm2_inline_image,
-    encode_kitty_graphics, encode_sixel_image,
+    ImageProtocolError, ImageProtocolPreference, ImageRenderPolicy, ImageSource, InlineImage,
+    Iterm2Dimension, Iterm2InlineImageOptions, KittyGraphicsOptions, KittyImageFormat,
+    NegotiatedImageProtocol, SixelImageOptions, SixelPaletteColor, TerminalImageCapabilities,
+    encode_iterm2_inline_image, encode_kitty_graphics, encode_sixel_image,
 };
 
 #[test]
@@ -133,5 +134,88 @@ fn image_protocol_encoders_reject_empty_payloads_and_invalid_options() {
             &SixelImageOptions::new(1, 1, vec![SixelPaletteColor::rgb_percent(101, 0, 0)]),
         ),
         Err(ImageProtocolError::InvalidPalette)
+    );
+}
+
+#[test]
+fn image_protocol_auto_negotiates_available_terminal_protocol() {
+    assert_eq!(
+        ImageRenderPolicy::new(ImageProtocolPreference::Auto, false)
+            .negotiate(TerminalImageCapabilities::default().with_kitty(true)),
+        NegotiatedImageProtocol::Kitty
+    );
+    assert_eq!(
+        ImageRenderPolicy::new(ImageProtocolPreference::Auto, false)
+            .negotiate(TerminalImageCapabilities::default().with_iterm2(true)),
+        NegotiatedImageProtocol::Iterm2
+    );
+    assert_eq!(
+        ImageRenderPolicy::new(ImageProtocolPreference::Auto, false)
+            .negotiate(TerminalImageCapabilities::default().with_sixel(true)),
+        NegotiatedImageProtocol::Sixel
+    );
+    assert_eq!(
+        ImageRenderPolicy::new(ImageProtocolPreference::None, true).negotiate(
+            TerminalImageCapabilities::default()
+                .with_kitty(true)
+                .with_iterm2(true)
+                .with_sixel(true)
+        ),
+        NegotiatedImageProtocol::None
+    );
+}
+
+#[test]
+fn image_render_policy_keeps_remote_images_metadata_only_by_default() {
+    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Kitty, false);
+    let remote = InlineImage::remote_url(
+        "img-remote",
+        "image/png",
+        "https://example.test/private.png",
+        Some("private chart"),
+    );
+
+    let rendered = policy.render_inline_image(
+        &remote,
+        TerminalImageCapabilities::default().with_kitty(true),
+    );
+
+    assert_eq!(rendered.protocol, NegotiatedImageProtocol::None);
+    assert_eq!(
+        rendered.metadata,
+        "[image: image/png url=https://example.test/private.png alt=\"private chart\"]"
+    );
+    assert!(rendered.escape_sequence.is_none());
+    assert_eq!(remote.size_bytes(), None);
+}
+
+#[test]
+fn image_render_policy_renders_local_or_base64_payloads_with_selected_protocol() {
+    let policy = ImageRenderPolicy::new(ImageProtocolPreference::Kitty, false);
+    let local = InlineImage::bytes(
+        "img-local",
+        "image/png",
+        [137, 80, 78, 71],
+        Some("generated plot"),
+        ImageSource::Generated,
+    );
+
+    let rendered = policy.render_inline_image(
+        &local,
+        TerminalImageCapabilities::default().with_kitty(true),
+    );
+
+    assert_eq!(local.size_bytes(), Some(4));
+    assert_eq!(rendered.protocol, NegotiatedImageProtocol::Kitty);
+    assert!(
+        rendered
+            .metadata
+            .contains("[image: image/png generated 4 bytes alt=\"generated plot\"]")
+    );
+    assert!(
+        rendered
+            .escape_sequence
+            .as_deref()
+            .is_some_and(|sequence| sequence.starts_with("\x1b_G"))
     );
 }

@@ -286,6 +286,9 @@ fn transcript_row(item: &TranscriptItem, theme: TuiTheme) -> (&'static str, Stri
             format!("{} {} ({})", status.marker(), name, detail),
             status_style(*status, theme),
         ),
+        TranscriptItem::Image { metadata, .. } => {
+            ("Image", metadata.clone(), Style::default().fg(theme.notice))
+        }
         TranscriptItem::Notice { content } => {
             ("Notice", content.clone(), Style::default().fg(theme.notice))
         }

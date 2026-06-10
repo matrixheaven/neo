@@ -1,6 +1,7 @@
 use neo_tui::{
-    AppMode, CommandPaletteState, CommandSpec, ModelPickerState, NeoTuiApp, Overlay, OverlayKind,
-    PickerItem, SessionPickerState, StreamUpdate, TranscriptLine, TranscriptRenderer,
+    AppMode, CommandPaletteState, CommandSpec, ImageProtocolPreference, ImageRenderPolicy,
+    ModelPickerState, NeoTuiApp, Overlay, OverlayKind, PickerItem, SessionPickerState,
+    StreamUpdate, TerminalImageCapabilities, TranscriptLine, TranscriptRenderer,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Cell};
 use std::path::PathBuf;
@@ -401,25 +402,132 @@ fn app_shell_renders_agent_core_image_content_as_safe_metadata_summary() {
         ),
     });
 
-    assert_eq!(app.transcript().items().len(), 2);
+    assert_eq!(app.transcript().items().len(), 3);
     assert!(matches!(
         &app.transcript().items()[0],
-        neo_tui::TranscriptItem::Assistant { content, .. }
-            if content == "[image: image/png url=https://example.test/cat.png]"
+        neo_tui::TranscriptItem::Image { mime_type, size_bytes, source, metadata, payload, .. }
+            if mime_type == "image/png"
+                && size_bytes.is_none()
+                && *source == neo_tui::ImageSource::RemoteUrl
+                && metadata == "[image: image/png url=https://example.test/cat.png]"
+                && payload.is_none()
     ));
     assert!(matches!(
         &app.transcript().items()[1],
         neo_tui::TranscriptItem::Assistant { content, .. }
-            if content.contains("see attached")
-                && content.contains("[image: image/jpeg data=256 bytes]")
-                && !content.contains(&large_base64)
+            if content == "see attached"
+    ));
+    assert!(matches!(
+        &app.transcript().items()[2],
+        neo_tui::TranscriptItem::Image { mime_type, size_bytes, source, metadata, payload, .. }
+            if mime_type == "image/jpeg"
+                && *size_bytes == payload.as_ref().map(Vec::len)
+                && *source == neo_tui::ImageSource::Base64
+                && metadata == "[image: image/jpeg data=192 bytes]"
+                && payload.as_ref().is_some_and(|bytes| bytes.len() <= large_base64.len())
     ));
 
     let rendered = render_app(80, 12, &app).join("\n");
     assert!(rendered.contains("[image: image/png url=https://example.test/cat.png]"));
     assert!(rendered.contains("see attached"));
-    assert!(rendered.contains("[image: image/jpeg data=256 bytes]"));
+    assert!(rendered.contains("[image: image/jpeg data=192 bytes]"));
     assert!(!rendered.contains(&large_base64));
+}
+
+#[test]
+fn app_shell_stores_agent_core_images_as_sanitized_transcript_items() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let encoded = "iVBORw0KGgo=".to_owned();
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageAppended {
+        message: neo_agent_core::AgentMessage::assistant(
+            [
+                neo_agent_core::Content::text("generated preview"),
+                neo_agent_core::Content::Image {
+                    mime_type: "image/png".to_owned(),
+                    data: neo_agent_core::ImageRef::Base64(encoded.clone()),
+                },
+                neo_agent_core::Content::Image {
+                    mime_type: "image/jpeg".to_owned(),
+                    data: neo_agent_core::ImageRef::Url(
+                        "https://example.test/private.jpg?token=secret".to_owned(),
+                    ),
+                },
+            ],
+            Vec::new(),
+            neo_agent_core::StopReason::EndTurn,
+        ),
+    });
+
+    assert_eq!(app.transcript().items().len(), 3);
+    assert!(matches!(
+        &app.transcript().items()[0],
+        neo_tui::TranscriptItem::Assistant { content, .. } if content == "generated preview"
+    ));
+    assert!(matches!(
+        &app.transcript().items()[1],
+        neo_tui::TranscriptItem::Image { id, mime_type, size_bytes, alt, source, .. }
+            if id == "image-1"
+                && mime_type == "image/png"
+                && *size_bytes == Some(8)
+                && alt.is_none()
+                && *source == neo_tui::ImageSource::Base64
+    ));
+    assert!(matches!(
+        &app.transcript().items()[2],
+        neo_tui::TranscriptItem::Image { id, mime_type, size_bytes, alt, source, metadata, .. }
+            if id == "image-2"
+                && mime_type == "image/jpeg"
+                && size_bytes.is_none()
+                && alt.is_none()
+                && *source == neo_tui::ImageSource::RemoteUrl
+                && metadata.contains("https://example.test/private.jpg")
+                && !metadata.contains("secret")
+                && !metadata.contains("token=")
+    ));
+}
+
+#[test]
+fn app_shell_renders_byte_backed_images_with_negotiated_terminal_protocol() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    app.set_image_render_policy(ImageRenderPolicy::new(
+        ImageProtocolPreference::Kitty,
+        false,
+    ));
+    app.set_image_capabilities(TerminalImageCapabilities::default().with_kitty(true));
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageAppended {
+        message: neo_agent_core::AgentMessage::assistant(
+            [neo_agent_core::Content::Image {
+                mime_type: "image/png".to_owned(),
+                data: neo_agent_core::ImageRef::Base64("iVBORw0KGgo=".to_owned()),
+            }],
+            Vec::new(),
+            neo_agent_core::StopReason::EndTurn,
+        ),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageAppended {
+        message: neo_agent_core::AgentMessage::assistant(
+            [neo_agent_core::Content::Image {
+                mime_type: "image/png".to_owned(),
+                data: neo_agent_core::ImageRef::Url(
+                    "https://example.test/private.png?token=secret".to_owned(),
+                ),
+            }],
+            Vec::new(),
+            neo_agent_core::StopReason::EndTurn,
+        ),
+    });
+
+    let image_sequences = app.inline_image_sequences();
+    assert_eq!(image_sequences.len(), 1);
+    assert!(image_sequences[0].starts_with("\x1b_G"));
+
+    let rendered = render_app(96, 12, &app).join("\n");
+    assert!(!rendered.contains("\x1b_G"));
+    assert!(rendered.contains("[image: image/png data=8 bytes]"));
+    assert!(rendered.contains("[image: image/png url=https://example.test/private.png]"));
+    assert!(!rendered.contains("token=secret"));
 }
 
 #[test]

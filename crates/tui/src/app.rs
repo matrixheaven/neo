@@ -3,6 +3,8 @@ use std::{fmt::Write as _, ops::Range};
 use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef};
 use ratatui::style::Color;
 
+use crate::{ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TuiTheme {
     pub header: Color,
@@ -112,6 +114,9 @@ pub struct NeoTuiApp {
     active_thinking_buffer: String,
     active_tools: Vec<ActiveTool>,
     completed_tool_result_ids: Vec<String>,
+    next_image_id: u64,
+    image_render_policy: ImageRenderPolicy,
+    image_capabilities: TerminalImageCapabilities,
     theme: TuiTheme,
 }
 
@@ -141,6 +146,9 @@ impl NeoTuiApp {
             active_thinking_buffer: String::new(),
             active_tools: Vec::new(),
             completed_tool_result_ids: Vec::new(),
+            next_image_id: 0,
+            image_render_policy: ImageRenderPolicy::default(),
+            image_capabilities: TerminalImageCapabilities::default(),
             theme: TuiTheme::default(),
         }
     }
@@ -172,6 +180,43 @@ impl NeoTuiApp {
 
     pub const fn set_theme(&mut self, theme: TuiTheme) {
         self.theme = theme;
+    }
+
+    #[must_use]
+    pub const fn image_render_policy(&self) -> ImageRenderPolicy {
+        self.image_render_policy
+    }
+
+    pub const fn set_image_render_policy(&mut self, policy: ImageRenderPolicy) {
+        self.image_render_policy = policy;
+    }
+
+    #[must_use]
+    pub const fn image_capabilities(&self) -> TerminalImageCapabilities {
+        self.image_capabilities
+    }
+
+    pub const fn set_image_capabilities(&mut self, capabilities: TerminalImageCapabilities) {
+        self.image_capabilities = capabilities;
+    }
+
+    #[must_use]
+    pub fn inline_image_renders(&self) -> Vec<InlineImageRender> {
+        self.transcript
+            .items()
+            .iter()
+            .filter_map(|item| {
+                inline_image_render(item, self.image_render_policy, self.image_capabilities)
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn inline_image_sequences(&self) -> Vec<String> {
+        self.inline_image_renders()
+            .into_iter()
+            .map(|render| render.escape_sequence)
+            .collect()
     }
 
     #[must_use]
@@ -291,6 +336,7 @@ impl NeoTuiApp {
         self.active_thinking_buffer.clear();
         self.active_tools.clear();
         self.completed_tool_result_ids.clear();
+        self.next_image_id = 0;
 
         for notice in notices {
             self.transcript.push(TranscriptItem::notice(notice));
@@ -688,8 +734,16 @@ impl NeoTuiApp {
                 self.transcript.push(TranscriptItem::user(text));
             }
             AgentMessage::Assistant { content, .. } => {
-                let (thinking, text) = assistant_transcript_parts(&content);
+                let (thinking, text, images) = self.assistant_transcript_parts(&content);
                 if thinking.is_none() && text.is_empty() {
+                    if images.is_empty() {
+                        return;
+                    }
+                    for image in images {
+                        self.transcript.push(image);
+                    }
+                    self.transcript_selection = None;
+                    self.transcript_view.follow_bottom();
                     return;
                 }
                 if self.active_assistant_id.is_some() {
@@ -703,6 +757,9 @@ impl NeoTuiApp {
                 } else {
                     self.transcript
                         .push(TranscriptItem::assistant_parts(thinking, text));
+                }
+                for image in images {
+                    self.transcript.push(image);
                 }
             }
             AgentMessage::ToolResult {
@@ -739,6 +796,83 @@ impl NeoTuiApp {
         }
         self.transcript_selection = None;
         self.transcript_view.follow_bottom();
+    }
+
+    fn assistant_transcript_parts(
+        &mut self,
+        content: &[Content],
+    ) -> (Option<String>, String, Vec<TranscriptItem>) {
+        let mut thinking_blocks = Vec::new();
+        let mut text = String::new();
+        let mut images = Vec::new();
+        for part in content {
+            match part {
+                Content::Thinking {
+                    text,
+                    redacted,
+                    signature: _,
+                } => {
+                    if !text.is_empty() {
+                        thinking_blocks.push(text.clone());
+                    } else if *redacted {
+                        thinking_blocks.push("[Reasoning redacted]".to_owned());
+                    }
+                }
+                Content::Text { text: part_text } => {
+                    text.push_str(part_text);
+                }
+                Content::Image { mime_type, data } => {
+                    images.push(self.transcript_image_item(mime_type, data));
+                }
+            }
+        }
+        let thinking = (!thinking_blocks.is_empty()).then(|| thinking_blocks.join("\n\n"));
+        (thinking, text, images)
+    }
+
+    fn transcript_image_item(&mut self, mime_type: &str, data: &ImageRef) -> TranscriptItem {
+        self.next_image_id = self.next_image_id.saturating_add(1);
+        let id = format!("image-{}", self.next_image_id);
+        match data {
+            ImageRef::Base64(encoded) => {
+                let bytes = decode_base64(encoded).unwrap_or_else(|| encoded.as_bytes().to_vec());
+                let inline = InlineImage::bytes(
+                    id.clone(),
+                    mime_type.to_owned(),
+                    bytes,
+                    None::<String>,
+                    ImageSource::Base64,
+                );
+                let size_bytes = inline.size_bytes();
+                TranscriptItem::image(
+                    id,
+                    mime_type.to_owned(),
+                    size_bytes,
+                    None::<String>,
+                    ImageSource::Base64,
+                    inline.metadata_summary(),
+                    inline.into_payload_bytes(),
+                )
+            }
+            ImageRef::Url(url) => {
+                let safe_url = sanitized_image_url(url);
+                let inline = InlineImage::remote_url(
+                    id.clone(),
+                    mime_type.to_owned(),
+                    safe_url,
+                    None::<String>,
+                );
+                TranscriptItem::image(
+                    id,
+                    mime_type.to_owned(),
+                    None,
+                    None::<String>,
+                    ImageSource::RemoteUrl,
+                    inline.metadata_summary(),
+                    None,
+                )
+            }
+        }
     }
 
     pub fn push_overlay(&mut self, mut overlay: Overlay) -> OverlayId {
@@ -982,33 +1116,6 @@ fn content_display_text(content: &[Content]) -> String {
     content.iter().filter_map(content_visible_text).collect()
 }
 
-fn assistant_transcript_parts(content: &[Content]) -> (Option<String>, String) {
-    let mut thinking_blocks = Vec::new();
-    let mut text = String::new();
-    for part in content {
-        match part {
-            Content::Thinking {
-                text,
-                redacted,
-                signature: _,
-            } => {
-                if !text.is_empty() {
-                    thinking_blocks.push(text.clone());
-                } else if *redacted {
-                    thinking_blocks.push("[Reasoning redacted]".to_owned());
-                }
-            }
-            Content::Text { .. } | Content::Image { .. } => {
-                if let Some(visible) = content_visible_text(part) {
-                    text.push_str(&visible);
-                }
-            }
-        }
-    }
-    let thinking = (!thinking_blocks.is_empty()).then(|| thinking_blocks.join("\n\n"));
-    (thinking, text)
-}
-
 fn content_visible_text(content: &Content) -> Option<String> {
     match content {
         Content::Text { text } => Some(text.clone()),
@@ -1019,8 +1126,45 @@ fn content_visible_text(content: &Content) -> Option<String> {
 
 fn image_summary(mime_type: &str, data: &ImageRef) -> String {
     match data {
-        ImageRef::Url(url) => format!("[image: {mime_type} url={url}]"),
+        ImageRef::Url(url) => format!("[image: {mime_type} url={}]", sanitized_image_url(url)),
         ImageRef::Base64(data) => format!("[image: {mime_type} data={} bytes]", data.len()),
+    }
+}
+
+fn sanitized_image_url(url: &str) -> String {
+    let end = url.find(['?', '#']).unwrap_or(url.len());
+    url[..end].to_owned()
+}
+
+fn decode_base64(encoded: &str) -> Option<Vec<u8>> {
+    let mut output = Vec::with_capacity(encoded.len() / 4 * 3);
+    let mut buffer = 0_u32;
+    let mut bits = 0_u8;
+
+    for byte in encoded.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
+        if byte == b'=' {
+            break;
+        }
+        let value = base64_value(byte)?;
+        buffer = (buffer << 6) | u32::from(value);
+        bits += 6;
+        while bits >= 8 {
+            bits -= 8;
+            output.push(((buffer >> bits) & 0xff) as u8);
+        }
+    }
+
+    Some(output)
+}
+
+const fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
     }
 }
 
@@ -1502,9 +1646,57 @@ pub enum TranscriptItem {
         detail: String,
         status: ToolStatusKind,
     },
+    Image {
+        id: String,
+        mime_type: String,
+        size_bytes: Option<usize>,
+        alt: Option<String>,
+        source: ImageSource,
+        metadata: String,
+        payload: Option<Vec<u8>>,
+    },
     Notice {
         content: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineImageRender {
+    pub id: String,
+    pub escape_sequence: String,
+}
+
+fn inline_image_render(
+    item: &TranscriptItem,
+    image_render_policy: ImageRenderPolicy,
+    image_capabilities: TerminalImageCapabilities,
+) -> Option<InlineImageRender> {
+    let TranscriptItem::Image {
+        id,
+        mime_type,
+        alt,
+        source,
+        payload,
+        ..
+    } = item
+    else {
+        return None;
+    };
+    let payload = payload.as_ref()?;
+    let inline = InlineImage::bytes(
+        id.clone(),
+        mime_type.clone(),
+        payload.clone(),
+        alt.clone(),
+        *source,
+    );
+    image_render_policy
+        .render_inline_image(&inline, image_capabilities)
+        .escape_sequence
+        .map(|escape_sequence| InlineImageRender {
+            id: id.clone(),
+            escape_sequence,
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1834,6 +2026,27 @@ impl TranscriptItem {
     }
 
     #[must_use]
+    pub fn image(
+        id: impl Into<String>,
+        mime_type: impl Into<String>,
+        size_bytes: Option<usize>,
+        alt: Option<impl Into<String>>,
+        source: ImageSource,
+        metadata: impl Into<String>,
+        payload: Option<Vec<u8>>,
+    ) -> Self {
+        Self::Image {
+            id: id.into(),
+            mime_type: mime_type.into(),
+            size_bytes,
+            alt: alt.map(Into::into),
+            source,
+            metadata: metadata.into(),
+            payload,
+        }
+    }
+
+    #[must_use]
     pub fn notice(content: impl Into<String>) -> Self {
         Self::Notice {
             content: content.into(),
@@ -1965,6 +2178,7 @@ fn transcript_copy_parts(item: &TranscriptItem) -> (&'static str, String) {
             detail,
             status,
         } => ("Tool", format!("{} {} ({})", status.marker(), name, detail)),
+        TranscriptItem::Image { metadata, .. } => ("Image", metadata.clone()),
         TranscriptItem::Notice { content } => ("Notice", content.clone()),
     }
 }
