@@ -241,6 +241,37 @@ async fn dispatch_command(
         },
         Some(Command::Mcp { command }) => match command {
             McpCommand::List => Ok(modes::run::list_mcp_servers(config)),
+            McpCommand::Servers { command } => match command {
+                cli::McpServersCommand::Add {
+                    server_id,
+                    transport,
+                    command,
+                    url,
+                    args,
+                    env,
+                    headers,
+                } => modes::run::add_mcp_server(
+                    server_id, transport, command, url, args, env, headers,
+                ),
+                cli::McpServersCommand::Remove { server_id } => {
+                    config::remove_mcp_server(&server_id)
+                }
+                cli::McpServersCommand::Enable { server_id } => {
+                    config::set_mcp_server_enabled(&server_id, true)
+                }
+                cli::McpServersCommand::Disable { server_id } => {
+                    config::set_mcp_server_enabled(&server_id, false)
+                }
+                cli::McpServersCommand::Health { server_id } => {
+                    modes::run::mcp_server_health(config, &server_id).await
+                }
+                cli::McpServersCommand::Start { server_id } => {
+                    modes::run::start_mcp_server(config, &server_id).await
+                }
+                cli::McpServersCommand::Stop { server_id } => {
+                    modes::run::stop_mcp_server(config, &server_id)
+                }
+            },
             McpCommand::Tools { server_id } => modes::run::list_mcp_tools(config, &server_id).await,
             McpCommand::Resources { server_id, command } => match command {
                 cli::McpResourceCommand::List => {

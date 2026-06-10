@@ -1,11 +1,14 @@
 use std::{
     collections::BTreeMap,
-    env,
+    env, fs,
     fmt::Write as _,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
 
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -23,6 +26,7 @@ use neo_ai::{
     ProviderSpec, ResolvedCredential, providers::openai_images::OpenAiImagesClient,
 };
 use reqwest::header;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -1089,6 +1093,103 @@ pub async fn list_mcp_tools(config: &AppConfig, server_id: &str) -> anyhow::Resu
     Ok(out)
 }
 
+pub fn add_mcp_server(
+    server_id: String,
+    transport: String,
+    command: Option<String>,
+    url: Option<String>,
+    args: Vec<String>,
+    env: Vec<String>,
+    headers: Vec<String>,
+) -> anyhow::Result<String> {
+    config::upsert_mcp_server(McpServerConfig {
+        id: server_id,
+        enabled: true,
+        transport,
+        command,
+        url,
+        args,
+        env: key_value_pairs(env, "--env")?,
+        headers: key_value_pairs(headers, "--header")?,
+    })
+}
+
+pub async fn mcp_server_health(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
+    let server = enabled_mcp_server(config, server_id)?;
+    if server.transport == "cloud" {
+        anyhow::bail!("cloud MCP server {server_id} requires self-hosted neo-cloud auth");
+    }
+    let adapter = mcp_adapter_for_server(server)?;
+    let tools = adapter
+        .list_tools()
+        .await
+        .with_context(|| format!("failed to probe MCP server {server_id}"))?;
+    Ok(format!(
+        "{server_id}\thealthy\t{} {}\n",
+        tools.len(),
+        if tools.len() == 1 { "tool" } else { "tools" }
+    ))
+}
+
+pub async fn start_mcp_server(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
+    let server = enabled_mcp_server(config, server_id)?;
+    if server.transport == "cloud" {
+        anyhow::bail!("cloud MCP server {server_id} requires self-hosted neo-cloud auth");
+    }
+    anyhow::ensure!(
+        server.transport == "stdio",
+        "MCP server {server_id} uses {} transport; only stdio servers can be started locally",
+        server.transport
+    );
+    let command = server
+        .command
+        .as_deref()
+        .with_context(|| format!("missing MCP command for {server_id}"))?;
+    let mut process = std::process::Command::new("sh");
+    process
+        .arg("-c")
+        .arg("tail -f /dev/null | \"$0\" \"$@\"")
+        .arg(command)
+        .args(&server.args)
+        .envs(&server.env)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        process.process_group(0);
+    }
+    let child = process
+        .spawn()
+        .with_context(|| format!("failed to start MCP server {server_id}"))?;
+    let child_pid = child.id();
+    let server_pid = wait_for_mcp_server_pid(server, Duration::from_secs(2));
+    let mut state = read_mcp_process_state(config)?;
+    state.servers.retain(|record| record.id != server_id);
+    state.servers.push(McpProcessRecord {
+        id: server_id.to_owned(),
+        child_pid,
+        #[cfg(unix)]
+        process_group_id: Some(child_pid),
+        #[cfg(not(unix))]
+        process_group_id: None,
+        server_pid,
+    });
+    write_mcp_process_state(config, &state)?;
+    Ok(format!("started MCP server {server_id}\tpid={child_pid}\n"))
+}
+
+pub fn stop_mcp_server(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
+    let mut state = read_mcp_process_state(config)?;
+    let Some(index) = state.servers.iter().position(|record| record.id == server_id) else {
+        anyhow::bail!("MCP server {server_id} is not running");
+    };
+    let record = state.servers.remove(index);
+    terminate_mcp_process(&record);
+    write_mcp_process_state(config, &state)?;
+    Ok(format!("stopped MCP server {server_id}\n"))
+}
+
 pub async fn list_mcp_resources(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
     let server = enabled_mcp_server(config, server_id)?;
     let adapter = mcp_adapter_for_server(server)?;
@@ -1778,6 +1879,9 @@ fn mcp_adapter_for_server_with_hosted_client(
                 ),
             })))
         }
+        "cloud" => {
+            anyhow::bail!("cloud MCP server {} requires self-hosted neo-cloud auth", server.id)
+        }
         other => anyhow::bail!("unsupported MCP transport for {}: {other}", server.id),
     }
 }
@@ -1795,6 +1899,112 @@ fn parse_hosted_mcp_url(url: &str, configured_id: &str) -> anyhow::Result<Option
         "hosted MCP url server id {server_id} does not match configured server {configured_id}"
     );
     Ok(Some(server_id.to_owned()))
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct McpProcessState {
+    #[serde(default)]
+    servers: Vec<McpProcessRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct McpProcessRecord {
+    id: String,
+    child_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    server_pid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    process_group_id: Option<u32>,
+}
+
+fn key_value_pairs(values: Vec<String>, flag: &str) -> anyhow::Result<BTreeMap<String, String>> {
+    let mut pairs = BTreeMap::new();
+    for value in values {
+        let Some((key, value)) = value.split_once('=') else {
+            anyhow::bail!("{flag} values must use KEY=VALUE");
+        };
+        let key = key.trim();
+        anyhow::ensure!(!key.is_empty(), "{flag} key must not be empty");
+        pairs.insert(key.to_owned(), value.trim().to_owned());
+    }
+    Ok(pairs)
+}
+
+fn mcp_state_path(config: &AppConfig) -> PathBuf {
+    config.project_dir.join(".neo/mcp-state.toml")
+}
+
+fn read_mcp_process_state(config: &AppConfig) -> anyhow::Result<McpProcessState> {
+    let path = mcp_state_path(config);
+    let content = fs::read_to_string(&path).unwrap_or_default();
+    if content.trim().is_empty() {
+        return Ok(McpProcessState::default());
+    }
+    toml::from_str(&content)
+        .with_context(|| format!("failed to parse MCP process state {}", path.display()))
+}
+
+fn write_mcp_process_state(config: &AppConfig, state: &McpProcessState) -> anyhow::Result<()> {
+    let path = mcp_state_path(config);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &path,
+        toml::to_string_pretty(state)
+            .with_context(|| format!("failed to serialize MCP process state {}", path.display()))?,
+    )?;
+    Ok(())
+}
+
+fn wait_for_mcp_server_pid(server: &McpServerConfig, timeout: Duration) -> Option<String> {
+    let pid_file = server
+        .env
+        .get("MCP_PID_FILE")
+        .map(PathBuf::from)?;
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(pid) = fs::read_to_string(&pid_file) {
+            let pid = pid.trim();
+            if !pid.is_empty() {
+                return Some(pid.to_owned());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    None
+}
+
+fn terminate_mcp_process(record: &McpProcessRecord) {
+    #[cfg(unix)]
+    let target = record
+        .process_group_id
+        .map(|pgid| format!("-{pgid}"))
+        .unwrap_or_else(|| record.child_pid.to_string());
+    #[cfg(not(unix))]
+    let target = record.child_pid.to_string();
+
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &target])
+        .status();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if !process_exists(&target) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", &target])
+        .status();
+}
+
+fn process_exists(target: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", target])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 async fn create_session_path(config: &AppConfig) -> anyhow::Result<std::path::PathBuf> {

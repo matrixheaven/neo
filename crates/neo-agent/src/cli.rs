@@ -399,6 +399,10 @@ pub enum ImageCommand {
 #[derive(Debug, Subcommand)]
 pub enum McpCommand {
     List,
+    Servers {
+        #[command(subcommand)]
+        command: McpServersCommand,
+    },
     Tools {
         server_id: String,
     },
@@ -406,6 +410,43 @@ pub enum McpCommand {
         server_id: String,
         #[command(subcommand)]
         command: McpResourceCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum McpServersCommand {
+    Add {
+        server_id: String,
+        #[arg(long)]
+        transport: String,
+        #[arg(long)]
+        command: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long = "arg")]
+        args: Vec<String>,
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+        #[arg(long = "header", value_name = "KEY=VALUE")]
+        headers: Vec<String>,
+    },
+    Remove {
+        server_id: String,
+    },
+    Enable {
+        server_id: String,
+    },
+    Disable {
+        server_id: String,
+    },
+    Health {
+        server_id: String,
+    },
+    Start {
+        server_id: String,
+    },
+    Stop {
+        server_id: String,
     },
 }
 

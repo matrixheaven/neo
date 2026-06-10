@@ -12,7 +12,7 @@ use neo_agent_core::{
     HostedMcpClient, McpError, McpHostedConfig, McpHostedToolAdapter, McpHttpConfig,
     McpHttpToolAdapter, McpResourceDefinition, McpResourceRead, McpResourceUpdate, McpStdioConfig,
     McpStdioToolAdapter, McpToolAdapter, McpToolCall, McpToolDefinition, McpToolProvider,
-    McpToolResponse, PermissionPolicy, ToolContext, ToolRegistry,
+    McpToolResponse, PermissionPolicy, ProcessSupervisor, ToolContext, ToolRegistry,
 };
 use serde_json::{Value, json};
 
@@ -246,6 +246,52 @@ for line in sys.stdin:
     print(json.dumps(response), flush=True)
 "#;
 
+const MCP_STDIO_SUPERVISED_FIXTURE: &str = r#"
+import json
+import os
+import sys
+
+with open(os.environ["MCP_PID_FILE"], "w", encoding="utf-8") as pid_file:
+    pid_file.write(str(os.getpid()))
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request["method"]
+    if method == "initialize":
+        response = {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "supervised-fixture", "version": "0.1.0"},
+                "capabilities": {"tools": {}},
+            },
+        }
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        response = {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {
+                "tools": [
+                    {
+                        "name": "echo",
+                        "description": "Echo a message",
+                        "inputSchema": {"type": "object"},
+                    }
+                ]
+            },
+        }
+    else:
+        response = {
+            "jsonrpc": "2.0",
+            "id": request.get("id"),
+            "error": {"code": -32601, "message": f"unknown method {method}"},
+        }
+    print(json.dumps(response), flush=True)
+"#;
+
 #[tokio::test]
 async fn mcp_stdio_adapter_discovers_and_calls_json_rpc_tools() {
     let workspace = tempfile::tempdir().expect("workspace");
@@ -448,6 +494,43 @@ async fn mcp_stdio_adapter_reconnects_after_cached_session_closes() {
     assert_eq!(recovered.content, "after reconnect");
     let startups = fs::read_to_string(startup_log).expect("read startup log");
     assert_eq!(startups.lines().count(), 2);
+}
+
+#[tokio::test]
+async fn mcp_stdio_adapter_registers_session_with_process_supervisor_for_cleanup() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let fixture_path = workspace.path().join("mcp-supervised-fixture.py");
+    let pid_path = workspace.path().join("mcp.pid");
+    fs::write(&fixture_path, MCP_STDIO_SUPERVISED_FIXTURE)
+        .expect("write MCP supervised fixture");
+    let supervisor = ProcessSupervisor::default();
+    let adapter = McpStdioToolAdapter::new_supervised(
+        McpStdioConfig {
+            command: "python3".to_owned(),
+            args: vec!["-u".to_owned(), fixture_path.display().to_string()],
+            env: BTreeMap::from([("MCP_PID_FILE".to_owned(), pid_path.display().to_string())]),
+        },
+        supervisor.clone(),
+        "supervised-server",
+    );
+
+    let tools = adapter
+        .list_tools()
+        .await
+        .expect("list tools starts supervised stdio session");
+    let pid = wait_for_pid_file(&pid_path).await;
+
+    assert_eq!(tools.len(), 1);
+    assert_eq!(supervisor.active_count().await, 1);
+    assert!(process_exists(&pid), "MCP stdio process should be alive");
+
+    supervisor.cleanup_all().await;
+
+    assert_eq!(supervisor.active_count().await, 0);
+    assert!(
+        wait_for_process_exit(&pid).await,
+        "supervisor cleanup should stop MCP stdio process {pid}"
+    );
 }
 
 #[tokio::test]
@@ -1389,4 +1472,35 @@ fn read_http_json_request(socket: &mut TcpStream) -> McpHttpRecordedRequest {
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+async fn wait_for_pid_file(path: &std::path::Path) -> String {
+    for _ in 0..50 {
+        if let Ok(pid) = fs::read_to_string(path) {
+            let pid = pid.trim();
+            if !pid.is_empty() {
+                return pid.to_owned();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("pid file should be written: {}", path.display());
+}
+
+async fn wait_for_process_exit(pid: &str) -> bool {
+    for _ in 0..50 {
+        if !process_exists(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    !process_exists(pid)
+}
+
+fn process_exists(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }

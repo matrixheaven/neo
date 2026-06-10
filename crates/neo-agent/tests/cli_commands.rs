@@ -7,6 +7,8 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex, OnceLock},
+    thread,
+    time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -3194,6 +3196,198 @@ url = "https://mcp.example.test/sse"
 }
 
 #[test]
+fn mcp_servers_add_enable_disable_remove_persists_project_config_without_printing_secrets() {
+    let temp = TempDir::new().expect("tempdir");
+    let secret_value = "token-secret-123456";
+
+    let mut add = neo();
+    add.current_dir(temp.path()).args([
+        "mcp",
+        "servers",
+        "add",
+        "remote-docs",
+        "--transport",
+        "http",
+        "--url",
+        "https://mcp.example.test/rpc",
+        "--header",
+        "authorization=Bearer token-secret-123456",
+        "--env",
+        "MCP_TOKEN=token-secret-123456",
+    ]);
+    let add_stdout = run(add);
+    assert_eq!(add_stdout, "added MCP server remote-docs\n");
+    assert!(!add_stdout.contains(secret_value));
+
+    let config_path = temp.path().join(".neo/config.toml");
+    let config_content = fs::read_to_string(&config_path).expect("read config");
+    assert!(config_content.contains("id = \"remote-docs\""));
+    assert!(config_content.contains("transport = \"http\""));
+    assert!(config_content.contains("url = \"https://mcp.example.test/rpc\""));
+    assert!(config_content.contains("authorization = \"Bearer token-secret-123456\""));
+    assert!(config_content.contains("MCP_TOKEN = \"token-secret-123456\""));
+
+    let mut list = neo();
+    list.current_dir(temp.path()).args(["mcp", "list"]);
+    let list_stdout = run(list);
+    assert!(list_stdout.contains("remote-docs"));
+    assert!(list_stdout.contains("https://mcp.example.test/rpc"));
+    assert!(!list_stdout.contains(secret_value));
+    assert!(!list_stdout.contains("authorization"));
+    assert!(!list_stdout.contains("MCP_TOKEN"));
+
+    let mut show = neo();
+    show.current_dir(temp.path()).args(["config", "show"]);
+    let show_stdout = run(show);
+    assert!(show_stdout.contains("remote-docs"));
+    assert!(show_stdout.contains("authorization = \"[REDACTED]\""));
+    assert!(show_stdout.contains("MCP_TOKEN = \"[REDACTED]\""));
+    assert!(!show_stdout.contains(secret_value));
+
+    let mut disable = neo();
+    disable
+        .current_dir(temp.path())
+        .args(["mcp", "servers", "disable", "remote-docs"]);
+    assert_eq!(run(disable), "disabled MCP server remote-docs\n");
+    let config_content = fs::read_to_string(&config_path).expect("read disabled config");
+    assert!(config_content.contains("enabled = false"));
+
+    let mut enable = neo();
+    enable
+        .current_dir(temp.path())
+        .args(["mcp", "servers", "enable", "remote-docs"]);
+    assert_eq!(run(enable), "enabled MCP server remote-docs\n");
+    let config_content = fs::read_to_string(&config_path).expect("read enabled config");
+    assert!(config_content.contains("enabled = true"));
+
+    let mut remove = neo();
+    remove
+        .current_dir(temp.path())
+        .args(["mcp", "servers", "remove", "remote-docs"]);
+    assert_eq!(run(remove), "removed MCP server remote-docs\n");
+    let config_content = fs::read_to_string(&config_path).expect("read removed config");
+    assert!(!config_content.contains("remote-docs"));
+    assert!(!config_content.contains(secret_value));
+}
+
+#[test]
+fn mcp_servers_health_performs_real_enabled_server_probe() {
+    let temp = TempDir::new().expect("tempdir");
+    let mcp_server = MockSseServer::start(vec![
+        mcp_json_response(
+            1,
+            &json!({
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "remote-docs", "version": "0.1.0"},
+                "capabilities": {"tools": {}}
+            }),
+        ),
+        mcp_json_response(2, &json!({ "tools": [] })),
+    ]);
+    write_remote_mcp_config(temp.path(), &mcp_server.url);
+
+    let mut health = neo();
+    health
+        .current_dir(temp.path())
+        .args(["mcp", "servers", "health", "remote-docs"]);
+    let stdout = run(health);
+
+    assert_eq!(stdout, "remote-docs\thealthy\t0 tools\n");
+    assert_eq!(
+        mcp_server
+            .requests()
+            .iter()
+            .map(|request| request.body["method"].as_str().expect("method"))
+            .collect::<Vec<_>>(),
+        vec!["initialize", "tools/list"]
+    );
+}
+
+#[test]
+fn mcp_servers_start_and_stop_stdio_persist_state_and_cleanup_process() {
+    let temp = TempDir::new().expect("tempdir");
+    let fixture = temp.path().join("mcp-fixture.py");
+    let pid_file = temp.path().join("mcp.pid");
+    fs::write(&fixture, MCP_STDIO_PID_FIXTURE).expect("write MCP pid fixture");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        format!(
+            r#"
+[[mcp.servers]]
+id = "docs-server"
+enabled = true
+transport = "stdio"
+command = "python3"
+args = ["-u", "{}"]
+
+[mcp.servers.env]
+MCP_PID_FILE = "{}"
+"#,
+            fixture.display(),
+            pid_file.display()
+        ),
+    )
+    .expect("write config");
+
+    let mut start = neo();
+    start
+        .current_dir(temp.path())
+        .args(["mcp", "servers", "start", "docs-server"]);
+    let stdout = run(start);
+    assert!(stdout.contains("started MCP server docs-server"));
+
+    let pid = wait_for_pid_file(&pid_file);
+    assert!(process_exists(&pid), "started MCP server process should live");
+    let state_path = temp.path().join(".neo/mcp-state.toml");
+    let state = fs::read_to_string(&state_path).expect("read MCP state");
+    assert!(state.contains("docs-server"));
+    assert!(state.contains(&pid));
+
+    let mut stop = neo();
+    stop.current_dir(temp.path())
+        .args(["mcp", "servers", "stop", "docs-server"]);
+    assert_eq!(run(stop), "stopped MCP server docs-server\n");
+    assert!(
+        wait_for_process_exit(&pid),
+        "stop should terminate MCP server process {pid}"
+    );
+    let state = fs::read_to_string(&state_path).expect("read stopped MCP state");
+    assert!(!state.contains("docs-server"));
+}
+
+#[test]
+fn mcp_cloud_self_hosted_servers_fail_closed_without_login() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+[[mcp.servers]]
+id = "hosted-docs"
+enabled = true
+transport = "cloud"
+url = "cloud://mcp/hosted-docs"
+"#,
+    )
+    .expect("write cloud MCP config");
+
+    let mut health = neo();
+    health
+        .current_dir(temp.path())
+        .args(["mcp", "servers", "health", "hosted-docs"]);
+    let output = health.output().expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cloud MCP server hosted-docs requires self-hosted neo-cloud auth"));
+    assert!(!stdout.contains("mcp__hosted_docs__"));
+    assert!(!stderr.contains("placeholder"));
+    assert!(!stderr.contains("fake"));
+}
+
+#[test]
 fn print_registers_enabled_stdio_mcp_tools_from_project_config() {
     let temp = TempDir::new().expect("tempdir");
     let provider = MockSseServer::start(vec![openai_response_sse("resp-mcp", "mcp tools listed")]);
@@ -4042,6 +4236,37 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
+fn wait_for_pid_file(path: &Path) -> String {
+    for _ in 0..50 {
+        if let Ok(pid) = fs::read_to_string(path) {
+            let pid = pid.trim();
+            if !pid.is_empty() {
+                return pid.to_owned();
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("pid file should be written: {}", path.display());
+}
+
+fn wait_for_process_exit(pid: &str) -> bool {
+    for _ in 0..50 {
+        if !process_exists(pid) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    !process_exists(pid)
+}
+
+fn process_exists(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 const MCP_STDIO_FIXTURE: &str = r#"
 import json
 import sys
@@ -4087,6 +4312,44 @@ for line in sys.stdin:
                 "content": [{"type": "text", "text": "ok"}],
                 "isError": False,
             },
+        }
+    else:
+        response = {
+            "jsonrpc": "2.0",
+            "id": request.get("id"),
+            "error": {"code": -32601, "message": f"unknown method {method}"},
+        }
+    print(json.dumps(response), flush=True)
+"#;
+
+const MCP_STDIO_PID_FIXTURE: &str = r#"
+import json
+import os
+import sys
+
+with open(os.environ["MCP_PID_FILE"], "w", encoding="utf-8") as pid_file:
+    pid_file.write(str(os.getpid()))
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request["method"]
+    if method == "initialize":
+        response = {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "pid-fixture", "version": "0.1.0"},
+                "capabilities": {"tools": {}},
+            },
+        }
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        response = {
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {"tools": []},
         }
     else:
         response = {

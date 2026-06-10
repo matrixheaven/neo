@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessKind {
     BashBackground,
+    McpStdio,
     Terminal,
 }
 

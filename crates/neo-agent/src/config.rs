@@ -384,6 +384,14 @@ pub struct McpConfig {
     pub servers: Vec<McpServerConfig>,
 }
 
+impl McpConfig {
+    fn redacted(&self) -> Self {
+        Self {
+            servers: self.servers.iter().map(McpServerConfig::redacted).collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     pub id: String,
@@ -400,6 +408,23 @@ pub struct McpServerConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+}
+
+impl McpServerConfig {
+    fn redacted(&self) -> Self {
+        let mut server = self.clone();
+        server.env = server
+            .env
+            .keys()
+            .map(|key| (key.clone(), "[REDACTED]".to_owned()))
+            .collect();
+        server.headers = server
+            .headers
+            .keys()
+            .map(|key| (key.clone(), "[REDACTED]".to_owned()))
+            .collect();
+        server
+    }
 }
 
 const fn default_enabled() -> bool {
@@ -745,7 +770,7 @@ pub fn show(config: &AppConfig) -> anyhow::Result<String> {
         runtime: Some(FileRuntimeConfig::from_runtime(&config.runtime)),
         tui: Some(FileTuiConfig::from_tui(&config.tui)),
         cloud: None,
-        mcp: Some(config.mcp.clone()),
+        mcp: Some(config.mcp.redacted()),
     };
 
     Ok(format!(
@@ -753,6 +778,52 @@ pub fn show(config: &AppConfig) -> anyhow::Result<String> {
         config.config_path.display(),
         toml::to_string_pretty(&snapshot)?
     ))
+}
+
+pub fn upsert_mcp_server(server: McpServerConfig) -> anyhow::Result<String> {
+    validate_mcp_server(&server)?;
+    let config_path = find_config_path()?;
+    let mut config = read_file_config(&config_path)?;
+    let mcp = config.mcp.get_or_insert_with(McpConfig::default);
+    if let Some(existing) = mcp.servers.iter_mut().find(|existing| existing.id == server.id) {
+        *existing = server.clone();
+    } else {
+        mcp.servers.push(server.clone());
+    }
+    write_file_config(&config_path, &config)?;
+    Ok(format!("added MCP server {}\n", server.id))
+}
+
+pub fn remove_mcp_server(server_id: &str) -> anyhow::Result<String> {
+    let config_path = find_config_path()?;
+    let mut config = read_file_config(&config_path)?;
+    let Some(mcp) = config.mcp.as_mut() else {
+        anyhow::bail!("MCP server {server_id} is not configured");
+    };
+    let original_len = mcp.servers.len();
+    mcp.servers.retain(|server| server.id != server_id);
+    anyhow::ensure!(
+        mcp.servers.len() != original_len,
+        "MCP server {server_id} is not configured"
+    );
+    write_file_config(&config_path, &config)?;
+    Ok(format!("removed MCP server {server_id}\n"))
+}
+
+pub fn set_mcp_server_enabled(server_id: &str, enabled: bool) -> anyhow::Result<String> {
+    let config_path = find_config_path()?;
+    let mut config = read_file_config(&config_path)?;
+    let Some(server) = config
+        .mcp
+        .as_mut()
+        .and_then(|mcp| mcp.servers.iter_mut().find(|server| server.id == server_id))
+    else {
+        anyhow::bail!("MCP server {server_id} is not configured");
+    };
+    server.enabled = enabled;
+    write_file_config(&config_path, &config)?;
+    let action = if enabled { "enabled" } else { "disabled" };
+    Ok(format!("{action} MCP server {server_id}\n"))
 }
 
 pub fn set(key: &str, value: &str) -> anyhow::Result<String> {
@@ -1070,6 +1141,41 @@ fn merge_mcp_configs(base: Option<McpConfig>, layer: Option<McpConfig>) -> Optio
             Some(base)
         }
     }
+}
+
+fn validate_mcp_server(server: &McpServerConfig) -> anyhow::Result<()> {
+    anyhow::ensure!(!server.id.trim().is_empty(), "MCP server id must not be empty");
+    anyhow::ensure!(
+        !server.id.contains('/'),
+        "MCP server id must not contain '/'"
+    );
+    match server.transport.as_str() {
+        "stdio" => {
+            anyhow::ensure!(
+                server.command.as_deref().is_some_and(|command| !command.trim().is_empty()),
+                "stdio MCP server {} requires --command",
+                server.id
+            );
+        }
+        "http" | "sse" => {
+            anyhow::ensure!(
+                server.url.as_deref().is_some_and(|url| !url.trim().is_empty()),
+                "{} MCP server {} requires --url",
+                server.transport,
+                server.id
+            );
+        }
+        "cloud" => {
+            let url = server.url.as_deref().unwrap_or_default();
+            anyhow::ensure!(
+                url.starts_with("cloud://mcp/"),
+                "cloud MCP server {} requires --url cloud://mcp/<server-id>",
+                server.id
+            );
+        }
+        other => anyhow::bail!("unsupported MCP transport for {}: {other}", server.id),
+    }
+    Ok(())
 }
 
 fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {

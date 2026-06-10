@@ -13,6 +13,7 @@ use tokio::{
 };
 
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolRegistry, ToolResult};
+use super::{ProcessKind, ProcessSupervisor};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpToolDefinition {
@@ -666,6 +667,8 @@ impl McpToolAdapter for McpHttpToolAdapter {
 pub struct McpStdioToolAdapter {
     config: McpStdioConfig,
     session: Arc<Mutex<Option<StdioJsonRpcSession>>>,
+    supervisor: Option<ProcessSupervisor>,
+    supervisor_handle: String,
 }
 
 impl McpStdioToolAdapter {
@@ -674,6 +677,22 @@ impl McpStdioToolAdapter {
         Self {
             config,
             session: Arc::new(Mutex::new(None)),
+            supervisor: None,
+            supervisor_handle: "mcp-stdio".to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn new_supervised(
+        config: McpStdioConfig,
+        supervisor: ProcessSupervisor,
+        handle: impl Into<String>,
+    ) -> Self {
+        Self {
+            config,
+            session: Arc::new(Mutex::new(None)),
+            supervisor: Some(supervisor),
+            supervisor_handle: handle.into(),
         }
     }
 
@@ -685,6 +704,22 @@ impl McpStdioToolAdapter {
         let mut session = self.session.lock().await;
         if session.is_none() {
             *session = Some(StdioJsonRpcSession::connect(&self.config).await?);
+            if let Some(supervisor) = &self.supervisor {
+                let handle = self.supervisor_handle.clone();
+                let session = Arc::clone(&self.session);
+                supervisor
+                    .register(handle, ProcessKind::McpStdio, move |_| {
+                        let session = Arc::clone(&session);
+                        Box::pin(async move {
+                            if let Ok(mut session) = session.try_lock()
+                                && let Some(mut active) = session.take()
+                            {
+                                active.shutdown().await;
+                            }
+                        })
+                    })
+                    .await;
+            }
         }
         let active = session
             .as_mut()
@@ -692,6 +727,9 @@ impl McpStdioToolAdapter {
         let result = active.request(method, params).await;
         if result.is_err() {
             *session = None;
+            if let Some(supervisor) = &self.supervisor {
+                supervisor.unregister(&self.supervisor_handle).await;
+            }
         }
         result
     }
@@ -954,6 +992,14 @@ impl Drop for StdioJsonRpcSession {
     fn drop(&mut self) {
         self.reader_task.abort();
         let _ = self.child.start_kill();
+    }
+}
+
+impl StdioJsonRpcSession {
+    async fn shutdown(&mut self) {
+        self.reader_task.abort();
+        let _ = self.child.start_kill();
+        let _ = self.child.wait().await;
     }
 }
 
