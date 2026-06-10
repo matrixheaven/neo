@@ -21,6 +21,7 @@ const PI_DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
 pub struct ModelRegistry {
     models: Vec<ModelSpec>,
     display_metadata: BTreeMap<(String, String), ModelDisplayMetadata>,
+    source_metadata: BTreeMap<(String, String), ModelSourceMetadata>,
     pricing: BTreeMap<(String, String), ModelPricing>,
     image_generation_models: BTreeSet<(String, String)>,
     default: Option<(String, String)>,
@@ -32,6 +33,7 @@ impl ModelRegistry {
         Self {
             models: Vec::new(),
             display_metadata: BTreeMap::new(),
+            source_metadata: BTreeMap::new(),
             pricing: BTreeMap::new(),
             image_generation_models: BTreeSet::new(),
             default: None,
@@ -126,12 +128,18 @@ impl ModelRegistry {
         if let Some(default) = &catalog.default {
             validate_catalog_default(label, default)?;
         }
+        let source_metadata = generated_source_metadata(&catalog);
 
         let mut candidate = self.clone();
         for model in catalog.models {
             let generated = generated_model_entry(label, model)?;
             let key = model_key(&generated.spec);
             candidate.register(generated.spec);
+            if let Some(source_metadata) = &source_metadata {
+                candidate
+                    .source_metadata
+                    .insert(key.clone(), source_metadata.clone());
+            }
             if let Some(pricing) = generated.pricing {
                 candidate.pricing.insert(key.clone(), pricing);
             }
@@ -165,6 +173,7 @@ impl ModelRegistry {
 
         let mut models = Vec::new();
         let mut display_metadata = BTreeMap::new();
+        let mut pricing = BTreeMap::new();
         for (provider, config) in catalog.providers {
             let provider = provider.trim().to_owned();
             if provider.is_empty() {
@@ -176,14 +185,19 @@ impl ModelRegistry {
             let provider_name = string_metadata(&config.metadata, "name")?;
             for model in config.models {
                 let spec = pi_model_spec(label, &provider, config.api.as_ref(), &model)?;
+                let model_pricing = pi_model_pricing(label, &provider, &spec.model, &model.cost)?;
                 let model_name = string_metadata(&model.metadata, "name")?;
+                let key = model_key(&spec);
                 display_metadata.insert(
-                    model_key(&spec),
+                    key.clone(),
                     ModelDisplayMetadata {
                         provider_name: provider_name.clone(),
                         model_name,
                     },
                 );
+                if let Some(model_pricing) = model_pricing {
+                    pricing.insert(key, model_pricing);
+                }
                 models.push(spec);
             }
         }
@@ -200,6 +214,9 @@ impl ModelRegistry {
         for (key, metadata) in display_metadata {
             candidate.display_metadata.insert(key, metadata);
         }
+        for (key, pricing) in pricing {
+            candidate.pricing.insert(key, pricing);
+        }
         *self = candidate;
         Ok(())
     }
@@ -207,6 +224,7 @@ impl ModelRegistry {
     pub fn register(&mut self, model: ModelSpec) {
         let key = model_key(&model);
         self.display_metadata.remove(&key);
+        self.source_metadata.remove(&key);
         self.pricing.remove(&key);
         self.image_generation_models.remove(&key);
         if self.default.is_none() {
@@ -249,6 +267,12 @@ impl ModelRegistry {
     }
 
     #[must_use]
+    pub fn source_metadata(&self, provider: &str, model: &str) -> Option<&ModelSourceMetadata> {
+        self.source_metadata
+            .get(&(provider.to_owned(), model.to_owned()))
+    }
+
+    #[must_use]
     pub fn pricing(&self, provider: &str, model: &str) -> Option<&ModelPricing> {
         self.pricing.get(&(provider.to_owned(), model.to_owned()))
     }
@@ -264,6 +288,14 @@ impl ModelRegistry {
 pub struct ModelDisplayMetadata {
     pub provider_name: Option<String>,
     pub model_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelSourceMetadata {
+    pub generated_at: Option<String>,
+    pub name: Option<String>,
+    pub revision: Option<String>,
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -302,6 +334,20 @@ struct GeneratedModelCatalog {
     models: Vec<GeneratedModelDefinition>,
     #[serde(default)]
     default: Option<ModelCatalogDefault>,
+    #[serde(default)]
+    generated_at: Option<String>,
+    #[serde(default)]
+    source: Option<GeneratedCatalogSource>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct GeneratedCatalogSource {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    revision: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -398,6 +444,18 @@ struct PiModelDefinition {
     input: Option<Vec<String>>,
     #[serde(default, rename = "contextWindow")]
     context_window: Option<u32>,
+    #[serde(default)]
+    cost: Option<PiModelCost>,
+    #[serde(flatten)]
+    metadata: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PiModelCost {
+    #[serde(default)]
+    input: Option<f64>,
+    #[serde(default)]
+    output: Option<f64>,
     #[serde(flatten)]
     metadata: BTreeMap<String, Value>,
 }
@@ -516,6 +574,27 @@ impl GeneratedPricing {
     }
 }
 
+fn generated_source_metadata(catalog: &GeneratedModelCatalog) -> Option<ModelSourceMetadata> {
+    let source = catalog.source.as_ref();
+    let metadata = ModelSourceMetadata {
+        generated_at: catalog.generated_at.clone().filter(|value| !value.is_empty()),
+        name: source
+            .and_then(|source| source.name.clone())
+            .filter(|value| !value.is_empty()),
+        revision: source
+            .and_then(|source| source.revision.clone())
+            .filter(|value| !value.is_empty()),
+        url: source
+            .and_then(|source| source.url.clone())
+            .filter(|value| !value.is_empty()),
+    };
+    (metadata.generated_at.is_some()
+        || metadata.name.is_some()
+        || metadata.revision.is_some()
+        || metadata.url.is_some())
+    .then_some(metadata)
+}
+
 fn validate_pi_provider_metadata(
     label: &str,
     provider: &str,
@@ -607,6 +686,29 @@ fn validate_pi_model_metadata(
 
 fn is_allowed_pi_model_metadata(field: &str) -> bool {
     matches!(field, "name")
+}
+
+fn pi_model_pricing(
+    label: &str,
+    provider: &str,
+    model_id: &str,
+    cost: &Option<PiModelCost>,
+) -> Result<Option<ModelPricing>, AiError> {
+    let Some(cost) = cost else {
+        return Ok(None);
+    };
+    if let Some(field) = cost.metadata.keys().next() {
+        return Err(AiError::Configuration(format!(
+            "pi models.json {label} provider {provider}, model {model_id}: unsupported pi models.json model cost field {field}; only input/output token pricing can be imported until request-affecting runtime contracts exist"
+        )));
+    }
+    Ok((cost.input.is_some() || cost.output.is_some()).then_some(ModelPricing {
+        tokens: Some(TokenPricing {
+            input_per_million_tokens: cost.input,
+            output_per_million_tokens: cost.output,
+        }),
+        image_generation: None,
+    }))
 }
 
 fn is_generated_catalog(value: &Value) -> bool {

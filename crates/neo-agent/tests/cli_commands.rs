@@ -2778,6 +2778,11 @@ model_catalogs = [".neo/generated-models.json"]
         r#"
 {
   "generated_at": "2026-06-10T00:00:00Z",
+  "source": {
+    "name": "models.dev",
+    "revision": "abc123",
+    "url": "https://models.dev/api/models.json"
+  },
   "models": [
     {
       "provider": "openai",
@@ -2816,6 +2821,7 @@ model_catalogs = [".neo/generated-models.json"]
     assert!(stdout.contains("input $5/1M"));
     assert!(stdout.contains("output $40/1M"));
     assert!(stdout.contains("image $0.04/image"));
+    assert!(stdout.contains("source models.dev@abc123 generated 2026-06-10T00:00:00Z"));
 
     let mut json_cmd = neo();
     json_cmd
@@ -2836,6 +2842,15 @@ model_catalogs = [".neo/generated-models.json"]
     assert_eq!(
         image_model["pricing"]["image_generation"],
         json!({"unit": "image", "per_unit": 0.04})
+    );
+    assert_eq!(
+        image_model["source"],
+        json!({
+            "generated_at": "2026-06-10T00:00:00Z",
+            "name": "models.dev",
+            "revision": "abc123",
+            "url": "https://models.dev/api/models.json"
+        })
     );
 }
 
@@ -2924,6 +2939,158 @@ model_catalogs = [".neo/generated-models.json"]
     assert_eq!(requests[0].body["prompt"], "draw terminal");
     assert_eq!(requests[0].body["size"], "512x512");
     assert_eq!(requests[0].body["n"], 1);
+}
+
+#[test]
+fn images_generate_rejects_url_only_response_without_remote_fetch_policy() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![json_response(&json!({
+        "created": 1_710_000_000,
+        "data": [
+            {
+                "url": "https://images.example.test/generated.png",
+                "revised_prompt": "draw a quiet terminal"
+            }
+        ]
+    }))]);
+    write_image_generation_config(&temp, &server.url, false);
+    let output_path = temp.path().join("out/generated.png");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "image-key")
+        .args([
+            "images",
+            "generate",
+            "draw terminal",
+            "--model",
+            "openai/gpt-image-1",
+            "--output",
+        ])
+        .arg(&output_path);
+    let output = command.output().expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("provider returned an image URL"));
+    assert!(stderr.contains("tui.fetch_remote_images = true"));
+    assert!(!output_path.exists());
+}
+
+#[test]
+fn images_generate_fetches_url_only_response_when_remote_fetch_policy_enabled() {
+    let temp = TempDir::new().expect("tempdir");
+    let image_bytes = b"remote-image";
+    let image_server = MockSseServer::start(vec![binary_response("image/png", image_bytes)]);
+    let provider = MockSseServer::start(vec![json_response(&json!({
+        "created": 1_710_000_000,
+        "data": [
+            {
+                "url": format!("{}/generated.png", image_server.url),
+                "revised_prompt": "draw a quiet terminal"
+            }
+        ]
+    }))]);
+    write_image_generation_config(&temp, &provider.url, true);
+    let output_path = temp.path().join("out/generated.png");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "image-key")
+        .args([
+            "images",
+            "generate",
+            "draw terminal",
+            "--model",
+            "openai/gpt-image-1",
+            "--output",
+        ])
+        .arg(&output_path)
+        .args(["--size", "512x512"]);
+    let stdout = run(command);
+
+    assert!(stdout.contains(&format!("wrote image to {}", output_path.display())));
+    assert_eq!(fs::read(&output_path).expect("generated image file"), image_bytes);
+    let image_requests = image_server.requests();
+    assert_eq!(image_requests.len(), 1);
+    assert_eq!(image_requests[0].method, "GET");
+    assert_eq!(image_requests[0].path, "/generated.png");
+}
+
+#[test]
+fn images_generate_rejects_remote_fetch_with_non_image_content_type() {
+    let temp = TempDir::new().expect("tempdir");
+    let image_server = MockSseServer::start(vec![text_response("text/plain", "not an image")]);
+    let provider = MockSseServer::start(vec![json_response(&json!({
+        "created": 1_710_000_000,
+        "data": [
+            {
+                "url": format!("{}/generated.txt", image_server.url),
+                "revised_prompt": "draw a quiet terminal"
+            }
+        ]
+    }))]);
+    write_image_generation_config(&temp, &provider.url, true);
+    let output_path = temp.path().join("out/generated.png");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "image-key")
+        .args([
+            "images",
+            "generate",
+            "draw terminal",
+            "--model",
+            "openai/gpt-image-1",
+            "--output",
+        ])
+        .arg(&output_path);
+    let output = command.output().expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("remote image response content-type text/plain is not allowed"));
+    assert!(!output_path.exists());
+}
+
+#[test]
+fn images_generate_rejects_remote_fetch_with_oversized_content_length() {
+    let temp = TempDir::new().expect("tempdir");
+    let image_server = MockSseServer::start(vec![oversized_image_response(20 * 1024 * 1024 + 1)]);
+    let provider = MockSseServer::start(vec![json_response(&json!({
+        "created": 1_710_000_000,
+        "data": [
+            {
+                "url": format!("{}/generated.png", image_server.url),
+                "revised_prompt": "draw a quiet terminal"
+            }
+        ]
+    }))]);
+    write_image_generation_config(&temp, &provider.url, true);
+    let output_path = temp.path().join("out/generated.png");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "image-key")
+        .args([
+            "images",
+            "generate",
+            "draw terminal",
+            "--model",
+            "openai/gpt-image-1",
+            "--output",
+        ])
+        .arg(&output_path);
+    let output = command.output().expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("remote image response is larger than 20971520 bytes"));
+    assert!(!output_path.exists());
 }
 
 #[test]
@@ -3739,6 +3906,55 @@ fn binary_response(content_type: &str, body: &[u8]) -> String {
     .into_bytes();
     response.extend_from_slice(body);
     String::from_utf8(response).expect("test package archive response should be utf8-compatible")
+}
+
+fn oversized_image_response(content_length: usize) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {content_length}\r\nconnection: close\r\n\r\n"
+    )
+}
+
+fn write_image_generation_config(temp: &TempDir, api_base: &str, fetch_remote_images: bool) {
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        format!(
+            r#"
+default_provider = "openai"
+default_model = "gpt-image-1"
+api_base = "{api_base}"
+model_catalogs = [".neo/generated-models.json"]
+
+[tui]
+fetch_remote_images = {fetch_remote_images}
+"#
+        ),
+    )
+    .expect("write config");
+    fs::write(
+        temp.path().join(".neo/generated-models.json"),
+        r#"
+{
+  "generated_at": "2026-06-10T00:00:00Z",
+  "models": [
+    {
+      "provider": "openai",
+      "id": "gpt-image-1",
+      "api": "openai-responses",
+      "capabilities": {
+        "streaming": false,
+        "tools": false,
+        "images": true,
+        "reasoning": false,
+        "embeddings": false,
+        "image_generation": true
+      }
+    }
+  ]
+}
+"#,
+    )
+    .expect("write generated catalog");
 }
 
 fn write_remote_mcp_config(root: &Path, url: &str) {

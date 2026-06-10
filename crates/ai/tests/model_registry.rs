@@ -210,6 +210,54 @@ fn model_registry_loads_generated_catalog_pricing_context_and_image_generation_f
 }
 
 #[test]
+fn model_registry_tracks_generated_catalog_source_metadata() {
+    let mut registry = ModelRegistry::new();
+
+    registry
+        .load_catalog_str(
+            r#"
+{
+  "generated_at": "2026-06-10T00:00:00Z",
+  "source": {
+    "name": "models.dev",
+    "revision": "abc123",
+    "url": "https://models.dev/api/models.json"
+  },
+  "models": [
+    {
+      "provider": "openai",
+      "id": "gpt-5-mini",
+      "api": "openai-responses",
+      "context_window": 128000,
+      "capabilities": {
+        "streaming": true,
+        "tools": true,
+        "images": true,
+        "reasoning": true,
+        "embeddings": false
+      }
+    }
+  ]
+}
+"#,
+            "generated catalog",
+        )
+        .expect("load generated model catalog");
+
+    let source = registry
+        .source_metadata("openai", "gpt-5-mini")
+        .expect("generated source metadata");
+    assert_eq!(source.generated_at.as_deref(), Some("2026-06-10T00:00:00Z"));
+    assert_eq!(source.name.as_deref(), Some("models.dev"));
+    assert_eq!(source.revision.as_deref(), Some("abc123"));
+    assert_eq!(
+        source.url.as_deref(),
+        Some("https://models.dev/api/models.json")
+    );
+    assert_eq!(registry.source_metadata("openai", "gpt-4.1"), None);
+}
+
+#[test]
 fn model_registry_loads_pi_models_json_custom_models() {
     let mut registry = ModelRegistry::new();
 
@@ -274,6 +322,94 @@ fn model_registry_loads_pi_models_json_custom_models() {
         registry.default_model().map(|model| model.model.as_str()),
         Some("llama3.1:8b")
     );
+}
+
+#[test]
+fn model_registry_imports_pi_models_json_token_pricing_only() {
+    let mut registry = ModelRegistry::new();
+
+    registry
+        .load_catalog_str(
+            r#"
+{
+  "providers": {
+    "openrouter": {
+      "name": "OpenRouter",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "reasoning-model",
+          "name": "Reasoning Model",
+          "cost": {
+            "input": 1.25,
+            "output": 4.5
+          }
+        }
+      ]
+    }
+  }
+}
+"#,
+            "pi models.json",
+        )
+        .expect("load pi models.json pricing");
+
+    assert_eq!(
+        registry.pricing("openrouter", "reasoning-model"),
+        Some(&ModelPricing {
+            tokens: Some(TokenPricing {
+                input_per_million_tokens: Some(1.25),
+                output_per_million_tokens: Some(4.5),
+            }),
+            image_generation: None,
+        })
+    );
+}
+
+#[test]
+fn model_registry_rejects_request_affecting_pi_pricing_until_runtime_contract_exists() {
+    for (field, value) in [
+        ("cacheRead", "0.1"),
+        ("cacheWrite", "0.2"),
+        ("request", "0.3"),
+        ("image", "0.4"),
+    ] {
+        let mut registry = ModelRegistry::new();
+        let source = format!(
+            r#"
+{{
+  "providers": {{
+    "openrouter": {{
+      "api": "openai-completions",
+      "models": [
+        {{
+          "id": "routed-model",
+          "cost": {{
+            "input": 1.0,
+            "output": 2.0,
+            "{field}": {value}
+          }}
+        }}
+      ]
+    }}
+  }}
+}}
+"#
+        );
+
+        let error = registry
+            .load_catalog_str(&source, "pi models.json")
+            .expect_err("request-affecting Pi pricing should fail closed");
+
+        assert!(error.to_string().contains("provider openrouter"));
+        assert!(error.to_string().contains("model routed-model"));
+        assert!(error.to_string().contains(field));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported pi models.json model cost field")
+        );
+    }
 }
 
 #[test]
@@ -431,10 +567,6 @@ fn model_registry_rejects_unsupported_pi_provider_metadata() {
 fn model_registry_rejects_unsupported_pi_model_metadata() {
     for (field, value) in [
         ("baseUrl", r#""https://model-route.example.test/v1""#),
-        (
-            "cost",
-            r#"{"input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0}"#,
-        ),
         ("maxTokens", "8192"),
         ("headers", r#"{"x-model": "$MODEL_HEADER"}"#),
         ("compat", r#"{"maxTokensField": "max_tokens"}"#),

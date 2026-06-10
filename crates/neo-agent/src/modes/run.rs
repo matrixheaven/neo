@@ -1,4 +1,11 @@
-use std::{collections::BTreeMap, env, fmt::Write as _, path::Path, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    env,
+    fmt::Write as _,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -12,9 +19,10 @@ use neo_agent_core::{
 };
 use neo_ai::{
     ApiKind, CredentialResolver, ImageData, ImageGenerationClient, ImageGenerationRequest,
-    ModelClient, ModelPricing, ModelRegistry, ModelSpec, ProviderRegistry, ProviderSpec,
-    ResolvedCredential, providers::openai_images::OpenAiImagesClient,
+    ModelClient, ModelPricing, ModelRegistry, ModelSourceMetadata, ModelSpec, ProviderRegistry,
+    ProviderSpec, ResolvedCredential, providers::openai_images::OpenAiImagesClient,
 };
+use reqwest::header;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -24,6 +32,9 @@ use crate::{
     config::{self, AppConfig, McpServerConfig},
     extension_tools, resources, session_commands,
 };
+
+const REMOTE_IMAGE_MAX_BYTES: u64 = 20 * 1024 * 1024;
+const REMOTE_IMAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub async fn execute(
     prompt: &[String],
@@ -592,9 +603,14 @@ fn list_models_with_search_and_options(
             .flatten()
             .map(format_pricing_suffix)
             .unwrap_or_default();
+        let source_suffix = pricing
+            .then(|| models.source_metadata(&model.provider.0, &model.model))
+            .flatten()
+            .map(format_source_suffix)
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            "- {}/{} ({:?}{marker}){display}{pricing_suffix}",
+            "- {}/{} ({:?}{marker}){display}{pricing_suffix}{source_suffix}",
             model.provider.0, model.model, model.api
         );
     }
@@ -661,19 +677,107 @@ pub async fn generate_image(
         ImageData::Base64(value) => BASE64_STANDARD
             .decode(value)
             .context("provider returned invalid base64 image data")?,
-        ImageData::Url(url) => anyhow::bail!(
-            "provider returned an image URL ({url}); Neo only writes base64 image responses today"
-        ),
+        ImageData::Url(url) => {
+            if !config.tui.fetch_remote_images {
+                anyhow::bail!(
+                    "provider returned an image URL ({url}); enable tui.fetch_remote_images = true to allow Neo to fetch remote image outputs"
+                );
+            }
+            fetch_remote_image(&url).await?
+        }
     };
+    let output = workspace_safe_output_path(&config.project_dir, output)?;
     if let Some(parent) = output.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    std::fs::write(output, bytes)
+    std::fs::write(&output, bytes)
         .with_context(|| format!("failed to write image to {}", output.display()))?;
     Ok(format!("wrote image to {}\n", output.display()))
+}
+
+async fn fetch_remote_image(url: &str) -> anyhow::Result<Vec<u8>> {
+    let parsed = reqwest::Url::parse(url).context("provider returned an invalid image URL")?;
+    anyhow::ensure!(
+        matches!(parsed.scheme(), "http" | "https"),
+        "remote image URL must use http or https"
+    );
+    let client = reqwest::Client::builder()
+        .timeout(REMOTE_IMAGE_FETCH_TIMEOUT)
+        .build()
+        .context("failed to initialize remote image fetch client")?;
+    let response = client
+        .get(parsed)
+        .send()
+        .await
+        .context("failed to fetch remote image URL")?;
+    let status = response.status();
+    anyhow::ensure!(
+        status.is_success(),
+        "remote image fetch failed with HTTP status {}",
+        status.as_u16()
+    );
+    if let Some(length) = response.content_length() {
+        anyhow::ensure!(
+            length <= REMOTE_IMAGE_MAX_BYTES,
+            "remote image response is larger than {REMOTE_IMAGE_MAX_BYTES} bytes"
+        );
+    }
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let media_type = content_type
+        .split_once(';')
+        .map_or(content_type.as_str(), |(media_type, _)| media_type)
+        .trim()
+        .to_ascii_lowercase();
+    anyhow::ensure!(
+        media_type.starts_with("image/"),
+        "remote image response content-type {content_type} is not allowed"
+    );
+    let bytes = response
+        .bytes()
+        .await
+        .context("failed to read remote image response")?;
+    anyhow::ensure!(
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= REMOTE_IMAGE_MAX_BYTES,
+        "remote image response is larger than {REMOTE_IMAGE_MAX_BYTES} bytes"
+    );
+    Ok(bytes.to_vec())
+}
+
+fn workspace_safe_output_path(project_dir: &Path, output: &Path) -> anyhow::Result<PathBuf> {
+    let project_dir = project_dir
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize project dir {}", project_dir.display()))?;
+    let output = if output.is_absolute() {
+        output.to_path_buf()
+    } else {
+        project_dir.join(output)
+    };
+    let parent = output.parent().unwrap_or(&project_dir);
+    let canonical_parent = nearest_existing_ancestor(parent)?
+        .canonicalize()
+        .with_context(|| format!("failed to resolve output directory {}", parent.display()))?;
+    anyhow::ensure!(
+        canonical_parent.starts_with(&project_dir),
+        "image output path must stay inside workspace {}",
+        project_dir.display()
+    );
+    Ok(output)
+}
+
+fn nearest_existing_ancestor(path: &Path) -> anyhow::Result<&Path> {
+    path.ancestors()
+        .find(|ancestor| ancestor.exists())
+        .context("failed to find an existing output directory ancestor")
 }
 
 fn parse_provider_model(model: &str) -> anyhow::Result<(&str, &str)> {
@@ -702,6 +806,9 @@ fn list_models_json(
             let pricing = include_pricing
                 .then(|| registry.pricing(&model.provider.0, &model.model))
                 .flatten();
+            let source = include_pricing
+                .then(|| registry.source_metadata(&model.provider.0, &model.model))
+                .flatten();
             json!({
                 "provider": model.provider.0,
                 "model": model.model,
@@ -717,6 +824,7 @@ fn list_models_json(
                     "image_generation": registry.supports_image_generation(&model.provider.0, &model.model),
                 },
                 "pricing": pricing.map(model_pricing_json),
+                "source": source.map(model_source_json),
             })
         })
         .collect::<Vec<_>>();
@@ -764,6 +872,15 @@ fn model_pricing_json(pricing: &ModelPricing) -> serde_json::Value {
     serde_json::Value::Object(value)
 }
 
+fn model_source_json(source: &ModelSourceMetadata) -> serde_json::Value {
+    json!({
+        "generated_at": source.generated_at,
+        "name": source.name,
+        "revision": source.revision,
+        "url": source.url,
+    })
+}
+
 fn format_pricing_suffix(pricing: &ModelPricing) -> String {
     let mut parts = Vec::new();
     if let Some(tokens) = &pricing.tokens {
@@ -782,6 +899,26 @@ fn format_pricing_suffix(pricing: &ModelPricing) -> String {
     } else {
         format!(" [{}]", parts.join(", "))
     }
+}
+
+fn format_source_suffix(source: &ModelSourceMetadata) -> String {
+    let Some(name) = source.name.as_deref() else {
+        return source
+            .generated_at
+            .as_ref()
+            .map(|generated_at| format!(" [source generated {generated_at}]"))
+            .unwrap_or_default();
+    };
+    let mut label = format!("source {name}");
+    if let Some(revision) = source.revision.as_deref() {
+        label.push('@');
+        label.push_str(revision);
+    }
+    if let Some(generated_at) = source.generated_at.as_deref() {
+        label.push_str(" generated ");
+        label.push_str(generated_at);
+    }
+    format!(" [{label}]")
 }
 
 const fn credential_status_label(configured: bool) -> &'static str {
