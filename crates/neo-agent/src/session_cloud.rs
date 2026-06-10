@@ -244,7 +244,7 @@ pub async fn resume_remote(remote_ref: &str, config: &AppConfig) -> anyhow::Resu
         payload
             .record
             .remote_parent_id
-            .unwrap_or_else(|| cloud_id.to_owned())
+            .unwrap_or_else(|| cloud_id.clone())
     )))
 }
 

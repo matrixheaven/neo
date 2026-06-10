@@ -2183,6 +2183,172 @@ api_key_env = "PROJECT_OPENAI_KEY"
 }
 
 #[test]
+fn models_list_pricing_renders_generated_catalog_pricing_and_json() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+default_provider = "openai"
+default_model = "gpt-image-1"
+model_catalogs = [".neo/generated-models.json"]
+"#,
+    )
+    .expect("write config");
+    fs::write(
+        temp.path().join(".neo/generated-models.json"),
+        r#"
+{
+  "generated_at": "2026-06-10T00:00:00Z",
+  "models": [
+    {
+      "provider": "openai",
+      "id": "gpt-image-1",
+      "api": "openai-responses",
+      "context_window": 128000,
+      "capabilities": {
+        "streaming": true,
+        "tools": false,
+        "images": true,
+        "reasoning": false,
+        "embeddings": false,
+        "image_generation": true
+      },
+      "pricing": {
+        "input_per_million_tokens": 5.0,
+        "output_per_million_tokens": 40.0,
+        "image_generation": {
+          "unit": "image",
+          "per_unit": 0.04
+        }
+      }
+    }
+  ]
+}
+"#,
+    )
+    .expect("write generated catalog");
+
+    let mut plain = neo();
+    plain
+        .current_dir(temp.path())
+        .args(["models", "list", "--pricing"]);
+    let stdout = run(plain);
+    assert!(stdout.contains("openai/gpt-image-1"));
+    assert!(stdout.contains("input $5/1M"));
+    assert!(stdout.contains("output $40/1M"));
+    assert!(stdout.contains("image $0.04/image"));
+
+    let mut json_cmd = neo();
+    json_cmd
+        .current_dir(temp.path())
+        .args(["models", "list", "--pricing", "--json"]);
+    let stdout = run(json_cmd);
+    let value: Value = serde_json::from_str(&stdout).expect("models json output");
+    let image_model = value["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["provider"] == "openai" && model["model"] == "gpt-image-1")
+        .expect("generated image model");
+    assert_eq!(image_model["capabilities"]["image_generation"], true);
+    assert_eq!(image_model["context_window"], 128_000);
+    assert_eq!(image_model["pricing"]["input_per_million_tokens"], 5.0);
+    assert_eq!(image_model["pricing"]["output_per_million_tokens"], 40.0);
+    assert_eq!(
+        image_model["pricing"]["image_generation"],
+        json!({"unit": "image", "per_unit": 0.04})
+    );
+}
+
+#[test]
+fn images_generate_writes_base64_provider_response_to_output_file() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![json_response(&json!({
+        "created": 1_710_000_000,
+        "data": [
+            {
+                "b64_json": "aGVsbG8taW1hZ2U=",
+                "revised_prompt": "draw a quiet terminal"
+            }
+        ]
+    }))]);
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        format!(
+            r#"
+default_provider = "openai"
+default_model = "gpt-image-1"
+api_base = "{}"
+model_catalogs = [".neo/generated-models.json"]
+"#,
+            server.url
+        ),
+    )
+    .expect("write config");
+    fs::write(
+        temp.path().join(".neo/generated-models.json"),
+        r#"
+{
+  "generated_at": "2026-06-10T00:00:00Z",
+  "models": [
+    {
+      "provider": "openai",
+      "id": "gpt-image-1",
+      "api": "openai-responses",
+      "capabilities": {
+        "streaming": false,
+        "tools": false,
+        "images": true,
+        "reasoning": false,
+        "embeddings": false,
+        "image_generation": true
+      }
+    }
+  ]
+}
+"#,
+    )
+    .expect("write generated catalog");
+    let output_path = temp.path().join("out/generated.png");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "image-key")
+        .args([
+            "images",
+            "generate",
+            "draw terminal",
+            "--model",
+            "openai/gpt-image-1",
+            "--output",
+        ])
+        .arg(&output_path)
+        .args(["--size", "512x512"]);
+    let stdout = run(command);
+
+    assert!(stdout.contains(&format!("wrote image to {}", output_path.display())));
+    assert_eq!(
+        fs::read(&output_path).expect("generated image file"),
+        b"hello-image"
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/images/generations");
+    assert_eq!(
+        requests[0].headers.get("authorization").map(String::as_str),
+        Some("Bearer image-key")
+    );
+    assert_eq!(requests[0].body["model"], "gpt-image-1");
+    assert_eq!(requests[0].body["prompt"], "draw terminal");
+    assert_eq!(requests[0].body["size"], "512x512");
+    assert_eq!(requests[0].body["n"], 1);
+}
+
+#[test]
 fn config_show_applies_selected_provider_api_key_env_without_secret_values() {
     let temp = TempDir::new().expect("tempdir");
     fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
@@ -2904,6 +3070,15 @@ fn openai_response_sse(id: &str, text: &str) -> String {
             }
         }),
     ])
+}
+
+fn json_response(value: &Value) -> String {
+    let body = value.to_string();
+    format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
 }
 
 fn mcp_json_response(id: u64, result: &Value) -> String {

@@ -237,6 +237,10 @@ pub enum Command {
         #[command(subcommand)]
         command: ModelCommand,
     },
+    Images {
+        #[command(subcommand)]
+        command: ImageCommand,
+    },
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
@@ -363,7 +367,25 @@ pub enum ConfigSyncCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ModelCommand {
-    List,
+    List {
+        #[arg(long)]
+        pricing: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ImageCommand {
+    Generate {
+        prompt: String,
+        #[arg(long, value_name = "PROVIDER/MODEL")]
+        model: String,
+        #[arg(long, value_name = "PATH")]
+        output: std::path::PathBuf,
+        #[arg(long, default_value = "1024x1024")]
+        size: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

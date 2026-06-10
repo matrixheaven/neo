@@ -354,6 +354,7 @@ impl NeoTuiApp {
         Some(submitted)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn apply_stream_update(&mut self, update: StreamUpdate) {
         match update {
             StreamUpdate::AssistantStarted { id } => {

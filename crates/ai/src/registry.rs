@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, fs, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+    sync::Arc,
+};
 
 use crate::{
     AiError, ApiKind, ModelCapabilities, ModelClient, ModelSpec, ProviderId,
@@ -16,6 +21,8 @@ const PI_DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
 pub struct ModelRegistry {
     models: Vec<ModelSpec>,
     display_metadata: BTreeMap<(String, String), ModelDisplayMetadata>,
+    pricing: BTreeMap<(String, String), ModelPricing>,
+    image_generation_models: BTreeSet<(String, String)>,
     default: Option<(String, String)>,
 }
 
@@ -25,6 +32,8 @@ impl ModelRegistry {
         Self {
             models: Vec::new(),
             display_metadata: BTreeMap::new(),
+            pricing: BTreeMap::new(),
+            image_generation_models: BTreeSet::new(),
             default: None,
         }
     }
@@ -63,6 +72,14 @@ impl ModelRegistry {
             })?;
             return self.load_pi_models_config(catalog, label);
         }
+        if is_generated_catalog(&value) {
+            let catalog: GeneratedModelCatalog = serde_json::from_value(value).map_err(|err| {
+                AiError::Configuration(format!(
+                    "failed to parse generated model catalog {label}: {err}"
+                ))
+            })?;
+            return self.load_generated_model_catalog(catalog, label);
+        }
 
         let catalog: ModelCatalog = serde_json::from_value(value).map_err(|err| {
             AiError::Configuration(format!("failed to parse model catalog {label}: {err}"))
@@ -87,6 +104,45 @@ impl ModelRegistry {
             if candidate.get(&default.provider, &default.model).is_none() {
                 return Err(AiError::Configuration(format!(
                     "model catalog {label} default {}/{} is not registered",
+                    default.provider, default.model
+                )));
+            }
+            candidate.default = Some((default.provider, default.model));
+        }
+        *self = candidate;
+        Ok(())
+    }
+
+    fn load_generated_model_catalog(
+        &mut self,
+        catalog: GeneratedModelCatalog,
+        label: &str,
+    ) -> Result<(), AiError> {
+        if catalog.models.is_empty() {
+            return Err(AiError::Configuration(format!(
+                "generated model catalog {label} must define at least one model"
+            )));
+        }
+        if let Some(default) = &catalog.default {
+            validate_catalog_default(label, default)?;
+        }
+
+        let mut candidate = self.clone();
+        for model in catalog.models {
+            let generated = generated_model_entry(label, model)?;
+            let key = model_key(&generated.spec);
+            candidate.register(generated.spec);
+            if let Some(pricing) = generated.pricing {
+                candidate.pricing.insert(key.clone(), pricing);
+            }
+            if generated.image_generation {
+                candidate.image_generation_models.insert(key);
+            }
+        }
+        if let Some(default) = catalog.default {
+            if candidate.get(&default.provider, &default.model).is_none() {
+                return Err(AiError::Configuration(format!(
+                    "generated model catalog {label} default {}/{} is not registered",
                     default.provider, default.model
                 )));
             }
@@ -151,6 +207,8 @@ impl ModelRegistry {
     pub fn register(&mut self, model: ModelSpec) {
         let key = model_key(&model);
         self.display_metadata.remove(&key);
+        self.pricing.remove(&key);
+        self.image_generation_models.remove(&key);
         if self.default.is_none() {
             self.default = Some(key.clone());
         }
@@ -189,12 +247,41 @@ impl ModelRegistry {
         self.display_metadata
             .get(&(provider.to_owned(), model.to_owned()))
     }
+
+    #[must_use]
+    pub fn pricing(&self, provider: &str, model: &str) -> Option<&ModelPricing> {
+        self.pricing.get(&(provider.to_owned(), model.to_owned()))
+    }
+
+    #[must_use]
+    pub fn supports_image_generation(&self, provider: &str, model: &str) -> bool {
+        self.image_generation_models
+            .contains(&(provider.to_owned(), model.to_owned()))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModelDisplayMetadata {
     pub provider_name: Option<String>,
     pub model_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TokenPricing {
+    pub input_per_million_tokens: Option<f64>,
+    pub output_per_million_tokens: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageGenerationPricing {
+    pub unit: String,
+    pub per_unit: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModelPricing {
+    pub tokens: Option<TokenPricing>,
+    pub image_generation: Option<ImageGenerationPricing>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -208,6 +295,81 @@ struct ModelCatalog {
 struct ModelCatalogDefault {
     provider: String,
     model: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GeneratedModelCatalog {
+    models: Vec<GeneratedModelDefinition>,
+    #[serde(default)]
+    default: Option<ModelCatalogDefault>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GeneratedModelDefinition {
+    provider: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    api: String,
+    #[serde(default)]
+    context_window: Option<u32>,
+    #[serde(default)]
+    capabilities: GeneratedModelCapabilities,
+    #[serde(default)]
+    pricing: Option<GeneratedPricing>,
+}
+
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Deserialize)]
+struct GeneratedModelCapabilities {
+    #[serde(default = "default_true")]
+    streaming: bool,
+    #[serde(default)]
+    tools: bool,
+    #[serde(default)]
+    images: bool,
+    #[serde(default)]
+    reasoning: bool,
+    #[serde(default)]
+    embeddings: bool,
+    #[serde(default)]
+    image_generation: bool,
+}
+
+impl Default for GeneratedModelCapabilities {
+    fn default() -> Self {
+        Self {
+            streaming: true,
+            tools: false,
+            images: false,
+            reasoning: false,
+            embeddings: false,
+            image_generation: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GeneratedPricing {
+    #[serde(default)]
+    input_per_million_tokens: Option<f64>,
+    #[serde(default)]
+    output_per_million_tokens: Option<f64>,
+    #[serde(default)]
+    image_generation: Option<GeneratedImagePricing>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GeneratedImagePricing {
+    unit: String,
+    per_unit: f64,
+}
+
+struct GeneratedModelEntry {
+    spec: ModelSpec,
+    image_generation: bool,
+    pricing: Option<ModelPricing>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -266,6 +428,92 @@ fn pi_model_spec(
         api,
         capabilities,
     })
+}
+
+fn generated_model_entry(
+    label: &str,
+    model: GeneratedModelDefinition,
+) -> Result<GeneratedModelEntry, AiError> {
+    let provider = model.provider.trim().to_owned();
+    if provider.is_empty() {
+        return Err(AiError::Configuration(format!(
+            "generated model catalog {label} provider must not be empty"
+        )));
+    }
+    let model_id = model
+        .id
+        .or(model.model)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AiError::Configuration(format!(
+                "generated model catalog {label} provider {provider}: model id must not be empty"
+            ))
+        })?;
+    if model.context_window == Some(0) {
+        return Err(AiError::Configuration(format!(
+            "generated model catalog {label} provider {provider}, model {model_id}: context_window must be greater than 0"
+        )));
+    }
+    let api = catalog_api_kind(label, &provider, &model_id, &model.api)?;
+    let capabilities = ModelCapabilities {
+        streaming: model.capabilities.streaming,
+        tools: model.capabilities.tools,
+        images: model.capabilities.images,
+        reasoning: model.capabilities.reasoning,
+        embeddings: model.capabilities.embeddings,
+        max_context_tokens: model.context_window,
+    };
+    let pricing = model.pricing.map(GeneratedPricing::into_model_pricing);
+    Ok(GeneratedModelEntry {
+        spec: ModelSpec {
+            provider: ProviderId(provider),
+            model: model_id,
+            api,
+            capabilities,
+        },
+        image_generation: model.capabilities.image_generation,
+        pricing,
+    })
+}
+
+fn catalog_api_kind(
+    label: &str,
+    provider: &str,
+    model_id: &str,
+    api: &str,
+) -> Result<ApiKind, AiError> {
+    match api {
+        "OpenAiResponses" | "openai-responses" => Ok(ApiKind::OpenAiResponses),
+        "OpenAiChatCompletions" | "openai-chat-completions" => Ok(ApiKind::OpenAiChatCompletions),
+        "OpenAiCompatible" | "openai-completions" | "openai-compatible" => {
+            Ok(ApiKind::OpenAiCompatible)
+        }
+        "AnthropicMessages" | "anthropic-messages" => Ok(ApiKind::AnthropicMessages),
+        "GoogleGenerativeAi" | "google-generative-ai" => Ok(ApiKind::GoogleGenerativeAi),
+        "Local" | "local" => Ok(ApiKind::Local),
+        other => Err(AiError::Configuration(format!(
+            "model catalog {label} provider {provider}, model {model_id}: unsupported api {other}"
+        ))),
+    }
+}
+
+impl GeneratedPricing {
+    fn into_model_pricing(self) -> ModelPricing {
+        let tokens = (self.input_per_million_tokens.is_some()
+            || self.output_per_million_tokens.is_some())
+        .then_some(TokenPricing {
+            input_per_million_tokens: self.input_per_million_tokens,
+            output_per_million_tokens: self.output_per_million_tokens,
+        });
+        ModelPricing {
+            tokens,
+            image_generation: self.image_generation.map(|pricing| ImageGenerationPricing {
+                unit: pricing.unit,
+                per_unit: pricing.per_unit,
+            }),
+        }
+    }
 }
 
 fn validate_pi_provider_metadata(
@@ -359,6 +607,24 @@ fn validate_pi_model_metadata(
 
 fn is_allowed_pi_model_metadata(field: &str) -> bool {
     matches!(field, "name")
+}
+
+fn is_generated_catalog(value: &Value) -> bool {
+    value.get("generated_at").is_some()
+        || value
+            .get("models")
+            .and_then(Value::as_array)
+            .is_some_and(|models| {
+                models.iter().any(|model| {
+                    model.get("id").is_some()
+                        || model.get("context_window").is_some()
+                        || model.get("pricing").is_some()
+                        || model
+                            .get("capabilities")
+                            .and_then(|capabilities| capabilities.get("image_generation"))
+                            .is_some()
+                })
+            })
 }
 
 fn string_metadata(
@@ -617,6 +883,10 @@ fn missing_reason(provider: &ProviderSpec) -> String {
 
 fn model_key(model: &ModelSpec) -> (String, String) {
     (model.provider.0.clone(), model.model.clone())
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 fn builtin_models() -> Vec<ModelSpec> {

@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, env, fmt::Write as _, path::Path, sync::Arc};
 
 use anyhow::Context;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures::StreamExt;
 use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionMetadataStore};
 use neo_agent_core::{
@@ -8,14 +9,18 @@ use neo_agent_core::{
     McpHttpConfig, McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter,
     McpToolProvider, PermissionDecision, ToolRegistry,
 };
-use neo_ai::{ModelClient, ModelRegistry, ModelSpec, ProviderRegistry};
+use neo_ai::{
+    ApiKind, CredentialResolver, ImageData, ImageGenerationClient, ImageGenerationRequest,
+    ModelClient, ModelPricing, ModelRegistry, ModelSpec, ProviderRegistry, ProviderSpec,
+    ResolvedCredential, providers::openai_images::OpenAiImagesClient,
+};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     cli::RunOutput,
-    config::{self, AppConfig, McpServerConfig, provider_api_base},
+    config::{self, AppConfig, McpServerConfig},
     extension_tools, resources, session_commands,
 };
 
@@ -528,11 +533,24 @@ fn current_unix_timestamp() -> String {
     format!("{}.{:09}Z", duration.as_secs(), duration.subsec_nanos())
 }
 
-pub fn list_models(config: &AppConfig) -> anyhow::Result<String> {
-    list_models_filtered(config, None)
+pub fn list_models_filtered(config: &AppConfig, search: Option<&str>) -> anyhow::Result<String> {
+    list_models_with_search_and_options(config, search, false, false)
 }
 
-pub fn list_models_filtered(config: &AppConfig, search: Option<&str>) -> anyhow::Result<String> {
+pub fn list_models_with_options(
+    config: &AppConfig,
+    pricing: bool,
+    json_output: bool,
+) -> anyhow::Result<String> {
+    list_models_with_search_and_options(config, None, pricing, json_output)
+}
+
+fn list_models_with_search_and_options(
+    config: &AppConfig,
+    search: Option<&str>,
+    pricing: bool,
+    json_output: bool,
+) -> anyhow::Result<String> {
     let providers = provider_registry_for_config(config);
     let models = model_registry_for_config(config)?;
     let search = search.map(str::trim).filter(|search| !search.is_empty());
@@ -545,6 +563,9 @@ pub fn list_models_filtered(config: &AppConfig, search: Option<&str>) -> anyhow:
         && listed_models.is_empty()
     {
         return Ok(format!("no models matching \"{search}\"\n"));
+    }
+    if json_output {
+        return list_models_json(config, &providers, &models, &listed_models, pricing);
     }
 
     let mut out = "models:\n".to_owned();
@@ -565,26 +586,209 @@ pub fn list_models_filtered(config: &AppConfig, search: Option<&str>) -> anyhow:
         let display = model_display_suffix(&models, &model)
             .map(|display| format!(" - {display}"))
             .unwrap_or_default();
+        let pricing_suffix = pricing
+            .then(|| models.pricing(&model.provider.0, &model.model))
+            .flatten()
+            .map(format_pricing_suffix)
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            "- {}/{} ({:?}{marker}){display}",
+            "- {}/{} ({:?}{marker}){display}{pricing_suffix}",
             model.provider.0, model.model, model.api
         );
     }
     out.push_str("providers:\n");
     for provider in providers.list() {
-        let status = providers
-            .credential_status(&provider.id)
-            .map_or("unknown", |status| {
-                if status.configured {
-                    "configured"
-                } else {
-                    "missing credentials"
-                }
-            });
+        let status = provider_credential_status_for_config(config, &provider.id)
+            .map_or("unknown", credential_status_label);
         let _ = writeln!(out, "- {} ({:?}, {status})", provider.id, provider.api);
     }
     Ok(out)
+}
+
+pub async fn generate_image(
+    config: &AppConfig,
+    prompt: &str,
+    model: &str,
+    output: &Path,
+    size: &str,
+) -> anyhow::Result<String> {
+    let (provider_id, model_id) = parse_provider_model(model)?;
+    let registry = model_registry_for_config(config)?;
+    let model = registry
+        .list()
+        .into_iter()
+        .find(|candidate| candidate.provider.0 == provider_id && candidate.model == model_id)
+        .with_context(|| format!("unknown image model {model}; run `neo models list --json`"))?;
+    anyhow::ensure!(
+        registry.supports_image_generation(&model.provider.0, &model.model),
+        "model {}/{} does not advertise image generation support",
+        model.provider.0,
+        model.model
+    );
+    anyhow::ensure!(
+        matches!(
+            model.api,
+            ApiKind::OpenAiResponses | ApiKind::OpenAiCompatible | ApiKind::OpenAiChatCompletions
+        ),
+        "image generation currently requires an OpenAI-style image endpoint"
+    );
+
+    let provider = provider_with_invocation_overrides(config, &model.provider.0)
+        .with_context(|| format!("provider {} is not registered", model.provider.0))?;
+    let credential = resolve_provider_credential(config, &provider)
+        .with_context(|| format!("missing credentials for provider {}", provider.id))?;
+    let base_url = provider
+        .base_url
+        .as_deref()
+        .with_context(|| format!("provider {} does not define a base URL", provider.id))?;
+    let client = OpenAiImagesClient::new(base_url, credential.secret());
+    let response = client
+        .generate_image(ImageGenerationRequest {
+            model,
+            prompt: prompt.to_owned(),
+            size: size.to_owned(),
+        })
+        .await
+        .map_err(anyhow::Error::from)?;
+    let image = response
+        .images
+        .into_iter()
+        .next()
+        .context("provider returned no images")?;
+    let bytes = match image.data {
+        ImageData::Base64(value) => BASE64_STANDARD
+            .decode(value)
+            .context("provider returned invalid base64 image data")?,
+        ImageData::Url(url) => anyhow::bail!(
+            "provider returned an image URL ({url}); Neo only writes base64 image responses today"
+        ),
+    };
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::write(output, bytes)
+        .with_context(|| format!("failed to write image to {}", output.display()))?;
+    Ok(format!("wrote image to {}\n", output.display()))
+}
+
+fn parse_provider_model(model: &str) -> anyhow::Result<(&str, &str)> {
+    let (provider, model) = model
+        .split_once('/')
+        .with_context(|| format!("model must be qualified as provider/model, got {model:?}"))?;
+    let provider = provider.trim();
+    let model = model.trim();
+    anyhow::ensure!(
+        !provider.is_empty() && !model.is_empty(),
+        "model must be qualified as provider/model"
+    );
+    Ok((provider, model))
+}
+
+fn list_models_json(
+    config: &AppConfig,
+    providers: &ProviderRegistry,
+    registry: &ModelRegistry,
+    models: &[ModelSpec],
+    include_pricing: bool,
+) -> anyhow::Result<String> {
+    let models = models
+        .iter()
+        .map(|model| {
+            let pricing = include_pricing
+                .then(|| registry.pricing(&model.provider.0, &model.model))
+                .flatten();
+            json!({
+                "provider": model.provider.0,
+                "model": model.model,
+                "api": format!("{:?}", model.api),
+                "default": model.provider.0 == config.default_provider && model.model == config.default_model,
+                "context_window": model.capabilities.max_context_tokens,
+                "capabilities": {
+                    "streaming": model.capabilities.streaming,
+                    "tools": model.capabilities.tools,
+                    "images": model.capabilities.images,
+                    "reasoning": model.capabilities.reasoning,
+                    "embeddings": model.capabilities.embeddings,
+                    "image_generation": registry.supports_image_generation(&model.provider.0, &model.model),
+                },
+                "pricing": pricing.map(model_pricing_json),
+            })
+        })
+        .collect::<Vec<_>>();
+    let providers = providers
+        .list()
+        .into_iter()
+        .map(|provider| {
+            let status = provider_credential_status_for_config(config, &provider.id)
+                .map_or("unknown", credential_status_label);
+            json!({
+                "id": provider.id,
+                "api": format!("{:?}", provider.api),
+                "status": status,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string(&json!({
+            "models": models,
+            "providers": providers,
+        }))?
+    ))
+}
+
+fn model_pricing_json(pricing: &ModelPricing) -> serde_json::Value {
+    let mut value = serde_json::Map::new();
+    if let Some(tokens) = &pricing.tokens {
+        if let Some(input) = tokens.input_per_million_tokens {
+            value.insert("input_per_million_tokens".to_owned(), json!(input));
+        }
+        if let Some(output) = tokens.output_per_million_tokens {
+            value.insert("output_per_million_tokens".to_owned(), json!(output));
+        }
+    }
+    if let Some(image) = &pricing.image_generation {
+        value.insert(
+            "image_generation".to_owned(),
+            json!({
+                "unit": image.unit,
+                "per_unit": image.per_unit,
+            }),
+        );
+    }
+    serde_json::Value::Object(value)
+}
+
+fn format_pricing_suffix(pricing: &ModelPricing) -> String {
+    let mut parts = Vec::new();
+    if let Some(tokens) = &pricing.tokens {
+        if let Some(input) = tokens.input_per_million_tokens {
+            parts.push(format!("input ${input}/1M"));
+        }
+        if let Some(output) = tokens.output_per_million_tokens {
+            parts.push(format!("output ${output}/1M"));
+        }
+    }
+    if let Some(image) = &pricing.image_generation {
+        parts.push(format!("image ${}/{}", image.per_unit, image.unit));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", parts.join(", "))
+    }
+}
+
+const fn credential_status_label(configured: bool) -> &'static str {
+    if configured {
+        "configured"
+    } else {
+        "missing credentials"
+    }
 }
 
 fn model_matches_search(registry: &ModelRegistry, model: &ModelSpec, search: Option<&str>) -> bool {
@@ -631,6 +835,55 @@ fn provider_registry_for_config(config: &AppConfig) -> ProviderRegistry {
         registry.register(provider);
     }
     registry
+}
+
+fn provider_with_invocation_overrides(
+    config: &AppConfig,
+    provider_id: &str,
+) -> Option<ProviderSpec> {
+    let registry = provider_registry_for_config(config);
+    let mut provider = registry.get(provider_id).cloned()?;
+    if let Some(base_url) = &config.api_base {
+        provider.base_url = Some(base_url.clone());
+    }
+    if let Some(env_name) = &config.api_key_env {
+        provider.api_key_env_vars = vec![env_name.clone()];
+    }
+    Some(provider)
+}
+
+fn provider_credential_status_for_config(config: &AppConfig, provider_id: &str) -> Option<bool> {
+    let provider = provider_with_invocation_overrides(config, provider_id)?;
+    let env = env::vars().collect::<BTreeMap<_, _>>();
+    let ambient_authenticated = provider.ambient_auth_env_vars.iter().any(|group| {
+        group
+            .iter()
+            .all(|key| env.get(key).is_some_and(|value| !value.is_empty()))
+    });
+    let key_authenticated = resolve_provider_credential_from_env(config, &provider, &env).is_some();
+    Some(ambient_authenticated || key_authenticated)
+}
+
+fn resolve_provider_credential(
+    config: &AppConfig,
+    provider: &ProviderSpec,
+) -> Option<ResolvedCredential> {
+    resolve_provider_credential_from_env(config, provider, &env::vars().collect())
+}
+
+fn resolve_provider_credential_from_env(
+    config: &AppConfig,
+    provider: &ProviderSpec,
+    env: &BTreeMap<String, String>,
+) -> Option<ResolvedCredential> {
+    CredentialResolver::new(&provider.id)
+        .with_cli_api_key(config.api_key.clone())
+        .with_env(provider.api_key_env_vars.iter().map(String::as_str), env)
+        // Cloud profile sync stores provider/base/env configuration in normal config,
+        // not provider API secrets. Secrets still resolve from the selected env names.
+        .with_auth_file_credentials(BTreeMap::new())
+        .with_cloud_profile_credentials(BTreeMap::new())
+        .resolve()
 }
 
 fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: &AppConfig) {
@@ -1503,39 +1756,29 @@ fn resolve_model_client(
     config: &AppConfig,
     model: &ModelSpec,
 ) -> anyhow::Result<Arc<dyn ModelClient>> {
-    const CLI_API_KEY_ENV: &str = "__NEO_CLI_API_KEY";
+    const RESOLVED_API_KEY_ENV: &str = "__NEO_RESOLVED_API_KEY";
     let mut registry = ProviderRegistry::production();
     apply_configured_provider_overrides(&mut registry, config);
-    if config.api_base.is_some()
-        || config.api_key.is_some()
-        || config.api_key_env.is_some()
-        || provider_api_base(&config.providers, &model.provider.0).is_some()
-    {
-        let Some(mut provider) = registry.get(&model.provider.0).cloned() else {
-            return registry
-                .resolver()
-                .resolve(model)
-                .map_err(anyhow::Error::from);
-        };
-        if let Some(base_url) = &config.api_base {
-            provider.base_url = Some(base_url.clone());
-        }
-        if let Some(env_name) = &config.api_key_env {
-            provider.api_key_env_vars = vec![env_name.clone()];
-        }
-        if config.api_key.is_some() {
-            provider.api_key_env_vars = vec![CLI_API_KEY_ENV.to_owned()];
+    if let Some(mut provider) = provider_with_invocation_overrides(config, &model.provider.0) {
+        let credential = resolve_provider_credential(config, &provider);
+        let mut env = env::vars().collect::<BTreeMap<_, _>>();
+        if let Some(credential) = credential {
+            provider.api_key_env_vars = vec![RESOLVED_API_KEY_ENV.to_owned()];
+            env.insert(
+                RESOLVED_API_KEY_ENV.to_owned(),
+                credential.secret().to_owned(),
+            );
         }
         registry.register(provider);
+        return registry
+            .resolver_from(env)
+            .resolve(model)
+            .map_err(anyhow::Error::from);
     }
-    let resolver = if let Some(api_key) = &config.api_key {
-        let mut env = env::vars().collect::<BTreeMap<_, _>>();
-        env.insert(CLI_API_KEY_ENV.to_owned(), api_key.clone());
-        registry.resolver_from(env)
-    } else {
-        registry.resolver()
-    };
-    resolver.resolve(model).map_err(anyhow::Error::from)
+    registry
+        .resolver()
+        .resolve(model)
+        .map_err(anyhow::Error::from)
 }
 
 fn message_text(message: &AgentMessage) -> String {

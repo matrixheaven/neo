@@ -47,7 +47,7 @@ pub async fn login_cloud(config: &AppConfig, server: &str) -> anyhow::Result<Str
         client.bootstrap(&device_name(config)).await?
     };
     let mut auth = AuthFile::from(response);
-    auth.server_url = server_url.clone();
+    auth.server_url.clone_from(&server_url);
     write_auth(&auth_file, &auth)?;
     Ok(format!(
         "logged in to {server_url} as {}\nauth file: {}\n",
@@ -123,7 +123,7 @@ pub async fn sync_status(config: &AppConfig) -> anyhow::Result<String> {
 
 pub(crate) fn require_auth(auth_file: &Path) -> anyhow::Result<AuthFile> {
     read_auth(auth_file)?
-        .with_context(|| format!("not logged in; run `neo login cloud --server <url>` first"))
+        .with_context(|| "not logged in; run `neo login cloud --server <url>` first".to_owned())
 }
 
 fn read_auth(path: &Path) -> anyhow::Result<Option<AuthFile>> {

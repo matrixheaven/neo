@@ -470,6 +470,12 @@ struct FileTuiConfig {
     keybindings: Option<BTreeMap<String, Vec<String>>>,
 }
 
+#[derive(Deserialize)]
+struct ProfileTuiConfig {
+    #[serde(default)]
+    keybindings: Option<BTreeMap<String, Vec<String>>>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct FileCloudConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -703,15 +709,6 @@ fn provider_api_key_env(
     providers
         .get(provider_id)
         .and_then(|provider| provider.api_key_env.clone())
-}
-
-pub(crate) fn provider_api_base(
-    providers: &BTreeMap<String, ProviderConfig>,
-    provider_id: &str,
-) -> Option<String> {
-    providers
-        .get(provider_id)
-        .and_then(|provider| provider.api_base.clone())
 }
 
 pub fn show(config: &AppConfig) -> anyhow::Result<String> {
@@ -1110,8 +1107,7 @@ fn tui_from_file(tui: Option<FileTuiConfig>) -> TuiConfig {
 fn cloud_from_file(project_dir: &Path, cloud: Option<FileCloudConfig>) -> CloudConfig {
     let auth_file = cloud
         .and_then(|cloud| cloud.auth_file)
-        .map(expand_user_path)
-        .unwrap_or_else(default_auth_file_path);
+        .map_or_else(default_auth_file_path, expand_user_path);
     let auth_file = if auth_file.is_absolute() {
         auth_file
     } else {
@@ -1166,10 +1162,12 @@ pub(crate) fn apply_cloud_profile_to_global_config(
     });
     let mut config = read_file_config(&config_path)?;
 
-    config.default_provider = profile.default_provider.clone();
-    config.default_model = profile.default_model.clone();
-    config.api_base = profile.api_base.clone();
-    config.api_key_env = profile.api_key_env.clone();
+    config
+        .default_provider
+        .clone_from(&profile.default_provider);
+    config.default_model.clone_from(&profile.default_model);
+    config.api_base.clone_from(&profile.api_base);
+    config.api_key_env.clone_from(&profile.api_key_env);
     config.model_scope = (!profile.model_scope.is_empty()).then(|| profile.model_scope.clone());
     config.providers = json_to_option(&profile.providers)?;
     config.runtime = json_to_option(&profile.runtime)?;
@@ -1214,11 +1212,6 @@ where
 fn profile_tui_config(value: &serde_json::Value) -> anyhow::Result<Option<FileTuiConfig>> {
     if value.is_null() {
         return Ok(None);
-    }
-    #[derive(Deserialize)]
-    struct ProfileTuiConfig {
-        #[serde(default)]
-        keybindings: Option<BTreeMap<String, Vec<String>>>,
     }
     serde_json::from_value::<ProfileTuiConfig>(value.clone())
         .map(|tui| {

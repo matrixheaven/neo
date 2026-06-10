@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use neo_ai::{
-    AiError, ApiKind, ModelCapabilities, ModelSpec, ProviderId, registry::ProviderRegistry,
+    AiError, ApiKind, CredentialResolver, CredentialSource, ModelCapabilities, ModelSpec,
+    ProviderId, registry::ProviderRegistry,
 };
 
 fn model(provider: &str, name: &str, api: ApiKind) -> ModelSpec {
@@ -101,6 +102,57 @@ fn provider_registry_accepts_configured_environment_key_names_without_secret_sto
         missing.missing_reason.as_deref(),
         Some("missing PROJECT_OPENAI_KEY")
     );
+}
+
+#[test]
+fn credential_resolver_prefers_cli_env_auth_file_then_cloud_profile_without_leaking_values() {
+    let resolver = CredentialResolver::new("openai")
+        .with_cli_api_key(Some("cli-secret".to_owned()))
+        .with_env(
+            ["OPENAI_API_KEY"],
+            &BTreeMap::from([("OPENAI_API_KEY".to_owned(), "env-secret".to_owned())]),
+        )
+        .with_auth_file_credentials(BTreeMap::from([(
+            "openai".to_owned(),
+            "auth-file-secret".to_owned(),
+        )]))
+        .with_cloud_profile_credentials(BTreeMap::from([(
+            "openai".to_owned(),
+            "cloud-profile-secret".to_owned(),
+        )]));
+
+    let credential = resolver.resolve().expect("credential should resolve");
+    assert_eq!(credential.secret(), "cli-secret");
+    assert_eq!(credential.source(), CredentialSource::Cli);
+    assert_eq!(credential.redacted_label(), "cli --api-key");
+    assert!(!format!("{credential:?}").contains("cli-secret"));
+    assert!(!format!("{credential:?}").contains("env-secret"));
+    assert!(!format!("{credential:?}").contains("auth-file-secret"));
+    assert!(!format!("{credential:?}").contains("cloud-profile-secret"));
+
+    let auth_file = CredentialResolver::new("openai")
+        .with_auth_file_credentials(BTreeMap::from([(
+            "openai".to_owned(),
+            "auth-file-secret".to_owned(),
+        )]))
+        .with_cloud_profile_credentials(BTreeMap::from([(
+            "openai".to_owned(),
+            "cloud-profile-secret".to_owned(),
+        )]))
+        .resolve()
+        .expect("auth-file credential should resolve");
+    assert_eq!(auth_file.secret(), "auth-file-secret");
+    assert_eq!(auth_file.source(), CredentialSource::AuthFile);
+
+    let cloud_profile = CredentialResolver::new("openai")
+        .with_cloud_profile_credentials(BTreeMap::from([(
+            "openai".to_owned(),
+            "cloud-profile-secret".to_owned(),
+        )]))
+        .resolve()
+        .expect("cloud profile credential should resolve");
+    assert_eq!(cloud_profile.secret(), "cloud-profile-secret");
+    assert_eq!(cloud_profile.source(), CredentialSource::CloudProfile);
 }
 
 #[test]

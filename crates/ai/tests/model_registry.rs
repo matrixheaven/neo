@@ -1,4 +1,6 @@
-use neo_ai::{ApiKind, ModelCapabilities, ModelRegistry, ModelSpec, ProviderId};
+use neo_ai::{
+    ApiKind, ModelCapabilities, ModelPricing, ModelRegistry, ModelSpec, ProviderId, TokenPricing,
+};
 
 fn model(provider: &str, name: &str, capabilities: ModelCapabilities) -> ModelSpec {
     ModelSpec {
@@ -145,6 +147,65 @@ fn model_registry_loads_models_from_json_catalog() {
     assert_eq!(
         registry.default_model().map(|model| model.model.as_str()),
         Some("anthropic/claude-sonnet-4.5")
+    );
+}
+
+#[test]
+fn model_registry_loads_generated_catalog_pricing_context_and_image_generation_fields() {
+    let mut registry = ModelRegistry::new();
+
+    registry
+        .load_catalog_str(
+            r#"
+{
+  "generated_at": "2026-06-10T00:00:00Z",
+  "models": [
+    {
+      "provider": "openai",
+      "id": "gpt-image-1",
+      "api": "openai-responses",
+      "context_window": 128000,
+      "capabilities": {
+        "streaming": true,
+        "tools": false,
+        "images": true,
+        "reasoning": false,
+        "embeddings": false,
+        "image_generation": true
+      },
+      "pricing": {
+        "input_per_million_tokens": 5.0,
+        "output_per_million_tokens": 40.0,
+        "image_generation": {
+          "unit": "image",
+          "per_unit": 0.04
+        }
+      }
+    }
+  ]
+}
+"#,
+            "generated catalog",
+        )
+        .expect("load generated model catalog");
+
+    let model = registry.get("openai", "gpt-image-1").expect("model");
+    assert_eq!(model.api, ApiKind::OpenAiResponses);
+    assert_eq!(model.capabilities.max_context_tokens, Some(128_000));
+    assert!(model.capabilities.images);
+    assert!(registry.supports_image_generation("openai", "gpt-image-1"));
+    assert_eq!(
+        registry.pricing("openai", "gpt-image-1"),
+        Some(&ModelPricing {
+            tokens: Some(TokenPricing {
+                input_per_million_tokens: Some(5.0),
+                output_per_million_tokens: Some(40.0),
+            }),
+            image_generation: Some(neo_ai::ImageGenerationPricing {
+                unit: "image".to_owned(),
+                per_unit: 0.04,
+            }),
+        })
     );
 }
 

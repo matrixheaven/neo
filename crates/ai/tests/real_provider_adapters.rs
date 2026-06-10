@@ -7,11 +7,12 @@ use std::sync::{Arc, Mutex};
 use futures::StreamExt;
 use neo_ai::{
     AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
-    ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningEffort, RequestMetadata,
-    RequestOptions, StopReason, ToolCall, ToolSpec,
+    ImageGenerationClient, ImageGenerationRequest, ImageGenerationResponseImage, ModelCapabilities,
+    ModelClient, ModelSpec, ProviderId, ReasoningEffort, RequestMetadata, RequestOptions,
+    StopReason, ToolCall, ToolSpec,
     providers::{
         anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
-        openai_responses::OpenAiResponsesClient,
+        openai_images::OpenAiImagesClient, openai_responses::OpenAiResponsesClient,
     },
 };
 use serde_json::{Value, json};
@@ -121,6 +122,15 @@ fn status_response(status: u16) -> String {
     format!("HTTP/1.1 {status} Test\r\ncontent-length: 0\r\n\r\n")
 }
 
+fn json_response(value: &Value) -> String {
+    let body = value.to_string();
+    format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
 fn request(api: ApiKind) -> ChatRequest {
     ChatRequest {
         model: ModelSpec {
@@ -144,6 +154,19 @@ fn request(api: ApiKind) -> ChatRequest {
             max_tokens: Some(64),
             ..RequestOptions::default()
         },
+    }
+}
+
+fn image_generation_request() -> ImageGenerationRequest {
+    ImageGenerationRequest {
+        model: ModelSpec {
+            provider: ProviderId("openai".to_owned()),
+            model: "gpt-image-1".to_owned(),
+            api: ApiKind::OpenAiResponses,
+            capabilities: ModelCapabilities::vision_chat(),
+        },
+        prompt: "draw a quiet terminal".to_owned(),
+        size: "1024x1024".to_owned(),
     }
 }
 
@@ -240,6 +263,46 @@ fn assistant_image_request(api: ApiKind, image: ImageData) -> ChatRequest {
         tools: Vec::new(),
         options: RequestOptions::default(),
     }
+}
+
+#[tokio::test]
+async fn openai_image_generation_client_serializes_request_and_decodes_base64_response() {
+    let server = MockServer::start(vec![json_response(&json!({
+        "created": 1_710_000_000,
+        "data": [
+            {
+                "b64_json": "iVBORw0KGgo=",
+                "revised_prompt": "draw a quiet terminal with soft light"
+            }
+        ]
+    }))]);
+    let client = OpenAiImagesClient::new(server.url.clone(), "test-key");
+
+    let response = client
+        .generate_image(image_generation_request())
+        .await
+        .expect("image generation should succeed");
+
+    assert_eq!(
+        response.images,
+        vec![ImageGenerationResponseImage {
+            mime_type: "image/png".to_owned(),
+            data: ImageData::Base64("iVBORw0KGgo=".to_owned()),
+            revised_prompt: Some("draw a quiet terminal with soft light".to_owned()),
+        }]
+    );
+    let sent = server.requests().pop().expect("request");
+    assert_eq!(sent.method, "POST");
+    assert_eq!(sent.path, "/images/generations");
+    assert_eq!(
+        sent.headers.get("authorization").unwrap(),
+        "Bearer test-key"
+    );
+    assert_eq!(sent.body["model"], "gpt-image-1");
+    assert_eq!(sent.body["prompt"], "draw a quiet terminal");
+    assert_eq!(sent.body["size"], "1024x1024");
+    assert_eq!(sent.body["n"], 1);
+    assert!(sent.body.get("response_format").is_none());
 }
 
 #[tokio::test]

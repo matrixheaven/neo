@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use neo_ai::{
-    CacheRetention, ReasoningEffort, RequestMetadata, RequestOptions, env_api_key_from,
-    find_env_keys_from,
+    ApiKind, CacheRetention, ChatMessage, ContentPart, ModelCapabilities, ModelSpec, ProviderId,
+    ReasoningContinuation, ReasoningEffort, ReasoningPolicy, RequestMetadata, RequestOptions,
+    env_api_key_from, find_env_keys_from, sanitize_reasoning_continuation,
 };
 
 #[test]
@@ -71,6 +72,108 @@ fn reasoning_effort_serializes_as_stable_snake_case_values() {
         serde_json::from_value::<ReasoningEffort>(serde_json::json!("xhigh"))
             .expect("deserialize effort"),
         ReasoningEffort::XHigh
+    );
+}
+
+#[test]
+fn reasoning_policy_auto_is_deterministic_and_model_capability_aware() {
+    let reasoning_model = ModelSpec {
+        provider: ProviderId("openai".to_owned()),
+        model: "gpt-reasoning".to_owned(),
+        api: ApiKind::OpenAiResponses,
+        capabilities: ModelCapabilities::reasoning_chat(),
+    };
+    let plain_model = ModelSpec {
+        provider: ProviderId("openai".to_owned()),
+        model: "gpt-plain".to_owned(),
+        api: ApiKind::OpenAiResponses,
+        capabilities: ModelCapabilities::tool_chat(),
+    };
+
+    assert_eq!(
+        ReasoningPolicy::Auto.resolve_for_model(&reasoning_model),
+        Some(ReasoningEffort::Medium)
+    );
+    assert_eq!(ReasoningPolicy::Auto.resolve_for_model(&plain_model), None);
+    assert_eq!(
+        ReasoningPolicy::Off.resolve_for_model(&reasoning_model),
+        None
+    );
+    assert_eq!(
+        ReasoningPolicy::XHigh.resolve_for_model(&reasoning_model),
+        Some(ReasoningEffort::XHigh)
+    );
+    assert_eq!(
+        serde_json::from_value::<ReasoningPolicy>(serde_json::json!("auto"))
+            .expect("deserialize auto reasoning policy"),
+        ReasoningPolicy::Auto
+    );
+}
+
+#[test]
+fn reasoning_continuation_strips_opaque_thinking_across_provider_or_api_boundaries() {
+    let origin = ReasoningContinuation {
+        provider: ProviderId("openai".to_owned()),
+        api: ApiKind::OpenAiResponses,
+    };
+    let same_target = ModelSpec {
+        provider: ProviderId("openai".to_owned()),
+        model: "gpt-reasoning".to_owned(),
+        api: ApiKind::OpenAiResponses,
+        capabilities: ModelCapabilities::reasoning_chat(),
+    };
+    let cross_provider_target = ModelSpec {
+        provider: ProviderId("anthropic".to_owned()),
+        model: "claude-reasoning".to_owned(),
+        api: ApiKind::AnthropicMessages,
+        capabilities: ModelCapabilities::reasoning_chat(),
+    };
+    let messages = vec![ChatMessage::Assistant {
+        content: vec![
+            ContentPart::Thinking {
+                text: "portable summary".to_owned(),
+                signature: None,
+                redacted: false,
+            },
+            ContentPart::Thinking {
+                text: "signed opaque".to_owned(),
+                signature: Some("sig-openai".to_owned()),
+                redacted: false,
+            },
+            ContentPart::Thinking {
+                text: "redacted opaque".to_owned(),
+                signature: None,
+                redacted: true,
+            },
+            ContentPart::Text {
+                text: "answer".to_owned(),
+            },
+        ],
+        tool_calls: Vec::new(),
+    }];
+
+    assert_eq!(
+        sanitize_reasoning_continuation(messages.clone(), Some(&origin), &same_target),
+        messages
+    );
+
+    let sanitized =
+        sanitize_reasoning_continuation(messages, Some(&origin), &cross_provider_target);
+    assert_eq!(
+        sanitized,
+        vec![ChatMessage::Assistant {
+            content: vec![
+                ContentPart::Thinking {
+                    text: "portable summary".to_owned(),
+                    signature: None,
+                    redacted: false,
+                },
+                ContentPart::Text {
+                    text: "answer".to_owned(),
+                },
+            ],
+            tool_calls: Vec::new(),
+        }]
     );
 }
 

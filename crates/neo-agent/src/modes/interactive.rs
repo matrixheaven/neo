@@ -498,7 +498,7 @@ impl InteractiveController {
                 if self.active_turn.is_some() {
                     return Ok(true);
                 }
-                return self.handle_app_clear();
+                return Ok(self.handle_app_clear());
             }
         }
 
@@ -542,8 +542,8 @@ impl InteractiveController {
             }
             KeybindingAction::InputTab => self.complete_prompt_or_insert_tab(),
             KeybindingAction::InputCopy => self.copy_prompt_to_clipboard(),
-            KeybindingAction::AppClear => return self.handle_app_clear(),
-            KeybindingAction::AppExit => return self.handle_app_exit(),
+            KeybindingAction::AppClear => return Ok(self.handle_app_clear()),
+            KeybindingAction::AppExit => return Ok(self.handle_app_exit()),
             KeybindingAction::AppSuspend => {
                 self.suspend_requested = true;
             }
@@ -742,38 +742,38 @@ impl InteractiveController {
         }
     }
 
-    fn handle_app_clear(&mut self) -> Result<bool> {
+    fn handle_app_clear(&mut self) -> bool {
         if self.app.transcript_selection().is_some() {
             self.copy_transcript_selection_to_clipboard();
             self.clear_pending_exit_confirmation();
-            return Ok(false);
+            return false;
         }
         if !self.app.prompt().text.is_empty() {
             self.app.prompt_mut().apply_edit(PromptEdit::Clear);
             self.show_notice("Press Ctrl-C again to exit");
             self.pending_exit_confirmation = Some(ExitConfirmation::new(ExitGesture::CtrlC));
-            return Ok(false);
+            return false;
         }
         self.handle_exit_confirmation(ExitGesture::CtrlC)
     }
 
-    fn handle_app_exit(&mut self) -> Result<bool> {
+    fn handle_app_exit(&mut self) -> bool {
         if self.app.prompt().text.is_empty() {
             return self.handle_exit_confirmation(ExitGesture::CtrlD);
         }
         self.clear_pending_exit_confirmation();
         self.app.prompt_mut().apply_edit(PromptEdit::Delete);
-        Ok(false)
+        false
     }
 
-    fn handle_exit_confirmation(&mut self, gesture: ExitGesture) -> Result<bool> {
+    fn handle_exit_confirmation(&mut self, gesture: ExitGesture) -> bool {
         if self
             .pending_exit_confirmation
             .as_ref()
             .is_some_and(|confirmation| confirmation.matches(gesture))
         {
             self.pending_exit_confirmation = None;
-            return Ok(true);
+            return true;
         }
         let message = match gesture {
             ExitGesture::CtrlC => "Press Ctrl-C again to exit",
@@ -781,7 +781,7 @@ impl InteractiveController {
         };
         self.show_notice(message);
         self.pending_exit_confirmation = Some(ExitConfirmation::new(gesture));
-        Ok(false)
+        false
     }
 
     fn show_notice(&mut self, message: impl Into<String>) {

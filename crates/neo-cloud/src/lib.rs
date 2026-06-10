@@ -740,13 +740,11 @@ impl CloudError {
 impl From<anyhow::Error> for CloudError {
     fn from(error: anyhow::Error) -> Self {
         match error.downcast::<CloudError>() {
-            Ok(cloud_error) => return cloud_error,
-            Err(error) => {
-                return Self {
-                    status: StatusCode::INTERNAL_SERVER_ERROR,
-                    message: error.to_string(),
-                };
-            }
+            Ok(cloud_error) => cloud_error,
+            Err(error) => Self {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: error.to_string(),
+            },
         }
     }
 }
@@ -920,7 +918,7 @@ fn jsonl_path_regex() -> &'static Regex {
 fn api_secret_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
-        Regex::new(r#"(?i)\b(?:sk|api|token|key)[-_A-Za-z0-9]{8,}\b"#).expect("secret regex")
+        Regex::new(r"(?i)\b(?:sk|api|token|key)[-_A-Za-z0-9]{8,}\b").expect("secret regex")
     })
 }
 

@@ -25,8 +25,8 @@ use anyhow::Context as _;
 use crate::{
     cli::{
         AuthCommand, Cli, CloudCommand, Command, ConfigCommand, ConfigSyncCommand,
-        ExtensionCommand, LIST_MODELS_NO_SEARCH, LoginCommand, McpCommand, ModelCommand,
-        SessionCommand, SkillCommand, TrustCommand,
+        ExtensionCommand, ImageCommand, LIST_MODELS_NO_SEARCH, LoginCommand, McpCommand,
+        ModelCommand, SessionCommand, SkillCommand, TrustCommand,
     },
     config::{AppConfig, ConfigOverrides},
 };
@@ -125,6 +125,7 @@ impl RunSessionOptions {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn dispatch_command(
     command: Option<Command>,
     config: &AppConfig,
@@ -222,7 +223,17 @@ async fn dispatch_command(
             },
         },
         Some(Command::Models { command }) => match command {
-            ModelCommand::List => modes::run::list_models(config),
+            ModelCommand::List { pricing, json } => {
+                modes::run::list_models_with_options(config, pricing, json)
+            }
+        },
+        Some(Command::Images { command }) => match command {
+            ImageCommand::Generate {
+                prompt,
+                model,
+                output,
+                size,
+            } => modes::run::generate_image(config, &prompt, &model, &output, &size).await,
         },
         Some(Command::Mcp { command }) => match command {
             McpCommand::List => Ok(modes::run::list_mcp_servers(config)),
