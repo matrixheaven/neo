@@ -57,3 +57,57 @@ fn diff_render_state_navigates_and_folds_hunks() {
     state.unfold_active_hunk();
     assert!(!state.is_active_hunk_folded());
 }
+
+#[test]
+fn diff_render_state_groups_files_and_collapses_active_file() {
+    let model = DiffModel::parse_unified(
+        "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1 +1 @@\n-before\n+after\n",
+    )
+    .expect("diff parses");
+    let mut state = DiffRenderState::new(model);
+
+    let rendered = state.render_lines(80);
+    assert!(rendered.iter().any(|line| line.contains("src/a.rs")));
+    assert!(rendered.iter().any(|line| line.contains("1 hunk")));
+
+    state.toggle_active_file_fold();
+    assert!(state.is_active_file_folded());
+    let folded = state.render_lines(80);
+    assert!(folded.iter().any(|line| {
+        line.contains("src/a.rs") && line.contains("folded") && line.contains("2 changes")
+    }));
+    assert!(!folded.iter().any(|line| line == "-old"));
+    assert!(!folded.iter().any(|line| line == "+new"));
+
+    state.next_file();
+    assert_eq!(state.active_file_index(), 1);
+    assert_eq!(state.active_hunk_index(), 0);
+    state.previous_file();
+    assert_eq!(state.active_file_index(), 0);
+}
+
+#[test]
+fn diff_render_state_copies_active_hunk_and_file_as_unified_diff() {
+    let model = DiffModel::parse_unified(
+        "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n@@ -8 +8 @@\n-before\n+after\n",
+    )
+    .expect("diff parses");
+    let mut state = DiffRenderState::new(model);
+
+    assert_eq!(
+        state.copy_active_hunk().as_deref(),
+        Some("--- src/a.rs\n+++ src/a.rs\n@@ -1 +1 @@\n-old\n+new\n")
+    );
+
+    state.next_hunk();
+    assert_eq!(
+        state.copy_active_hunk().as_deref(),
+        Some("--- src/a.rs\n+++ src/a.rs\n@@ -8 +8 @@\n-before\n+after\n")
+    );
+    assert_eq!(
+        state.copy_active_file().as_deref(),
+        Some(
+            "--- src/a.rs\n+++ src/a.rs\n@@ -1 +1 @@\n-old\n+new\n@@ -8 +8 @@\n-before\n+after\n"
+        )
+    );
+}

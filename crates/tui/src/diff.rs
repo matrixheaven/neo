@@ -172,6 +172,7 @@ pub struct DiffRenderState {
     model: DiffModel,
     active_file: usize,
     active_hunk: usize,
+    folded_files: BTreeSet<usize>,
     folded_hunks: BTreeSet<(usize, usize)>,
 }
 
@@ -182,6 +183,7 @@ impl DiffRenderState {
             model,
             active_file: 0,
             active_hunk: 0,
+            folded_files: BTreeSet::new(),
             folded_hunks: BTreeSet::new(),
         }
     }
@@ -199,6 +201,20 @@ impl DiffRenderState {
     #[must_use]
     pub const fn stats(&self) -> &DiffStats {
         self.model.stats()
+    }
+
+    pub fn next_file(&mut self) {
+        if self.active_file + 1 < self.model.files.len() {
+            self.active_file += 1;
+            self.active_hunk = 0;
+        }
+    }
+
+    pub fn previous_file(&mut self) {
+        if self.active_file > 0 {
+            self.active_file -= 1;
+            self.active_hunk = 0;
+        }
     }
 
     pub fn next_hunk(&mut self) {
@@ -239,6 +255,12 @@ impl DiffRenderState {
         }
     }
 
+    pub fn toggle_active_file_fold(&mut self) {
+        if !self.folded_files.remove(&self.active_file) {
+            self.folded_files.insert(self.active_file);
+        }
+    }
+
     pub fn unfold_active_hunk(&mut self) {
         self.folded_hunks
             .remove(&(self.active_file, self.active_hunk));
@@ -251,9 +273,59 @@ impl DiffRenderState {
     }
 
     #[must_use]
+    pub fn is_active_file_folded(&self) -> bool {
+        self.folded_files.contains(&self.active_file)
+    }
+
+    #[must_use]
+    pub fn copy_active_hunk(&self) -> Option<String> {
+        let file = self.model.files.get(self.active_file)?;
+        let hunk = file.hunks.get(self.active_hunk)?;
+        let mut copied = diff_file_header(file);
+        copied.push_str(&hunk.to_unified());
+        Some(copied)
+    }
+
+    #[must_use]
+    pub fn copy_active_file(&self) -> Option<String> {
+        let file = self.model.files.get(self.active_file)?;
+        let mut copied = diff_file_header(file);
+        for hunk in &file.hunks {
+            copied.push_str(&hunk.to_unified());
+        }
+        Some(copied)
+    }
+
+    #[must_use]
     pub fn render_lines(&self, width: usize) -> Vec<String> {
         let mut lines = Vec::new();
         for (file_index, file) in self.model.files.iter().enumerate() {
+            let active_file = file_index == self.active_file;
+            let file_prefix = if active_file { ">" } else { " " };
+            let file_change_count = file.change_count();
+            let hunk_label = if file.hunks.len() == 1 {
+                "1 hunk".to_owned()
+            } else {
+                format!("{} hunks", file.hunks.len())
+            };
+            if self.folded_files.contains(&file_index) {
+                lines.push(fit_width(
+                    &format!(
+                        "{file_prefix} {} folded {hunk_label}, {file_change_count} changes",
+                        file.display_path()
+                    ),
+                    width,
+                ));
+                continue;
+            }
+
+            lines.push(fit_width(
+                &format!(
+                    "{file_prefix} {} ({hunk_label}, {file_change_count} changes)",
+                    file.display_path()
+                ),
+                width,
+            ));
             lines.push(format!("--- {}", file.old_path));
             lines.push(format!("+++ {}", file.new_path));
             for (hunk_index, hunk) in file.hunks.iter().enumerate() {
@@ -279,6 +351,40 @@ impl DiffRenderState {
         }
         lines
     }
+}
+
+impl DiffFile {
+    fn display_path(&self) -> &str {
+        if self.new_path.is_empty() {
+            &self.old_path
+        } else {
+            &self.new_path
+        }
+    }
+
+    fn change_count(&self) -> usize {
+        self.hunks
+            .iter()
+            .map(|hunk| hunk.stats.added + hunk.stats.removed)
+            .sum()
+    }
+}
+
+impl DiffHunk {
+    fn to_unified(&self) -> String {
+        let mut copied = String::new();
+        copied.push_str(&self.header);
+        copied.push('\n');
+        for line in &self.lines {
+            copied.push_str(&line.display_text());
+            copied.push('\n');
+        }
+        copied
+    }
+}
+
+fn diff_file_header(file: &DiffFile) -> String {
+    format!("--- {}\n+++ {}\n", file.old_path, file.new_path)
 }
 
 fn flush_hunk(current_file: &mut Option<DiffFile>, current_hunk: &mut Option<DiffHunk>) {

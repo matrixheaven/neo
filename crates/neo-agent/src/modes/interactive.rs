@@ -1,10 +1,13 @@
 use crate::{
     config::{self, AppConfig},
-    prompt_templates::{expand_prompt_template_args, load_project_prompt_templates},
+    prompt_templates::{
+        PromptTemplateLocation, discover_prompt_template_commands, expand_prompt_template_args,
+        load_project_prompt_templates,
+    },
 };
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     env, fs,
     future::{Future, Ready, ready},
     io::{IsTerminal as _, Stdout, Write as _, stdout},
@@ -27,8 +30,8 @@ use neo_agent_core::{
 };
 use neo_tui::{
     ApprovalChoice, ApprovalResult, CommandSpec, ImageProtocolPreference, ImageRenderPolicy,
-    InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager, NeoTuiApp, PickerItem,
-    PromptEdit, TerminalImageCapabilities,
+    InlineImageRenderCache, InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager,
+    NeoTuiApp, PickerItem, PromptEdit, TerminalImageCapabilities,
 };
 use ratatui::{
     Terminal,
@@ -1125,10 +1128,7 @@ fn terminal_image_capabilities_for_policy(
     protocol: ImageProtocolPreference,
     env_var: impl Fn(&str) -> std::result::Result<String, env::VarError>,
 ) -> TerminalImageCapabilities {
-    if matches!(
-        protocol,
-        ImageProtocolPreference::Auto | ImageProtocolPreference::None
-    ) {
+    if matches!(protocol, ImageProtocolPreference::None) {
         return TerminalImageCapabilities::default();
     }
 
@@ -1137,6 +1137,15 @@ fn terminal_image_capabilities_for_policy(
         .unwrap_or_default()
         .to_ascii_lowercase();
     let has_env = |name: &str| env_var(name).is_ok();
+    let conservative_multiplexer = has_env("TMUX")
+        || has_env("STY")
+        || has_env("SSH_CONNECTION")
+        || has_env("SSH_TTY")
+        || term.starts_with("screen")
+        || term.contains("tmux");
+    if conservative_multiplexer {
+        return TerminalImageCapabilities::default();
+    }
 
     let static_hints = TerminalImageCapabilities::default()
         .with_kitty(
@@ -1158,9 +1167,8 @@ fn terminal_image_capabilities_for_policy(
         ImageProtocolPreference::Sixel => {
             TerminalImageCapabilities::default().with_sixel(static_hints.sixel())
         }
-        ImageProtocolPreference::Auto | ImageProtocolPreference::None => {
-            TerminalImageCapabilities::default()
-        }
+        ImageProtocolPreference::Auto => static_hints,
+        ImageProtocolPreference::None => TerminalImageCapabilities::default(),
     }
 }
 
@@ -1171,15 +1179,122 @@ fn prompt_completions(
 ) -> Result<Vec<PickerItem>> {
     let catalog = CompletionCatalog {
         slash_prompts: slash_prompt_template_completion_items(root, prefix)?.unwrap_or_default(),
-        prompt_packages: Vec::new(),
-        extension_commands: Vec::new(),
-        cloud_commands: Vec::new(),
+        prompt_packages: prompt_package_completion_items(root)?,
+        extension_commands: extension_command_completion_items(root)?,
+        cloud_commands: cloud_session_completion_items(),
         model_items: model_items.to_vec(),
     };
     Ok(completion_source_candidates(root, prefix, &catalog)?
         .into_iter()
         .map(|candidate| candidate.to_picker_item())
         .collect())
+}
+
+fn prompt_package_completion_items(root: &Path) -> Result<Vec<PickerItem>> {
+    let mut items = discover_prompt_template_commands(root, None, &[])?
+        .into_iter()
+        .filter(|command| command.location == PromptTemplateLocation::Project)
+        .filter_map(|command| {
+            let relative_path = command
+                .template
+                .path
+                .strip_prefix(root.join(".neo/prompts"))
+                .ok()?;
+            let provider = relative_path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .and_then(|parent| parent.components().next())
+                .and_then(|component| component.as_os_str().to_str())
+                .filter(|provider| !provider.is_empty())?;
+            let value = format!("/{}", command.template.name);
+            let description = prompt_source_description(
+                (!command.template.description.is_empty())
+                    .then_some(command.template.description.as_str()),
+                Some(provider),
+                None,
+            );
+            Some(PickerItem::new(value.clone(), value, Some(description)))
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| left.value.cmp(&right.value));
+    items.dedup_by(|left, right| left.value == right.value);
+    Ok(items)
+}
+
+fn extension_command_completion_items(root: &Path) -> Result<Vec<PickerItem>> {
+    let extension_root = crate::extension_tools::default_extension_root(root);
+    if !extension_root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut items = neo_extensions::ExtensionDiscovery::new(&extension_root)
+        .discover()
+        .with_context(|| {
+            format!(
+                "failed to discover extensions under {}",
+                extension_root.display()
+            )
+        })?
+        .into_iter()
+        .map(|extension| {
+            let value = format!("/{}", extension.manifest.id);
+            let description = prompt_source_description(
+                extension.manifest.description.as_deref(),
+                Some(&extension.manifest.id),
+                Some("local extension"),
+            );
+            PickerItem::new(value.clone(), value, Some(description))
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| left.value.cmp(&right.value));
+    Ok(items)
+}
+
+fn cloud_session_completion_items() -> Vec<PickerItem> {
+    [
+        (
+            "/tree",
+            "Browse local session tree",
+            "local sessions",
+            "local",
+        ),
+        (
+            "/sync",
+            "Sync profile and sessions with self-hosted cloud",
+            "self-hosted cloud",
+            "cloud auth",
+        ),
+    ]
+    .into_iter()
+    .map(|(value, description, provider, trust)| {
+        PickerItem::new(
+            value,
+            value,
+            Some(prompt_source_description(
+                Some(description),
+                Some(provider),
+                Some(trust),
+            )),
+        )
+    })
+    .collect()
+}
+
+fn prompt_source_description(
+    description: Option<&str>,
+    provider: Option<&str>,
+    trust: Option<&str>,
+) -> String {
+    let mut details = Vec::new();
+    if let Some(description) = description.filter(|description| !description.is_empty()) {
+        details.push(description.to_owned());
+    }
+    if let Some(provider) = provider {
+        details.push(format!("provider: {provider}"));
+    }
+    if let Some(trust) = trust {
+        details.push(format!("trust: {trust}"));
+    }
+    details.join(" | ")
 }
 
 fn slash_prompt_template_completion_items(
@@ -1189,7 +1304,7 @@ fn slash_prompt_template_completion_items(
     let Some(name_prefix) = prefix.strip_prefix('/') else {
         return Ok(None);
     };
-    if name_prefix.contains('/') || name_prefix.is_empty() {
+    if name_prefix.contains('/') {
         return Ok(None);
     }
 
@@ -1322,7 +1437,7 @@ impl CompletionSource {
             Self::SlashPrompt => "slash prompt",
             Self::PromptPackage => "prompt package",
             Self::ExtensionCommand => "extension command",
-            Self::CloudCommand => "cloud command",
+            Self::CloudCommand => "cloud/session command",
             Self::ProviderModel => "provider model",
         }
     }
@@ -1797,7 +1912,8 @@ const OVERLAY_ACTION_PRIORITY: &[KeybindingAction] = &[
 struct RawTerminal {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     raw_mode: RawModeGuard,
-    rendered_inline_images: BTreeSet<String>,
+    inline_image_cache: InlineImageRenderCache,
+    last_area: Option<ratatui::layout::Rect>,
 }
 
 impl RawTerminal {
@@ -1811,19 +1927,22 @@ impl RawTerminal {
         Ok(Self {
             terminal,
             raw_mode,
-            rendered_inline_images: BTreeSet::new(),
+            inline_image_cache: InlineImageRenderCache::default(),
+            last_area: None,
         })
     }
 
     fn draw(&mut self, app: &NeoTuiApp) -> Result<()> {
         self.terminal
             .draw(|frame| frame.render_widget(app, frame.area()))?;
-        for render in app.inline_image_renders() {
-            if self.rendered_inline_images.insert(render.id) {
-                self.terminal
-                    .backend_mut()
-                    .write_all(render.escape_sequence.as_bytes())?;
-            }
+        let area = self.terminal.get_frame().area();
+        if self.last_area.replace(area).is_some_and(|last| last != area) {
+            self.inline_image_cache.reset_for_full_redraw();
+        }
+        for render in self.inline_image_cache.take_pending(app.inline_image_renders()) {
+            self.terminal
+                .backend_mut()
+                .write_all(render.escape_sequence.as_bytes())?;
         }
         self.terminal.backend_mut().flush()?;
         Ok(())
@@ -1847,7 +1966,8 @@ impl RawTerminal {
             EnableBracketedPaste
         )?;
         self.terminal.clear()?;
-        self.rendered_inline_images.clear();
+        self.inline_image_cache.reset_for_full_redraw();
+        self.last_area = None;
         Ok(())
     }
 }
@@ -2074,7 +2194,7 @@ fn startup_notices(config: &AppConfig) -> Vec<String> {
     } else {
         config.model_scope.join(",")
     };
-    vec![
+    let mut notices = vec![
         "Startup".to_owned(),
         format!("project: {}", config.project_dir.display()),
         format!("sessions: {}", config.sessions_dir.display()),
@@ -2092,11 +2212,24 @@ fn startup_notices(config: &AppConfig) -> Vec<String> {
             enabled_label(config.offline),
         ),
         format!("trust: project={}", enabled_label(config.project_trusted)),
-    ]
+    ];
+    if !config.tui.keybindings.is_empty() {
+        notices.push(format!(
+            "keybindings: {} {}",
+            config.tui.keybindings.len(),
+            pluralize(config.tui.keybindings.len(), "override", "overrides")
+        ));
+        notices.push("profile sync: tui.keybindings available".to_owned());
+    }
+    notices
 }
 
 fn enabled_label(enabled: bool) -> &'static str {
     if enabled { "enabled" } else { "disabled" }
+}
+
+const fn pluralize(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
+    if count == 1 { singular } else { plural }
 }
 
 fn session_record_to_picker_item(
@@ -2853,11 +2986,11 @@ mod tests {
     }
 
     #[test]
-    fn auto_image_protocol_ignores_static_terminal_hints_without_runtime_negotiation() {
+    fn auto_image_protocol_uses_positive_runtime_hints_on_local_terminals() {
         let env = |name: &str| match name {
             "TERM" => Ok("xterm-kitty".to_owned()),
             "TERM_PROGRAM" => Ok("WezTerm".to_owned()),
-            "KITTY_WINDOW_ID" | "SIXEL" => Ok("1".to_owned()),
+            "KITTY_WINDOW_ID" => Ok("1".to_owned()),
             "WEZTERM_PANE" => Ok("2".to_owned()),
             _ => Err(env::VarError::NotPresent),
         };
@@ -2865,7 +2998,32 @@ mod tests {
         let capabilities =
             terminal_image_capabilities_for_policy(ImageProtocolPreference::Auto, env);
 
-        assert_eq!(capabilities, TerminalImageCapabilities::default());
+        assert!(capabilities.kitty());
+        assert!(!capabilities.iterm2());
+        assert!(!capabilities.sixel());
+    }
+
+    #[test]
+    fn auto_image_protocol_falls_back_inside_tmux_screen_or_ssh() {
+        let tmux_env = |name: &str| match name {
+            "TERM" => Ok("xterm-kitty".to_owned()),
+            "KITTY_WINDOW_ID" | "TMUX" => Ok("1".to_owned()),
+            _ => Err(env::VarError::NotPresent),
+        };
+        let ssh_env = |name: &str| match name {
+            "TERM_PROGRAM" => Ok("iTerm.app".to_owned()),
+            "SSH_CONNECTION" => Ok("127.0.0.1 1 127.0.0.1 2".to_owned()),
+            _ => Err(env::VarError::NotPresent),
+        };
+
+        assert_eq!(
+            terminal_image_capabilities_for_policy(ImageProtocolPreference::Auto, tmux_env),
+            TerminalImageCapabilities::default()
+        );
+        assert_eq!(
+            terminal_image_capabilities_for_policy(ImageProtocolPreference::Auto, ssh_env),
+            TerminalImageCapabilities::default()
+        );
     }
 
     #[test]
@@ -2913,6 +3071,120 @@ mod tests {
         assert_eq!(controller.app().prompt().text, "/review");
         assert_eq!(controller.app().prompt().cursor, 7);
         assert!(controller.app().focused_overlay().is_none());
+    }
+
+    #[test]
+    fn prompt_completions_merges_real_prompt_package_extension_and_cloud_session_commands() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prompts_dir = temp.path().join(".neo/prompts");
+        fs::create_dir_all(prompts_dir.join("review-pack")).expect("create prompts");
+        fs::write(
+            prompts_dir.join("review.md"),
+            "---\ndescription: Review local changes\n---\nReview $1.\n",
+        )
+        .expect("write local prompt");
+        fs::write(
+            prompts_dir.join("review-pack/refactor.md"),
+            "---\ndescription: Refactor from package\n---\nRefactor $1.\n",
+        )
+        .expect("write packaged prompt");
+        let extension_dir = temp.path().join(".neo/extensions/echo");
+        fs::create_dir_all(&extension_dir).expect("create extension");
+        fs::write(
+            extension_dir.join("neo-extension.toml"),
+            r#"
+id = "echo"
+name = "Echo Tools"
+version = "0.1.0"
+description = "Local echo extension"
+
+[runner]
+command = "echo"
+"#,
+        )
+        .expect("write extension manifest");
+
+        let completions = prompt_completions(temp.path(), "/", &[]).expect("slash completions");
+        let by_value = completions
+            .iter()
+            .map(|item| (item.value.as_str(), item))
+            .collect::<BTreeMap<_, _>>();
+
+        assert!(
+            by_value["/review"]
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("source: slash prompt"))
+        );
+        assert!(
+            by_value["/refactor"]
+                .description
+                .as_deref()
+                .is_some_and(|description| {
+                    description.contains("source: prompt package")
+                        && description.contains("provider: review-pack")
+                })
+        );
+        assert!(
+            by_value["/echo"]
+                .description
+                .as_deref()
+                .is_some_and(|description| {
+                    description.contains("source: extension command")
+                        && description.contains("provider: echo")
+                        && description.contains("trust: local extension")
+                })
+        );
+        assert!(
+            by_value["/tree"]
+                .description
+                .as_deref()
+                .is_some_and(|description| {
+                    description.contains("source: cloud/session command")
+                        && description.contains("provider: local sessions")
+                        && description.contains("trust: local")
+                })
+        );
+        assert!(
+            by_value["/sync"]
+                .description
+                .as_deref()
+                .is_some_and(|description| {
+                    description.contains("provider: self-hosted cloud")
+                        && description.contains("trust: cloud auth")
+                })
+        );
+    }
+
+    #[test]
+    fn verbose_startup_mentions_profile_synced_keybinding_overrides() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+        config
+            .tui
+            .keybindings
+            .insert("tui.input.submit".to_owned(), vec!["ctrl+j".to_owned()]);
+
+        let mut controller = controller_for_config(&config);
+        controller.apply_startup_options(
+            &config,
+            InteractiveOptions {
+                verbose_startup: true,
+            },
+        );
+        let notices = controller
+            .app()
+            .transcript()
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                neo_tui::TranscriptItem::Notice { content } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(notices.contains(&"keybindings: 1 override"));
+        assert!(notices.contains(&"profile sync: tui.keybindings available"));
     }
 
     #[test]
