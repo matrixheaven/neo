@@ -23,7 +23,8 @@ use rustix::{
 };
 
 use super::{
-    Tool, ToolContext, ToolError, ToolFuture, ToolResult, cap_output, parse_input, schema,
+    ProcessKind, Tool, ToolContext, ToolError, ToolFuture, ToolResult, cap_output, parse_input,
+    schema,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -81,12 +82,12 @@ impl Tool for BashTool {
                 }
                 BashMode::Poll => {
                     let handle = required_field(self.name(), input.handle, "handle")?;
-                    poll_background_command(self.name(), &handle, max_output_bytes).await
+                    poll_background_command(ctx, self.name(), &handle, max_output_bytes).await
                 }
                 BashMode::Stop => {
                     reject_field(self.name(), input.command.is_some(), "command")?;
                     let handle = required_field(self.name(), input.handle, "handle")?;
-                    stop_background_command(self.name(), &handle, max_output_bytes).await
+                    stop_background_command(ctx, self.name(), &handle, max_output_bytes).await
                 }
             }
         })
@@ -136,6 +137,8 @@ fn reject_field(tool: &str, present: bool, field: &'static str) -> Result<(), To
 fn command_result(output: &CommandOutput, max_output_bytes: usize) -> ToolResult {
     let (stdout_capped, stdout_truncated) = cap_output(&output.stdout, max_output_bytes);
     let (stderr_capped, stderr_truncated) = cap_output(&output.stderr, max_output_bytes);
+    let stdout_details = cap_output_details(&output.stdout, max_output_bytes);
+    let stderr_details = cap_output_details(&output.stderr, max_output_bytes);
     let truncated = stdout_truncated || stderr_truncated;
     let combined = format!(
         "exit_code: {:?}\nstdout:\n{}\nstderr:\n{}",
@@ -143,8 +146,8 @@ fn command_result(output: &CommandOutput, max_output_bytes: usize) -> ToolResult
     );
     ToolResult::ok(format!("{combined}\ntruncated: {truncated}")).with_details(json!({
         "exit_code": output.exit_code,
-        "stdout": output.stdout,
-        "stderr": output.stderr,
+        "stdout": stdout_details,
+        "stderr": stderr_details,
         "stdout_truncated": stdout_truncated,
         "stderr_truncated": stderr_truncated,
         "truncated": truncated,
@@ -270,6 +273,11 @@ async fn start_background_command(
             stderr_task,
         },
     );
+    ctx.process_supervisor
+        .register(handle.clone(), ProcessKind::BashBackground, |handle| {
+            Box::pin(async move { cleanup_background_command(&handle).await })
+        })
+        .await;
 
     Ok(
         ToolResult::ok(format!("started background command: {handle}")).with_details(json!({
@@ -301,6 +309,7 @@ where
 }
 
 async fn poll_background_command(
+    ctx: &ToolContext,
     tool: &str,
     handle: &str,
     max_output_bytes: usize,
@@ -317,6 +326,7 @@ async fn poll_background_command(
     if let Some(status) = status {
         let command = commands.remove(handle).expect("command existed");
         drop(commands);
+        ctx.process_supervisor.unregister(handle).await;
         let _ = command.stdout_task.await;
         let _ = command.stderr_task.await;
         let output = output_from_buffers(status.code(), command.stdout, command.stderr).await;
@@ -343,6 +353,7 @@ async fn poll_background_command(
 }
 
 async fn stop_background_command(
+    ctx: &ToolContext,
     tool: &str,
     handle: &str,
     max_output_bytes: usize,
@@ -355,6 +366,7 @@ async fn stop_background_command(
             message: format!("unknown background handle `{handle}`"),
         })?;
     drop(commands);
+    ctx.process_supervisor.unregister(handle).await;
 
     let exit_code = kill_child(&mut command.process).await;
     let _ = command.stdout_task.await;
@@ -398,6 +410,8 @@ fn background_command_result(
 ) -> ToolResult {
     let (stdout_capped, stdout_truncated) = cap_output(&output.stdout, max_output_bytes);
     let (stderr_capped, stderr_truncated) = cap_output(&output.stderr, max_output_bytes);
+    let stdout_details = cap_output_details(&output.stdout, max_output_bytes);
+    let stderr_details = cap_output_details(&output.stderr, max_output_bytes);
     let truncated = stdout_truncated || stderr_truncated;
     let content = format!(
         "handle: {handle}\nstatus: {status}\nexit_code: {:?}\nstdout:\n{}\nstderr:\n{}\ntruncated: {truncated}",
@@ -407,10 +421,34 @@ fn background_command_result(
         "handle": handle,
         "status": status,
         "exit_code": output.exit_code,
-        "stdout": output.stdout,
-        "stderr": output.stderr,
+        "stdout": stdout_details,
+        "stderr": stderr_details,
         "stdout_truncated": stdout_truncated,
         "stderr_truncated": stderr_truncated,
         "truncated": truncated,
     }))
+}
+
+async fn cleanup_background_command(handle: &str) {
+    let Some(mut command) = BACKGROUND_COMMANDS.lock().await.remove(handle) else {
+        return;
+    };
+    let _ = kill_child(&mut command.process).await;
+    let _ = command.stdout_task.await;
+    let _ = command.stderr_task.await;
+}
+
+fn cap_output_details(content: &str, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        return content.to_owned();
+    }
+    let mut capped = String::new();
+    for character in content.chars() {
+        let next_len = capped.len() + character.len_utf8();
+        if next_len > max_bytes {
+            break;
+        }
+        capped.push(character);
+    }
+    capped
 }

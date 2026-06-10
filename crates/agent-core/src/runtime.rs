@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     AgentEvent, AgentMessage, AgentToolCall, CompactionSummary, Content, PermissionDecision,
-    PermissionOperation, PermissionPolicy, QueueKind, StopReason, ToolContext, ToolError,
-    ToolRegistry, ToolResult,
+    PermissionOperation, PermissionPolicy, ProcessSupervisor, QueueKind, StopReason, ToolContext,
+    ToolError, ToolRegistry, ToolResult,
 };
 
 pub type ContextTransform = Arc<dyn Fn(&[AgentMessage]) -> Vec<AgentMessage> + Send + Sync>;
@@ -457,6 +457,7 @@ impl AgentRuntime {
         let model = Arc::clone(&self.model);
         let tools = self.tools.clone();
         let config = self.config.clone();
+        let process_supervisor = ProcessSupervisor::default();
         let (sender, receiver) = mpsc::unbounded_channel();
         let (final_sender, final_receiver) = oneshot::channel();
 
@@ -466,8 +467,17 @@ impl AgentRuntime {
                 turn: emitter.context.turns.saturating_add(1),
             });
             emitter.emit(AgentEvent::MessageAppended { message });
-            if let Err(err) = run_agent_turn(model, config, tools, &mut emitter, cancel_token).await
+            if let Err(err) = run_agent_turn(
+                model,
+                config,
+                tools,
+                &mut emitter,
+                cancel_token,
+                process_supervisor.clone(),
+            )
+            .await
             {
+                process_supervisor.cleanup_all().await;
                 emitter.emit(AgentEvent::RunFinished {
                     turn: emitter.context.turns.saturating_add(1),
                     stop_reason: StopReason::Error,
@@ -709,6 +719,7 @@ async fn run_agent_turn(
     tools: Option<Arc<ToolRegistry>>,
     emitter: &mut EventEmitter,
     cancel_token: CancellationToken,
+    process_supervisor: ProcessSupervisor,
 ) -> Result<(), AgentRuntimeError> {
     let mut final_turn: u32;
     let mut final_stop_reason = StopReason::EndTurn;
@@ -761,9 +772,16 @@ async fn run_agent_turn(
         let Some(registry) = &tools else {
             break;
         };
-        let tool_results =
-            execute_tool_calls(&config, registry, turn, &tool_calls, emitter, &cancel_token)
-                .await?;
+        let tool_results = execute_tool_calls(
+            &config,
+            registry,
+            turn,
+            &tool_calls,
+            emitter,
+            &cancel_token,
+            &process_supervisor,
+        )
+        .await?;
         if cancel_token.is_cancelled() {
             emitter.emit(AgentEvent::TurnFinished {
                 turn,
@@ -787,6 +805,7 @@ async fn run_agent_turn(
         pending_messages = drain_steering_queue(&config, emitter);
     }
 
+    process_supervisor.cleanup_all().await;
     emit_run_finished(emitter, final_turn, final_stop_reason);
     Ok(())
 }
@@ -958,15 +977,32 @@ async fn execute_tool_calls(
     tool_calls: &[AgentToolCall],
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
+    process_supervisor: &ProcessSupervisor,
 ) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
     match config.tool_execution_mode {
         ToolExecutionMode::Sequential => {
-            execute_tool_calls_sequential(config, registry, turn, tool_calls, emitter, cancel_token)
-                .await
+            execute_tool_calls_sequential(
+                config,
+                registry,
+                turn,
+                tool_calls,
+                emitter,
+                cancel_token,
+                process_supervisor,
+            )
+            .await
         }
         ToolExecutionMode::Parallel => {
-            execute_tool_calls_parallel(config, registry, turn, tool_calls, emitter, cancel_token)
-                .await
+            execute_tool_calls_parallel(
+                config,
+                registry,
+                turn,
+                tool_calls,
+                emitter,
+                cancel_token,
+                process_supervisor,
+            )
+            .await
         }
     }
 }
@@ -978,8 +1014,9 @@ async fn execute_tool_calls_sequential(
     tool_calls: &[AgentToolCall],
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
+    process_supervisor: &ProcessSupervisor,
 ) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
-    let tool_context = default_tool_context(config, cancel_token)?;
+    let tool_context = default_tool_context(config, cancel_token, process_supervisor.clone())?;
     let mut results = Vec::new();
     for tool_call in tool_calls {
         emitter.emit(AgentEvent::ToolExecutionStarted {
@@ -1006,9 +1043,8 @@ async fn execute_tool_calls_sequential(
         if !cancel_token.is_cancelled() {
             result = after_tool_result(config, tool_call, result, cancel_token).await;
         }
-        if tool_call.name == "bash" {
-            emit_shell_finished(turn, tool_call, &result, emitter);
-        }
+        emit_shell_finished(turn, tool_call, &result, emitter);
+        emit_terminal_events(turn, tool_call, &result, &tool_context, emitter);
         emitter.emit(AgentEvent::ToolExecutionFinished {
             turn,
             id: tool_call.id.clone(),
@@ -1030,8 +1066,9 @@ async fn execute_tool_calls_parallel(
     tool_calls: &[AgentToolCall],
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
+    process_supervisor: &ProcessSupervisor,
 ) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
-    let tool_context = default_tool_context(config, cancel_token)?;
+    let tool_context = default_tool_context(config, cancel_token, process_supervisor.clone())?;
     let mut completed = Vec::with_capacity(tool_calls.len());
     let mut running = FuturesUnordered::new();
 
@@ -1050,6 +1087,7 @@ async fn execute_tool_calls_parallel(
                 result = after_tool_result(config, &tool_call, result, cancel_token).await;
             }
             emit_shell_finished(turn, &tool_call, &result, emitter);
+            emit_terminal_events(turn, &tool_call, &result, &tool_context, emitter);
             emitter.emit(AgentEvent::ToolExecutionFinished {
                 turn,
                 id: tool_call.id.clone(),
@@ -1095,6 +1133,7 @@ async fn execute_tool_calls_parallel(
     while let Some(outcome) = running.next().await {
         let (index, tool_call, result) = outcome?;
         emit_shell_finished(turn, &tool_call, &result, emitter);
+        emit_terminal_events(turn, &tool_call, &result, &tool_context, emitter);
         emitter.emit(AgentEvent::ToolExecutionFinished {
             turn,
             id: tool_call.id.clone(),
@@ -1554,13 +1593,19 @@ fn permission_operation_for_tool(
             PermissionOperation::FileWrite,
             path_subject(&tool_call.arguments).unwrap_or_else(|| tool_call.name.clone()),
         )),
-        "bash" => Some((
+        "bash" | "terminal" => Some((
             PermissionOperation::Shell,
             tool_call
                 .arguments
                 .get("command")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or("bash")
+                .or_else(|| {
+                    tool_call
+                        .arguments
+                        .get("handle")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .unwrap_or(tool_call.name.as_str())
                 .to_owned(),
         )),
         _ => None,
@@ -1637,9 +1682,104 @@ fn emit_shell_finished(
     });
 }
 
+fn emit_terminal_events(
+    turn: u32,
+    tool_call: &AgentToolCall,
+    result: &ToolResult,
+    tool_context: &ToolContext,
+    emitter: &mut impl EventPublisher,
+) {
+    if tool_call.name != "terminal" {
+        return;
+    }
+    let Some(details) = &result.details else {
+        return;
+    };
+    let Some(handle) = details
+        .get("handle")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+    else {
+        return;
+    };
+    match tool_call
+        .arguments
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("start") => {
+            let command = details
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let cols = details
+                .get("cols")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+                .unwrap_or(80);
+            let rows = details
+                .get("rows")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+                .unwrap_or(24);
+            emitter.emit(AgentEvent::TerminalSessionStarted {
+                turn,
+                id: tool_call.id.clone(),
+                handle,
+                command,
+                cwd: tool_context.workspace_root().to_path_buf(),
+                cols,
+                rows,
+            });
+        }
+        Some("read") => {
+            let output = details
+                .get("output")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if output.is_empty() {
+                return;
+            }
+            let truncated = details
+                .get("truncated")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            emitter.emit(AgentEvent::TerminalSessionOutput {
+                turn,
+                id: tool_call.id.clone(),
+                handle,
+                output,
+                truncated,
+            });
+        }
+        Some("stop") => {
+            let status = details
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("stopped")
+                .to_owned();
+            let exit_code = details
+                .get("exit_code")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|code| i32::try_from(code).ok());
+            emitter.emit(AgentEvent::TerminalSessionFinished {
+                turn,
+                id: tool_call.id.clone(),
+                handle,
+                status,
+                exit_code,
+            });
+        }
+        _ => {}
+    }
+}
+
 fn default_tool_context(
     config: &AgentConfig,
     cancel_token: &CancellationToken,
+    process_supervisor: ProcessSupervisor,
 ) -> Result<ToolContext, AgentRuntimeError> {
     let workspace_root = if let Some(workspace_root) = &config.workspace_root {
         workspace_root.clone()
@@ -1651,6 +1791,7 @@ fn default_tool_context(
             context
                 .with_permission_policy(config.tool_permission_policy.clone())
                 .with_cancel_token(cancel_token.clone())
+                .with_process_supervisor(process_supervisor)
         })
         .map_err(AgentRuntimeError::Tool)
 }

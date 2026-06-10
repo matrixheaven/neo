@@ -4,7 +4,9 @@ mod find;
 mod grep;
 mod list;
 mod mcp;
+mod process_supervisor;
 mod read;
+mod terminal;
 mod write;
 
 use std::{
@@ -24,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 use crate::PermissionPolicy;
 
 pub use mcp::*;
+pub use process_supervisor::{ProcessKind, ProcessSupervisor};
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolResult, ToolError>> + Send + 'a>>;
 
@@ -60,6 +63,7 @@ pub struct ToolContext {
     pub bash_timeout: Duration,
     pub max_output_bytes: usize,
     pub cancel_token: CancellationToken,
+    pub process_supervisor: ProcessSupervisor,
 }
 
 impl ToolContext {
@@ -71,6 +75,7 @@ impl ToolContext {
             bash_timeout: Duration::from_secs(30),
             max_output_bytes: 64 * 1024,
             cancel_token: CancellationToken::new(),
+            process_supervisor: ProcessSupervisor::default(),
         })
     }
 
@@ -89,6 +94,12 @@ impl ToolContext {
     #[must_use]
     pub fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
         self.cancel_token = cancel_token;
+        self
+    }
+
+    #[must_use]
+    pub fn with_process_supervisor(mut self, process_supervisor: ProcessSupervisor) -> Self {
+        self.process_supervisor = process_supervisor;
         self
     }
 
@@ -239,6 +250,7 @@ impl ToolRegistry {
         registry.register(write::WriteTool);
         registry.register(edit::EditTool);
         registry.register(bash::BashTool);
+        registry.register(terminal::TerminalTool);
         registry
     }
 

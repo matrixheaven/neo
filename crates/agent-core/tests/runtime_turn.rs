@@ -3,7 +3,9 @@ use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentRuntimeError,
     AgentToolCall, ApprovalRequest, CompactionSettings, Content, PermissionDecision,
     PermissionOperation, PermissionPolicy, QueueMode, StopReason, Tool, ToolContext, ToolError,
-    ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult, harness::FakeHarness,
+    ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult,
+    harness::{FakeHarness, fake_model},
+    session::JsonlSessionWriter,
 };
 use neo_ai::{
     AiError, AiStreamEvent, ApiKind, ChatRequest, ModelCapabilities, ModelClient, ModelSpec,
@@ -2656,6 +2658,228 @@ async fn runtime_emits_shell_lifecycle_for_bash_tool() {
     )));
 }
 
+#[tokio::test]
+async fn runtime_events_and_session_jsonl_do_not_leak_capped_bash_output() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "bash".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({
+                    "command": "printf keep; printf '%s%s%s%s' runtime -bash -leak -tail",
+                    "max_output_bytes": 4
+                }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_permission_policy(PermissionPolicy::allow_all()),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("run capped shell"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("shell tool should succeed");
+    let event_json = persist_events_to_jsonl_and_read_back(&events).await;
+
+    assert!(!event_json.contains("runtime-bash-leak-tail"));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ShellCommandFinished {
+            stdout,
+            truncated: true,
+            ..
+        } if stdout.len() <= 4
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolExecutionFinished {
+            result,
+            ..
+        } if result
+            .details
+            .as_ref()
+            .and_then(|details| details["stdout"].as_str())
+            .is_some_and(|stdout| stdout.len() <= 4)
+    )));
+}
+
+#[tokio::test]
+async fn runtime_emits_terminal_lifecycle_events_for_terminal_tool() {
+    let model = Arc::new(TerminalLifecycleModel::default());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_root = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(fake_model())
+            .with_workspace_root(workspace.path())
+            .expect("workspace root")
+            .with_tool_permission_policy(PermissionPolicy::allow_all())
+            .with_tool_execution_mode(ToolExecutionMode::Sequential),
+        model,
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("open terminal"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("terminal tool turn should succeed");
+
+    let handle = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::TerminalSessionStarted {
+                handle,
+                command,
+                cols,
+                rows,
+                cwd,
+                ..
+            } if command == "bash --noprofile --norc"
+                && *cols == 44
+                && *rows == 9
+                && cwd == &workspace_root =>
+            {
+                Some(handle.clone())
+            }
+            _ => None,
+        })
+        .expect("terminal start event should expose handle and PTY metadata");
+    assert!(!handle.is_empty());
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TerminalSessionOutput {
+            handle: event_handle,
+            output,
+            ..
+        } if event_handle == &handle && output.contains("terminal-event-ok")
+    )));
+
+    let finished = events.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::TerminalSessionFinished {
+                handle: event_handle,
+                status,
+                ..
+            } if event_handle == &handle && status == "stopped"
+        )
+    });
+    assert!(
+        finished,
+        "terminal stop should emit a provider-neutral finished event"
+    );
+}
+
+#[tokio::test]
+async fn runtime_events_and_session_jsonl_do_not_leak_capped_terminal_output() {
+    let model = Arc::new(CappedTerminalOutputModel::default());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(fake_model())
+            .with_workspace_root(workspace.path())
+            .expect("workspace root")
+            .with_tool_permission_policy(PermissionPolicy::allow_all())
+            .with_tool_execution_mode(ToolExecutionMode::Sequential),
+        model,
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(
+            &mut context,
+            AgentMessage::user_text("read capped terminal"),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("terminal tool turn should succeed");
+    let event_json = persist_events_to_jsonl_and_read_back(&events).await;
+
+    assert!(!event_json.contains("terminal-runtime-leak-tail"));
+    assert!(
+        events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TerminalSessionOutput {
+            output,
+            truncated: true,
+            ..
+        } if output.len() <= 4
+        )),
+        "events should include capped terminal output: {event_json}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolExecutionFinished {
+            name,
+            result,
+            ..
+        } if name == "terminal"
+            && result
+                .details
+                .as_ref()
+                .and_then(|details| details["output"].as_str())
+                .is_some_and(|output| output.len() <= 4)
+        )),
+        "events should include capped terminal ToolExecutionFinished: {event_json}"
+    );
+}
+
+async fn persist_events_to_jsonl_and_read_back(events: &[AgentEvent]) -> String {
+    let temp = tempfile::tempdir().expect("session dir");
+    let path = temp.path().join("session.jsonl");
+    let mut writer = JsonlSessionWriter::create(&path)
+        .await
+        .expect("create session writer");
+    for event in events {
+        writer
+            .append_event(event)
+            .await
+            .expect("append session event");
+    }
+    writer.flush().await.expect("flush session writer");
+    std::fs::read_to_string(path).expect("read session jsonl")
+}
+
 fn blocking_then_terminating_tool_harness() -> FakeHarness {
     FakeHarness::from_turns([
         vec![
@@ -2958,6 +3182,257 @@ impl Tool for SleepEchoTool {
             Ok(ToolResult::ok(text))
         })
     }
+}
+
+#[derive(Default)]
+struct TerminalLifecycleModel {
+    requests: Mutex<Vec<ChatRequest>>,
+}
+
+impl ModelClient for TerminalLifecycleModel {
+    fn stream_chat(
+        &self,
+        request: ChatRequest,
+    ) -> futures::stream::BoxStream<'static, Result<AiStreamEvent, AiError>> {
+        let next = terminal_lifecycle_events_for_request(&request);
+        self.requests
+            .lock()
+            .expect("request lock poisoned")
+            .push(request);
+        futures::stream::iter(next.into_iter().map(Ok)).boxed()
+    }
+}
+
+#[derive(Default)]
+struct CappedTerminalOutputModel {
+    requests: Mutex<Vec<ChatRequest>>,
+}
+
+impl ModelClient for CappedTerminalOutputModel {
+    fn stream_chat(
+        &self,
+        request: ChatRequest,
+    ) -> futures::stream::BoxStream<'static, Result<AiStreamEvent, AiError>> {
+        let next = capped_terminal_output_events_for_request(&request);
+        self.requests
+            .lock()
+            .expect("request lock poisoned")
+            .push(request);
+        futures::stream::iter(next.into_iter().map(Ok)).boxed()
+    }
+}
+
+fn capped_terminal_output_events_for_request(request: &ChatRequest) -> Vec<AiStreamEvent> {
+    let tool_results = request
+        .messages
+        .iter()
+        .filter_map(tool_result_text)
+        .collect::<Vec<_>>();
+    let turn_index = tool_results.len() + 1;
+    let handle = tool_results
+        .iter()
+        .find_map(|content| terminal_handle(content));
+    let last = tool_results.last().map(String::as_str).unwrap_or_default();
+    match handle {
+        None => terminal_tool_turn(
+            turn_index,
+            "tool_start",
+            json!({
+                "mode": "start",
+                "command": "printf term; printf '%s%s%s%s' inal -runtime -leak -tail; sleep 1"
+            }),
+        ),
+        Some(handle) if last.contains("truncated: true") => terminal_tool_turn(
+            turn_index,
+            "tool_stop",
+            json!({
+                "mode": "stop",
+                "handle": handle,
+                "max_output_bytes": 4
+            }),
+        ),
+        Some(_) if last.contains("status: running") => bash_tool_turn(
+            turn_index,
+            "tool_wait",
+            json!({
+                "command": "sleep 0.05; printf waited"
+            }),
+        ),
+        Some(handle) if !last.contains("status: stopped") => terminal_tool_turn(
+            turn_index,
+            "tool_read",
+            json!({
+                "mode": "read",
+                "handle": handle,
+                "max_output_bytes": 4
+            }),
+        ),
+        _ => vec![
+            AiStreamEvent::MessageStart {
+                id: format!("msg_{turn_index}"),
+            },
+            AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    }
+}
+
+fn bash_tool_turn(
+    turn_index: usize,
+    tool_id: &str,
+    arguments: serde_json::Value,
+) -> Vec<AiStreamEvent> {
+    vec![
+        AiStreamEvent::MessageStart {
+            id: format!("msg_{turn_index}"),
+        },
+        AiStreamEvent::ToolCallStart {
+            id: tool_id.to_owned(),
+            name: "bash".to_owned(),
+        },
+        AiStreamEvent::ToolCallEnd {
+            id: tool_id.to_owned(),
+            arguments,
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::ToolUse,
+            usage: None,
+        },
+    ]
+}
+
+fn terminal_lifecycle_events_for_request(request: &ChatRequest) -> Vec<AiStreamEvent> {
+    let tool_results = request
+        .messages
+        .iter()
+        .filter_map(tool_result_text)
+        .collect::<Vec<_>>();
+    let turn_index = tool_results.len() + 1;
+    match tool_results
+        .last()
+        .and_then(|content| terminal_handle(content))
+    {
+        None => terminal_tool_turn(
+            turn_index,
+            "tool_start",
+            json!({
+                "mode": "start",
+                "command": "bash --noprofile --norc",
+                "cols": 44,
+                "rows": 9
+            }),
+        ),
+        Some(handle)
+            if tool_results
+                .last()
+                .is_some_and(|content| content.contains("terminal-event-ok")) =>
+        {
+            terminal_tool_turn(
+                turn_index,
+                "tool_stop",
+                json!({
+                    "mode": "stop",
+                    "handle": handle
+                }),
+            )
+        }
+        Some(handle)
+            if tool_results
+                .last()
+                .is_some_and(|content| content.contains("written: true")) =>
+        {
+            terminal_tool_turn(
+                turn_index,
+                "tool_read",
+                json!({
+                    "mode": "read",
+                    "handle": handle,
+                    "max_output_bytes": 4096
+                }),
+            )
+        }
+        Some(handle)
+            if tool_results
+                .last()
+                .is_some_and(|content| content.contains("status: running")) =>
+        {
+            terminal_tool_turn(
+                turn_index,
+                "tool_write",
+                json!({
+                    "mode": "write",
+                    "handle": handle,
+                    "input": "printf terminal-event-ok\\n\n"
+                }),
+            )
+        }
+        _ => vec![
+            AiStreamEvent::MessageStart {
+                id: format!("msg_{turn_index}"),
+            },
+            AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    }
+}
+
+fn terminal_tool_turn(
+    turn_index: usize,
+    tool_id: &str,
+    arguments: serde_json::Value,
+) -> Vec<AiStreamEvent> {
+    vec![
+        AiStreamEvent::MessageStart {
+            id: format!("msg_{turn_index}"),
+        },
+        AiStreamEvent::ToolCallStart {
+            id: tool_id.to_owned(),
+            name: "terminal".to_owned(),
+        },
+        AiStreamEvent::ToolCallEnd {
+            id: tool_id.to_owned(),
+            arguments,
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::ToolUse,
+            usage: None,
+        },
+    ]
+}
+
+fn tool_result_text(message: &neo_ai::ChatMessage) -> Option<String> {
+    match message {
+        neo_ai::ChatMessage::ToolResult { content, .. } => Some(
+            content
+                .iter()
+                .filter_map(|part| match part {
+                    neo_ai::ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        ),
+        _ => None,
+    }
+}
+
+fn terminal_handle(content: &str) -> Option<String> {
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("handle: "))
+        .map(str::trim)
+        .filter(|handle| !handle.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 #[derive(Clone)]

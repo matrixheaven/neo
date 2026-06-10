@@ -3348,6 +3348,47 @@ transport = "http"
 }
 
 #[test]
+fn print_rejects_hosted_cloud_mcp_when_cloud_client_is_unavailable() {
+    let temp = TempDir::new().expect("tempdir");
+    let provider = MockSseServer::start(vec![]);
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        format!(
+            r#"
+api_base = "{}"
+
+[[mcp.servers]]
+id = "hosted-docs"
+enabled = true
+transport = "http"
+url = "cloud://mcp/hosted-docs"
+"#,
+            provider.url
+        ),
+    )
+    .expect("write hosted MCP config");
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .args(["print", "show", "hosted", "tools"]);
+    let output = command.output().expect("neo command should run");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("hosted MCP server hosted-docs requires an available neo-cloud client"),
+        "stderr should explain unavailable hosted MCP, got: {stderr}"
+    );
+    assert!(!stdout.contains("mcp__hosted_docs__"));
+    assert!(!stderr.contains("placeholder"));
+    assert!(!stderr.contains("fake"));
+}
+
+#[test]
 fn mcp_resources_list_reads_remote_resource_catalog() {
     let temp = TempDir::new().expect("tempdir");
     let mcp_server = MockSseServer::start(vec![

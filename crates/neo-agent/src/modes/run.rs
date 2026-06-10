@@ -6,8 +6,9 @@ use futures::StreamExt;
 use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionMetadataStore};
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, CompactionSettings, Content,
-    McpHttpConfig, McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter,
-    McpToolProvider, PermissionDecision, ToolRegistry,
+    HostedMcpClient, McpHostedConfig, McpHostedToolAdapter, McpHttpConfig, McpHttpToolAdapter,
+    McpStdioConfig, McpStdioToolAdapter, McpToolAdapter, McpToolProvider, PermissionDecision,
+    ToolRegistry,
 };
 use neo_ai::{
     ApiKind, CredentialResolver, ImageData, ImageGenerationClient, ImageGenerationRequest,
@@ -1585,6 +1586,13 @@ fn enabled_mcp_server<'a>(
 }
 
 fn mcp_adapter_for_server(server: &McpServerConfig) -> anyhow::Result<Arc<dyn McpToolAdapter>> {
+    mcp_adapter_for_server_with_hosted_client(server, None)
+}
+
+fn mcp_adapter_for_server_with_hosted_client(
+    server: &McpServerConfig,
+    hosted_client: Option<Arc<dyn HostedMcpClient>>,
+) -> anyhow::Result<Arc<dyn McpToolAdapter>> {
     match server.transport.as_str() {
         "stdio" => {
             let command = server
@@ -1608,6 +1616,20 @@ fn mcp_adapter_for_server(server: &McpServerConfig) -> anyhow::Result<Arc<dyn Mc
                 .url
                 .clone()
                 .with_context(|| format!("missing MCP url for {}", server.id))?;
+            if let Some(hosted_server_id) = parse_hosted_mcp_url(&url, &server.id)? {
+                let Some(client) = hosted_client else {
+                    anyhow::bail!(
+                        "hosted MCP server {} requires an available neo-cloud client",
+                        server.id
+                    );
+                };
+                return Ok(Arc::new(McpHostedToolAdapter::new(
+                    McpHostedConfig {
+                        server_id: hosted_server_id,
+                    },
+                    client,
+                )));
+            }
             Ok(Arc::new(McpHttpToolAdapter::new(McpHttpConfig {
                 url,
                 headers: server.headers.iter().fold(
@@ -1621,6 +1643,21 @@ fn mcp_adapter_for_server(server: &McpServerConfig) -> anyhow::Result<Arc<dyn Mc
         }
         other => anyhow::bail!("unsupported MCP transport for {}: {other}", server.id),
     }
+}
+
+fn parse_hosted_mcp_url(url: &str, configured_id: &str) -> anyhow::Result<Option<String>> {
+    let Some(server_id) = url.strip_prefix("cloud://mcp/") else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        !server_id.is_empty() && !server_id.contains('/'),
+        "invalid hosted MCP url for {configured_id}: expected cloud://mcp/<server-id>"
+    );
+    anyhow::ensure!(
+        server_id == configured_id,
+        "hosted MCP url server id {server_id} does not match configured server {configured_id}"
+    );
+    Ok(Some(server_id.to_owned()))
 }
 
 async fn create_session_path(config: &AppConfig) -> anyhow::Result<std::path::PathBuf> {

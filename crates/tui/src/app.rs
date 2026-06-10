@@ -566,6 +566,9 @@ impl NeoTuiApp {
             AgentEvent::RunStarted { .. }
             | AgentEvent::TurnStarted { .. }
             | AgentEvent::MessageFinished { .. }
+            | AgentEvent::TerminalSessionStarted { .. }
+            | AgentEvent::TerminalSessionOutput { .. }
+            | AgentEvent::TerminalSessionFinished { .. }
             | AgentEvent::RunFinished { .. } => {}
         }
     }

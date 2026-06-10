@@ -9,9 +9,10 @@ use std::{
 
 use async_trait::async_trait;
 use neo_agent_core::{
-    McpError, McpHttpConfig, McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter,
-    McpToolAdapter, McpToolCall, McpToolDefinition, McpToolProvider, McpToolResponse,
-    PermissionPolicy, ToolContext, ToolRegistry,
+    HostedMcpClient, McpError, McpHostedConfig, McpHostedToolAdapter, McpHttpConfig,
+    McpHttpToolAdapter, McpResourceDefinition, McpResourceRead, McpResourceUpdate, McpStdioConfig,
+    McpStdioToolAdapter, McpToolAdapter, McpToolCall, McpToolDefinition, McpToolProvider,
+    McpToolResponse, PermissionPolicy, ToolContext, ToolRegistry,
 };
 use serde_json::{Value, json};
 
@@ -986,6 +987,52 @@ async fn mcp_tool_execution_surfaces_adapter_errors() {
     );
 }
 
+#[tokio::test]
+async fn mcp_hosted_adapter_delegates_discovery_and_calls_to_cloud_client() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let client = Arc::new(MockHostedMcpClient::new(vec![McpToolDefinition::new(
+        "search",
+        "Search hosted docs",
+        json!({ "type": "object" }),
+    )]));
+    client.push_response(McpToolResponse::ok("found hosted architecture"));
+
+    let adapter = Arc::new(McpHostedToolAdapter::new(
+        McpHostedConfig {
+            server_id: "hosted-docs".to_owned(),
+        },
+        Arc::clone(&client) as Arc<dyn HostedMcpClient>,
+    ));
+    let provider = McpToolProvider::discover("hosted_docs", Arc::clone(&adapter))
+        .await
+        .expect("discover hosted provider");
+    let mut registry = ToolRegistry::new();
+    provider.register_into(&mut registry);
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let result = registry
+        .run(
+            "mcp__hosted_docs__search",
+            &context,
+            json!({ "query": "runtime tools" }),
+        )
+        .await
+        .expect("run hosted mcp tool");
+
+    assert_eq!(result.content, "found hosted architecture");
+    assert_eq!(client.listed_servers(), vec!["hosted-docs".to_owned()]);
+    assert_eq!(
+        client.calls(),
+        vec![HostedMcpCall {
+            server_id: "hosted-docs".to_owned(),
+            name: "search".to_owned(),
+            arguments: json!({ "query": "runtime tools" }),
+        }]
+    );
+}
+
 #[derive(Debug)]
 struct MockMcpAdapter {
     tools: Vec<McpToolDefinition>,
@@ -1041,6 +1088,98 @@ impl McpToolAdapter for MockMcpAdapter {
             .expect("responses lock")
             .pop()
             .unwrap_or_else(|| Err(McpError::protocol("missing mock response")))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct HostedMcpCall {
+    server_id: String,
+    name: String,
+    arguments: Value,
+}
+
+#[derive(Debug)]
+struct MockHostedMcpClient {
+    tools: Vec<McpToolDefinition>,
+    listed_servers: Mutex<Vec<String>>,
+    calls: Mutex<Vec<HostedMcpCall>>,
+    responses: Mutex<Vec<Result<McpToolResponse, McpError>>>,
+}
+
+impl MockHostedMcpClient {
+    fn new(tools: Vec<McpToolDefinition>) -> Self {
+        Self {
+            tools,
+            listed_servers: Mutex::new(Vec::new()),
+            calls: Mutex::new(Vec::new()),
+            responses: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn push_response(&self, response: McpToolResponse) {
+        self.responses
+            .lock()
+            .expect("responses lock")
+            .push(Ok(response));
+    }
+
+    fn listed_servers(&self) -> Vec<String> {
+        self.listed_servers
+            .lock()
+            .expect("listed servers lock")
+            .clone()
+    }
+
+    fn calls(&self) -> Vec<HostedMcpCall> {
+        self.calls.lock().expect("calls lock").clone()
+    }
+}
+
+#[async_trait]
+impl HostedMcpClient for MockHostedMcpClient {
+    async fn list_tools(&self, server_id: &str) -> Result<Vec<McpToolDefinition>, McpError> {
+        self.listed_servers
+            .lock()
+            .expect("listed servers lock")
+            .push(server_id.to_owned());
+        Ok(self.tools.clone())
+    }
+
+    async fn call_tool(
+        &self,
+        server_id: &str,
+        name: &str,
+        arguments: Value,
+    ) -> Result<McpToolResponse, McpError> {
+        self.calls.lock().expect("calls lock").push(HostedMcpCall {
+            server_id: server_id.to_owned(),
+            name: name.to_owned(),
+            arguments,
+        });
+        self.responses
+            .lock()
+            .expect("responses lock")
+            .pop()
+            .unwrap_or_else(|| Err(McpError::protocol("missing hosted mock response")))
+    }
+
+    async fn list_resources(
+        &self,
+        _server_id: &str,
+    ) -> Result<Vec<McpResourceDefinition>, McpError> {
+        Err(McpError::protocol("resources not used in this test"))
+    }
+
+    async fn read_resource(
+        &self,
+        _server_id: &str,
+        _uri: &str,
+    ) -> Result<McpResourceRead, McpError> {
+        Err(McpError::protocol("resources not used in this test"))
+    }
+
+    async fn next_resource_update(&self, _server_id: &str) -> Result<McpResourceUpdate, McpError> {
+        Err(McpError::protocol("resources not used in this test"))
     }
 }
 

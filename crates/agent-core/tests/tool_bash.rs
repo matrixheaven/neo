@@ -133,6 +133,87 @@ async fn bash_without_mode_remains_foreground_compatible() {
 }
 
 #[tokio::test]
+async fn bash_foreground_details_do_not_leak_output_past_max_output_bytes() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let result = registry
+        .run(
+            "bash",
+            &context,
+            json!({
+                "command": "printf 'keep-secret-leak-tail'",
+                "max_output_bytes": 4
+            }),
+        )
+        .await
+        .expect("foreground bash should run");
+    let serialized = serde_json::to_string(&result).expect("result serializes");
+
+    assert!(result.content.contains("truncated: true"));
+    assert!(!result.content.contains("secret-leak-tail"));
+    assert!(!serialized.contains("secret-leak-tail"));
+    let details = result.details.expect("details");
+    assert_eq!(details["stdout"], "keep");
+    assert_eq!(details["stdout_truncated"], true);
+}
+
+#[tokio::test]
+async fn bash_background_details_do_not_leak_output_past_max_output_bytes() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let started = registry
+        .run(
+            "bash",
+            &context,
+            json!({
+                "mode": "start",
+                "command": "printf 'keep-background-leak-tail'",
+                "max_output_bytes": 4
+            }),
+        )
+        .await
+        .expect("background start should succeed");
+    let handle = started.details.as_ref().expect("start details")["handle"]
+        .as_str()
+        .expect("handle")
+        .to_owned();
+
+    let mut result = None;
+    for _ in 0..20 {
+        let polled = registry
+            .run(
+                "bash",
+                &context,
+                json!({ "mode": "poll", "handle": handle, "max_output_bytes": 4 }),
+            )
+            .await
+            .expect("background poll should succeed");
+        if polled.details.as_ref().expect("poll details")["status"] == "exited" {
+            result = Some(polled);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let result = result.expect("background command should exit");
+    let serialized = serde_json::to_string(&result).expect("result serializes");
+
+    assert!(result.content.contains("truncated: true"));
+    assert!(!result.content.contains("background-leak-tail"));
+    assert!(!serialized.contains("background-leak-tail"));
+    let details = result.details.expect("details");
+    assert_eq!(details["stdout"], "keep");
+    assert_eq!(details["stdout_truncated"], true);
+}
+
+#[tokio::test]
 async fn bash_foreground_kills_child_when_context_is_cancelled() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
