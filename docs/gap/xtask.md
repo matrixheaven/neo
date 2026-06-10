@@ -7,17 +7,30 @@
   -D warnings`, and `cargo test -p xtask`.
 - `cargo run -p xtask -- check --docs` runs the docs/examples parity gate:
   local Markdown link validation for `README.md`, `docs/**/*.md`, and
-  `examples/**/*.md`; production fake/local/placeholder guidance scans; and
-  stale gap-claim scans for implemented MCP/session/extension, runtime hook,
-  HTTP MCP JSON subscribe event-reader and subscribe ACK event-channel URLs,
-  TUI diff/paste/terminal image/Sixel protocol, local session export-json,
-  provider thinking-payload surfaces, reasoning replay controls, and stale
-  Anthropic/Google thinking-translation claims; TOML, JSON, and Rust
-  example harness validation for the documented example artifacts; and
+  `examples/**/*.md`; production fake/local/placeholder guidance scans; auth
+  token leak checks in docs/export examples; package-signature fixture checks;
+  generated cloud API schema link checks; and stale gap-claim scans for
+  implemented MCP/session/extension, runtime hook, HTTP MCP JSON subscribe
+  event-reader and subscribe ACK event-channel URLs, TUI diff/paste/terminal
+  image/Sixel protocol, local session export-json, provider thinking-payload
+  surfaces, reasoning replay controls, and stale Anthropic/Google
+  thinking-translation claims; TOML, JSON, and Rust example harness validation
+  for the documented example artifacts; optional generated catalog schema
+  validation when such artifacts exist; and
   `cargo check --manifest-path examples/rust/Cargo.toml
   --examples`.
 - `cargo run -p xtask -- parity` runs the docs/examples parity gate without the
   fmt, clippy, and test steps.
+- `cargo run -p xtask -- catalog check` validates generated model catalog
+  schema artifacts. It currently fails with an actionable missing-artifact
+  message until a generated schema lands under one of the supported generated
+  docs/example paths.
+- `cargo run -p xtask -- release-smoke` runs the docs/examples parity gate,
+  validates generated catalog schemas if present, chooses a random loopback
+  port, and is wired to start self-hosted `neo-cloud` before CLI smoke flows.
+  Because this checkout does not yet contain `crates/neo-cloud/Cargo.toml`, the
+  command fails with a clear dependency error unless
+  `NEO_RELEASE_SMOKE_CLOUD_CMD` supplies an explicit cloud start command.
 - `cargo run -p xtask -- check --workspace` opts into full workspace fmt,
   clippy, and tests.
 - `--quick` remains an xtask-only compatibility alias.
@@ -49,11 +62,13 @@ subscribe ACK claims once `start_resource_event_reader` exists, and stale
 terminal image-protocol claims once real terminal image protocol symbols land.
 It also rejects stale claims for MCP subscribe ACK event-channel URL discovery,
 local `sessions export-json` / `sessions.export_json`, Sixel output primitives,
-and `--thinking off` signed-reasoning replay suppression once their symbols
-land. It still allows honest gaps for hosted MCP management, Link-header or
+`--thinking off` signed-reasoning replay suppression, and self-hosted
+`neo-cloud` release-smoke coverage once their symbols or packages land. It
+still allows honest gaps for hosted MCP management, Link-header or
 provider-specific MCP discovery beyond configured endpoints and subscribe ACK
-URLs, hosted share, OAuth login, runtime image-protocol detection/negotiation,
-advanced diff affordances, and other surfaces that are not implemented.
+URLs, hosted share, OAuth login, cloud package/runtime work that has not
+landed, runtime image-protocol detection/negotiation, advanced diff
+affordances, and other surfaces that are not implemented.
 
 ## Pi Parity Pressure
 
@@ -65,7 +80,10 @@ not inherit those Node-specific gates.
 
 - Keep the deployment-fixture guidance scan narrow enough that honest "not
   implemented" gap language and provider-rejection documentation remain allowed.
-- Add generated-docs checks only after Neo has stable generated documentation
-  artifacts.
+- Land a generated model catalog schema artifact so `xtask catalog check` can
+  become part of the required gate instead of reporting the missing artifact.
+- Land `crates/neo-cloud` and the matching CLI cloud smoke command shape, or
+  document an explicit `NEO_RELEASE_SMOKE_CLOUD_CMD`, before treating
+  `release-smoke` as a passing release gate.
 - Keep the default gate narrow while independent crate workers are making API
   migrations.

@@ -1,8 +1,11 @@
 use std::{
     collections::BTreeSet,
-    fs,
+    env, fs,
+    net::TcpListener,
     path::{Component, Path, PathBuf},
-    process::Command,
+    process::{Child, Command},
+    thread,
+    time::Duration,
 };
 
 use anyhow::{Result, bail};
@@ -20,6 +23,17 @@ enum XtaskCommand {
     Check(CheckOptions),
     /// Run the docs/examples parity gate without fmt, clippy, or tests.
     Parity,
+    /// Run the release smoke gate against a self-hosted neo-cloud.
+    ReleaseSmoke,
+    /// Validate generated catalog artifacts.
+    #[command(subcommand)]
+    Catalog(CatalogCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum CatalogCommand {
+    /// Validate generated model catalog schema artifacts.
+    Check(CatalogCheckOptions),
 }
 
 #[derive(Debug, Clone, Default, clap::Args)]
@@ -35,6 +49,9 @@ struct CheckOptions {
     quick: bool,
 }
 
+#[derive(Debug, Clone, Default, clap::Args)]
+struct CatalogCheckOptions {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CommandStep {
     program: String,
@@ -48,6 +65,14 @@ impl CommandStep {
             args: args.iter().map(ToString::to_string).collect(),
         }
     }
+
+    fn display(&self) -> String {
+        if self.args.is_empty() {
+            self.program.clone()
+        } else {
+            format!("{} {}", self.program, self.args.join(" "))
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -58,6 +83,8 @@ fn main() -> Result<()> {
     {
         XtaskCommand::Check(options) => check(&options),
         XtaskCommand::Parity => run_parity_gate(Path::new(".")),
+        XtaskCommand::ReleaseSmoke => run_release_smoke(Path::new(".")),
+        XtaskCommand::Catalog(CatalogCommand::Check(options)) => catalog_check(&options),
     }
 }
 
@@ -84,10 +111,74 @@ fn run_parity_gate(root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn catalog_check(_options: &CatalogCheckOptions) -> Result<()> {
+    let report = validate_catalog_schemas(Path::new("."), CatalogRequirement::Required)?;
+    if !report.errors.is_empty() {
+        bail!(
+            "catalog schema validation failed:\n{}",
+            report.errors.join("\n")
+        );
+    }
+    println!(
+        "catalog schema validation passed ({} artifact{})",
+        report.checked,
+        if report.checked == 1 { "" } else { "s" }
+    );
+    Ok(())
+}
+
+fn run_release_smoke(root: &Path) -> Result<()> {
+    run_parity_gate(root)?;
+
+    let catalog_report = validate_catalog_schemas(root, CatalogRequirement::Optional)?;
+    if !catalog_report.errors.is_empty() {
+        bail!(
+            "release smoke catalog validation failed:\n{}",
+            catalog_report.errors.join("\n")
+        );
+    }
+
+    let cloud_override = env::var("NEO_RELEASE_SMOKE_CLOUD_CMD").ok();
+    let dependency_errors = if cloud_override
+        .as_deref()
+        .is_some_and(|command| !command.trim().is_empty())
+    {
+        release_smoke_dependency_errors_with_override(root, cloud_override.as_deref())?
+    } else {
+        release_smoke_dependency_errors(root)?
+    };
+    if !dependency_errors.is_empty() {
+        bail!(
+            "release smoke dependencies are not ready:\n{}",
+            dependency_errors.join("\n")
+        );
+    }
+
+    let port = random_local_port()?;
+    let cloud_step = release_smoke_cloud_step(port, cloud_override.as_deref());
+    let mut cloud = spawn_release_smoke_cloud(&cloud_step)?;
+    thread::sleep(Duration::from_millis(500));
+    if let Some(status) = cloud.try_wait()? {
+        bail!(
+            "self-hosted neo-cloud exited before CLI smoke flows could run with status {status}; command was `{}`",
+            cloud_step.display()
+        );
+    }
+
+    let result = run_release_smoke_cli_flows(port);
+    stop_release_smoke_cloud(&mut cloud);
+    result?;
+
+    println!("release smoke passed on http://127.0.0.1:{port}");
+    Ok(())
+}
+
 fn validate_parity_gate(root: &Path) -> Result<Vec<String>> {
     let mut errors = validate_docs_links(root)?;
+    errors.extend(validate_generated_cloud_api_schema_links(root)?);
     errors.extend(validate_docs_parity(root)?);
     errors.extend(validate_examples(root)?);
+    errors.extend(validate_catalog_schemas(root, CatalogRequirement::Optional)?.errors);
     errors.sort();
     Ok(errors)
 }
@@ -131,12 +222,128 @@ fn check_steps(options: &CheckOptions) -> Vec<CommandStep> {
 }
 
 fn run(step: &CommandStep) -> Result<()> {
-    println!("running: {} {}", step.program, step.args.join(" "));
+    println!("running: {}", step.display());
     let status = Command::new(&step.program).args(&step.args).status()?;
     if !status.success() {
-        bail!("{} {} failed", step.program, step.args.join(" "));
+        bail!("{} failed", step.display());
     }
     Ok(())
+}
+
+fn run_release_smoke_cli_flows(port: u16) -> Result<()> {
+    for step in release_smoke_cli_steps(port) {
+        run(&step)?;
+    }
+    Ok(())
+}
+
+fn release_smoke_cli_steps(port: u16) -> Vec<CommandStep> {
+    vec![
+        CommandStep::new("cargo", &["run", "-p", "neo-agent", "--", "--help"]),
+        CommandStep::new("cargo", &["run", "-p", "neo-agent", "--", "models", "list"]),
+        CommandStep::new(
+            "cargo",
+            &[
+                "run",
+                "-p",
+                "neo-agent",
+                "--",
+                "cloud",
+                "status",
+                "--api-base",
+                &format!("http://127.0.0.1:{port}"),
+            ],
+        ),
+    ]
+}
+
+fn release_smoke_dependency_errors(root: &Path) -> Result<Vec<String>> {
+    release_smoke_dependency_errors_with_override(root, None)
+}
+
+fn release_smoke_dependency_errors_with_override(
+    root: &Path,
+    cloud_override: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut errors = Vec::new();
+    let has_cloud_override = cloud_override.is_some_and(|command| !command.trim().is_empty());
+
+    let cloud_manifest = root.join("crates").join("neo-cloud").join("Cargo.toml");
+    if !cloud_manifest.exists() && !has_cloud_override {
+        errors.push(
+            "missing self-hosted neo-cloud package at crates/neo-cloud/Cargo.toml; land the cloud worker output or set NEO_RELEASE_SMOKE_CLOUD_CMD to an explicit start command"
+                .to_owned(),
+        );
+    }
+    if (cloud_manifest.exists() || has_cloud_override) && !release_smoke_cli_flow_exists(root)? {
+        errors.push(
+            "missing neo-agent cloud CLI smoke flow; expected crates/neo-agent/src/cli.rs to expose `cloud status --api-base <URL>` before release-smoke can exercise neo-cloud"
+                .to_owned(),
+        );
+    }
+
+    Ok(errors)
+}
+
+fn release_smoke_cli_flow_exists(root: &Path) -> Result<bool> {
+    let source = read_optional_source(&root.join("crates/neo-agent/src/cli.rs"))?;
+    let normalized = source.to_lowercase().replace(['-', '_'], " ");
+    Ok(normalized.contains("cloud")
+        && normalized.contains("status")
+        && normalized.contains("api base"))
+}
+
+fn release_smoke_cloud_step(port: u16, cloud_override: Option<&str>) -> CommandStep {
+    if let Some(command) = cloud_override
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+    {
+        return override_command_step(command, port);
+    }
+
+    CommandStep::new(
+        "cargo",
+        &[
+            "run",
+            "-p",
+            "neo-cloud",
+            "--",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+        ],
+    )
+}
+
+fn override_command_step(command: &str, port: u16) -> CommandStep {
+    let substituted = command
+        .replace("{host}", "127.0.0.1")
+        .replace("{port}", &port.to_string());
+    let mut parts = substituted.split_whitespace();
+    let program = parts.next().unwrap_or("neo-cloud").to_owned();
+    let args = parts.map(ToString::to_string).collect();
+    CommandStep { program, args }
+}
+
+fn spawn_release_smoke_cloud(step: &CommandStep) -> Result<Child> {
+    println!("starting self-hosted cloud: {}", step.display());
+    Command::new(&step.program)
+        .args(&step.args)
+        .spawn()
+        .map_err(Into::into)
+}
+
+fn stop_release_smoke_cloud(child: &mut Child) {
+    if child.try_wait().is_ok_and(|status| status.is_none()) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+fn random_local_port() -> Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    Ok(listener.local_addr()?.port())
 }
 
 fn validate_docs_links(root: &Path) -> Result<Vec<String>> {
@@ -203,7 +410,8 @@ fn validate_docs_parity(root: &Path) -> Result<Vec<String>> {
                 continue;
             }
 
-            if let Some(reason) = parity_line_violation(trimmed, explicit_fixture_path, &code_truth)
+            if let Some(reason) =
+                parity_line_violation(&relative_file, trimmed, explicit_fixture_path, &code_truth)
             {
                 errors.push(format!(
                     "{}:{line_number} contains {reason}: {trimmed}",
@@ -219,11 +427,9 @@ fn validate_docs_parity(root: &Path) -> Result<Vec<String>> {
 fn parity_scan_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = production_scan_files(root)?;
     out.extend(markdown_files(root)?);
-    for dir in ["examples/config", "examples/tools"] {
-        let path = root.join(dir);
-        if path.is_dir() {
-            collect_files_with_extensions(&path, &["toml", "json"], &mut out)?;
-        }
+    let examples = root.join("examples");
+    if examples.is_dir() {
+        collect_files_with_extensions(&examples, &["toml", "json", "yaml", "yml"], &mut out)?;
     }
     out.sort();
     out.dedup();
@@ -257,6 +463,7 @@ enum ImplementedSurface {
     StdioMcpProcessAdapter,
     HttpMcpJsonSubscribeEventReader,
     McpSubscribeEventStreamUrl,
+    SelfHostedNeoCloud,
     ExtensionLifecycleCommands,
     SessionMetadataBranching,
     SessionExportJson,
@@ -323,6 +530,9 @@ impl ParityCodeTruth {
         insert_interactive_surfaces(&sources, &mut implemented);
         insert_tui_surfaces(&sources, &mut implemented);
         insert_ai_surfaces(&sources, &mut implemented);
+        if root.join("crates/neo-cloud/Cargo.toml").exists() {
+            implemented.insert(ImplementedSurface::SelfHostedNeoCloud);
+        }
 
         Ok(Self { implemented })
     }
@@ -614,6 +824,7 @@ fn parity_line_is_fixture_safe(line: &str) -> bool {
 }
 
 fn parity_line_violation(
+    relative_file: &Path,
     line: &str,
     explicit_fixture_path: bool,
     code_truth: &ParityCodeTruth,
@@ -630,6 +841,16 @@ fn parity_line_violation(
             || normalized.contains("allowlist"))
     {
         return None;
+    }
+
+    if should_scan_auth_token_leaks(relative_file) && contains_auth_token_leak(line) {
+        return Some("auth token leak");
+    }
+
+    if should_scan_package_signature_fixtures(relative_file)
+        && contains_private_package_signature_material(line)
+    {
+        return Some("private package signature material");
     }
 
     let production_context = contains_any_word(
@@ -692,14 +913,122 @@ fn parity_line_violation(
     None
 }
 
+fn should_scan_auth_token_leaks(path: &Path) -> bool {
+    let text = normalize_path(path).to_string_lossy().to_lowercase();
+    text.starts_with("docs/") || text.starts_with("examples/")
+}
+
+fn should_scan_package_signature_fixtures(path: &Path) -> bool {
+    let text = normalize_path(path).to_string_lossy().to_lowercase();
+    (text.starts_with("examples/") || text.starts_with("docs/"))
+        && (text.contains("signature") || text.contains("package"))
+}
+
+fn contains_auth_token_leak(line: &str) -> bool {
+    contains_bearer_token_leak(line) || contains_inline_api_key_leak(line)
+}
+
+fn contains_bearer_token_leak(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    let Some(bearer_index) = lower.find("bearer ") else {
+        return false;
+    };
+    let token = line[bearer_index + "bearer ".len()..]
+        .split(|character: char| character.is_whitespace() || matches!(character, '"' | '\'' | '`'))
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|character: char| {
+            matches!(character, ',' | ';' | ')' | ']' | '}' | '"' | '\'' | '`')
+        });
+    looks_like_secret_token(token)
+}
+
+fn contains_inline_api_key_leak(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    if lower.contains("api_key_env") || lower.contains("api key env") {
+        return false;
+    }
+
+    for marker in ["api_key", "apikey", "api-key", "token", "auth_token"] {
+        let Some(index) = lower.find(marker) else {
+            continue;
+        };
+        let value = line[index + marker.len()..]
+            .trim_start_matches(|character: char| {
+                character.is_whitespace() || matches!(character, '=' | ':' | '"' | '\'' | '`')
+            })
+            .split(|character: char| {
+                character.is_whitespace() || matches!(character, '"' | '\'' | '`' | ',' | ';')
+            })
+            .next()
+            .unwrap_or_default();
+        if looks_like_secret_token(value) {
+            return true;
+        }
+    }
+    false
+}
+
+fn looks_like_secret_token(value: &str) -> bool {
+    let token = value.trim();
+    if token.len() < 20 {
+        return false;
+    }
+    if token.contains('$')
+        || token.contains('<')
+        || token.contains('>')
+        || token.contains('{')
+        || token.contains('}')
+        || token.contains("...")
+        || token.eq_ignore_ascii_case("redacted")
+        || token.eq_ignore_ascii_case("example")
+    {
+        return false;
+    }
+    let lower = token.to_lowercase();
+    lower.starts_with("sk-")
+        || lower.starts_with("pk-")
+        || lower.starts_with("ghp_")
+        || lower.starts_with("github_pat_")
+        || token.chars().filter(char::is_ascii_alphanumeric).count() >= 24
+}
+
+fn contains_private_package_signature_material(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    (lower.contains("privatekey") || lower.contains("private_key") || lower.contains("private key"))
+        && (lower.contains("begin private key")
+            || lower.contains("-----begin")
+            || lower.contains("\"signature\"")
+            || lower.contains("'signature'"))
+}
+
 fn stale_gap_claim_violation(
     normalized: &str,
     code_truth: &ParityCodeTruth,
 ) -> Option<&'static str> {
-    stale_backend_gap_claim_violation(normalized, code_truth)
+    stale_cloud_gap_claim_violation(normalized, code_truth)
+        .or_else(|| stale_backend_gap_claim_violation(normalized, code_truth))
         .or_else(|| stale_interactive_gap_claim_violation(normalized, code_truth))
         .or_else(|| stale_tui_gap_claim_violation(normalized, code_truth))
         .or_else(|| stale_ai_gap_claim_violation(normalized, code_truth))
+}
+
+fn stale_cloud_gap_claim_violation(
+    normalized: &str,
+    code_truth: &ParityCodeTruth,
+) -> Option<&'static str> {
+    if code_truth.has(ImplementedSurface::SelfHostedNeoCloud)
+        && normalized.contains("neo cloud")
+        && normalized.contains("smoke")
+        && (normalized.contains("future work")
+            || normalized.contains("missing")
+            || normalized.contains("not implemented")
+            || normalized.contains("remain"))
+    {
+        return Some("stale self-hosted cloud smoke gap claim");
+    }
+
+    None
 }
 
 fn stale_backend_gap_claim_violation(
@@ -1249,6 +1578,144 @@ fn validate_read_file_schema(root: &Path, path: &Path) -> Result<Vec<String>> {
     }
 
     Ok(errors)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogRequirement {
+    Optional,
+    Required,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CatalogValidationReport {
+    checked: usize,
+    errors: Vec<String>,
+}
+
+fn validate_catalog_schemas(
+    root: &Path,
+    requirement: CatalogRequirement,
+) -> Result<CatalogValidationReport> {
+    let mut checked = 0;
+    let mut errors = Vec::new();
+    for path in catalog_schema_candidate_paths(root) {
+        if !path.exists() {
+            continue;
+        }
+        checked += 1;
+        let source = fs::read_to_string(&path)?;
+        if !looks_like_json_object(&source) {
+            errors.push(format!(
+                "{} must be a JSON object schema",
+                relative_path(root, &path).display()
+            ));
+            continue;
+        }
+        if !json_field_equals(&source, "type", "object") || !source.contains("\"properties\"") {
+            errors.push(format!(
+                "{} must be an object schema with `properties`",
+                relative_path(root, &path).display()
+            ));
+        }
+    }
+
+    if checked == 0 && requirement == CatalogRequirement::Required {
+        errors.push(format!(
+            "missing generated model catalog schema; expected one of {}",
+            human_join(&catalog_schema_candidate_labels())
+        ));
+    }
+
+    errors.sort();
+    Ok(CatalogValidationReport { checked, errors })
+}
+
+fn catalog_schema_candidate_paths(root: &Path) -> Vec<PathBuf> {
+    catalog_schema_candidate_labels()
+        .into_iter()
+        .map(|path| root.join(path))
+        .collect()
+}
+
+fn catalog_schema_candidate_labels() -> Vec<&'static str> {
+    vec![
+        "docs/generated/model-catalog.schema.json",
+        "docs/generated/models.schema.json",
+        "docs/reference/model-catalog.schema.json",
+        "examples/catalog/model-catalog.schema.json",
+    ]
+}
+
+fn human_join(values: &[&str]) -> String {
+    match values {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [first, second] => format!("{first} or {second}"),
+        [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
+    }
+}
+
+fn validate_generated_cloud_api_schema_links(root: &Path) -> Result<Vec<String>> {
+    let link_pattern = Regex::new(r"\[[^\]]+\]\(([^)]+)\)")?;
+    let mut errors = Vec::new();
+    for file in markdown_files(root)? {
+        let source = fs::read_to_string(&file)?;
+        let relative_file = relative_path(root, &file);
+        let Some(parent) = file.parent() else {
+            continue;
+        };
+
+        for (index, line) in source.lines().enumerate() {
+            for captures in link_pattern.captures_iter(line) {
+                let Some(raw_target) = captures.get(1).map(|target| target.as_str().trim()) else {
+                    continue;
+                };
+                let Some(target) = local_link_target(raw_target) else {
+                    continue;
+                };
+                let normalized_target = normalize_path(Path::new(target));
+                if !is_generated_cloud_api_schema_path(&normalized_target) {
+                    continue;
+                }
+                let target_path = parent.join(&normalized_target);
+                if !target_path.exists() {
+                    errors.push(format!(
+                        "{}:{} links to missing generated cloud API schema {}",
+                        relative_file.display(),
+                        index + 1,
+                        relative_path(root, &target_path).display()
+                    ));
+                }
+            }
+        }
+    }
+
+    errors.sort();
+    Ok(errors)
+}
+
+fn is_generated_cloud_api_schema_path(path: &Path) -> bool {
+    let text = normalize_path(path).to_string_lossy().to_lowercase();
+    text.contains("generated")
+        && text.contains("cloud")
+        && (text.contains("openapi") || text.contains("schema"))
+        && path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+}
+
+fn looks_like_json_object(source: &str) -> bool {
+    let trimmed = source.trim();
+    trimmed.starts_with('{') && trimmed.ends_with('}')
+}
+
+fn json_field_equals(source: &str, field: &str, expected: &str) -> bool {
+    let pattern = format!(
+        r#""{}"\s*:\s*"{}""#,
+        regex::escape(field),
+        regex::escape(expected)
+    );
+    Regex::new(&pattern).is_ok_and(|regex| regex.is_match(source))
 }
 
 fn top_level_toml_keys(source: &str) -> Vec<&str> {
@@ -2461,6 +2928,279 @@ mod tests {
             errors,
             vec![
                 "examples/rust/Cargo.toml does not declare example target for examples/rust/tool_schema.rs".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn cli_accepts_release_smoke_and_catalog_check_commands() {
+        assert!(matches!(
+            Cli::try_parse_from(["xtask", "release-smoke"])
+                .expect("release-smoke command should parse")
+                .command,
+            Some(XtaskCommand::ReleaseSmoke)
+        ));
+
+        assert!(matches!(
+            Cli::try_parse_from(["xtask", "catalog", "check"])
+                .expect("catalog check command should parse")
+                .command,
+            Some(XtaskCommand::Catalog(CatalogCommand::Check(_)))
+        ));
+    }
+
+    #[test]
+    fn release_smoke_reports_missing_self_hosted_cloud_package() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("crates").join("neo-agent"))
+            .expect("neo-agent dir");
+        std::fs::write(
+            dir.path()
+                .join("crates")
+                .join("neo-agent")
+                .join("Cargo.toml"),
+            "[package]\nname = \"neo-agent\"\n",
+        )
+        .expect("neo-agent manifest");
+
+        let errors = release_smoke_dependency_errors(dir.path()).expect("dependency scan");
+
+        assert_eq!(
+            errors,
+            vec![
+                "missing self-hosted neo-cloud package at crates/neo-cloud/Cargo.toml; land the cloud worker output or set NEO_RELEASE_SMOKE_CLOUD_CMD to an explicit start command".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn release_smoke_reports_missing_cloud_cli_flow_after_cloud_package_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("crates").join("neo-cloud")).expect("cloud dir");
+        std::fs::write(
+            dir.path()
+                .join("crates")
+                .join("neo-cloud")
+                .join("Cargo.toml"),
+            "[package]\nname = \"neo-cloud\"\n",
+        )
+        .expect("cloud manifest");
+        let cli_dir = dir.path().join("crates").join("neo-agent").join("src");
+        std::fs::create_dir_all(&cli_dir).expect("cli dir");
+        std::fs::write(cli_dir.join("cli.rs"), "pub enum Command { Models }\n")
+            .expect("cli source");
+
+        let errors = release_smoke_dependency_errors(dir.path()).expect("dependency scan");
+
+        assert_eq!(
+            errors,
+            vec![
+                "missing neo-agent cloud CLI smoke flow; expected crates/neo-agent/src/cli.rs to expose `cloud status --api-base <URL>` before release-smoke can exercise neo-cloud".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn release_smoke_builds_cloud_start_step_with_random_port() {
+        let step = release_smoke_cloud_step(49152, None);
+
+        assert_eq!(
+            step,
+            CommandStep::new(
+                "cargo",
+                &[
+                    "run",
+                    "-p",
+                    "neo-cloud",
+                    "--",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "49152"
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn catalog_check_validates_generated_catalog_schema_shape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let generated = dir.path().join("docs").join("generated");
+        std::fs::create_dir_all(&generated).expect("generated docs dir");
+        std::fs::write(
+            generated.join("model-catalog.schema.json"),
+            r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"models":{"type":"array"}}}"#,
+        )
+        .expect("schema");
+
+        let report = validate_catalog_schemas(dir.path(), CatalogRequirement::Optional)
+            .expect("catalog check");
+
+        assert_eq!(report.checked, 1);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
+
+    #[test]
+    fn catalog_check_rejects_invalid_generated_catalog_schema_shape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let generated = dir.path().join("docs").join("generated");
+        std::fs::create_dir_all(&generated).expect("generated docs dir");
+        std::fs::write(
+            generated.join("model-catalog.schema.json"),
+            r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"array"}"#,
+        )
+        .expect("schema");
+
+        let report = validate_catalog_schemas(dir.path(), CatalogRequirement::Optional)
+            .expect("catalog check");
+
+        assert_eq!(
+            report.errors,
+            vec![
+                "docs/generated/model-catalog.schema.json must be an object schema with `properties`".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn required_catalog_check_reports_missing_generated_schema() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let report = validate_catalog_schemas(dir.path(), CatalogRequirement::Required)
+            .expect("catalog check");
+
+        assert_eq!(
+            report.errors,
+            vec![
+                "missing generated model catalog schema; expected one of docs/generated/model-catalog.schema.json, docs/generated/models.schema.json, docs/reference/model-catalog.schema.json, or examples/catalog/model-catalog.schema.json".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_auth_token_leaks_in_docs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
+        std::fs::write(
+            dir.path().join("docs").join("export.md"),
+            "Authorization: Bearer sk-live-abcdefghijklmnopqrstuvwxyz123456\n",
+        )
+        .expect("write docs");
+
+        let errors = validate_parity_gate(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/export.md:1 contains auth token leak: Authorization: Bearer sk-live-abcdefghijklmnopqrstuvwxyz123456".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_allows_auth_token_placeholders_in_docs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
+        std::fs::write(
+            dir.path().join("docs").join("providers.md"),
+            "Authorization: Bearer $NEO_API_KEY\napi_key_env = \"OPENAI_API_KEY\"\n",
+        )
+        .expect("write docs");
+
+        let errors = validate_parity_gate(dir.path()).expect("parity validation should run");
+
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn parity_validation_does_not_treat_source_identifiers_as_auth_token_leaks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_dir = dir.path().join("crates").join("neo-agent").join("src");
+        std::fs::create_dir_all(&source_dir).expect("source dir");
+        std::fs::write(
+            source_dir.join("main.rs"),
+            concat!(
+                "let api_key = api_key_from_provider(provider, &env);\n",
+                "let captured_token = StdArc::new(std::sync::Mutex::new(None));\n",
+            ),
+        )
+        .expect("source");
+
+        let errors = validate_parity_gate(dir.path()).expect("parity validation should run");
+
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn parity_validation_rejects_cloud_api_schema_links_when_generated_target_is_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
+        std::fs::write(
+            dir.path().join("docs").join("cloud.md"),
+            "[Cloud OpenAPI schema](./generated/cloud-api.openapi.json)\n",
+        )
+        .expect("write docs");
+
+        let errors = validate_parity_gate(dir.path()).expect("parity validation should run");
+
+        assert!(errors.iter().any(|error| error
+            == "docs/cloud.md links to missing local file docs/generated/cloud-api.openapi.json"));
+        assert!(errors.iter().any(|error| error
+            == "docs/cloud.md:1 links to missing generated cloud API schema docs/generated/cloud-api.openapi.json"));
+    }
+
+    #[test]
+    fn parity_validation_rejects_private_package_signature_fixture_material() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fixtures = dir.path().join("examples").join("packages");
+        std::fs::create_dir_all(&fixtures).expect("fixtures dir");
+        std::fs::write(
+            fixtures.join("signature-fixture.json"),
+            r#"{"privateKey":"-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"}"#,
+        )
+        .expect("fixture");
+
+        let errors = validate_parity_gate(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "examples/packages/signature-fixture.json:1 contains private package signature material: {\"privateKey\":\"-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\"}".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_rejects_stale_cloud_gap_after_cloud_package_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cloud_dir = dir.path().join("crates").join("neo-cloud").join("src");
+        std::fs::create_dir_all(&cloud_dir).expect("cloud source dir");
+        std::fs::write(
+            cloud_dir.join("main.rs"),
+            "fn main() { let _ = \"neo_cloud_self_hosted\"; }\n",
+        )
+        .expect("cloud main");
+        std::fs::write(
+            dir.path()
+                .join("crates")
+                .join("neo-cloud")
+                .join("Cargo.toml"),
+            "[package]\nname = \"neo-cloud\"\n",
+        )
+        .expect("cloud manifest");
+        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("gap docs dir");
+        std::fs::write(
+            dir.path().join("docs").join("gap").join("xtask.md"),
+            "Self-hosted neo-cloud smoke remains future work.\n",
+        )
+        .expect("gap doc");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/gap/xtask.md:1 contains stale self-hosted cloud smoke gap claim: Self-hosted neo-cloud smoke remains future work.".to_string()
             ]
         );
     }
