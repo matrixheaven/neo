@@ -178,7 +178,7 @@ fn validate_parity_gate(root: &Path) -> Result<Vec<String>> {
     errors.extend(validate_generated_cloud_api_schema_links(root)?);
     errors.extend(validate_docs_parity(root)?);
     errors.extend(validate_examples(root)?);
-    errors.extend(validate_catalog_schemas(root, CatalogRequirement::Optional)?.errors);
+    errors.extend(validate_catalog_schemas(root, CatalogRequirement::Required)?.errors);
     errors.sort();
     Ok(errors)
 }
@@ -200,6 +200,7 @@ fn check_steps(options: &CheckOptions) -> Vec<CommandStep> {
                 ],
             ),
             CommandStep::new("cargo", &["test", "-p", "xtask"]),
+            CommandStep::new("cargo", &["run", "-p", "xtask", "--", "catalog", "check"]),
         ]
     } else {
         vec![
@@ -217,6 +218,7 @@ fn check_steps(options: &CheckOptions) -> Vec<CommandStep> {
                 ],
             ),
             CommandStep::new("cargo", &["test", "--workspace", "--all-features"]),
+            CommandStep::new("cargo", &["run", "-p", "xtask", "--", "catalog", "check"]),
         ]
     }
 }
@@ -238,22 +240,68 @@ fn run_release_smoke_cli_flows(port: u16) -> Result<()> {
 }
 
 fn release_smoke_cli_steps(port: u16) -> Vec<CommandStep> {
+    let api_base = format!("http://127.0.0.1:{port}");
+    let mut steps = vec![
+        neo_agent_step(&["--help"]),
+        neo_agent_step(&["models", "list", "--pricing"]),
+        neo_agent_step(&["cloud", "status", "--api-base", &api_base]),
+        neo_agent_step(&["login", "cloud", "--server", &api_base]),
+    ];
+
+    steps.extend(release_smoke_profile_steps());
+    steps.extend(release_smoke_session_steps());
+    steps.extend(release_smoke_marketplace_steps());
+    steps.extend(release_smoke_mcp_steps());
+    steps.push(CommandStep::new(
+        "cargo",
+        &["run", "-p", "xtask", "--", "catalog", "check"],
+    ));
+
+    steps
+}
+
+fn neo_agent_step(args: &[&str]) -> CommandStep {
+    let mut cargo_args = vec!["run", "-p", "neo-agent", "--"];
+    cargo_args.extend_from_slice(args);
+    CommandStep::new("cargo", &cargo_args)
+}
+
+fn release_smoke_profile_steps() -> Vec<CommandStep> {
     vec![
-        CommandStep::new("cargo", &["run", "-p", "neo-agent", "--", "--help"]),
-        CommandStep::new("cargo", &["run", "-p", "neo-agent", "--", "models", "list"]),
-        CommandStep::new(
-            "cargo",
-            &[
-                "run",
-                "-p",
-                "neo-agent",
-                "--",
-                "cloud",
-                "status",
-                "--api-base",
-                &format!("http://127.0.0.1:{port}"),
-            ],
-        ),
+        neo_agent_step(&["auth", "status"]),
+        neo_agent_step(&["config", "sync", "status"]),
+        neo_agent_step(&["config", "sync", "push"]),
+        neo_agent_step(&["config", "sync", "pull"]),
+    ]
+}
+
+fn release_smoke_session_steps() -> Vec<CommandStep> {
+    vec![
+        neo_agent_step(&["sessions", "sync", "status"]),
+        neo_agent_step(&["sessions", "share", "release-smoke", "--public"]),
+        neo_agent_step(&["sessions", "import", "sh_release_smoke"]),
+        neo_agent_step(&["resume", "cs_release_smoke"]),
+    ]
+}
+
+fn release_smoke_marketplace_steps() -> Vec<CommandStep> {
+    vec![
+        neo_agent_step(&["extensions", "search", "echo"]),
+        neo_agent_step(&[
+            "extensions",
+            "install",
+            "echo@0.1.0",
+            "--from",
+            "marketplace",
+        ]),
+    ]
+}
+
+fn release_smoke_mcp_steps() -> Vec<CommandStep> {
+    vec![
+        neo_agent_step(&["mcp", "health", "release-smoke"]),
+        neo_agent_step(&["mcp", "start", "release-smoke"]),
+        neo_agent_step(&["mcp", "stop", "release-smoke"]),
     ]
 }
 
@@ -280,6 +328,10 @@ fn release_smoke_dependency_errors_with_override(
             "missing neo-agent cloud CLI smoke flow; expected crates/neo-agent/src/cli.rs to expose `cloud status --api-base <URL>` before release-smoke can exercise neo-cloud"
                 .to_owned(),
         );
+        return Ok(errors);
+    }
+    if cloud_manifest.exists() || has_cloud_override {
+        errors.extend(release_smoke_cli_surface_errors(root)?);
     }
 
     Ok(errors)
@@ -291,6 +343,64 @@ fn release_smoke_cli_flow_exists(root: &Path) -> Result<bool> {
     Ok(normalized.contains("cloud")
         && normalized.contains("status")
         && normalized.contains("api base"))
+}
+
+fn release_smoke_cli_surface_errors(root: &Path) -> Result<Vec<String>> {
+    let source = read_optional_source(&root.join("crates/neo-agent/src/cli.rs"))?;
+    let normalized = source.to_lowercase().replace(['-', '_'], " ");
+    let mut errors = Vec::new();
+
+    for (ok, message) in [
+        (
+            normalized.contains("logincommand") && normalized.contains("cloud"),
+            "missing neo-agent cloud login smoke flow; expected `login cloud --server <URL>` before release-smoke can exercise self-hosted profile sync",
+        ),
+        (
+            normalized.contains("authcommand") && normalized.contains("status"),
+            "missing neo-agent auth status smoke flow; expected `auth status` before release-smoke can verify self-hosted login state",
+        ),
+        (
+            normalized.contains("configsynccommand")
+                && normalized.contains("push")
+                && normalized.contains("pull")
+                && normalized.contains("status"),
+            "missing neo-agent config sync smoke flow; expected `config sync status|push|pull` before release-smoke can exercise profile sync",
+        ),
+        (
+            normalized.contains("sessioncommand")
+                && normalized.contains("share")
+                && normalized.contains("import")
+                && normalized.contains("sync"),
+            "missing neo-agent session cloud smoke flow; expected `sessions sync`, `sessions share`, and `sessions import` before release-smoke can exercise session share/import/resume",
+        ),
+        (
+            normalized.contains("modelcommand")
+                && normalized.contains("list")
+                && normalized.contains("pricing"),
+            "missing neo-agent model pricing smoke flow; expected `models list --pricing` before release-smoke can verify generated catalog pricing display",
+        ),
+        (
+            normalized.contains("extensioncommand")
+                && normalized.contains("search")
+                && normalized.contains("install")
+                && normalized.contains("packagesource")
+                && normalized.contains("marketplace"),
+            "missing neo-agent marketplace smoke flow; expected `extensions search` and `extensions install --from marketplace` before release-smoke can exercise local marketplace fixtures",
+        ),
+        (
+            normalized.contains("mcpcommand")
+                && normalized.contains("health")
+                && normalized.contains("start")
+                && normalized.contains("stop"),
+            "missing neo-agent MCP lifecycle smoke flow; expected crates/neo-agent/src/cli.rs to expose `mcp health/start/stop <server-id>` before release-smoke can exercise local MCP lifecycle",
+        ),
+    ] {
+        if !ok {
+            errors.push(message.to_owned());
+        }
+    }
+
+    Ok(errors)
 }
 
 fn release_smoke_cloud_step(port: u16, cloud_override: Option<&str>) -> CommandStep {
@@ -883,6 +993,22 @@ fn parity_line_violation(
         return Some(reason);
     }
 
+    if hosted_or_oauth_overclaim(&normalized) {
+        return Some("hosted/OAuth overclaim");
+    }
+
+    if self_hosted_or_local_first_overclaim(&normalized, code_truth) {
+        return Some("unbacked self-hosted/local-first claim");
+    }
+
+    if package_trust_overclaim(relative_file, &normalized) {
+        return Some("package trust overclaim");
+    }
+
+    if image_runtime_detection_overclaim(&normalized) {
+        return Some("image runtime-detection overclaim");
+    }
+
     if production_context && fake_context {
         return Some("production fake/default guidance");
     }
@@ -911,6 +1037,95 @@ fn parity_line_violation(
     }
 
     None
+}
+
+fn hosted_or_oauth_overclaim(normalized: &str) -> bool {
+    (normalized.contains("oauth")
+        || normalized.contains("hosted provider")
+        || normalized.contains("managed hosted")
+        || normalized.contains("hosted collaboration")
+        || normalized.contains("hosted session")
+        || normalized.contains("hosted share")
+        || normalized.contains("package account"))
+        && positive_claim_statement(normalized)
+        && !honest_gap_or_rejection_statement(normalized)
+}
+
+fn self_hosted_or_local_first_overclaim(normalized: &str, code_truth: &ParityCodeTruth) -> bool {
+    !code_truth.has(ImplementedSurface::SelfHostedNeoCloud)
+        && (normalized.contains("self hosted")
+            || normalized.contains("self-hosted")
+            || normalized.contains("local first")
+            || normalized.contains("local-first"))
+        && positive_claim_statement(normalized)
+        && !honest_gap_or_rejection_statement(normalized)
+}
+
+fn package_trust_overclaim(relative_file: &Path, normalized: &str) -> bool {
+    let path = normalize_path(relative_file)
+        .to_string_lossy()
+        .to_lowercase();
+    (path.contains("package") || normalized.contains("package"))
+        && (normalized.contains("publisher/root")
+            || (normalized.contains("publisher") && normalized.contains("root trust"))
+            || normalized.contains("trust chain")
+            || normalized.contains("root trust anchor"))
+        && positive_claim_statement(normalized)
+        && !honest_gap_or_rejection_statement(normalized)
+}
+
+fn image_runtime_detection_overclaim(normalized: &str) -> bool {
+    (normalized.contains("image protocol")
+        || normalized.contains("terminal image")
+        || normalized.contains("kitty")
+        || normalized.contains("sixel")
+        || normalized.contains("iterm2"))
+        && (normalized.contains("runtime detection")
+            || normalized.contains("auto detect")
+            || normalized.contains("auto-detect")
+            || normalized.contains("detects")
+            || normalized.contains("detection/negotiation")
+            || normalized.contains("capability detection")
+            || normalized.contains("capability negotiation"))
+        && positive_claim_statement(normalized)
+        && !honest_gap_or_rejection_statement(normalized)
+}
+
+fn positive_claim_statement(normalized: &str) -> bool {
+    contains_any_word(
+        normalized,
+        &[
+            "support",
+            "supports",
+            "supported",
+            "available",
+            "ready",
+            "implemented",
+            "exposes",
+            "provides",
+            "establish",
+            "establishes",
+            "backed",
+        ],
+    ) || normalized.contains("can ")
+        || normalized.contains("is implemented")
+}
+
+fn honest_gap_or_rejection_statement(normalized: &str) -> bool {
+    is_rejection_or_gap_statement(normalized)
+        || normalized.contains("future work")
+        || normalized.contains("out of scope")
+        || normalized.contains("not yet")
+        || normalized.contains("does not")
+        || normalized.contains("do not")
+        || normalized.contains("cannot")
+        || normalized.contains("can't")
+        || normalized.contains("remain")
+        || normalized.contains("remaining")
+        || normalized.contains("limitation")
+        || normalized.contains("only when")
+        || normalized.contains("not a ")
+        || normalized.contains("not an ")
 }
 
 fn should_scan_auth_token_leaks(path: &Path) -> bool {
@@ -1853,6 +2068,7 @@ mod tests {
                     ]
                 ),
                 CommandStep::new("cargo", &["test", "-p", "xtask"]),
+                CommandStep::new("cargo", &["run", "-p", "xtask", "--", "catalog", "check"]),
             ]
         );
     }
@@ -1881,6 +2097,7 @@ mod tests {
                     ]
                 ),
                 CommandStep::new("cargo", &["test", "--workspace", "--all-features"]),
+                CommandStep::new("cargo", &["run", "-p", "xtask", "--", "catalog", "check"]),
             ]
         );
     }
@@ -1909,6 +2126,21 @@ mod tests {
                     ]
                 ),
                 CommandStep::new("cargo", &["test", "-p", "xtask"]),
+                CommandStep::new("cargo", &["run", "-p", "xtask", "--", "catalog", "check"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_gate_requires_generated_catalog_schema_artifact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let errors = validate_parity_gate(dir.path()).expect("parity gate");
+
+        assert_eq!(
+            errors,
+            vec![
+                "missing generated model catalog schema; expected one of docs/generated/model-catalog.schema.json, docs/generated/models.schema.json, docs/reference/model-catalog.schema.json, or examples/catalog/model-catalog.schema.json".to_string()
             ]
         );
     }
@@ -2152,6 +2384,166 @@ mod tests {
             "A compile-time Rust stub should only be added after adjacent modules are stable.\n",
         )
         .expect("write mcp");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn parity_validation_rejects_oauth_and_hosted_feature_claims() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
+        std::fs::write(
+            dir.path().join("docs").join("quickstart.md"),
+            concat!(
+                "Neo supports OAuth browser login for hosted provider accounts.\n",
+                "Managed hosted collaboration is available through Pi-compatible share rooms.\n",
+            ),
+        )
+        .expect("write docs");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/quickstart.md:1 contains hosted/OAuth overclaim: Neo supports OAuth browser login for hosted provider accounts.".to_string(),
+                "docs/quickstart.md:2 contains hosted/OAuth overclaim: Managed hosted collaboration is available through Pi-compatible share rooms.".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_allows_oauth_and_hosted_gap_language() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
+        std::fs::write(
+            dir.path().join("docs").join("providers.md"),
+            "OAuth browser login and managed hosted collaboration remain gaps; use a user-run self-hosted neo-cloud instead.\n",
+        )
+        .expect("write docs");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn parity_validation_rejects_self_hosted_claims_without_cloud_code() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
+        std::fs::write(
+            dir.path().join("docs").join("sessions.md"),
+            "Self-hosted cloud session sync is implemented and ready to use.\n",
+        )
+        .expect("write docs");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/sessions.md:1 contains unbacked self-hosted/local-first claim: Self-hosted cloud session sync is implemented and ready to use.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_allows_self_hosted_claims_when_cloud_code_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("crates").join("neo-cloud")).expect("cloud dir");
+        std::fs::write(
+            dir.path()
+                .join("crates")
+                .join("neo-cloud")
+                .join("Cargo.toml"),
+            "[package]\nname = \"neo-cloud\"\n",
+        )
+        .expect("cloud manifest");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
+        std::fs::write(
+            dir.path().join("docs").join("sessions.md"),
+            "Self-hosted cloud session sync is implemented against user-run neo-cloud.\n",
+        )
+        .expect("write docs");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn parity_validation_rejects_package_root_trust_claims_for_self_signing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
+        std::fs::write(
+            dir.path().join("docs").join("packages.md"),
+            "Package signatures establish publisher/root trust for marketplace installs.\n",
+        )
+        .expect("write docs");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/packages.md:1 contains package trust overclaim: Package signatures establish publisher/root trust for marketplace installs.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_allows_manifest_self_sign_trust_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
+        std::fs::write(
+            dir.path().join("docs").join("packages.md"),
+            "Current package trust is manifest self-sign only, not a publisher/root trust chain.\n",
+        )
+        .expect("write docs");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn parity_validation_rejects_image_runtime_detection_claims_from_encoder_symbols() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tui_src = dir.path().join("crates").join("tui").join("src");
+        std::fs::create_dir_all(&tui_src).expect("tui source dir");
+        std::fs::write(
+            tui_src.join("image.rs"),
+            "pub fn encode_kitty_graphics() {} pub fn encode_iterm2_inline_image() {}\n",
+        )
+        .expect("write image source");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
+        std::fs::write(
+            dir.path().join("docs").join("quickstart.md"),
+            "Neo auto-detects terminal image protocol support at runtime.\n",
+        )
+        .expect("write docs");
+
+        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+
+        assert_eq!(
+            errors,
+            vec![
+                "docs/quickstart.md:1 contains image runtime-detection overclaim: Neo auto-detects terminal image protocol support at runtime.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parity_validation_allows_conditional_image_runtime_detection_guardrail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
+        std::fs::write(
+            dir.path().join("docs").join("plan.md"),
+            "Do not claim terminal image auto-detection unless runtime protocol negotiation is implemented and tested.\n",
+        )
+        .expect("write docs");
 
         let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
 
@@ -3023,6 +3415,77 @@ mod tests {
     }
 
     #[test]
+    fn release_smoke_cli_steps_cover_local_first_release_surface() {
+        let steps = release_smoke_cli_steps(49152)
+            .into_iter()
+            .map(|step| step.display())
+            .collect::<Vec<_>>();
+
+        for expected in [
+            "cargo run -p neo-agent -- --help",
+            "cargo run -p neo-agent -- models list --pricing",
+            "cargo run -p neo-agent -- cloud status --api-base http://127.0.0.1:49152",
+            "cargo run -p neo-agent -- login cloud --server http://127.0.0.1:49152",
+            "cargo run -p neo-agent -- auth status",
+            "cargo run -p neo-agent -- config sync status",
+            "cargo run -p neo-agent -- config sync push",
+            "cargo run -p neo-agent -- config sync pull",
+            "cargo run -p neo-agent -- sessions sync status",
+            "cargo run -p neo-agent -- sessions share release-smoke --public",
+            "cargo run -p neo-agent -- sessions import sh_release_smoke",
+            "cargo run -p neo-agent -- resume cs_release_smoke",
+            "cargo run -p neo-agent -- extensions search echo",
+            "cargo run -p neo-agent -- extensions install echo@0.1.0 --from marketplace",
+            "cargo run -p neo-agent -- mcp health release-smoke",
+            "cargo run -p neo-agent -- mcp start release-smoke",
+            "cargo run -p neo-agent -- mcp stop release-smoke",
+            "cargo run -p xtask -- catalog check",
+        ] {
+            assert!(steps.iter().any(|step| step == expected), "{expected}");
+        }
+    }
+
+    #[test]
+    fn release_smoke_reports_missing_mcp_lifecycle_cli_flow() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("crates").join("neo-cloud")).expect("cloud dir");
+        std::fs::write(
+            dir.path()
+                .join("crates")
+                .join("neo-cloud")
+                .join("Cargo.toml"),
+            "[package]\nname = \"neo-cloud\"\n",
+        )
+        .expect("cloud manifest");
+        let cli_dir = dir.path().join("crates").join("neo-agent").join("src");
+        std::fs::create_dir_all(&cli_dir).expect("cli dir");
+        std::fs::write(
+            cli_dir.join("cli.rs"),
+            concat!(
+                "pub enum CloudCommand { Status { api_base: String } }\n",
+                "pub enum LoginCommand { Cloud }\n",
+                "pub enum AuthCommand { Status }\n",
+                "pub enum ConfigSyncCommand { Push, Pull, Status }\n",
+                "pub enum SessionCommand { Share, Import, Sync }\n",
+                "pub enum ModelCommand { List { pricing: bool } }\n",
+                "pub enum ExtensionCommand { Search, Install }\n",
+                "pub enum PackageSource { Marketplace }\n",
+                "pub enum McpCommand { List }\n",
+            ),
+        )
+        .expect("cli source");
+
+        let errors = release_smoke_dependency_errors(dir.path()).expect("dependency scan");
+
+        assert_eq!(
+            errors,
+            vec![
+                "missing neo-agent MCP lifecycle smoke flow; expected crates/neo-agent/src/cli.rs to expose `mcp health/start/stop <server-id>` before release-smoke can exercise local MCP lifecycle".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn catalog_check_validates_generated_catalog_schema_shape() {
         let dir = tempfile::tempdir().expect("tempdir");
         let generated = dir.path().join("docs").join("generated");
@@ -3080,6 +3543,7 @@ mod tests {
     #[test]
     fn parity_validation_rejects_auth_token_leaks_in_docs() {
         let dir = tempfile::tempdir().expect("tempdir");
+        write_catalog_schema_fixture(dir.path());
         std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
         std::fs::write(
             dir.path().join("docs").join("export.md"),
@@ -3100,6 +3564,7 @@ mod tests {
     #[test]
     fn parity_validation_allows_auth_token_placeholders_in_docs() {
         let dir = tempfile::tempdir().expect("tempdir");
+        write_catalog_schema_fixture(dir.path());
         std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
         std::fs::write(
             dir.path().join("docs").join("providers.md"),
@@ -3115,6 +3580,7 @@ mod tests {
     #[test]
     fn parity_validation_does_not_treat_source_identifiers_as_auth_token_leaks() {
         let dir = tempfile::tempdir().expect("tempdir");
+        write_catalog_schema_fixture(dir.path());
         let source_dir = dir.path().join("crates").join("neo-agent").join("src");
         std::fs::create_dir_all(&source_dir).expect("source dir");
         std::fs::write(
@@ -3134,6 +3600,7 @@ mod tests {
     #[test]
     fn parity_validation_rejects_cloud_api_schema_links_when_generated_target_is_missing() {
         let dir = tempfile::tempdir().expect("tempdir");
+        write_catalog_schema_fixture(dir.path());
         std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
         std::fs::write(
             dir.path().join("docs").join("cloud.md"),
@@ -3152,6 +3619,7 @@ mod tests {
     #[test]
     fn parity_validation_rejects_private_package_signature_fixture_material() {
         let dir = tempfile::tempdir().expect("tempdir");
+        write_catalog_schema_fixture(dir.path());
         let fixtures = dir.path().join("examples").join("packages");
         std::fs::create_dir_all(&fixtures).expect("fixtures dir");
         std::fs::write(
@@ -3203,5 +3671,15 @@ mod tests {
                 "docs/gap/xtask.md:1 contains stale self-hosted cloud smoke gap claim: Self-hosted neo-cloud smoke remains future work.".to_string()
             ]
         );
+    }
+
+    fn write_catalog_schema_fixture(root: &Path) {
+        let generated = root.join("docs").join("generated");
+        std::fs::create_dir_all(&generated).expect("generated docs dir");
+        std::fs::write(
+            generated.join("model-catalog.schema.json"),
+            r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"models":{"type":"array"}}}"#,
+        )
+        .expect("schema");
     }
 }

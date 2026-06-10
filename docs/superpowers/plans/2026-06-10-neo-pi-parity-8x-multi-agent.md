@@ -39,7 +39,8 @@
 - Do not claim full Pi cloud/product parity where Neo only has a self-hosted or local-first implementation.
 - Do not claim full trust chain if the implemented marketplace trust is only manifest self-signing.
 - Hosted MCP must fail closed unless there is a real local/self-hosted lifecycle implementation.
-- Terminal image auto-detection must conservatively degrade unless runtime protocol negotiation is actually implemented and tested.
+- Terminal image protocol selection must conservatively degrade; do not claim
+  auto-detection without tested runtime protocol negotiation.
 - Each integrated worker/module must land as its own commit after focused verification.
 
 ## Parallelism Model
