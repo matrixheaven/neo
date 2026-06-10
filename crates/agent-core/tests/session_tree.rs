@@ -1,4 +1,7 @@
-use neo_agent_core::session::{SessionMetadataStore, SessionRecord};
+use neo_agent_core::session::{
+    SessionMetadataStore, SessionRecord, SessionShareRecord, SessionSummaryRecord,
+    SessionSummarySource,
+};
 
 #[test]
 fn session_metadata_lists_existing_jsonl_sessions_with_names_and_children() {
@@ -29,8 +32,15 @@ fn session_metadata_lists_existing_jsonl_sessions_with_names_and_children() {
                 cloud_id: None,
                 synced_at: None,
                 remote_parent_id: None,
+                summary_record: Some(SessionSummaryRecord {
+                    text: "Investigating parser branch".to_owned(),
+                    source: SessionSummarySource::LocalExtractive,
+                    model: None,
+                    updated_at: None,
+                }),
                 children: vec![child.id.clone()],
                 share_ids: Vec::new(),
+                shares: Vec::new(),
             },
             SessionRecord {
                 id: child.id,
@@ -40,8 +50,10 @@ fn session_metadata_lists_existing_jsonl_sessions_with_names_and_children() {
                 cloud_id: None,
                 synced_at: None,
                 remote_parent_id: None,
+                summary_record: None,
                 children: Vec::new(),
                 share_ids: Vec::new(),
+                shares: Vec::new(),
             },
         ]
     );
@@ -66,6 +78,9 @@ fn session_metadata_records_cloud_sync_and_share_state() {
             "alpha",
             "cs_alpha".to_owned(),
             "sh_alpha".to_owned(),
+            true,
+            Some("/v1/shares/sh_alpha.html".to_owned()),
+            Some("/v1/shares/sh_alpha.json".to_owned()),
             "124.0Z".to_owned(),
         )
         .expect("record share");
@@ -75,19 +90,38 @@ fn session_metadata_records_cloud_sync_and_share_state() {
     assert_eq!(shared.remote_parent_id.as_deref(), Some("cs_parent"));
     assert_eq!(shared.share_ids, vec!["sh_alpha"]);
     assert_eq!(
+        shared.shares,
+        vec![SessionShareRecord {
+            id: "sh_alpha".to_owned(),
+            cloud_id: Some("cs_alpha".to_owned()),
+            public: Some(true),
+            html_url: Some("/v1/shares/sh_alpha.html".to_owned()),
+            json_url: Some("/v1/shares/sh_alpha.json".to_owned()),
+            created_at: Some("124.0Z".to_owned()),
+        }]
+    );
+    assert_eq!(
         store.list().expect("list sessions")[0].share_ids,
         vec!["sh_alpha"]
     );
 }
 
 #[test]
-fn session_metadata_stores_branch_summaries() {
+fn session_metadata_stores_branch_summary_records() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("alpha.jsonl"), "{}\n").expect("write alpha");
 
     let store = SessionMetadataStore::new(dir.path());
     let summarized = store
-        .summarize("alpha", "Investigating parser branch".to_owned())
+        .record_summary(
+            "alpha",
+            SessionSummaryRecord {
+                text: "Investigating parser branch".to_owned(),
+                source: SessionSummarySource::ModelGenerated,
+                model: Some("openai/gpt-4.1".to_owned()),
+                updated_at: Some("125.0Z".to_owned()),
+            },
+        )
         .expect("summarize alpha");
 
     assert_eq!(
@@ -95,7 +129,19 @@ fn session_metadata_stores_branch_summaries() {
         Some("Investigating parser branch")
     );
     assert_eq!(
-        store.list().expect("list sessions")[0].summary.as_deref(),
-        Some("Investigating parser branch")
+        summarized.summary_record,
+        Some(SessionSummaryRecord {
+            text: "Investigating parser branch".to_owned(),
+            source: SessionSummarySource::ModelGenerated,
+            model: Some("openai/gpt-4.1".to_owned()),
+            updated_at: Some("125.0Z".to_owned()),
+        })
+    );
+    assert_eq!(
+        store.list().expect("list sessions")[0]
+            .summary_record
+            .as_ref()
+            .map(|summary| summary.source),
+        Some(SessionSummarySource::ModelGenerated)
     );
 }

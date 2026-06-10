@@ -1,8 +1,12 @@
 pub use neo_cloud_protocol::{
-    BootstrapRequest, BootstrapResponse, CloudCreateShareRequest, CloudForkSessionResponse,
-    CloudImportSessionRequest, CloudImportSessionResponse, CloudProfile, CloudSessionListResponse,
-    CloudSessionPayload, CloudSessionRecord, CloudSharePayload, DeviceTokenLoginRequest,
-    HealthResponse, ProfilePullResponse, ProfilePushRequest, ProfileStatusResponse,
+    BootstrapRequest, BootstrapResponse, CloudCommandCatalogResponse, CloudCommandRecord,
+    CloudContinueSessionRequest, CloudContinueSessionResponse, CloudCreateShareRequest,
+    CloudForkSessionResponse, CloudImportSessionRequest, CloudImportSessionResponse, CloudProfile,
+    CloudSessionListResponse, CloudSessionPayload, CloudSessionRecord, CloudSessionTreeRecord,
+    CloudSessionTreeResponse, CloudShareListResponse, CloudSharePayload, CloudShareRecord,
+    CloudShareRecordResponse, CloudUpdateBranchRequest, CloudUpdateBranchResponse,
+    DeviceTokenLoginRequest, HealthResponse, ProfilePullResponse, ProfilePushRequest,
+    ProfileStatusResponse, SettingsPullResponse, SettingsPushRequest,
 };
 
 #[derive(Debug, Clone)]
@@ -108,12 +112,57 @@ impl CloudClient {
             .map_err(Into::into)
     }
 
+    pub async fn pull_settings(&self, access_token: &str) -> anyhow::Result<SettingsPullResponse> {
+        self.client
+            .get(format!("{}/v1/settings", self.base_url))
+            .bearer_auth(access_token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn push_settings(
+        &self,
+        access_token: &str,
+        settings: CloudProfile,
+    ) -> anyhow::Result<ProfileStatusResponse> {
+        self.client
+            .put(format!("{}/v1/settings", self.base_url))
+            .bearer_auth(access_token)
+            .json(&SettingsPushRequest { settings })
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn command_catalog(
+        &self,
+        access_token: &str,
+    ) -> anyhow::Result<CloudCommandCatalogResponse> {
+        self.client
+            .get(format!("{}/v1/commands", self.base_url))
+            .bearer_auth(access_token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn import_session(
         &self,
         access_token: &str,
         local_session_id: &str,
         jsonl: String,
         name: Option<String>,
+        summary: Option<String>,
         remote_parent_id: Option<String>,
     ) -> anyhow::Result<CloudSessionRecord> {
         let response = self
@@ -124,6 +173,7 @@ impl CloudClient {
                 local_session_id: local_session_id.to_owned(),
                 jsonl,
                 name,
+                summary,
                 remote_parent_id,
             })
             .send()
@@ -150,6 +200,22 @@ impl CloudClient {
         Ok(response.sessions)
     }
 
+    pub async fn session_tree(
+        &self,
+        access_token: &str,
+    ) -> anyhow::Result<Vec<CloudSessionTreeRecord>> {
+        let response = self
+            .client
+            .get(format!("{}/v1/sessions/tree", self.base_url))
+            .bearer_auth(access_token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<CloudSessionTreeResponse>()
+            .await?;
+        Ok(response.tree)
+    }
+
     pub async fn get_session(
         &self,
         access_token: &str,
@@ -158,6 +224,56 @@ impl CloudClient {
         self.client
             .get(format!("{}/v1/sessions/{session_id}", self.base_url))
             .bearer_auth(access_token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn update_branch(
+        &self,
+        access_token: &str,
+        session_id: &str,
+        name: Option<String>,
+        summary: Option<String>,
+        remote_parent_id: Option<String>,
+    ) -> anyhow::Result<CloudSessionRecord> {
+        let response = self
+            .client
+            .put(format!("{}/v1/sessions/{session_id}/branch", self.base_url))
+            .bearer_auth(access_token)
+            .json(&CloudUpdateBranchRequest {
+                name,
+                summary,
+                remote_parent_id,
+            })
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<CloudUpdateBranchResponse>()
+            .await?;
+        Ok(response.record)
+    }
+
+    pub async fn continue_session(
+        &self,
+        access_token: &str,
+        session_id: &str,
+        local_session_id: Option<String>,
+        name: Option<String>,
+    ) -> anyhow::Result<CloudContinueSessionResponse> {
+        self.client
+            .post(format!(
+                "{}/v1/sessions/{session_id}/continue",
+                self.base_url
+            ))
+            .bearer_auth(access_token)
+            .json(&CloudContinueSessionRequest {
+                local_session_id,
+                name,
+            })
             .send()
             .await?
             .error_for_status()?
@@ -184,6 +300,23 @@ impl CloudClient {
         Ok(response.record)
     }
 
+    pub async fn list_share_records(
+        &self,
+        access_token: &str,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<CloudShareRecord>> {
+        let response = self
+            .client
+            .get(format!("{}/v1/sessions/{session_id}/shares", self.base_url))
+            .bearer_auth(access_token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<CloudShareListResponse>()
+            .await?;
+        Ok(response.shares)
+    }
+
     pub async fn create_share(
         &self,
         access_token: &str,
@@ -200,6 +333,23 @@ impl CloudClient {
             .json()
             .await
             .map_err(Into::into)
+    }
+
+    pub async fn get_share_record(
+        &self,
+        access_token: &str,
+        share_id: &str,
+    ) -> anyhow::Result<CloudShareRecord> {
+        let response = self
+            .client
+            .get(format!("{}/v1/share-records/{share_id}", self.base_url))
+            .bearer_auth(access_token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<CloudShareRecordResponse>()
+            .await?;
+        Ok(response.record)
     }
 
     pub async fn get_share(&self, share_id: &str) -> anyhow::Result<CloudSharePayload> {

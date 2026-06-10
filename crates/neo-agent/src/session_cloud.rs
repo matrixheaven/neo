@@ -8,6 +8,7 @@ use neo_agent_core::{
     AgentEvent, AgentMessage,
     session::{JsonlSessionWriter, SessionMetadataStore, validate_session_id},
 };
+use std::collections::BTreeMap;
 use neo_sdk::{CloudClient, CloudSharePayload};
 
 use crate::{cloud_commands, config, config::AppConfig, session_commands};
@@ -25,6 +26,7 @@ pub async fn share(session_ref: &str, public: bool, config: &AppConfig) -> anyho
             &session_id,
             jsonl,
             local_session_name(config, &session_id),
+            local_session_summary(config, &session_id),
             None,
         )
         .await
@@ -44,6 +46,9 @@ pub async fn share(session_ref: &str, public: bool, config: &AppConfig) -> anyho
         &session_id,
         record.id.clone(),
         share.record.id.clone(),
+        share.record.public,
+        Some(format!("{}{}", auth.server_url, share.record.html_url)),
+        Some(format!("{}{}", auth.server_url, share.record.json_url)),
         current_unix_timestamp(),
     )?;
 
@@ -68,17 +73,34 @@ pub async fn sync_push(config: &AppConfig) -> anyhow::Result<String> {
     let auth = cloud_commands::require_auth(&auth_file)?;
     let client = CloudClient::new(&auth.server_url);
     let mut lines = Vec::new();
-    for session in metadata_store(config).list()? {
+    let mut sessions = metadata_store(config).list()?;
+    let mut cloud_ids = sessions
+        .iter()
+        .filter_map(|session| {
+            session
+                .cloud_id
+                .as_ref()
+                .map(|cloud_id| (session.id.clone(), cloud_id.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for session in sessions.drain(..) {
         let path = config.sessions_dir.join(format!("{}.jsonl", session.id));
         let jsonl = fs::read_to_string(&path)
             .with_context(|| format!("failed to read session {}", path.display()))?;
+        let remote_parent_id = session.remote_parent_id.clone().or_else(|| {
+            session
+                .parent_id
+                .as_ref()
+                .and_then(|parent_id| cloud_ids.get(parent_id).cloned())
+        });
         let record = client
             .import_session(
                 &auth.access_token,
                 &session.id,
                 jsonl,
                 session.name.clone(),
-                session.remote_parent_id.clone(),
+                session.summary.clone(),
+                remote_parent_id,
             )
             .await
             .with_context(|| format!("failed to push session {}", session.id))?;
@@ -88,6 +110,7 @@ pub async fn sync_push(config: &AppConfig) -> anyhow::Result<String> {
             current_unix_timestamp(),
             record.remote_parent_id.clone(),
         )?;
+        cloud_ids.insert(session.id.clone(), record.id.clone());
         lines.push(format!("pushed {}\tcloud_id={}", session.id, record.id));
     }
     if lines.is_empty() {
@@ -259,6 +282,15 @@ fn local_session_name(config: &AppConfig, session_id: &str) -> Option<String> {
         .into_iter()
         .find(|session| session.id == session_id)
         .and_then(|session| session.name)
+}
+
+fn local_session_summary(config: &AppConfig, session_id: &str) -> Option<String> {
+    metadata_store(config)
+        .list()
+        .ok()?
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.summary)
 }
 
 async fn write_messages_jsonl(

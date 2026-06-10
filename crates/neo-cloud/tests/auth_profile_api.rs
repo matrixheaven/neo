@@ -1,12 +1,15 @@
-use std::{net::TcpListener, path::Path};
+use std::net::TcpListener;
 
 use neo_agent_core::{AgentEvent, AgentMessage};
 use neo_cloud::{CloudServer, Store};
 use neo_cloud_protocol::{
-    BootstrapRequest, BootstrapResponse, CloudCreateShareRequest, CloudImportSessionRequest,
+    BootstrapRequest, BootstrapResponse, CloudCommandCatalogResponse, CloudContinueSessionRequest,
+    CloudContinueSessionResponse, CloudCreateShareRequest, CloudImportSessionRequest,
     CloudImportSessionResponse, CloudProfile, CloudSessionListResponse, CloudSessionPayload,
-    CloudSharePayload, DeviceTokenLoginRequest, ProfilePullResponse, ProfilePushRequest,
-    ProfileStatusResponse,
+    CloudSessionTreeResponse, CloudShareListResponse, CloudSharePayload, CloudShareRecordResponse,
+    CloudUpdateBranchRequest, CloudUpdateBranchResponse, DeviceTokenLoginRequest,
+    ProfilePullResponse, ProfilePushRequest, ProfileStatusResponse, SettingsPullResponse,
+    SettingsPushRequest,
 };
 use reqwest::StatusCode;
 use tempfile::TempDir;
@@ -133,17 +136,29 @@ async fn hosted_sessions_share_and_public_artifacts_are_persisted_and_sanitized(
     let client = reqwest::Client::new();
     let token = bootstrap_access_token(&client, &server.base_url).await;
     let secret = "sk-test-secret-token";
+    let access_token = "neo_at_0123456789abcdef0123456789abcdef";
+    let device_token = "neo_dt_0123456789abcdef0123456789abcdef";
     let local_path = temp.path().join("alpha.jsonl");
+    let config_path = temp.path().join("nested/config.toml");
+    let config_path_text = config_path.to_string_lossy().into_owned();
     let jsonl = format!(
         "{}\n",
         serde_json::to_string(&AgentEvent::MessageAppended {
             message: AgentMessage::user_text(format!(
-                "keep hosted session but redact {secret} and {}",
-                local_path.display()
+                "keep hosted session but redact {secret}, {access_token}, {device_token}, {}, and {}",
+                local_path.display(),
+                config_path.display()
             )),
         })
         .expect("event json")
     );
+    let leak_values = [
+        secret,
+        access_token,
+        device_token,
+        local_path.to_str().expect("local path"),
+        config_path_text.as_str(),
+    ];
 
     let imported = import_cloud_session(&client, &server.base_url, &token, jsonl).await;
     assert!(imported.record.id.starts_with("cs_"));
@@ -155,8 +170,7 @@ async fn hosted_sessions_share_and_public_artifacts_are_persisted_and_sanitized(
         &server.base_url,
         &token,
         &imported,
-        secret,
-        temp.path(),
+        &leak_values,
     )
     .await;
 
@@ -169,9 +183,229 @@ async fn hosted_sessions_share_and_public_artifacts_are_persisted_and_sanitized(
     let share = create_public_share(&client, &server.base_url, &token, &imported.record.id).await;
     assert!(share.record.public);
     assert!(share.html.contains("<!doctype html>"));
-    assert!(!share.html.contains(secret));
+    assert_no_leaks(&share.html, &leak_values);
 
-    assert_public_share_artifacts(&client, &server.base_url, &share.record.id, secret).await;
+    assert_public_share_artifacts(&client, &server.base_url, &share.record.id, &leak_values).await;
+}
+
+#[tokio::test]
+async fn self_hosted_collaboration_apis_expose_tree_metadata_records_continuation_settings_and_catalog()
+ {
+    let temp = TempDir::new().expect("tempdir");
+    let store = Store::open(&temp.path().join("neo-cloud.sqlite"))
+        .await
+        .expect("open store");
+    let server = spawn_server(store);
+    let client = reqwest::Client::new();
+    let token = bootstrap_access_token(&client, &server.base_url).await;
+    let secret = "sk-test-secret-token";
+    let absolute_path = temp.path().join("branch.jsonl");
+    let absolute_path_text = absolute_path.to_string_lossy().into_owned();
+    let leak_values = [secret, absolute_path_text.as_str()];
+    let jsonl = format!(
+        "{}\n",
+        serde_json::to_string(&AgentEvent::MessageAppended {
+            message: AgentMessage::user_text(format!(
+                "continue without leaking {secret} or {}",
+                absolute_path.display()
+            )),
+        })
+        .expect("event json")
+    );
+
+    let imported = import_cloud_session(&client, &server.base_url, &token, jsonl).await;
+    let branch_name = format!("Feature branch {secret} {}", absolute_path.display());
+    let branch_summary = format!("Summary hides {secret} {}", absolute_path.display());
+    let updated = client
+        .put(format!(
+            "{}/v1/sessions/{}/branch",
+            server.base_url, imported.record.id
+        ))
+        .bearer_auth(&token)
+        .json(&CloudUpdateBranchRequest {
+            name: Some(branch_name),
+            summary: Some(branch_summary),
+            remote_parent_id: None,
+        })
+        .send()
+        .await
+        .expect("branch update response")
+        .error_for_status()
+        .expect("branch update success")
+        .json::<CloudUpdateBranchResponse>()
+        .await
+        .expect("branch update json");
+    let updated_json = serde_json::to_string(&updated).expect("updated json");
+    assert!(!updated_json.contains(secret));
+    assert!(!updated_json.contains(absolute_path.to_str().expect("absolute path")));
+    assert_eq!(
+        updated.record.summary.as_deref(),
+        Some("Summary hides [REDACTED] [REDACTED_PATH]")
+    );
+
+    let continued = client
+        .post(format!(
+            "{}/v1/sessions/{}/continue",
+            server.base_url, imported.record.id
+        ))
+        .bearer_auth(&token)
+        .json(&CloudContinueSessionRequest {
+            local_session_id: Some("remote-child".to_owned()),
+            name: Some(format!("Child {secret} {}", absolute_path.display())),
+        })
+        .send()
+        .await
+        .expect("continue response")
+        .error_for_status()
+        .expect("continue success")
+        .json::<CloudContinueSessionResponse>()
+        .await
+        .expect("continue json");
+    assert_eq!(
+        continued.record.remote_parent_id.as_deref(),
+        Some(imported.record.id.as_str())
+    );
+    assert_eq!(
+        continued.record.local_session_id.as_deref(),
+        Some("remote-child")
+    );
+    assert_eq!(continued.messages.len(), 1);
+    let continued_json = serde_json::to_string(&continued).expect("continued json");
+    assert!(!continued_json.contains(secret));
+    assert!(!continued_json.contains(absolute_path.to_str().expect("absolute path")));
+
+    let tree = client
+        .get(format!("{}/v1/sessions/tree", server.base_url))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("tree response")
+        .error_for_status()
+        .expect("tree success")
+        .json::<CloudSessionTreeResponse>()
+        .await
+        .expect("tree json");
+    assert_eq!(tree.tree.len(), 2);
+    assert_eq!(tree.tree[0].depth, 0);
+    assert_eq!(tree.tree[0].record.id, imported.record.id);
+    assert_eq!(tree.tree[0].children, vec![continued.record.id.clone()]);
+    assert_eq!(tree.tree[1].depth, 1);
+    assert_eq!(tree.tree[1].record.id, continued.record.id);
+
+    let share = create_public_share(&client, &server.base_url, &token, &continued.record.id).await;
+    let session_shares = client
+        .get(format!(
+            "{}/v1/sessions/{}/shares",
+            server.base_url, continued.record.id
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("session share records response")
+        .error_for_status()
+        .expect("session share records success")
+        .json::<CloudShareListResponse>()
+        .await
+        .expect("session share records json");
+    assert_eq!(session_shares.shares, vec![share.record.clone()]);
+
+    let share_record = client
+        .get(format!(
+            "{}/v1/share-records/{}",
+            server.base_url, share.record.id
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("share record response")
+        .error_for_status()
+        .expect("share record success")
+        .json::<CloudShareRecordResponse>()
+        .await
+        .expect("share record json");
+    assert_eq!(share_record.record, share.record);
+    assert_public_share_artifacts(&client, &server.base_url, &share.record.id, &leak_values).await;
+
+    let settings = CloudProfile {
+        default_provider: Some("anthropic".to_owned()),
+        default_model: Some("deepseek-v4-pro".to_owned()),
+        api_base: Some("https://api.deepseek.com/anthropic".to_owned()),
+        api_key_env: Some("DEEPSEEK_API_KEY".to_owned()),
+        ..CloudProfile::default()
+    };
+    let settings_status = client
+        .put(format!("{}/v1/settings", server.base_url))
+        .bearer_auth(&token)
+        .json(&SettingsPushRequest {
+            settings: settings.clone(),
+        })
+        .send()
+        .await
+        .expect("settings push response")
+        .error_for_status()
+        .expect("settings push success")
+        .json::<ProfileStatusResponse>()
+        .await
+        .expect("settings status json");
+    assert_eq!(settings_status.revision, 1);
+    let pulled_settings = client
+        .get(format!("{}/v1/settings", server.base_url))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("settings pull response")
+        .error_for_status()
+        .expect("settings pull success")
+        .json::<SettingsPullResponse>()
+        .await
+        .expect("settings pull json");
+    assert_eq!(pulled_settings.settings, settings);
+
+    let catalog = client
+        .get(format!("{}/v1/commands", server.base_url))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("catalog response")
+        .error_for_status()
+        .expect("catalog success")
+        .json::<CloudCommandCatalogResponse>()
+        .await
+        .expect("catalog json");
+    let command_names = catalog
+        .commands
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(command_names.contains(&"sessions.tree"));
+    assert!(command_names.contains(&"sessions.continue"));
+    assert!(command_names.contains(&"settings.pull"));
+    assert!(catalog.commands.iter().all(|command| command.available));
+    assert!(
+        catalog
+            .commands
+            .iter()
+            .all(|command| !command.name.contains("oauth") && !command.name.contains("hosted"))
+    );
+}
+
+#[tokio::test]
+async fn managed_hosted_or_oauth_paths_fail_closed() {
+    let temp = TempDir::new().expect("tempdir");
+    let store = Store::open(&temp.path().join("neo-cloud.sqlite"))
+        .await
+        .expect("open store");
+    let server = spawn_server(store);
+
+    let status = reqwest::Client::new()
+        .post(format!("{}/v1/auth/oauth", server.base_url))
+        .send()
+        .await
+        .expect("oauth response")
+        .status();
+
+    assert!(status.is_client_error());
+    assert_ne!(status, StatusCode::OK);
 }
 
 async fn import_cloud_session(
@@ -187,6 +421,7 @@ async fn import_cloud_session(
             local_session_id: "alpha".to_owned(),
             jsonl,
             name: Some("Main thread".to_owned()),
+            summary: None,
             remote_parent_id: None,
         })
         .send()
@@ -204,8 +439,7 @@ async fn assert_listed_session_payload_is_sanitized(
     base_url: &str,
     token: &str,
     imported: &CloudImportSessionResponse,
-    secret: &str,
-    temp_path: &Path,
+    leak_values: &[&str],
 ) {
     let listed = client
         .get(format!("{base_url}/v1/sessions"))
@@ -233,8 +467,7 @@ async fn assert_listed_session_payload_is_sanitized(
         .expect("get json");
     let fetched_json = serde_json::to_string(&fetched).expect("fetched json");
     assert!(fetched_json.contains("keep hosted session"));
-    assert!(!fetched_json.contains(secret));
-    assert!(!fetched_json.contains(temp_path.to_str().expect("temp path")));
+    assert_no_leaks(&fetched_json, leak_values);
 }
 
 async fn fork_cloud_session(
@@ -281,7 +514,7 @@ async fn assert_public_share_artifacts(
     client: &reqwest::Client,
     base_url: &str,
     share_id: &str,
-    secret: &str,
+    leak_values: &[&str],
 ) {
     let public_json = client
         .get(format!("{base_url}/v1/shares/{share_id}"))
@@ -294,6 +527,8 @@ async fn assert_public_share_artifacts(
         .await
         .expect("public json");
     assert_eq!(public_json.record.id, share_id);
+    let public_json_text = serde_json::to_string(&public_json).expect("public share json");
+    assert_no_leaks(&public_json_text, leak_values);
 
     let html = client
         .get(format!("{base_url}/v1/shares/{share_id}.html"))
@@ -306,7 +541,16 @@ async fn assert_public_share_artifacts(
         .await
         .expect("html text");
     assert!(html.contains("<!doctype html>"));
-    assert!(!html.contains(secret));
+    assert_no_leaks(&html, leak_values);
+}
+
+fn assert_no_leaks(haystack: &str, leak_values: &[&str]) {
+    for value in leak_values {
+        assert!(
+            !haystack.contains(value),
+            "sanitized payload leaked sensitive value {value:?} in {haystack}"
+        );
+    }
 }
 
 async fn bootstrap_access_token(client: &reqwest::Client, base_url: &str) -> String {

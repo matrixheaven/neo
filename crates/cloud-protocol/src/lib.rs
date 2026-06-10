@@ -63,6 +63,18 @@ pub struct ProfileStatusResponse {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettingsPushRequest {
+    pub settings: CloudProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettingsPullResponse {
+    pub settings: CloudProfile,
+    pub revision: i64,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: String,
@@ -98,6 +110,8 @@ pub struct CloudImportSessionRequest {
     pub jsonl: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_parent_id: Option<String>,
 }
@@ -113,8 +127,50 @@ pub struct CloudSessionListResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudSessionTreeRecord {
+    pub depth: usize,
+    pub record: CloudSessionRecord,
+    #[serde(default)]
+    pub children: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudSessionTreeResponse {
+    pub tree: Vec<CloudSessionTreeRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudUpdateBranchRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_parent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudUpdateBranchResponse {
+    pub record: CloudSessionRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloudForkSessionResponse {
     pub record: CloudSessionRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudContinueSessionRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudContinueSessionResponse {
+    pub record: CloudSessionRecord,
+    pub messages: Vec<AgentMessage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +193,30 @@ pub struct CloudSharePayload {
     pub record: CloudShareRecord,
     pub html: String,
     pub json: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudShareListResponse {
+    pub shares: Vec<CloudShareRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudShareRecordResponse {
+    pub record: CloudShareRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudCommandRecord {
+    pub name: String,
+    pub description: String,
+    pub method: String,
+    pub path: String,
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudCommandCatalogResponse {
+    pub commands: Vec<CloudCommandRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

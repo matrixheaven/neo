@@ -1,6 +1,7 @@
 //! Self-hosted Neo cloud server.
 
 use std::{
+    collections::{BTreeMap, HashSet},
     net::TcpListener,
     path::Path,
     sync::OnceLock,
@@ -15,15 +16,18 @@ use axum::{
     http::{StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use neo_agent_core::{AgentEvent, AgentMessage, Content, session::replay_messages};
 use neo_cloud_protocol::{
-    BootstrapRequest, BootstrapResponse, CloudCreateShareRequest, CloudForkSessionResponse,
-    CloudImportSessionRequest, CloudImportSessionResponse, CloudProfile, CloudSessionListResponse,
-    CloudSessionPayload, CloudSessionRecord, CloudSharePayload, CloudShareRecord,
+    BootstrapRequest, BootstrapResponse, CloudCommandCatalogResponse, CloudCommandRecord,
+    CloudContinueSessionRequest, CloudContinueSessionResponse, CloudCreateShareRequest,
+    CloudForkSessionResponse, CloudImportSessionRequest, CloudImportSessionResponse, CloudProfile,
+    CloudSessionListResponse, CloudSessionPayload, CloudSessionRecord, CloudSessionTreeRecord,
+    CloudSessionTreeResponse, CloudShareListResponse, CloudSharePayload, CloudShareRecord,
+    CloudShareRecordResponse, CloudUpdateBranchRequest, CloudUpdateBranchResponse,
     DeviceTokenLoginRequest, ErrorResponse, HealthResponse, ProfilePullResponse,
-    ProfilePushRequest, ProfileStatusResponse,
+    ProfilePushRequest, ProfileStatusResponse, SettingsPullResponse, SettingsPushRequest,
 };
 use neo_sdk::{ExportConversation, ExportMessage, HtmlExportOptions, export_html};
 use regex::Regex;
@@ -220,6 +224,19 @@ impl Store {
         })
     }
 
+    fn push_settings(&self, user_id: &str, settings: &CloudProfile) -> anyhow::Result<i64> {
+        self.push_profile(user_id, settings)
+    }
+
+    fn pull_settings(&self, user_id: &str) -> anyhow::Result<SettingsPullResponse> {
+        let pulled = self.pull_profile(user_id)?;
+        Ok(SettingsPullResponse {
+            settings: pulled.profile,
+            revision: pulled.revision,
+            updated_at: pulled.updated_at,
+        })
+    }
+
     fn import_session(
         &self,
         user_id: &str,
@@ -238,10 +255,10 @@ impl Store {
             params![
                 session_id,
                 user_id,
-                request.local_session_id,
-                request.name,
+                sanitize_optional_text(Some(&request.local_session_id)),
+                sanitize_optional_text(request.name.as_deref()),
                 Option::<String>::None,
-                request.remote_parent_id,
+                sanitize_optional_text(request.remote_parent_id.as_deref()),
                 messages_json,
                 i64::try_from(messages.len()).unwrap_or(i64::MAX),
                 now,
@@ -285,6 +302,61 @@ impl Store {
                 Ok(record)
             })
             .collect()
+    }
+
+    fn session_tree(&self, user_id: &str) -> anyhow::Result<Vec<CloudSessionTreeRecord>> {
+        let records = self.list_sessions(user_id)?;
+        let record_ids = records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<HashSet<_>>();
+        let records_by_id = records
+            .iter()
+            .map(|record| (record.id.clone(), record.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut children_by_parent = BTreeMap::<String, Vec<String>>::new();
+        for record in &records {
+            let Some(parent_id) = record.remote_parent_id.as_deref() else {
+                continue;
+            };
+            if record_ids.contains(parent_id) {
+                children_by_parent
+                    .entry(parent_id.to_owned())
+                    .or_default()
+                    .push(record.id.clone());
+            }
+        }
+
+        let mut tree = Vec::new();
+        let mut visited = HashSet::new();
+        for record in records.iter().filter(|record| {
+            record
+                .remote_parent_id
+                .as_deref()
+                .is_none_or(|parent_id| !record_ids.contains(parent_id))
+        }) {
+            append_tree_record(
+                &record.id,
+                0,
+                &records_by_id,
+                &children_by_parent,
+                &mut visited,
+                &mut tree,
+            );
+        }
+        for record in &records {
+            if !visited.contains(&record.id) {
+                append_tree_record(
+                    &record.id,
+                    0,
+                    &records_by_id,
+                    &children_by_parent,
+                    &mut visited,
+                    &mut tree,
+                );
+            }
+        }
+        Ok(tree)
     }
 
     fn get_session(&self, user_id: &str, session_id: &str) -> anyhow::Result<CloudSessionPayload> {
@@ -335,6 +407,75 @@ impl Store {
         drop(connection);
         self.session_record(user_id, &fork_id)?
             .ok_or_else(|| anyhow::anyhow!("forked cloud session was not persisted"))
+    }
+
+    fn update_branch(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        request: &CloudUpdateBranchRequest,
+    ) -> anyhow::Result<CloudSessionRecord> {
+        if self.session_record(user_id, session_id)?.is_none() {
+            return Err(CloudError::not_found("session not found").into());
+        }
+        let now = now_string();
+        let connection = self.connection()?;
+        connection.execute(
+            "UPDATE sessions
+             SET name = COALESCE(?1, name),
+                 summary = COALESCE(?2, summary),
+                 remote_parent_id = COALESCE(?3, remote_parent_id),
+                 updated_at = ?4
+             WHERE user_id = ?5 AND id = ?6",
+            params![
+                sanitize_optional_text(request.name.as_deref()),
+                sanitize_optional_text(request.summary.as_deref()),
+                sanitize_optional_text(request.remote_parent_id.as_deref()),
+                now,
+                user_id,
+                session_id,
+            ],
+        )?;
+        drop(connection);
+        self.session_record(user_id, session_id)?
+            .ok_or_else(|| CloudError::not_found("session not found").into())
+    }
+
+    fn continue_session(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        request: &CloudContinueSessionRequest,
+    ) -> anyhow::Result<CloudContinueSessionResponse> {
+        let parent = self.get_session(user_id, session_id)?;
+        let now = now_string();
+        let continuation_id = format!("cs_{}", Uuid::new_v4().simple());
+        let messages_json = serde_json::to_string(&parent.messages)?;
+        let connection = self.connection()?;
+        connection.execute(
+            "INSERT INTO sessions (
+                id, user_id, local_session_id, name, summary, remote_parent_id,
+                messages_json, message_count, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                continuation_id,
+                user_id,
+                sanitize_optional_text(request.local_session_id.as_deref()),
+                sanitize_optional_text(request.name.as_deref()).or(parent.record.name),
+                parent.record.summary,
+                parent.record.id,
+                messages_json,
+                i64::try_from(parent.messages.len()).unwrap_or(i64::MAX),
+                now,
+                now,
+            ],
+        )?;
+        drop(connection);
+        let payload = self.get_session(user_id, &continuation_id)?;
+        Ok(CloudContinueSessionResponse {
+            record: payload.record,
+            messages: payload.messages,
+        })
     }
 
     fn create_share(
@@ -393,6 +534,44 @@ impl Store {
              WHERE id = ?1 AND public = 1",
             params![share_id],
         )
+    }
+
+    fn list_session_shares(
+        &self,
+        user_id: &str,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<CloudShareRecord>> {
+        if self.session_record(user_id, session_id)?.is_none() {
+            return Err(CloudError::not_found("session not found").into());
+        }
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, session_id, public, created_at
+             FROM shares
+             WHERE user_id = ?1 AND session_id = ?2
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        statement
+            .query_map(params![user_id, session_id], share_record_from_row)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    fn get_share_record(&self, user_id: &str, share_id: &str) -> anyhow::Result<CloudShareRecord> {
+        let connection = self.connection()?;
+        let Some(record) = connection
+            .query_row(
+                "SELECT id, session_id, public, created_at
+                 FROM shares
+                 WHERE user_id = ?1 AND id = ?2",
+                params![user_id, share_id],
+                share_record_from_row,
+            )
+            .optional()?
+        else {
+            return Err(CloudError::not_found("share not found").into());
+        };
+        Ok(record)
     }
 
     fn read_share<P>(&self, query: &str, params: P) -> anyhow::Result<CloudSharePayload>
@@ -513,11 +692,20 @@ impl CloudServer {
         let protected = Router::new()
             .route("/v1/profile", get(pull_profile).put(push_profile))
             .route("/v1/profile/status", get(profile_status))
+            .route("/v1/settings", get(pull_settings).put(push_settings))
+            .route("/v1/commands", get(command_catalog))
             .route("/v1/sessions/import", post(import_session))
             .route("/v1/sessions", get(list_sessions))
+            .route("/v1/sessions/tree", get(session_tree))
             .route("/v1/sessions/{session_id}", get(get_session))
+            .route("/v1/sessions/{session_id}/branch", put(update_branch))
+            .route("/v1/sessions/{session_id}/continue", post(continue_session))
             .route("/v1/sessions/{session_id}/fork", post(fork_session))
-            .route("/v1/sessions/{session_id}/shares", post(create_share))
+            .route(
+                "/v1/sessions/{session_id}/shares",
+                get(list_session_shares).post(create_share),
+            )
+            .route("/v1/share-records/{share_id}", get(get_share_record))
             .layer(middleware::from_fn_with_state(
                 self.store.clone(),
                 authenticate,
@@ -593,6 +781,127 @@ fn migrate(connection: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn append_tree_record(
+    session_id: &str,
+    depth: usize,
+    records_by_id: &BTreeMap<String, CloudSessionRecord>,
+    children_by_parent: &BTreeMap<String, Vec<String>>,
+    visited: &mut HashSet<String>,
+    tree: &mut Vec<CloudSessionTreeRecord>,
+) {
+    if !visited.insert(session_id.to_owned()) {
+        return;
+    }
+    let Some(record) = records_by_id.get(session_id).cloned() else {
+        return;
+    };
+    let children = children_by_parent
+        .get(session_id)
+        .cloned()
+        .unwrap_or_default();
+    tree.push(CloudSessionTreeRecord {
+        depth,
+        record,
+        children: children.clone(),
+    });
+    for child_id in children {
+        append_tree_record(
+            &child_id,
+            depth + 1,
+            records_by_id,
+            children_by_parent,
+            visited,
+            tree,
+        );
+    }
+}
+
+fn share_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CloudShareRecord> {
+    let id = row.get::<_, String>(0)?;
+    Ok(CloudShareRecord {
+        html_url: format!("/v1/shares/{id}.html"),
+        json_url: format!("/v1/shares/{id}.json"),
+        id,
+        session_id: row.get(1)?,
+        public: row.get(2)?,
+        created_at: row.get(3)?,
+    })
+}
+
+fn cloud_command_catalog() -> Vec<CloudCommandRecord> {
+    [
+        (
+            "settings.pull",
+            "Pull self-hosted profile/settings for this device",
+            "GET",
+            "/v1/settings",
+        ),
+        (
+            "settings.push",
+            "Push self-hosted profile/settings from this device",
+            "PUT",
+            "/v1/settings",
+        ),
+        (
+            "sessions.import",
+            "Upload a sanitized local JSONL session",
+            "POST",
+            "/v1/sessions/import",
+        ),
+        (
+            "sessions.list",
+            "List self-hosted cloud sessions",
+            "GET",
+            "/v1/sessions",
+        ),
+        (
+            "sessions.tree",
+            "List self-hosted cloud sessions as a branch tree",
+            "GET",
+            "/v1/sessions/tree",
+        ),
+        (
+            "sessions.branch.update",
+            "Update sanitized cloud branch metadata",
+            "PUT",
+            "/v1/sessions/{session_id}/branch",
+        ),
+        (
+            "sessions.continue",
+            "Create a sanitized remote continuation branch",
+            "POST",
+            "/v1/sessions/{session_id}/continue",
+        ),
+        (
+            "sessions.share.create",
+            "Create a self-hosted session share artifact",
+            "POST",
+            "/v1/sessions/{session_id}/shares",
+        ),
+        (
+            "sessions.shares.list",
+            "List share records for a self-hosted cloud session",
+            "GET",
+            "/v1/sessions/{session_id}/shares",
+        ),
+        (
+            "shares.record",
+            "Read a self-hosted share record",
+            "GET",
+            "/v1/share-records/{share_id}",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, description, method, path)| CloudCommandRecord {
+        name: name.to_owned(),
+        description: description.to_owned(),
+        method: method.to_owned(),
+        path: path.to_owned(),
+        available: true,
+    })
+    .collect()
+}
+
 async fn bootstrap(
     State(store): State<Store>,
     Json(request): Json<BootstrapRequest>,
@@ -636,6 +945,33 @@ async fn profile_status(
     Ok(Json(store.profile_status(&user.user_id)?))
 }
 
+async fn pull_settings(
+    Extension(user): Extension<AuthenticatedUser>,
+    State(store): State<Store>,
+) -> Result<Json<SettingsPullResponse>, CloudError> {
+    Ok(Json(store.pull_settings(&user.user_id)?))
+}
+
+async fn push_settings(
+    Extension(user): Extension<AuthenticatedUser>,
+    State(store): State<Store>,
+    Json(request): Json<SettingsPushRequest>,
+) -> Result<Json<ProfileStatusResponse>, CloudError> {
+    let revision = store.push_settings(&user.user_id, &request.settings)?;
+    Ok(Json(ProfileStatusResponse {
+        revision,
+        updated_at: store.profile_status(&user.user_id)?.updated_at,
+    }))
+}
+
+async fn command_catalog(
+    Extension(_user): Extension<AuthenticatedUser>,
+) -> Json<CloudCommandCatalogResponse> {
+    Json(CloudCommandCatalogResponse {
+        commands: cloud_command_catalog(),
+    })
+}
+
 async fn import_session(
     Extension(user): Extension<AuthenticatedUser>,
     State(store): State<Store>,
@@ -654,12 +990,45 @@ async fn list_sessions(
     }))
 }
 
+async fn session_tree(
+    Extension(user): Extension<AuthenticatedUser>,
+    State(store): State<Store>,
+) -> Result<Json<CloudSessionTreeResponse>, CloudError> {
+    Ok(Json(CloudSessionTreeResponse {
+        tree: store.session_tree(&user.user_id)?,
+    }))
+}
+
 async fn get_session(
     Extension(user): Extension<AuthenticatedUser>,
     State(store): State<Store>,
     AxumPath(session_id): AxumPath<String>,
 ) -> Result<Json<CloudSessionPayload>, CloudError> {
     Ok(Json(store.get_session(&user.user_id, &session_id)?))
+}
+
+async fn update_branch(
+    Extension(user): Extension<AuthenticatedUser>,
+    State(store): State<Store>,
+    AxumPath(session_id): AxumPath<String>,
+    Json(request): Json<CloudUpdateBranchRequest>,
+) -> Result<Json<CloudUpdateBranchResponse>, CloudError> {
+    Ok(Json(CloudUpdateBranchResponse {
+        record: store.update_branch(&user.user_id, &session_id, &request)?,
+    }))
+}
+
+async fn continue_session(
+    Extension(user): Extension<AuthenticatedUser>,
+    State(store): State<Store>,
+    AxumPath(session_id): AxumPath<String>,
+    Json(request): Json<CloudContinueSessionRequest>,
+) -> Result<Json<CloudContinueSessionResponse>, CloudError> {
+    Ok(Json(store.continue_session(
+        &user.user_id,
+        &session_id,
+        &request,
+    )?))
 }
 
 async fn fork_session(
@@ -669,6 +1038,16 @@ async fn fork_session(
 ) -> Result<Json<CloudForkSessionResponse>, CloudError> {
     let record = store.fork_session(&user.user_id, &session_id)?;
     Ok(Json(CloudForkSessionResponse { record }))
+}
+
+async fn list_session_shares(
+    Extension(user): Extension<AuthenticatedUser>,
+    State(store): State<Store>,
+    AxumPath(session_id): AxumPath<String>,
+) -> Result<Json<CloudShareListResponse>, CloudError> {
+    Ok(Json(CloudShareListResponse {
+        shares: store.list_session_shares(&user.user_id, &session_id)?,
+    }))
 }
 
 async fn create_share(
@@ -682,6 +1061,16 @@ async fn create_share(
         &session_id,
         request.public,
     )?))
+}
+
+async fn get_share_record(
+    Extension(user): Extension<AuthenticatedUser>,
+    State(store): State<Store>,
+    AxumPath(share_id): AxumPath<String>,
+) -> Result<Json<CloudShareRecordResponse>, CloudError> {
+    Ok(Json(CloudShareRecordResponse {
+        record: store.get_share_record(&user.user_id, &share_id)?,
+    }))
 }
 
 async fn get_public_share(
@@ -900,25 +1289,44 @@ fn sanitize_json_value(value: serde_json::Value) -> serde_json::Value {
 
 fn sensitive_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
-    key.contains("token") || key.contains("api_key") || key.contains("apikey")
+    key.contains("token")
+        || key.contains("secret")
+        || key.contains("authorization")
+        || key.contains("api_key")
+        || key.contains("apikey")
+        || key == "key"
 }
 
 fn sanitize_text(text: &str) -> String {
-    let redacted_paths = jsonl_path_regex().replace_all(text, "[REDACTED_PATH]");
+    let redacted_paths =
+        absolute_path_regex().replace_all(text, |captures: &regex::Captures<'_>| {
+            let prefix = captures.get(1).map_or("", |value| value.as_str());
+            format!("{prefix}[REDACTED_PATH]")
+        });
     api_secret_regex()
         .replace_all(&redacted_paths, "[REDACTED]")
         .into_owned()
 }
 
-fn jsonl_path_regex() -> &'static Regex {
+fn sanitize_optional_text(text: Option<&str>) -> Option<String> {
+    text.map(sanitize_text)
+}
+
+fn absolute_path_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r#"(?:[A-Za-z]:)?/[^\s"'<>]+\.jsonl"#).expect("path regex"))
+    REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?m)(^|[\s"'(=\[{])((?:[A-Za-z]:)?/(?:Users|home|private|var|tmp|Volumes|opt|etc|Applications|Library|System|usr|bin|sbin|dev|mnt|media|root)(?:/[^\s"'<>),\]}]*)?)"#,
+        )
+        .expect("path regex")
+    })
 }
 
 fn api_secret_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
-        Regex::new(r"(?i)\b(?:sk|api|token|key)[-_A-Za-z0-9]{8,}\b").expect("secret regex")
+        Regex::new(r"(?i)\b(?:neo_(?:at|dt)_[A-Za-z0-9_-]{16,}|(?:sk|api|token|key)[-_A-Za-z0-9]{8,})\b")
+            .expect("secret regex")
     })
 }
 

@@ -1,12 +1,14 @@
 use std::io::{self, BufRead};
 
 use anyhow::Context;
-use neo_agent_core::session::{JsonlSessionReader, SessionMetadataStore, SessionRecord};
+use neo_agent_core::session::{
+    JsonlSessionReader, SessionMetadataStore, SessionRecord, SessionSummarySource,
+};
 use neo_sdk::{
     JsonlCodec, RpcCommandKind, RpcCommandRecord, RpcCommandsResult, RpcError, RpcErrorCode,
     RpcMessage, RpcNotification, RpcRequest, RpcResponse, RpcSessionExportHtmlResult,
-    RpcSessionGetResult, RpcSessionRecord, RpcSessionTreeRecord, RpcSessionsListResult,
-    RpcSessionsTreeResult,
+    RpcSessionGetResult, RpcSessionRecord, RpcSessionShareRecord, RpcSessionTreeRecord,
+    RpcSessionsListResult, RpcSessionsTreeResult,
 };
 use serde_json::{Value, json};
 
@@ -617,12 +619,44 @@ fn session_store(config: &AppConfig) -> SessionMetadataStore {
 }
 
 fn rpc_session_record(record: SessionRecord) -> RpcSessionRecord {
+    let summary_record = record.summary_record;
     RpcSessionRecord {
         id: record.id,
         name: record.name,
         summary: record.summary,
+        summary_source: summary_record
+            .as_ref()
+            .map(|summary| rpc_summary_source(summary.source).to_owned()),
+        summary_model: summary_record
+            .as_ref()
+            .and_then(|summary| summary.model.clone()),
+        summary_updated_at: summary_record.and_then(|summary| summary.updated_at),
         parent_id: record.parent_id,
+        cloud_id: record.cloud_id,
+        synced_at: record.synced_at,
+        remote_parent_id: record.remote_parent_id,
         children: record.children,
+        share_ids: record.share_ids,
+        shares: record
+            .shares
+            .into_iter()
+            .map(|share| RpcSessionShareRecord {
+                id: share.id,
+                cloud_id: share.cloud_id,
+                public: share.public,
+                html_url: share.html_url,
+                json_url: share.json_url,
+                created_at: share.created_at,
+            })
+            .collect(),
+    }
+}
+
+fn rpc_summary_source(source: SessionSummarySource) -> &'static str {
+    match source {
+        SessionSummarySource::LocalExtractive => "local_extractive",
+        SessionSummarySource::ModelGenerated => "model_generated",
+        SessionSummarySource::Remote => "remote",
     }
 }
 

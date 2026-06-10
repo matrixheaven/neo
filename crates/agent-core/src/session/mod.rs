@@ -247,10 +247,46 @@ pub struct SessionRecord {
     pub cloud_id: Option<String>,
     pub synced_at: Option<String>,
     pub remote_parent_id: Option<String>,
+    pub summary_record: Option<SessionSummaryRecord>,
     #[serde(default)]
     pub children: Vec<String>,
     #[serde(default)]
     pub share_ids: Vec<String>,
+    #[serde(default)]
+    pub shares: Vec<SessionShareRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSummaryRecord {
+    pub text: String,
+    pub source: SessionSummarySource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionSummarySource {
+    LocalExtractive,
+    ModelGenerated,
+    Remote,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionShareRecord {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -271,6 +307,8 @@ struct StoredSessionMetadata {
     #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
+    summary_record: Option<SessionSummaryRecord>,
+    #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
     cloud_id: Option<String>,
@@ -280,6 +318,8 @@ struct StoredSessionMetadata {
     remote_parent_id: Option<String>,
     #[serde(default)]
     share_ids: Vec<String>,
+    #[serde(default)]
+    shares: Vec<SessionShareRecord>,
 }
 
 impl SessionMetadataStore {
@@ -320,15 +360,29 @@ impl SessionMetadataStore {
         session_id: &str,
         summary: String,
     ) -> Result<SessionRecord, SessionError> {
+        self.record_summary(
+            session_id,
+            SessionSummaryRecord {
+                text: summary,
+                source: SessionSummarySource::LocalExtractive,
+                model: None,
+                updated_at: None,
+            },
+        )
+    }
+
+    pub fn record_summary(
+        &self,
+        session_id: &str,
+        summary: SessionSummaryRecord,
+    ) -> Result<SessionRecord, SessionError> {
         validate_session_id(session_id)?;
         self.ensure_session_exists(session_id)?;
 
         let mut metadata = self.read_metadata()?;
-        metadata
-            .sessions
-            .entry(session_id.to_owned())
-            .or_default()
-            .summary = Some(summary);
+        let stored = metadata.sessions.entry(session_id.to_owned()).or_default();
+        stored.summary = Some(summary.text.clone());
+        stored.summary_record = Some(summary);
         self.write_metadata(&metadata)?;
 
         Ok(self
@@ -369,6 +423,9 @@ impl SessionMetadataStore {
         session_id: &str,
         cloud_id: String,
         share_id: String,
+        public: bool,
+        html_url: Option<String>,
+        json_url: Option<String>,
         synced_at: String,
     ) -> Result<SessionRecord, SessionError> {
         validate_session_id(session_id)?;
@@ -379,7 +436,20 @@ impl SessionMetadataStore {
         stored.cloud_id = Some(cloud_id);
         stored.synced_at = Some(synced_at);
         if !stored.share_ids.contains(&share_id) {
-            stored.share_ids.push(share_id);
+            stored.share_ids.push(share_id.clone());
+        }
+        let share = SessionShareRecord {
+            id: share_id,
+            cloud_id: stored.cloud_id.clone(),
+            public: Some(public),
+            html_url,
+            json_url,
+            created_at: stored.synced_at.clone(),
+        };
+        if let Some(existing) = stored.shares.iter_mut().find(|stored| stored.id == share.id) {
+            *existing = share;
+        } else {
+            stored.shares.push(share);
         }
         self.write_metadata(&metadata)?;
 
@@ -388,6 +458,53 @@ impl SessionMetadataStore {
             .into_iter()
             .find(|session| session.id == session_id)
             .expect("shared session should be listable"))
+    }
+
+    pub fn record_remote_metadata(
+        &self,
+        session_id: &str,
+        cloud_id: String,
+        synced_at: String,
+        remote_parent_id: Option<String>,
+        summary: Option<SessionSummaryRecord>,
+        share_ids: Vec<String>,
+    ) -> Result<SessionRecord, SessionError> {
+        validate_session_id(session_id)?;
+        self.ensure_session_exists(session_id)?;
+
+        let mut metadata = self.read_metadata()?;
+        let stored = metadata.sessions.entry(session_id.to_owned()).or_default();
+        stored.cloud_id = Some(cloud_id.clone());
+        stored.synced_at = Some(synced_at);
+        if remote_parent_id.is_some() {
+            stored.remote_parent_id = remote_parent_id;
+        }
+        if let Some(summary) = summary {
+            stored.summary = Some(summary.text.clone());
+            stored.summary_record = Some(summary);
+        }
+        for share_id in share_ids {
+            if !stored.share_ids.contains(&share_id) {
+                stored.share_ids.push(share_id.clone());
+            }
+            if !stored.shares.iter().any(|share| share.id == share_id) {
+                stored.shares.push(SessionShareRecord {
+                    id: share_id,
+                    cloud_id: Some(cloud_id.clone()),
+                    public: None,
+                    html_url: None,
+                    json_url: None,
+                    created_at: None,
+                });
+            }
+        }
+        self.write_metadata(&metadata)?;
+
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .expect("remote metadata session should be listable"))
     }
 
     pub fn fork(
@@ -505,21 +622,59 @@ fn records_from_metadata(
         .into_iter()
         .map(|id| {
             let stored = metadata.sessions.get(&id);
+            let summary_record = stored.and_then(summary_record_from_stored);
+            let shares = stored.map(shares_from_stored).unwrap_or_default();
             SessionRecord {
                 children: children_by_parent.remove(&id).unwrap_or_default(),
                 id,
                 name: stored.and_then(|record| record.name.clone()),
-                summary: stored.and_then(|record| record.summary.clone()),
+                summary: summary_record
+                    .as_ref()
+                    .map(|summary| summary.text.clone())
+                    .or_else(|| stored.and_then(|record| record.summary.clone())),
                 parent_id: stored.and_then(|record| record.parent_id.clone()),
                 cloud_id: stored.and_then(|record| record.cloud_id.clone()),
                 synced_at: stored.and_then(|record| record.synced_at.clone()),
                 remote_parent_id: stored.and_then(|record| record.remote_parent_id.clone()),
+                summary_record,
                 share_ids: stored
                     .map(|record| record.share_ids.clone())
                     .unwrap_or_default(),
+                shares,
             }
         })
         .collect()
+}
+
+fn summary_record_from_stored(stored: &StoredSessionMetadata) -> Option<SessionSummaryRecord> {
+    stored
+        .summary_record
+        .clone()
+        .or_else(|| {
+            stored.summary.as_ref().map(|summary| SessionSummaryRecord {
+                text: summary.clone(),
+                source: SessionSummarySource::LocalExtractive,
+                model: None,
+                updated_at: None,
+            })
+        })
+}
+
+fn shares_from_stored(stored: &StoredSessionMetadata) -> Vec<SessionShareRecord> {
+    let mut shares = stored.shares.clone();
+    for share_id in &stored.share_ids {
+        if !shares.iter().any(|share| share.id == *share_id) {
+            shares.push(SessionShareRecord {
+                id: share_id.clone(),
+                cloud_id: stored.cloud_id.clone(),
+                public: None,
+                html_url: None,
+                json_url: None,
+                created_at: stored.synced_at.clone(),
+            });
+        }
+    }
+    shares
 }
 
 pub fn validate_session_id(session_id: &str) -> Result<(), SessionError> {
