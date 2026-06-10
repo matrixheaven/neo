@@ -7,6 +7,7 @@ use std::{
 use anyhow::{Context, bail};
 use neo_agent_core::{PermissionPolicy, QueueMode, ToolExecutionMode};
 use neo_ai::{ModelRegistry, ModelSpec, ReasoningEffort};
+use neo_cloud_protocol::CloudProfile;
 use neo_tui::{KeyId, KeybindingAction, KeybindingsManager};
 use serde::{Deserialize, Serialize};
 
@@ -344,6 +345,19 @@ pub struct TuiConfig {
     pub keybindings: BTreeMap<String, Vec<String>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudConfig {
+    pub auth_file: PathBuf,
+}
+
+impl Default for CloudConfig {
+    fn default() -> Self {
+        Self {
+            auth_file: default_auth_file_path(),
+        }
+    }
+}
+
 impl Default for RuntimeCompactionConfig {
     fn default() -> Self {
         Self {
@@ -403,6 +417,7 @@ struct FileConfig {
     api_base: Option<String>,
     api_key_env: Option<String>,
     providers: Option<BTreeMap<String, ProviderConfig>>,
+    model_scope: Option<Vec<String>>,
     model_catalogs: Option<Vec<PathBuf>>,
     prompt_templates: Option<Vec<String>>,
     sessions_dir: Option<PathBuf>,
@@ -410,6 +425,7 @@ struct FileConfig {
     defaults: Option<FileDefaults>,
     runtime: Option<FileRuntimeConfig>,
     tui: Option<FileTuiConfig>,
+    cloud: Option<FileCloudConfig>,
     mcp: Option<McpConfig>,
 }
 
@@ -452,6 +468,12 @@ struct FileRuntimeCompactionConfig {
 struct FileTuiConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     keybindings: Option<BTreeMap<String, Vec<String>>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct FileCloudConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth_file: Option<PathBuf>,
 }
 
 impl FileTuiConfig {
@@ -536,14 +558,20 @@ impl AppConfig {
             .into_iter()
             .map(|path| resolve_project_path(&project_dir, path))
             .collect();
-        let model_scope = overrides.model_scope;
-        apply_scoped_default_model(
-            &mut default_provider,
-            &mut default_model,
-            &model_catalogs,
-            &model_scope,
-            explicit_model,
-        )?;
+        let cli_model_scope = overrides.model_scope;
+        let explicit_model_scope = !cli_model_scope.is_empty();
+        let model_scope = if explicit_model_scope {
+            apply_scoped_default_model(
+                &mut default_provider,
+                &mut default_model,
+                &model_catalogs,
+                &cli_model_scope,
+                explicit_model,
+            )?;
+            cli_model_scope
+        } else {
+            file_config.model_scope.unwrap_or_default()
+        };
         let configured_prompt_templates = file_config.prompt_templates.unwrap_or_default();
         let sessions_dir = overrides
             .sessions_dir
@@ -693,6 +721,7 @@ pub fn show(config: &AppConfig) -> anyhow::Result<String> {
         api_base: config.api_base.clone(),
         api_key_env: config.api_key_env.clone(),
         providers: (!config.providers.is_empty()).then(|| config.providers.clone()),
+        model_scope: (!config.model_scope.is_empty()).then(|| config.model_scope.clone()),
         model_catalogs: (!config.model_catalogs.is_empty()).then(|| config.model_catalogs.clone()),
         prompt_templates: (!config.configured_prompt_templates.is_empty())
             .then(|| config.configured_prompt_templates.clone()),
@@ -703,6 +732,7 @@ pub fn show(config: &AppConfig) -> anyhow::Result<String> {
         }),
         runtime: Some(FileRuntimeConfig::from_runtime(&config.runtime)),
         tui: Some(FileTuiConfig::from_tui(&config.tui)),
+        cloud: None,
         mcp: Some(config.mcp.clone()),
     };
 
@@ -722,6 +752,7 @@ pub fn set(key: &str, value: &str) -> anyhow::Result<String> {
         "default_provider" | "provider" => config.default_provider = Some(value.to_owned()),
         "api_base" => config.api_base = Some(value.to_owned()),
         "api_key_env" => config.api_key_env = Some(value.to_owned()),
+        "model_scope" => config.model_scope = Some(parse_string_list(value)?),
         key if key.starts_with("providers.") && key.ends_with(".api_base") => {
             let provider_id = parse_provider_key(key, ".api_base")?;
             let provider = config
@@ -847,6 +878,7 @@ fn merge_file_configs(base: FileConfig, layer: FileConfig) -> FileConfig {
         api_base: layer.api_base.or(base.api_base),
         api_key_env: layer.api_key_env.or(base.api_key_env),
         providers: merge_provider_configs(base.providers, layer.providers),
+        model_scope: merge_string_lists(base.model_scope, layer.model_scope),
         model_catalogs: merge_path_lists(base.model_catalogs, layer.model_catalogs),
         prompt_templates: merge_string_lists(base.prompt_templates, layer.prompt_templates),
         sessions_dir: layer.sessions_dir.or(base.sessions_dir),
@@ -854,7 +886,21 @@ fn merge_file_configs(base: FileConfig, layer: FileConfig) -> FileConfig {
         defaults: merge_defaults(base.defaults, layer.defaults),
         runtime: merge_runtime_configs(base.runtime, layer.runtime),
         tui: merge_tui_configs(base.tui, layer.tui),
+        cloud: merge_cloud_configs(base.cloud, layer.cloud),
         mcp: merge_mcp_configs(base.mcp, layer.mcp),
+    }
+}
+
+fn merge_cloud_configs(
+    base: Option<FileCloudConfig>,
+    layer: Option<FileCloudConfig>,
+) -> Option<FileCloudConfig> {
+    match (base, layer) {
+        (None, None) => None,
+        (Some(cloud), None) | (None, Some(cloud)) => Some(cloud),
+        (Some(base), Some(layer)) => Some(FileCloudConfig {
+            auth_file: layer.auth_file.or(base.auth_file),
+        }),
     }
 }
 
@@ -1059,6 +1105,158 @@ fn tui_from_file(tui: Option<FileTuiConfig>) -> TuiConfig {
     TuiConfig {
         keybindings: tui.keybindings.unwrap_or_default(),
     }
+}
+
+fn cloud_from_file(project_dir: &Path, cloud: Option<FileCloudConfig>) -> CloudConfig {
+    let auth_file = cloud
+        .and_then(|cloud| cloud.auth_file)
+        .map(expand_user_path)
+        .unwrap_or_else(default_auth_file_path);
+    let auth_file = if auth_file.is_absolute() {
+        auth_file
+    } else {
+        project_dir.join(auth_file)
+    };
+    CloudConfig { auth_file }
+}
+
+pub(crate) fn cloud_profile(config: &AppConfig) -> anyhow::Result<CloudProfile> {
+    let mut tui = serde_json::to_value(FileTuiConfig::from_tui(&config.tui))?;
+    if config.theme.name != "default"
+        && let Some(tui_object) = tui.as_object_mut()
+    {
+        tui_object.insert(
+            "theme".to_owned(),
+            serde_json::Value::String(config.theme.name.clone()),
+        );
+        if let Some(source) = &config.theme.source {
+            tui_object.insert(
+                "theme_source".to_owned(),
+                serde_json::Value::String(source.display().to_string()),
+            );
+        }
+    }
+
+    Ok(CloudProfile {
+        default_provider: Some(config.default_provider.clone()),
+        default_model: Some(config.default_model.clone()),
+        api_base: config.api_base.clone(),
+        api_key_env: config.api_key_env.clone(),
+        model_scope: config.model_scope.clone(),
+        providers: if config.providers.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::to_value(&config.providers)?
+        },
+        runtime: serde_json::to_value(FileRuntimeConfig::from_runtime(&config.runtime))?,
+        tui,
+        extensions: enabled_extension_ids(&config.project_dir)?,
+    })
+}
+
+pub(crate) fn apply_cloud_profile_to_global_config(
+    profile: &CloudProfile,
+    auth_file: &Path,
+) -> anyhow::Result<()> {
+    let config_path = find_global_config_path().unwrap_or_else(|| {
+        home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(CONFIG_DIR)
+            .join(CONFIG_FILE)
+    });
+    let mut config = read_file_config(&config_path)?;
+
+    config.default_provider = profile.default_provider.clone();
+    config.default_model = profile.default_model.clone();
+    config.api_base = profile.api_base.clone();
+    config.api_key_env = profile.api_key_env.clone();
+    config.model_scope = (!profile.model_scope.is_empty()).then(|| profile.model_scope.clone());
+    config.providers = json_to_option(&profile.providers)?;
+    config.runtime = json_to_option(&profile.runtime)?;
+    config.tui = profile_tui_config(&profile.tui)?;
+    if config.cloud.is_none() {
+        config.cloud = Some(FileCloudConfig {
+            auth_file: Some(auth_file.to_path_buf()),
+        });
+    }
+
+    if let Some(runtime) = &config.runtime {
+        validate_runtime_config(&runtime_from_file(Some(runtime.clone())))?;
+    }
+    if let Some(tui) = &config.tui {
+        validate_tui_config(&tui_from_file(Some(tui.clone())))?;
+    }
+    write_file_config(&config_path, &config)
+}
+
+pub(crate) fn cloud_auth_file(config: &AppConfig) -> anyhow::Result<PathBuf> {
+    let global_config = find_global_config_path()
+        .map(|path| read_file_config(&path))
+        .transpose()?
+        .unwrap_or_default();
+    let project_config = read_file_config(&config.config_path)?;
+    let file_config = merge_file_configs(global_config, project_config);
+    Ok(cloud_from_file(&config.project_dir, file_config.cloud).auth_file)
+}
+
+fn json_to_option<T>(value: &serde_json::Value) -> anyhow::Result<Option<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .with_context(|| "failed to parse cloud profile JSON")
+}
+
+fn profile_tui_config(value: &serde_json::Value) -> anyhow::Result<Option<FileTuiConfig>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    #[derive(Deserialize)]
+    struct ProfileTuiConfig {
+        #[serde(default)]
+        keybindings: Option<BTreeMap<String, Vec<String>>>,
+    }
+    serde_json::from_value::<ProfileTuiConfig>(value.clone())
+        .map(|tui| {
+            tui.keybindings.map(|keybindings| FileTuiConfig {
+                keybindings: Some(keybindings),
+            })
+        })
+        .with_context(|| "failed to parse cloud profile TUI config")
+}
+
+fn enabled_extension_ids(project_dir: &Path) -> anyhow::Result<Vec<String>> {
+    let state_path = project_dir.join(CONFIG_DIR).join("extensions-state.toml");
+    if !state_path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(&state_path)
+        .with_context(|| format!("failed to read extension state {}", state_path.display()))?;
+    let value: toml::Value = toml::from_str(&content)
+        .with_context(|| format!("failed to parse extension state {}", state_path.display()))?;
+    let Some(extensions) = value.get("extensions").and_then(toml::Value::as_table) else {
+        return Ok(Vec::new());
+    };
+    let mut ids = extensions
+        .iter()
+        .filter_map(|(id, state)| {
+            let disabled_by_enabled = state
+                .get("enabled")
+                .and_then(toml::Value::as_bool)
+                .is_some_and(|enabled| !enabled);
+            let disabled_by_status = state
+                .get("status")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|status| status.eq_ignore_ascii_case("disabled"));
+            (!disabled_by_enabled && !disabled_by_status).then(|| id.clone())
+        })
+        .collect::<Vec<_>>();
+    ids.sort();
+    Ok(ids)
 }
 
 fn runtime_config_mut(config: &mut FileConfig) -> &mut FileRuntimeConfig {
@@ -1292,6 +1490,13 @@ fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME")
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
+}
+
+fn default_auth_file_path() -> PathBuf {
+    home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(CONFIG_DIR)
+        .join("auth.json")
 }
 
 fn expand_user_path(path: PathBuf) -> PathBuf {

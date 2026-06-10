@@ -9,6 +9,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+use neo_cloud::{CloudServer, Store};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -529,6 +530,184 @@ api_key_env = "PROJECT_OPENAI_KEY"
     assert!(stdout.contains("[providers.openai]"));
     assert!(stdout.contains("api_key_env = \"PROJECT_OPENAI_KEY\""));
     assert!(!stdout.contains("secret"));
+}
+
+#[test]
+fn cloud_login_status_logout_manage_auth_file_without_printing_tokens() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let temp = TempDir::new().expect("tempdir");
+    let server = runtime.block_on(start_cloud_server(temp.path().join("cloud.sqlite")));
+    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+[cloud]
+auth_file = ".neo/custom-auth.json"
+"#,
+    )
+    .expect("write config");
+
+    let mut login = neo();
+    login
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .args(["login", "cloud", "--server", &server.base_url]);
+    let login_stdout = run(login);
+
+    assert!(login_stdout.contains("logged in to"));
+    assert!(login_stdout.contains(&server.base_url));
+    assert!(!login_stdout.contains("access_token"));
+    assert!(!login_stdout.contains("device_token"));
+    let auth_path = temp.path().join(".neo/custom-auth.json");
+    let auth_json: Value =
+        serde_json::from_str(&fs::read_to_string(&auth_path).expect("read auth file"))
+            .expect("auth json");
+    assert_eq!(auth_json["server_url"], server.base_url);
+    assert!(
+        auth_json["access_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+    assert!(
+        auth_json["device_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+
+    let mut status = neo();
+    status
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .args(["auth", "status"]);
+    let status_stdout = run(status);
+    assert!(status_stdout.contains("logged in"));
+    assert!(status_stdout.contains(&server.base_url));
+    assert!(!status_stdout.contains(auth_json["access_token"].as_str().expect("token")));
+    assert!(!status_stdout.contains(auth_json["device_token"].as_str().expect("token")));
+
+    let mut logout = neo();
+    logout
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .arg("logout");
+    let logout_stdout = run(logout);
+    assert!(logout_stdout.contains("logged out"));
+    assert!(!auth_path.exists());
+
+    drop(server);
+}
+
+#[test]
+fn config_sync_push_status_and_pull_round_trip_global_profile_without_project_trust_or_sessions() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let home = TempDir::new().expect("home tempdir");
+    let project = TempDir::new().expect("project tempdir");
+    let server = runtime.block_on(start_cloud_server(home.path().join("cloud.sqlite")));
+    fs::create_dir_all(home.path().join(".neo")).expect("create home .neo");
+    fs::create_dir_all(project.path().join(".neo/sessions")).expect("create project sessions");
+    fs::write(
+        project.path().join(".neo/trust.toml"),
+        "decision = \"deny\"\n",
+    )
+    .expect("write project trust");
+    fs::write(
+        project.path().join(".neo/sessions/local.jsonl"),
+        "{\"local\":true}\n",
+    )
+    .expect("write project session");
+    fs::write(
+        home.path().join(".neo/config.toml"),
+        r#"
+default_provider = "anthropic"
+default_model = "deepseek-v4-pro"
+model_scope = ["anthropic/deepseek-*"]
+
+[providers.anthropic]
+api_base = "https://api.deepseek.com/anthropic"
+api_key_env = "DEEPSEEK_API_KEY"
+
+[runtime]
+max_tokens = 2048
+reasoning_effort = "high"
+tool_execution_mode = "Sequential"
+
+[tui.keybindings]
+"tui.input.submit" = ["ctrl+j"]
+
+[cloud]
+auth_file = "~/.neo/auth.json"
+"#,
+    )
+    .expect("write home config");
+    fs::write(
+        project.path().join(".neo/extensions-state.toml"),
+        r#"
+[extensions.echo]
+status = "enabled"
+name = "Echo"
+version = "0.1.0"
+manifest_path = ".neo/extensions/echo/neo-extension.toml"
+"#,
+    )
+    .expect("write extension state");
+
+    let mut login = neo();
+    login
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["login", "cloud", "--server", &server.base_url]);
+    run(login);
+
+    let mut push = neo();
+    push.current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["config", "sync", "push"]);
+    let push_stdout = run(push);
+    assert!(push_stdout.contains("profile pushed"));
+    assert!(push_stdout.contains("revision 1"));
+
+    fs::write(
+        home.path().join(".neo/config.toml"),
+        format!(
+            r#"
+default_provider = "openai"
+default_model = "gpt-4.1"
+
+[cloud]
+auth_file = "{}"
+"#,
+            home.path().join(".neo/auth.json").display()
+        ),
+    )
+    .expect("replace home config");
+
+    let mut status = neo();
+    status
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["config", "sync", "status"]);
+    let status_stdout = run(status);
+    assert!(status_stdout.contains("remote revision 1"));
+
+    let mut pull = neo();
+    pull.current_dir(project.path())
+        .env("HOME", home.path())
+        .args(["config", "sync", "pull"]);
+    let pull_stdout = run(pull);
+    assert!(pull_stdout.contains("profile pulled"));
+
+    let global_config = fs::read_to_string(home.path().join(".neo/config.toml"))
+        .expect("read pulled global config");
+    assert!(global_config.contains("default_provider = \"anthropic\""));
+    assert!(global_config.contains("default_model = \"deepseek-v4-pro\""));
+    assert!(global_config.contains("model_scope = [\"anthropic/deepseek-*\"]"));
+    assert!(global_config.contains("api_base = \"https://api.deepseek.com/anthropic\""));
+    assert!(global_config.contains("reasoning_effort = \"high\""));
+    assert!(global_config.contains("\"tui.input.submit\" = [\"ctrl+j\"]"));
+    assert!(project.path().join(".neo/trust.toml").exists());
+    assert!(project.path().join(".neo/sessions/local.jsonl").exists());
+
+    drop(server);
 }
 
 #[test]
@@ -2520,6 +2699,28 @@ struct RecordedRequest {
 struct MockSseServer {
     url: String,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
+}
+
+struct TestCloudServer {
+    base_url: String,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for TestCloudServer {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+async fn start_cloud_server(database_path: PathBuf) -> TestCloudServer {
+    let store = Store::open(database_path).await.expect("open cloud store");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind cloud server");
+    let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+    let server = CloudServer::new(store);
+    let handle = tokio::spawn(async move {
+        server.serve(listener).await.expect("serve cloud");
+    });
+    TestCloudServer { base_url, handle }
 }
 
 impl MockSseServer {

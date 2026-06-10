@@ -216,6 +216,15 @@ pub enum Command {
         #[command(subcommand)]
         command: TrustCommand,
     },
+    Login {
+        #[command(subcommand)]
+        command: LoginCommand,
+    },
+    Logout,
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -283,7 +292,14 @@ pub enum SessionCommand {
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
     Show,
-    Set { key: String, value: String },
+    Set {
+        key: String,
+        value: String,
+    },
+    Sync {
+        #[command(subcommand)]
+        command: ConfigSyncCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -292,6 +308,26 @@ pub enum TrustCommand {
     Approve,
     Deny,
     Clear,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LoginCommand {
+    Cloud {
+        #[arg(long, value_name = "URL")]
+        server: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuthCommand {
+    Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigSyncCommand {
+    Push,
+    Pull,
+    Status,
 }
 
 #[derive(Debug, Subcommand)]

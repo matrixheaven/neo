@@ -1,4 +1,5 @@
 mod cli;
+mod cloud_commands;
 mod config;
 mod extension_commands;
 mod extension_tools;
@@ -22,8 +23,9 @@ use anyhow::Context as _;
 
 use crate::{
     cli::{
-        Cli, Command, ConfigCommand, ExtensionCommand, LIST_MODELS_NO_SEARCH, McpCommand,
-        ModelCommand, SessionCommand, SkillCommand, TrustCommand,
+        AuthCommand, Cli, Command, ConfigCommand, ConfigSyncCommand, ExtensionCommand,
+        LIST_MODELS_NO_SEARCH, LoginCommand, McpCommand, ModelCommand, SessionCommand,
+        SkillCommand, TrustCommand,
     },
     config::{AppConfig, ConfigOverrides},
 };
@@ -188,9 +190,21 @@ async fn dispatch_command(
             TrustCommand::Deny => trust::deny(&config.project_dir),
             TrustCommand::Clear => trust::clear(&config.project_dir),
         },
+        Some(Command::Login { command }) => match command {
+            LoginCommand::Cloud { server } => cloud_commands::login_cloud(config, &server).await,
+        },
+        Some(Command::Logout) => cloud_commands::logout(config),
+        Some(Command::Auth { command }) => match command {
+            AuthCommand::Status => cloud_commands::auth_status(config),
+        },
         Some(Command::Config { command }) => match command {
             ConfigCommand::Show => config::show(config),
             ConfigCommand::Set { key, value } => config::set(&key, &value),
+            ConfigCommand::Sync { command } => match command {
+                ConfigSyncCommand::Push => cloud_commands::sync_push(config).await,
+                ConfigSyncCommand::Pull => cloud_commands::sync_pull(config).await,
+                ConfigSyncCommand::Status => cloud_commands::sync_status(config).await,
+            },
         },
         Some(Command::Models { command }) => match command {
             ModelCommand::List => modes::run::list_models(config),
