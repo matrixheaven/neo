@@ -598,6 +598,25 @@ auth_file = ".neo/custom-auth.json"
 }
 
 #[test]
+fn cloud_status_reports_self_hosted_cloud_health_without_auth_file() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let temp = TempDir::new().expect("tempdir");
+    let server = runtime.block_on(start_cloud_server(temp.path().join("cloud.sqlite")));
+
+    let mut status = neo();
+    status
+        .current_dir(temp.path())
+        .env("HOME", temp.path())
+        .args(["cloud", "status", "--api-base", &server.base_url]);
+    let stdout = run(status);
+
+    assert!(stdout.contains("cloud available"));
+    assert!(stdout.contains(&server.base_url));
+
+    drop(server);
+}
+
+#[test]
 fn config_sync_push_status_and_pull_round_trip_global_profile_without_project_trust_or_sessions() {
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
     let home = TempDir::new().expect("home tempdir");

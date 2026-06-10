@@ -225,6 +225,10 @@ pub enum Command {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    Cloud {
+        #[command(subcommand)]
+        command: CloudCommand,
+    },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -321,6 +325,14 @@ pub enum LoginCommand {
 #[derive(Debug, Subcommand)]
 pub enum AuthCommand {
     Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CloudCommand {
+    Status {
+        #[arg(long = "api-base", value_name = "URL")]
+        api_base: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

@@ -84,6 +84,16 @@ pub fn auth_status(config: &AppConfig) -> anyhow::Result<String> {
     ))
 }
 
+pub async fn cloud_status(api_base: &str) -> anyhow::Result<String> {
+    let api_base = api_base.trim_end_matches('/');
+    anyhow::ensure!(!api_base.is_empty(), "--api-base must not be empty");
+    let health = CloudClient::new(api_base).health().await?;
+    Ok(format!(
+        "cloud available: {api_base}\nstatus: {}\n",
+        health.status
+    ))
+}
+
 pub async fn sync_push(config: &AppConfig) -> anyhow::Result<String> {
     let auth_file = config::cloud_auth_file(config)?;
     let auth = require_auth(&auth_file)?;

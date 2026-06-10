@@ -1,5 +1,5 @@
 use neo_cloud_protocol::{
-    BootstrapRequest, BootstrapResponse, CloudProfile, DeviceTokenLoginRequest,
+    BootstrapRequest, BootstrapResponse, CloudProfile, DeviceTokenLoginRequest, HealthResponse,
     ProfilePullResponse, ProfilePushRequest, ProfileStatusResponse,
 };
 
@@ -87,6 +87,17 @@ impl CloudClient {
         self.client
             .get(format!("{}/v1/profile/status", self.base_url))
             .bearer_auth(access_token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn health(&self) -> anyhow::Result<HealthResponse> {
+        self.client
+            .get(format!("{}/v1/health", self.base_url))
             .send()
             .await?
             .error_for_status()?

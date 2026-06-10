@@ -6,8 +6,10 @@ use neo_cloud::{CloudServer, Store};
 #[derive(Debug, Parser)]
 #[command(name = "neo-cloud", about = "Self-hosted Neo cloud server")]
 struct Args {
-    #[arg(long, default_value = "127.0.0.1:8765")]
-    listen: String,
+    #[arg(long)]
+    host: String,
+    #[arg(long)]
+    port: u16,
     #[arg(long, default_value = "~/.neo/cloud.sqlite")]
     database: PathBuf,
 }
@@ -17,7 +19,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let database = expand_user_path(args.database);
     let store = Store::open(database).await?;
-    let listener = TcpListener::bind(&args.listen)?;
+    let listener = TcpListener::bind((args.host.as_str(), args.port))?;
     println!("neo-cloud listening on http://{}", listener.local_addr()?);
     CloudServer::new(store).serve(listener).await
 }

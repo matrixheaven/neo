@@ -23,9 +23,9 @@ use anyhow::Context as _;
 
 use crate::{
     cli::{
-        AuthCommand, Cli, Command, ConfigCommand, ConfigSyncCommand, ExtensionCommand,
-        LIST_MODELS_NO_SEARCH, LoginCommand, McpCommand, ModelCommand, SessionCommand,
-        SkillCommand, TrustCommand,
+        AuthCommand, Cli, CloudCommand, Command, ConfigCommand, ConfigSyncCommand,
+        ExtensionCommand, LIST_MODELS_NO_SEARCH, LoginCommand, McpCommand, ModelCommand,
+        SessionCommand, SkillCommand, TrustCommand,
     },
     config::{AppConfig, ConfigOverrides},
 };
@@ -196,6 +196,9 @@ async fn dispatch_command(
         Some(Command::Logout) => cloud_commands::logout(config),
         Some(Command::Auth { command }) => match command {
             AuthCommand::Status => cloud_commands::auth_status(config),
+        },
+        Some(Command::Cloud { command }) => match command {
+            CloudCommand::Status { api_base } => cloud_commands::cloud_status(&api_base).await,
         },
         Some(Command::Config { command }) => match command {
             ConfigCommand::Show => config::show(config),

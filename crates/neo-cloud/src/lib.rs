@@ -18,7 +18,7 @@ use axum::{
 };
 use neo_cloud_protocol::{
     BootstrapRequest, BootstrapResponse, CloudProfile, DeviceTokenLoginRequest, ErrorResponse,
-    ProfilePullResponse, ProfilePushRequest, ProfileStatusResponse,
+    HealthResponse, ProfilePullResponse, ProfilePushRequest, ProfileStatusResponse,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -251,11 +251,18 @@ impl CloudServer {
                 authenticate,
             ));
         Router::new()
+            .route("/v1/health", get(health))
             .route("/v1/auth/bootstrap", post(bootstrap))
             .route("/v1/auth/device-token", post(device_token_login))
             .merge(protected)
             .with_state(self.store)
     }
+}
+
+async fn health() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok".to_owned(),
+    })
 }
 
 fn migrate(connection: &Connection) -> anyhow::Result<()> {
