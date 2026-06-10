@@ -1,7 +1,8 @@
 use std::{
     collections::BTreeMap,
-    env, fs,
+    env,
     fmt::Write as _,
+    fs,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -758,9 +759,12 @@ async fn fetch_remote_image(url: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 fn workspace_safe_output_path(project_dir: &Path, output: &Path) -> anyhow::Result<PathBuf> {
-    let project_dir = project_dir
-        .canonicalize()
-        .with_context(|| format!("failed to canonicalize project dir {}", project_dir.display()))?;
+    let project_dir = project_dir.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize project dir {}",
+            project_dir.display()
+        )
+    })?;
     let output = if output.is_absolute() {
         output.to_path_buf()
     } else {
@@ -1181,7 +1185,11 @@ pub async fn start_mcp_server(config: &AppConfig, server_id: &str) -> anyhow::Re
 
 pub fn stop_mcp_server(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
     let mut state = read_mcp_process_state(config)?;
-    let Some(index) = state.servers.iter().position(|record| record.id == server_id) else {
+    let Some(index) = state
+        .servers
+        .iter()
+        .position(|record| record.id == server_id)
+    else {
         anyhow::bail!("MCP server {server_id} is not running");
     };
     let record = state.servers.remove(index);
@@ -1880,7 +1888,10 @@ fn mcp_adapter_for_server_with_hosted_client(
             })))
         }
         "cloud" => {
-            anyhow::bail!("cloud MCP server {} requires self-hosted neo-cloud auth", server.id)
+            anyhow::bail!(
+                "cloud MCP server {} requires self-hosted neo-cloud auth",
+                server.id
+            )
         }
         other => anyhow::bail!("unsupported MCP transport for {}: {other}", server.id),
     }
@@ -1958,10 +1969,7 @@ fn write_mcp_process_state(config: &AppConfig, state: &McpProcessState) -> anyho
 }
 
 fn wait_for_mcp_server_pid(server: &McpServerConfig, timeout: Duration) -> Option<String> {
-    let pid_file = server
-        .env
-        .get("MCP_PID_FILE")
-        .map(PathBuf::from)?;
+    let pid_file = server.env.get("MCP_PID_FILE").map(PathBuf::from)?;
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if let Ok(pid) = fs::read_to_string(&pid_file) {

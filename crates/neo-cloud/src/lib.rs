@@ -1325,8 +1325,10 @@ fn absolute_path_regex() -> &'static Regex {
 fn api_secret_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
-        Regex::new(r"(?i)\b(?:neo_(?:at|dt)_[A-Za-z0-9_-]{16,}|(?:sk|api|token|key)[-_A-Za-z0-9]{8,})\b")
-            .expect("secret regex")
+        Regex::new(
+            r"(?i)\b(?:neo_(?:at|dt)_[A-Za-z0-9_-]{16,}|(?:sk|api|token|key)[-_A-Za-z0-9]{8,})\b",
+        )
+        .expect("secret regex")
     })
 }
 

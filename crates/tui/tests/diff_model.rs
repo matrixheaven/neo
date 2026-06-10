@@ -106,8 +106,6 @@ fn diff_render_state_copies_active_hunk_and_file_as_unified_diff() {
     );
     assert_eq!(
         state.copy_active_file().as_deref(),
-        Some(
-            "--- src/a.rs\n+++ src/a.rs\n@@ -1 +1 @@\n-old\n+new\n@@ -8 +8 @@\n-before\n+after\n"
-        )
+        Some("--- src/a.rs\n+++ src/a.rs\n@@ -1 +1 @@\n-old\n+new\n@@ -8 +8 @@\n-before\n+after\n")
     );
 }

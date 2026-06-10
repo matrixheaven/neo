@@ -785,7 +785,11 @@ pub fn upsert_mcp_server(server: McpServerConfig) -> anyhow::Result<String> {
     let config_path = find_config_path()?;
     let mut config = read_file_config(&config_path)?;
     let mcp = config.mcp.get_or_insert_with(McpConfig::default);
-    if let Some(existing) = mcp.servers.iter_mut().find(|existing| existing.id == server.id) {
+    if let Some(existing) = mcp
+        .servers
+        .iter_mut()
+        .find(|existing| existing.id == server.id)
+    {
         *existing = server.clone();
     } else {
         mcp.servers.push(server.clone());
@@ -1144,7 +1148,10 @@ fn merge_mcp_configs(base: Option<McpConfig>, layer: Option<McpConfig>) -> Optio
 }
 
 fn validate_mcp_server(server: &McpServerConfig) -> anyhow::Result<()> {
-    anyhow::ensure!(!server.id.trim().is_empty(), "MCP server id must not be empty");
+    anyhow::ensure!(
+        !server.id.trim().is_empty(),
+        "MCP server id must not be empty"
+    );
     anyhow::ensure!(
         !server.id.contains('/'),
         "MCP server id must not contain '/'"
@@ -1152,14 +1159,20 @@ fn validate_mcp_server(server: &McpServerConfig) -> anyhow::Result<()> {
     match server.transport.as_str() {
         "stdio" => {
             anyhow::ensure!(
-                server.command.as_deref().is_some_and(|command| !command.trim().is_empty()),
+                server
+                    .command
+                    .as_deref()
+                    .is_some_and(|command| !command.trim().is_empty()),
                 "stdio MCP server {} requires --command",
                 server.id
             );
         }
         "http" | "sse" => {
             anyhow::ensure!(
-                server.url.as_deref().is_some_and(|url| !url.trim().is_empty()),
+                server
+                    .url
+                    .as_deref()
+                    .is_some_and(|url| !url.trim().is_empty()),
                 "{} MCP server {} requires --url",
                 server.transport,
                 server.id

@@ -12,8 +12,8 @@ use tokio::{
     task::JoinHandle,
 };
 
-use super::{Tool, ToolContext, ToolError, ToolFuture, ToolRegistry, ToolResult};
 use super::{ProcessKind, ProcessSupervisor};
+use super::{Tool, ToolContext, ToolError, ToolFuture, ToolRegistry, ToolResult};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpToolDefinition {

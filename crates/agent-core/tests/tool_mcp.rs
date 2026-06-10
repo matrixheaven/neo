@@ -501,8 +501,7 @@ async fn mcp_stdio_adapter_registers_session_with_process_supervisor_for_cleanup
     let workspace = tempfile::tempdir().expect("workspace");
     let fixture_path = workspace.path().join("mcp-supervised-fixture.py");
     let pid_path = workspace.path().join("mcp.pid");
-    fs::write(&fixture_path, MCP_STDIO_SUPERVISED_FIXTURE)
-        .expect("write MCP supervised fixture");
+    fs::write(&fixture_path, MCP_STDIO_SUPERVISED_FIXTURE).expect("write MCP supervised fixture");
     let supervisor = ProcessSupervisor::default();
     let adapter = McpStdioToolAdapter::new_supervised(
         McpStdioConfig {

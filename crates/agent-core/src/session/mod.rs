@@ -446,7 +446,11 @@ impl SessionMetadataStore {
             json_url,
             created_at: stored.synced_at.clone(),
         };
-        if let Some(existing) = stored.shares.iter_mut().find(|stored| stored.id == share.id) {
+        if let Some(existing) = stored
+            .shares
+            .iter_mut()
+            .find(|stored| stored.id == share.id)
+        {
             *existing = share;
         } else {
             stored.shares.push(share);
@@ -647,17 +651,14 @@ fn records_from_metadata(
 }
 
 fn summary_record_from_stored(stored: &StoredSessionMetadata) -> Option<SessionSummaryRecord> {
-    stored
-        .summary_record
-        .clone()
-        .or_else(|| {
-            stored.summary.as_ref().map(|summary| SessionSummaryRecord {
-                text: summary.clone(),
-                source: SessionSummarySource::LocalExtractive,
-                model: None,
-                updated_at: None,
-            })
+    stored.summary_record.clone().or_else(|| {
+        stored.summary.as_ref().map(|summary| SessionSummaryRecord {
+            text: summary.clone(),
+            source: SessionSummarySource::LocalExtractive,
+            model: None,
+            updated_at: None,
         })
+    })
 }
 
 fn shares_from_stored(stored: &StoredSessionMetadata) -> Vec<SessionShareRecord> {

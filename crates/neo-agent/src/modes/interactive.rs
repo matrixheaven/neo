@@ -1938,10 +1938,17 @@ impl RawTerminal {
         self.terminal
             .draw(|frame| frame.render_widget(app, frame.area()))?;
         let area = self.terminal.get_frame().area();
-        if self.last_area.replace(area).is_some_and(|last| last != area) {
+        if self
+            .last_area
+            .replace(area)
+            .is_some_and(|last| last != area)
+        {
             self.inline_image_cache.reset_for_full_redraw();
         }
-        for render in self.inline_image_cache.take_pending(app.inline_image_renders()) {
+        for render in self
+            .inline_image_cache
+            .take_pending(app.inline_image_renders())
+        {
             self.terminal
                 .backend_mut()
                 .write_all(render.escape_sequence.as_bytes())?;

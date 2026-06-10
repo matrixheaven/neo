@@ -3574,7 +3574,10 @@ fn images_generate_fetches_url_only_response_when_remote_fetch_policy_enabled() 
     let stdout = run(command);
 
     assert!(stdout.contains(&format!("wrote image to {}", output_path.display())));
-    assert_eq!(fs::read(&output_path).expect("generated image file"), image_bytes);
+    assert_eq!(
+        fs::read(&output_path).expect("generated image file"),
+        image_bytes
+    );
     let image_requests = image_server.requests();
     assert_eq!(image_requests.len(), 1);
     assert_eq!(image_requests[0].method, "GET");
@@ -3898,7 +3901,10 @@ MCP_PID_FILE = "{}"
     assert!(stdout.contains("started MCP server docs-server"));
 
     let pid = wait_for_pid_file(&pid_file);
-    assert!(process_exists(&pid), "started MCP server process should live");
+    assert!(
+        process_exists(&pid),
+        "started MCP server process should live"
+    );
     let state_path = temp.path().join(".neo/mcp-state.toml");
     let state = fs::read_to_string(&state_path).expect("read MCP state");
     assert!(state.contains("docs-server"));

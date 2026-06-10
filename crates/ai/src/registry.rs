@@ -577,7 +577,10 @@ impl GeneratedPricing {
 fn generated_source_metadata(catalog: &GeneratedModelCatalog) -> Option<ModelSourceMetadata> {
     let source = catalog.source.as_ref();
     let metadata = ModelSourceMetadata {
-        generated_at: catalog.generated_at.clone().filter(|value| !value.is_empty()),
+        generated_at: catalog
+            .generated_at
+            .clone()
+            .filter(|value| !value.is_empty()),
         name: source
             .and_then(|source| source.name.clone())
             .filter(|value| !value.is_empty()),
@@ -702,13 +705,15 @@ fn pi_model_pricing(
             "pi models.json {label} provider {provider}, model {model_id}: unsupported pi models.json model cost field {field}; only input/output token pricing can be imported until request-affecting runtime contracts exist"
         )));
     }
-    Ok((cost.input.is_some() || cost.output.is_some()).then_some(ModelPricing {
-        tokens: Some(TokenPricing {
-            input_per_million_tokens: cost.input,
-            output_per_million_tokens: cost.output,
+    Ok(
+        (cost.input.is_some() || cost.output.is_some()).then_some(ModelPricing {
+            tokens: Some(TokenPricing {
+                input_per_million_tokens: cost.input,
+                output_per_million_tokens: cost.output,
+            }),
+            image_generation: None,
         }),
-        image_generation: None,
-    }))
+    )
 }
 
 fn is_generated_catalog(value: &Value) -> bool {
