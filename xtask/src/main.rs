@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
     env, fs,
+    io::{Read, Write},
     net::TcpListener,
     path::{Component, Path, PathBuf},
     process::{Child, Command},
@@ -9,8 +10,12 @@ use std::{
 };
 
 use anyhow::{Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::{Parser, Subcommand};
+use ed25519_dalek::{Signer as _, SigningKey};
 use regex::Regex;
+use sha2::{Digest as _, Sha256};
+use tar::{Builder, Header};
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -56,6 +61,8 @@ struct CatalogCheckOptions {}
 struct CommandStep {
     program: String,
     args: Vec<String>,
+    env: Vec<(String, String)>,
+    current_dir: Option<PathBuf>,
 }
 
 impl CommandStep {
@@ -63,7 +70,19 @@ impl CommandStep {
         Self {
             program: program.to_owned(),
             args: args.iter().map(ToString::to_string).collect(),
+            env: Vec::new(),
+            current_dir: None,
         }
+    }
+
+    fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
+    }
+
+    fn with_envs(mut self, env: &[(String, String)]) -> Self {
+        self.env.extend(env.iter().cloned());
+        self
     }
 
     fn display(&self) -> String {
@@ -154,8 +173,10 @@ fn run_release_smoke(root: &Path) -> Result<()> {
         );
     }
 
+    let fixture = ReleaseSmokeFixture::new()?;
     let port = random_local_port()?;
-    let cloud_step = release_smoke_cloud_step(port, cloud_override.as_deref());
+    let cloud_step = release_smoke_cloud_step(port, cloud_override.as_deref())
+        .with_env("HOME", fixture.home_dir.display().to_string());
     let mut cloud = spawn_release_smoke_cloud(&cloud_step)?;
     thread::sleep(Duration::from_millis(500));
     if let Some(status) = cloud.try_wait()? {
@@ -165,7 +186,7 @@ fn run_release_smoke(root: &Path) -> Result<()> {
         );
     }
 
-    let result = run_release_smoke_cli_flows(port);
+    let result = run_release_smoke_cli_flows(port, &fixture);
     stop_release_smoke_cloud(&mut cloud);
     result?;
 
@@ -225,20 +246,112 @@ fn check_steps(options: &CheckOptions) -> Vec<CommandStep> {
 
 fn run(step: &CommandStep) -> Result<()> {
     println!("running: {}", step.display());
-    let status = Command::new(&step.program).args(&step.args).status()?;
+    let mut command = Command::new(&step.program);
+    command.args(&step.args).envs(step.env.iter().cloned());
+    if let Some(current_dir) = &step.current_dir {
+        command.current_dir(current_dir);
+    }
+    let status = command.status()?;
     if !status.success() {
         bail!("{} failed", step.display());
     }
     Ok(())
 }
 
-fn run_release_smoke_cli_flows(port: u16) -> Result<()> {
-    for step in release_smoke_cli_steps(port) {
-        run(&step)?;
+fn run_capture(step: &CommandStep) -> Result<String> {
+    println!("running: {}", step.display());
+    let mut command = Command::new(&step.program);
+    command.args(&step.args).envs(step.env.iter().cloned());
+    if let Some(current_dir) = &step.current_dir {
+        command.current_dir(current_dir);
     }
+    let output = command.output()?;
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        bail!("{} failed", step.display());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn run_release_smoke_cli_flows(port: u16, fixture: &ReleaseSmokeFixture) -> Result<()> {
+    let marketplace = spawn_release_smoke_marketplace(fixture)?;
+    let env = fixture.command_env(&marketplace.url);
+    let api_base = format!("http://127.0.0.1:{port}");
+
+    run(&release_smoke_neo_step(&["--help"], &env))?;
+    run(&release_smoke_neo_step(
+        &["models", "list", "--pricing"],
+        &env,
+    ))?;
+    run(&release_smoke_neo_step(
+        &["cloud", "status", "--api-base", &api_base],
+        &env,
+    ))?;
+    run(&release_smoke_neo_step(
+        &["login", "cloud", "--server", &api_base],
+        &env,
+    ))?;
+    for step in release_smoke_profile_steps() {
+        run(&release_smoke_prepare_step(step, &env))?;
+    }
+    run(&release_smoke_neo_step(
+        &["sessions", "sync", "status"],
+        &env,
+    ))?;
+    let share_output = run_capture(&release_smoke_neo_step(
+        &["sessions", "share", "release-smoke", "--public"],
+        &env,
+    ))?;
+    let share_id = output_value(&share_output, "share_id")?;
+    let cloud_id = output_value(&share_output, "cloud_id")?;
+    run(&release_smoke_neo_step(
+        &["sessions", "import", &share_id],
+        &env,
+    ))?;
+    run(&release_smoke_neo_step(&["resume", &cloud_id], &env))?;
+
+    run(&release_smoke_neo_step(
+        &[
+            "trust",
+            "publishers",
+            "add",
+            "neo-test",
+            "--name",
+            "Neo Test",
+            "--root",
+            "local-root",
+            "--key-id",
+            "ed25519:2026-a",
+            "--public-key",
+            &marketplace.public_key,
+            "--account-id",
+            "acct_neo_test",
+        ],
+        &env,
+    ))?;
+    for step in release_smoke_marketplace_steps() {
+        run(&release_smoke_prepare_step(step, &env))?;
+    }
+    for step in release_smoke_mcp_steps() {
+        run(&release_smoke_prepare_step(step, &env))?;
+    }
+    run(&CommandStep::new(
+        "cargo",
+        &["run", "-p", "xtask", "--", "catalog", "check"],
+    ))?;
     Ok(())
 }
 
+fn release_smoke_neo_step(args: &[&str], env: &[(String, String)]) -> CommandStep {
+    neo_agent_step(args).with_envs(env)
+}
+
+fn release_smoke_prepare_step(step: CommandStep, env: &[(String, String)]) -> CommandStep {
+    step.with_envs(env)
+}
+
+#[cfg(test)]
 fn release_smoke_cli_steps(port: u16) -> Vec<CommandStep> {
     let api_base = format!("http://127.0.0.1:{port}");
     let mut steps = vec![
@@ -275,6 +388,7 @@ fn release_smoke_profile_steps() -> Vec<CommandStep> {
     ]
 }
 
+#[cfg(test)]
 fn release_smoke_session_steps() -> Vec<CommandStep> {
     vec![
         neo_agent_step(&["sessions", "sync", "status"]),
@@ -299,15 +413,320 @@ fn release_smoke_marketplace_steps() -> Vec<CommandStep> {
 
 fn release_smoke_mcp_steps() -> Vec<CommandStep> {
     vec![
-        neo_agent_step(&["mcp", "health", "release-smoke"]),
-        neo_agent_step(&["mcp", "start", "release-smoke"]),
-        neo_agent_step(&["mcp", "stop", "release-smoke"]),
+        neo_agent_step(&["mcp", "servers", "health", "release-smoke"]),
+        neo_agent_step(&["mcp", "servers", "start", "release-smoke"]),
+        neo_agent_step(&["mcp", "servers", "stop", "release-smoke"]),
     ]
+}
+
+struct ReleaseSmokeFixture {
+    _temp_dir: tempfile::TempDir,
+    home_dir: PathBuf,
+    config_path: PathBuf,
+    sessions_dir: PathBuf,
+    package_dir: PathBuf,
+}
+
+impl ReleaseSmokeFixture {
+    fn new() -> Result<Self> {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("neo-release-smoke-")
+            .tempdir()?;
+        let project_dir = temp_dir.path().join("project");
+        let home_dir = temp_dir.path().join("home");
+        let neo_dir = project_dir.join(".neo");
+        let sessions_dir = neo_dir.join("sessions");
+        let package_dir = temp_dir.path().join("marketplace");
+        let mcp_script = temp_dir.path().join("release-smoke-mcp.py");
+        let mcp_pid_file = temp_dir.path().join("release-smoke-mcp.pid");
+
+        fs::create_dir_all(&sessions_dir)?;
+        fs::create_dir_all(&home_dir)?;
+        fs::create_dir_all(&package_dir)?;
+        fs::write(&mcp_script, RELEASE_SMOKE_MCP_FIXTURE)?;
+        fs::write(
+            sessions_dir.join("release-smoke.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "MessageAppended": {
+                        "message": {
+                            "User": {
+                                "content": [{
+                                    "Text": {
+                                        "text": "release smoke self-hosted session"
+                                    }
+                                }]
+                            }
+                        }
+                    }
+                })
+            ),
+        )?;
+        let config_path = neo_dir.join("config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                r#"
+sessions_dir = ".neo/sessions"
+
+[cloud]
+auth_file = ".neo/auth.json"
+
+[[mcp.servers]]
+id = "release-smoke"
+enabled = true
+transport = "stdio"
+command = "python3"
+args = ["-u", "{}"]
+
+[mcp.servers.env]
+MCP_PID_FILE = "{}"
+"#,
+                toml_escape(&mcp_script),
+                toml_escape(&mcp_pid_file)
+            ),
+        )?;
+
+        Ok(Self {
+            _temp_dir: temp_dir,
+            home_dir,
+            config_path,
+            sessions_dir,
+            package_dir,
+        })
+    }
+
+    fn command_env(&self, marketplace_url: &str) -> Vec<(String, String)> {
+        vec![
+            ("HOME".to_owned(), self.home_dir.display().to_string()),
+            (
+                "NEO_CONFIG".to_owned(),
+                self.config_path.display().to_string(),
+            ),
+            (
+                "NEO_SESSIONS_DIR".to_owned(),
+                self.sessions_dir.display().to_string(),
+            ),
+            ("NEO_MARKETPLACE_URL".to_owned(), marketplace_url.to_owned()),
+        ]
+    }
+}
+
+struct ReleaseSmokeMarketplace {
+    url: String,
+    public_key: String,
+}
+
+fn spawn_release_smoke_marketplace(
+    fixture: &ReleaseSmokeFixture,
+) -> Result<ReleaseSmokeMarketplace> {
+    let package = write_release_smoke_extension_package(&fixture.package_dir)?;
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let responses = vec![
+        http_json_response(&serde_json::json!({
+            "packages": [{
+                "kind": "extension",
+                "id": "echo",
+                "version": "0.1.0",
+                "name": "Echo",
+                "description": "Release smoke echo extension",
+                "publisher": "neo-test"
+            }]
+        }))?,
+        http_json_response(&serde_json::json!({
+            "package": {
+                "kind": "extension",
+                "id": "echo",
+                "version": "0.1.0",
+                "manifest_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/.neo-package.toml",
+                "archive_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/echo-0.1.0.tar"
+            }
+        }))?,
+        http_response("application/toml", package.manifest.as_bytes()),
+        http_response("application/x-tar", &package.archive),
+    ];
+    thread::spawn(move || {
+        for response in responses {
+            let Ok((mut socket, _)) = listener.accept() else {
+                return;
+            };
+            let _ = read_http_headers(&mut socket);
+            let _ = socket.write_all(&response);
+        }
+    });
+    Ok(ReleaseSmokeMarketplace {
+        url,
+        public_key: package.public_key,
+    })
+}
+
+struct ReleaseSmokePackage {
+    manifest: String,
+    archive: Vec<u8>,
+    public_key: String,
+}
+
+fn write_release_smoke_extension_package(root: &Path) -> Result<ReleaseSmokePackage> {
+    fs::create_dir_all(root)?;
+    let archive_path = root.join("echo-0.1.0.tar");
+    write_release_smoke_archive(&archive_path)?;
+    let archive = fs::read(&archive_path)?;
+    let digest = hex_sha256(&archive);
+    let signing_key = SigningKey::from_bytes(&[23_u8; 32]);
+    let verifying_key = signing_key.verifying_key();
+    let signature = signing_key.sign(&archive);
+    let public_key = STANDARD.encode(verifying_key.to_bytes());
+    let manifest = format!(
+        r#"
+kind = "extension"
+id = "echo"
+version = "0.1.0"
+entry = "neo-extension.toml"
+
+[publisher]
+id = "neo-test"
+name = "Neo Test"
+account_id = "acct_neo_test"
+
+[archive]
+path = "echo-0.1.0.tar"
+sha256 = "{digest}"
+
+[signature]
+algorithm = "ed25519"
+root = "local-root"
+public_key_id = "ed25519:2026-a"
+public_key = "{public_key}"
+signature = "{}"
+"#,
+        STANDARD.encode(signature.to_bytes()),
+    );
+    Ok(ReleaseSmokePackage {
+        manifest,
+        archive,
+        public_key,
+    })
+}
+
+fn write_release_smoke_archive(path: &Path) -> Result<()> {
+    let file = fs::File::create(path)?;
+    let mut builder = Builder::new(file);
+    let content = br#"
+id = "echo"
+name = "Echo"
+version = "0.1.0"
+
+[runner]
+command = "python3"
+"#;
+    let mut header = Header::new_gnu();
+    header.set_path("neo-extension.toml")?;
+    header.set_size(content.len().try_into()?);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder.append(&header, &content[..])?;
+    builder.finish()?;
+    Ok(())
+}
+
+fn http_json_response(value: &serde_json::Value) -> Result<Vec<u8>> {
+    Ok(http_response(
+        "application/json",
+        serde_json::to_vec(value)?.as_slice(),
+    ))
+}
+
+fn http_response(content_type: &str, body: &[u8]) -> Vec<u8> {
+    let mut response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(body);
+    response
+}
+
+fn read_http_headers(stream: &mut impl Read) -> Result<()> {
+    let mut buffer = [0_u8; 1024];
+    let mut request = Vec::new();
+    loop {
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn output_value(output: &str, key: &str) -> Result<String> {
+    for line in output.lines() {
+        if let Some(value) = line.strip_prefix(&format!("{key}: ")) {
+            return Ok(value.trim().to_owned());
+        }
+        if let Some(value) = line.strip_prefix(&format!("{key}=")) {
+            return Ok(value.trim().to_owned());
+        }
+    }
+    bail!("missing {key} in command output:\n{output}")
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = std::fmt::Write::write_fmt(&mut output, format_args!("{byte:02x}"));
+    }
+    output
+}
+
+fn toml_escape(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 
 fn release_smoke_dependency_errors(root: &Path) -> Result<Vec<String>> {
     release_smoke_dependency_errors_with_override(root, None)
 }
+
+const RELEASE_SMOKE_MCP_FIXTURE: &str = r#"
+import json
+import os
+import sys
+
+pid_file = os.environ.get("MCP_PID_FILE")
+if pid_file:
+    with open(pid_file, "w", encoding="utf-8") as handle:
+        handle.write(str(os.getpid()))
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if method == "initialize":
+        result = {
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {"name": "release-smoke", "version": "0.1.0"},
+            "capabilities": {"tools": {}},
+        }
+    elif method == "tools/list":
+        result = {
+            "tools": [{
+                "name": "echo",
+                "description": "Release smoke echo tool",
+                "inputSchema": {"type": "object", "properties": {}},
+            }]
+        }
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": request.get("id"), "result": result}), flush=True)
+"#;
 
 fn release_smoke_dependency_errors_with_override(
     root: &Path,
@@ -392,7 +811,7 @@ fn release_smoke_cli_surface_errors(root: &Path) -> Result<Vec<String>> {
                 && normalized.contains("health")
                 && normalized.contains("start")
                 && normalized.contains("stop"),
-            "missing neo-agent MCP lifecycle smoke flow; expected crates/neo-agent/src/cli.rs to expose `mcp health/start/stop <server-id>` before release-smoke can exercise local MCP lifecycle",
+            "missing neo-agent MCP lifecycle smoke flow; expected crates/neo-agent/src/cli.rs to expose `mcp servers health/start/stop <server-id>` before release-smoke can exercise local MCP lifecycle",
         ),
     ] {
         if !ok {
@@ -433,7 +852,12 @@ fn override_command_step(command: &str, port: u16) -> CommandStep {
     let mut parts = substituted.split_whitespace();
     let program = parts.next().unwrap_or("neo-cloud").to_owned();
     let args = parts.map(ToString::to_string).collect();
-    CommandStep { program, args }
+    CommandStep {
+        program,
+        args,
+        env: Vec::new(),
+        current_dir: None,
+    }
 }
 
 fn spawn_release_smoke_cloud(step: &CommandStep) -> Result<Child> {
@@ -1632,6 +2056,8 @@ fn run_rust_examples_compile_gate(root: &Path) -> Result<()> {
             manifest.display().to_string(),
             "--examples".to_owned(),
         ],
+        env: Vec::new(),
+        current_dir: None,
     })
 }
 
@@ -3436,9 +3862,9 @@ mod tests {
             "cargo run -p neo-agent -- resume cs_release_smoke",
             "cargo run -p neo-agent -- extensions search echo",
             "cargo run -p neo-agent -- extensions install echo@0.1.0 --from marketplace",
-            "cargo run -p neo-agent -- mcp health release-smoke",
-            "cargo run -p neo-agent -- mcp start release-smoke",
-            "cargo run -p neo-agent -- mcp stop release-smoke",
+            "cargo run -p neo-agent -- mcp servers health release-smoke",
+            "cargo run -p neo-agent -- mcp servers start release-smoke",
+            "cargo run -p neo-agent -- mcp servers stop release-smoke",
             "cargo run -p xtask -- catalog check",
         ] {
             assert!(steps.iter().any(|step| step == expected), "{expected}");
@@ -3480,7 +3906,7 @@ mod tests {
         assert_eq!(
             errors,
             vec![
-                "missing neo-agent MCP lifecycle smoke flow; expected crates/neo-agent/src/cli.rs to expose `mcp health/start/stop <server-id>` before release-smoke can exercise local MCP lifecycle".to_string()
+                "missing neo-agent MCP lifecycle smoke flow; expected crates/neo-agent/src/cli.rs to expose `mcp servers health/start/stop <server-id>` before release-smoke can exercise local MCP lifecycle".to_string()
             ]
         );
     }
