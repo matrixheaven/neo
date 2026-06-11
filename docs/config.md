@@ -61,6 +61,10 @@ keep_recent_messages = 20
 "tui.session.open" = ["ctrl+r"]
 "tui.model.open" = ["ctrl+o"]
 
+[tui]
+image_protocol = "auto"
+fetch_remote_images = false
+
 [[mcp.servers]]
 id = "filesystem"
 enabled = true
@@ -165,6 +169,14 @@ array replaces that action's default key list. Config loading and `config set`
 validate action IDs, key syntax, text-insertion reserved keys, and same-context
 conflicts before the interactive controller receives the resolved keybinding
 manager.
+
+The `[tui]` image settings control local transcript image handling.
+`image_protocol` accepts `auto`, `kitty`, `iterm2`, `sixel`, or `none`.
+`auto` uses conservative local terminal hints and does not claim full runtime
+protocol negotiation. `fetch_remote_images` defaults to false; when false, Neo
+will not fetch URL-only image generation outputs or remote transcript images.
+When true, remote image fetches still require HTTP(S), an image content type,
+and the built-in size guard.
 
 ## Environment Variables
 

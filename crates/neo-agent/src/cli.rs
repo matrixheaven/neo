@@ -224,19 +224,6 @@ pub enum Command {
         #[command(subcommand)]
         command: TrustCommand,
     },
-    Login {
-        #[command(subcommand)]
-        command: LoginCommand,
-    },
-    Logout,
-    Auth {
-        #[command(subcommand)]
-        command: AuthCommand,
-    },
-    Cloud {
-        #[command(subcommand)]
-        command: CloudCommand,
-    },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -303,38 +290,12 @@ pub enum SessionCommand {
     ExportJson {
         session_id: String,
     },
-    Share {
-        session_id: String,
-        #[arg(long)]
-        public: bool,
-    },
-    Sync {
-        #[command(subcommand)]
-        command: SessionSyncCommand,
-    },
-    Import {
-        share_ref: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum SessionSyncCommand {
-    Push,
-    Pull,
-    Status,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
     Show,
-    Set {
-        key: String,
-        value: String,
-    },
-    Sync {
-        #[command(subcommand)]
-        command: ConfigSyncCommand,
-    },
+    Set { key: String, value: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -343,73 +304,11 @@ pub enum TrustCommand {
     Approve,
     Deny,
     Clear,
-    Publishers {
-        #[command(subcommand)]
-        command: PublisherTrustCommand,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum PublisherTrustCommand {
-    Add {
-        publisher_id: String,
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        root: String,
-        #[arg(long = "key-id")]
-        key_id: String,
-        #[arg(long = "public-key")]
-        public_key: String,
-        #[arg(long = "account-id")]
-        account_id: Option<String>,
-    },
-    Remove {
-        publisher_id: String,
-    },
-    List,
-    #[command(alias = "revoke")]
-    RevokeKey {
-        publisher_id: String,
-        key_id: String,
-        #[arg(long, default_value = "")]
-        reason: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum LoginCommand {
-    Cloud {
-        #[arg(long, value_name = "URL")]
-        server: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum AuthCommand {
-    Status,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum CloudCommand {
-    Status {
-        #[arg(long = "api-base", value_name = "URL")]
-        api_base: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ConfigSyncCommand {
-    Push,
-    Pull,
-    Status,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ModelCommand {
     List {
-        #[arg(long)]
-        pricing: bool,
         #[arg(long)]
         json: bool,
     },
@@ -502,22 +401,14 @@ pub enum SkillCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ExtensionCommand {
-    Search {
-        query: String,
-    },
     List {
         #[arg(default_value = ".neo/extensions")]
         root: std::path::PathBuf,
     },
     Install {
         source: String,
-        #[arg(long = "from", value_enum)]
-        from: Option<PackageSource>,
         #[arg(long, default_value = ".neo/extensions")]
         root: std::path::PathBuf,
-    },
-    Publish {
-        path: std::path::PathBuf,
     },
     Update {
         extension_id: String,
@@ -554,57 +445,14 @@ pub enum ExtensionCommand {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum PackageSource {
-    Marketplace,
-}
-
 #[derive(Debug, Subcommand)]
 pub enum PromptPackageCommand {
-    Search {
-        query: String,
-    },
-    Install {
-        package: String,
-        #[arg(long = "from", value_enum)]
-        from: PackageSource,
-    },
-    Publish {
-        path: std::path::PathBuf,
-    },
-    Update {
-        package: String,
-    },
-    Uninstall {
-        package: String,
-    },
     List,
-    Preview {
-        name: String,
-    },
+    Preview { name: String },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ThemePackageCommand {
-    Search {
-        query: String,
-    },
-    Install {
-        package: String,
-        #[arg(long = "from", value_enum)]
-        from: PackageSource,
-    },
-    Publish {
-        path: std::path::PathBuf,
-    },
-    Update {
-        package: String,
-    },
-    Uninstall {
-        package: String,
-    },
     List,
-    Preview {
-        name: String,
-    },
+    Preview { name: String },
 }

@@ -105,7 +105,7 @@ fn provider_registry_accepts_configured_environment_key_names_without_secret_sto
 }
 
 #[test]
-fn credential_resolver_prefers_cli_env_auth_file_then_cloud_profile_without_leaking_values() {
+fn credential_resolver_prefers_cli_env_then_auth_file_without_leaking_values() {
     let resolver = CredentialResolver::new("openai")
         .with_cli_api_key(Some("cli-secret".to_owned()))
         .with_env(
@@ -115,10 +115,6 @@ fn credential_resolver_prefers_cli_env_auth_file_then_cloud_profile_without_leak
         .with_auth_file_credentials(BTreeMap::from([(
             "openai".to_owned(),
             "auth-file-secret".to_owned(),
-        )]))
-        .with_cloud_profile_credentials(BTreeMap::from([(
-            "openai".to_owned(),
-            "cloud-profile-secret".to_owned(),
         )]));
 
     let credential = resolver.resolve().expect("credential should resolve");
@@ -128,31 +124,16 @@ fn credential_resolver_prefers_cli_env_auth_file_then_cloud_profile_without_leak
     assert!(!format!("{credential:?}").contains("cli-secret"));
     assert!(!format!("{credential:?}").contains("env-secret"));
     assert!(!format!("{credential:?}").contains("auth-file-secret"));
-    assert!(!format!("{credential:?}").contains("cloud-profile-secret"));
 
     let auth_file = CredentialResolver::new("openai")
         .with_auth_file_credentials(BTreeMap::from([(
             "openai".to_owned(),
             "auth-file-secret".to_owned(),
         )]))
-        .with_cloud_profile_credentials(BTreeMap::from([(
-            "openai".to_owned(),
-            "cloud-profile-secret".to_owned(),
-        )]))
         .resolve()
         .expect("auth-file credential should resolve");
     assert_eq!(auth_file.secret(), "auth-file-secret");
     assert_eq!(auth_file.source(), CredentialSource::AuthFile);
-
-    let cloud_profile = CredentialResolver::new("openai")
-        .with_cloud_profile_credentials(BTreeMap::from([(
-            "openai".to_owned(),
-            "cloud-profile-secret".to_owned(),
-        )]))
-        .resolve()
-        .expect("cloud profile credential should resolve");
-    assert_eq!(cloud_profile.secret(), "cloud-profile-secret");
-    assert_eq!(cloud_profile.source(), CredentialSource::CloudProfile);
 }
 
 #[test]

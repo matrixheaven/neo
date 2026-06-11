@@ -17,14 +17,13 @@ use futures::StreamExt;
 use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionMetadataStore};
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, CompactionSettings, Content,
-    HostedMcpClient, McpHostedConfig, McpHostedToolAdapter, McpHttpConfig, McpHttpToolAdapter,
-    McpStdioConfig, McpStdioToolAdapter, McpToolAdapter, McpToolProvider, PermissionDecision,
-    ToolRegistry,
+    McpHttpConfig, McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter,
+    McpToolProvider, PermissionDecision, ToolRegistry,
 };
 use neo_ai::{
     ApiKind, CredentialResolver, ImageData, ImageGenerationClient, ImageGenerationRequest,
-    ModelClient, ModelPricing, ModelRegistry, ModelSourceMetadata, ModelSpec, ProviderRegistry,
-    ProviderSpec, ResolvedCredential, providers::openai_images::OpenAiImagesClient,
+    ModelClient, ModelRegistry, ModelSpec, ProviderRegistry, ProviderSpec, ResolvedCredential,
+    providers::openai_images::OpenAiImagesClient,
 };
 use reqwest::header;
 use serde::{Deserialize, Serialize};
@@ -72,9 +71,6 @@ pub async fn execute(
 }
 
 pub async fn resume(session_ref: &str, config: &AppConfig) -> anyhow::Result<String> {
-    if let Some(remote) = crate::session_cloud::resume_remote(session_ref, config).await? {
-        return Ok(remote);
-    }
     let session_id = session_commands::resolve_session_id(session_ref, config)?;
     let transcript = session_commands::transcript(&session_id, config).await?;
     Ok(format!("session {session_id}\n{transcript}"))
@@ -551,21 +547,16 @@ fn current_unix_timestamp() -> String {
 }
 
 pub fn list_models_filtered(config: &AppConfig, search: Option<&str>) -> anyhow::Result<String> {
-    list_models_with_search_and_options(config, search, false, false)
+    list_models_with_search_and_options(config, search, false)
 }
 
-pub fn list_models_with_options(
-    config: &AppConfig,
-    pricing: bool,
-    json_output: bool,
-) -> anyhow::Result<String> {
-    list_models_with_search_and_options(config, None, pricing, json_output)
+pub fn list_models_with_options(config: &AppConfig, json_output: bool) -> anyhow::Result<String> {
+    list_models_with_search_and_options(config, None, json_output)
 }
 
 fn list_models_with_search_and_options(
     config: &AppConfig,
     search: Option<&str>,
-    pricing: bool,
     json_output: bool,
 ) -> anyhow::Result<String> {
     let providers = provider_registry_for_config(config);
@@ -582,7 +573,7 @@ fn list_models_with_search_and_options(
         return Ok(format!("no models matching \"{search}\"\n"));
     }
     if json_output {
-        return list_models_json(config, &providers, &models, &listed_models, pricing);
+        return list_models_json(config, &providers, &models, &listed_models);
     }
 
     let mut out = "models:\n".to_owned();
@@ -603,19 +594,9 @@ fn list_models_with_search_and_options(
         let display = model_display_suffix(&models, &model)
             .map(|display| format!(" - {display}"))
             .unwrap_or_default();
-        let pricing_suffix = pricing
-            .then(|| models.pricing(&model.provider.0, &model.model))
-            .flatten()
-            .map(format_pricing_suffix)
-            .unwrap_or_default();
-        let source_suffix = pricing
-            .then(|| models.source_metadata(&model.provider.0, &model.model))
-            .flatten()
-            .map(format_source_suffix)
-            .unwrap_or_default();
         let _ = writeln!(
             out,
-            "- {}/{} ({:?}{marker}){display}{pricing_suffix}{source_suffix}",
+            "- {}/{} ({:?}{marker}){display}",
             model.provider.0, model.model, model.api
         );
     }
@@ -806,17 +787,10 @@ fn list_models_json(
     providers: &ProviderRegistry,
     registry: &ModelRegistry,
     models: &[ModelSpec],
-    include_pricing: bool,
 ) -> anyhow::Result<String> {
     let models = models
         .iter()
         .map(|model| {
-            let pricing = include_pricing
-                .then(|| registry.pricing(&model.provider.0, &model.model))
-                .flatten();
-            let source = include_pricing
-                .then(|| registry.source_metadata(&model.provider.0, &model.model))
-                .flatten();
             json!({
                 "provider": model.provider.0,
                 "model": model.model,
@@ -830,9 +804,7 @@ fn list_models_json(
                     "reasoning": model.capabilities.reasoning,
                     "embeddings": model.capabilities.embeddings,
                     "image_generation": registry.supports_image_generation(&model.provider.0, &model.model),
-                },
-                "pricing": pricing.map(model_pricing_json),
-                "source": source.map(model_source_json),
+                }
             })
         })
         .collect::<Vec<_>>();
@@ -856,77 +828,6 @@ fn list_models_json(
             "providers": providers,
         }))?
     ))
-}
-
-fn model_pricing_json(pricing: &ModelPricing) -> serde_json::Value {
-    let mut value = serde_json::Map::new();
-    if let Some(tokens) = &pricing.tokens {
-        if let Some(input) = tokens.input_per_million_tokens {
-            value.insert("input_per_million_tokens".to_owned(), json!(input));
-        }
-        if let Some(output) = tokens.output_per_million_tokens {
-            value.insert("output_per_million_tokens".to_owned(), json!(output));
-        }
-    }
-    if let Some(image) = &pricing.image_generation {
-        value.insert(
-            "image_generation".to_owned(),
-            json!({
-                "unit": image.unit,
-                "per_unit": image.per_unit,
-            }),
-        );
-    }
-    serde_json::Value::Object(value)
-}
-
-fn model_source_json(source: &ModelSourceMetadata) -> serde_json::Value {
-    json!({
-        "generated_at": source.generated_at,
-        "name": source.name,
-        "revision": source.revision,
-        "url": source.url,
-    })
-}
-
-fn format_pricing_suffix(pricing: &ModelPricing) -> String {
-    let mut parts = Vec::new();
-    if let Some(tokens) = &pricing.tokens {
-        if let Some(input) = tokens.input_per_million_tokens {
-            parts.push(format!("input ${input}/1M"));
-        }
-        if let Some(output) = tokens.output_per_million_tokens {
-            parts.push(format!("output ${output}/1M"));
-        }
-    }
-    if let Some(image) = &pricing.image_generation {
-        parts.push(format!("image ${}/{}", image.per_unit, image.unit));
-    }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!(" [{}]", parts.join(", "))
-    }
-}
-
-fn format_source_suffix(source: &ModelSourceMetadata) -> String {
-    let Some(name) = source.name.as_deref() else {
-        return source
-            .generated_at
-            .as_ref()
-            .map(|generated_at| format!(" [source generated {generated_at}]"))
-            .unwrap_or_default();
-    };
-    let mut label = format!("source {name}");
-    if let Some(revision) = source.revision.as_deref() {
-        label.push('@');
-        label.push_str(revision);
-    }
-    if let Some(generated_at) = source.generated_at.as_deref() {
-        label.push_str(" generated ");
-        label.push_str(generated_at);
-    }
-    format!(" [{label}]")
 }
 
 const fn credential_status_label(configured: bool) -> &'static str {
@@ -1025,10 +926,7 @@ fn resolve_provider_credential_from_env(
     CredentialResolver::new(&provider.id)
         .with_cli_api_key(config.api_key.clone())
         .with_env(provider.api_key_env_vars.iter().map(String::as_str), env)
-        // Cloud profile sync stores provider/base/env configuration in normal config,
-        // not provider API secrets. Secrets still resolve from the selected env names.
         .with_auth_file_credentials(BTreeMap::new())
-        .with_cloud_profile_credentials(BTreeMap::new())
         .resolve()
 }
 
@@ -1120,9 +1018,6 @@ pub fn add_mcp_server(
 
 pub async fn mcp_server_health(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
     let server = enabled_mcp_server(config, server_id)?;
-    if server.transport == "cloud" {
-        anyhow::bail!("cloud MCP server {server_id} requires self-hosted neo-cloud auth");
-    }
     let adapter = mcp_adapter_for_server(server)?;
     let tools = adapter
         .list_tools()
@@ -1137,9 +1032,6 @@ pub async fn mcp_server_health(config: &AppConfig, server_id: &str) -> anyhow::R
 
 pub fn start_mcp_server(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
     let server = enabled_mcp_server(config, server_id)?;
-    if server.transport == "cloud" {
-        anyhow::bail!("cloud MCP server {server_id} requires self-hosted neo-cloud auth");
-    }
     anyhow::ensure!(
         server.transport == "stdio",
         "MCP server {server_id} uses {} transport; only stdio servers can be started locally",
@@ -1832,13 +1724,6 @@ fn enabled_mcp_server<'a>(
 }
 
 fn mcp_adapter_for_server(server: &McpServerConfig) -> anyhow::Result<Arc<dyn McpToolAdapter>> {
-    mcp_adapter_for_server_with_hosted_client(server, None)
-}
-
-fn mcp_adapter_for_server_with_hosted_client(
-    server: &McpServerConfig,
-    hosted_client: Option<Arc<dyn HostedMcpClient>>,
-) -> anyhow::Result<Arc<dyn McpToolAdapter>> {
     match server.transport.as_str() {
         "stdio" => {
             let command = server
@@ -1862,20 +1747,6 @@ fn mcp_adapter_for_server_with_hosted_client(
                 .url
                 .clone()
                 .with_context(|| format!("missing MCP url for {}", server.id))?;
-            if let Some(hosted_server_id) = parse_hosted_mcp_url(&url, &server.id)? {
-                let Some(client) = hosted_client else {
-                    anyhow::bail!(
-                        "hosted MCP server {} requires an available neo-cloud client",
-                        server.id
-                    );
-                };
-                return Ok(Arc::new(McpHostedToolAdapter::new(
-                    McpHostedConfig {
-                        server_id: hosted_server_id,
-                    },
-                    client,
-                )));
-            }
             Ok(Arc::new(McpHttpToolAdapter::new(McpHttpConfig {
                 url,
                 headers: server.headers.iter().fold(
@@ -1887,29 +1758,8 @@ fn mcp_adapter_for_server_with_hosted_client(
                 ),
             })))
         }
-        "cloud" => {
-            anyhow::bail!(
-                "cloud MCP server {} requires self-hosted neo-cloud auth",
-                server.id
-            )
-        }
         other => anyhow::bail!("unsupported MCP transport for {}: {other}", server.id),
     }
-}
-
-fn parse_hosted_mcp_url(url: &str, configured_id: &str) -> anyhow::Result<Option<String>> {
-    let Some(server_id) = url.strip_prefix("cloud://mcp/") else {
-        return Ok(None);
-    };
-    anyhow::ensure!(
-        !server_id.is_empty() && !server_id.contains('/'),
-        "invalid hosted MCP url for {configured_id}: expected cloud://mcp/<server-id>"
-    );
-    anyhow::ensure!(
-        server_id == configured_id,
-        "hosted MCP url server id {server_id} does not match configured server {configured_id}"
-    );
-    Ok(Some(server_id.to_owned()))
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

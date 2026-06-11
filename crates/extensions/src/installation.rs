@@ -2,7 +2,6 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use serde::{Deserialize, Serialize};
@@ -70,8 +69,6 @@ pub enum ExtensionInstallError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("failed to clone git extension source {url}: {stderr}")]
-    GitClone { url: String, stderr: String },
 }
 
 #[derive(Debug, Clone)]
@@ -106,13 +103,6 @@ impl ExtensionInstaller {
     ) -> Result<InstalledExtension, ExtensionInstallError> {
         let source = ExtensionSource::LocalPath {
             path: source.as_ref().to_path_buf(),
-        };
-        self.install_source(&source)
-    }
-
-    pub fn install_git(&self, source: &str) -> Result<InstalledExtension, ExtensionInstallError> {
-        let source = ExtensionSource::GitUrl {
-            url: source.to_owned(),
         };
         self.install_source(&source)
     }
@@ -170,16 +160,6 @@ impl ExtensionInstaller {
     ) -> Result<InstalledExtension, ExtensionInstallError> {
         match source {
             ExtensionSource::LocalPath { path } => self.install_from_directory(path, source),
-            ExtensionSource::GitUrl { url } => {
-                let temp = tempfile::tempdir().map_err(|source| {
-                    ExtensionInstallError::CreateDirectory {
-                        path: self.root.clone(),
-                        source,
-                    }
-                })?;
-                clone_git(url, temp.path())?;
-                self.install_from_directory(temp.path(), source)
-            }
         }
     }
 
@@ -269,14 +249,12 @@ impl ExtensionInstaller {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ExtensionSource {
     LocalPath { path: PathBuf },
-    GitUrl { url: String },
 }
 
 impl ExtensionSource {
     fn display(&self) -> String {
         match self {
             Self::LocalPath { path } => path.display().to_string(),
-            Self::GitUrl { url } => url.clone(),
         }
     }
 }
@@ -390,24 +368,6 @@ fn copy_directory(from: &Path, to: &Path) -> Result<(), ExtensionInstallError> {
                 }
             })?;
         }
-    }
-    Ok(())
-}
-
-fn clone_git(source: &str, destination: &Path) -> Result<(), ExtensionInstallError> {
-    let output = Command::new("git")
-        .args(["clone", "--depth", "1", source])
-        .arg(destination)
-        .output()
-        .map_err(|source_error| ExtensionInstallError::GitClone {
-            url: source.to_owned(),
-            stderr: source_error.to_string(),
-        })?;
-    if !output.status.success() {
-        return Err(ExtensionInstallError::GitClone {
-            url: source.to_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
     }
     Ok(())
 }

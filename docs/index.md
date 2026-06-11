@@ -1,6 +1,8 @@
 # Neo Documentation
 
-Neo is a Rust-native coding-agent workspace. The repository is intentionally split into small crates so provider adapters, agent runtime policy, terminal UI, and developer tooling can evolve independently.
+Neo is a Rust-native local coding-agent workspace. The repository is
+intentionally split into small crates so provider adapters, agent runtime
+policy, terminal UI, and developer tooling can evolve independently.
 
 ## Start Here
 
@@ -11,14 +13,14 @@ Neo is a Rust-native coding-agent workspace. The repository is intentionally spl
 - [Tools](tools.md) - implemented built-in tools, schemas, permissions, and runtime boundary.
 - [Sessions](sessions.md) - JSONL event persistence and current resume expectations.
 - [MCP](mcp.md) - conceptual Model Context Protocol interface.
-- [Packages](packages.md) - signed extension, prompt-pack, theme package format and marketplace DTOs.
+- [Local Assets](packages.md) - local extensions, prompt templates, themes, and unsupported distribution surfaces.
 - [Gap Map](gap/INDEX.md) - module-by-module pi parity map.
 
 ## Repository Map
 
 - `crates/ai` owns provider-neutral chat, stream, model, and tool schema types.
-- `crates/agent-core` is the intended home for runtime loops, tools, permissions, sessions, and MCP adapters.
-- `crates/tui` is reserved for reusable terminal UI primitives.
+- `crates/agent-core` owns runtime loops, tools, permissions, sessions, and MCP adapters.
+- `crates/tui` owns reusable terminal UI primitives.
 - `crates/neo-agent` is the CLI/TUI binary.
 - `xtask` contains repository maintenance commands.
 - `docs` and `examples` contain the public operating model for contributors.

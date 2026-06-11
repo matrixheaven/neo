@@ -7,8 +7,8 @@ use neo_agent_core::session::{
 use neo_sdk::{
     JsonlCodec, RpcCommandKind, RpcCommandRecord, RpcCommandsResult, RpcError, RpcErrorCode,
     RpcMessage, RpcNotification, RpcRequest, RpcResponse, RpcSessionExportHtmlResult,
-    RpcSessionGetResult, RpcSessionRecord, RpcSessionShareRecord, RpcSessionTreeRecord,
-    RpcSessionsListResult, RpcSessionsTreeResult,
+    RpcSessionGetResult, RpcSessionRecord, RpcSessionTreeRecord, RpcSessionsListResult,
+    RpcSessionsTreeResult,
 };
 use serde_json::{Value, json};
 
@@ -632,23 +632,7 @@ fn rpc_session_record(record: SessionRecord) -> RpcSessionRecord {
             .and_then(|summary| summary.model.clone()),
         summary_updated_at: summary_record.and_then(|summary| summary.updated_at),
         parent_id: record.parent_id,
-        cloud_id: record.cloud_id,
-        synced_at: record.synced_at,
-        remote_parent_id: record.remote_parent_id,
         children: record.children,
-        share_ids: record.share_ids,
-        shares: record
-            .shares
-            .into_iter()
-            .map(|share| RpcSessionShareRecord {
-                id: share.id,
-                cloud_id: share.cloud_id,
-                public: share.public,
-                html_url: share.html_url,
-                json_url: share.json_url,
-                created_at: share.created_at,
-            })
-            .collect(),
     }
 }
 
@@ -656,7 +640,6 @@ fn rpc_summary_source(source: SessionSummarySource) -> &'static str {
     match source {
         SessionSummarySource::LocalExtractive => "local_extractive",
         SessionSummarySource::ModelGenerated => "model_generated",
-        SessionSummarySource::Remote => "remote",
     }
 }
 

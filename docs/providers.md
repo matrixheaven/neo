@@ -96,8 +96,16 @@ silently dropped. OpenAI Responses and OpenAI-compatible adapters send image
 URL parts or base64 data URLs in user messages. Anthropic Messages sends
 base64 image sources in user messages and rejects image URLs before issuing a
 request. Google Generative AI sends base64 images as `inlineData` and rejects
-image URLs before issuing a request. This is chat image-input support only; Neo
-does not implement image generation.
+image URLs before issuing a request.
+
+`ImageGenerationClient` and `OpenAiImagesClient` support OpenAI-style
+`/images/generations` requests for local catalog models that advertise
+image-generation capability metadata. `neo images generate` writes base64
+provider image data directly to a workspace-contained output path. If a
+provider returns only a remote image URL, Neo refuses to fetch it unless
+`tui.fetch_remote_images = true` is set in config. Remote image fetches must
+use HTTP(S), return an image content type, and stay under the remote image size
+limit.
 
 OpenAI reasoning controls use the typed `RequestOptions::reasoning_effort`
 field. OpenAI Responses sends `reasoning: { effort, summary: "auto" }` and

@@ -43,11 +43,7 @@ pub fn install(
     registry_path: &Path,
     source: &str,
 ) -> anyhow::Result<String> {
-    let installed = if is_git_source(source) {
-        installer(root, state_path, registry_path).install_git(source)?
-    } else {
-        installer(root, state_path, registry_path).install(source)?
-    };
+    let installed = installer(root, state_path, registry_path).install(source)?;
     Ok(format!(
         "{} installed {}\t{}\n",
         installed.manifest.id, installed.manifest.version, installed.source
@@ -154,18 +150,6 @@ fn lifecycle_store(state_path: &Path) -> ExtensionLifecycleStore {
 
 fn installer(root: &Path, state_path: &Path, registry_path: &Path) -> ExtensionInstaller {
     ExtensionInstaller::new(root, state_path, registry_path)
-}
-
-fn is_git_source(source: &str) -> bool {
-    source.starts_with("git@")
-        || source.starts_with("git://")
-        || source.starts_with("ssh://")
-        || source.starts_with("https://")
-        || source.starts_with("http://")
-        || source.starts_with("file://")
-        || Path::new(source)
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("git"))
 }
 
 fn format_status(status: &ExtensionLifecycleStatus) -> String {

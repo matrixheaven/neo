@@ -8,8 +8,6 @@ use neo_tui::TuiTheme;
 use ratatui::style::Color;
 use serde::Deserialize;
 
-use crate::package_commands;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedTheme {
     pub name: String,
@@ -193,35 +191,15 @@ pub fn list_project_themes(project_dir: &Path) -> anyhow::Result<String> {
     let mut output = String::new();
     for theme in themes {
         use std::fmt::Write as _;
-        let metadata = match &theme.source {
-            Some(path) => package_commands::metadata_for_installed_file(
-                &project_dir.join(".neo/themes"),
-                path,
-            )?,
-            None => None,
-        };
-        if let Some(metadata) = metadata {
-            let _ = writeln!(
-                output,
-                "{}\t{}\t{}\t{}\t{}\t{}",
-                metadata.id,
-                metadata.version,
-                metadata.source,
-                metadata.publisher,
-                metadata.trust,
-                theme.name,
-            );
-        } else {
-            let _ = writeln!(
-                output,
-                "{}\t{}",
-                theme.name,
-                theme
-                    .source
-                    .as_ref()
-                    .map_or_else(|| "-".to_owned(), |path| path.display().to_string())
-            );
-        }
+        let _ = writeln!(
+            output,
+            "{}\t{}",
+            theme.name,
+            theme
+                .source
+                .as_ref()
+                .map_or_else(|| "-".to_owned(), |path| path.display().to_string())
+        );
     }
     Ok(output)
 }
@@ -244,19 +222,10 @@ pub fn preview_project_theme(project_dir: &Path, name: &str) -> anyhow::Result<S
         .with_context(|| format!("theme {name:?} has no source"))?;
     let content = fs::read_to_string(source)
         .with_context(|| format!("failed to read theme {}", source.display()))?;
-    let package_metadata =
-        package_commands::metadata_for_installed_file(&project_dir.join(".neo/themes"), source)?;
-    let package_header = package_metadata.map_or_else(String::new, |metadata| {
-        format!(
-            "source: {}\npublisher: {}\ntrust: {}\n",
-            metadata.source, metadata.publisher, metadata.trust
-        )
-    });
     Ok(format!(
-        "{}\t{}\n{}{}\n",
+        "{}\t{}\n{}\n",
         theme.name,
         source.display(),
-        package_header,
         content
     ))
 }

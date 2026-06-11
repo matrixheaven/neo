@@ -11,12 +11,7 @@ use std::{
     time::Duration,
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use ed25519_dalek::{Signer as _, SigningKey};
-use neo_cloud::{CloudServer, Store};
 use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
-use tar::{Builder, Header};
 use tempfile::TempDir;
 
 static ISOLATED_HOMES: OnceLock<Mutex<Vec<TempDir>>> = OnceLock::new();
@@ -58,21 +53,6 @@ fn model_tool_names(body: &Value) -> Vec<&str> {
         .collect::<Vec<_>>();
     names.sort_unstable();
     names
-}
-
-fn output_value(output: &str, key: &str) -> String {
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix(&format!("{key}: ")))
-        .unwrap_or_else(|| panic!("missing {key} in output:\n{output}"))
-        .trim()
-        .to_owned()
-}
-
-fn read_session_metadata(root: &Path) -> Value {
-    let content = fs::read_to_string(root.join(".neo/sessions/sessions.metadata.json"))
-        .expect("read session metadata");
-    serde_json::from_str(&content).expect("session metadata json")
 }
 
 #[test]
@@ -554,203 +534,6 @@ api_key_env = "PROJECT_OPENAI_KEY"
 }
 
 #[test]
-fn cloud_login_status_logout_manage_auth_file_without_printing_tokens() {
-    let runtime = tokio::runtime::Runtime::new().expect("runtime");
-    let temp = TempDir::new().expect("tempdir");
-    let server = runtime.block_on(start_cloud_server(temp.path().join("cloud.sqlite")));
-    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    fs::write(
-        temp.path().join(".neo/config.toml"),
-        r#"
-[cloud]
-auth_file = ".neo/custom-auth.json"
-"#,
-    )
-    .expect("write config");
-
-    let mut login = neo();
-    login
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
-        .args(["login", "cloud", "--server", &server.base_url]);
-    let login_stdout = run(login);
-
-    assert!(login_stdout.contains("logged in to"));
-    assert!(login_stdout.contains(&server.base_url));
-    assert!(!login_stdout.contains("access_token"));
-    assert!(!login_stdout.contains("device_token"));
-    let auth_path = temp.path().join(".neo/custom-auth.json");
-    let auth_json: Value =
-        serde_json::from_str(&fs::read_to_string(&auth_path).expect("read auth file"))
-            .expect("auth json");
-    assert_eq!(auth_json["server_url"], server.base_url);
-    assert!(
-        auth_json["access_token"]
-            .as_str()
-            .is_some_and(|token| !token.is_empty())
-    );
-    assert!(
-        auth_json["device_token"]
-            .as_str()
-            .is_some_and(|token| !token.is_empty())
-    );
-
-    let mut status = neo();
-    status
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
-        .args(["auth", "status"]);
-    let status_stdout = run(status);
-    assert!(status_stdout.contains("logged in"));
-    assert!(status_stdout.contains(&server.base_url));
-    assert!(!status_stdout.contains(auth_json["access_token"].as_str().expect("token")));
-    assert!(!status_stdout.contains(auth_json["device_token"].as_str().expect("token")));
-
-    let mut logout = neo();
-    logout
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
-        .arg("logout");
-    let logout_stdout = run(logout);
-    assert!(logout_stdout.contains("logged out"));
-    assert!(!auth_path.exists());
-
-    drop(server);
-}
-
-#[test]
-fn cloud_status_reports_self_hosted_cloud_health_without_auth_file() {
-    let runtime = tokio::runtime::Runtime::new().expect("runtime");
-    let temp = TempDir::new().expect("tempdir");
-    let server = runtime.block_on(start_cloud_server(temp.path().join("cloud.sqlite")));
-
-    let mut status = neo();
-    status
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
-        .args(["cloud", "status", "--api-base", &server.base_url]);
-    let stdout = run(status);
-
-    assert!(stdout.contains("cloud available"));
-    assert!(stdout.contains(&server.base_url));
-
-    drop(server);
-}
-
-#[test]
-fn config_sync_push_status_and_pull_round_trip_global_profile_without_project_trust_or_sessions() {
-    let runtime = tokio::runtime::Runtime::new().expect("runtime");
-    let home = TempDir::new().expect("home tempdir");
-    let project = TempDir::new().expect("project tempdir");
-    let server = runtime.block_on(start_cloud_server(home.path().join("cloud.sqlite")));
-    fs::create_dir_all(home.path().join(".neo")).expect("create home .neo");
-    fs::create_dir_all(project.path().join(".neo/sessions")).expect("create project sessions");
-    fs::write(
-        project.path().join(".neo/trust.toml"),
-        "decision = \"deny\"\n",
-    )
-    .expect("write project trust");
-    fs::write(
-        project.path().join(".neo/sessions/local.jsonl"),
-        "{\"local\":true}\n",
-    )
-    .expect("write project session");
-    fs::write(
-        home.path().join(".neo/config.toml"),
-        r#"
-default_provider = "anthropic"
-default_model = "deepseek-v4-pro"
-model_scope = ["anthropic/deepseek-*"]
-
-[providers.anthropic]
-api_base = "https://api.deepseek.com/anthropic"
-api_key_env = "DEEPSEEK_API_KEY"
-
-[runtime]
-max_tokens = 2048
-reasoning_effort = "high"
-tool_execution_mode = "Sequential"
-
-[tui.keybindings]
-"tui.input.submit" = ["ctrl+j"]
-
-[cloud]
-auth_file = "~/.neo/auth.json"
-"#,
-    )
-    .expect("write home config");
-    fs::write(
-        project.path().join(".neo/extensions-state.toml"),
-        r#"
-[extensions.echo]
-status = "enabled"
-name = "Echo"
-version = "0.1.0"
-manifest_path = ".neo/extensions/echo/neo-extension.toml"
-"#,
-    )
-    .expect("write extension state");
-
-    let mut login = neo();
-    login
-        .current_dir(project.path())
-        .env("HOME", home.path())
-        .args(["login", "cloud", "--server", &server.base_url]);
-    run(login);
-
-    let mut push = neo();
-    push.current_dir(project.path())
-        .env("HOME", home.path())
-        .args(["config", "sync", "push"]);
-    let push_stdout = run(push);
-    assert!(push_stdout.contains("profile pushed"));
-    assert!(push_stdout.contains("revision 1"));
-
-    fs::write(
-        home.path().join(".neo/config.toml"),
-        format!(
-            r#"
-default_provider = "openai"
-default_model = "gpt-4.1"
-
-[cloud]
-auth_file = "{}"
-"#,
-            home.path().join(".neo/auth.json").display()
-        ),
-    )
-    .expect("replace home config");
-
-    let mut status = neo();
-    status
-        .current_dir(project.path())
-        .env("HOME", home.path())
-        .args(["config", "sync", "status"]);
-    let status_stdout = run(status);
-    assert!(status_stdout.contains("remote revision 1"));
-
-    let mut pull = neo();
-    pull.current_dir(project.path())
-        .env("HOME", home.path())
-        .args(["config", "sync", "pull"]);
-    let pull_stdout = run(pull);
-    assert!(pull_stdout.contains("profile pulled"));
-
-    let global_config = fs::read_to_string(home.path().join(".neo/config.toml"))
-        .expect("read pulled global config");
-    assert!(global_config.contains("default_provider = \"anthropic\""));
-    assert!(global_config.contains("default_model = \"deepseek-v4-pro\""));
-    assert!(global_config.contains("model_scope = [\"anthropic/deepseek-*\"]"));
-    assert!(global_config.contains("api_base = \"https://api.deepseek.com/anthropic\""));
-    assert!(global_config.contains("reasoning_effort = \"high\""));
-    assert!(global_config.contains("\"tui.input.submit\" = [\"ctrl+j\"]"));
-    assert!(project.path().join(".neo/trust.toml").exists());
-    assert!(project.path().join(".neo/sessions/local.jsonl").exists());
-
-    drop(server);
-}
-
-#[test]
 fn config_show_does_not_print_cli_api_key_value() {
     let temp = TempDir::new().expect("tempdir");
 
@@ -1189,112 +972,6 @@ fn sessions_show_and_resume_read_jsonl_transcripts() {
     assert!(resume_stdout.contains("user: hello"));
     assert!(resume_stdout.contains("assistant: hi back"));
     assert!(!resume_stdout.contains("placeholder"));
-}
-
-#[test]
-fn sessions_share_import_resume_and_sync_use_self_hosted_cloud() {
-    let runtime = tokio::runtime::Runtime::new().expect("runtime");
-    let temp = TempDir::new().expect("tempdir");
-    let server = runtime.block_on(start_cloud_server(temp.path().join("cloud.sqlite")));
-    let sessions = temp.path().join(".neo/sessions");
-    fs::create_dir_all(&sessions).expect("create sessions");
-    let session_path = sessions.join("alpha.jsonl");
-    let secret = "sk-test-secret-token";
-    fs::write(
-        &session_path,
-        format!(
-            "{}\n",
-            json!({
-                "MessageAppended": {
-                    "message": {
-                        "User": {
-                            "content": [{
-                                "Text": {
-                                    "text": format!(
-                                        "please replay this, but not {secret} or {}",
-                                        session_path.display()
-                                    )
-                                }
-                            }]
-                        }
-                    }
-                }
-            })
-        ),
-    )
-    .expect("write session");
-
-    let mut login = neo();
-    login
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
-        .args(["login", "cloud", "--server", &server.base_url]);
-    run(login);
-
-    let mut push = neo();
-    push.current_dir(temp.path())
-        .env("HOME", temp.path())
-        .args(["sessions", "sync", "push"]);
-    let push_stdout = run(push);
-    assert!(push_stdout.contains("pushed alpha"));
-    assert!(push_stdout.contains("cloud_id=cs_"));
-
-    let mut share = neo();
-    share
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
-        .args(["sessions", "share", "alpha", "--public"]);
-    let share_stdout = run(share);
-    let cloud_id = output_value(&share_stdout, "cloud_id");
-    let share_id = output_value(&share_stdout, "share_id");
-    assert!(cloud_id.starts_with("cs_"));
-    assert!(share_id.starts_with("sh_"));
-    assert!(share_stdout.contains(&format!("{}/v1/shares/{share_id}.html", server.base_url)));
-    assert!(!share_stdout.contains(secret));
-    assert!(!share_stdout.contains(temp.path().to_str().expect("temp path")));
-
-    let metadata = read_session_metadata(temp.path());
-    assert_eq!(metadata["sessions"]["alpha"]["cloud_id"], cloud_id);
-    assert_eq!(
-        metadata["sessions"]["alpha"]["share_ids"],
-        json!([share_id])
-    );
-
-    let mut status = neo();
-    status
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
-        .args(["sessions", "sync", "status"]);
-    let status_stdout = run(status);
-    assert!(status_stdout.contains("alpha"));
-    assert!(status_stdout.contains(&cloud_id));
-    assert!(status_stdout.contains(&share_id));
-
-    let mut import = neo();
-    import
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
-        .args(["sessions", "import", &share_id]);
-    let import_stdout = run(import);
-    let imported_id = output_value(&import_stdout, "session_id");
-    let imported_jsonl =
-        fs::read_to_string(sessions.join(format!("{imported_id}.jsonl"))).expect("read import");
-    assert!(imported_jsonl.contains("please replay this"));
-    assert!(!imported_jsonl.contains(secret));
-    assert!(!imported_jsonl.contains(temp.path().to_str().expect("temp path")));
-
-    let mut resume = neo();
-    resume
-        .current_dir(temp.path())
-        .env("HOME", temp.path())
-        .args(["resume", &cloud_id]);
-    let resume_stdout = run(resume);
-    assert!(resume_stdout.contains("remote_parent_id:"));
-    assert!(resume_stdout.contains("please replay this"));
-    assert!(!resume_stdout.contains(secret));
-    assert!(!resume_stdout.contains(temp.path().to_str().expect("temp path")));
-
-    drop(server);
 }
 
 #[test]
@@ -1763,85 +1440,6 @@ fn extensions_uninstall_removes_install_dir_and_source_entry() {
 }
 
 #[test]
-fn extensions_install_and_update_from_local_git_repo_without_marketplace_catalog() {
-    let temp = TempDir::new().expect("tempdir");
-    let repo = temp.path().join("repo");
-    write_extension_manifest(&repo, "git_echo", "Git Echo", "0.1.0");
-    init_git_repo(&repo);
-
-    let source_url = format!("file://{}", repo.display());
-    let mut install = neo();
-    install
-        .current_dir(temp.path())
-        .args(["extensions", "install"])
-        .arg(&source_url);
-    let installed = run(install);
-    assert!(installed.contains("git_echo installed"));
-    assert!(installed.contains("0.1.0"));
-
-    write_extension_manifest(&repo, "git_echo", "Git Echo", "0.2.0");
-    commit_git_repo(&repo, "update extension");
-
-    let mut update = neo();
-    update
-        .current_dir(temp.path())
-        .args(["extensions", "update", "git_echo"]);
-    let updated = run(update);
-    assert!(updated.contains("git_echo updated"));
-    assert!(updated.contains("0.2.0"));
-
-    let mut list = neo();
-    list.current_dir(temp.path()).args(["extensions", "list"]);
-    let listed = run(list);
-    assert!(listed.contains("git_echo"));
-    assert!(listed.contains("0.2.0"));
-    assert!(listed.contains(&source_url));
-    assert!(!listed.contains("marketplace"));
-    assert!(!listed.contains("fake"));
-}
-
-#[test]
-fn extensions_update_skips_git_source_when_offline_env_is_enabled() {
-    let temp = TempDir::new().expect("tempdir");
-    let repo = temp.path().join("repo");
-    write_extension_manifest(&repo, "git_echo", "Git Echo", "0.1.0");
-    init_git_repo(&repo);
-
-    let source_url = format!("file://{}", repo.display());
-    let mut install = neo();
-    install
-        .current_dir(temp.path())
-        .args(["extensions", "install"])
-        .arg(&source_url);
-    run(install);
-
-    write_extension_manifest(&repo, "git_echo", "Git Echo", "0.2.0");
-    commit_git_repo(&repo, "update extension");
-
-    let mut update = neo();
-    update
-        .current_dir(temp.path())
-        .env("NEO_OFFLINE", "1")
-        .args(["extensions", "update", "git_echo"]);
-    let skipped = run(update);
-    assert!(skipped.contains("offline: skipped extension update git_echo"));
-
-    let manifest = fs::read_to_string(
-        temp.path()
-            .join(".neo/extensions/git_echo/neo-extension.toml"),
-    )
-    .expect("read installed extension manifest");
-    assert!(manifest.contains("version = \"0.1.0\""));
-
-    let mut list = neo();
-    list.current_dir(temp.path()).args(["extensions", "list"]);
-    let listed = run(list);
-    assert!(listed.contains("git_echo"));
-    assert!(listed.contains("0.1.0"));
-    assert!(!listed.contains("0.2.0"));
-}
-
-#[test]
 fn extensions_update_skips_local_source_when_offline_flag_is_set() {
     let temp = TempDir::new().expect("tempdir");
     let source = temp.path().join("source");
@@ -2004,800 +1602,77 @@ args = [{}]
 }
 
 #[test]
-fn extensions_search_reads_real_marketplace_catalog() {
-    let marketplace = MockSseServer::start(vec![json_response(&json!({
-        "packages": [
-            {
-                "kind": "extension",
-                "id": "echo",
-                "version": "0.1.0",
-                "name": "Echo",
-                "description": "Echo extension",
-                "publisher": "neo-test"
-            }
-        ]
-    }))]);
-
-    let mut search = neo();
-    search
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .args(["extensions", "search", "echo"]);
-    let stdout = run(search);
-
-    assert!(stdout.contains("echo"));
-    assert!(stdout.contains("0.1.0"));
-    assert!(stdout.contains("Echo extension"));
-    let requests = marketplace.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].method, "GET");
-    assert!(
-        requests[0]
-            .path
-            .contains("/api/v1/marketplace/packages/search")
-    );
-    assert!(requests[0].path.contains("kind=extension"));
-    assert!(requests[0].path.contains("q=echo"));
-}
-
-#[test]
-fn extensions_marketplace_install_downloads_and_validates_package() {
+fn removed_remote_cli_surfaces_fail_parser() {
     let temp = TempDir::new().expect("tempdir");
-    let package_dir = TempDir::new().expect("package tempdir");
-    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
-    trust_test_publisher(temp.path(), &publisher_key);
-    let package = write_trusted_neo_package(
-        package_dir.path(),
-        "extension",
-        "echo",
-        "0.1.0",
-        "neo-extension.toml",
-        &publisher_key,
-        &[PackageFixtureEntry::file(
-            "neo-extension.toml",
-            r#"
-id = "echo"
-name = "Echo"
-version = "0.1.0"
-
-[runner]
-command = "python3"
-"#,
-        )],
-    );
-    let manifest = fs::read_to_string(&package).expect("read package manifest");
-    let archive = fs::read(package_dir.path().join("echo-0.1.0.tar")).expect("read archive");
-    let marketplace = MockSseServer::start(vec![
-        json_response(&json!({
-            "package": {
-                "kind": "extension",
-                "id": "echo",
-                "version": "0.1.0",
-                "manifest_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/.neo-package.toml",
-                "archive_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/echo-0.1.0.tar"
-            }
-        })),
-        text_response("application/toml", &manifest),
-        binary_response("application/x-tar", &archive),
-    ]);
-
-    let mut install = neo();
-    install
-        .current_dir(temp.path())
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .args([
-            "extensions",
-            "install",
-            "echo@0.1.0",
-            "--from",
-            "marketplace",
-        ]);
-    let stdout = run(install);
-
-    assert!(stdout.contains("echo installed 0.1.0"));
-    assert!(stdout.contains("marketplace"));
-    assert!(
-        temp.path()
-            .join(".neo/extensions/echo/neo-extension.toml")
-            .exists()
-    );
-    let requests = marketplace.requests();
-    assert_eq!(requests.len(), 3);
-    assert_eq!(
-        requests
-            .iter()
-            .map(|request| request.path.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "/api/v1/marketplace/packages/extension/echo/0.1.0",
-            "/api/v1/marketplace/packages/extension/echo/0.1.0/.neo-package.toml",
-            "/api/v1/marketplace/packages/extension/echo/0.1.0/echo-0.1.0.tar",
-        ]
-    );
+    for args in [
+        vec!["extensions", "search", "echo"],
+        vec!["extensions", "install", "echo", "--from", "marketplace"],
+        vec!["trust", "publishers", "list"],
+        vec!["sessions", "sync", "status"],
+        vec!["models", "list", "--pricing"],
+    ] {
+        let output = neo()
+            .current_dir(temp.path())
+            .args(args)
+            .output()
+            .expect("neo command should run");
+        assert!(!output.status.success());
+    }
 }
 
 #[test]
-fn trust_publishers_add_list_remove_and_revoke_use_local_store() {
+fn prompts_list_and_preview_project_prompt_without_remote_metadata() {
     let temp = TempDir::new().expect("tempdir");
-    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
-    let public_key = STANDARD.encode(publisher_key.verifying_key().to_bytes());
-
-    let mut add = neo();
-    add.current_dir(temp.path()).args([
-        "trust",
-        "publishers",
-        "add",
-        "neo-test",
-        "--name",
-        "Neo Test",
-        "--root",
-        "local-root",
-        "--key-id",
-        "ed25519:2026-a",
-        "--public-key",
-        &public_key,
-        "--account-id",
-        "acct_neo_test",
-    ]);
-    let added = run(add);
-    assert!(added.contains("trusted publisher neo-test"));
-    assert!(temp.path().join(".neo/package-trust.toml").exists());
-
-    let mut list = neo();
-    list.current_dir(temp.path())
-        .args(["trust", "publishers", "list"]);
-    let listed = run(list);
-    assert!(listed.contains("neo-test"));
-    assert!(listed.contains("local-root"));
-    assert!(listed.contains("ed25519:2026-a"));
-    assert!(listed.contains("trusted"));
-
-    let mut revoke = neo();
-    revoke.current_dir(temp.path()).args([
-        "trust",
-        "publishers",
-        "revoke-key",
-        "neo-test",
-        "ed25519:2026-a",
-        "--reason",
-        "rotated",
-    ]);
-    let revoked = run(revoke);
-    assert!(revoked.contains("revoked publisher neo-test key ed25519:2026-a"));
-
-    let mut remove = neo();
-    remove
-        .current_dir(temp.path())
-        .args(["trust", "publishers", "remove", "neo-test"]);
-    let removed = run(remove);
-    assert!(removed.contains("removed publisher neo-test"));
-}
-
-#[test]
-fn marketplace_install_requires_trusted_publisher_before_extracting_archive() {
-    let temp = TempDir::new().expect("tempdir");
-    let package_dir = TempDir::new().expect("package tempdir");
-    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
-    let package = write_trusted_neo_package(
-        package_dir.path(),
-        "extension",
-        "echo",
-        "0.1.0",
-        "neo-extension.toml",
-        &publisher_key,
-        &[PackageFixtureEntry::file(
-            "neo-extension.toml",
-            r#"
-id = "echo"
-name = "Echo"
-version = "0.1.0"
-
-[runner]
-command = "python3"
-"#,
-        )],
-    );
-    let manifest = fs::read_to_string(&package).expect("read package manifest");
-    let archive = fs::read(package_dir.path().join("echo-0.1.0.tar")).expect("read archive");
-    let marketplace = MockSseServer::start(vec![
-        json_response(&json!({
-            "package": {
-                "kind": "extension",
-                "id": "echo",
-                "version": "0.1.0",
-                "manifest_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/.neo-package.toml",
-                "archive_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/echo-0.1.0.tar"
-            }
-        })),
-        text_response("application/toml", &manifest),
-        binary_response("application/x-tar", &archive),
-    ]);
-
-    let output = neo()
-        .current_dir(temp.path())
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .args([
-            "extensions",
-            "install",
-            "echo@0.1.0",
-            "--from",
-            "marketplace",
-        ])
-        .output()
-        .expect("neo command should run");
-
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("not trusted"));
-    assert!(!temp.path().join(".neo/extensions/echo").exists());
-}
-
-#[test]
-fn marketplace_install_succeeds_for_trusted_publisher_and_reports_trust_state() {
-    let temp = TempDir::new().expect("tempdir");
-    let package_dir = TempDir::new().expect("package tempdir");
-    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
-    trust_test_publisher(temp.path(), &publisher_key);
-    let package = write_trusted_neo_package(
-        package_dir.path(),
-        "extension",
-        "echo",
-        "0.1.0",
-        "neo-extension.toml",
-        &publisher_key,
-        &[PackageFixtureEntry::file(
-            "neo-extension.toml",
-            r#"
-id = "echo"
-name = "Echo"
-version = "0.1.0"
-
-[runner]
-command = "python3"
-"#,
-        )],
-    );
-    let manifest = fs::read_to_string(&package).expect("read package manifest");
-    let archive = fs::read(package_dir.path().join("echo-0.1.0.tar")).expect("read archive");
-    let marketplace = MockSseServer::start(vec![
-        json_response(&json!({
-            "package": {
-                "kind": "extension",
-                "id": "echo",
-                "version": "0.1.0",
-                "manifest_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/.neo-package.toml",
-                "archive_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/echo-0.1.0.tar"
-            }
-        })),
-        text_response("application/toml", &manifest),
-        binary_response("application/x-tar", &archive),
-    ]);
-
-    let mut install = neo();
-    install
-        .current_dir(temp.path())
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .args([
-            "extensions",
-            "install",
-            "echo@0.1.0",
-            "--from",
-            "marketplace",
-        ]);
-    let stdout = run(install);
-
-    assert!(stdout.contains("echo installed 0.1.0"));
-    assert!(stdout.contains("marketplace"));
-    assert!(stdout.contains("neo-test"));
-    assert!(stdout.contains("trusted"));
-    assert!(
-        temp.path()
-            .join(".neo/extensions/echo/neo-extension.toml")
-            .exists()
-    );
-}
-
-#[test]
-fn extensions_marketplace_install_rejects_cross_origin_package_urls() {
-    let temp = TempDir::new().expect("tempdir");
-    let marketplace = MockSseServer::start(vec![json_response(&json!({
-        "package": {
-            "kind": "extension",
-            "id": "echo",
-            "version": "0.1.0",
-            "manifest_url": "https://example.invalid/.neo-package.toml",
-            "archive_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/echo-0.1.0.tar"
-        }
-    }))]);
-
-    let output = neo()
-        .current_dir(temp.path())
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .args([
-            "extensions",
-            "install",
-            "echo@0.1.0",
-            "--from",
-            "marketplace",
-        ])
-        .output()
-        .expect("neo command should run");
-
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("configured marketplace origin"));
-    assert_eq!(marketplace.requests().len(), 1);
-    assert!(!temp.path().join(".neo/extensions/echo").exists());
-}
-
-#[test]
-fn extensions_marketplace_install_allows_cross_origin_only_with_explicit_policy() {
-    let temp = TempDir::new().expect("tempdir");
-    let package_dir = TempDir::new().expect("package tempdir");
-    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
-    trust_test_publisher(temp.path(), &publisher_key);
-    let package = write_trusted_neo_package(
-        package_dir.path(),
-        "extension",
-        "echo",
-        "0.1.0",
-        "neo-extension.toml",
-        &publisher_key,
-        &[PackageFixtureEntry::file(
-            "neo-extension.toml",
-            r#"
-id = "echo"
-name = "Echo"
-version = "0.1.0"
-
-[runner]
-command = "python3"
-"#,
-        )],
-    );
-    let manifest = fs::read_to_string(&package).expect("read package manifest");
-    let archive = fs::read(package_dir.path().join("echo-0.1.0.tar")).expect("read archive");
-    let asset_server = MockSseServer::start(vec![
-        text_response("application/toml", &manifest),
-        binary_response("application/x-tar", &archive),
-    ]);
-    let marketplace = MockSseServer::start(vec![json_response(&json!({
-        "package": {
-            "kind": "extension",
-            "id": "echo",
-            "version": "0.1.0",
-            "manifest_url": format!("{}/manifest.toml", asset_server.url),
-            "archive_url": format!("{}/echo-0.1.0.tar", asset_server.url)
-        }
-    }))]);
-
-    let mut install = neo();
-    install
-        .current_dir(temp.path())
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .env("NEO_MARKETPLACE_ALLOW_CROSS_ORIGIN", "1")
-        .args([
-            "extensions",
-            "install",
-            "echo@0.1.0",
-            "--from",
-            "marketplace",
-        ]);
-    let stdout = run(install);
-
-    assert!(stdout.contains("echo installed 0.1.0"));
-    assert_eq!(marketplace.requests().len(), 1);
-    assert_eq!(asset_server.requests().len(), 2);
-}
-
-#[test]
-fn extensions_marketplace_install_fails_without_catalog_configuration() {
-    let temp = TempDir::new().expect("tempdir");
-    let output = neo()
-        .current_dir(temp.path())
-        .env_remove("NEO_MARKETPLACE_URL")
-        .args(["extensions", "install", "echo", "--from", "marketplace"])
-        .output()
-        .expect("neo command should run");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("NEO_MARKETPLACE_URL"));
-    assert!(!temp.path().join(".neo/extensions/echo").exists());
-}
-
-#[test]
-fn extensions_publish_validates_package_and_posts_to_marketplace() {
-    let package_dir = TempDir::new().expect("package tempdir");
-    let package = write_signed_neo_package(
-        package_dir.path(),
-        "extension",
-        "echo",
-        "0.1.0",
-        "neo-extension.toml",
-        &[PackageFixtureEntry::file(
-            "neo-extension.toml",
-            r#"
-id = "echo"
-name = "Echo"
-version = "0.1.0"
-
-[runner]
-command = "python3"
-"#,
-        )],
-    );
-    let marketplace = MockSseServer::start(vec![json_response(&json!({
-        "package": {
-            "kind": "extension",
-            "id": "echo",
-            "version": "0.1.0",
-            "name": "Echo",
-            "description": "Echo extension",
-            "publisher": "neo-test"
-        }
-    }))]);
-
-    let mut publish = neo();
-    publish
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .args(["extensions", "publish"])
-        .arg(&package);
-    let stdout = run(publish);
-
-    assert!(stdout.contains("echo published 0.1.0"));
-    let requests = marketplace.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/api/v1/marketplace/packages/publish");
-    assert_eq!(requests[0].body["manifest"]["id"], "echo");
-    assert_eq!(requests[0].body["manifest"]["kind"], "extension");
-    assert!(requests[0].body["archive_base64"].as_str().is_some());
-}
-
-#[test]
-fn prompt_packages_publish_validates_package_and_posts_to_marketplace() {
-    let package_dir = TempDir::new().expect("package tempdir");
-    let package = write_signed_neo_package(
-        package_dir.path(),
-        "prompt-pack",
-        "review-pack",
-        "1.0.0",
-        "review.md",
-        &[PackageFixtureEntry::file(
-            "review.md",
-            "---\ndescription: Review code\n---\nReview $ARGUMENTS\n",
-        )],
-    );
-    let marketplace = MockSseServer::start(vec![json_response(&json!({
-        "package": {
-            "kind": "prompt-pack",
-            "id": "review-pack",
-            "version": "1.0.0",
-            "name": "Review Pack",
-            "description": "Review prompts",
-            "publisher": "neo-test"
-        }
-    }))]);
-
-    let mut publish = neo();
-    publish
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .args(["prompts", "publish"])
-        .arg(&package);
-    let stdout = run(publish);
-
-    assert!(stdout.contains("review-pack published 1.0.0"));
-    let requests = marketplace.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/api/v1/marketplace/packages/publish");
-    assert_eq!(requests[0].body["manifest"]["id"], "review-pack");
-    assert_eq!(requests[0].body["manifest"]["kind"], "prompt-pack");
-    assert!(requests[0].body["archive_base64"].as_str().is_some());
-}
-
-#[test]
-fn theme_packages_publish_validates_package_and_posts_to_marketplace() {
-    let package_dir = TempDir::new().expect("package tempdir");
-    let package = write_signed_neo_package(
-        package_dir.path(),
-        "theme",
-        "night-owl",
-        "2.0.0",
-        "night-owl.json",
-        &[PackageFixtureEntry::file(
-            "night-owl.json",
-            r##"{"name":"Night Owl","colors":{"prompt":"#82aaff"}}"##,
-        )],
-    );
-    let marketplace = MockSseServer::start(vec![json_response(&json!({
-        "package": {
-            "kind": "theme",
-            "id": "night-owl",
-            "version": "2.0.0",
-            "name": "Night Owl",
-            "description": "Night Owl theme",
-            "publisher": "neo-test"
-        }
-    }))]);
-
-    let mut publish = neo();
-    publish
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .args(["themes", "publish"])
-        .arg(&package);
-    let stdout = run(publish);
-
-    assert!(stdout.contains("night-owl published 2.0.0"));
-    let requests = marketplace.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/api/v1/marketplace/packages/publish");
-    assert_eq!(requests[0].body["manifest"]["id"], "night-owl");
-    assert_eq!(requests[0].body["manifest"]["kind"], "theme");
-    assert!(requests[0].body["archive_base64"].as_str().is_some());
-}
-
-#[test]
-fn prompt_packages_install_list_and_preview_from_marketplace() {
-    let temp = TempDir::new().expect("tempdir");
-    let package_dir = TempDir::new().expect("package tempdir");
-    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
-    trust_test_publisher(temp.path(), &publisher_key);
-    let package = write_trusted_neo_package(
-        package_dir.path(),
-        "prompt-pack",
-        "review-pack",
-        "1.0.0",
-        "review.md",
-        &publisher_key,
-        &[PackageFixtureEntry::file(
-            "review.md",
-            "---\ndescription: Review code\n---\nReview $ARGUMENTS\n",
-        )],
-    );
-    let manifest = fs::read_to_string(&package).expect("read package manifest");
-    let archive = fs::read(package_dir.path().join("review-pack-1.0.0.tar")).expect("read archive");
-    let marketplace = MockSseServer::start(vec![
-        json_response(&json!({
-            "packages": [
-                {
-                    "kind": "prompt-pack",
-                    "id": "review-pack",
-                    "version": "1.0.0",
-                    "name": "Review Pack",
-                    "description": "Review prompts",
-                    "publisher": "neo-test"
-                }
-            ]
-        })),
-        json_response(&json!({
-            "package": {
-                "kind": "prompt-pack",
-                "id": "review-pack",
-                "version": "1.0.0",
-                "manifest_url": "/api/v1/marketplace/packages/prompt-pack/review-pack/1.0.0/.neo-package.toml",
-                "archive_url": "/api/v1/marketplace/packages/prompt-pack/review-pack/1.0.0/review-pack-1.0.0.tar"
-            }
-        })),
-        text_response("application/toml", &manifest),
-        binary_response("application/x-tar", &archive),
-    ]);
-
-    let mut search = neo();
-    search
-        .current_dir(temp.path())
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .args(["prompts", "search", "review"]);
-    let searched = run(search);
-    assert!(searched.contains("review-pack"));
-
-    let mut install = neo();
-    install
-        .current_dir(temp.path())
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .args([
-            "prompts",
-            "install",
-            "review-pack@1.0.0",
-            "--from",
-            "marketplace",
-        ]);
-    let installed = run(install);
-    assert!(installed.contains("review-pack installed 1.0.0"));
+    let prompts = temp.path().join(".neo/prompts");
+    fs::create_dir_all(&prompts).expect("create prompts");
+    fs::write(
+        prompts.join("review.md"),
+        "---\ndescription: Review local changes\n---\nReview $ARGUMENTS with local context.\n",
+    )
+    .expect("write prompt");
 
     let mut list = neo();
     list.current_dir(temp.path()).args(["prompts", "list"]);
     let listed = run(list);
     assert!(listed.contains("review"));
-    assert!(listed.contains("Review code"));
+    assert!(listed.contains("Review local changes"));
+    assert!(listed.contains(".neo/prompts/review.md"));
+    assert!(!listed.contains("marketplace"));
+    assert!(!listed.contains("publisher"));
+    assert!(!listed.contains("trust"));
 
     let mut preview = neo();
     preview
         .current_dir(temp.path())
         .args(["prompts", "preview", "review"]);
     let previewed = run(preview);
-    assert!(previewed.contains("Review $ARGUMENTS"));
-    assert!(
-        temp.path()
-            .join(".neo/prompts/review-pack/review.md")
-            .exists()
-    );
+    assert!(previewed.contains("review"));
+    assert!(previewed.contains("Review local changes"));
+    assert!(previewed.contains("Review $ARGUMENTS with local context."));
+    assert!(!previewed.contains("marketplace"));
+    assert!(!previewed.contains("publisher"));
+    assert!(!previewed.contains("trust"));
 }
 
 #[test]
-fn prompt_packages_update_uninstall_and_metadata_from_marketplace() {
+fn themes_list_and_preview_project_theme_without_remote_metadata() {
     let temp = TempDir::new().expect("tempdir");
-    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
-    trust_test_publisher(temp.path(), &publisher_key);
-    let marketplace = prompt_update_marketplace(&publisher_key);
-
-    let mut install = neo();
-    install
-        .current_dir(temp.path())
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .args([
-            "prompts",
-            "install",
-            "review-pack@1.0.0",
-            "--from",
-            "marketplace",
-        ]);
-    run(install);
-
-    let mut update = neo();
-    update
-        .current_dir(temp.path())
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .args(["prompts", "update", "review-pack"]);
-    let updated = run(update);
-    assert!(updated.contains("review-pack updated 1.1.0"));
-    assert!(updated.contains("trusted"));
-
-    let mut list = neo();
-    list.current_dir(temp.path()).args(["prompts", "list"]);
-    let listed = run(list);
-    assert!(listed.contains("review-pack"));
-    assert!(listed.contains("1.1.0"));
-    assert!(listed.contains("marketplace"));
-    assert!(listed.contains("neo-test"));
-    assert!(listed.contains("trusted"));
-
-    let mut preview = neo();
-    preview
-        .current_dir(temp.path())
-        .args(["prompts", "preview", "review"]);
-    let previewed = run(preview);
-    assert!(previewed.contains("source: marketplace"));
-    assert!(previewed.contains("publisher: neo-test"));
-    assert!(previewed.contains("trust: trusted"));
-    assert!(previewed.contains("Review v2"));
-
-    let mut uninstall = neo();
-    uninstall
-        .current_dir(temp.path())
-        .args(["prompts", "uninstall", "review-pack"]);
-    let uninstalled = run(uninstall);
-    assert!(uninstalled.contains("review-pack uninstalled"));
-    assert!(!temp.path().join(".neo/prompts/review-pack").exists());
-}
-
-fn prompt_update_marketplace(publisher_key: &SigningKey) -> MockSseServer {
-    let v1_dir = TempDir::new().expect("package tempdir");
-    let v1 = write_trusted_neo_package(
-        v1_dir.path(),
-        "prompt-pack",
-        "review-pack",
-        "1.0.0",
-        "review.md",
-        publisher_key,
-        &[PackageFixtureEntry::file(
-            "review.md",
-            "---\ndescription: Review code\n---\nReview v1\n",
-        )],
-    );
-    let v2_dir = TempDir::new().expect("package tempdir");
-    let v2 = write_trusted_neo_package(
-        v2_dir.path(),
-        "prompt-pack",
-        "review-pack",
-        "1.1.0",
-        "review.md",
-        publisher_key,
-        &[PackageFixtureEntry::file(
-            "review.md",
-            "---\ndescription: Review code\n---\nReview v2\n",
-        )],
-    );
-    MockSseServer::start(vec![
-        json_response(&json!({
-            "package": {
-                "kind": "prompt-pack",
-                "id": "review-pack",
-                "version": "1.0.0",
-                "manifest_url": "/p/review-pack/1.0.0/.neo-package.toml",
-                "archive_url": "/p/review-pack/1.0.0/review-pack-1.0.0.tar"
-            }
-        })),
-        text_response(
-            "application/toml",
-            &fs::read_to_string(&v1).expect("manifest v1"),
-        ),
-        binary_response(
-            "application/x-tar",
-            &fs::read(v1_dir.path().join("review-pack-1.0.0.tar")).expect("archive v1"),
-        ),
-        json_response(&json!({
-            "package": {
-                "kind": "prompt-pack",
-                "id": "review-pack",
-                "version": "1.1.0",
-                "manifest_url": "/p/review-pack/latest/.neo-package.toml",
-                "archive_url": "/p/review-pack/latest/review-pack-1.1.0.tar"
-            }
-        })),
-        text_response(
-            "application/toml",
-            &fs::read_to_string(&v2).expect("manifest v2"),
-        ),
-        binary_response(
-            "application/x-tar",
-            &fs::read(v2_dir.path().join("review-pack-1.1.0.tar")).expect("archive v2"),
-        ),
-    ])
-}
-
-#[test]
-fn theme_packages_install_list_and_preview_from_marketplace() {
-    let temp = TempDir::new().expect("tempdir");
-    let package_dir = TempDir::new().expect("package tempdir");
-    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
-    trust_test_publisher(temp.path(), &publisher_key);
-    let package = write_trusted_neo_package(
-        package_dir.path(),
-        "theme",
-        "night-owl",
-        "2.0.0",
-        "night-owl.json",
-        &publisher_key,
-        &[PackageFixtureEntry::file(
-            "night-owl.json",
-            r##"{"name":"Night Owl","colors":{"prompt":"#82aaff"}}"##,
-        )],
-    );
-    let manifest = fs::read_to_string(&package).expect("read package manifest");
-    let archive = fs::read(package_dir.path().join("night-owl-2.0.0.tar")).expect("read archive");
-    let marketplace = MockSseServer::start(vec![
-        json_response(&json!({
-            "package": {
-                "kind": "theme",
-                "id": "night-owl",
-                "version": "2.0.0",
-                "manifest_url": "/api/v1/marketplace/packages/theme/night-owl/2.0.0/.neo-package.toml",
-                "archive_url": "/api/v1/marketplace/packages/theme/night-owl/2.0.0/night-owl-2.0.0.tar"
-            }
-        })),
-        text_response("application/toml", &manifest),
-        binary_response("application/x-tar", &archive),
-    ]);
-
-    let mut install = neo();
-    install
-        .current_dir(temp.path())
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .args([
-            "themes",
-            "install",
-            "night-owl@2.0.0",
-            "--from",
-            "marketplace",
-        ]);
-    let installed = run(install);
-    assert!(installed.contains("night-owl installed 2.0.0"));
+    let themes = temp.path().join(".neo/themes");
+    fs::create_dir_all(&themes).expect("create themes");
+    fs::write(
+        themes.join("night-owl.json"),
+        r##"{"name":"Night Owl","colors":{"prompt":"#82aaff","assistant":"#c792ea"}}"##,
+    )
+    .expect("write theme");
 
     let mut list = neo();
     list.current_dir(temp.path()).args(["themes", "list"]);
     let listed = run(list);
-    assert!(listed.contains("night-owl"));
     assert!(listed.contains("Night Owl"));
+    assert!(listed.contains(".neo/themes/night-owl.json"));
+    assert!(!listed.contains("marketplace"));
+    assert!(!listed.contains("publisher"));
+    assert!(!listed.contains("trust"));
 
     let mut preview = neo();
     preview
@@ -2806,133 +1681,10 @@ fn theme_packages_install_list_and_preview_from_marketplace() {
     let previewed = run(preview);
     assert!(previewed.contains("Night Owl"));
     assert!(previewed.contains("#82aaff"));
-    assert!(
-        temp.path()
-            .join(".neo/themes/night-owl/night-owl.json")
-            .exists()
-    );
-}
-
-#[test]
-fn theme_packages_update_uninstall_and_metadata_from_marketplace() {
-    let temp = TempDir::new().expect("tempdir");
-    let publisher_key = SigningKey::from_bytes(&[23_u8; 32]);
-    trust_test_publisher(temp.path(), &publisher_key);
-    let marketplace = theme_update_marketplace(&publisher_key);
-
-    let mut install = neo();
-    install
-        .current_dir(temp.path())
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .args([
-            "themes",
-            "install",
-            "night-owl@2.0.0",
-            "--from",
-            "marketplace",
-        ]);
-    run(install);
-
-    let mut update = neo();
-    update
-        .current_dir(temp.path())
-        .env("NEO_MARKETPLACE_URL", &marketplace.url)
-        .args(["themes", "update", "night-owl"]);
-    let updated = run(update);
-    assert!(updated.contains("night-owl updated 2.1.0"));
-    assert!(updated.contains("trusted"));
-
-    let mut list = neo();
-    list.current_dir(temp.path()).args(["themes", "list"]);
-    let listed = run(list);
-    assert!(listed.contains("night-owl"));
-    assert!(listed.contains("2.1.0"));
-    assert!(listed.contains("marketplace"));
-    assert!(listed.contains("neo-test"));
-    assert!(listed.contains("trusted"));
-
-    let mut preview = neo();
-    preview
-        .current_dir(temp.path())
-        .args(["themes", "preview", "night-owl"]);
-    let previewed = run(preview);
-    assert!(previewed.contains("source: marketplace"));
-    assert!(previewed.contains("publisher: neo-test"));
-    assert!(previewed.contains("trust: trusted"));
     assert!(previewed.contains("#c792ea"));
-
-    let mut uninstall = neo();
-    uninstall
-        .current_dir(temp.path())
-        .args(["themes", "uninstall", "night-owl"]);
-    let uninstalled = run(uninstall);
-    assert!(uninstalled.contains("night-owl uninstalled"));
-    assert!(!temp.path().join(".neo/themes/night-owl").exists());
-}
-
-fn theme_update_marketplace(publisher_key: &SigningKey) -> MockSseServer {
-    let v1_dir = TempDir::new().expect("package tempdir");
-    let v1 = write_trusted_neo_package(
-        v1_dir.path(),
-        "theme",
-        "night-owl",
-        "2.0.0",
-        "night-owl.json",
-        publisher_key,
-        &[PackageFixtureEntry::file(
-            "night-owl.json",
-            r##"{"name":"Night Owl","colors":{"prompt":"#82aaff"}}"##,
-        )],
-    );
-    let v2_dir = TempDir::new().expect("package tempdir");
-    let v2 = write_trusted_neo_package(
-        v2_dir.path(),
-        "theme",
-        "night-owl",
-        "2.1.0",
-        "night-owl.json",
-        publisher_key,
-        &[PackageFixtureEntry::file(
-            "night-owl.json",
-            r##"{"name":"Night Owl","colors":{"prompt":"#c792ea"}}"##,
-        )],
-    );
-    MockSseServer::start(vec![
-        json_response(&json!({
-            "package": {
-                "kind": "theme",
-                "id": "night-owl",
-                "version": "2.0.0",
-                "manifest_url": "/t/night-owl/2.0.0/.neo-package.toml",
-                "archive_url": "/t/night-owl/2.0.0/night-owl-2.0.0.tar"
-            }
-        })),
-        text_response(
-            "application/toml",
-            &fs::read_to_string(&v1).expect("manifest v1"),
-        ),
-        binary_response(
-            "application/x-tar",
-            &fs::read(v1_dir.path().join("night-owl-2.0.0.tar")).expect("archive v1"),
-        ),
-        json_response(&json!({
-            "package": {
-                "kind": "theme",
-                "id": "night-owl",
-                "version": "2.1.0",
-                "manifest_url": "/t/night-owl/latest/.neo-package.toml",
-                "archive_url": "/t/night-owl/latest/night-owl-2.1.0.tar"
-            }
-        })),
-        text_response(
-            "application/toml",
-            &fs::read_to_string(&v2).expect("manifest v2"),
-        ),
-        binary_response(
-            "application/x-tar",
-            &fs::read(v2_dir.path().join("night-owl-2.1.0.tar")).expect("archive v2"),
-        ),
-    ])
+    assert!(!previewed.contains("marketplace"));
+    assert!(!previewed.contains("publisher"));
+    assert!(!previewed.contains("trust"));
 }
 
 fn write_extension_manifest(root: &std::path::Path, id: &str, name: &str, version: &str) {
@@ -2951,196 +1703,6 @@ command = "python3"
         ),
     )
     .expect("write extension manifest");
-}
-
-fn init_git_repo(repo: &std::path::Path) {
-    git(repo, ["init"]);
-    git(repo, ["config", "user.email", "neo@example.invalid"]);
-    git(repo, ["config", "user.name", "Neo Test"]);
-    git(repo, ["add", "neo-extension.toml"]);
-    git(repo, ["commit", "-m", "initial extension"]);
-}
-
-fn commit_git_repo(repo: &std::path::Path, message: &str) {
-    git(repo, ["add", "neo-extension.toml"]);
-    git(repo, ["commit", "-m", message]);
-}
-
-fn git<const N: usize>(repo: &std::path::Path, args: [&str; N]) {
-    let output = Command::new("git")
-        .current_dir(repo)
-        .args(args)
-        .output()
-        .expect("git should run");
-    assert!(
-        output.status.success(),
-        "git failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-struct PackageFixtureEntry {
-    path: PathBuf,
-    content: String,
-}
-
-impl PackageFixtureEntry {
-    fn file(path: impl Into<PathBuf>, content: impl Into<String>) -> Self {
-        Self {
-            path: path.into(),
-            content: content.into(),
-        }
-    }
-}
-
-fn write_signed_neo_package(
-    root: &Path,
-    kind: &str,
-    id: &str,
-    version: &str,
-    entry: &str,
-    entries: &[PackageFixtureEntry],
-) -> PathBuf {
-    fs::create_dir_all(root).expect("create package root");
-    let archive_name = format!("{id}-{version}.tar");
-    let archive_path = root.join(&archive_name);
-    write_package_archive(&archive_path, entries);
-    let archive_bytes = fs::read(&archive_path).expect("read package archive");
-    let digest = hex_sha256(&archive_bytes);
-    let signing_key = SigningKey::from_bytes(&[11_u8; 32]);
-    let verifying_key = signing_key.verifying_key();
-    let signature = signing_key.sign(&archive_bytes);
-    let manifest_path = root.join(".neo-package.toml");
-    fs::write(
-        &manifest_path,
-        format!(
-            r#"
-kind = "{kind}"
-id = "{id}"
-version = "{version}"
-entry = "{entry}"
-
-[archive]
-path = "{archive_name}"
-sha256 = "{digest}"
-
-[signature]
-algorithm = "ed25519"
-public_key = "{}"
-signature = "{}"
-"#,
-            STANDARD.encode(verifying_key.to_bytes()),
-            STANDARD.encode(signature.to_bytes()),
-        ),
-    )
-    .expect("write package manifest");
-    manifest_path
-}
-
-fn write_trusted_neo_package(
-    root: &Path,
-    kind: &str,
-    id: &str,
-    version: &str,
-    entry: &str,
-    signing_key: &SigningKey,
-    entries: &[PackageFixtureEntry],
-) -> PathBuf {
-    fs::create_dir_all(root).expect("create package root");
-    let archive_name = format!("{id}-{version}.tar");
-    let archive_path = root.join(&archive_name);
-    write_package_archive(&archive_path, entries);
-    let archive_bytes = fs::read(&archive_path).expect("read package archive");
-    let digest = hex_sha256(&archive_bytes);
-    let verifying_key = signing_key.verifying_key();
-    let signature = signing_key.sign(&archive_bytes);
-    let manifest_path = root.join(".neo-package.toml");
-    fs::write(
-        &manifest_path,
-        format!(
-            r#"
-kind = "{kind}"
-id = "{id}"
-version = "{version}"
-entry = "{entry}"
-
-[publisher]
-id = "neo-test"
-name = "Neo Test"
-account_id = "acct_neo_test"
-
-[archive]
-path = "{archive_name}"
-sha256 = "{digest}"
-
-[signature]
-algorithm = "ed25519"
-root = "local-root"
-public_key_id = "ed25519:2026-a"
-public_key = "{}"
-signature = "{}"
-"#,
-            STANDARD.encode(verifying_key.to_bytes()),
-            STANDARD.encode(signature.to_bytes()),
-        ),
-    )
-    .expect("write package manifest");
-    manifest_path
-}
-
-fn trust_test_publisher(project: &Path, signing_key: &SigningKey) {
-    let trust_dir = project.join(".neo");
-    fs::create_dir_all(&trust_dir).expect("create trust dir");
-    fs::write(
-        trust_dir.join("package-trust.toml"),
-        format!(
-            r#"
-[publishers.neo-test]
-id = "neo-test"
-name = "Neo Test"
-root = "local-root"
-account_id = "acct_neo_test"
-
-[publishers.neo-test.keys."ed25519:2026-a"]
-id = "ed25519:2026-a"
-public_key = "{}"
-revoked = false
-"#,
-            STANDARD.encode(signing_key.verifying_key().to_bytes()),
-        ),
-    )
-    .expect("write trust store");
-}
-
-fn write_package_archive(path: &Path, entries: &[PackageFixtureEntry]) {
-    let file = fs::File::create(path).expect("create package archive");
-    let mut builder = Builder::new(file);
-    for entry in entries {
-        let bytes = entry.content.as_bytes();
-        let mut header = Header::new_gnu();
-        header.set_size(bytes.len().try_into().expect("archive entry length"));
-        header.set_mode(0o644);
-        header.set_cksum();
-        builder
-            .append_data(&mut header, &entry.path, bytes)
-            .expect("append archive entry");
-    }
-    builder.finish().expect("finish package archive");
-    builder
-        .into_inner()
-        .expect("package archive writer")
-        .flush()
-        .expect("flush package archive");
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        let _ = write!(&mut output, "{byte:02x}");
-    }
-    output
 }
 
 #[test]
@@ -3331,7 +1893,7 @@ api_key_env = "PROJECT_OPENAI_KEY"
 }
 
 #[test]
-fn models_list_pricing_renders_generated_catalog_pricing_and_json() {
+fn models_list_json_renders_generated_catalog_without_remote_metadata() {
     let temp = TempDir::new().expect("tempdir");
     fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
     fs::write(
@@ -3348,11 +1910,6 @@ model_catalogs = [".neo/generated-models.json"]
         r#"
 {
   "generated_at": "2026-06-10T00:00:00Z",
-  "source": {
-    "name": "models.dev",
-    "revision": "abc123",
-    "url": "https://models.dev/api/models.json"
-  },
   "models": [
     {
       "provider": "openai",
@@ -3366,14 +1923,6 @@ model_catalogs = [".neo/generated-models.json"]
         "reasoning": false,
         "embeddings": false,
         "image_generation": true
-      },
-      "pricing": {
-        "input_per_million_tokens": 5.0,
-        "output_per_million_tokens": 40.0,
-        "image_generation": {
-          "unit": "image",
-          "per_unit": 0.04
-        }
       }
     }
   ]
@@ -3382,21 +1931,10 @@ model_catalogs = [".neo/generated-models.json"]
     )
     .expect("write generated catalog");
 
-    let mut plain = neo();
-    plain
-        .current_dir(temp.path())
-        .args(["models", "list", "--pricing"]);
-    let stdout = run(plain);
-    assert!(stdout.contains("openai/gpt-image-1"));
-    assert!(stdout.contains("input $5/1M"));
-    assert!(stdout.contains("output $40/1M"));
-    assert!(stdout.contains("image $0.04/image"));
-    assert!(stdout.contains("source models.dev@abc123 generated 2026-06-10T00:00:00Z"));
-
     let mut json_cmd = neo();
     json_cmd
         .current_dir(temp.path())
-        .args(["models", "list", "--pricing", "--json"]);
+        .args(["models", "list", "--json"]);
     let stdout = run(json_cmd);
     let value: Value = serde_json::from_str(&stdout).expect("models json output");
     let image_model = value["models"]
@@ -3407,21 +1945,8 @@ model_catalogs = [".neo/generated-models.json"]
         .expect("generated image model");
     assert_eq!(image_model["capabilities"]["image_generation"], true);
     assert_eq!(image_model["context_window"], 128_000);
-    assert_eq!(image_model["pricing"]["input_per_million_tokens"], 5.0);
-    assert_eq!(image_model["pricing"]["output_per_million_tokens"], 40.0);
-    assert_eq!(
-        image_model["pricing"]["image_generation"],
-        json!({"unit": "image", "per_unit": 0.04})
-    );
-    assert_eq!(
-        image_model["source"],
-        json!({
-            "generated_at": "2026-06-10T00:00:00Z",
-            "name": "models.dev",
-            "revision": "abc123",
-            "url": "https://models.dev/api/models.json"
-        })
-    );
+    assert!(image_model.get("pricing").is_none());
+    assert!(image_model.get("source").is_none());
 }
 
 #[test]
@@ -3931,37 +2456,6 @@ MCP_PID_FILE = "{}"
 }
 
 #[test]
-fn mcp_cloud_self_hosted_servers_fail_closed_without_login() {
-    let temp = TempDir::new().expect("tempdir");
-    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    fs::write(
-        temp.path().join(".neo/config.toml"),
-        r#"
-[[mcp.servers]]
-id = "hosted-docs"
-enabled = true
-transport = "cloud"
-url = "cloud://mcp/hosted-docs"
-"#,
-    )
-    .expect("write cloud MCP config");
-
-    let mut health = neo();
-    health
-        .current_dir(temp.path())
-        .args(["mcp", "servers", "health", "hosted-docs"]);
-    let output = health.output().expect("neo command should run");
-
-    assert!(!output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("cloud MCP server hosted-docs requires self-hosted neo-cloud auth"));
-    assert!(!stdout.contains("mcp__hosted_docs__"));
-    assert!(!stderr.contains("placeholder"));
-    assert!(!stderr.contains("fake"));
-}
-
-#[test]
 fn print_registers_enabled_stdio_mcp_tools_from_project_config() {
     let temp = TempDir::new().expect("tempdir");
     let provider = MockSseServer::start(vec![openai_response_sse("resp-mcp", "mcp tools listed")]);
@@ -4283,47 +2777,6 @@ transport = "http"
 }
 
 #[test]
-fn print_rejects_hosted_cloud_mcp_when_cloud_client_is_unavailable() {
-    let temp = TempDir::new().expect("tempdir");
-    let provider = MockSseServer::start(vec![]);
-    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    fs::write(
-        temp.path().join(".neo/config.toml"),
-        format!(
-            r#"
-api_base = "{}"
-
-[[mcp.servers]]
-id = "hosted-docs"
-enabled = true
-transport = "http"
-url = "cloud://mcp/hosted-docs"
-"#,
-            provider.url
-        ),
-    )
-    .expect("write hosted MCP config");
-
-    let mut command = neo();
-    command
-        .current_dir(temp.path())
-        .env("OPENAI_API_KEY", "test-key")
-        .args(["print", "show", "hosted", "tools"]);
-    let output = command.output().expect("neo command should run");
-
-    assert!(!output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("hosted MCP server hosted-docs requires an available neo-cloud client"),
-        "stderr should explain unavailable hosted MCP, got: {stderr}"
-    );
-    assert!(!stdout.contains("mcp__hosted_docs__"));
-    assert!(!stderr.contains("placeholder"));
-    assert!(!stderr.contains("fake"));
-}
-
-#[test]
 fn mcp_resources_list_reads_remote_resource_catalog() {
     let temp = TempDir::new().expect("tempdir");
     let mcp_server = MockSseServer::start(vec![
@@ -4559,28 +3012,6 @@ struct RecordedRequest {
 struct MockSseServer {
     url: String,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
-}
-
-struct TestCloudServer {
-    base_url: String,
-    handle: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for TestCloudServer {
-    fn drop(&mut self) {
-        self.handle.abort();
-    }
-}
-
-async fn start_cloud_server(database_path: PathBuf) -> TestCloudServer {
-    let store = Store::open(database_path).await.expect("open cloud store");
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind cloud server");
-    let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
-    let server = CloudServer::new(store);
-    let handle = tokio::spawn(async move {
-        server.serve(listener).await.expect("serve cloud");
-    });
-    TestCloudServer { base_url, handle }
 }
 
 impl MockSseServer {

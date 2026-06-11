@@ -5,8 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::package_commands;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PromptTemplate {
     pub name: String,
@@ -155,30 +153,13 @@ pub(crate) fn list_project_prompt_templates(
     let mut output = String::new();
     for command in commands {
         use std::fmt::Write as _;
-        if let Some(metadata) = package_commands::metadata_for_installed_file(
-            &project_dir.join(".neo/prompts"),
-            &command.template.path,
-        )? {
-            let _ = writeln!(
-                output,
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                metadata.id,
-                metadata.version,
-                metadata.source,
-                metadata.publisher,
-                metadata.trust,
-                command.template.name,
-                command.template.description,
-            );
-        } else {
-            let _ = writeln!(
-                output,
-                "{}\t{}\t{}",
-                command.template.name,
-                command.template.description,
-                command.template.path.display()
-            );
-        }
+        let _ = writeln!(
+            output,
+            "{}\t{}\t{}",
+            command.template.name,
+            command.template.description,
+            command.template.path.display()
+        );
     }
     Ok(output)
 }
@@ -190,22 +171,11 @@ pub(crate) fn preview_project_prompt_template(
 ) -> anyhow::Result<String> {
     let template = find_prompt_template_by_name(name, project_dir, global_prompts_dir)?
         .ok_or_else(|| anyhow::anyhow!("prompt {name:?} not found"))?;
-    let package_metadata = package_commands::metadata_for_installed_file(
-        &project_dir.join(".neo/prompts"),
-        &template.path,
-    )?;
-    let package_header = package_metadata.map_or_else(String::new, |metadata| {
-        format!(
-            "source: {}\npublisher: {}\ntrust: {}\n",
-            metadata.source, metadata.publisher, metadata.trust
-        )
-    });
     Ok(format!(
-        "{}\t{}\t{}\n{}{}\n",
+        "{}\t{}\t{}\n{}\n",
         template.name,
         template.description,
         template.path.display(),
-        package_header,
         template.content
     ))
 }

@@ -1,6 +1,6 @@
 # neo
 
-Rust-native agent monorepo inspired by pi. The workspace contains:
+Rust-native local AI agent monorepo inspired by pi. The workspace contains:
 
 - `neo-ai`: provider abstraction and streaming event normalization
 - `neo-agent-core`: agent loop, tools, permissions, sessions, and harness
@@ -15,6 +15,7 @@ Rust-native agent monorepo inspired by pi. The workspace contains:
 cargo run -p neo-agent -- print "hello from neo"
 cargo run -p neo-agent -- models list
 cargo run -p xtask -- check --docs
+cargo run -p xtask -- release-smoke
 ```
 
 The default maintenance gate intentionally checks the stable `xtask` slice while
@@ -24,6 +25,9 @@ clippy, and test gate.
 `cargo run -p xtask -- check --docs` also runs the docs/examples parity gate,
 including local Markdown link checks, production fake/local/placeholder guidance
 scans, and example TOML/JSON validation.
+`cargo run -p xtask -- release-smoke` is a local-only smoke flow for CLI help,
+models, local sessions/export, local extensions, MCP fixtures, catalog, and
+docs checks. It does not start cloud services or marketplace fixtures.
 
 ## Documentation
 

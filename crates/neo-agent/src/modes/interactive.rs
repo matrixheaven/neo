@@ -1181,7 +1181,7 @@ fn prompt_completions(
         slash_prompts: slash_prompt_template_completion_items(root, prefix)?.unwrap_or_default(),
         prompt_packages: prompt_package_completion_items(root)?,
         extension_commands: extension_command_completion_items(root)?,
-        cloud_commands: cloud_session_completion_items(),
+        session_commands: session_completion_items(),
         model_items: model_items.to_vec(),
     };
     Ok(completion_source_candidates(root, prefix, &catalog)?
@@ -1251,21 +1251,13 @@ fn extension_command_completion_items(root: &Path) -> Result<Vec<PickerItem>> {
     Ok(items)
 }
 
-fn cloud_session_completion_items() -> Vec<PickerItem> {
-    [
-        (
-            "/tree",
-            "Browse local session tree",
-            "local sessions",
-            "local",
-        ),
-        (
-            "/sync",
-            "Sync profile and sessions with self-hosted cloud",
-            "self-hosted cloud",
-            "cloud auth",
-        ),
-    ]
+fn session_completion_items() -> Vec<PickerItem> {
+    [(
+        "/tree",
+        "Browse local session tree",
+        "local sessions",
+        "local",
+    )]
     .into_iter()
     .map(|(value, description, provider, trust)| {
         PickerItem::new(
@@ -1418,7 +1410,7 @@ struct CompletionCatalog {
     slash_prompts: Vec<PickerItem>,
     prompt_packages: Vec<PickerItem>,
     extension_commands: Vec<PickerItem>,
-    cloud_commands: Vec<PickerItem>,
+    session_commands: Vec<PickerItem>,
     model_items: Vec<PickerItem>,
 }
 
@@ -1428,7 +1420,7 @@ enum CompletionSource {
     SlashPrompt,
     PromptPackage,
     ExtensionCommand,
-    CloudCommand,
+    SessionCommand,
     ProviderModel,
 }
 
@@ -1439,7 +1431,7 @@ impl CompletionSource {
             Self::SlashPrompt => "slash prompt",
             Self::PromptPackage => "prompt package",
             Self::ExtensionCommand => "extension command",
-            Self::CloudCommand => "cloud/session command",
+            Self::SessionCommand => "session command",
             Self::ProviderModel => "provider model",
         }
     }
@@ -1515,7 +1507,7 @@ fn slash_source_candidates(prefix: &str, catalog: &CompletionCatalog) -> Vec<Com
             &catalog.extension_commands,
             CompletionSource::ExtensionCommand,
         ),
-        (&catalog.cloud_commands, CompletionSource::CloudCommand),
+        (&catalog.session_commands, CompletionSource::SessionCommand),
     ];
     sources
         .into_iter()
@@ -1535,7 +1527,7 @@ const fn completion_source_rank(source: CompletionSource) -> u8 {
         CompletionSource::SlashPrompt => 1,
         CompletionSource::PromptPackage => 2,
         CompletionSource::ExtensionCommand => 3,
-        CompletionSource::CloudCommand => 4,
+        CompletionSource::SessionCommand => 4,
         CompletionSource::ProviderModel => 5,
     }
 }
@@ -2228,7 +2220,7 @@ fn startup_notices(config: &AppConfig) -> Vec<String> {
             config.tui.keybindings.len(),
             pluralize(config.tui.keybindings.len(), "override", "overrides")
         ));
-        notices.push("profile sync: tui.keybindings available".to_owned());
+        notices.push("local config: tui.keybindings available".to_owned());
     }
     notices
 }
@@ -3083,7 +3075,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_completions_merges_real_prompt_package_extension_and_cloud_session_commands() {
+    fn prompt_completions_merges_real_prompt_package_extension_and_session_commands() {
         let temp = tempfile::tempdir().expect("tempdir");
         let prompts_dir = temp.path().join(".neo/prompts");
         fs::create_dir_all(prompts_dir.join("review-pack")).expect("create prompts");
@@ -3149,24 +3141,16 @@ command = "echo"
                 .description
                 .as_deref()
                 .is_some_and(|description| {
-                    description.contains("source: cloud/session command")
+                    description.contains("source: session command")
                         && description.contains("provider: local sessions")
                         && description.contains("trust: local")
                 })
         );
-        assert!(
-            by_value["/sync"]
-                .description
-                .as_deref()
-                .is_some_and(|description| {
-                    description.contains("provider: self-hosted cloud")
-                        && description.contains("trust: cloud auth")
-                })
-        );
+        assert!(!by_value.contains_key("/sync"));
     }
 
     #[test]
-    fn verbose_startup_mentions_profile_synced_keybinding_overrides() {
+    fn verbose_startup_mentions_local_keybinding_overrides() {
         let temp = tempfile::tempdir().expect("tempdir");
         let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
         config
@@ -3193,7 +3177,6 @@ command = "echo"
             .collect::<Vec<_>>();
 
         assert!(notices.contains(&"keybindings: 1 override"));
-        assert!(notices.contains(&"profile sync: tui.keybindings available"));
     }
 
     #[test]
@@ -3218,10 +3201,10 @@ command = "echo"
                 "/review-extension",
                 Some("Extension command"),
             )],
-            cloud_commands: vec![PickerItem::new(
-                "/review-cloud",
-                "/review-cloud",
-                Some("Cloud command"),
+            session_commands: vec![PickerItem::new(
+                "/review-session",
+                "/review-session",
+                Some("Session command"),
             )],
             model_items: vec![PickerItem::new(
                 "anthropic/claude-sonnet",
@@ -3247,7 +3230,7 @@ command = "echo"
         assert!(slash_sources.contains(&CompletionSource::SlashPrompt));
         assert!(slash_sources.contains(&CompletionSource::PromptPackage));
         assert!(slash_sources.contains(&CompletionSource::ExtensionCommand));
-        assert!(slash_sources.contains(&CompletionSource::CloudCommand));
+        assert!(slash_sources.contains(&CompletionSource::SessionCommand));
         assert!(slash.iter().any(|candidate| {
             candidate
                 .to_picker_item()

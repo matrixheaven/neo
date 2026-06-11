@@ -1,7 +1,7 @@
 use neo_sdk::{
     JsonlCodec, RpcCodecError, RpcCommandKind, RpcCommandRecord, RpcCommandsResult, RpcError,
     RpcErrorCode, RpcMessage, RpcNotification, RpcRequest, RpcResponse, RpcSessionExportHtmlResult,
-    RpcSessionGetResult, RpcSessionRecord, RpcSessionShareRecord, RpcSessionTreeRecord,
+    RpcSessionGetResult, RpcSessionRecord, RpcSessionTreeRecord,
 };
 use serde_json::json;
 
@@ -89,19 +89,7 @@ fn session_rpc_records_have_stable_json_shape() {
         summary_model: None,
         summary_updated_at: Some("125.0Z".to_owned()),
         parent_id: None,
-        cloud_id: Some("cs_alpha".to_owned()),
-        synced_at: Some("126.0Z".to_owned()),
-        remote_parent_id: Some("cs_parent".to_owned()),
         children: vec!["alpha-fork-1".to_owned()],
-        share_ids: vec!["sh_alpha".to_owned()],
-        shares: vec![RpcSessionShareRecord {
-            id: "sh_alpha".to_owned(),
-            cloud_id: Some("cs_alpha".to_owned()),
-            public: Some(true),
-            html_url: Some("https://neo.example/v1/shares/sh_alpha.html".to_owned()),
-            json_url: Some("https://neo.example/v1/shares/sh_alpha.json".to_owned()),
-            created_at: Some("127.0Z".to_owned()),
-        }],
     };
     let tree_record = RpcSessionTreeRecord {
         depth: 1,
@@ -117,17 +105,12 @@ fn session_rpc_records_have_stable_json_shape() {
     assert_eq!(value["record"]["summary_source"], "local_extractive");
     assert_eq!(value["record"]["summary_updated_at"], "125.0Z");
     assert!(value["record"]["parent_id"].is_null());
-    assert_eq!(value["record"]["cloud_id"], "cs_alpha");
-    assert_eq!(value["record"]["synced_at"], "126.0Z");
-    assert_eq!(value["record"]["remote_parent_id"], "cs_parent");
     assert_eq!(value["record"]["children"], json!(["alpha-fork-1"]));
-    assert_eq!(value["record"]["share_ids"], json!(["sh_alpha"]));
-    assert_eq!(value["record"]["shares"][0]["id"], "sh_alpha");
-    assert_eq!(value["record"]["shares"][0]["public"], true);
-    assert_eq!(
-        value["record"]["shares"][0]["html_url"],
-        "https://neo.example/v1/shares/sh_alpha.html"
-    );
+    assert!(value["record"].get("cloud_id").is_none());
+    assert!(value["record"].get("synced_at").is_none());
+    assert!(value["record"].get("remote_parent_id").is_none());
+    assert!(value["record"].get("share_ids").is_none());
+    assert!(value["record"].get("shares").is_none());
     assert_eq!(
         serde_json::from_value::<RpcSessionTreeRecord>(value).expect("deserialize tree record"),
         tree_record
@@ -145,12 +128,7 @@ fn session_get_result_has_stable_json_shape() {
             summary_model: None,
             summary_updated_at: None,
             parent_id: None,
-            cloud_id: None,
-            synced_at: None,
-            remote_parent_id: None,
             children: vec!["alpha-fork-1".to_owned()],
-            share_ids: Vec::new(),
-            shares: Vec::new(),
         },
         path: "/tmp/neo/.neo/sessions/alpha.jsonl".to_owned(),
         messages: vec![json!({

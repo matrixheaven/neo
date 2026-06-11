@@ -19,7 +19,6 @@ crossterm.workspace = true
 futures.workspace = true
 neo-agent-core = { path = "../agent-core" }
 neo-ai = { path = "../ai" }
-neo-cloud-protocol = { path = "../cloud-protocol" }
 neo-extensions = { path = "../extensions" }
 neo-tui = { path = "../tui" }
 neo-sdk = { path = "../sdk" }
@@ -37,7 +36,6 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 base64.workspace = true
 ed25519-dalek.workspace = true
-neo-cloud = { path = "../neo-cloud" }
 sha2.workspace = true
 tar.workspace = true
 tempfile.workspace = true

@@ -96,9 +96,11 @@ Target: `crates/tui`.
 
 ## Remaining lower-priority gaps
 
-- The Rust crate does not yet implement runtime detection/negotiation for active
-  terminal image support, hosted keybinding/profile sync, command autocomplete from
-  hosted or extension command catalogs, or the full TypeScript renderer's
-  advanced diff affordances beyond width-safe unified diff line classification,
-  coloring, and item-range transcript selection.
+- Runtime detection/negotiation for active terminal image support remains a gap
+  beyond conservative protocol hints.
+- Hosted keybinding/profile sync and hosted command autocomplete are out of
+  scope for the local-only surface.
+- The full TypeScript renderer's advanced diff affordances remain beyond the
+  current width-safe unified diff line classification, coloring, and item-range
+  transcript selection.
 - The Rust crate intentionally contains no provider/runtime configuration or execution logic.

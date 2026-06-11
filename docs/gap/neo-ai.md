@@ -39,9 +39,8 @@
   `/images/generations` HTTP requests, returning base64 or URL image data to
   callers without synthesizing image bytes.
 - `CredentialResolver` resolves provider credentials in explicit precedence
-  order from CLI key, environment variables, auth-file credentials, then cloud
-  profile credentials, while `ResolvedCredential` redacts secrets from debug
-  output.
+  order from CLI key, environment variables, and local auth-file credentials,
+  while `ResolvedCredential` redacts secrets from debug output.
 - `schema_for<T>()` and `ToolSpec::from_schema<T>()` generate JSON Schema from
   Rust input types.
 - `providers::fake::FakeModelClient` supports tests.
@@ -68,8 +67,7 @@ contracts exist.
   `neo-agent` config. Pi catalog import preserves provider/model `name` as
   display-only metadata, but rejects request-affecting provider/model metadata
   until those fields have explicit Neo runtime contracts.
-- CLI/env/auth-file/cloud-profile credential precedence is implemented. Managed
-  OAuth login and hosted account credential sync remain future work.
+- CLI/env/local auth-file credential precedence is implemented. Managed OAuth login, profile sync, and hosted account credential sync are out of scope for the local-only surface.
 - Provider-native reasoning streams are normalized for OpenAI Responses,
   Anthropic Messages, and Google Generative AI, including opaque signature
   passthrough when providers send one. Signed thinking blocks can be explicitly

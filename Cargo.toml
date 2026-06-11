@@ -2,9 +2,7 @@
 members = [
     "crates/ai",
     "crates/agent-core",
-    "crates/cloud-protocol",
     "crates/sdk",
-    "crates/neo-cloud",
     "crates/extensions",
     "crates/tui",
     "crates/neo-agent",

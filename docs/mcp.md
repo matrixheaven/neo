@@ -110,6 +110,7 @@ stdio resource or a remote HTTP/SSE resource backed by a live SSE subscribe
 response, waits for real `notifications/resources/updated` messages, prints
 updated URIs, and unsubscribes before exiting.
 
-Current limitation: remote servers that require OAuth/hosted server lifecycle,
-hosted MCP management, or provider-specific event-channel discovery beyond the
-configured HTTP endpoint remain future work.
+Current limitation: Neo supports configured local stdio and explicit HTTP/SSE
+MCP endpoints. Hosted MCP registries, OAuth onboarding, hosted server lifecycle
+management, and provider-specific discovery beyond configured endpoints remain
+out of scope for the local-only surface.

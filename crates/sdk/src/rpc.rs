@@ -115,21 +115,6 @@ pub enum RpcErrorCode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RpcSessionShareRecord {
-    pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cloud_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub public: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub html_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub json_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RpcSessionRecord {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -144,18 +129,8 @@ pub struct RpcSessionRecord {
     pub summary_updated_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cloud_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub synced_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub remote_parent_id: Option<String>,
     #[serde(default)]
     pub children: Vec<String>,
-    #[serde(default)]
-    pub share_ids: Vec<String>,
-    #[serde(default)]
-    pub shares: Vec<RpcSessionShareRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

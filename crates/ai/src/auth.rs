@@ -5,7 +5,6 @@ pub enum CredentialSource {
     Cli,
     Environment,
     AuthFile,
-    CloudProfile,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -63,7 +62,6 @@ pub struct CredentialResolver {
     env_vars: Vec<String>,
     env: BTreeMap<String, String>,
     auth_file_credentials: BTreeMap<String, String>,
-    cloud_profile_credentials: BTreeMap<String, String>,
 }
 
 impl CredentialResolver {
@@ -75,7 +73,6 @@ impl CredentialResolver {
             env_vars: Vec::new(),
             env: BTreeMap::new(),
             auth_file_credentials: BTreeMap::new(),
-            cloud_profile_credentials: BTreeMap::new(),
         }
     }
 
@@ -103,12 +100,6 @@ impl CredentialResolver {
     }
 
     #[must_use]
-    pub fn with_cloud_profile_credentials(mut self, credentials: BTreeMap<String, String>) -> Self {
-        self.cloud_profile_credentials = credentials;
-        self
-    }
-
-    #[must_use]
     pub fn resolve(&self) -> Option<ResolvedCredential> {
         self.cli_api_key
             .as_ref()
@@ -125,18 +116,6 @@ impl CredentialResolver {
                             secret.clone(),
                             CredentialSource::AuthFile,
                             "auth file",
-                        )
-                    })
-            })
-            .or_else(|| {
-                self.cloud_profile_credentials
-                    .get(&self.provider)
-                    .filter(|value| !value.is_empty())
-                    .map(|secret| {
-                        ResolvedCredential::new(
-                            secret.clone(),
-                            CredentialSource::CloudProfile,
-                            "cloud profile",
                         )
                     })
             })

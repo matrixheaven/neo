@@ -9,7 +9,7 @@
   local Markdown link validation for `README.md`, `docs/**/*.md`, and
   `examples/**/*.md`; production fake/local/placeholder guidance scans; auth
   token leak checks in docs/export examples; package-signature fixture checks;
-  generated cloud API schema link checks; and stale gap-claim scans for
+  generated schema link checks; and stale gap-claim scans for
   implemented MCP/session/extension, runtime hook, HTTP MCP JSON subscribe
   event-reader and subscribe ACK event-channel URLs, TUI diff/paste/terminal
   image/Sixel protocol, local session export-json, provider thinking-payload
@@ -26,9 +26,10 @@
   message until a generated schema lands under one of the supported generated
   docs/example paths.
 - `cargo run -p xtask -- release-smoke` runs the docs/examples parity gate,
-  validates generated catalog schemas if present, chooses a random loopback
-  port, starts self-hosted `neo-cloud`, and then exercises CLI smoke flows
-  including `neo --help`, `neo models list`, and `neo cloud status --api-base`.
+  validates generated catalog schemas if present, and exercises local-only CLI
+  smoke flows: `neo --help`, `neo models list`, local session list/tree/show
+  and export-json, local extension install/list/status/enable/disable/call,
+  MCP fixture health/start/stop, and `xtask catalog check`.
 - `cargo run -p xtask -- check --workspace` opts into full workspace fmt,
   clippy, and tests.
 - `--quick` remains an xtask-only compatibility alias.
@@ -60,12 +61,11 @@ subscribe ACK claims once `start_resource_event_reader` exists, and stale
 terminal image-protocol claims once real terminal image protocol symbols land.
 It also rejects stale claims for MCP subscribe ACK event-channel URL discovery,
 local `sessions export-json` / `sessions.export_json`, Sixel output primitives,
-`--thinking off` signed-reasoning replay suppression, and self-hosted
-`neo-cloud` release-smoke coverage once their symbols or packages land. It
-still allows honest gaps for hosted MCP management, Link-header or
+and `--thinking off` signed-reasoning replay suppression once their symbols
+land. It still allows honest gaps for hosted MCP management, Link-header or
 provider-specific MCP discovery beyond configured endpoints and subscribe ACK
-URLs, managed collaboration, OAuth login, cloud package/runtime work that has not
-landed, runtime image-protocol detection/negotiation, advanced diff
+URLs, managed collaboration, OAuth login, cloud runtime work, marketplace
+distribution, runtime image-protocol detection/negotiation, advanced diff
 affordances, and other surfaces that are not implemented.
 
 ## Pi Parity Pressure
@@ -80,7 +80,8 @@ not inherit those Node-specific gates.
   implemented" gap language and provider-rejection documentation remain allowed.
 - Land a generated model catalog schema artifact so `xtask catalog check` can
   become part of the required gate instead of reporting the missing artifact.
-- Keep `release-smoke` aligned with the real self-hosted `neo-cloud` CLI
-  command shape as cloud APIs expand.
+- Keep `release-smoke` aligned with the local-only supported surface: help,
+  model catalog display, local sessions/export, local extensions, configured
+  MCP fixtures, generated catalog checks, and docs parity checks.
 - Keep the default gate narrow while independent crate workers are making API
   migrations.

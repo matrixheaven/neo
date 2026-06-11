@@ -1,14 +1,11 @@
 mod cli;
-mod cloud_commands;
 mod config;
 mod extension_commands;
 mod extension_tools;
 mod modes;
-mod package_commands;
 mod prompt_templates;
 mod resources;
 mod rpc_mode;
-mod session_cloud;
 mod session_commands;
 mod skill_commands;
 mod themes;
@@ -25,10 +22,9 @@ use anyhow::Context as _;
 
 use crate::{
     cli::{
-        AuthCommand, Cli, CloudCommand, Command, ConfigCommand, ConfigSyncCommand,
-        ExtensionCommand, ImageCommand, LIST_MODELS_NO_SEARCH, LoginCommand, McpCommand,
-        ModelCommand, PackageSource, PromptPackageCommand, PublisherTrustCommand, SessionCommand,
-        SkillCommand, ThemePackageCommand, TrustCommand,
+        Cli, Command, ConfigCommand, ExtensionCommand, ImageCommand, LIST_MODELS_NO_SEARCH,
+        McpCommand, ModelCommand, PromptPackageCommand, SessionCommand, SkillCommand,
+        ThemePackageCommand, TrustCommand,
     },
     config::{AppConfig, ConfigOverrides},
 };
@@ -183,85 +179,25 @@ async fn dispatch_command(
             SessionCommand::ExportJson { session_id } => {
                 session_commands::export_json(&session_id, config).await
             }
-            SessionCommand::Share { session_id, public } => {
-                session_cloud::share(&session_id, public, config).await
-            }
-            SessionCommand::Sync { command } => match command {
-                cli::SessionSyncCommand::Push => session_cloud::sync_push(config).await,
-                cli::SessionSyncCommand::Pull => session_cloud::sync_pull(config).await,
-                cli::SessionSyncCommand::Status => session_cloud::sync_status(config),
-            },
-            SessionCommand::Import { share_ref } => {
-                session_cloud::import_share(&share_ref, config).await
-            }
         },
         Some(Command::Skills { command }) => match command {
             SkillCommand::Show { path } => skill_commands::show(&path),
         },
         Some(Command::Extensions { command }) => dispatch_extensions(config, command).await,
-        Some(Command::Prompts { command }) => dispatch_prompts(config, command).await,
-        Some(Command::Themes { command }) => dispatch_themes(config, command).await,
+        Some(Command::Prompts { command }) => dispatch_prompts(config, command),
+        Some(Command::Themes { command }) => dispatch_themes(config, command),
         Some(Command::Trust { command }) => match command {
             TrustCommand::Status => trust::status(&config.project_dir),
             TrustCommand::Approve => trust::approve(&config.project_dir),
             TrustCommand::Deny => trust::deny(&config.project_dir),
             TrustCommand::Clear => trust::clear(&config.project_dir),
-            TrustCommand::Publishers { command } => match command {
-                PublisherTrustCommand::Add {
-                    publisher_id,
-                    name,
-                    root,
-                    key_id,
-                    public_key,
-                    account_id,
-                } => trust::add_publisher(
-                    &config.project_dir,
-                    &publisher_id,
-                    &name,
-                    &root,
-                    &key_id,
-                    &public_key,
-                    account_id,
-                ),
-                PublisherTrustCommand::Remove { publisher_id } => {
-                    trust::remove_publisher(&config.project_dir, &publisher_id)
-                }
-                PublisherTrustCommand::List => trust::list_publishers(&config.project_dir),
-                PublisherTrustCommand::RevokeKey {
-                    publisher_id,
-                    key_id,
-                    reason,
-                } => trust::revoke_publisher_key(
-                    &config.project_dir,
-                    &publisher_id,
-                    &key_id,
-                    &reason,
-                ),
-            },
-        },
-        Some(Command::Login { command }) => match command {
-            LoginCommand::Cloud { server } => cloud_commands::login_cloud(config, &server).await,
-        },
-        Some(Command::Logout) => cloud_commands::logout(config),
-        Some(Command::Auth { command }) => match command {
-            AuthCommand::Status => cloud_commands::auth_status(config),
-        },
-        Some(Command::Cloud { command }) => match command {
-            CloudCommand::Status { api_base } => cloud_commands::cloud_status(&api_base).await,
         },
         Some(Command::Config { command }) => match command {
             ConfigCommand::Show => config::show(config),
             ConfigCommand::Set { key, value } => config::set(&key, &value),
-            ConfigCommand::Sync { command } => match command {
-                ConfigSyncCommand::Push => cloud_commands::sync_push(config).await,
-                ConfigSyncCommand::Pull => cloud_commands::sync_pull(config).await,
-                ConfigSyncCommand::Status => cloud_commands::sync_status(config).await,
-            },
         },
         Some(Command::Models { command }) => match command {
-            ModelCommand::List { pricing, json } => {
-                modes::run::list_models_with_options(config, pricing, json)
-            }
+            ModelCommand::List { json } => modes::run::list_models_with_options(config, json),
         },
         Some(Command::Images { command }) => match command {
             ImageCommand::Generate {
@@ -487,40 +423,18 @@ async fn dispatch_extensions(
     command: ExtensionCommand,
 ) -> anyhow::Result<String> {
     match command {
-        ExtensionCommand::Search { query } => {
-            package_commands::search(neo_extensions::PackageKind::Extension, &query).await
-        }
         ExtensionCommand::List { root } => {
             let paths = extension_paths(config, root);
             extension_commands::list(&paths.root, &paths.state_path, &paths.registry_path)
         }
-        ExtensionCommand::Install { source, from, root } => {
+        ExtensionCommand::Install { source, root } => {
             let paths = extension_paths(config, root);
-            match from {
-                Some(PackageSource::Marketplace) => {
-                    let installed = package_commands::install_from_marketplace(
-                        neo_extensions::PackageInstallKind::Extension,
-                        &source,
-                        &paths.root,
-                        &config.project_dir,
-                    )
-                    .await?;
-                    Ok(installed)
-                }
-                None => extension_commands::install(
-                    &paths.root,
-                    &paths.state_path,
-                    &paths.registry_path,
-                    &source,
-                ),
-            }
-        }
-        ExtensionCommand::Publish { path } => {
-            package_commands::publish(
-                neo_extensions::PackageKind::Extension,
-                &resolve_package_path(config, path),
+            extension_commands::install(
+                &paths.root,
+                &paths.state_path,
+                &paths.registry_path,
+                &source,
             )
-            .await
         }
         ExtensionCommand::Update { extension_id, root } => {
             let paths = extension_paths(config, root);
@@ -572,32 +486,8 @@ async fn dispatch_extensions(
     }
 }
 
-async fn dispatch_prompts(
-    config: &AppConfig,
-    command: PromptPackageCommand,
-) -> anyhow::Result<String> {
+fn dispatch_prompts(config: &AppConfig, command: PromptPackageCommand) -> anyhow::Result<String> {
     match command {
-        PromptPackageCommand::Search { query } => {
-            package_commands::search(neo_extensions::PackageKind::PromptPack, &query).await
-        }
-        PromptPackageCommand::Install { package, from } => match from {
-            PackageSource::Marketplace => {
-                package_commands::install_from_marketplace(
-                    neo_extensions::PackageInstallKind::PromptPack,
-                    &package,
-                    &config.project_dir.join(".neo/prompts"),
-                    &config.project_dir,
-                )
-                .await
-            }
-        },
-        PromptPackageCommand::Publish { path } => {
-            package_commands::publish(
-                neo_extensions::PackageKind::PromptPack,
-                &resolve_package_path(config, path),
-            )
-            .await
-        }
         PromptPackageCommand::List => prompt_templates::list_project_prompt_templates(
             &config.project_dir,
             config::global_prompts_dir().as_deref(),
@@ -609,62 +499,14 @@ async fn dispatch_prompts(
                 &name,
             )
         }
-        PromptPackageCommand::Update { package } => {
-            package_commands::update_from_marketplace(
-                neo_extensions::PackageInstallKind::PromptPack,
-                &package,
-                &config.project_dir.join(".neo/prompts"),
-                &config.project_dir,
-            )
-            .await
-        }
-        PromptPackageCommand::Uninstall { package } => {
-            package_commands::uninstall_package(&package, &config.project_dir.join(".neo/prompts"))
-        }
     }
 }
 
-async fn dispatch_themes(
-    config: &AppConfig,
-    command: ThemePackageCommand,
-) -> anyhow::Result<String> {
+fn dispatch_themes(config: &AppConfig, command: ThemePackageCommand) -> anyhow::Result<String> {
     match command {
-        ThemePackageCommand::Search { query } => {
-            package_commands::search(neo_extensions::PackageKind::Theme, &query).await
-        }
-        ThemePackageCommand::Install { package, from } => match from {
-            PackageSource::Marketplace => {
-                package_commands::install_from_marketplace(
-                    neo_extensions::PackageInstallKind::Theme,
-                    &package,
-                    &config.project_dir.join(".neo/themes"),
-                    &config.project_dir,
-                )
-                .await
-            }
-        },
-        ThemePackageCommand::Publish { path } => {
-            package_commands::publish(
-                neo_extensions::PackageKind::Theme,
-                &resolve_package_path(config, path),
-            )
-            .await
-        }
         ThemePackageCommand::List => themes::list_project_themes(&config.project_dir),
         ThemePackageCommand::Preview { name } => {
             themes::preview_project_theme(&config.project_dir, &name)
-        }
-        ThemePackageCommand::Update { package } => {
-            package_commands::update_from_marketplace(
-                neo_extensions::PackageInstallKind::Theme,
-                &package,
-                &config.project_dir.join(".neo/themes"),
-                &config.project_dir,
-            )
-            .await
-        }
-        ThemePackageCommand::Uninstall { package } => {
-            package_commands::uninstall_package(&package, &config.project_dir.join(".neo/themes"))
         }
     }
 }
@@ -689,13 +531,5 @@ fn resolve_default_extension_root(config: &AppConfig, root: PathBuf) -> PathBuf 
         config.project_dir.join(root)
     } else {
         root
-    }
-}
-
-fn resolve_package_path(config: &AppConfig, path: PathBuf) -> PathBuf {
-    if path.is_absolute() {
-        path
-    } else {
-        config.project_dir.join(path)
     }
 }

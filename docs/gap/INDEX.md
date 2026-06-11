@@ -1,92 +1,50 @@
 # Neo/Pi Gap Map
 
-This directory tracks high-priority documentation and automation parity gaps
-between the pi package docs under `pi/` and the current Neo Rust workspace.
-Each file is module-scoped so code workers can close gaps without rewriting the
-whole map.
+This directory tracks documentation and automation parity pressure between pi
+and the current Neo Rust workspace. Neo's documented product direction here is
+a local-only AI agent, not a hosted collaboration or marketplace product.
 
 ## Priority Map
 
 | Module | Current Neo surface | Pi reference pressure | High-priority gap |
 | --- | --- | --- | --- |
-| [`neo-ai`](neo-ai.md) | Provider-neutral `ChatRequest`, `RequestOptions` including typed OpenAI reasoning effort, `ModelRegistry`, strict local JSON model catalogs including generated catalog pricing/image-generation metadata and a supported custom-model subset of Pi `models.json`, `ProviderRegistry`, provider/API compatibility validation in `ProviderResolver`, OpenAI Responses, Anthropic Messages, Google Generative AI, OpenAI-compatible adapters with chat image-input serialization, OpenAI-style image generation client primitives, OpenAI Responses reasoning-summary stream events, Anthropic Messages extended-thinking stream events with signature passthrough, Google Generative AI thought-part stream events with signature passthrough, Anthropic/Google budget-based thinking request payloads, tool schemas, test fake provider, and credential resolution helpers. | `pi-ai` documents broad provider discovery, credential resolution, tool streaming, provider-native reasoning, images, and context handoff. | Keep Neo docs focused on implemented Rust contracts; leave Pi `models.json` pricing import, upstream generated catalog production, provider override/auth APIs, OAuth, adaptive/off-state reasoning controls, and cross-provider handoff as explicit gaps. |
-| [`neo-agent-core`](neo-agent-core.md) | Runtime turn loop, `AgentConfig`, `AgentContext`, normalized lifecycle events including run/message/turn/thinking barriers, `run_turn_with_cancel` for in-flight model stream and tool-future cancellation, permissions with synchronous and async approval handlers, recoverable tool errors returned as model-visible error tool results, built-in workspace tools including edit diff details, compact background bash stop with Unix shell process-group cleanup, real PTY `terminal` sessions with start/write/read/resize/stop and process-supervisor cleanup, MCP adapter/provider boundary with stdio and HTTP/SSE tool/resource transports, JSONL session reader/writer, local session metadata fork/rename, deterministic JSONL compaction, fake harness. | `pi-agent-core` documents richer event lifecycle, hooks, steering, parallel tool execution, and cancellation. | Document implemented event/tool/MCP/session APIs now; leave hosted/alternate-channel MCP lifecycle, daemonized process reaping beyond tracked groups, and richer hook lifecycle gaps explicit. |
-| [`neo-agent`](neo-agent.md) | Clap command surface, project `.neo/config.toml`, user-global `~/.neo/config.toml`, environment overrides including `--mode`/`NEO_MODE`, `--offline`/`NEO_OFFLINE`, and `--verbose`, provider-specific base URL/API key env config, config setters including runtime `AgentConfig` options and `[tui.keybindings]` overrides, self-hosted `neo-cloud` login/auth status/logout, config profile sync, session sync/share/import/remote-resume against a user-run `neo-cloud`, provider-backed print/run with piped stdin merging, project-relative `@file` text prompt expansion, project/user `SYSTEM.md` and `APPEND_SYSTEM.md` system prompt resources plus trust-gated user/project/ancestor `AGENTS.md`/`CLAUDE.md` context files, `--system-prompt` / repeatable `--append-system-prompt` text-or-path overrides, `--thinking <off|minimal|low|medium|high|xhigh>` runtime reasoning override, Pi-style single-invocation tool registry filters `--no-tools`/`-nt`, `--no-builtin-tools`/`-nbt`, `--tools`/`-t`, and `--exclude-tools`/`-xt` across registered built-in, MCP, and extension tool names, project/user slash prompt templates plus explicit prompt-template selectors, default and explicit skill loading, local extension lifecycle/RPC tooling, signed marketplace package search/install/publish for extensions, prompt packs, and themes through `NEO_MARKETPLACE_URL`, prompt/theme package list-preview commands, enabled/default and explicit extension runtime tool discovery through `tools.list`, JSONL-backed RPC local prompt/session methods, models list plus root --list-models [search], MCP server/tool/resource commands, and live TUI local command/session/model pickers plus local `/tree` session picker slash command. | pi coding-agent docs cover settings, providers, sessions, TUI, MCP/resources, and trust. | Document actual project/global config, local system prompt resources, self-hosted cloud session/config sync, local/RPC commands, and the configured marketplace package API. Strict non-goals remain managed SaaS collaboration, external account flows, non-local trust roots, and SaaS-backed session services. |
-| [`neo-tui`](tui.md) | Prompt/editor with undo/kill-ring yank, internal copy buffer plus live OS clipboard prompt and transcript-selection copy, filesystem-backed prompt Tab completion, local slash prompt-template completion, inline `@provider/model` completion metadata, rendered transcript viewport scrolling, item-range transcript selection/highlighting, keybinding override resolution/conflict detection consumed by `neo-agent` config, command palette with project slash prompt-template command insertion, selection/list paging, width-safe rendering primitives, unified diff transcript classification/coloring, safe image-content metadata summaries in transcripts, session transcript loading, streamed thinking notices, bracketed paste buffering, Kitty/Sixel/OSC image protocol encoding primitives, conservative byte-backed inline image rendering under explicit protocol preferences, and a live raw-mode keybinding dispatcher for prompt/approval/command/session-export/model-picker/session-fork/transcript-selection actions. | `pi-tui` has a richer terminal renderer and interaction stack. | Keep TUI docs scoped to implemented primitives and live prompt/overlay actions; runtime detection/negotiation for active terminal image support, hosted/extension command catalogs, and advanced diff affordances remain explicit gaps. |
-| [`xtask`](xtask.md) | Stable xtask gate, opt-in workspace gate, docs/examples parity scan, Markdown local-link validation, example TOML/JSON validation, Rust example compile checks through `examples/rust/Cargo.toml`, generated catalog schema validation hook, docs/export auth-token leak scan, generated cloud API schema link scan, package-signature fixture scan, and a `release-smoke` command that starts self-hosted `neo-cloud` before CLI smoke flows. | pi has npm check/supply-chain automation, generated docs metadata, and release smoke tests. | Preserve a small Rust gate, block fake/placeholder production guidance, keep generated catalog checks artifact-backed, keep release smoke aligned with real cloud CLI behavior, and leave generated docs metadata as the remaining automation gap. |
+| [`neo-ai`](neo-ai.md) | Provider-neutral `ChatRequest`, `RequestOptions` with typed reasoning effort, strict local model catalogs with pricing/image-generation metadata, production provider resolver, OpenAI Responses, Anthropic Messages, Google Generative AI, OpenAI-compatible adapters, OpenAI-style image generation, provider-neutral thinking events, and tool schemas. | `pi-ai` documents broader provider discovery, provider-native reasoning, images, and context handoff. | Keep Neo docs focused on implemented Rust contracts; OAuth, provider override/auth APIs, adaptive/off-state reasoning, and model-aware cross-provider thinking conversion remain explicit gaps. |
+| [`neo-agent-core`](neo-agent-core.md) | Runtime turn loop, normalized lifecycle/thinking events, cancellation, permissions, recoverable model-visible tool errors, built-in workspace tools, background bash cleanup, PTY terminal sessions, MCP adapters, JSONL session reader/writer, local session metadata fork/rename, deterministic compaction, and fake harness. | `pi-agent-core` documents richer lifecycle, hooks, steering, parallel tool execution, and cancellation. | Document implemented event/tool/MCP/session APIs now; leave hosted lifecycle, daemonized process reaping beyond tracked groups, and richer hook phases as gaps. |
+| [`neo-agent`](neo-agent.md) | Local CLI/TUI surface for provider-backed print/run, project/global config, local system prompt resources, trust-gated context files, `--thinking`, local JSONL sessions/export, local skills, local extension lifecycle/RPC tooling, local prompt/theme inspection, models list, image generation, configured MCP commands, RPC local prompt/session methods, and live local session/model/command pickers. | pi coding-agent docs cover settings, providers, sessions, TUI, MCP/resources, trust, packages, and hosted flows. | Keep docs scoped to local operation. Do not present profile sync, hosted share/import, remote resume, hosted MCP registry, marketplace search/install/publish, package publisher/root trust, or managed collaboration as supported local-agent features. |
+| [`neo-tui`](tui.md) | Prompt/editor controls, transcript viewport and selection/copy, filesystem and slash-template completion, inline `@provider/model` completion, diff rendering, streamed thinking notices, bracketed paste, Kitty/iTerm2/Sixel encoding primitives, and conservative byte-backed inline image rendering under explicit protocol preferences. | `pi-tui` has a richer terminal renderer and interaction stack. | Preserve explicit protocol behavior: `auto` uses conservative hints and does not claim full runtime negotiation; advanced diff affordances remain lower priority. |
+| [`xtask`](xtask.md) | Stable xtask gate, docs/examples parity scan, Markdown local-link validation, example TOML/JSON validation, Rust example compile checks, generated catalog schema validation, docs/export auth-token leak scan, package-signature fixture scan, and local-only `release-smoke`. | pi has npm check/supply-chain automation, generated docs metadata, and release smoke tests. | Keep release-smoke aligned with local surfaces: help, models, local sessions/export, local extensions, MCP fixture, catalog, and docs checks. |
 
-## Cross-Cutting Gaps
+## Cross-Cutting Facts
 
-- OpenAI Responses, Anthropic Messages, Google Generative AI, and
-  OpenAI-compatible adapters are wired through `ProviderRegistry::production()`
-  and `ProviderResolver`, which now fails provider/API mismatches before
-  credential lookup, serializes supported chat image inputs instead of
-  silently dropping image parts, and maps typed reasoning effort into OpenAI
-  Responses / OpenAI-compatible request payloads and Anthropic/Google
-  budget-based thinking request payloads. OpenAI Responses reasoning
-  summary SSE events are mapped into provider-neutral thinking events that
-  `neo-agent-core`, stable JSONL output, and `neo-tui` consume without mixing
-  thinking content into plain assistant text. Strict local JSON model catalogs
-  can extend
-  `ModelRegistry`, including a supported custom-model subset of Pi
-  `models.json` that rejects request-affecting provider/model metadata until
-  Neo has explicit runtime contracts for those fields. Neo provider-specific
-  base URLs and API key env names are configured through `.neo/config.toml`,
-  generated catalog pricing and image-generation metadata. Pi `models.json`
-  pricing import, upstream generated catalog production, automatic
-  provider-metadata migration, OAuth flows, broader provider-native image
-  generation modes, and local APIs remain catalog/API gaps.
-- MCP is documented as a runtime boundary. `neo-agent-core` now has the
-  adapter/provider abstraction, stdio JSON-RPC process adapter, HTTP/SSE
-  JSON-RPC adapter, discovery-to-`ToolSpec` bridge, namespaced `ToolRegistry`
-  registration, persistent initialized stdio session reuse, explicit
-  resources/list and resources/read, stdio and HTTP/SSE resource subscriptions
-  backed by real notification streams, queued resource update notifications,
-  and async call delegation. `neo-agent print` and `neo-agent run` load enabled
-  stdio, HTTP, and SSE MCP entries from project config; `neo mcp tools ...`
-  prints the same model-facing tool specs discovered from a configured MCP
-  server, and `neo mcp resources ... watch` exposes stdio, live remote SSE
-  subscribe streams, same-endpoint HTTP SSE event-channel updates, and JSON
-  subscribe ACK alternate event-channel URLs named `eventStreamUrl`,
-  `event_stream_url`, or `event_url` without injecting them into model context.
-  Hosted MCP management, authorization flows, and provider-specific discovery
-  beyond configured endpoints and subscribe ACK URLs remain gaps.
-- Session storage is implemented as JSONL event persistence in
-  `neo-agent-core`; local tree fork/rename metadata, deterministic extractive
-  compaction, schema metadata, local branch summaries, HTML export, sanitized
-  local JSON export, and self-hosted `neo-cloud` session sync/share/import are
-  wired, while managed collaboration and model-generated/richer compaction
-  remain pi-inspired future work.
-- Project runtime config now maps generation options, queue modes, tool
-  execution mode, permission policy, live interactive approval decisions, and
-  compaction thresholds into real `AgentConfig` fields for provider-backed
-  runs. Project/global `[tui.keybindings]` entries are validated through
-  `neo-tui` action/key parsing, text-insertion reserved-key checks, and
-  same-context conflict detection, then applied to the live interactive
-  crossterm parser.
-- RPC mode now exposes local prompt-template command discovery through
-  `get_commands`, real session message replay through `get_messages`, local
-  session navigation through `sessions.list` / `sessions.tree`, metadata plus
-  replayed message payloads through `sessions.get`, sanitized local HTML
-  export through `sessions.export_html`, and sanitized local JSON export
-  through `sessions.export_json`; hosted
-  streaming/session services remain out of scope until they have backing
-  infrastructure.
+- Reasoning handoff is implemented through provider-neutral thinking events and
+  persisted `ContentPart::Thinking` blocks. OpenAI Responses, Anthropic
+  Messages, and Google Generative AI can replay signed or opaque reasoning in
+  provider-native shapes where supported. Adaptive/off-state behavior and
+  model-aware cross-provider conversion remain gaps.
+- Image generation is implemented for OpenAI-style image endpoints through
+  local catalog metadata. Base64 provider outputs are written directly; URL-only
+  outputs require explicit `tui.fetch_remote_images = true` and still pass
+  HTTP(S), image content-type, and size checks.
+- MCP is documented as a runtime boundary. Neo supports configured stdio,
+  HTTP, and SSE endpoints plus explicit resource list/read/watch flows. Hosted
+  MCP registries, OAuth onboarding, and hosted server lifecycle management are
+  out of scope for the local-only surface.
+- Session storage is local JSONL event persistence with local tree metadata,
+  fork/rename, deterministic compaction, HTML export, and sanitized JSON
+  export. Hosted share/import, profile sync, and remote resume are not part of
+  the supported local session surface.
+- RPC mode exposes local prompt-template command discovery, prompt execution,
+  local session replay/navigation, and sanitized local HTML/JSON export.
 
 ## Docs Updated In This Pass
 
-- Quickstart now describes the stable `xtask` docs gate and the opt-in
-  workspace gate, including the docs/examples parity scan.
-- Configuration docs now reflect `.neo/config.toml`, `NEO_*` overrides, and
-  supported `neo config set` keys without treating deterministic development
-  fixtures as production defaults.
-- Providers docs now reflect `ModelSpec`, strict local model catalogs,
-  `RequestOptions`, typed OpenAI reasoning effort, environment key helpers,
-  production provider resolution, real OpenAI/Anthropic-compatible clients,
-  fail-closed Pi catalog metadata import, and the fake test provider.
-- Tools docs now list the implemented built-in workspace tools and permissions.
-- Sessions docs now describe JSONL event persistence, local session metadata
-  fork/rename, deterministic extractive compaction, self-hosted cloud
-  session/share commands, and current CLI/session reader behavior.
-- Examples now include Rust snippets for provider registry, tool schemas,
-  runtime turns, and JSONL session replay.
+- Quickstart now presents Neo as a local-only agent and removes cloud,
+  profile-sync, share/import, remote-resume, and marketplace flows.
+- Configuration docs preserve reasoning, TUI image protocol, and remote image
+  fetch policy.
+- Providers docs preserve image generation and reasoning handoff contracts.
+- Sessions docs now describe local JSONL sessions/export only.
+- Packages docs were replaced with local extension/prompt/theme asset guidance
+  and explicit unsupported distribution surfaces.
+- `xtask release-smoke` now points at local help/models/sessions/extensions/MCP
+  plus catalog/docs checks instead of cloud or marketplace fixtures.

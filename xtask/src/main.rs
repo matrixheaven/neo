@@ -1,21 +1,13 @@
 use std::{
     collections::BTreeSet,
-    env, fs,
-    io::{Read, Write},
-    net::TcpListener,
+    fs,
     path::{Component, Path, PathBuf},
-    process::{Child, Command},
-    thread,
-    time::Duration,
+    process::Command,
 };
 
 use anyhow::{Result, bail};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::{Parser, Subcommand};
-use ed25519_dalek::{Signer as _, SigningKey};
 use regex::Regex;
-use sha2::{Digest as _, Sha256};
-use tar::{Builder, Header};
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -28,7 +20,7 @@ enum XtaskCommand {
     Check(CheckOptions),
     /// Run the docs/examples parity gate without fmt, clippy, or tests.
     Parity,
-    /// Run the release smoke gate against a self-hosted neo-cloud.
+    /// Run the local-only release smoke gate.
     ReleaseSmoke,
     /// Validate generated catalog artifacts.
     #[command(subcommand)]
@@ -73,11 +65,6 @@ impl CommandStep {
             env: Vec::new(),
             current_dir: None,
         }
-    }
-
-    fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.env.push((key.into(), value.into()));
-        self
     }
 
     fn with_envs(mut self, env: &[(String, String)]) -> Self {
@@ -157,15 +144,7 @@ fn run_release_smoke(root: &Path) -> Result<()> {
         );
     }
 
-    let cloud_override = env::var("NEO_RELEASE_SMOKE_CLOUD_CMD").ok();
-    let dependency_errors = if cloud_override
-        .as_deref()
-        .is_some_and(|command| !command.trim().is_empty())
-    {
-        release_smoke_dependency_errors_with_override(root, cloud_override.as_deref())?
-    } else {
-        release_smoke_dependency_errors(root)?
-    };
+    let dependency_errors = release_smoke_dependency_errors(root)?;
     if !dependency_errors.is_empty() {
         bail!(
             "release smoke dependencies are not ready:\n{}",
@@ -174,29 +153,14 @@ fn run_release_smoke(root: &Path) -> Result<()> {
     }
 
     let fixture = ReleaseSmokeFixture::new()?;
-    let port = random_local_port()?;
-    let cloud_step = release_smoke_cloud_step(port, cloud_override.as_deref())
-        .with_env("HOME", fixture.home_dir.display().to_string());
-    let mut cloud = spawn_release_smoke_cloud(&cloud_step)?;
-    thread::sleep(Duration::from_millis(500));
-    if let Some(status) = cloud.try_wait()? {
-        bail!(
-            "self-hosted neo-cloud exited before CLI smoke flows could run with status {status}; command was `{}`",
-            cloud_step.display()
-        );
-    }
+    run_release_smoke_cli_flows(&fixture)?;
 
-    let result = run_release_smoke_cli_flows(port, &fixture);
-    stop_release_smoke_cloud(&mut cloud);
-    result?;
-
-    println!("release smoke passed on http://127.0.0.1:{port}");
+    println!("local-only release smoke passed");
     Ok(())
 }
 
 fn validate_parity_gate(root: &Path) -> Result<Vec<String>> {
     let mut errors = validate_docs_links(root)?;
-    errors.extend(validate_generated_cloud_api_schema_links(root)?);
     errors.extend(validate_docs_parity(root)?);
     errors.extend(validate_examples(root)?);
     errors.extend(validate_catalog_schemas(root, CatalogRequirement::Required)?.errors);
@@ -258,79 +222,22 @@ fn run(step: &CommandStep) -> Result<()> {
     Ok(())
 }
 
-fn run_capture(step: &CommandStep) -> Result<String> {
-    println!("running: {}", step.display());
-    let mut command = Command::new(&step.program);
-    command.args(&step.args).envs(step.env.iter().cloned());
-    if let Some(current_dir) = &step.current_dir {
-        command.current_dir(current_dir);
-    }
-    let output = command.output()?;
-    print!("{}", String::from_utf8_lossy(&output.stdout));
-    eprint!("{}", String::from_utf8_lossy(&output.stderr));
-    if !output.status.success() {
-        bail!("{} failed", step.display());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-fn run_release_smoke_cli_flows(port: u16, fixture: &ReleaseSmokeFixture) -> Result<()> {
-    let marketplace = spawn_release_smoke_marketplace(fixture)?;
-    let env = fixture.command_env(&marketplace.url);
-    let api_base = format!("http://127.0.0.1:{port}");
-
+fn run_release_smoke_cli_flows(fixture: &ReleaseSmokeFixture) -> Result<()> {
+    let env = fixture.command_env();
     run(&release_smoke_neo_step(&["--help"], &env))?;
-    run(&release_smoke_neo_step(
-        &["models", "list", "--pricing"],
-        &env,
-    ))?;
-    run(&release_smoke_neo_step(
-        &["cloud", "status", "--api-base", &api_base],
-        &env,
-    ))?;
-    run(&release_smoke_neo_step(
-        &["login", "cloud", "--server", &api_base],
-        &env,
-    ))?;
-    for step in release_smoke_profile_steps() {
+    run(&release_smoke_neo_step(&["models", "list"], &env))?;
+    for step in release_smoke_session_steps() {
         run(&release_smoke_prepare_step(step, &env))?;
     }
     run(&release_smoke_neo_step(
-        &["sessions", "sync", "status"],
-        &env,
-    ))?;
-    let share_output = run_capture(&release_smoke_neo_step(
-        &["sessions", "share", "release-smoke", "--public"],
-        &env,
-    ))?;
-    let share_id = output_value(&share_output, "share_id")?;
-    let cloud_id = output_value(&share_output, "cloud_id")?;
-    run(&release_smoke_neo_step(
-        &["sessions", "import", &share_id],
-        &env,
-    ))?;
-    run(&release_smoke_neo_step(&["resume", &cloud_id], &env))?;
-
-    run(&release_smoke_neo_step(
         &[
-            "trust",
-            "publishers",
-            "add",
-            "neo-test",
-            "--name",
-            "Neo Test",
-            "--root",
-            "local-root",
-            "--key-id",
-            "ed25519:2026-a",
-            "--public-key",
-            &marketplace.public_key,
-            "--account-id",
-            "acct_neo_test",
+            "extensions",
+            "install",
+            fixture.extension_source_dir.to_string_lossy().as_ref(),
         ],
         &env,
     ))?;
-    for step in release_smoke_marketplace_steps() {
+    for step in release_smoke_local_extension_steps() {
         run(&release_smoke_prepare_step(step, &env))?;
     }
     for step in release_smoke_mcp_steps() {
@@ -353,17 +260,19 @@ fn release_smoke_prepare_step(step: CommandStep, env: &[(String, String)]) -> Co
 
 #[cfg(test)]
 fn release_smoke_cli_steps(port: u16) -> Vec<CommandStep> {
-    let api_base = format!("http://127.0.0.1:{port}");
+    let _ = port;
     let mut steps = vec![
         neo_agent_step(&["--help"]),
-        neo_agent_step(&["models", "list", "--pricing"]),
-        neo_agent_step(&["cloud", "status", "--api-base", &api_base]),
-        neo_agent_step(&["login", "cloud", "--server", &api_base]),
+        neo_agent_step(&["models", "list"]),
     ];
 
-    steps.extend(release_smoke_profile_steps());
     steps.extend(release_smoke_session_steps());
-    steps.extend(release_smoke_marketplace_steps());
+    steps.extend(std::iter::once(neo_agent_step(&[
+        "extensions",
+        "install",
+        ".neo/release-smoke-extension",
+    ])));
+    steps.extend(release_smoke_local_extension_steps());
     steps.extend(release_smoke_mcp_steps());
     steps.push(CommandStep::new(
         "cargo",
@@ -379,34 +288,27 @@ fn neo_agent_step(args: &[&str]) -> CommandStep {
     CommandStep::new("cargo", &cargo_args)
 }
 
-fn release_smoke_profile_steps() -> Vec<CommandStep> {
-    vec![
-        neo_agent_step(&["auth", "status"]),
-        neo_agent_step(&["config", "sync", "status"]),
-        neo_agent_step(&["config", "sync", "push"]),
-        neo_agent_step(&["config", "sync", "pull"]),
-    ]
-}
-
-#[cfg(test)]
 fn release_smoke_session_steps() -> Vec<CommandStep> {
     vec![
-        neo_agent_step(&["sessions", "sync", "status"]),
-        neo_agent_step(&["sessions", "share", "release-smoke", "--public"]),
-        neo_agent_step(&["sessions", "import", "sh_release_smoke"]),
-        neo_agent_step(&["resume", "cs_release_smoke"]),
+        neo_agent_step(&["sessions", "list"]),
+        neo_agent_step(&["sessions", "tree"]),
+        neo_agent_step(&["sessions", "show", "release-smoke"]),
+        neo_agent_step(&["sessions", "export-json", "release-smoke"]),
     ]
 }
 
-fn release_smoke_marketplace_steps() -> Vec<CommandStep> {
+fn release_smoke_local_extension_steps() -> Vec<CommandStep> {
     vec![
-        neo_agent_step(&["extensions", "search", "echo"]),
+        neo_agent_step(&["extensions", "list"]),
+        neo_agent_step(&["extensions", "status", "echo"]),
+        neo_agent_step(&["extensions", "disable", "echo"]),
+        neo_agent_step(&["extensions", "enable", "echo"]),
         neo_agent_step(&[
             "extensions",
-            "install",
-            "echo@0.1.0",
-            "--from",
-            "marketplace",
+            "call",
+            "echo",
+            "tools.echo",
+            r#"{"value":42}"#,
         ]),
     ]
 }
@@ -424,7 +326,7 @@ struct ReleaseSmokeFixture {
     home_dir: PathBuf,
     config_path: PathBuf,
     sessions_dir: PathBuf,
-    package_dir: PathBuf,
+    extension_source_dir: PathBuf,
 }
 
 impl ReleaseSmokeFixture {
@@ -436,13 +338,31 @@ impl ReleaseSmokeFixture {
         let home_dir = temp_dir.path().join("home");
         let neo_dir = project_dir.join(".neo");
         let sessions_dir = neo_dir.join("sessions");
-        let package_dir = temp_dir.path().join("marketplace");
+        let extension_source_dir = neo_dir.join("release-smoke-extension");
+        let extension_script = temp_dir.path().join("release-smoke-extension.py");
         let mcp_script = temp_dir.path().join("release-smoke-mcp.py");
         let mcp_pid_file = temp_dir.path().join("release-smoke-mcp.pid");
 
         fs::create_dir_all(&sessions_dir)?;
         fs::create_dir_all(&home_dir)?;
-        fs::create_dir_all(&package_dir)?;
+        fs::create_dir_all(&extension_source_dir)?;
+        fs::write(&extension_script, RELEASE_SMOKE_EXTENSION_FIXTURE)?;
+        fs::write(
+            extension_source_dir.join("neo-extension.toml"),
+            format!(
+                r#"
+id = "echo"
+name = "Echo"
+version = "0.1.0"
+description = "Release smoke local echo extension"
+
+[runner]
+command = "python3"
+args = ["-u", "{}"]
+"#,
+                toml_escape(&extension_script)
+            ),
+        )?;
         fs::write(&mcp_script, RELEASE_SMOKE_MCP_FIXTURE)?;
         fs::write(
             sessions_dir.join("release-smoke.jsonl"),
@@ -454,7 +374,7 @@ impl ReleaseSmokeFixture {
                             "User": {
                                 "content": [{
                                     "Text": {
-                                        "text": "release smoke self-hosted session"
+                                        "text": "release smoke local session"
                                     }
                                 }]
                             }
@@ -469,9 +389,6 @@ impl ReleaseSmokeFixture {
             format!(
                 r#"
 sessions_dir = ".neo/sessions"
-
-[cloud]
-auth_file = ".neo/auth.json"
 
 [[mcp.servers]]
 id = "release-smoke"
@@ -493,11 +410,11 @@ MCP_PID_FILE = "{}"
             home_dir,
             config_path,
             sessions_dir,
-            package_dir,
+            extension_source_dir,
         })
     }
 
-    fn command_env(&self, marketplace_url: &str) -> Vec<(String, String)> {
+    fn command_env(&self) -> Vec<(String, String)> {
         vec![
             ("HOME".to_owned(), self.home_dir.display().to_string()),
             (
@@ -508,181 +425,8 @@ MCP_PID_FILE = "{}"
                 "NEO_SESSIONS_DIR".to_owned(),
                 self.sessions_dir.display().to_string(),
             ),
-            ("NEO_MARKETPLACE_URL".to_owned(), marketplace_url.to_owned()),
         ]
     }
-}
-
-struct ReleaseSmokeMarketplace {
-    url: String,
-    public_key: String,
-}
-
-fn spawn_release_smoke_marketplace(
-    fixture: &ReleaseSmokeFixture,
-) -> Result<ReleaseSmokeMarketplace> {
-    let package = write_release_smoke_extension_package(&fixture.package_dir)?;
-    let listener = TcpListener::bind(("127.0.0.1", 0))?;
-    let url = format!("http://{}", listener.local_addr()?);
-    let responses = vec![
-        http_json_response(&serde_json::json!({
-            "packages": [{
-                "kind": "extension",
-                "id": "echo",
-                "version": "0.1.0",
-                "name": "Echo",
-                "description": "Release smoke echo extension",
-                "publisher": "neo-test"
-            }]
-        }))?,
-        http_json_response(&serde_json::json!({
-            "package": {
-                "kind": "extension",
-                "id": "echo",
-                "version": "0.1.0",
-                "manifest_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/.neo-package.toml",
-                "archive_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/echo-0.1.0.tar"
-            }
-        }))?,
-        http_response("application/toml", package.manifest.as_bytes()),
-        http_response("application/x-tar", &package.archive),
-    ];
-    thread::spawn(move || {
-        for response in responses {
-            let Ok((mut socket, _)) = listener.accept() else {
-                return;
-            };
-            let _ = read_http_headers(&mut socket);
-            let _ = socket.write_all(&response);
-        }
-    });
-    Ok(ReleaseSmokeMarketplace {
-        url,
-        public_key: package.public_key,
-    })
-}
-
-struct ReleaseSmokePackage {
-    manifest: String,
-    archive: Vec<u8>,
-    public_key: String,
-}
-
-fn write_release_smoke_extension_package(root: &Path) -> Result<ReleaseSmokePackage> {
-    fs::create_dir_all(root)?;
-    let archive_path = root.join("echo-0.1.0.tar");
-    write_release_smoke_archive(&archive_path)?;
-    let archive = fs::read(&archive_path)?;
-    let digest = hex_sha256(&archive);
-    let signing_key = SigningKey::from_bytes(&[23_u8; 32]);
-    let verifying_key = signing_key.verifying_key();
-    let signature = signing_key.sign(&archive);
-    let public_key = STANDARD.encode(verifying_key.to_bytes());
-    let manifest = format!(
-        r#"
-kind = "extension"
-id = "echo"
-version = "0.1.0"
-entry = "neo-extension.toml"
-
-[publisher]
-id = "neo-test"
-name = "Neo Test"
-account_id = "acct_neo_test"
-
-[archive]
-path = "echo-0.1.0.tar"
-sha256 = "{digest}"
-
-[signature]
-algorithm = "ed25519"
-root = "local-root"
-public_key_id = "ed25519:2026-a"
-public_key = "{public_key}"
-signature = "{}"
-"#,
-        STANDARD.encode(signature.to_bytes()),
-    );
-    Ok(ReleaseSmokePackage {
-        manifest,
-        archive,
-        public_key,
-    })
-}
-
-fn write_release_smoke_archive(path: &Path) -> Result<()> {
-    let file = fs::File::create(path)?;
-    let mut builder = Builder::new(file);
-    let content = br#"
-id = "echo"
-name = "Echo"
-version = "0.1.0"
-
-[runner]
-command = "python3"
-"#;
-    let mut header = Header::new_gnu();
-    header.set_path("neo-extension.toml")?;
-    header.set_size(content.len().try_into()?);
-    header.set_mode(0o644);
-    header.set_cksum();
-    builder.append(&header, &content[..])?;
-    builder.finish()?;
-    Ok(())
-}
-
-fn http_json_response(value: &serde_json::Value) -> Result<Vec<u8>> {
-    Ok(http_response(
-        "application/json",
-        serde_json::to_vec(value)?.as_slice(),
-    ))
-}
-
-fn http_response(content_type: &str, body: &[u8]) -> Vec<u8> {
-    let mut response = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-        body.len()
-    )
-    .into_bytes();
-    response.extend_from_slice(body);
-    response
-}
-
-fn read_http_headers(stream: &mut impl Read) -> Result<()> {
-    let mut buffer = [0_u8; 1024];
-    let mut request = Vec::new();
-    loop {
-        let read = stream.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        request.extend_from_slice(&buffer[..read]);
-        if request.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
-        }
-    }
-    Ok(())
-}
-
-fn output_value(output: &str, key: &str) -> Result<String> {
-    for line in output.lines() {
-        if let Some(value) = line.strip_prefix(&format!("{key}: ")) {
-            return Ok(value.trim().to_owned());
-        }
-        if let Some(value) = line.strip_prefix(&format!("{key}=")) {
-            return Ok(value.trim().to_owned());
-        }
-    }
-    bail!("missing {key} in command output:\n{output}")
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        let _ = std::fmt::Write::write_fmt(&mut output, format_args!("{byte:02x}"));
-    }
-    output
 }
 
 fn toml_escape(path: &Path) -> String {
@@ -693,8 +437,28 @@ fn toml_escape(path: &Path) -> String {
 }
 
 fn release_smoke_dependency_errors(root: &Path) -> Result<Vec<String>> {
-    release_smoke_dependency_errors_with_override(root, None)
+    release_smoke_cli_surface_errors(root)
 }
+
+const RELEASE_SMOKE_EXTENSION_FIXTURE: &str = r#"
+import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    if request.get("type") != "request":
+        continue
+    message = {
+        "type": "response",
+        "id": request.get("id"),
+        "result": {
+            "ok": True,
+            "method": request.get("method"),
+            "params": request.get("params", {}),
+        },
+    }
+    print(json.dumps(message), flush=True)
+"#;
 
 const RELEASE_SMOKE_MCP_FIXTURE: &str = r#"
 import json
@@ -728,42 +492,6 @@ for line in sys.stdin:
     print(json.dumps({"jsonrpc": "2.0", "id": request.get("id"), "result": result}), flush=True)
 "#;
 
-fn release_smoke_dependency_errors_with_override(
-    root: &Path,
-    cloud_override: Option<&str>,
-) -> Result<Vec<String>> {
-    let mut errors = Vec::new();
-    let has_cloud_override = cloud_override.is_some_and(|command| !command.trim().is_empty());
-
-    let cloud_manifest = root.join("crates").join("neo-cloud").join("Cargo.toml");
-    if !cloud_manifest.exists() && !has_cloud_override {
-        errors.push(
-            "missing self-hosted neo-cloud package at crates/neo-cloud/Cargo.toml; land the cloud worker output or set NEO_RELEASE_SMOKE_CLOUD_CMD to an explicit start command"
-                .to_owned(),
-        );
-    }
-    if (cloud_manifest.exists() || has_cloud_override) && !release_smoke_cli_flow_exists(root)? {
-        errors.push(
-            "missing neo-agent cloud CLI smoke flow; expected crates/neo-agent/src/cli.rs to expose `cloud status --api-base <URL>` before release-smoke can exercise neo-cloud"
-                .to_owned(),
-        );
-        return Ok(errors);
-    }
-    if cloud_manifest.exists() || has_cloud_override {
-        errors.extend(release_smoke_cli_surface_errors(root)?);
-    }
-
-    Ok(errors)
-}
-
-fn release_smoke_cli_flow_exists(root: &Path) -> Result<bool> {
-    let source = read_optional_source(&root.join("crates/neo-agent/src/cli.rs"))?;
-    let normalized = source.to_lowercase().replace(['-', '_'], " ");
-    Ok(normalized.contains("cloud")
-        && normalized.contains("status")
-        && normalized.contains("api base"))
-}
-
 fn release_smoke_cli_surface_errors(root: &Path) -> Result<Vec<String>> {
     let source = read_optional_source(&root.join("crates/neo-agent/src/cli.rs"))?;
     let normalized = source.to_lowercase().replace(['-', '_'], " ");
@@ -771,40 +499,26 @@ fn release_smoke_cli_surface_errors(root: &Path) -> Result<Vec<String>> {
 
     for (ok, message) in [
         (
-            normalized.contains("logincommand") && normalized.contains("cloud"),
-            "missing neo-agent cloud login smoke flow; expected `login cloud --server <URL>` before release-smoke can exercise self-hosted profile sync",
-        ),
-        (
-            normalized.contains("authcommand") && normalized.contains("status"),
-            "missing neo-agent auth status smoke flow; expected `auth status` before release-smoke can verify self-hosted login state",
-        ),
-        (
-            normalized.contains("configsynccommand")
-                && normalized.contains("push")
-                && normalized.contains("pull")
-                && normalized.contains("status"),
-            "missing neo-agent config sync smoke flow; expected `config sync status|push|pull` before release-smoke can exercise profile sync",
+            normalized.contains("modelcommand") && normalized.contains("list"),
+            "missing neo-agent model list smoke flow; expected `models list` before release-smoke can verify local model catalog display",
         ),
         (
             normalized.contains("sessioncommand")
-                && normalized.contains("share")
-                && normalized.contains("import")
-                && normalized.contains("sync"),
-            "missing neo-agent session cloud smoke flow; expected `sessions sync`, `sessions share`, and `sessions import` before release-smoke can exercise session share/import/resume",
-        ),
-        (
-            normalized.contains("modelcommand")
                 && normalized.contains("list")
-                && normalized.contains("pricing"),
-            "missing neo-agent model pricing smoke flow; expected `models list --pricing` before release-smoke can verify generated catalog pricing display",
+                && normalized.contains("tree")
+                && normalized.contains("show")
+                && normalized.contains("exportjson"),
+            "missing neo-agent local session smoke flow; expected `sessions list|tree|show|export-json` before release-smoke can verify local session surfaces",
         ),
         (
             normalized.contains("extensioncommand")
-                && normalized.contains("search")
                 && normalized.contains("install")
-                && normalized.contains("packagesource")
-                && normalized.contains("marketplace"),
-            "missing neo-agent marketplace smoke flow; expected `extensions search` and `extensions install --from marketplace` before release-smoke can exercise local marketplace fixtures",
+                && normalized.contains("list")
+                && normalized.contains("status")
+                && normalized.contains("disable")
+                && normalized.contains("enable")
+                && normalized.contains("call"),
+            "missing neo-agent local extension smoke flow; expected `extensions install|list|status|disable|enable|call` before release-smoke can exercise local extensions",
         ),
         (
             normalized.contains("mcpcommand")
@@ -820,64 +534,6 @@ fn release_smoke_cli_surface_errors(root: &Path) -> Result<Vec<String>> {
     }
 
     Ok(errors)
-}
-
-fn release_smoke_cloud_step(port: u16, cloud_override: Option<&str>) -> CommandStep {
-    if let Some(command) = cloud_override
-        .map(str::trim)
-        .filter(|command| !command.is_empty())
-    {
-        return override_command_step(command, port);
-    }
-
-    CommandStep::new(
-        "cargo",
-        &[
-            "run",
-            "-p",
-            "neo-cloud",
-            "--",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            &port.to_string(),
-        ],
-    )
-}
-
-fn override_command_step(command: &str, port: u16) -> CommandStep {
-    let substituted = command
-        .replace("{host}", "127.0.0.1")
-        .replace("{port}", &port.to_string());
-    let mut parts = substituted.split_whitespace();
-    let program = parts.next().unwrap_or("neo-cloud").to_owned();
-    let args = parts.map(ToString::to_string).collect();
-    CommandStep {
-        program,
-        args,
-        env: Vec::new(),
-        current_dir: None,
-    }
-}
-
-fn spawn_release_smoke_cloud(step: &CommandStep) -> Result<Child> {
-    println!("starting self-hosted cloud: {}", step.display());
-    Command::new(&step.program)
-        .args(&step.args)
-        .spawn()
-        .map_err(Into::into)
-}
-
-fn stop_release_smoke_cloud(child: &mut Child) {
-    if child.try_wait().is_ok_and(|status| status.is_none()) {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-}
-
-fn random_local_port() -> Result<u16> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))?;
-    Ok(listener.local_addr()?.port())
 }
 
 fn validate_docs_links(root: &Path) -> Result<Vec<String>> {
@@ -997,7 +653,6 @@ enum ImplementedSurface {
     StdioMcpProcessAdapter,
     HttpMcpJsonSubscribeEventReader,
     McpSubscribeEventStreamUrl,
-    SelfHostedNeoCloud,
     ExtensionLifecycleCommands,
     SessionMetadataBranching,
     SessionExportJson,
@@ -1064,10 +719,6 @@ impl ParityCodeTruth {
         insert_interactive_surfaces(&sources, &mut implemented);
         insert_tui_surfaces(&sources, &mut implemented);
         insert_ai_surfaces(&sources, &mut implemented);
-        if root.join("crates/neo-cloud/Cargo.toml").exists() {
-            implemented.insert(ImplementedSurface::SelfHostedNeoCloud);
-        }
-
         Ok(Self { implemented })
     }
 
@@ -1421,12 +1072,16 @@ fn parity_line_violation(
         return Some("hosted/OAuth overclaim");
     }
 
-    if self_hosted_or_local_first_overclaim(&normalized, code_truth) {
+    if self_hosted_or_local_first_overclaim(relative_file, &normalized) {
         return Some("unbacked self-hosted/local-first claim");
     }
 
     if package_trust_overclaim(relative_file, &normalized) {
         return Some("package trust overclaim");
+    }
+
+    if local_agent_remote_feature_overclaim(relative_file, &normalized) {
+        return Some("remote/cloud marketplace overclaim");
     }
 
     if image_runtime_detection_overclaim(&normalized) {
@@ -1475,12 +1130,44 @@ fn hosted_or_oauth_overclaim(normalized: &str) -> bool {
         && !honest_gap_or_rejection_statement(normalized)
 }
 
-fn self_hosted_or_local_first_overclaim(normalized: &str, code_truth: &ParityCodeTruth) -> bool {
-    !code_truth.has(ImplementedSurface::SelfHostedNeoCloud)
-        && (normalized.contains("self hosted")
-            || normalized.contains("self-hosted")
-            || normalized.contains("local first")
-            || normalized.contains("local-first"))
+fn self_hosted_or_local_first_overclaim(relative_file: &Path, normalized: &str) -> bool {
+    let path = normalize_path(relative_file)
+        .to_string_lossy()
+        .to_lowercase();
+    if path.starts_with("docs/superpowers/") {
+        return false;
+    }
+
+    (normalized.contains("self hosted")
+        || normalized.contains("self-hosted")
+        || normalized.contains("self hosted neo cloud")
+        || normalized.contains("self-hosted neo cloud"))
+        && positive_claim_statement(normalized)
+        && !honest_gap_or_rejection_statement(normalized)
+}
+
+fn local_agent_remote_feature_overclaim(relative_file: &Path, normalized: &str) -> bool {
+    let path = normalize_path(relative_file)
+        .to_string_lossy()
+        .to_lowercase();
+    if !(path == "readme.md" || path.starts_with("docs/")) || path.starts_with("docs/superpowers/")
+    {
+        return false;
+    }
+
+    (normalized.contains("neo cloud")
+        || normalized.contains("profile sync")
+        || normalized.contains("config sync")
+        || normalized.contains("cloud status")
+        || normalized.contains("login cloud")
+        || normalized.contains("sessions sync")
+        || normalized.contains("sessions share")
+        || normalized.contains("sessions import")
+        || normalized.contains("remote resume")
+        || normalized.contains("remote continuation")
+        || normalized.contains("hosted mcp registry")
+        || normalized.contains("mcp registry")
+        || normalized.contains("marketplace"))
         && positive_claim_statement(normalized)
         && !honest_gap_or_rejection_statement(normalized)
 }
@@ -1539,7 +1226,9 @@ fn honest_gap_or_rejection_statement(normalized: &str) -> bool {
     is_rejection_or_gap_statement(normalized)
         || normalized.contains("future work")
         || normalized.contains("out of scope")
+        || normalized.contains("out-of-scope")
         || normalized.contains("not yet")
+        || normalized.contains("no longer")
         || normalized.contains("does not")
         || normalized.contains("do not")
         || normalized.contains("cannot")
@@ -1645,29 +1334,10 @@ fn stale_gap_claim_violation(
     normalized: &str,
     code_truth: &ParityCodeTruth,
 ) -> Option<&'static str> {
-    stale_cloud_gap_claim_violation(normalized, code_truth)
-        .or_else(|| stale_backend_gap_claim_violation(normalized, code_truth))
+    stale_backend_gap_claim_violation(normalized, code_truth)
         .or_else(|| stale_interactive_gap_claim_violation(normalized, code_truth))
         .or_else(|| stale_tui_gap_claim_violation(normalized, code_truth))
         .or_else(|| stale_ai_gap_claim_violation(normalized, code_truth))
-}
-
-fn stale_cloud_gap_claim_violation(
-    normalized: &str,
-    code_truth: &ParityCodeTruth,
-) -> Option<&'static str> {
-    if code_truth.has(ImplementedSurface::SelfHostedNeoCloud)
-        && normalized.contains("neo cloud")
-        && normalized.contains("smoke")
-        && (normalized.contains("future work")
-            || normalized.contains("missing")
-            || normalized.contains("not implemented")
-            || normalized.contains("remain"))
-    {
-        return Some("stale self-hosted cloud smoke gap claim");
-    }
-
-    None
 }
 
 fn stale_backend_gap_claim_violation(
@@ -2296,55 +1966,6 @@ fn human_join(values: &[&str]) -> String {
     }
 }
 
-fn validate_generated_cloud_api_schema_links(root: &Path) -> Result<Vec<String>> {
-    let link_pattern = Regex::new(r"\[[^\]]+\]\(([^)]+)\)")?;
-    let mut errors = Vec::new();
-    for file in markdown_files(root)? {
-        let source = fs::read_to_string(&file)?;
-        let relative_file = relative_path(root, &file);
-        let Some(parent) = file.parent() else {
-            continue;
-        };
-
-        for (index, line) in source.lines().enumerate() {
-            for captures in link_pattern.captures_iter(line) {
-                let Some(raw_target) = captures.get(1).map(|target| target.as_str().trim()) else {
-                    continue;
-                };
-                let Some(target) = local_link_target(raw_target) else {
-                    continue;
-                };
-                let normalized_target = normalize_path(Path::new(target));
-                if !is_generated_cloud_api_schema_path(&normalized_target) {
-                    continue;
-                }
-                let target_path = parent.join(&normalized_target);
-                if !target_path.exists() {
-                    errors.push(format!(
-                        "{}:{} links to missing generated cloud API schema {}",
-                        relative_file.display(),
-                        index + 1,
-                        relative_path(root, &target_path).display()
-                    ));
-                }
-            }
-        }
-    }
-
-    errors.sort();
-    Ok(errors)
-}
-
-fn is_generated_cloud_api_schema_path(path: &Path) -> bool {
-    let text = normalize_path(path).to_string_lossy().to_lowercase();
-    text.contains("generated")
-        && text.contains("cloud")
-        && (text.contains("openapi") || text.contains("schema"))
-        && path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
-}
-
 fn looks_like_json_object(source: &str) -> bool {
     let trimmed = source.trim();
     trimmed.starts_with('{') && trimmed.ends_with('}')
@@ -2846,7 +2467,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
         std::fs::write(
             dir.path().join("docs").join("providers.md"),
-            "OAuth browser login and managed hosted collaboration remain gaps; use a user-run self-hosted neo-cloud instead.\n",
+            "OAuth browser login and managed hosted collaboration remain gaps in local-only Neo.\n",
         )
         .expect("write docs");
 
@@ -2856,7 +2477,7 @@ mod tests {
     }
 
     #[test]
-    fn parity_validation_rejects_self_hosted_claims_without_cloud_code() {
+    fn parity_validation_rejects_self_hosted_cloud_claims() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
         std::fs::write(
@@ -2876,27 +2497,23 @@ mod tests {
     }
 
     #[test]
-    fn parity_validation_allows_self_hosted_claims_when_cloud_code_exists() {
+    fn parity_validation_rejects_self_hosted_cloud_claims_with_specific_service_names() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(dir.path().join("crates").join("neo-cloud")).expect("cloud dir");
-        std::fs::write(
-            dir.path()
-                .join("crates")
-                .join("neo-cloud")
-                .join("Cargo.toml"),
-            "[package]\nname = \"neo-cloud\"\n",
-        )
-        .expect("cloud manifest");
         std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
         std::fs::write(
             dir.path().join("docs").join("sessions.md"),
-            "Self-hosted cloud session sync is implemented against user-run neo-cloud.\n",
+            "Self-hosted cloud session sync is implemented against a user-run service.\n",
         )
         .expect("write docs");
 
         let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
 
-        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            errors,
+            vec![
+                "docs/sessions.md:1 contains unbacked self-hosted/local-first claim: Self-hosted cloud session sync is implemented against a user-run service.".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -3768,10 +3385,10 @@ mod tests {
     }
 
     #[test]
-    fn release_smoke_reports_missing_self_hosted_cloud_package() {
+    fn release_smoke_does_not_require_self_hosted_cloud_package() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(dir.path().join("crates").join("neo-agent"))
-            .expect("neo-agent dir");
+        let cli_dir = dir.path().join("crates").join("neo-agent").join("src");
+        std::fs::create_dir_all(&cli_dir).expect("cli dir");
         std::fs::write(
             dir.path()
                 .join("crates")
@@ -3780,64 +3397,20 @@ mod tests {
             "[package]\nname = \"neo-agent\"\n",
         )
         .expect("neo-agent manifest");
-
-        let errors = release_smoke_dependency_errors(dir.path()).expect("dependency scan");
-
-        assert_eq!(
-            errors,
-            vec![
-                "missing self-hosted neo-cloud package at crates/neo-cloud/Cargo.toml; land the cloud worker output or set NEO_RELEASE_SMOKE_CLOUD_CMD to an explicit start command".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn release_smoke_reports_missing_cloud_cli_flow_after_cloud_package_exists() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(dir.path().join("crates").join("neo-cloud")).expect("cloud dir");
         std::fs::write(
-            dir.path()
-                .join("crates")
-                .join("neo-cloud")
-                .join("Cargo.toml"),
-            "[package]\nname = \"neo-cloud\"\n",
+            cli_dir.join("cli.rs"),
+            concat!(
+                "pub enum ModelCommand { List }\n",
+                "pub enum SessionCommand { List, Tree, Show, ExportJson }\n",
+                "pub enum ExtensionCommand { Install, List, Status, Disable, Enable, Call }\n",
+                "pub enum McpCommand { Health, Start, Stop }\n",
+            ),
         )
-        .expect("cloud manifest");
-        let cli_dir = dir.path().join("crates").join("neo-agent").join("src");
-        std::fs::create_dir_all(&cli_dir).expect("cli dir");
-        std::fs::write(cli_dir.join("cli.rs"), "pub enum Command { Models }\n")
-            .expect("cli source");
+        .expect("cli source");
 
         let errors = release_smoke_dependency_errors(dir.path()).expect("dependency scan");
 
-        assert_eq!(
-            errors,
-            vec![
-                "missing neo-agent cloud CLI smoke flow; expected crates/neo-agent/src/cli.rs to expose `cloud status --api-base <URL>` before release-smoke can exercise neo-cloud".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn release_smoke_builds_cloud_start_step_with_random_port() {
-        let step = release_smoke_cloud_step(49152, None);
-
-        assert_eq!(
-            step,
-            CommandStep::new(
-                "cargo",
-                &[
-                    "run",
-                    "-p",
-                    "neo-cloud",
-                    "--",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    "49152"
-                ]
-            )
-        );
+        assert!(errors.is_empty(), "{errors:?}");
     }
 
     #[test]
@@ -3849,19 +3422,17 @@ mod tests {
 
         for expected in [
             "cargo run -p neo-agent -- --help",
-            "cargo run -p neo-agent -- models list --pricing",
-            "cargo run -p neo-agent -- cloud status --api-base http://127.0.0.1:49152",
-            "cargo run -p neo-agent -- login cloud --server http://127.0.0.1:49152",
-            "cargo run -p neo-agent -- auth status",
-            "cargo run -p neo-agent -- config sync status",
-            "cargo run -p neo-agent -- config sync push",
-            "cargo run -p neo-agent -- config sync pull",
-            "cargo run -p neo-agent -- sessions sync status",
-            "cargo run -p neo-agent -- sessions share release-smoke --public",
-            "cargo run -p neo-agent -- sessions import sh_release_smoke",
-            "cargo run -p neo-agent -- resume cs_release_smoke",
-            "cargo run -p neo-agent -- extensions search echo",
-            "cargo run -p neo-agent -- extensions install echo@0.1.0 --from marketplace",
+            "cargo run -p neo-agent -- models list",
+            "cargo run -p neo-agent -- sessions list",
+            "cargo run -p neo-agent -- sessions tree",
+            "cargo run -p neo-agent -- sessions show release-smoke",
+            "cargo run -p neo-agent -- sessions export-json release-smoke",
+            "cargo run -p neo-agent -- extensions install .neo/release-smoke-extension",
+            "cargo run -p neo-agent -- extensions list",
+            "cargo run -p neo-agent -- extensions status echo",
+            "cargo run -p neo-agent -- extensions disable echo",
+            "cargo run -p neo-agent -- extensions enable echo",
+            "cargo run -p neo-agent -- extensions call echo tools.echo {\"value\":42}",
             "cargo run -p neo-agent -- mcp servers health release-smoke",
             "cargo run -p neo-agent -- mcp servers start release-smoke",
             "cargo run -p neo-agent -- mcp servers stop release-smoke",
@@ -3869,46 +3440,20 @@ mod tests {
         ] {
             assert!(steps.iter().any(|step| step == expected), "{expected}");
         }
-    }
 
-    #[test]
-    fn release_smoke_reports_missing_mcp_lifecycle_cli_flow() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(dir.path().join("crates").join("neo-cloud")).expect("cloud dir");
-        std::fs::write(
-            dir.path()
-                .join("crates")
-                .join("neo-cloud")
-                .join("Cargo.toml"),
-            "[package]\nname = \"neo-cloud\"\n",
-        )
-        .expect("cloud manifest");
-        let cli_dir = dir.path().join("crates").join("neo-agent").join("src");
-        std::fs::create_dir_all(&cli_dir).expect("cli dir");
-        std::fs::write(
-            cli_dir.join("cli.rs"),
-            concat!(
-                "pub enum CloudCommand { Status { api_base: String } }\n",
-                "pub enum LoginCommand { Cloud }\n",
-                "pub enum AuthCommand { Status }\n",
-                "pub enum ConfigSyncCommand { Push, Pull, Status }\n",
-                "pub enum SessionCommand { Share, Import, Sync }\n",
-                "pub enum ModelCommand { List { pricing: bool } }\n",
-                "pub enum ExtensionCommand { Search, Install }\n",
-                "pub enum PackageSource { Marketplace }\n",
-                "pub enum McpCommand { List }\n",
-            ),
-        )
-        .expect("cli source");
-
-        let errors = release_smoke_dependency_errors(dir.path()).expect("dependency scan");
-
-        assert_eq!(
-            errors,
-            vec![
-                "missing neo-agent MCP lifecycle smoke flow; expected crates/neo-agent/src/cli.rs to expose `mcp servers health/start/stop <server-id>` before release-smoke can exercise local MCP lifecycle".to_string()
-            ]
-        );
+        for removed in [
+            "cloud",
+            "login cloud",
+            "sessions sync",
+            "sessions share",
+            "sessions import",
+            "marketplace",
+        ] {
+            assert!(
+                steps.iter().all(|step| !step.contains(removed)),
+                "{removed} should not be in local-only release-smoke steps: {steps:?}"
+            );
+        }
     }
 
     #[test]
@@ -4024,25 +3569,6 @@ mod tests {
     }
 
     #[test]
-    fn parity_validation_rejects_cloud_api_schema_links_when_generated_target_is_missing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        write_catalog_schema_fixture(dir.path());
-        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
-        std::fs::write(
-            dir.path().join("docs").join("cloud.md"),
-            "[Cloud OpenAPI schema](./generated/cloud-api.openapi.json)\n",
-        )
-        .expect("write docs");
-
-        let errors = validate_parity_gate(dir.path()).expect("parity validation should run");
-
-        assert!(errors.iter().any(|error| error
-            == "docs/cloud.md links to missing local file docs/generated/cloud-api.openapi.json"));
-        assert!(errors.iter().any(|error| error
-            == "docs/cloud.md:1 links to missing generated cloud API schema docs/generated/cloud-api.openapi.json"));
-    }
-
-    #[test]
     fn parity_validation_rejects_private_package_signature_fixture_material() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_catalog_schema_fixture(dir.path());
@@ -4060,41 +3586,6 @@ mod tests {
             errors,
             vec![
                 "examples/packages/signature-fixture.json:1 contains private package signature material: {\"privateKey\":\"-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\"}".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_cloud_gap_after_cloud_package_exists() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let cloud_dir = dir.path().join("crates").join("neo-cloud").join("src");
-        std::fs::create_dir_all(&cloud_dir).expect("cloud source dir");
-        std::fs::write(
-            cloud_dir.join("main.rs"),
-            "fn main() { let _ = \"neo_cloud_self_hosted\"; }\n",
-        )
-        .expect("cloud main");
-        std::fs::write(
-            dir.path()
-                .join("crates")
-                .join("neo-cloud")
-                .join("Cargo.toml"),
-            "[package]\nname = \"neo-cloud\"\n",
-        )
-        .expect("cloud manifest");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("gap docs dir");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("xtask.md"),
-            "Self-hosted neo-cloud smoke remains future work.\n",
-        )
-        .expect("gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/xtask.md:1 contains stale self-hosted cloud smoke gap claim: Self-hosted neo-cloud smoke remains future work.".to_string()
             ]
         );
     }

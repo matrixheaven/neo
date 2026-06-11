@@ -1,13 +1,10 @@
 use std::{
     collections::BTreeMap,
-    env,
-    fmt::Write as _,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, bail};
-use neo_extensions::PackageTrustStore;
 
 const CONFIG_DIR: &str = ".neo";
 const TRUST_FILE: &str = "trust.json";
@@ -121,72 +118,6 @@ pub(crate) fn deny(project_dir: &Path) -> anyhow::Result<String> {
 pub(crate) fn clear(project_dir: &Path) -> anyhow::Result<String> {
     ProjectTrustStore::from_home()?.set(project_dir, None)?;
     Ok(format!("cleared trust: {}\n", project_key(project_dir)?))
-}
-
-pub(crate) fn package_trust_store(project_dir: &Path) -> PackageTrustStore {
-    PackageTrustStore::new(project_dir.join(CONFIG_DIR).join("package-trust.toml"))
-}
-
-pub(crate) fn add_publisher(
-    project_dir: &Path,
-    publisher_id: &str,
-    name: &str,
-    root: &str,
-    key_id: &str,
-    public_key: &str,
-    account_id: Option<String>,
-) -> anyhow::Result<String> {
-    let mut store = package_trust_store(project_dir);
-    store.trust_publisher(publisher_id, name, root, key_id, public_key, account_id)?;
-    Ok(format!(
-        "trusted publisher {publisher_id}\t{root}\t{key_id}\n"
-    ))
-}
-
-pub(crate) fn remove_publisher(project_dir: &Path, publisher_id: &str) -> anyhow::Result<String> {
-    let mut store = package_trust_store(project_dir);
-    if store.remove_publisher(publisher_id)? {
-        Ok(format!("removed publisher {publisher_id}\n"))
-    } else {
-        Ok(format!("publisher {publisher_id} was not trusted\n"))
-    }
-}
-
-pub(crate) fn revoke_publisher_key(
-    project_dir: &Path,
-    publisher_id: &str,
-    key_id: &str,
-    reason: &str,
-) -> anyhow::Result<String> {
-    let mut store = package_trust_store(project_dir);
-    store.revoke_publisher_key(publisher_id, key_id, reason)?;
-    Ok(format!("revoked publisher {publisher_id} key {key_id}\n"))
-}
-
-pub(crate) fn list_publishers(project_dir: &Path) -> anyhow::Result<String> {
-    let store = package_trust_store(project_dir);
-    let publishers = store.list_publishers()?;
-    if publishers.is_empty() {
-        return Ok("no trusted publishers\n".to_owned());
-    }
-
-    let mut output = String::new();
-    for publisher in publishers {
-        for key in publisher.keys.values() {
-            let state = if key.revoked { "revoked" } else { "trusted" };
-            let _ = writeln!(
-                output,
-                "{}\t{}\t{}\t{}\t{}\t{}",
-                publisher.id,
-                publisher.name,
-                publisher.root,
-                key.id,
-                state,
-                publisher.account_id.as_deref().unwrap_or("-")
-            );
-        }
-    }
-    Ok(output)
 }
 
 pub(crate) fn has_project_trust_inputs(project_dir: &Path) -> bool {

@@ -1,157 +1,78 @@
-# Packages and Marketplace
+# Local Extension And Prompt Assets
 
-Neo packages are tar archives described by a sibling `.neo-package.toml`
-manifest. The same format is used for extension packages, prompt packs, and
-theme packages.
+Neo's local-only documentation treats extensions, prompt templates, and themes
+as files under the project or user configuration tree. It does not document a
+hosted catalog, publish flow, publisher identity system, or root trust chain as
+a supported local-agent feature.
 
-## Manifest Format
+## Extensions
+
+Local extensions are directories that contain `neo-extension.toml`:
 
 ```toml
-kind = "extension" # "extension", "prompt-pack", or "theme"
 id = "echo"
+name = "Echo"
 version = "0.1.0"
-entry = "neo-extension.toml"
+description = "Local echo extension"
 
-[archive]
-path = "echo-0.1.0.tar"
-sha256 = "<lowercase-or-uppercase-hex-sha256-of-archive>"
-
-[signature]
-algorithm = "ed25519"
-public_key = "<base64-raw-32-byte-ed25519-public-key>"
-signature = "<base64-raw-64-byte-ed25519-signature-over-archive-bytes>"
+[runner]
+command = "python3"
+args = ["-u", "extension.py"]
 ```
 
-The `entry` field is the package's primary file:
-
-- `extension`: usually `neo-extension.toml`.
-- `prompt-pack`: a packaged `.md` prompt template.
-- `theme`: a packaged `.json` theme file.
-
-Package ids must be safe single path segments using ASCII letters, digits,
-`.`, `_`, or `-`. Archive references, entry paths, and archive member paths
-must be relative paths without `..`.
-
-## Validation
-
-Before install or publish, Neo validates the package manifest and archive:
-
-- Reads `.neo-package.toml` and verifies `kind`, `id`, `version`, `entry`,
-  archive digest, and signature metadata.
-- Verifies the archive bytes against `archive.sha256`.
-- Verifies the Ed25519 package signature over the exact archive bytes.
-- Rejects absolute archive paths, `..` components, unsafe ids, and missing
-  package entry files.
-- Rejects archive member paths that are absolute, contain `..`, or are empty.
-- Rejects symlinks and hard links whose targets escape the package root.
-
-Current trust policy: manifest self-sign only. The public key lives in the
-downloaded manifest, and Neo verifies that key against the archive bytes. Neo
-does not yet bind that key to a publisher identity, marketplace account, local
-trust store, transparency log, or root trust anchor. Treat this as archive
-integrity plus tamper detection for the manifest/archive pair, not a complete
-publisher/root trust chain.
-
-Validated packages install under the project-local roots:
-
-- Extensions: `.neo/extensions/<id>`
-- Prompt packs: `.neo/prompts/<id>`
-- Themes: `.neo/themes/<id>`
-
-Prompt and theme discovery recursively scans those package install roots, while
-explicit prompt-template directory selectors remain non-recursive.
-
-## CLI
-
-Marketplace operations require `NEO_MARKETPLACE_URL`. Neo fails closed when the
-server is unavailable or the environment variable is not set.
+Install and manage them with local commands:
 
 ```bash
-export NEO_MARKETPLACE_URL=http://localhost:8080
-
-cargo run -p neo-agent -- extensions search echo
-cargo run -p neo-agent -- extensions install echo@0.1.0 --from marketplace
-cargo run -p neo-agent -- extensions publish path/to/.neo-package.toml
-
-cargo run -p neo-agent -- prompts search review
-cargo run -p neo-agent -- prompts install review-pack@1.0.0 --from marketplace
-cargo run -p neo-agent -- prompts publish path/to/.neo-package.toml
-cargo run -p neo-agent -- prompts list
-cargo run -p neo-agent -- prompts preview review
-
-cargo run -p neo-agent -- themes search night
-cargo run -p neo-agent -- themes install night-owl@2.0.0 --from marketplace
-cargo run -p neo-agent -- themes publish path/to/.neo-package.toml
-cargo run -p neo-agent -- themes list
-cargo run -p neo-agent -- themes preview night-owl
+neo extensions install path/to/extension
+neo extensions list
+neo extensions status echo
+neo extensions disable echo
+neo extensions enable echo
+neo extensions update echo
+neo extensions call echo tool.echo '{"value":42}'
 ```
 
-## Marketplace HTTP DTOs
+Installed extensions live under `.neo/extensions/<id>`. Neo records local
+source paths in `.neo/extensions-sources.toml` and enablement in
+`.neo/extensions-state.toml`.
 
-Search:
+Provider-backed turns discover enabled project extensions by calling each
+extension's JSONL RPC `tools.list` method and advertise returned tools as
+`extension__<extension>__<tool>` functions. `--extension <PATH>` adds an
+explicit root for one invocation, and `--no-extensions` disables automatic
+project extension discovery.
 
-```http
-GET /api/v1/marketplace/packages/search?kind=extension&q=echo
+## Prompt Templates
+
+Project prompt templates live under `.neo/prompts/*.md`; user-global templates
+live under `~/.neo/prompts/*.md`. Neo can also load configured selectors from
+`prompt_templates` in config or explicit `--prompt-template` flags.
+
+```bash
+neo prompts list
+neo prompts preview review
+neo --prompt-template review print src/lib.rs
 ```
 
-```json
-{
-  "packages": [
-    {
-      "kind": "extension",
-      "id": "echo",
-      "version": "0.1.0",
-      "name": "Echo",
-      "description": "Echo extension",
-      "publisher": "neo-test"
-    }
-  ]
-}
+Template directories from explicit selectors are non-recursive. Auto-discovered
+project and user prompt templates are selected by slash name during `print`,
+`run`, RPC prompts, and TUI turns.
+
+## Themes
+
+Project themes live under `.neo/themes`, and user themes may be loaded through
+the same local theme resolution path:
+
+```bash
+neo themes list
+neo themes preview night-owl
+neo --theme .neo/themes/night-owl.json
 ```
 
-Resolve:
+## Out Of Scope
 
-```http
-GET /api/v1/marketplace/packages/extension/echo/0.1.0
-```
-
-```json
-{
-  "package": {
-    "kind": "extension",
-    "id": "echo",
-    "version": "0.1.0",
-    "manifest_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/.neo-package.toml",
-    "archive_url": "/api/v1/marketplace/packages/extension/echo/0.1.0/echo-0.1.0.tar"
-  }
-}
-```
-
-Publish:
-
-```http
-POST /api/v1/marketplace/packages/publish
-```
-
-```json
-{
-  "manifest": {
-    "kind": "extension",
-    "id": "echo",
-    "version": "0.1.0",
-    "entry": "neo-extension.toml",
-    "archive": {
-      "path": "echo-0.1.0.tar",
-      "sha256": "<hex>"
-    },
-    "signature": {
-      "algorithm": "ed25519",
-      "public_key": "<base64>",
-      "signature": "<base64>"
-    }
-  },
-  "archive_base64": "<base64-tar-bytes>"
-}
-```
-
-The publish response returns the same package record shape used by search.
+Neo's local-only docs intentionally omit marketplace search/install/publish,
+hosted package registries, package accounts, publisher identity binding,
+transparency logs, and root trust anchors. If package archive validation code is
+present in the repository, treat it as an implementation detail until the
+product chooses a supported distribution model.
