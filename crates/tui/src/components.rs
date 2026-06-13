@@ -2,7 +2,8 @@ use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Clear, Widget},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 use std::collections::BTreeSet;
 use unicode_width::UnicodeWidthChar;
@@ -1276,29 +1277,121 @@ fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
     }
 
     buf.set_style(area, Style::default().bg(app.theme().background));
-    let mut footer_parts = vec![
-        "neo".to_owned(),
-        app.model_label().to_owned(),
-        app.session_label().to_owned(),
-    ];
-    if let Some(context) = app.context_window_label() {
-        footer_parts.push(context);
+
+    let theme = app.theme();
+    let (permission_label, permission_color) = app.permission_badge();
+    let muted = Style::default().fg(theme.muted);
+    let working_style = Style::default().fg(theme.footer_working);
+    let hint_style = Style::default().fg(theme.footer_hint);
+    let context_style = Style::default().fg(app.context_color());
+
+    // Two-line footer when space allows; otherwise just the hints/context line.
+    if area.height >= 2 {
+        let mut status_spans = vec![
+            Span::styled(
+                format!("[{permission_label}]"),
+                Style::default().fg(permission_color),
+            ),
+            Span::raw(" "),
+        ];
+        if let Some(working) = app.working_label() {
+            status_spans.push(Span::styled(format!("● {working}"), working_style));
+            status_spans.push(Span::raw(" "));
+        }
+        status_spans.push(Span::styled(app.cwd_label(), muted));
+
+        let status_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        };
+        render_truncated_line(status_spans, status_area, buf);
     }
-    if let Some(working) = app.working_label() {
-        footer_parts.push(working);
+
+    let hints_y = area.y.saturating_add(area.height.saturating_sub(1));
+    let narrow = area.width < 50;
+    let mut hints = if narrow {
+        "enter send · esc interrupt".to_owned()
+    } else {
+        "enter send · shift+enter newline · / commands".to_owned()
+    };
+    if !app.transcript_view().is_following_tail() && area.width >= 60 {
+        hints.push_str(" · new output below · end to jump");
     }
-    if !app.transcript_view().is_following_tail() {
-        footer_parts.push("new output below · end to jump".to_owned());
+
+    let context_label = app.context_window_label();
+    let context_width = context_label
+        .as_ref()
+        .map(|label| visible_width(label))
+        .unwrap_or(0);
+    let gap: u16 = if context_width > 0 { 1 } else { 0 };
+    let left_width = area
+        .width
+        .saturating_sub(context_width as u16)
+        .saturating_sub(gap);
+
+    let hints_area = Rect {
+        x: area.x,
+        y: hints_y,
+        width: left_width,
+        height: 1,
+    };
+    render_truncated_line(vec![Span::styled(hints, hint_style)], hints_area, buf);
+
+    if let Some(context_label) = context_label {
+        let context_area = Rect {
+            x: area.x.saturating_add(left_width).saturating_add(gap),
+            y: hints_y,
+            width: context_width as u16,
+            height: 1,
+        };
+        render_truncated_line_right(
+            vec![Span::styled(context_label, context_style)],
+            context_area,
+            buf,
+        );
     }
-    footer_parts.push("enter send · shift+enter newline · / commands".to_owned());
-    let footer = format!(" {}", footer_parts.join("  "));
-    write_line(
-        area,
-        buf,
-        area.y,
-        &footer,
-        Style::default().fg(app.theme().notice),
-    );
+}
+
+fn render_truncated_line(spans: Vec<Span<'_>>, area: Rect, buf: &mut Buffer) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let line = Line::from(truncate_spans(spans, usize::from(area.width)));
+    Paragraph::new(line).render(area, buf);
+}
+
+fn render_truncated_line_right(spans: Vec<Span<'_>>, area: Rect, buf: &mut Buffer) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let line = Line::from(truncate_spans(spans, usize::from(area.width)));
+    Paragraph::new(line)
+        .alignment(Alignment::Right)
+        .render(area, buf);
+}
+
+fn truncate_spans(spans: Vec<Span<'_>>, max_width: usize) -> Vec<Span<'_>> {
+    let mut used = 0;
+    let mut out = Vec::new();
+    for span in spans {
+        let width = visible_width(&span.content);
+        if used + width <= max_width {
+            used += width;
+            out.push(span);
+        } else {
+            let remaining = max_width.saturating_sub(used);
+            if remaining > 0 {
+                out.push(Span::styled(
+                    clip_width(&span.content, remaining),
+                    span.style,
+                ));
+            }
+            break;
+        }
+    }
+    out
 }
 
 fn approval_panel_height(modal: &ApprovalModal, width: u16) -> u16 {

@@ -418,6 +418,41 @@ impl NeoTuiApp {
     }
 
     #[must_use]
+    pub fn permission_badge(&self) -> (&'static str, Color) {
+        ("ask", self.theme().footer_permission_ask)
+    }
+
+    #[must_use]
+    pub fn cwd_label(&self) -> String {
+        let path = self.workspace_root.to_string_lossy();
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = home.to_string_lossy();
+            if let Some(rest) = path.strip_prefix(home.as_ref()) {
+                return format!("~{rest}");
+            }
+        }
+        path.into_owned()
+    }
+
+    #[must_use]
+    pub fn context_color(&self) -> Color {
+        let Some(context) = self.context_window else {
+            return self.theme().footer_context_ok;
+        };
+        let Some(used) = context.used_tokens else {
+            return self.theme().footer_context_ok;
+        };
+        let ratio = f64::from(used) / f64::from(context.max_tokens);
+        if ratio >= 0.9 {
+            self.theme().footer_context_critical
+        } else if ratio >= 0.7 {
+            self.theme().footer_context_warn
+        } else {
+            self.theme().footer_context_ok
+        }
+    }
+
+    #[must_use]
     pub const fn activity_frame(&self) -> usize {
         self.activity_frame
     }
