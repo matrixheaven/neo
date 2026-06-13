@@ -417,6 +417,7 @@ impl NeoTuiApp {
         matches!(self.mode, AppMode::Streaming).then(|| "working · esc interrupt".to_owned())
     }
 
+    /// TODO: placeholder until `NeoTuiApp` stores actual permission state.
     #[must_use]
     pub fn permission_badge(&self) -> (&'static str, Color) {
         ("ask", self.theme().footer_permission_ask)
@@ -424,14 +425,13 @@ impl NeoTuiApp {
 
     #[must_use]
     pub fn cwd_label(&self) -> String {
-        let path = self.workspace_root.to_string_lossy();
         if let Some(home) = std::env::var_os("HOME") {
-            let home = home.to_string_lossy();
-            if let Some(rest) = path.strip_prefix(home.as_ref()) {
-                return format!("~{rest}");
+            let home = PathBuf::from(home);
+            if let Ok(rest) = self.workspace_root.strip_prefix(&home) {
+                return format!("~{}", rest.display());
             }
         }
-        path.into_owned()
+        self.workspace_root.display().to_string()
     }
 
     #[must_use]
@@ -439,6 +439,9 @@ impl NeoTuiApp {
         let Some(context) = self.context_window else {
             return self.theme().footer_context_ok;
         };
+        if context.max_tokens == 0 {
+            return self.theme().footer_context_ok;
+        }
         let Some(used) = context.used_tokens else {
             return self.theme().footer_context_ok;
         };
