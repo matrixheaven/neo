@@ -1,4 +1,8 @@
-/target
-/.neo
-/pi
+target
+.neo
+pi
 .DS_Store
+claude-code
+codex
+opencode
+kimi-code
