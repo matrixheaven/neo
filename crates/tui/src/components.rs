@@ -383,6 +383,25 @@ fn transcript_render_rows(
             continue;
         }
 
+        if let TranscriptItem::Banner {
+            title,
+            session_label,
+            model_label,
+            workspace_root,
+        } = item
+        {
+            rows.extend(banner_render_rows(
+                title,
+                session_label,
+                model_label,
+                workspace_root,
+                text_width,
+                selected,
+                theme,
+            ));
+            continue;
+        }
+
         let (label, content, style) = transcript_row(item, theme, expanded);
         let style = selected_style(style, selected, theme);
         let fill = matches!(item, TranscriptItem::User { .. })
@@ -501,6 +520,72 @@ fn compaction_phase_label(phase: Option<neo_agent_core::CompactionPhase>) -> &'s
         Some(neo_agent_core::CompactionPhase::Applying) => "Applying compacted context",
         None => "Preparing compaction",
     }
+}
+
+fn banner_render_rows(
+    title: &str,
+    session_label: &str,
+    model_label: &str,
+    workspace_root: &std::path::Path,
+    text_width: usize,
+    selected: bool,
+    theme: TuiTheme,
+) -> Vec<TranscriptRenderRow> {
+    let border_style = selected_style(Style::default().fg(theme.surface_border), selected, theme);
+    let header_style = selected_style(
+        Style::default()
+            .fg(theme.header)
+            .add_modifier(Modifier::BOLD),
+        selected,
+        theme,
+    );
+    let muted_style = selected_style(Style::default().fg(theme.muted), selected, theme);
+
+    let inner_width = text_width.saturating_sub(2).max(1);
+    let top = format!("┌{}┐", "─".repeat(inner_width));
+    let bottom = format!("└{}┘", "─".repeat(inner_width));
+
+    vec![
+        TranscriptRenderRow::new(top, border_style, None),
+        TranscriptRenderRow::new(
+            banner_box_line('│', &format!("  {title}"), '│', inner_width),
+            header_style,
+            None,
+        ),
+        TranscriptRenderRow::new(
+            banner_box_line(
+                '│',
+                &format!("  Session: {session_label}"),
+                '│',
+                inner_width,
+            ),
+            muted_style,
+            None,
+        ),
+        TranscriptRenderRow::new(
+            banner_box_line('│', &format!("  Model: {model_label}"), '│', inner_width),
+            muted_style,
+            None,
+        ),
+        TranscriptRenderRow::new(
+            banner_box_line(
+                '│',
+                &format!("  Workspace: {}", workspace_root.display()),
+                '│',
+                inner_width,
+            ),
+            muted_style,
+            None,
+        ),
+        TranscriptRenderRow::new(bottom, border_style, None),
+    ]
+}
+
+fn banner_box_line(left: char, content: &str, right: char, inner_width: usize) -> String {
+    let content = clip_width(content, inner_width);
+    let content_width = visible_width(&content);
+    let padding = inner_width.saturating_sub(content_width);
+    format!("{left}{content}{}{right}", " ".repeat(padding))
 }
 
 fn tool_render_rows(
@@ -778,6 +863,9 @@ fn transcript_row(
         }
         TranscriptItem::Notice { content } => {
             ("Notice", content.clone(), Style::default().fg(theme.notice))
+        }
+        TranscriptItem::Banner { title, .. } => {
+            ("Banner", title.clone(), Style::default().fg(theme.header))
         }
     }
 }

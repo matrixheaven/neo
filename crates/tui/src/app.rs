@@ -2122,6 +2122,12 @@ pub enum TranscriptItem {
     Notice {
         content: String,
     },
+    Banner {
+        title: String,
+        session_label: String,
+        model_label: String,
+        workspace_root: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2830,6 +2836,21 @@ impl TranscriptItem {
             content: content.into(),
         }
     }
+
+    #[must_use]
+    pub fn banner(
+        title: impl Into<String>,
+        session_label: impl Into<String>,
+        model_label: impl Into<String>,
+        workspace_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self::Banner {
+            title: title.into(),
+            session_label: session_label.into(),
+            model_label: model_label.into(),
+            workspace_root: workspace_root.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2978,6 +2999,18 @@ fn transcript_copy_parts(item: &TranscriptItem) -> (&'static str, String) {
             ),
         ),
         TranscriptItem::Notice { content } => ("Notice", content.clone()),
+        TranscriptItem::Banner {
+            title,
+            session_label,
+            model_label,
+            workspace_root,
+        } => (
+            "Banner",
+            format!(
+                "{title}\nSession: {session_label}\nModel: {model_label}\nWorkspace: {}",
+                workspace_root.display()
+            ),
+        ),
     }
 }
 
