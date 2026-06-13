@@ -63,7 +63,6 @@ subsequent prompts to the child session.
 
 ```bash
 neo sessions list
-neo sessions tree
 neo sessions show <session-ref>
 neo sessions rename <session-ref> <name>
 neo sessions fork <session-ref> --name <name>
@@ -106,12 +105,11 @@ same events and emits a stable local-only artifact:
 ```json
 {"type":"request","id":"commands","method":"get_commands","params":{}}
 {"type":"request","id":"sessions","method":"sessions.list","params":{}}
-{"type":"request","id":"tree","method":"sessions.tree","params":{}}
 {"type":"request","id":"messages","method":"get_messages","params":{"session_id":"alpha"}}
 {"type":"request","id":"export","method":"sessions.export_json","params":{"session_id":"alpha"}}
 ```
 
-`sessions.list`, `sessions.tree`, `sessions.get`, `sessions.export_html`, and
+`sessions.list`, `sessions.get`, `sessions.export_html`, and
 `sessions.export_json` read local `sessions_dir` JSONL plus
 `sessions.metadata.json`. They do not create remote continuation, share, or
 import records.

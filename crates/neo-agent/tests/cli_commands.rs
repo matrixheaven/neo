@@ -834,7 +834,7 @@ fn sessions_list_uses_project_session_directory() {
 }
 
 #[test]
-fn sessions_rename_and_fork_surface_tree_metadata() {
+fn sessions_rename_and_fork_surface_flat_metadata_without_tree_command() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = temp.path().join(".neo/sessions");
     fs::create_dir_all(&sessions).expect("create sessions");
@@ -874,14 +874,10 @@ fn sessions_rename_and_fork_surface_tree_metadata() {
 
     let mut tree = neo();
     tree.current_dir(temp.path()).args(["sessions", "tree"]);
-    let tree_stdout = run(tree);
-    let parent_position = tree_stdout.find("alpha").expect("tree includes parent");
-    let child_position = tree_stdout
-        .find(&format!("  {child_id}"))
-        .expect("tree indents child");
-    assert!(parent_position < child_position);
-    assert!(tree_stdout.contains("Main thread"));
-    assert!(tree_stdout.contains("Parser branch"));
+    let tree_output = tree.output().expect("neo command should run");
+    assert!(!tree_output.status.success());
+    let stderr = String::from_utf8_lossy(&tree_output.stderr);
+    assert!(stderr.contains("unrecognized subcommand"));
 }
 
 #[test]

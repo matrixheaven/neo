@@ -245,6 +245,12 @@ pub struct SessionRecord {
     pub summary: Option<String>,
     pub parent_id: Option<String>,
     pub summary_record: Option<SessionSummaryRecord>,
+    pub title: Option<String>,
+    pub title_model: Option<String>,
+    pub title_updated_at: Option<String>,
+    pub workspace: Option<String>,
+    pub last_user_prompt: Option<String>,
+    pub updated_at: Option<String>,
     #[serde(default)]
     pub children: Vec<String>,
 }
@@ -287,6 +293,18 @@ struct StoredSessionMetadata {
     summary_record: Option<SessionSummaryRecord>,
     #[serde(default)]
     parent_id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    title_model: Option<String>,
+    #[serde(default)]
+    title_updated_at: Option<String>,
+    #[serde(default)]
+    workspace: Option<String>,
+    #[serde(default)]
+    last_user_prompt: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
 }
 
 impl SessionMetadataStore {
@@ -301,6 +319,17 @@ impl SessionMetadataStore {
         let metadata = self.read_metadata()?;
         let session_ids = self.session_ids()?;
         Ok(records_from_metadata(&metadata, session_ids))
+    }
+
+    pub fn list_recent(&self) -> Result<Vec<SessionRecord>, SessionError> {
+        let mut records = self.list()?;
+        records.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        Ok(records)
     }
 
     pub fn rename(&self, session_id: &str, name: String) -> Result<SessionRecord, SessionError> {
@@ -357,6 +386,61 @@ impl SessionMetadataStore {
             .into_iter()
             .find(|session| session.id == session_id)
             .expect("summarized session should be listable"))
+    }
+
+    pub fn record_activity(
+        &self,
+        session_id: &str,
+        workspace: Option<String>,
+        last_user_prompt: Option<String>,
+        updated_at: String,
+    ) -> Result<SessionRecord, SessionError> {
+        validate_session_id(session_id)?;
+        self.ensure_session_exists(session_id)?;
+
+        let mut metadata = self.read_metadata()?;
+        let stored = metadata.sessions.entry(session_id.to_owned()).or_default();
+        stored.workspace = workspace;
+        stored.last_user_prompt = last_user_prompt;
+        stored.updated_at = Some(updated_at);
+        self.write_metadata(&metadata)?;
+
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .expect("active session should be listable"))
+    }
+
+    pub fn record_title(
+        &self,
+        session_id: &str,
+        title: String,
+        model: Option<String>,
+        updated_at: String,
+    ) -> Result<SessionRecord, SessionError> {
+        validate_session_id(session_id)?;
+        self.ensure_session_exists(session_id)?;
+
+        let mut metadata = self.read_metadata()?;
+        let stored = metadata.sessions.entry(session_id.to_owned()).or_default();
+        if stored.name.is_some() {
+            return Ok(self
+                .list()?
+                .into_iter()
+                .find(|session| session.id == session_id)
+                .expect("named session should be listable"));
+        }
+        stored.title = Some(title);
+        stored.title_model = model;
+        stored.title_updated_at = Some(updated_at);
+        self.write_metadata(&metadata)?;
+
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .expect("titled session should be listable"))
     }
 
     pub fn fork(
@@ -475,6 +559,7 @@ fn records_from_metadata(
         .map(|id| {
             let stored = metadata.sessions.get(&id);
             let summary_record = stored.and_then(summary_record_from_stored);
+            let title = session_title(&id, stored);
             SessionRecord {
                 children: children_by_parent.remove(&id).unwrap_or_default(),
                 id,
@@ -485,9 +570,23 @@ fn records_from_metadata(
                     .or_else(|| stored.and_then(|record| record.summary.clone())),
                 parent_id: stored.and_then(|record| record.parent_id.clone()),
                 summary_record,
+                title,
+                title_model: stored.and_then(|record| record.title_model.clone()),
+                title_updated_at: stored.and_then(|record| record.title_updated_at.clone()),
+                workspace: stored.and_then(|record| record.workspace.clone()),
+                last_user_prompt: stored.and_then(|record| record.last_user_prompt.clone()),
+                updated_at: stored.and_then(|record| record.updated_at.clone()),
             }
         })
         .collect()
+}
+
+fn session_title(id: &str, stored: Option<&StoredSessionMetadata>) -> Option<String> {
+    stored
+        .and_then(|record| record.name.clone())
+        .or_else(|| stored.and_then(|record| record.title.clone()))
+        .or_else(|| stored.and_then(|record| record.last_user_prompt.clone()))
+        .or_else(|| Some(id.to_owned()))
 }
 
 fn summary_record_from_stored(stored: &StoredSessionMetadata) -> Option<SessionSummaryRecord> {

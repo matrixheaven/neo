@@ -118,6 +118,18 @@ pub enum RpcErrorCode {
 pub struct RpcSessionRecord {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_user_prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
@@ -134,19 +146,8 @@ pub struct RpcSessionRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RpcSessionTreeRecord {
-    pub depth: usize,
-    pub record: RpcSessionRecord,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RpcSessionsListResult {
     pub sessions: Vec<RpcSessionRecord>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RpcSessionsTreeResult {
-    pub tree: Vec<RpcSessionTreeRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

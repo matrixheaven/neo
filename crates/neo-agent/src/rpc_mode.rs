@@ -7,8 +7,7 @@ use neo_agent_core::session::{
 use neo_sdk::{
     JsonlCodec, RpcCommandKind, RpcCommandRecord, RpcCommandsResult, RpcError, RpcErrorCode,
     RpcMessage, RpcNotification, RpcRequest, RpcResponse, RpcSessionExportHtmlResult,
-    RpcSessionGetResult, RpcSessionRecord, RpcSessionTreeRecord, RpcSessionsListResult,
-    RpcSessionsTreeResult,
+    RpcSessionGetResult, RpcSessionRecord, RpcSessionsListResult,
 };
 use serde_json::{Value, json};
 
@@ -70,7 +69,6 @@ async fn handle_request(
         "get_commands" => handle_get_commands(config, request, output),
         "get_messages" => handle_get_messages(config, request, output).await,
         "sessions.list" => handle_sessions_list(config, request, output),
-        "sessions.tree" => handle_sessions_tree(config, request, output),
         "sessions.get" => handle_sessions_get(config, request, output).await,
         "sessions.export_html" => handle_sessions_export_html(config, request, output).await,
         "sessions.export_json" => handle_sessions_export_json(config, request, output).await,
@@ -138,7 +136,7 @@ fn handle_sessions_list(
     request: RpcRequest,
     output: &mut String,
 ) -> anyhow::Result<()> {
-    let sessions = match session_store(config).list() {
+    let sessions = match session_store(config).list_recent() {
         Ok(sessions) => sessions,
         Err(err) => {
             return push_rpc_message(
@@ -158,40 +156,6 @@ fn handle_sessions_list(
             serde_json::to_value(RpcSessionsListResult {
                 sessions: sessions.into_iter().map(rpc_session_record).collect(),
             })?,
-        )),
-    )
-}
-
-fn handle_sessions_tree(
-    config: &AppConfig,
-    request: RpcRequest,
-    output: &mut String,
-) -> anyhow::Result<()> {
-    let sessions = match session_store(config).list() {
-        Ok(sessions) => sessions,
-        Err(err) => {
-            return push_rpc_message(
-                output,
-                &RpcMessage::Response(RpcResponse::failure(
-                    request.id,
-                    RpcError::new(RpcErrorCode::InternalError, err.to_string(), None),
-                )),
-            );
-        }
-    };
-    let tree = session_commands::tree_order_sessions(&sessions)
-        .into_iter()
-        .map(|tree_record| RpcSessionTreeRecord {
-            depth: tree_record.depth,
-            record: rpc_session_record(tree_record.record),
-        })
-        .collect();
-
-    push_rpc_message(
-        output,
-        &RpcMessage::Response(RpcResponse::success(
-            request.id,
-            serde_json::to_value(RpcSessionsTreeResult { tree })?,
         )),
     )
 }
@@ -622,6 +586,12 @@ fn rpc_session_record(record: SessionRecord) -> RpcSessionRecord {
     let summary_record = record.summary_record;
     RpcSessionRecord {
         id: record.id,
+        title: record.title,
+        title_model: record.title_model,
+        title_updated_at: record.title_updated_at,
+        workspace: record.workspace,
+        last_user_prompt: record.last_user_prompt,
+        updated_at: record.updated_at,
         name: record.name,
         summary: record.summary,
         summary_source: summary_record

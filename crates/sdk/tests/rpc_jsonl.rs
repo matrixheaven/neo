@@ -1,7 +1,7 @@
 use neo_sdk::{
     JsonlCodec, RpcCodecError, RpcCommandKind, RpcCommandRecord, RpcCommandsResult, RpcError,
     RpcErrorCode, RpcMessage, RpcNotification, RpcRequest, RpcResponse, RpcSessionExportHtmlResult,
-    RpcSessionGetResult, RpcSessionRecord, RpcSessionTreeRecord,
+    RpcSessionGetResult, RpcSessionRecord,
 };
 use serde_json::json;
 
@@ -83,6 +83,12 @@ fn parse_error_can_be_returned_as_structured_rpc_failure() {
 fn session_rpc_records_have_stable_json_shape() {
     let record = RpcSessionRecord {
         id: "alpha".to_owned(),
+        title: Some("Generated title".to_owned()),
+        title_model: Some("openai/gpt-4.1".to_owned()),
+        title_updated_at: Some("126.0Z".to_owned()),
+        workspace: Some("/workspace/neo".to_owned()),
+        last_user_prompt: Some("Fix session picker".to_owned()),
+        updated_at: Some("127.0Z".to_owned()),
         name: Some("Main thread".to_owned()),
         summary: Some("Local branch summary".to_owned()),
         summary_source: Some("local_extractive".to_owned()),
@@ -91,29 +97,30 @@ fn session_rpc_records_have_stable_json_shape() {
         parent_id: None,
         children: vec!["alpha-fork-1".to_owned()],
     };
-    let tree_record = RpcSessionTreeRecord {
-        depth: 1,
-        record: record.clone(),
-    };
 
-    let value = serde_json::to_value(&tree_record).expect("serialize tree record");
+    let value = serde_json::to_value(&record).expect("serialize session record");
 
-    assert_eq!(value["depth"], 1);
-    assert_eq!(value["record"]["id"], "alpha");
-    assert_eq!(value["record"]["name"], "Main thread");
-    assert_eq!(value["record"]["summary"], "Local branch summary");
-    assert_eq!(value["record"]["summary_source"], "local_extractive");
-    assert_eq!(value["record"]["summary_updated_at"], "125.0Z");
-    assert!(value["record"]["parent_id"].is_null());
-    assert_eq!(value["record"]["children"], json!(["alpha-fork-1"]));
-    assert!(value["record"].get("cloud_id").is_none());
-    assert!(value["record"].get("synced_at").is_none());
-    assert!(value["record"].get("remote_parent_id").is_none());
-    assert!(value["record"].get("share_ids").is_none());
-    assert!(value["record"].get("shares").is_none());
+    assert_eq!(value["id"], "alpha");
+    assert_eq!(value["title"], "Generated title");
+    assert_eq!(value["title_model"], "openai/gpt-4.1");
+    assert_eq!(value["title_updated_at"], "126.0Z");
+    assert_eq!(value["workspace"], "/workspace/neo");
+    assert_eq!(value["last_user_prompt"], "Fix session picker");
+    assert_eq!(value["updated_at"], "127.0Z");
+    assert_eq!(value["name"], "Main thread");
+    assert_eq!(value["summary"], "Local branch summary");
+    assert_eq!(value["summary_source"], "local_extractive");
+    assert_eq!(value["summary_updated_at"], "125.0Z");
+    assert!(value["parent_id"].is_null());
+    assert_eq!(value["children"], json!(["alpha-fork-1"]));
+    assert!(value.get("cloud_id").is_none());
+    assert!(value.get("synced_at").is_none());
+    assert!(value.get("remote_parent_id").is_none());
+    assert!(value.get("share_ids").is_none());
+    assert!(value.get("shares").is_none());
     assert_eq!(
-        serde_json::from_value::<RpcSessionTreeRecord>(value).expect("deserialize tree record"),
-        tree_record
+        serde_json::from_value::<RpcSessionRecord>(value).expect("deserialize session record"),
+        record
     );
 }
 
@@ -122,6 +129,12 @@ fn session_get_result_has_stable_json_shape() {
     let result = RpcSessionGetResult {
         record: RpcSessionRecord {
             id: "alpha".to_owned(),
+            title: Some("Main thread".to_owned()),
+            title_model: None,
+            title_updated_at: None,
+            workspace: None,
+            last_user_prompt: None,
+            updated_at: None,
             name: Some("Main thread".to_owned()),
             summary: Some("Local branch summary".to_owned()),
             summary_source: Some("local_extractive".to_owned()),
