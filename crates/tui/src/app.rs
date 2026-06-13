@@ -1,16 +1,34 @@
-use std::{collections::BTreeMap, fmt::Write as _, ops::Range};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+    ops::Range,
+};
 
-use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef};
-use ratatui::style::Color;
+use neo_agent_core::{AgentEvent, AgentMessage, CompactionPhase, Content, ImageRef};
+use ratatui::{layout::Rect, style::Color};
 
-use crate::{ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities};
+use crate::{
+    ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities, TranscriptWidget,
+    app_layout,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TuiTheme {
+    pub background: Color,
+    pub surface: Color,
+    pub surface_border: Color,
+    pub accent: Color,
+    pub success: Color,
+    pub danger: Color,
+    pub warning: Color,
+    pub muted: Color,
     pub header: Color,
     pub prompt: Color,
+    pub composer_bg: Color,
     pub user: Color,
+    pub user_bg: Color,
     pub assistant: Color,
+    pub thinking: Color,
     pub notice: Color,
     pub diff_added: Color,
     pub diff_removed: Color,
@@ -22,7 +40,9 @@ pub struct TuiTheme {
     pub succeeded: Color,
     pub failed: Color,
     pub cancelled: Color,
+    pub approval_bg: Color,
     pub approval_border: Color,
+    pub approval_title: Color,
     pub selected_fg: Color,
     pub selected_bg: Color,
     pub overlay_border: Color,
@@ -31,30 +51,102 @@ pub struct TuiTheme {
 impl Default for TuiTheme {
     fn default() -> Self {
         Self {
+            background: Color::Rgb(19, 22, 28),
+            surface: Color::Rgb(31, 35, 43),
+            surface_border: Color::Rgb(75, 88, 104),
+            accent: Color::Rgb(88, 166, 255),
+            success: Color::Rgb(65, 184, 131),
+            danger: Color::Rgb(248, 81, 73),
+            warning: Color::Rgb(210, 153, 34),
+            muted: Color::Rgb(139, 148, 158),
             header: Color::White,
             prompt: Color::White,
+            composer_bg: Color::Rgb(31, 35, 43),
             user: Color::Cyan,
+            user_bg: Color::Rgb(35, 42, 50),
             assistant: Color::Green,
-            notice: Color::Gray,
-            diff_added: Color::Green,
-            diff_removed: Color::Red,
-            diff_hunk: Color::Yellow,
-            diff_context: Color::DarkGray,
+            thinking: Color::Rgb(139, 148, 158),
+            notice: Color::Rgb(139, 148, 158),
+            diff_added: Color::Rgb(65, 184, 131),
+            diff_removed: Color::Rgb(248, 81, 73),
+            diff_hunk: Color::Rgb(210, 153, 34),
+            diff_context: Color::Rgb(139, 148, 158),
             selection_bg: Color::DarkGray,
-            pending: Color::Gray,
-            running: Color::Yellow,
-            succeeded: Color::Green,
-            failed: Color::Red,
+            pending: Color::Rgb(139, 148, 158),
+            running: Color::Rgb(210, 153, 34),
+            succeeded: Color::Rgb(65, 184, 131),
+            failed: Color::Rgb(248, 81, 73),
             cancelled: Color::DarkGray,
-            approval_border: Color::Yellow,
+            approval_bg: Color::Rgb(31, 35, 43),
+            approval_border: Color::Rgb(75, 88, 104),
+            approval_title: Color::Rgb(210, 153, 34),
             selected_fg: Color::Black,
-            selected_bg: Color::Yellow,
-            overlay_border: Color::Blue,
+            selected_bg: Color::Rgb(88, 166, 255),
+            overlay_border: Color::Rgb(88, 166, 255),
         }
     }
 }
 
 impl TuiTheme {
+    #[must_use]
+    pub const fn with_background(mut self, color: Color) -> Self {
+        self.background = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_surface(mut self, color: Color) -> Self {
+        self.surface = color;
+        self.composer_bg = color;
+        self.approval_bg = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_surface_border(mut self, color: Color) -> Self {
+        self.surface_border = color;
+        self.overlay_border = color;
+        self.approval_border = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_accent(mut self, color: Color) -> Self {
+        self.accent = color;
+        self.overlay_border = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_success(mut self, color: Color) -> Self {
+        self.success = color;
+        self.succeeded = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_danger(mut self, color: Color) -> Self {
+        self.danger = color;
+        self.failed = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_warning(mut self, color: Color) -> Self {
+        self.warning = color;
+        self.running = color;
+        self.approval_title = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_muted(mut self, color: Color) -> Self {
+        self.muted = color;
+        self.notice = color;
+        self.thinking = color;
+        self
+    }
+
     #[must_use]
     pub const fn with_header(mut self, color: Color) -> Self {
         self.header = color;
@@ -68,6 +160,12 @@ impl TuiTheme {
     }
 
     #[must_use]
+    pub const fn with_composer_bg(mut self, color: Color) -> Self {
+        self.composer_bg = color;
+        self
+    }
+
+    #[must_use]
     pub const fn with_user(mut self, color: Color) -> Self {
         self.user = color;
         self
@@ -76,6 +174,12 @@ impl TuiTheme {
     #[must_use]
     pub const fn with_assistant(mut self, color: Color) -> Self {
         self.assistant = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_thinking(mut self, color: Color) -> Self {
+        self.thinking = color;
         self
     }
 
@@ -94,14 +198,58 @@ pub enum AppMode {
     Approval,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextWindow {
+    pub used_tokens: Option<u32>,
+    pub max_tokens: u32,
+}
+
+impl ContextWindow {
+    #[must_use]
+    pub const fn new(max_tokens: u32) -> Self {
+        Self {
+            used_tokens: None,
+            max_tokens,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_used_tokens(mut self, used_tokens: u32) -> Self {
+        self.used_tokens = Some(used_tokens);
+        self
+    }
+
+    #[must_use]
+    pub fn label(self) -> String {
+        let used = self
+            .used_tokens
+            .map(format_token_count)
+            .unwrap_or_else(|| "--".to_owned());
+        format!("ctx {used}/{}", format_token_count(self.max_tokens))
+    }
+}
+
+fn format_token_count(tokens: u32) -> String {
+    if tokens >= 1_000_000 {
+        format!("{}m", tokens / 1_000_000)
+    } else if tokens >= 1_000 {
+        format!("{}k", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NeoTuiApp {
     title: String,
     session_label: String,
     model_label: String,
+    context_window: Option<ContextWindow>,
+    activity_frame: usize,
     transcript: ChatTranscript,
     transcript_view: TranscriptView,
     transcript_selection: Option<TranscriptSelection>,
+    expanded_transcript_items: BTreeSet<usize>,
     prompt: PromptState,
     copy_buffer: Option<String>,
     mode: AppMode,
@@ -131,9 +279,12 @@ impl NeoTuiApp {
             title: title.into(),
             session_label: session_label.into(),
             model_label: model_label.into(),
+            context_window: None,
+            activity_frame: 0,
             transcript: ChatTranscript::default(),
             transcript_view: TranscriptView::new(),
             transcript_selection: None,
+            expanded_transcript_items: BTreeSet::new(),
             prompt: PromptState::default(),
             copy_buffer: None,
             mode: AppMode::Editing,
@@ -166,6 +317,40 @@ impl NeoTuiApp {
     #[must_use]
     pub fn model_label(&self) -> &str {
         &self.model_label
+    }
+
+    #[must_use]
+    pub const fn context_window(&self) -> Option<ContextWindow> {
+        self.context_window
+    }
+
+    pub const fn set_context_window(&mut self, context_window: Option<ContextWindow>) {
+        self.context_window = context_window;
+    }
+
+    #[must_use]
+    pub fn context_window_label(&self) -> Option<String> {
+        self.context_window.map(ContextWindow::label)
+    }
+
+    #[must_use]
+    pub fn working_label(&self) -> Option<String> {
+        if !self.active_tools.is_empty() {
+            return Some("working · esc interrupt".to_owned());
+        }
+        if !self.active_thinking_buffer.is_empty() {
+            return Some("thinking · esc interrupt".to_owned());
+        }
+        matches!(self.mode, AppMode::Streaming).then(|| "working · esc interrupt".to_owned())
+    }
+
+    #[must_use]
+    pub const fn activity_frame(&self) -> usize {
+        self.activity_frame
+    }
+
+    pub fn advance_activity_frame(&mut self) {
+        self.activity_frame = self.activity_frame.wrapping_add(1);
     }
 
     #[must_use]
@@ -229,9 +414,18 @@ impl NeoTuiApp {
         &self.transcript_view
     }
 
+    pub fn transcript_view_mut(&mut self) -> &mut TranscriptView {
+        &mut self.transcript_view
+    }
+
     #[must_use]
     pub const fn transcript_selection(&self) -> Option<&TranscriptSelection> {
         self.transcript_selection.as_ref()
+    }
+
+    #[must_use]
+    pub const fn expanded_transcript_items(&self) -> &BTreeSet<usize> {
+        &self.expanded_transcript_items
     }
 
     #[must_use]
@@ -263,17 +457,49 @@ impl NeoTuiApp {
         Some(copied)
     }
 
+    pub fn toggle_selected_transcript_detail(&mut self) -> bool {
+        let Some(index) = self.selected_transcript_detail_index() else {
+            return false;
+        };
+        if !self.expanded_transcript_items.remove(&index) {
+            self.expanded_transcript_items.insert(index);
+        }
+        true
+    }
+
+    fn selected_transcript_detail_index(&self) -> Option<usize> {
+        let range = self
+            .transcript_selection
+            .as_ref()?
+            .range(&self.transcript)?;
+        let index = range.end.checked_sub(1)?;
+        match self.transcript.items().get(index) {
+            Some(TranscriptItem::Tool { detail, .. }) if !detail.is_empty() => Some(index),
+            _ => None,
+        }
+    }
+
     pub fn transcript_mut(&mut self) -> &mut ChatTranscript {
         &mut self.transcript
     }
 
     pub fn scroll_transcript_up(&mut self, lines: usize) {
-        self.transcript_view
-            .scroll_up_unbounded(lines, &self.transcript);
+        self.transcript_view.scroll_up(lines);
     }
 
     pub fn scroll_transcript_down(&mut self, lines: usize) {
-        self.transcript_view.scroll_down_unbounded(lines);
+        self.transcript_view.scroll_down(lines);
+    }
+
+    pub fn sync_transcript_view_for_area(&mut self, area: Rect) {
+        let body = app_layout(self, area).body;
+        let content_rows = TranscriptWidget::new(&self.transcript)
+            .with_selection(self.transcript_selection.as_ref())
+            .with_expanded_items(&self.expanded_transcript_items)
+            .with_theme(self.theme)
+            .row_count(body.width);
+        self.transcript_view
+            .sync(content_rows, usize::from(body.height));
     }
 
     pub fn select_visible_transcript_item(&mut self) {
@@ -329,6 +555,7 @@ impl NeoTuiApp {
         self.transcript = ChatTranscript::default();
         self.transcript_view = TranscriptView::new();
         self.transcript_selection = None;
+        self.expanded_transcript_items.clear();
         self.prompt = PromptState::default();
         self.active_assistant_id = None;
         self.active_user_prompt = None;
@@ -360,12 +587,18 @@ impl NeoTuiApp {
             .iter()
             .map(|tool| {
                 let mut status = ToolStatus::new(tool.name.clone(), tool.status);
-                if !tool.detail.is_empty() {
-                    status = status.with_detail(tool.detail.clone());
+                if let Some(detail) = tool.status_detail() {
+                    status = status.with_detail(detail);
                 }
                 status
             })
             .collect()
+    }
+
+    fn follow_tail_after_transcript_change(&mut self) {
+        if self.transcript_view.is_following_tail() {
+            self.transcript_view.follow_bottom();
+        }
     }
 
     #[must_use]
@@ -394,7 +627,8 @@ impl NeoTuiApp {
             .push(TranscriptItem::user(submitted.clone()));
         self.active_user_prompt = Some(submitted.clone());
         self.transcript_selection = None;
-        self.prompt = PromptState::default();
+        self.prompt.remember_history(submitted.clone());
+        self.prompt.clear_after_submit();
         self.mode = AppMode::Streaming;
         self.transcript_view.follow_bottom();
         Some(submitted)
@@ -430,20 +664,37 @@ impl NeoTuiApp {
                 self.transcript_selection = None;
                 if let Some(tool) = self.active_tools.iter_mut().find(|tool| tool.id == id) {
                     tool.name = name;
-                    tool.detail = detail;
+                    tool.arguments = Some(detail);
+                    tool.result = None;
+                    tool.metadata = ToolRunMetadata::default();
                     tool.status = ToolStatusKind::Running;
+                    self.transcript.update_tool_run(
+                        tool.transcript_index,
+                        tool.clone().into_transcript_item(),
+                    );
                 } else {
-                    self.active_tools.push(ActiveTool {
+                    let transcript_index = self.transcript.len();
+                    let tool = ActiveTool {
                         id,
                         name,
-                        detail,
+                        arguments: Some(detail),
+                        result: None,
+                        metadata: ToolRunMetadata::default(),
+                        presentation: ToolPresentationKind::Text,
                         status: ToolStatusKind::Running,
-                    });
+                        transcript_index,
+                    };
+                    self.transcript.push(tool.clone().into_transcript_item());
+                    self.active_tools.push(ActiveTool { ..tool });
                 }
             }
             StreamUpdate::ToolUpdated { id, detail } => {
                 if let Some(tool) = self.active_tools.iter_mut().find(|tool| tool.id == id) {
-                    tool.detail = detail;
+                    tool.result = Some(detail);
+                    self.transcript.update_tool_run(
+                        tool.transcript_index,
+                        tool.clone().into_transcript_item(),
+                    );
                 }
             }
             StreamUpdate::ToolFinished {
@@ -458,10 +709,10 @@ impl NeoTuiApp {
                 };
                 if let Some(index) = self.active_tools.iter().position(|tool| tool.id == id) {
                     let mut tool = self.active_tools.remove(index);
-                    tool.detail = detail;
+                    tool.result = Some(detail);
                     tool.status = status;
                     self.transcript
-                        .push(TranscriptItem::tool(tool.name, tool.detail, tool.status));
+                        .update_tool_run(tool.transcript_index, tool.into_transcript_item());
                 }
             }
             StreamUpdate::Notice { text } => {
@@ -516,8 +767,14 @@ impl NeoTuiApp {
                 self.active_tools.clear();
                 self.mode = self.overlay_mode();
             }
+            StreamUpdate::RunFinished { turn, stop_reason } => {
+                if let Some(text) = run_finished_notice(turn, stop_reason) {
+                    self.transcript.push(TranscriptItem::notice(text));
+                    self.transcript_selection = None;
+                }
+            }
         }
-        self.transcript_view.follow_bottom();
+        self.follow_tail_after_transcript_change();
     }
 
     pub fn apply_agent_event(&mut self, event: AgentEvent) {
@@ -550,10 +807,28 @@ impl NeoTuiApp {
             AgentEvent::ShellCommandStarted { .. } | AgentEvent::ShellCommandFinished { .. } => {
                 self.apply_shell_event(event);
             }
+            AgentEvent::TokenUsage { usage, .. } => {
+                if let Some(context_window) = &mut self.context_window {
+                    *context_window =
+                        context_window.with_used_tokens(usage.input_tokens + usage.output_tokens);
+                }
+            }
             AgentEvent::SteeringQueued { .. }
             | AgentEvent::FollowUpQueued { .. }
-            | AgentEvent::QueueDrained { .. }
-            | AgentEvent::CompactionApplied { .. } => self.apply_runtime_notice_event(event),
+            | AgentEvent::QueueDrained { .. } => self.apply_runtime_notice_event(event),
+            AgentEvent::CompactionStarted {
+                tokens_before,
+                message_count,
+                ..
+            } => {
+                self.start_compaction(tokens_before, message_count);
+            }
+            AgentEvent::CompactionProgress { phase, percent } => {
+                self.update_compaction_progress(phase, percent);
+            }
+            AgentEvent::CompactionApplied { summary } => {
+                self.finish_compaction(summary.first_kept_message_index, summary.tokens_before);
+            }
             AgentEvent::MessageAppended { message } => {
                 self.apply_message(message);
             }
@@ -563,13 +838,15 @@ impl NeoTuiApp {
             AgentEvent::Error { message, .. } => {
                 self.apply_stream_update(StreamUpdate::Error { text: message });
             }
+            AgentEvent::RunFinished { turn, stop_reason } => {
+                self.apply_stream_update(StreamUpdate::RunFinished { turn, stop_reason });
+            }
             AgentEvent::RunStarted { .. }
             | AgentEvent::TurnStarted { .. }
             | AgentEvent::MessageFinished { .. }
             | AgentEvent::TerminalSessionStarted { .. }
             | AgentEvent::TerminalSessionOutput { .. }
-            | AgentEvent::TerminalSessionFinished { .. }
-            | AgentEvent::RunFinished { .. } => {}
+            | AgentEvent::TerminalSessionFinished { .. } => {}
         }
     }
 
@@ -660,17 +937,20 @@ impl NeoTuiApp {
             });
             self.completed_tool_result_ids.push(id);
         } else {
-            self.transcript.push(TranscriptItem::tool(
+            self.transcript.push(TranscriptItem::tool_run(
                 name,
-                detail,
+                None,
+                Some(detail),
                 if success {
                     ToolStatusKind::Succeeded
                 } else {
                     ToolStatusKind::Failed
                 },
+                ToolRunMetadata::default(),
+                ToolPresentationKind::Text,
             ));
             self.transcript_selection = None;
-            self.transcript_view.follow_bottom();
+            self.follow_tail_after_transcript_change();
         }
     }
 
@@ -679,10 +959,11 @@ impl NeoTuiApp {
             AgentEvent::ShellCommandStarted {
                 id, command, cwd, ..
             } => {
+                let arguments = format!("{command} ({})", cwd.display());
                 self.apply_stream_update(StreamUpdate::ToolStarted {
                     id,
                     name: "shell.run".to_owned(),
-                    detail: format!("{command} ({})", cwd.display()),
+                    detail: arguments,
                 });
             }
             AgentEvent::ShellCommandFinished {
@@ -694,13 +975,57 @@ impl NeoTuiApp {
                 ..
             } => {
                 let detail = shell_finished_detail(exit_code, &stdout, &stderr, truncated);
-                self.apply_stream_update(StreamUpdate::ToolFinished {
-                    id,
-                    detail,
-                    success: exit_code == Some(0),
-                });
+                let metadata = ToolRunMetadata {
+                    exit_code,
+                    stdout: if stdout.is_empty() {
+                        None
+                    } else {
+                        Some(stdout)
+                    },
+                    stderr: if stderr.is_empty() {
+                        None
+                    } else {
+                        Some(stderr)
+                    },
+                    elapsed: None,
+                    truncated,
+                };
+                self.finish_shell_execution(id, detail, exit_code == Some(0), metadata);
             }
             _ => {}
+        }
+    }
+
+    fn finish_shell_execution(
+        &mut self,
+        id: String,
+        detail: String,
+        success: bool,
+        metadata: ToolRunMetadata,
+    ) {
+        let status = if success {
+            ToolStatusKind::Succeeded
+        } else {
+            ToolStatusKind::Failed
+        };
+        if let Some(index) = self.active_tools.iter().position(|tool| tool.id == id) {
+            let mut tool = self.active_tools.remove(index);
+            tool.result = Some(detail);
+            tool.metadata = metadata;
+            tool.presentation = ToolPresentationKind::Shell;
+            tool.status = status;
+            self.transcript.push(tool.into_transcript_item());
+        } else {
+            self.transcript.push(TranscriptItem::tool_run(
+                "shell.run",
+                None,
+                Some(detail),
+                status,
+                metadata,
+                ToolPresentationKind::Shell,
+            ));
+            self.transcript_selection = None;
+            self.follow_tail_after_transcript_change();
         }
     }
 
@@ -715,13 +1040,77 @@ impl NeoTuiApp {
             AgentEvent::QueueDrained { kind, count } => {
                 format!("{kind:?} queue drained ({count})")
             }
-            AgentEvent::CompactionApplied { summary } => format!(
-                "Compaction applied: kept from message {}, {} tokens before",
-                summary.first_kept_message_index, summary.tokens_before
-            ),
             _ => return,
         };
         self.apply_stream_update(StreamUpdate::Notice { text });
+    }
+
+    fn start_compaction(&mut self, tokens_before: usize, message_count: usize) {
+        let item = TranscriptItem::Compaction {
+            phase: Some(CompactionPhase::Estimating),
+            percent: 0,
+            compacted_message_count: message_count,
+            tokens_before,
+        };
+        if let Some(existing) = self.last_compaction_mut() {
+            *existing = item;
+        } else {
+            self.transcript.push(item);
+        }
+        self.transcript_selection = None;
+        self.follow_tail_after_transcript_change();
+    }
+
+    fn update_compaction_progress(&mut self, phase: CompactionPhase, percent: u8) {
+        let percent = percent.min(99);
+        if let Some(TranscriptItem::Compaction {
+            phase: existing_phase,
+            percent: existing_percent,
+            ..
+        }) = self.last_compaction_mut()
+        {
+            *existing_phase = Some(phase);
+            *existing_percent = percent;
+        } else {
+            self.transcript.push(TranscriptItem::Compaction {
+                phase: Some(phase),
+                percent,
+                compacted_message_count: 0,
+                tokens_before: 0,
+            });
+        }
+        self.transcript_selection = None;
+        self.follow_tail_after_transcript_change();
+    }
+
+    fn finish_compaction(&mut self, compacted_message_count: usize, tokens_before: usize) {
+        if let Some(TranscriptItem::Compaction {
+            phase,
+            percent,
+            compacted_message_count: existing_count,
+            tokens_before: existing_tokens,
+        }) = self.last_compaction_mut()
+        {
+            *phase = Some(CompactionPhase::Applying);
+            *percent = 100;
+            *existing_count = compacted_message_count;
+            *existing_tokens = tokens_before;
+        } else {
+            self.transcript.push(TranscriptItem::compaction(
+                compacted_message_count,
+                tokens_before,
+            ));
+        }
+        self.transcript_selection = None;
+        self.follow_tail_after_transcript_change();
+    }
+
+    fn last_compaction_mut(&mut self) -> Option<&mut TranscriptItem> {
+        self.transcript
+            .items
+            .iter_mut()
+            .rev()
+            .find(|item| matches!(item, TranscriptItem::Compaction { .. }))
     }
 
     fn apply_message(&mut self, message: AgentMessage) {
@@ -746,7 +1135,7 @@ impl NeoTuiApp {
                         self.transcript.push(image);
                     }
                     self.transcript_selection = None;
-                    self.transcript_view.follow_bottom();
+                    self.follow_tail_after_transcript_change();
                     return;
                 }
                 if self.active_assistant_id.is_some() {
@@ -798,7 +1187,7 @@ impl NeoTuiApp {
             }
         }
         self.transcript_selection = None;
-        self.transcript_view.follow_bottom();
+        self.follow_tail_after_transcript_change();
     }
 
     fn assistant_transcript_parts(
@@ -1218,8 +1607,37 @@ fn take_completed_tool_result(completed_tool_result_ids: &mut Vec<String>, id: &
 struct ActiveTool {
     id: String,
     name: String,
-    detail: String,
+    arguments: Option<String>,
+    result: Option<String>,
+    metadata: ToolRunMetadata,
+    presentation: ToolPresentationKind,
     status: ToolStatusKind,
+    transcript_index: usize,
+}
+
+impl ActiveTool {
+    fn status_detail(&self) -> Option<String> {
+        self.result
+            .as_ref()
+            .filter(|result| !result.is_empty())
+            .or_else(|| {
+                self.arguments
+                    .as_ref()
+                    .filter(|arguments| !arguments.is_empty())
+            })
+            .cloned()
+    }
+
+    fn into_transcript_item(self) -> TranscriptItem {
+        TranscriptItem::tool_run(
+            self.name,
+            self.arguments,
+            self.result,
+            self.status,
+            self.metadata,
+            self.presentation,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1256,6 +1674,25 @@ pub enum StreamUpdate {
         text: String,
     },
     TurnFinished,
+    RunFinished {
+        turn: u32,
+        stop_reason: neo_agent_core::StopReason,
+    },
+}
+
+fn run_finished_notice(turn: u32, stop_reason: neo_agent_core::StopReason) -> Option<String> {
+    match stop_reason {
+        neo_agent_core::StopReason::MaxTokens => Some(format!(
+            "Run stopped after turn {turn}: model token limit reached."
+        )),
+        neo_agent_core::StopReason::Error => {
+            Some(format!("Run stopped after turn {turn}: runtime error."))
+        }
+        neo_agent_core::StopReason::Cancelled => {
+            Some(format!("Run stopped after turn {turn}: cancelled."))
+        }
+        neo_agent_core::StopReason::EndTurn | neo_agent_core::StopReason::ToolUse => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1648,6 +2085,7 @@ pub enum TranscriptItem {
         name: String,
         detail: String,
         status: ToolStatusKind,
+        tool_run: ToolRunTranscript,
     },
     Image {
         id: String,
@@ -1658,9 +2096,57 @@ pub enum TranscriptItem {
         metadata: String,
         payload: Option<Vec<u8>>,
     },
+    Compaction {
+        phase: Option<CompactionPhase>,
+        percent: u8,
+        compacted_message_count: usize,
+        tokens_before: usize,
+    },
     Notice {
         content: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolRunTranscript {
+    pub name: String,
+    pub arguments: Option<String>,
+    pub result: Option<String>,
+    pub status: ToolStatusKind,
+    pub metadata: ToolRunMetadata,
+    pub presentation: ToolPresentationKind,
+}
+
+impl ToolRunTranscript {
+    #[must_use]
+    pub fn display_detail(&self) -> String {
+        self.result
+            .as_ref()
+            .filter(|result| !result.is_empty())
+            .or_else(|| {
+                self.arguments
+                    .as_ref()
+                    .filter(|arguments| !arguments.is_empty())
+            })
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolRunMetadata {
+    pub exit_code: Option<i32>,
+    pub elapsed: Option<String>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolPresentationKind {
+    #[default]
+    Text,
+    Shell,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1746,6 +2232,7 @@ pub enum TranscriptLine {
     },
     ListItem {
         indent: usize,
+        marker: ListMarker,
         text: String,
     },
     Code {
@@ -1773,6 +2260,26 @@ pub enum TranscriptLine {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListMarker {
+    Bullet,
+    Ordered(String),
+    TaskOpen,
+    TaskDone,
+}
+
+impl ListMarker {
+    #[must_use]
+    pub fn display(&self) -> &str {
+        match self {
+            Self::Bullet => "•",
+            Self::Ordered(marker) => marker.as_str(),
+            Self::TaskOpen => "○",
+            Self::TaskDone => "✓",
+        }
+    }
+}
+
 impl TranscriptLine {
     #[must_use]
     pub fn text(&self) -> &str {
@@ -1796,12 +2303,14 @@ impl TranscriptLine {
         match self {
             Self::Blank => String::new(),
             Self::Text { text } | Self::DiffHunk { text } => text.clone(),
-            Self::Heading { level, text } => {
-                format!("{} {text}", "#".repeat(usize::from(*level)))
-            }
-            Self::ListItem { indent, text } => format!("{}- {text}", " ".repeat(indent * 2)),
+            Self::Heading { text, .. } => text.clone(),
+            Self::ListItem {
+                indent,
+                marker,
+                text,
+            } => format!("{}{} {text}", " ".repeat(indent * 2), marker.display()),
             Self::Code { text, .. } => format!("  {text}"),
-            Self::Quote { text } => format!("> {text}"),
+            Self::Quote { text } => format!("│ {text}"),
             Self::DiffFileHeader { marker, path } => format!("{marker}{marker}{marker} {path}"),
             Self::DiffContext { text } => format!(" {text}"),
             Self::DiffAdded { text } => format!("+{text}"),
@@ -1831,11 +2340,13 @@ impl TranscriptRenderer {
         let mut lines = Vec::new();
         let mut code_language: Option<String> = None;
         let mut in_diff = false;
+        let mut table_rows: Vec<Vec<String>> = Vec::new();
 
         for raw_line in text.lines() {
             let trimmed_end = raw_line.trim_end();
             let trimmed = trimmed_end.trim_start();
             if let Some(language) = fence_language(trimmed) {
+                flush_table(&mut lines, &mut table_rows, self.width);
                 if code_language.is_some() {
                     code_language = None;
                 } else {
@@ -1845,6 +2356,12 @@ impl TranscriptRenderer {
             }
 
             if let Some(language) = &code_language {
+                if language == "diff" {
+                    if let Some(line) = parse_diff_line(trimmed_end, true) {
+                        push_diff_line(&mut lines, line, self.width);
+                    }
+                    continue;
+                }
                 push_wrapped_line(&mut lines, trimmed_end, self.width, |text| {
                     TranscriptLine::Code {
                         language: Some(language.clone()),
@@ -1855,6 +2372,7 @@ impl TranscriptRenderer {
             }
 
             if let Some(line) = parse_diff_line(trimmed_end, in_diff) {
+                flush_table(&mut lines, &mut table_rows, self.width);
                 push_diff_line(&mut lines, line, self.width);
                 in_diff = true;
                 continue;
@@ -1865,25 +2383,51 @@ impl TranscriptRenderer {
 
             if trimmed.is_empty() {
                 in_diff = false;
+                flush_table(&mut lines, &mut table_rows, self.width);
                 lines.push(TranscriptLine::Blank);
             } else if let Some((level, heading)) = parse_heading(trimmed) {
-                push_wrapped_line(&mut lines, heading, self.width, |text| {
-                    TranscriptLine::Heading { level, text }
-                });
-            } else if let Some((indent, text)) = parse_list_item(trimmed_end) {
-                push_wrapped_line(&mut lines, text, self.width, |text| {
-                    TranscriptLine::ListItem { indent, text }
-                });
+                flush_table(&mut lines, &mut table_rows, self.width);
+                push_wrapped_line(
+                    &mut lines,
+                    &strip_inline_markdown(heading),
+                    self.width,
+                    |text| TranscriptLine::Heading { level, text },
+                );
+            } else if let Some((indent, marker, text)) = parse_list_item(trimmed_end) {
+                flush_table(&mut lines, &mut table_rows, self.width);
+                push_wrapped_line(
+                    &mut lines,
+                    &strip_inline_markdown(&text),
+                    self.width,
+                    |text| TranscriptLine::ListItem {
+                        indent,
+                        marker: marker.clone(),
+                        text,
+                    },
+                );
+            } else if is_markdown_table_separator(trimmed) {
+                continue;
+            } else if let Some(cells) = parse_table_row(trimmed) {
+                table_rows.push(cells);
             } else if let Some(text) = trimmed.strip_prefix("> ") {
-                push_wrapped_line(&mut lines, text, self.width, |text| TranscriptLine::Quote {
-                    text,
-                });
+                flush_table(&mut lines, &mut table_rows, self.width);
+                push_wrapped_line(
+                    &mut lines,
+                    &strip_inline_markdown(text),
+                    self.width,
+                    |text| TranscriptLine::Quote { text },
+                );
             } else {
-                push_wrapped_line(&mut lines, trimmed_end, self.width, |text| {
-                    TranscriptLine::Text { text }
-                });
+                flush_table(&mut lines, &mut table_rows, self.width);
+                push_wrapped_line(
+                    &mut lines,
+                    &strip_inline_markdown(trimmed_end),
+                    self.width,
+                    |text| TranscriptLine::Text { text },
+                );
             }
         }
+        flush_table(&mut lines, &mut table_rows, self.width);
 
         if lines.is_empty() {
             lines.push(TranscriptLine::Blank);
@@ -1989,18 +2533,27 @@ fn parse_heading(line: &str) -> Option<(u8, &str)> {
     Some((u8::try_from(level).expect("heading level is <= 6"), text))
 }
 
-fn parse_list_item(line: &str) -> Option<(usize, &str)> {
+fn parse_list_item(line: &str) -> Option<(usize, ListMarker, String)> {
     let leading_spaces = line
         .chars()
         .take_while(|character| *character == ' ')
         .count();
     let indent = leading_spaces / 2;
     let trimmed = line.trim_start();
+    if let Some(text) = trimmed.strip_prefix("- [x] ") {
+        return Some((indent, ListMarker::TaskDone, text.to_owned()));
+    }
+    if let Some(text) = trimmed.strip_prefix("- [X] ") {
+        return Some((indent, ListMarker::TaskDone, text.to_owned()));
+    }
+    if let Some(text) = trimmed.strip_prefix("- [ ] ") {
+        return Some((indent, ListMarker::TaskOpen, text.to_owned()));
+    }
     if let Some(text) = trimmed
         .strip_prefix("- ")
         .or_else(|| trimmed.strip_prefix("* "))
     {
-        return Some((indent, text));
+        return Some((indent, ListMarker::Bullet, text.to_owned()));
     }
 
     let marker_end = trimmed.find(['.', ')'])?;
@@ -2014,7 +2567,128 @@ fn parse_list_item(line: &str) -> Option<(usize, &str)> {
     trimmed
         .get(marker_end + 1..)?
         .strip_prefix(' ')
-        .map(|text| (indent, text))
+        .map(|text| {
+            (
+                indent,
+                ListMarker::Ordered(trimmed[..=marker_end].to_owned()),
+                text.to_owned(),
+            )
+        })
+}
+
+fn parse_table_row(line: &str) -> Option<Vec<String>> {
+    if !line.starts_with('|') || !line.ends_with('|') {
+        return None;
+    }
+    let cells = line
+        .trim_matches('|')
+        .split('|')
+        .map(str::trim)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if cells.len() < 2 {
+        return None;
+    }
+    Some(cells)
+}
+
+fn flush_table(lines: &mut Vec<TranscriptLine>, rows: &mut Vec<Vec<String>>, width: usize) {
+    if rows.is_empty() {
+        return;
+    }
+    let table = std::mem::take(rows);
+    if table.len() < 2 {
+        for row in table {
+            let text = row.join(" | ");
+            push_wrapped_line(lines, &strip_inline_markdown(&text), width, |text| {
+                TranscriptLine::Text { text }
+            });
+        }
+        return;
+    }
+
+    let widths = table_column_widths(&table);
+    let full_width =
+        widths.iter().sum::<usize>() + widths.len().saturating_sub(1).saturating_mul(" | ".len());
+    if full_width <= width {
+        for row in table {
+            let text = format_table_row(&row, &widths);
+            push_wrapped_line(lines, &strip_inline_markdown(&text), width, |text| {
+                TranscriptLine::Text { text }
+            });
+        }
+        return;
+    }
+
+    let headers = &table[0];
+    for (row_index, row) in table.iter().enumerate().skip(1) {
+        if row_index > 1 {
+            lines.push(TranscriptLine::Blank);
+        }
+        for (index, cell) in row.iter().enumerate() {
+            let header = headers
+                .get(index)
+                .filter(|header| !header.is_empty())
+                .map_or_else(|| format!("Column {}", index + 1), Clone::clone);
+            let text = format!("{header}: {cell}");
+            push_wrapped_line(lines, &strip_inline_markdown(&text), width, |text| {
+                TranscriptLine::Text { text }
+            });
+        }
+    }
+}
+
+fn table_column_widths(rows: &[Vec<String>]) -> Vec<usize> {
+    let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut widths = vec![0; column_count];
+    for row in rows {
+        for (index, cell) in row.iter().enumerate() {
+            widths[index] = widths[index].max(cell.chars().count());
+        }
+    }
+    widths
+}
+
+fn format_table_row(cells: &[String], widths: &[usize]) -> String {
+    let last_index = cells.len().saturating_sub(1);
+    cells
+        .iter()
+        .enumerate()
+        .map(|(index, cell)| {
+            let width = widths.get(index).copied().unwrap_or(cell.chars().count());
+            if index == last_index {
+                cell.clone()
+            } else {
+                format!("{cell:<width$}", width = width)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn is_markdown_table_separator(line: &str) -> bool {
+    if !line.starts_with('|') || !line.ends_with('|') {
+        return false;
+    }
+    line.trim_matches('|').split('|').all(|cell| {
+        let cell = cell.trim();
+        cell.len() >= 3 && cell.chars().all(|character| matches!(character, '-' | ':'))
+    })
+}
+
+fn strip_inline_markdown(text: &str) -> String {
+    let mut output = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        if matches!(character, '*' | '_') {
+            if chars.peek() == Some(&character) {
+                let _ = chars.next();
+            }
+            continue;
+        }
+        output.push(character);
+    }
+    output
 }
 
 impl TranscriptItem {
@@ -2053,10 +2727,52 @@ impl TranscriptItem {
         detail: impl Into<String>,
         status: ToolStatusKind,
     ) -> Self {
-        Self::Tool {
-            name: name.into(),
-            detail: detail.into(),
+        let name = name.into();
+        let detail = detail.into();
+        let tool_run = ToolRunTranscript {
+            name: name.clone(),
+            arguments: None,
+            result: if detail.is_empty() {
+                None
+            } else {
+                Some(detail.clone())
+            },
             status,
+            metadata: ToolRunMetadata::default(),
+            presentation: ToolPresentationKind::Text,
+        };
+        Self::Tool {
+            name,
+            detail,
+            status,
+            tool_run,
+        }
+    }
+
+    #[must_use]
+    pub fn tool_run(
+        name: impl Into<String>,
+        arguments: Option<String>,
+        result: Option<String>,
+        status: ToolStatusKind,
+        metadata: ToolRunMetadata,
+        presentation: ToolPresentationKind,
+    ) -> Self {
+        let name = name.into();
+        let tool_run = ToolRunTranscript {
+            name: name.clone(),
+            arguments,
+            result,
+            status,
+            metadata,
+            presentation,
+        };
+        let detail = tool_run.display_detail();
+        Self::Tool {
+            name,
+            detail,
+            status,
+            tool_run,
         }
     }
 
@@ -2078,6 +2794,16 @@ impl TranscriptItem {
             source,
             metadata: metadata.into(),
             payload,
+        }
+    }
+
+    #[must_use]
+    pub const fn compaction(compacted_message_count: usize, tokens_before: usize) -> Self {
+        Self::Compaction {
+            phase: Some(CompactionPhase::Applying),
+            percent: 100,
+            compacted_message_count,
+            tokens_before,
         }
     }
 
@@ -2169,6 +2895,14 @@ impl ChatTranscript {
         true
     }
 
+    pub fn update_tool_run(&mut self, index: usize, item: TranscriptItem) -> bool {
+        let Some(existing @ TranscriptItem::Tool { .. }) = self.items.get_mut(index) else {
+            return false;
+        };
+        *existing = item;
+        true
+    }
+
     #[must_use]
     pub fn items(&self) -> &[TranscriptItem] {
         &self.items
@@ -2212,8 +2946,20 @@ fn transcript_copy_parts(item: &TranscriptItem) -> (&'static str, String) {
             name,
             detail,
             status,
+            ..
         } => ("Tool", format!("{} {} ({})", status.marker(), name, detail)),
         TranscriptItem::Image { metadata, .. } => ("Image", metadata.clone()),
+        TranscriptItem::Compaction {
+            compacted_message_count,
+            tokens_before,
+            ..
+        } => (
+            "Compact",
+            format!(
+                "Compacted {compacted_message_count} messages · {} tokens before",
+                format_token_count_usize(*tokens_before)
+            ),
+        ),
         TranscriptItem::Notice { content } => ("Notice", content.clone()),
     }
 }
@@ -2223,6 +2969,16 @@ fn assistant_copy_text(thinking: Option<&str>, content: &str) -> String {
         Some(thinking) if !content.is_empty() => format!("{thinking}\n\n{content}"),
         Some(thinking) => thinking.to_owned(),
         None => content.to_owned(),
+    }
+}
+
+fn format_token_count_usize(tokens: usize) -> String {
+    if tokens >= 1_000_000 {
+        format!("{}m", tokens / 1_000_000)
+    } else if tokens >= 1_000 {
+        format!("{}k", tokens / 1_000)
+    } else {
+        tokens.to_string()
     }
 }
 
@@ -2267,41 +3023,69 @@ impl TranscriptSelection {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TranscriptView {
-    scrollback: usize,
+    scroll_offset_rows: usize,
+    content_rows: usize,
+    viewport_rows: usize,
+    follow_tail: bool,
 }
 
 impl TranscriptView {
     #[must_use]
     pub const fn new() -> Self {
-        Self { scrollback: 0 }
+        Self {
+            scroll_offset_rows: 0,
+            content_rows: 0,
+            viewport_rows: 0,
+            follow_tail: true,
+        }
     }
 
     #[must_use]
     pub const fn scrollback(&self) -> usize {
-        self.scrollback
+        self.scroll_offset_rows
+    }
+
+    #[must_use]
+    pub const fn is_following_tail(&self) -> bool {
+        self.follow_tail
     }
 
     pub fn follow_bottom(&mut self) {
-        self.scrollback = 0;
+        self.scroll_offset_rows = 0;
+        self.follow_tail = true;
     }
 
-    pub fn scroll_up(&mut self, lines: usize, transcript: &ChatTranscript, height: usize) {
-        let max_scrollback = transcript.len().saturating_sub(height);
-        self.scrollback = self.scrollback.saturating_add(lines).min(max_scrollback);
+    pub fn scroll_up(&mut self, rows: usize) {
+        self.follow_tail = false;
+        self.scroll_offset_rows = self.scroll_offset_rows.saturating_add(rows);
+        if self.has_synced_dimensions() {
+            self.scroll_offset_rows = self.scroll_offset_rows.min(self.max_scroll_offset());
+        }
     }
 
-    pub fn scroll_down(&mut self, lines: usize, transcript: &ChatTranscript, height: usize) {
-        let max_scrollback = transcript.len().saturating_sub(height);
-        self.scrollback = self.scrollback.saturating_sub(lines).min(max_scrollback);
+    pub fn scroll_down(&mut self, rows: usize) {
+        self.scroll_offset_rows = self.scroll_offset_rows.saturating_sub(rows);
+        if self.scroll_offset_rows == 0 {
+            self.follow_tail = true;
+        }
     }
 
-    pub fn scroll_up_unbounded(&mut self, lines: usize, transcript: &ChatTranscript) {
-        let max_scrollback = transcript.len().saturating_sub(1);
-        self.scrollback = self.scrollback.saturating_add(lines).min(max_scrollback);
+    pub fn page_up(&mut self) {
+        self.scroll_up(self.page_rows());
     }
 
-    pub fn scroll_down_unbounded(&mut self, lines: usize) {
-        self.scrollback = self.scrollback.saturating_sub(lines);
+    pub fn page_down(&mut self) {
+        self.scroll_down(self.page_rows());
+    }
+
+    pub fn sync(&mut self, content_rows: usize, viewport_rows: usize) {
+        self.content_rows = content_rows;
+        self.viewport_rows = viewport_rows;
+        if self.follow_tail {
+            self.scroll_offset_rows = 0;
+        } else {
+            self.scroll_offset_rows = self.scroll_offset_rows.min(self.max_scroll_offset());
+        }
     }
 
     #[must_use]
@@ -2312,8 +3096,38 @@ impl TranscriptView {
 
         let len = transcript.len();
         let window = height.min(len);
-        let bottom = len.saturating_sub(self.scrollback).max(window);
+        let scrollback = self.scroll_offset_rows.min(len.saturating_sub(window));
+        let bottom = len.saturating_sub(scrollback).max(window);
         bottom - window..bottom
+    }
+
+    #[must_use]
+    pub fn visible_row_range(&self, row_count: usize, height: usize) -> Range<usize> {
+        if height == 0 || row_count == 0 {
+            return 0..0;
+        }
+
+        let window = height.min(row_count);
+        let scrollback = self
+            .scroll_offset_rows
+            .min(row_count.saturating_sub(window));
+        let bottom = row_count.saturating_sub(scrollback).max(window);
+        bottom - window..bottom
+    }
+
+    #[must_use]
+    const fn max_scroll_offset(&self) -> usize {
+        self.content_rows.saturating_sub(self.viewport_rows)
+    }
+
+    #[must_use]
+    const fn has_synced_dimensions(&self) -> bool {
+        self.content_rows > 0 && self.viewport_rows > 0
+    }
+
+    #[must_use]
+    fn page_rows(&self) -> usize {
+        self.viewport_rows.saturating_sub(1).max(1)
     }
 }
 
@@ -2378,6 +3192,9 @@ impl ToolStatus {
 pub struct PromptState {
     pub text: String,
     pub cursor: usize,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    history_draft: Option<PromptSnapshot>,
     undo_stack: Vec<PromptSnapshot>,
     kill_ring: Vec<String>,
 }
@@ -2396,6 +3213,9 @@ impl PromptState {
         Self {
             text,
             cursor,
+            history: Vec::new(),
+            history_index: None,
+            history_draft: None,
             undo_stack: Vec::new(),
             kill_ring: Vec::new(),
         }
@@ -2407,6 +3227,61 @@ impl PromptState {
         self
     }
 
+    pub fn remember_history(&mut self, entry: impl Into<String>) {
+        let entry = entry.into();
+        if entry.trim().is_empty() {
+            return;
+        }
+        self.history.push(entry);
+        self.stop_history_navigation();
+    }
+
+    pub fn clear_after_submit(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+        self.undo_stack.clear();
+        self.kill_ring.clear();
+        self.stop_history_navigation();
+    }
+
+    pub fn recall_previous_history(&mut self) -> bool {
+        if self.history.is_empty() {
+            return false;
+        }
+        let index = match self.history_index {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.history_draft = Some(self.snapshot());
+                self.history.len() - 1
+            }
+        };
+        self.history_index = Some(index);
+        self.replace_with_history_text(index);
+        true
+    }
+
+    pub fn recall_next_history(&mut self) -> bool {
+        let Some(index) = self.history_index else {
+            return false;
+        };
+        let next = index + 1;
+        if next < self.history.len() {
+            self.history_index = Some(next);
+            self.replace_with_history_text(next);
+        } else {
+            if let Some(snapshot) = self.history_draft.take() {
+                self.text = snapshot.text;
+                self.cursor = snapshot.cursor.min(self.char_len());
+            } else {
+                self.text.clear();
+                self.cursor = 0;
+            }
+            self.history_index = None;
+            self.undo_stack.clear();
+        }
+        true
+    }
+
     pub fn apply_edit(&mut self, edit: PromptEdit<'_>) -> Option<String> {
         self.cursor = self.cursor.min(self.char_len());
 
@@ -2416,6 +3291,7 @@ impl PromptState {
                 if inserted.is_empty() {
                     return None;
                 }
+                self.stop_history_navigation();
                 let before = self.snapshot();
                 let index = self.byte_index(self.cursor);
                 self.text.insert_str(index, &inserted);
@@ -2427,6 +3303,7 @@ impl PromptState {
                 if self.text.is_empty() {
                     return None;
                 }
+                self.stop_history_navigation();
                 let before = self.snapshot();
                 let cleared = std::mem::take(&mut self.text);
                 self.cursor = 0;
@@ -2485,6 +3362,7 @@ impl PromptState {
             }
             PromptEdit::Yank => {
                 let yanked = self.kill_ring.last().cloned()?;
+                self.stop_history_navigation();
                 let before = self.snapshot();
                 let index = self.byte_index(self.cursor);
                 self.text.insert_str(index, &yanked);
@@ -2493,6 +3371,7 @@ impl PromptState {
                 Some(yanked)
             }
             PromptEdit::Undo => {
+                self.stop_history_navigation();
                 if let Some(snapshot) = self.undo_stack.pop() {
                     self.text = snapshot.text;
                     self.cursor = snapshot.cursor.min(self.char_len());
@@ -2546,6 +3425,7 @@ impl PromptState {
             return None;
         }
 
+        self.stop_history_navigation();
         let before = self.snapshot();
         let start_byte = self.byte_index(prefix.start);
         let end_byte = self.byte_index(prefix.end);
@@ -2586,6 +3466,17 @@ impl PromptState {
         self.undo_stack.push(snapshot);
     }
 
+    fn replace_with_history_text(&mut self, index: usize) {
+        self.text = self.history[index].clone();
+        self.cursor = self.char_len();
+        self.undo_stack.clear();
+    }
+
+    fn stop_history_navigation(&mut self) {
+        self.history_index = None;
+        self.history_draft = None;
+    }
+
     fn apply_delete(
         &mut self,
         start: usize,
@@ -2593,6 +3484,7 @@ impl PromptState {
         direction: DeleteDirection,
         record_kill: bool,
     ) -> Option<String> {
+        self.stop_history_navigation();
         let before = self.snapshot();
         let deleted = self.delete_range(start, end, direction)?;
         self.push_undo(before);
@@ -2741,6 +3633,7 @@ pub struct ApprovalModal {
     pub body: String,
     pub options: Vec<ApprovalOption>,
     pub selected: usize,
+    pub theme: TuiTheme,
 }
 
 impl ApprovalModal {
@@ -2755,6 +3648,7 @@ impl ApprovalModal {
             body: body.into(),
             options: options.into_iter().collect(),
             selected: 0,
+            theme: TuiTheme::default(),
         }
     }
 
@@ -2763,6 +3657,12 @@ impl ApprovalModal {
         if !self.options.is_empty() {
             self.selected = selected.min(self.options.len() - 1);
         }
+        self
+    }
+
+    #[must_use]
+    pub const fn with_theme(mut self, theme: TuiTheme) -> Self {
+        self.theme = theme;
         self
     }
 

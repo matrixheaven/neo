@@ -3,7 +3,9 @@ use std::{
     fmt,
 };
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+
+const MOUSE_WHEEL_SCROLL_ROWS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputEvent {
@@ -19,6 +21,8 @@ pub enum InputEvent {
     MoveEnd,
     Submit,
     NewLine,
+    ScrollUp(usize),
+    ScrollDown(usize),
     Resize { columns: u16, rows: u16 },
     Cancel,
     Interrupt,
@@ -30,6 +34,7 @@ impl InputEvent {
         match event {
             Event::Paste(text) => Some(Self::Paste(text.clone())),
             Event::Key(key_event) => Self::from_key_event(*key_event),
+            Event::Mouse(mouse_event) => Self::from_mouse_event_kind(mouse_event.kind),
             Event::Resize(columns, rows) => Some(Self::Resize {
                 columns: *columns,
                 rows: *rows,
@@ -46,6 +51,7 @@ impl InputEvent {
         match event {
             Event::Paste(text) => Some(Self::Paste(text.clone())),
             Event::Key(key_event) => Self::from_key_event_with_keybindings(*key_event, keybindings),
+            Event::Mouse(mouse_event) => Self::from_mouse_event_kind(mouse_event.kind),
             Event::Resize(columns, rows) => Some(Self::Resize {
                 columns: *columns,
                 rows: *rows,
@@ -99,6 +105,14 @@ impl InputEvent {
         }
         Some(Self::Key(key))
     }
+
+    fn from_mouse_event_kind(kind: MouseEventKind) -> Option<Self> {
+        match kind {
+            MouseEventKind::ScrollUp => Some(Self::ScrollUp(MOUSE_WHEEL_SCROLL_ROWS)),
+            MouseEventKind::ScrollDown => Some(Self::ScrollDown(MOUSE_WHEEL_SCROLL_ROWS)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -134,6 +148,9 @@ impl InputParser {
             Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
                 self.feed_key_event(*key_event)
             }
+            Event::Mouse(mouse_event) => InputEvent::from_mouse_event_kind(mouse_event.kind)
+                .into_iter()
+                .collect(),
             Event::Resize(columns, rows) => vec![InputEvent::Resize {
                 columns: *columns,
                 rows: *rows,

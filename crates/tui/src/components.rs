@@ -4,13 +4,84 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Clear, Widget},
 };
+use std::collections::BTreeSet;
 use unicode_width::UnicodeWidthChar;
 
 use crate::{
-    ApprovalModal, ChatTranscript, NeoTuiApp, Overlay, OverlayKind, PromptState, ToolStatus,
-    ToolStatusKind, TranscriptItem, TranscriptLine, TranscriptRenderer, TranscriptSelection,
-    TranscriptView, TuiTheme,
+    ApprovalModal, ChatTranscript, DiffLine, DiffModel, NeoTuiApp, Overlay, OverlayKind,
+    PromptState, ToolRunTranscript, ToolStatus, ToolStatusKind, TranscriptItem, TranscriptLine,
+    TranscriptRenderer, TranscriptSelection, TranscriptView, TuiTheme,
 };
+
+const COMPACTION_BAR_WIDTH: usize = 30;
+const TOOL_PREVIEW_LINES: usize = 4;
+const DIFF_PREVIEW_LINES: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppLayout {
+    pub body: Rect,
+    pub status: Rect,
+    pub approval: Rect,
+    pub prompt: Rect,
+    pub footer: Rect,
+}
+
+#[must_use]
+pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
+    let prompt_height = prompt_height(app.prompt(), area.width);
+    let footer_bar_height = u16::from(area.height > 0);
+    let approval_overlay = match app.focused_overlay().map(|overlay| &overlay.kind) {
+        Some(OverlayKind::Approval(request)) => Some(request),
+        _ => None,
+    };
+    let approval_height = approval_overlay
+        .map(|request| approval_panel_height(&request.modal, area.width))
+        .unwrap_or(0)
+        .min(area.height.saturating_sub(3));
+    let bottom_height = prompt_height
+        .saturating_add(footer_bar_height)
+        .saturating_add(approval_height);
+    let body_y = area.y.saturating_add(1);
+    let body_height = area.height.saturating_sub(1).saturating_sub(bottom_height);
+    let body = Rect {
+        x: area.x,
+        y: body_y,
+        width: area.width,
+        height: body_height,
+    };
+    let status = Rect {
+        x: area.x,
+        y: body.y.saturating_add(body.height),
+        width: area.width,
+        height: 0,
+    };
+    let approval = Rect {
+        x: area.x,
+        y: status.y.saturating_add(status.height),
+        width: area.width,
+        height: approval_height,
+    };
+    let prompt = Rect {
+        x: area.x,
+        y: approval.y.saturating_add(approval.height),
+        width: area.width,
+        height: prompt_height,
+    };
+    let footer = Rect {
+        x: area.x,
+        y: prompt.y.saturating_add(prompt.height),
+        width: area.width,
+        height: footer_bar_height,
+    };
+
+    AppLayout {
+        body,
+        status,
+        approval,
+        prompt,
+        footer,
+    }
+}
 
 #[must_use]
 pub fn visible_width(text: &str) -> usize {
@@ -173,6 +244,8 @@ pub struct TranscriptWidget<'a> {
     transcript: &'a ChatTranscript,
     view: Option<&'a TranscriptView>,
     selection: Option<&'a TranscriptSelection>,
+    expanded_items: Option<&'a BTreeSet<usize>>,
+    activity_frame: usize,
     theme: TuiTheme,
 }
 
@@ -183,6 +256,8 @@ impl<'a> TranscriptWidget<'a> {
             transcript,
             view: None,
             selection: None,
+            expanded_items: None,
+            activity_frame: 0,
             theme: TuiTheme::default(),
         }
     }
@@ -200,63 +275,446 @@ impl<'a> TranscriptWidget<'a> {
     }
 
     #[must_use]
+    pub const fn with_expanded_items(mut self, expanded_items: &'a BTreeSet<usize>) -> Self {
+        self.expanded_items = Some(expanded_items);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_activity_frame(mut self, activity_frame: usize) -> Self {
+        self.activity_frame = activity_frame;
+        self
+    }
+
+    #[must_use]
     pub const fn with_theme(mut self, theme: TuiTheme) -> Self {
         self.theme = theme;
         self
+    }
+
+    #[must_use]
+    pub fn row_count(&self, width: u16) -> usize {
+        transcript_render_rows(
+            self.transcript,
+            self.selection,
+            self.expanded_items,
+            self.activity_frame,
+            self.theme,
+            usize::from(width.saturating_sub(2).max(1)),
+        )
+        .len()
     }
 }
 
 impl Widget for TranscriptWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let mut y = area.y;
         let text_width = usize::from(area.width.saturating_sub(2).max(1));
+        let rows = transcript_render_rows(
+            self.transcript,
+            self.selection,
+            self.expanded_items,
+            self.activity_frame,
+            self.theme,
+            text_width,
+        );
 
-        let items = self.transcript.items();
-        let range = self.view.map_or(0..items.len(), |view| {
-            view.visible_range(self.transcript, usize::from(area.height))
-        });
-        let selected_range = self
-            .selection
-            .and_then(|selection| selection.range(self.transcript));
-        for (index, item) in items[range.clone()].iter().enumerate() {
+        let range = self.view.map_or_else(
+            || bottom_row_range(rows.len(), usize::from(area.height)),
+            |view| view.visible_row_range(rows.len(), usize::from(area.height)),
+        );
+        let mut y = area.y;
+        for row in &rows[range] {
             if y >= area.bottom() {
                 break;
             }
-            if index > 0 {
-                y = y.saturating_add(1);
-                if y >= area.bottom() {
-                    break;
+            if let Some(fill) = row.fill {
+                fill_line(area, buf, y, fill);
+            }
+            write_line(area, buf, y, &row.text, row.style);
+            y = y.saturating_add(1);
+        }
+    }
+}
+
+fn transcript_render_rows(
+    transcript: &ChatTranscript,
+    selection: Option<&TranscriptSelection>,
+    expanded_items: Option<&BTreeSet<usize>>,
+    activity_frame: usize,
+    theme: TuiTheme,
+    text_width: usize,
+) -> Vec<TranscriptRenderRow> {
+    let items = transcript.items();
+    let selected_range = selection.and_then(|selection| selection.range(transcript));
+
+    let mut rows = Vec::new();
+    for (item_index, item) in items.iter().enumerate() {
+        if item_index > 0 {
+            rows.push(TranscriptRenderRow::blank());
+        }
+
+        let selected = selected_range
+            .as_ref()
+            .is_some_and(|range| range.contains(&item_index));
+        let expanded = expanded_items.is_some_and(|expanded| expanded.contains(&item_index));
+        if let TranscriptItem::Tool { tool_run, .. } = item {
+            rows.extend(tool_render_rows(
+                tool_run,
+                expanded,
+                selected,
+                activity_frame,
+                theme,
+                text_width,
+            ));
+            continue;
+        }
+
+        let (label, content, style) = transcript_row(item, theme, expanded);
+        let style = selected_style(style, selected, theme);
+        let fill = matches!(item, TranscriptItem::User { .. })
+            .then_some(Style::default().bg(theme.user_bg));
+        rows.push(TranscriptRenderRow::new(
+            label,
+            style.add_modifier(Modifier::BOLD),
+            fill,
+        ));
+
+        if let TranscriptItem::Assistant { thinking, content } = item {
+            if let Some(thinking) = thinking.as_deref().filter(|thinking| !thinking.is_empty()) {
+                for line in wrap_width(thinking, text_width) {
+                    rows.push(TranscriptRenderRow::new(
+                        format!("  {line}"),
+                        selected_style(
+                            Style::default()
+                                .fg(theme.thinking)
+                                .add_modifier(Modifier::ITALIC),
+                            selected,
+                            theme,
+                        ),
+                        None,
+                    ));
+                }
+                if !content.is_empty() {
+                    rows.push(TranscriptRenderRow::blank());
                 }
             }
 
-            let item_index = range.start + index;
-            let selected = selected_range
-                .as_ref()
-                .is_some_and(|range| range.contains(&item_index));
-            let (label, content, style) = transcript_row(item, self.theme);
-            let style = selected_style(style, selected, self.theme);
-            write_line(area, buf, y, label, style.add_modifier(Modifier::BOLD));
-            y = y.saturating_add(1);
-
+            for line in TranscriptRenderer::new(text_width).render_markdownish(content) {
+                rows.push(TranscriptRenderRow::new(
+                    format!("  {}", line.display_text()),
+                    selected_style(transcript_line_style(&line, style, theme), selected, theme),
+                    None,
+                ));
+            }
+        } else if let TranscriptItem::Compaction {
+            phase,
+            percent,
+            compacted_message_count,
+            tokens_before,
+        } = item
+        {
+            let compact_rows = compaction_render_rows(
+                *phase,
+                *percent,
+                *compacted_message_count,
+                *tokens_before,
+                text_width,
+                selected,
+                theme,
+            );
+            rows.extend(compact_rows);
+        } else {
             for line in TranscriptRenderer::new(text_width).render_markdownish(&content) {
-                if y >= area.bottom() {
-                    break;
-                }
-                write_line(
-                    area,
-                    buf,
-                    y,
-                    &format!("  {}", line.display_text()),
-                    selected_style(
-                        transcript_line_style(&line, style, self.theme),
-                        selected,
-                        self.theme,
-                    ),
-                );
-                y = y.saturating_add(1);
+                rows.push(TranscriptRenderRow::new(
+                    format!("  {}", line.display_text()),
+                    selected_style(transcript_line_style(&line, style, theme), selected, theme),
+                    None,
+                ));
             }
         }
     }
+
+    rows
+}
+
+fn compaction_render_rows(
+    phase: Option<neo_agent_core::CompactionPhase>,
+    percent: u8,
+    compacted_message_count: usize,
+    tokens_before: usize,
+    text_width: usize,
+    selected: bool,
+    theme: TuiTheme,
+) -> Vec<TranscriptRenderRow> {
+    let bar_width = COMPACTION_BAR_WIDTH.min(text_width.saturating_sub(7).max(8));
+    let percent = percent.min(100);
+    let filled = bar_width.saturating_mul(usize::from(percent)) / 100;
+    let bar = format!(
+        "[{}{}] {percent}%",
+        "#".repeat(filled),
+        ".".repeat(bar_width.saturating_sub(filled))
+    );
+    let summary = format!(
+        "Compacted {} messages · {} tokens before",
+        compacted_message_count,
+        format_token_count(tokens_before)
+    );
+    let tip = "Tip: Use /compact after a long task to keep Neo focused.";
+    let muted = selected_style(Style::default().fg(theme.notice), selected, theme);
+    let progress = selected_style(Style::default().fg(theme.accent), selected, theme);
+
+    let mut rows = vec![
+        TranscriptRenderRow::new("  Compacting conversation...", muted, None),
+        TranscriptRenderRow::new(format!("  {bar}"), progress, None),
+        TranscriptRenderRow::new(format!("  {}", compaction_phase_label(phase)), muted, None),
+    ];
+    for line in wrap_width(&summary, text_width) {
+        rows.push(TranscriptRenderRow::new(format!("  {line}"), muted, None));
+    }
+    for line in wrap_width(tip, text_width) {
+        rows.push(TranscriptRenderRow::new(format!("  {line}"), muted, None));
+    }
+    rows
+}
+
+fn compaction_phase_label(phase: Option<neo_agent_core::CompactionPhase>) -> &'static str {
+    match phase {
+        Some(neo_agent_core::CompactionPhase::Estimating) => "Estimating context size",
+        Some(neo_agent_core::CompactionPhase::SelectingBoundary) => {
+            "Selecting safe compaction boundary"
+        }
+        Some(neo_agent_core::CompactionPhase::Summarizing) => "Summarizing older context",
+        Some(neo_agent_core::CompactionPhase::Applying) => "Applying compacted context",
+        None => "Preparing compaction",
+    }
+}
+
+fn tool_render_rows(
+    tool: &ToolRunTranscript,
+    expanded: bool,
+    selected: bool,
+    activity_frame: usize,
+    theme: TuiTheme,
+    text_width: usize,
+) -> Vec<TranscriptRenderRow> {
+    if let Some(diff) = tool.result.as_deref().and_then(DiffModel::parse_unified) {
+        return diff_tool_render_rows(tool, &diff, expanded, selected, theme, text_width);
+    }
+
+    let header = format!(
+        "{} Use {}{}",
+        tool_status_symbol(tool.status, activity_frame),
+        tool_call_label(tool),
+        tool_status_suffix(tool.status)
+    );
+    let style = selected_style(status_style(tool.status, theme), selected, theme);
+    let muted = selected_style(Style::default().fg(theme.notice), selected, theme);
+    let mut rows = vec![TranscriptRenderRow::new(header, style, None)];
+    let detail = tool.display_detail();
+    if detail.is_empty() {
+        return rows;
+    }
+
+    let detail_lines = detail.lines().collect::<Vec<_>>();
+    let visible_count = if expanded {
+        detail_lines.len()
+    } else {
+        detail_lines.len().min(TOOL_PREVIEW_LINES)
+    };
+    for line in detail_lines.iter().take(visible_count) {
+        for wrapped in wrap_width(line, text_width.saturating_sub(4).max(1)) {
+            rows.push(TranscriptRenderRow::new(
+                format!("  └─ {wrapped}"),
+                muted,
+                None,
+            ));
+        }
+    }
+    if !expanded && detail_lines.len() > visible_count {
+        rows.push(TranscriptRenderRow::new(
+            format!(
+                "     … {} more lines, ctrl+o expand",
+                detail_lines.len() - visible_count
+            ),
+            muted,
+            None,
+        ));
+    }
+    rows
+}
+
+fn diff_tool_render_rows(
+    tool: &ToolRunTranscript,
+    diff: &DiffModel,
+    expanded: bool,
+    selected: bool,
+    theme: TuiTheme,
+    text_width: usize,
+) -> Vec<TranscriptRenderRow> {
+    let stats = diff.stats();
+    let file = diff.files().first();
+    let path = file
+        .map(|file| {
+            if file.new_path.is_empty() {
+                file.old_path.as_str()
+            } else {
+                file.new_path.as_str()
+            }
+        })
+        .unwrap_or(tool.name.as_str());
+    let header = format!("◌ Edited {path} +{} -{}", stats.added, stats.removed);
+    let mut rows = vec![TranscriptRenderRow::new(
+        header,
+        selected_style(Style::default().fg(theme.diff_added), selected, theme),
+        None,
+    )];
+    let Some(file) = file else {
+        return rows;
+    };
+
+    let mut emitted = 0usize;
+    for hunk in &file.hunks {
+        rows.push(TranscriptRenderRow::new(
+            format!("  {}", hunk.header),
+            selected_style(
+                Style::default()
+                    .fg(theme.diff_hunk)
+                    .add_modifier(Modifier::BOLD),
+                selected,
+                theme,
+            ),
+            None,
+        ));
+        let mut old_line = diff_old_start(&hunk.header).unwrap_or(1);
+        let mut new_line = diff_new_start(&hunk.header).unwrap_or(old_line);
+        for line in &hunk.lines {
+            if !expanded && emitted >= DIFF_PREVIEW_LINES {
+                rows.push(TranscriptRenderRow::new(
+                    "     … more lines, ctrl+o expand",
+                    selected_style(Style::default().fg(theme.notice), selected, theme),
+                    None,
+                ));
+                return rows;
+            }
+            let (line_no, text, style) = match line {
+                DiffLine::Context(text) => {
+                    let current = new_line;
+                    old_line += 1;
+                    new_line += 1;
+                    (
+                        current,
+                        format!(" {text}"),
+                        Style::default().fg(theme.diff_context),
+                    )
+                }
+                DiffLine::Removed(text) => {
+                    let current = old_line;
+                    old_line += 1;
+                    (
+                        current,
+                        format!("-{text}"),
+                        Style::default().fg(theme.diff_removed),
+                    )
+                }
+                DiffLine::Added(text) => {
+                    let current = new_line;
+                    new_line += 1;
+                    (
+                        current,
+                        format!("+{text}"),
+                        Style::default().fg(theme.diff_added),
+                    )
+                }
+            };
+            rows.push(TranscriptRenderRow::new(
+                fit_tool_line(&format!("  {line_no:<3}{text}"), text_width),
+                selected_style(style, selected, theme),
+                None,
+            ));
+            emitted += 1;
+        }
+    }
+    rows
+}
+
+fn tool_call_label(tool: &ToolRunTranscript) -> String {
+    let arguments = tool.arguments.as_deref().unwrap_or_default().trim();
+    if arguments.is_empty() {
+        return format!("{}()", tool.name);
+    }
+    format!("{}({})", tool.name, one_line(arguments))
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn tool_status_symbol(status: ToolStatusKind, activity_frame: usize) -> &'static str {
+    match status {
+        ToolStatusKind::Failed => "×",
+        ToolStatusKind::Cancelled => "×",
+        ToolStatusKind::Pending | ToolStatusKind::Running => {
+            const FRAMES: [&str; 4] = ["·", "∙", "•", "∙"];
+            FRAMES[activity_frame % FRAMES.len()]
+        }
+        ToolStatusKind::Succeeded => "●",
+    }
+}
+
+fn tool_status_suffix(status: ToolStatusKind) -> &'static str {
+    match status {
+        ToolStatusKind::Pending => "      pending",
+        ToolStatusKind::Running => "      running",
+        _ => "",
+    }
+}
+
+fn diff_old_start(header: &str) -> Option<usize> {
+    diff_range_start(header, '-')
+}
+
+fn diff_new_start(header: &str) -> Option<usize> {
+    diff_range_start(header, '+')
+}
+
+fn diff_range_start(header: &str, marker: char) -> Option<usize> {
+    let marker_index = header.find(marker)?;
+    let range = header.get(marker_index + 1..)?.split_whitespace().next()?;
+    let start = range.split(',').next()?;
+    start.parse().ok()
+}
+
+fn fit_tool_line(text: &str, width: usize) -> String {
+    clip_width(text, width.max(1))
+}
+
+struct TranscriptRenderRow {
+    text: String,
+    style: Style,
+    fill: Option<Style>,
+}
+
+impl TranscriptRenderRow {
+    fn new(text: impl Into<String>, style: Style, fill: Option<Style>) -> Self {
+        Self {
+            text: text.into(),
+            style,
+            fill,
+        }
+    }
+
+    fn blank() -> Self {
+        Self::new("", Style::default(), None)
+    }
+}
+
+fn bottom_row_range(row_count: usize, height: usize) -> std::ops::Range<usize> {
+    if height == 0 || row_count == 0 {
+        return 0..0;
+    }
+
+    let window = height.min(row_count);
+    row_count - window..row_count
 }
 
 fn selected_style(style: Style, selected: bool, theme: TuiTheme) -> Style {
@@ -267,7 +725,11 @@ fn selected_style(style: Style, selected: bool, theme: TuiTheme) -> Style {
     }
 }
 
-fn transcript_row(item: &TranscriptItem, theme: TuiTheme) -> (&'static str, String, Style) {
+fn transcript_row(
+    item: &TranscriptItem,
+    theme: TuiTheme,
+    expanded: bool,
+) -> (&'static str, String, Style) {
     match item {
         TranscriptItem::User { content } => {
             ("You", content.clone(), Style::default().fg(theme.user))
@@ -281,17 +743,52 @@ fn transcript_row(item: &TranscriptItem, theme: TuiTheme) -> (&'static str, Stri
             name,
             detail,
             status,
-        } => (
-            "Tool",
-            format!("{} {} ({})", status.marker(), name, detail),
-            status_style(*status, theme),
-        ),
+            ..
+        } => {
+            let detail = if expanded {
+                detail.clone()
+            } else {
+                collapsed_tool_detail(*status, detail)
+            };
+            (
+                "Tool",
+                format!("{} {} ({})", status.marker(), name, detail),
+                status_style(*status, theme),
+            )
+        }
         TranscriptItem::Image { metadata, .. } => {
             ("Image", metadata.clone(), Style::default().fg(theme.notice))
+        }
+        TranscriptItem::Compaction { .. } => {
+            ("Compact", String::new(), Style::default().fg(theme.accent))
         }
         TranscriptItem::Notice { content } => {
             ("Notice", content.clone(), Style::default().fg(theme.notice))
         }
+    }
+}
+
+fn format_token_count(tokens: usize) -> String {
+    if tokens >= 1_000_000 {
+        format!("{}m", tokens / 1_000_000)
+    } else if tokens >= 1_000 {
+        format!("{}k", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn collapsed_tool_detail(status: ToolStatusKind, detail: &str) -> String {
+    let detail = detail.trim();
+    if detail.is_empty() {
+        return status.label().to_owned();
+    }
+
+    let line_count = detail.lines().count().max(1);
+    if line_count == 1 {
+        format!("{} · 1 line", status.label())
+    } else {
+        format!("{} · {line_count} lines", status.label())
     }
 }
 
@@ -395,6 +892,17 @@ impl<'a> PromptWidget<'a> {
 
 impl Widget for PromptWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        buf.set_style(area, Style::default().bg(self.theme.composer_bg));
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.overlay_border));
+        let inner = block.inner(area);
+        block.render(area, buf);
+
         let mut display = String::from("> ");
         for (index, character) in self.prompt.text.chars().enumerate() {
             if index == self.prompt.cursor {
@@ -406,19 +914,19 @@ impl Widget for PromptWidget<'_> {
             display.push('▏');
         }
 
-        let width = usize::from(area.width.max(1));
+        let width = usize::from(inner.width.max(1));
         for (row, line) in wrap_width(&display, width)
             .into_iter()
             .enumerate()
-            .take(usize::from(area.height))
+            .take(usize::from(inner.height))
         {
             let Ok(row) = u16::try_from(row) else {
                 break;
             };
             write_line(
-                area,
+                inner,
                 buf,
-                area.y + row,
+                inner.y + row,
                 &line,
                 Style::default().fg(self.theme.prompt),
             );
@@ -429,37 +937,80 @@ impl Widget for PromptWidget<'_> {
 impl Widget for ApprovalModal {
     fn render(self, area: Rect, buf: &mut Buffer) {
         Clear.render(area, buf);
+        buf.set_style(area, Style::default().bg(self.theme.approval_bg));
 
         let block = Block::default()
-            .title(self.title.as_str())
-            .title_alignment(Alignment::Center)
+            .title(" Action required ")
+            .title_alignment(Alignment::Left)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow));
+            .border_style(Style::default().fg(self.theme.approval_border));
         let inner = block.inner(area);
         block.render(area, buf);
 
-        let text_width = usize::from(inner.width.saturating_sub(2).max(1));
+        let content_area = Rect {
+            x: inner.x.saturating_add(1),
+            y: inner.y,
+            width: inner.width.saturating_sub(2).max(1),
+            height: inner.height,
+        };
+        let text_width = usize::from(content_area.width.max(1));
         let mut y = inner.y;
+        write_line(
+            content_area,
+            buf,
+            y,
+            &self.title,
+            Style::default()
+                .fg(self.theme.approval_title)
+                .add_modifier(Modifier::BOLD),
+        );
+        y = y.saturating_add(1);
+
         for line in wrap_width(&self.body, text_width) {
-            if y >= inner.bottom() {
+            if y >= content_area.bottom() {
                 return;
             }
-            write_line(inner, buf, y, &line, Style::default());
+            write_line(content_area, buf, y, &line, Style::default());
             y = y.saturating_add(1);
         }
 
         y = y.saturating_add(1);
+        if y < content_area.bottom() {
+            let hints = self
+                .options
+                .iter()
+                .enumerate()
+                .map(|(index, option)| format!("{}. {}", index + 1, option.label))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            write_line(
+                content_area,
+                buf,
+                y,
+                &hints,
+                Style::default().fg(self.theme.notice),
+            );
+            y = y.saturating_add(1);
+        }
         for (index, option) in self.options.iter().enumerate() {
-            if y >= inner.bottom() {
+            if y >= content_area.bottom() {
                 break;
             }
             let marker = if index == self.selected { ">" } else { " " };
             let style = if index == self.selected {
-                Style::default().fg(Color::Black).bg(Color::Yellow)
-            } else {
                 Style::default()
+                    .fg(self.theme.selected_fg)
+                    .bg(self.theme.selected_bg)
+            } else {
+                Style::default().fg(self.theme.prompt)
             };
-            write_line(inner, buf, y, &format!("{marker} {}", option.label), style);
+            write_line(
+                content_area,
+                buf,
+                y,
+                &format!("{marker} {}", option.label),
+                style,
+            );
             y = y.saturating_add(1);
         }
     }
@@ -471,13 +1022,19 @@ impl Widget for &NeoTuiApp {
             return;
         }
 
-        let header = format!(
-            "{} | session: {} | model: {} | {:?}",
-            self.title(),
-            self.session_label(),
-            self.model_label(),
-            self.mode()
-        );
+        buf.set_style(area, Style::default().bg(self.theme().background));
+        let mut header_parts = vec![
+            self.title().to_owned(),
+            format!("session:{}", self.session_label()),
+            format!("model:{}", self.model_label()),
+        ];
+        if let Some(context) = self.context_window_label() {
+            header_parts.push(context);
+        }
+        if let Some(working) = self.working_label() {
+            header_parts.push(format!("● {working}"));
+        }
+        let header = header_parts.join("  ");
         write_line(
             area,
             buf,
@@ -488,78 +1045,105 @@ impl Widget for &NeoTuiApp {
                 .add_modifier(Modifier::BOLD),
         );
 
-        let prompt_height = prompt_height(self.prompt(), area.width);
-        let status_height = self
-            .tool_statuses()
-            .len()
-            .min(usize::from(area.height.saturating_sub(2)))
-            .try_into()
-            .unwrap_or(0);
-        let body_y = area.y.saturating_add(1);
-        let footer_height = prompt_height.saturating_add(status_height);
-        let body_height = area.height.saturating_sub(1).saturating_sub(footer_height);
-
-        let body = Rect {
-            x: area.x,
-            y: body_y,
-            width: area.width,
-            height: body_height,
+        let approval_overlay = match self.focused_overlay().map(|overlay| &overlay.kind) {
+            Some(OverlayKind::Approval(request)) => Some(request),
+            _ => None,
         };
+        let layout = app_layout(self, area);
         TranscriptWidget::new(self.transcript())
             .with_view(self.transcript_view())
             .with_selection(self.transcript_selection())
+            .with_expanded_items(self.expanded_transcript_items())
+            .with_activity_frame(self.activity_frame())
             .with_theme(self.theme())
-            .render(body, buf);
+            .render(layout.body, buf);
 
-        let status_y = body.y.saturating_add(body.height);
-        let statuses = self.tool_statuses();
-        if status_height > 0 {
-            StatusWidget::new(&statuses)
+        if let Some(request) = approval_overlay {
+            request
+                .modal
+                .clone()
                 .with_theme(self.theme())
-                .render(
-                    Rect {
-                        x: area.x,
-                        y: status_y,
-                        width: area.width,
-                        height: status_height,
-                    },
-                    buf,
-                );
+                .render(layout.approval, buf);
         }
 
         PromptWidget::new(self.prompt())
             .with_theme(self.theme())
-            .render(
-                Rect {
-                    x: area.x,
-                    y: status_y.saturating_add(status_height),
-                    width: area.width,
-                    height: prompt_height,
-                },
-                buf,
-            );
+            .render(layout.prompt, buf);
 
-        if let Some(overlay) = self.focused_overlay() {
-            render_overlay(overlay, area, buf);
+        render_footer(self, layout.footer, buf);
+
+        if let Some(overlay) = self.focused_overlay()
+            && !matches!(overlay.kind, OverlayKind::Approval(_))
+        {
+            render_overlay(overlay, area, layout.prompt.y, buf);
         }
     }
 }
 
-fn prompt_height(prompt: &PromptState, width: u16) -> u16 {
-    let display_width = usize::from(width.max(1));
-    let lines = wrap_width(&format!("> {}", prompt.text), display_width)
-        .len()
-        .max(1);
-    u16::try_from(lines).unwrap_or(u16::MAX)
+fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    buf.set_style(area, Style::default().bg(app.theme().background));
+    let mut footer_parts = vec![
+        "neo".to_owned(),
+        app.model_label().to_owned(),
+        app.session_label().to_owned(),
+    ];
+    if let Some(context) = app.context_window_label() {
+        footer_parts.push(context);
+    }
+    if let Some(working) = app.working_label() {
+        footer_parts.push(working);
+    }
+    if !app.transcript_view().is_following_tail() {
+        footer_parts.push("new output below · end to jump".to_owned());
+    }
+    footer_parts.push("enter send · shift+enter newline · / commands".to_owned());
+    let footer = format!(" {}", footer_parts.join("  "));
+    write_line(
+        area,
+        buf,
+        area.y,
+        &footer,
+        Style::default().fg(app.theme().notice),
+    );
 }
 
-fn render_overlay(overlay: &Overlay, area: Rect, buf: &mut Buffer) {
+fn approval_panel_height(modal: &ApprovalModal, width: u16) -> u16 {
+    let content_width = usize::from(width.saturating_sub(4).max(1));
+    let body_lines = wrap_width(&modal.body, content_width).len();
+    let total = 2usize
+        .saturating_add(1)
+        .saturating_add(body_lines)
+        .saturating_add(1)
+        .saturating_add(1)
+        .saturating_add(modal.options.len());
+    u16::try_from(total.clamp(5, 10)).unwrap_or(10)
+}
+
+fn prompt_height(prompt: &PromptState, width: u16) -> u16 {
+    let display_width = usize::from(width.saturating_sub(2).max(1));
+    let lines = wrap_width(&format!("> {}", prompt.text), display_width)
+        .len()
+        .clamp(1, 6);
+    u16::try_from(lines.saturating_add(2)).unwrap_or(8)
+}
+
+fn render_overlay(overlay: &Overlay, area: Rect, composer_y: u16, buf: &mut Buffer) {
     let width = area.width.saturating_sub(4).clamp(20, 56);
     let lines = overlay_lines(overlay, usize::from(width.saturating_sub(2).max(1)));
     let content_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let height = content_height.saturating_add(2).min(area.height).max(3);
     let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(height) / 2;
+    let y = if matches!(overlay.kind, OverlayKind::PromptCompletion(_)) {
+        composer_y
+            .saturating_sub(height)
+            .max(area.y.saturating_add(1))
+    } else {
+        area.y + area.height.saturating_sub(height) / 2
+    };
     let overlay_area = Rect {
         x,
         y,
@@ -630,6 +1214,22 @@ fn write_line(area: Rect, buf: &mut Buffer, y: u16, text: &str, style: Style) {
 
     let clipped = clip_width(text, usize::from(area.width));
     buf.set_string(area.x, y, clipped, style);
+}
+
+fn fill_line(area: Rect, buf: &mut Buffer, y: u16, style: Style) {
+    if area.width == 0 || y >= area.bottom() {
+        return;
+    }
+
+    buf.set_style(
+        Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: 1,
+        },
+        style,
+    );
 }
 
 fn clip_width(text: &str, max_width: usize) -> String {

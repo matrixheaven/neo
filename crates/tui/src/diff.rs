@@ -60,19 +60,8 @@ impl DiffModel {
             let Some(diff_line) = DiffLine::parse(line) else {
                 continue;
             };
-            if current_file.is_none() {
-                current_file = Some(DiffFile {
-                    old_path: pending_old_path.take().unwrap_or_default(),
-                    new_path: String::new(),
-                    hunks: Vec::new(),
-                });
-            }
             if current_hunk.is_none() {
-                current_hunk = Some(DiffHunk {
-                    header: "@@".to_owned(),
-                    lines: Vec::new(),
-                    stats: DiffStats::default(),
-                });
+                continue;
             }
             if let Some(hunk) = &mut current_hunk {
                 hunk.stats.add_line(&diff_line);
@@ -99,6 +88,9 @@ impl DiffModel {
                 stats.added += hunk.stats.added;
                 stats.removed += hunk.stats.removed;
             }
+        }
+        if stats.added == 0 && stats.removed == 0 {
+            return None;
         }
 
         Some(Self { files, stats })

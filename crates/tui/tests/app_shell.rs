@@ -1,9 +1,10 @@
 use neo_tui::{
-    AppMode, CommandPaletteState, CommandSpec, ImageProtocolPreference, ImageRenderPolicy,
-    ModelPickerState, NeoTuiApp, Overlay, OverlayKind, PickerItem, SessionPickerState,
-    StreamUpdate, TerminalImageCapabilities, TranscriptLine, TranscriptRenderer,
+    AppMode, CommandPaletteState, CommandSpec, ContextWindow, ImageProtocolPreference,
+    ImageRenderPolicy, ModelPickerState, NeoTuiApp, Overlay, OverlayKind, PickerItem,
+    SessionPickerState, StreamUpdate, TerminalImageCapabilities, TranscriptLine,
+    TranscriptRenderer,
 };
-use ratatui::{Terminal, backend::TestBackend, buffer::Cell};
+use ratatui::{Terminal, backend::TestBackend, buffer::Cell, layout::Rect};
 use std::path::PathBuf;
 
 fn render_app(width: u16, height: u16, app: &NeoTuiApp) -> Vec<String> {
@@ -19,6 +20,61 @@ fn render_app(width: u16, height: u16, app: &NeoTuiApp) -> Vec<String> {
         .chunks(width as usize)
         .map(|line| line.iter().map(Cell::symbol).collect::<String>())
         .collect()
+}
+
+#[test]
+fn app_shell_renders_context_window_and_working_status() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
+    app.prompt_mut()
+        .apply_edit(neo_tui::PromptEdit::Insert("hello"));
+    assert_eq!(app.submit_prompt(), Some("hello".to_owned()));
+
+    let lines = render_app(100, 12, &app);
+
+    assert!(lines.iter().any(|line| line.contains("ctx 12k/200k")));
+    assert!(lines.iter().any(|line| line.contains("● working")));
+}
+
+#[test]
+fn app_shell_working_status_hides_running_tool_names_from_chrome() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    app.apply_stream_update(StreamUpdate::ToolStarted {
+        id: "tool-1".to_owned(),
+        name: "shell.run".to_owned(),
+        detail: "cargo test --workspace".to_owned(),
+    });
+
+    assert_eq!(
+        app.working_label().as_deref(),
+        Some("working · esc interrupt")
+    );
+    let lines = render_app(100, 12, &app);
+    assert!(!lines.iter().any(|line| line.contains("running shell.run")));
+    assert!(!lines.iter().any(|line| line.contains("shell.run running")));
+    assert!(lines.iter().any(|line| line.contains("Use shell.run")));
+    assert!(lines.iter().any(|line| line.contains("running")));
+}
+
+#[test]
+fn app_shell_updates_context_usage_from_agent_event() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    app.set_context_window(Some(ContextWindow::new(200_000)));
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::TokenUsage {
+        turn: 1,
+        usage: neo_agent_core::AgentTokenUsage {
+            input_tokens: 123,
+            output_tokens: 45,
+        },
+    });
+
+    assert_eq!(
+        app.context_window(),
+        Some(ContextWindow::new(200_000).with_used_tokens(168))
+    );
+    let lines = render_app(100, 12, &app);
+    assert!(lines.iter().any(|line| line.contains("ctx 168/200k")));
 }
 
 #[test]
@@ -45,6 +101,113 @@ fn app_shell_maps_agent_core_approval_request_to_approval_overlay() {
                 && modal.modal.title.contains("Tool")
                 && modal.modal.body.contains("cargo test -p neo-tui")
     ));
+}
+
+#[test]
+fn app_shell_renders_approval_panel_above_composer_at_bottom() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    app.transcript_mut()
+        .push(neo_tui::TranscriptItem::assistant("Earlier answer"));
+    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 7,
+        id: "approval-7".to_owned(),
+        operation: neo_agent_core::PermissionOperation::Tool,
+        subject: "shell.run".to_owned(),
+        arguments: serde_json::json!({ "command": "cargo test -p neo-tui" }),
+    });
+
+    let lines = render_app(76, 18, &app);
+    let approval_row = lines
+        .iter()
+        .position(|line| line.contains("Action required"))
+        .expect("approval panel title renders");
+    let composer_row = lines
+        .iter()
+        .rposition(|line| line.contains("> "))
+        .expect("composer renders");
+    let footer_row = lines
+        .iter()
+        .rposition(|line| line.contains("neo") && line.contains("shift+enter"))
+        .expect("footer renders below composer");
+
+    assert!(
+        footer_row > composer_row,
+        "footer should sit below the composer, composer={composer_row}, footer={footer_row}"
+    );
+    assert!(
+        composer_row > approval_row,
+        "composer should remain below approval panel"
+    );
+    assert!(
+        composer_row - approval_row <= 12,
+        "approval panel should sit directly above the composer"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("cargo test -p neo-tui"))
+    );
+}
+
+#[test]
+fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
+    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]");
+    app.transcript_mut()
+        .push(neo_tui::TranscriptItem::assistant("Ready"));
+    app.prompt_mut()
+        .apply_edit(neo_tui::PromptEdit::Insert("/"));
+
+    let lines = render_app(92, 18, &app);
+    let composer_row = lines
+        .iter()
+        .rposition(|line| line.contains("> /"))
+        .expect("composer prompt renders");
+    let footer_row = lines
+        .iter()
+        .rposition(|line| line.contains("neo") && line.contains("deepseek"))
+        .expect("neo footer renders");
+
+    assert!(
+        composer_row >= lines.len().saturating_sub(4),
+        "composer should stay pinned near bottom, got row {composer_row}"
+    );
+    assert!(
+        footer_row > composer_row,
+        "footer should sit below composer, composer={composer_row}, footer={footer_row}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("shift+enter")),
+        "footer should advertise compact keyboard hints"
+    );
+    assert!(
+        lines[composer_row.saturating_sub(1)].contains('┌')
+            || lines[composer_row.saturating_sub(1)].contains('─'),
+        "composer should render inside a bordered input box"
+    );
+}
+
+#[test]
+fn app_shell_syncs_transcript_view_to_keep_tail_visible_in_small_viewports() {
+    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]");
+    for index in 0..36 {
+        app.transcript_mut()
+            .push(neo_tui::TranscriptItem::notice(format!(
+                "history line {index}"
+            )));
+    }
+
+    app.sync_transcript_view_for_area(Rect::new(0, 0, 80, 12));
+
+    let lines = render_app(80, 12, &app);
+    assert!(
+        lines.iter().any(|line| line.contains("history line 35")),
+        "latest transcript row should remain visible after the body overflows:\n{}",
+        lines.join("\n")
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("history line 0")),
+        "oldest row should be clipped from the viewport once tail-follow is synced"
+    );
 }
 
 #[test]
@@ -82,15 +245,93 @@ fn app_shell_maps_agent_core_shell_command_lifecycle_to_tool_status() {
             name,
             detail,
             status,
+            tool_run,
         }) if name == "shell.run"
             && detail.contains("exit 0")
             && detail.contains("stdout: ok")
             && status == &neo_tui::ToolStatusKind::Succeeded
+            && tool_run.arguments.as_deref().is_some_and(|arguments| {
+                arguments.contains("cargo test -p neo-tui")
+                    && arguments.contains("/workspace/neo")
+            })
+            && tool_run.result.as_deref().is_some_and(|result| {
+                result.contains("exit 0") && result.contains("stdout: ok")
+            })
+            && tool_run.metadata.exit_code == Some(0)
     ));
 }
 
 #[test]
-fn app_shell_merges_model_tool_call_and_execution_lifecycle() {
+fn running_tool_call_is_rendered_in_transcript_before_finish() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "list".to_owned(),
+        arguments: serde_json::json!({ "path": "crates/tui/src" }),
+    });
+
+    assert_eq!(
+        app.transcript()
+            .items()
+            .iter()
+            .filter(|item| matches!(item, neo_tui::TranscriptItem::Tool { .. }))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        app.transcript().items().last(),
+        Some(neo_tui::TranscriptItem::Tool {
+            name,
+            status,
+            tool_run,
+            ..
+        }) if name == "list"
+            && status == &neo_tui::ToolStatusKind::Running
+            && tool_run.arguments.as_deref().is_some_and(|arguments| {
+                arguments.contains("crates/tui/src")
+            })
+    ));
+
+    let lines = render_app(100, 12, &app);
+    assert!(lines.iter().any(|line| line.contains("Use list")));
+    assert!(lines.iter().any(|line| line.contains("running")));
+    assert!(!lines.iter().any(|line| line.contains("list running")));
+}
+
+#[test]
+fn stream_updates_do_not_force_tail_when_transcript_is_detached() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    for index in 0..24 {
+        app.transcript_mut()
+            .push(neo_tui::TranscriptItem::notice(format!(
+                "history line {index}"
+            )));
+    }
+    app.sync_transcript_view_for_area(Rect::new(0, 0, 80, 12));
+    app.scroll_transcript_up(6);
+    let before = app.transcript_view().scrollback();
+
+    app.apply_stream_update(StreamUpdate::TextDelta {
+        text: "new streamed content".to_owned(),
+    });
+    app.apply_stream_update(StreamUpdate::ToolStarted {
+        id: "tool-1".to_owned(),
+        name: "list".to_owned(),
+        detail: r#"{"path":"."}"#.to_owned(),
+    });
+    app.apply_stream_update(StreamUpdate::ToolFinished {
+        id: "tool-1".to_owned(),
+        detail: "done".to_owned(),
+        success: true,
+    });
+
+    assert_eq!(app.transcript_view().scrollback(), before);
+}
+
+#[test]
+fn app_shell_preserves_tool_arguments_separately_from_result() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
 
     app.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
@@ -138,14 +379,58 @@ fn app_shell_merges_model_tool_call_and_execution_lifecycle() {
             name,
             detail,
             status,
+            tool_run,
         }) if name == "read"
             && detail == "read README"
             && status == &neo_tui::ToolStatusKind::Succeeded
+            && tool_run.name == "read"
+            && tool_run.arguments.as_deref() == Some(r#"{"path":"README.md"}"#)
+            && tool_run.result.as_deref() == Some("read README")
     ));
 }
 
 #[test]
-fn app_shell_maps_agent_core_queue_and_compaction_events_to_notices() {
+fn app_shell_failed_shell_transcript_keeps_exit_code_metadata() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::ShellCommandStarted {
+        turn: 1,
+        id: "shell-2".to_owned(),
+        command: "false".to_owned(),
+        cwd: PathBuf::from("/workspace/neo"),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ShellCommandFinished {
+        turn: 1,
+        id: "shell-2".to_owned(),
+        exit_code: Some(2),
+        stdout: String::new(),
+        stderr: "nope".to_owned(),
+        truncated: true,
+    });
+
+    assert!(matches!(
+        app.transcript().items().last(),
+        Some(neo_tui::TranscriptItem::Tool {
+            name,
+            detail,
+            status,
+            tool_run,
+        }) if name == "shell.run"
+            && status == &neo_tui::ToolStatusKind::Failed
+            && detail.contains("exit 2")
+            && detail.contains("stderr: nope")
+            && detail.contains("truncated")
+            && tool_run.result.as_deref().is_some_and(|result| {
+                result.contains("exit 2") && result.contains("stderr: nope")
+            })
+            && tool_run.metadata.exit_code == Some(2)
+            && tool_run.metadata.stderr.as_deref() == Some("nope")
+            && tool_run.metadata.truncated
+    ));
+}
+
+#[test]
+fn app_shell_maps_agent_core_queue_notice_and_compaction_boundary() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
 
     app.apply_agent_event(neo_agent_core::AgentEvent::QueueDrained {
@@ -169,10 +454,49 @@ fn app_shell_maps_agent_core_queue_and_compaction_events_to_notices() {
             _ => None,
         })
         .collect();
-    assert_eq!(notices.len(), 2);
+    assert_eq!(notices.len(), 1);
     assert!(notices[0].contains("FollowUp queue drained (2)"));
-    assert!(notices[1].contains("Compaction applied"));
-    assert!(notices[1].contains("12345 tokens before"));
+    assert!(matches!(
+        app.transcript().items()[1],
+        neo_tui::TranscriptItem::Compaction {
+            compacted_message_count: 4,
+            tokens_before: 12_345,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn app_shell_updates_compaction_progress_in_place() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::CompactionStarted {
+        reason: neo_agent_core::CompactionReason::Threshold,
+        tokens_before: 12_345,
+        message_count: 8,
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::CompactionProgress {
+        phase: neo_agent_core::CompactionPhase::Summarizing,
+        percent: 70,
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::CompactionApplied {
+        summary: neo_agent_core::CompactionSummary {
+            summary: "Older context summarized.".to_owned(),
+            tokens_before: 12_345,
+            first_kept_message_index: 4,
+        },
+    });
+
+    assert_eq!(app.transcript().items().len(), 1);
+    assert!(matches!(
+        app.transcript().items()[0],
+        neo_tui::TranscriptItem::Compaction {
+            phase: Some(neo_agent_core::CompactionPhase::Applying),
+            percent: 100,
+            compacted_message_count: 4,
+            tokens_before: 12_345
+        }
+    ));
 }
 
 #[test]
@@ -662,6 +986,52 @@ fn prompt_completion_overlay_confirms_selected_replacement() {
 }
 
 #[test]
+fn prompt_completion_overlay_renders_above_boxed_composer() {
+    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]");
+    app.prompt_mut()
+        .apply_edit(neo_tui::PromptEdit::Insert("/"));
+    let prefix = app
+        .prompt()
+        .completion_prefix()
+        .expect("prompt has slash prefix");
+
+    app.open_prompt_completion_picker(
+        prefix,
+        [
+            PickerItem::new("/tree", "/tree", Some("Browse local session tree")),
+            PickerItem::new("/review", "/review", Some("Project prompt")),
+        ],
+    );
+
+    let lines = render_app(88, 20, &app);
+    let completion_row = lines
+        .iter()
+        .position(|line| line.contains("Completions"))
+        .expect("completion overlay title renders");
+    let command_row = lines
+        .iter()
+        .position(|line| line.contains("/tree"))
+        .expect("completion item renders");
+    let composer_row = lines
+        .iter()
+        .rposition(|line| line.contains("> /"))
+        .expect("composer prompt renders");
+
+    assert!(
+        completion_row < composer_row,
+        "completion overlay should sit above composer"
+    );
+    assert!(
+        composer_row - completion_row <= 5,
+        "completion overlay should stay attached to composer, completion={completion_row}, composer={composer_row}"
+    );
+    assert!(
+        command_row > completion_row && command_row < composer_row,
+        "completion item should render inside the overlay above composer"
+    );
+}
+
+#[test]
 fn command_palette_session_and_model_pickers_page_selection() {
     let mut palette = CommandPaletteState::new((0..10).map(|index| {
         CommandSpec::new(
@@ -776,7 +1146,7 @@ fn transcript_renderer_handles_markdownish_blocks_and_wrapping() {
     assert!(lines.iter().any(|line| {
         matches!(
             line,
-            TranscriptLine::ListItem { text, indent } if text == "inspect files" && *indent == 0
+            TranscriptLine::ListItem { text, indent, .. } if text == "inspect files" && *indent == 0
         )
     }));
     assert!(lines.iter().any(|line| {
@@ -790,6 +1160,38 @@ fn transcript_renderer_handles_markdownish_blocks_and_wrapping() {
             .iter()
             .all(|line| neo_tui::visible_width(line.text()) <= 28)
     );
+}
+
+#[test]
+fn transcript_renderer_preserves_ordered_markers_and_task_states() {
+    let renderer = TranscriptRenderer::new(40);
+    let lines = renderer.render_markdownish("1. inspect\n2. implement\n- [ ] verify\n- [x] ship");
+    let rendered = lines
+        .iter()
+        .map(TranscriptLine::display_text)
+        .collect::<Vec<_>>();
+
+    assert!(rendered.iter().any(|line| line == "1. inspect"));
+    assert!(rendered.iter().any(|line| line == "2. implement"));
+    assert!(rendered.iter().any(|line| line == "○ verify"));
+    assert!(rendered.iter().any(|line| line == "✓ ship"));
+}
+
+#[test]
+fn transcript_renderer_renders_markdown_tables_without_separator_rows() {
+    let renderer = TranscriptRenderer::new(80);
+    let lines = renderer.render_markdownish(
+        "| File | Change |\n| --- | --- |\n| app.rs | remove footer tool status |\n| components.rs | render tool row |",
+    );
+    let rendered = lines
+        .iter()
+        .map(TranscriptLine::display_text)
+        .collect::<Vec<_>>();
+
+    assert!(rendered.iter().any(|line| line.contains("File")));
+    assert!(rendered.iter().any(|line| line.contains("app.rs")));
+    assert!(!rendered.iter().any(|line| line.contains("---")));
+    assert!(rendered.iter().all(|line| !line.starts_with('|')));
 }
 
 #[test]

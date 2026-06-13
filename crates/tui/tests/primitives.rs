@@ -1,10 +1,12 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use neo_tui::{
     ApprovalChoice, ApprovalModal, ApprovalOption, ChatTranscript, InputEvent, InputParser, KeyId,
-    KeybindingAction, KeybindingsManager, NeoTuiApp, PromptEdit, PromptState, PromptWidget,
-    SelectItem, SelectListState, StatusWidget, ToolStatus, ToolStatusKind, TranscriptItem,
-    TranscriptSelection, TranscriptView, TranscriptWidget, TuiTheme, truncate_width, visible_width,
-    wrap_width,
+    KeybindingAction, KeybindingsManager, ListMarker, NeoTuiApp, PromptEdit, PromptState,
+    PromptWidget, SelectItem, SelectListState, StatusWidget, ToolStatus, ToolStatusKind,
+    TranscriptItem, TranscriptLine, TranscriptRenderer, TranscriptSelection, TranscriptView,
+    TranscriptWidget, TuiTheme, truncate_width, visible_width, wrap_width,
 };
 use ratatui::{
     Terminal,
@@ -133,6 +135,49 @@ fn input_event_maps_terminal_resize_events() {
             rows: 30,
         })
     );
+}
+
+#[test]
+fn input_event_maps_mouse_wheel_events_to_transcript_scroll() {
+    let scroll_up = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 10,
+        row: 4,
+        modifiers: KeyModifiers::NONE,
+    });
+    let scroll_down = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 10,
+        row: 4,
+        modifiers: KeyModifiers::NONE,
+    });
+    let moved = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: 10,
+        row: 4,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert_eq!(
+        InputEvent::from_crossterm_event(&scroll_up),
+        Some(InputEvent::ScrollUp(3))
+    );
+    assert_eq!(
+        InputEvent::from_crossterm_event(&scroll_down),
+        Some(InputEvent::ScrollDown(3))
+    );
+    assert_eq!(InputEvent::from_crossterm_event(&moved), None);
+
+    let mut parser = InputParser::new();
+    assert_eq!(
+        parser.feed_crossterm_event(&scroll_up),
+        vec![InputEvent::ScrollUp(3)]
+    );
+    assert_eq!(
+        parser.feed_crossterm_event(&scroll_down),
+        vec![InputEvent::ScrollDown(3)]
+    );
+    assert!(parser.feed_crossterm_event(&moved).is_empty());
 }
 
 #[test]
@@ -523,17 +568,37 @@ fn transcript_view_tracks_bottom_and_manual_scroll() {
     );
     let mut view = TranscriptView::new();
 
+    view.sync(transcript.len(), 3);
     let bottom = view.visible_range(&transcript, 3);
     assert_eq!(bottom, 5..8);
 
-    view.scroll_up(2, &transcript, 3);
+    view.scroll_up(2);
     assert_eq!(view.visible_range(&transcript, 3), 3..6);
 
-    view.scroll_down(1, &transcript, 3);
+    view.scroll_down(1);
     assert_eq!(view.visible_range(&transcript, 3), 4..7);
 
     view.follow_bottom();
     assert_eq!(view.visible_range(&transcript, 3), 5..8);
+}
+
+#[test]
+fn transcript_view_syncs_visual_row_scrollback_and_follow_tail() {
+    let mut view = TranscriptView::new();
+
+    view.sync(40, 10);
+    assert_eq!(view.visible_row_range(40, 10), 30..40);
+
+    view.scroll_up(12);
+    assert_eq!(view.visible_row_range(40, 10), 18..28);
+
+    view.sync(8, 10);
+    assert_eq!(view.visible_row_range(8, 10), 0..8);
+
+    view.scroll_up(4);
+    view.follow_bottom();
+    view.sync(80, 12);
+    assert_eq!(view.visible_row_range(80, 12), 68..80);
 }
 
 #[test]
@@ -542,11 +607,12 @@ fn transcript_widget_uses_transcript_view_visible_range() {
         (0..6).map(|index| TranscriptItem::notice(format!("line {index}"))),
     );
     let mut view = TranscriptView::new();
-    view.scroll_up_unbounded(2, &transcript);
+    view.sync(11, 3);
+    view.scroll_up(2);
 
     let lines = render_widget(24, 3, TranscriptWidget::new(&transcript).with_view(&view));
 
-    assert!(lines.iter().any(|line| line.contains("line 1")));
+    assert!(lines.iter().any(|line| line.contains("line 4")));
     assert!(!lines.iter().any(|line| line.contains("line 0")));
     assert!(!lines.iter().any(|line| line.contains("line 5")));
 }
@@ -628,6 +694,35 @@ fn prompt_edit_clear_removes_text_and_can_be_undone() {
     prompt.apply_edit(PromptEdit::Undo);
     assert_eq!(prompt.text, "draft text");
     assert_eq!(prompt.cursor, 10);
+}
+
+#[test]
+fn prompt_history_recalls_entries_and_restores_draft() {
+    let mut prompt = PromptState::default();
+    prompt.remember_history("first prompt");
+    prompt.remember_history("second prompt");
+    prompt.apply_edit(PromptEdit::Insert("draft"));
+
+    assert!(prompt.recall_previous_history());
+    assert_eq!(prompt.text, "second prompt");
+    assert_eq!(prompt.cursor, 13);
+
+    assert!(prompt.recall_previous_history());
+    assert_eq!(prompt.text, "first prompt");
+    assert_eq!(prompt.cursor, 12);
+
+    assert!(prompt.recall_next_history());
+    assert_eq!(prompt.text, "second prompt");
+
+    assert!(prompt.recall_next_history());
+    assert_eq!(prompt.text, "draft");
+    assert_eq!(prompt.cursor, 5);
+
+    assert!(prompt.recall_previous_history());
+    assert_eq!(prompt.text, "second prompt");
+    prompt.apply_edit(PromptEdit::Insert(" edited"));
+    assert_eq!(prompt.text, "second prompt edited");
+    assert!(!prompt.recall_next_history());
 }
 
 #[test]
@@ -931,6 +1026,24 @@ fn app_transcript_copy_uses_internal_buffer_and_clears_on_new_prompt() {
 }
 
 #[test]
+fn app_toggles_selected_transcript_tool_detail() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    app.transcript_mut().push(TranscriptItem::tool(
+        "read",
+        "expanded file content",
+        ToolStatusKind::Succeeded,
+    ));
+
+    app.select_visible_transcript_item();
+
+    assert!(app.toggle_selected_transcript_detail());
+    assert!(app.expanded_transcript_items().contains(&0));
+
+    assert!(app.toggle_selected_transcript_detail());
+    assert!(!app.expanded_transcript_items().contains(&0));
+}
+
+#[test]
 fn transcript_widget_renders_roles_tools_and_wraps_content() {
     let transcript = ChatTranscript::from_items([
         TranscriptItem::user("hello world from me"),
@@ -938,12 +1051,198 @@ fn transcript_widget_renders_roles_tools_and_wraps_content() {
         TranscriptItem::tool("shell.run", "cargo test", ToolStatusKind::Succeeded),
     ]);
 
-    let lines = render_widget(18, 11, TranscriptWidget::new(&transcript));
+    let lines = render_widget(48, 14, TranscriptWidget::new(&transcript));
 
     assert!(lines.iter().any(|line| line.contains("You")));
     assert!(lines.iter().any(|line| line.contains("Assistant")));
     assert!(lines.iter().any(|line| line.contains("shell.run")));
-    assert!(lines.iter().any(|line| line.contains("test")));
+    assert!(lines.iter().any(|line| line.contains("Use shell.run")));
+    assert!(lines.iter().any(|line| line.contains("cargo test")));
+}
+
+#[test]
+fn transcript_widget_collapsed_tool_result_shows_preview_and_expand_hint() {
+    let transcript = ChatTranscript::from_items([TranscriptItem::tool(
+        "read",
+        "first file line\nsecond file line\nthird file line\nfourth file line\nfifth file line\nsixth file line",
+        ToolStatusKind::Succeeded,
+    )]);
+
+    let lines = render_widget(64, 8, TranscriptWidget::new(&transcript));
+
+    assert!(lines.iter().any(|line| line.contains("● Use read(")));
+    assert!(lines.iter().any(|line| line.contains("first file line")));
+    assert!(lines.iter().any(|line| line.contains("second file line")));
+    assert!(lines.iter().any(|line| line.contains("third file line")));
+    assert!(lines.iter().any(|line| line.contains("fourth file line")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("… 2 more lines, ctrl+o expand"))
+    );
+    assert!(!lines.iter().any(|line| line.contains("fifth file line")));
+    assert!(!lines.iter().any(|line| line.contains("sixth file line")));
+    assert!(!lines.iter().any(|line| line.contains("succeeded")));
+}
+
+#[test]
+fn transcript_widget_expanded_tool_result_shows_full_output() {
+    let transcript = ChatTranscript::from_items([TranscriptItem::tool(
+        "read",
+        "first file line\nsecond file line\nthird file line\nfourth file line\nfifth file line",
+        ToolStatusKind::Succeeded,
+    )]);
+    let expanded = [0usize].into_iter().collect();
+
+    let lines = render_widget(
+        64,
+        8,
+        TranscriptWidget::new(&transcript).with_expanded_items(&expanded),
+    );
+
+    assert!(lines.iter().any(|line| line.contains("● Use read(")));
+    assert!(lines.iter().any(|line| line.contains("first file line")));
+    assert!(lines.iter().any(|line| line.contains("second file line")));
+    assert!(lines.iter().any(|line| line.contains("third file line")));
+    assert!(lines.iter().any(|line| line.contains("fourth file line")));
+    assert!(lines.iter().any(|line| line.contains("fifth file line")));
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("more lines, ctrl+o expand"))
+    );
+}
+
+#[test]
+fn transcript_widget_renders_edit_diff_summary_and_preview() {
+    let transcript = ChatTranscript::from_items([TranscriptItem::tool(
+        "edit",
+        "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -10,5 +10,6 @@\n unchanged before\n-old value\n+new value\n+another line\n unchanged after",
+        ToolStatusKind::Succeeded,
+    )]);
+
+    let buffer = render_widget_buffer(72, 9, TranscriptWidget::new(&transcript));
+    let lines = buffer
+        .content
+        .chunks(72)
+        .map(|line| line.iter().map(Cell::symbol).collect::<String>())
+        .collect::<Vec<_>>();
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("◌ Edited src/lib.rs +2 -1"))
+    );
+    assert!(lines.iter().any(|line| line.contains("@@ -10,5 +10,6 @@")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("10  unchanged before"))
+    );
+    assert!(lines.iter().any(|line| line.contains("11 -old value")));
+    assert!(lines.iter().any(|line| line.contains("11 +new value")));
+    assert!(lines.iter().any(|line| line.contains("12 +another line")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("13  unchanged after"))
+    );
+
+    let removed_row = lines
+        .iter()
+        .position(|line| line.contains("-old value"))
+        .expect("removed row");
+    let added_row = lines
+        .iter()
+        .position(|line| line.contains("+new value"))
+        .expect("added row");
+    let removed = buffer
+        .cell((5, u16::try_from(removed_row).expect("row fits")))
+        .expect("removed prefix cell");
+    let added = buffer
+        .cell((5, u16::try_from(added_row).expect("row fits")))
+        .expect("added prefix cell");
+    let theme = TuiTheme::default();
+    assert_eq!(removed.fg, theme.diff_removed);
+    assert_eq!(added.fg, theme.diff_added);
+}
+
+#[test]
+fn transcript_widget_does_not_render_plain_read_output_as_edit_diff() {
+    let transcript = ChatTranscript::from_items([TranscriptItem::tool(
+        "read",
+        "[workspace]\nmembers = [\n    \"crates/ai\",\n    \"crates/tui\",\n]",
+        ToolStatusKind::Succeeded,
+    )]);
+
+    let lines = render_widget(72, 8, TranscriptWidget::new(&transcript));
+
+    assert!(lines.iter().any(|line| line.contains("● Use read(")));
+    assert!(lines.iter().any(|line| line.contains("[workspace]")));
+    assert!(lines.iter().any(|line| line.contains("\"crates/ai\"")));
+    assert!(!lines.iter().any(|line| line.contains("Edited")));
+    assert!(!lines.iter().any(|line| line.contains("+0 -0")));
+}
+
+#[test]
+fn transcript_widget_renders_compaction_boundary_with_progress() {
+    let transcript = ChatTranscript::from_items([TranscriptItem::compaction(9, 12_400)]);
+
+    let lines = render_widget(64, 7, TranscriptWidget::new(&transcript));
+
+    assert!(lines.iter().any(|line| line.contains("Compact")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Compacting conversation..."))
+    );
+    assert!(lines.iter().any(|line| line.contains("[########")));
+    assert!(lines.iter().any(|line| line.contains("100%")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Compacted 9 messages"))
+    );
+    assert!(lines.iter().any(|line| line.contains("12k tokens before")));
+    assert!(lines.iter().any(|line| line.contains("Use /compact")));
+}
+
+#[test]
+fn transcript_widget_renders_active_compaction_phase_and_percent() {
+    let transcript = ChatTranscript::from_items([TranscriptItem::Compaction {
+        phase: Some(neo_agent_core::CompactionPhase::Summarizing),
+        percent: 70,
+        compacted_message_count: 9,
+        tokens_before: 12_400,
+    }]);
+
+    let lines = render_widget(64, 8, TranscriptWidget::new(&transcript));
+
+    assert!(lines.iter().any(|line| line.contains("70%")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Summarizing older context"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("[#####################"))
+    );
+}
+
+#[test]
+fn transcript_widget_bottom_follows_visual_rows_not_item_count() {
+    let transcript = ChatTranscript::from_items([
+        TranscriptItem::assistant("line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7"),
+        TranscriptItem::notice("bottom message"),
+    ]);
+    let view = TranscriptView::new();
+
+    let lines = render_widget(40, 5, TranscriptWidget::new(&transcript).with_view(&view));
+
+    assert!(lines.iter().any(|line| line.contains("bottom message")));
+    assert!(!lines.iter().any(|line| line.contains("line 0")));
 }
 
 #[test]
@@ -987,6 +1286,45 @@ fn transcript_widget_uses_supplied_theme_colors() {
     assert_eq!(user.fg, Color::Magenta);
     assert_eq!(assistant.fg, Color::Blue);
     assert_eq!(notice.fg, Color::Yellow);
+}
+
+#[test]
+fn transcript_widget_styles_thinking_separately_from_answer() {
+    let transcript = ChatTranscript::from_items([TranscriptItem::assistant_with_thinking(
+        "I should inspect the UI hierarchy",
+        "Here is the answer",
+    )]);
+
+    let buffer = render_widget_buffer(44, 8, TranscriptWidget::new(&transcript));
+    let lines = buffer
+        .content
+        .chunks(44)
+        .map(|line| line.iter().map(Cell::symbol).collect::<String>())
+        .collect::<Vec<_>>();
+    let thinking_row = lines
+        .iter()
+        .position(|line| line.contains("I should inspect"))
+        .expect("thinking renders");
+    let answer_row = lines
+        .iter()
+        .position(|line| line.contains("Here is the answer"))
+        .expect("answer renders");
+
+    let theme = TuiTheme::default();
+    assert_eq!(
+        buffer
+            .cell((2, u16::try_from(thinking_row).expect("row fits")))
+            .expect("thinking cell")
+            .fg,
+        theme.thinking
+    );
+    assert_eq!(
+        buffer
+            .cell((2, u16::try_from(answer_row).expect("row fits")))
+            .expect("answer cell")
+            .fg,
+        theme.assistant
+    );
 }
 
 #[test]
@@ -1043,9 +1381,166 @@ fn transcript_widget_renders_unified_diff_lines_with_diff_colors() {
     let removed = buffer.cell((2, removed_row)).expect("removed prefix cell");
     let added = buffer.cell((2, added_row)).expect("added prefix cell");
     let context = buffer.cell((2, context_row)).expect("context prefix cell");
-    assert_eq!(removed.fg, Color::Red);
-    assert_eq!(added.fg, Color::Green);
-    assert_eq!(context.fg, Color::DarkGray);
+    let theme = TuiTheme::default();
+    assert_eq!(removed.fg, theme.diff_removed);
+    assert_eq!(added.fg, theme.diff_added);
+    assert_eq!(context.fg, theme.diff_context);
+}
+
+#[test]
+fn transcript_renderer_renders_markdown_tables_tasks_and_inline_marks_without_raw_markers() {
+    let renderer = TranscriptRenderer::new(64);
+    let lines = renderer.render_markdownish(
+        "## Ship list\n\
+         - [x] parse **bold** and *italic* with `code`\n\
+         - [ ] keep item\n\n\
+         | Area | Status |\n\
+         | --- | --- |\n\
+         | TUI | Ready |\n\n\
+         > quote with **weight**",
+    );
+
+    assert!(matches!(
+        &lines[0],
+        TranscriptLine::Heading { level: 2, text } if text == "Ship list"
+    ));
+    assert!(
+        lines.iter().any(|line| {
+            matches!(
+                line,
+                TranscriptLine::ListItem {
+                    indent: 0,
+                    marker: ListMarker::TaskDone,
+                    text,
+                }
+                    if text == "parse bold and italic with `code`"
+            )
+        }),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            matches!(
+                line,
+                TranscriptLine::ListItem {
+                    indent: 0,
+                    marker: ListMarker::TaskOpen,
+                    text,
+                }
+                    if text == "keep item"
+            )
+        }),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            matches!(
+                line,
+                TranscriptLine::Text { text }
+                    if text == "Area | Status"
+            )
+        }),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            matches!(
+                line,
+                TranscriptLine::Text { text }
+                    if text == "TUI  | Ready"
+            )
+        }),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().all(|line| !line.display_text().contains("**")
+            && !line.display_text().contains("[x]")
+            && !line.display_text().contains("[ ]")
+            && !line.display_text().contains("| --- |")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            matches!(
+                line,
+                TranscriptLine::Quote { text }
+                    if text == "quote with weight"
+            )
+        }),
+        "{lines:#?}"
+    );
+}
+
+#[test]
+fn transcript_widget_renders_markdown_without_raw_heading_markers() {
+    let transcript = ChatTranscript::from_items([TranscriptItem::assistant(
+        "## Neo Project Analysis\n\n### Core Features\n\n- Read files\n> Conclusion",
+    )]);
+
+    let lines = render_widget(64, 10, TranscriptWidget::new(&transcript));
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Neo Project Analysis")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Core Features")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Read files")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Conclusion")),
+        "{lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("## Neo")),
+        "{lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("### Core")),
+        "{lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("> Conclusion")),
+        "{lines:#?}"
+    );
+}
+
+#[test]
+fn transcript_renderer_classifies_fenced_diff_blocks_as_diff_lines() {
+    let renderer = TranscriptRenderer::new(24);
+    let lines = renderer.render_markdownish(
+        "```diff\n\
+         --- old.txt\n\
+         +++ new.txt\n\
+         @@\n\
+         -before\n\
+         +after\n\
+         ```",
+    );
+
+    assert!(matches!(
+        &lines[0],
+        TranscriptLine::DiffFileHeader { marker: '-', path } if path == "old.txt"
+    ));
+    assert!(matches!(
+        &lines[1],
+        TranscriptLine::DiffFileHeader { marker: '+', path } if path == "new.txt"
+    ));
+    assert!(matches!(&lines[2], TranscriptLine::DiffHunk { text } if text == "@@"));
+    assert!(matches!(
+        &lines[3],
+        TranscriptLine::DiffRemoved { text } if text == "before"
+    ));
+    assert!(matches!(
+        &lines[4],
+        TranscriptLine::DiffAdded { text } if text == "after"
+    ));
 }
 
 #[test]
@@ -1064,14 +1559,68 @@ fn status_widget_renders_tool_state_without_runtime_details() {
 }
 
 #[test]
+fn transcript_widget_animates_running_tool_marker_in_place() {
+    let transcript = ChatTranscript::from_items([TranscriptItem::tool_run(
+        "list",
+        Some(r#"{"path":"crates/tui/src"}"#.to_owned()),
+        None,
+        ToolStatusKind::Running,
+        neo_tui::ToolRunMetadata::default(),
+        neo_tui::ToolPresentationKind::Text,
+    )]);
+
+    let frame_zero = render_widget(
+        80,
+        4,
+        TranscriptWidget::new(&transcript).with_activity_frame(0),
+    );
+    let frame_two = render_widget(
+        80,
+        4,
+        TranscriptWidget::new(&transcript).with_activity_frame(2),
+    );
+
+    assert!(frame_zero.iter().any(|line| line.contains("· Use list")));
+    assert!(frame_two.iter().any(|line| line.contains("• Use list")));
+    assert!(frame_zero.iter().any(|line| line.contains("running")));
+    assert!(frame_two.iter().any(|line| line.contains("running")));
+}
+
+#[test]
 fn prompt_widget_renders_prompt_text_and_cursor_marker() {
     let prompt = PromptState::new("hello").with_cursor(2);
 
     let lines = render_widget(20, 3, PromptWidget::new(&prompt));
 
-    assert!(lines[0].contains("> he"));
-    assert!(lines[0].contains("llo"));
-    assert!(lines[0].contains("▏"));
+    assert!(lines[0].contains('┌'));
+    assert!(lines[1].contains("> he"));
+    assert!(lines[1].contains("llo"));
+    assert!(lines[1].contains("▏"));
+    assert!(lines[2].contains('└'));
+}
+
+#[test]
+fn prompt_widget_uses_composer_background_across_input_area() {
+    let prompt = PromptState::new("ship it").with_cursor(7);
+
+    let buffer = render_widget_buffer(28, 3, PromptWidget::new(&prompt));
+
+    assert!(buffer.content.chunks(28).any(|line| {
+        line.iter()
+            .map(Cell::symbol)
+            .collect::<String>()
+            .contains("> ship it")
+    }));
+    for y in 0..3 {
+        assert_eq!(
+            buffer.cell((0, y)).expect("left composer cell").bg,
+            Color::Rgb(31, 35, 43)
+        );
+        assert_eq!(
+            buffer.cell((27, y)).expect("right composer cell").bg,
+            Color::Rgb(31, 35, 43)
+        );
+    }
 }
 
 #[test]
@@ -1091,4 +1640,31 @@ fn approval_modal_renders_request_and_selected_option() {
     assert!(lines.iter().any(|line| line.contains("Run command?")));
     assert!(lines.iter().any(|line| line.contains("cargo clippy")));
     assert!(lines.iter().any(|line| line.contains("> Deny")));
+}
+
+#[test]
+fn approval_modal_renders_as_action_panel_with_structured_choice_copy() {
+    let modal = ApprovalModal::new(
+        "Tool use",
+        "shell.run\n$ cargo test -p neo-tui",
+        [
+            ApprovalOption::new(ApprovalChoice::Approve, "Approve once"),
+            ApprovalOption::new(ApprovalChoice::Deny, "Deny"),
+            ApprovalOption::new(ApprovalChoice::AlwaysApprove, "Always approve"),
+        ],
+    );
+
+    let buffer = render_widget_buffer(58, 9, modal);
+    let lines = buffer
+        .content
+        .chunks(58)
+        .map(|line| line.iter().map(Cell::symbol).collect::<String>())
+        .collect::<Vec<_>>();
+
+    assert!(lines.iter().any(|line| line.contains("Action required")));
+    assert!(lines.iter().any(|line| line.contains("Tool use")));
+    assert!(lines.iter().any(|line| line.contains("shell.run")));
+    assert!(lines.iter().any(|line| line.contains("1. Approve once")));
+    assert!(lines.iter().any(|line| line.contains("2. Deny")));
+    assert!(lines.iter().any(|line| line.contains("3. Always approve")));
 }
