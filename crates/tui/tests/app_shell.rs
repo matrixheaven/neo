@@ -998,7 +998,7 @@ fn prompt_completion_overlay_renders_above_boxed_composer() {
     app.open_prompt_completion_picker(
         prefix,
         [
-            PickerItem::new("/tree", "/tree", Some("Browse local session tree")),
+            PickerItem::new("/resume", "/resume", Some("Resume a local session")),
             PickerItem::new("/review", "/review", Some("Project prompt")),
         ],
     );
@@ -1010,7 +1010,7 @@ fn prompt_completion_overlay_renders_above_boxed_composer() {
         .expect("completion overlay title renders");
     let command_row = lines
         .iter()
-        .position(|line| line.contains("/tree"))
+        .position(|line| line.contains("/resume"))
         .expect("completion item renders");
     let composer_row = lines
         .iter()
@@ -1028,6 +1028,52 @@ fn prompt_completion_overlay_renders_above_boxed_composer() {
     assert!(
         command_row > completion_row && command_row < composer_row,
         "completion item should render inside the overlay above composer"
+    );
+}
+
+#[test]
+fn session_picker_renders_bottom_docked_resume_panel_with_four_sessions() {
+    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]");
+    app.open_session_picker((0..6).map(|index| {
+        PickerItem::new(
+            format!("session_{index}"),
+            format!("Resume title {index}"),
+            Some(format!(
+                "session_{index} | {index}m ago | ~/Workspace/neo | user prompt {index}"
+            )),
+        )
+    }));
+
+    let lines = render_app(96, 28, &app);
+    let panel_row = lines
+        .iter()
+        .position(|line| line.contains("Sessions"))
+        .expect("session panel title renders");
+    let composer_row = lines
+        .iter()
+        .rposition(|line| line.contains("> "))
+        .expect("composer renders");
+
+    assert!(
+        panel_row < composer_row,
+        "session picker should render above composer"
+    );
+    let hint_row = lines
+        .iter()
+        .position(|line| line.contains("Enter resume"))
+        .expect("session picker shortcut hint renders");
+    assert!(
+        hint_row < composer_row && composer_row - hint_row <= 3,
+        "session picker should dock directly above composer, hint={hint_row}, composer={composer_row}"
+    );
+    assert!(lines.iter().any(|line| line.contains("session_0")));
+    assert!(lines.iter().any(|line| line.contains("~/Workspace/neo")));
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("Resume title"))
+            .count(),
+        4
     );
 }
 

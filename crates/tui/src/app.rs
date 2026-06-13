@@ -1346,7 +1346,7 @@ impl NeoTuiApp {
     ) -> OverlayId {
         self.push_overlay(Overlay::new(
             "sessions",
-            OverlayKind::SessionPicker(SessionPickerState::new(items)),
+            OverlayKind::SessionPicker(SessionPickerState::new_with_visible(items, 4)),
         ))
     }
 
@@ -1873,8 +1873,16 @@ pub struct PickerState {
 impl PickerState {
     #[must_use]
     pub fn new(items: impl IntoIterator<Item = PickerItem>) -> Self {
+        Self::new_with_visible(items, 8)
+    }
+
+    #[must_use]
+    pub fn new_with_visible(
+        items: impl IntoIterator<Item = PickerItem>,
+        max_visible: usize,
+    ) -> Self {
         Self {
-            list: SelectListState::new(items.into_iter().map(SelectItem::from), 8),
+            list: SelectListState::new(items.into_iter().map(SelectItem::from), max_visible),
         }
     }
 
@@ -3702,6 +3710,12 @@ pub struct SelectListState {
     max_visible: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct VisibleSelectItem<'a> {
+    pub item: &'a SelectItem,
+    pub selected: bool,
+}
+
 impl SelectListState {
     #[must_use]
     pub fn new(items: impl IntoIterator<Item = SelectItem>, max_visible: usize) -> Self {
@@ -3787,6 +3801,21 @@ impl SelectListState {
         let max_start = len.saturating_sub(visible);
         let start = self.selected_index.saturating_sub(half).min(max_start);
         start..start + visible
+    }
+
+    #[must_use]
+    pub fn visible_items(&self) -> Vec<VisibleSelectItem<'_>> {
+        self.visible_range()
+            .filter_map(|filtered_index| {
+                self.filtered_indices
+                    .get(filtered_index)
+                    .and_then(|index| self.items.get(*index))
+                    .map(|item| VisibleSelectItem {
+                        item,
+                        selected: filtered_index == self.selected_index,
+                    })
+            })
+            .collect()
     }
 
     #[must_use]

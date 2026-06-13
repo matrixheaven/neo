@@ -994,7 +994,7 @@ impl InteractiveController {
         let Some(prompt) = self.app.submit_prompt() else {
             return Ok(());
         };
-        if prompt.trim() == "/tree" {
+        if prompt.trim() == "/resume" {
             self.open_session_picker();
             return Ok(());
         }
@@ -1394,8 +1394,8 @@ fn extension_command_completion_items(root: &Path) -> Result<Vec<PickerItem>> {
 
 fn session_completion_items() -> Vec<PickerItem> {
     [(
-        "/tree",
-        "Browse local session tree",
+        "/resume",
+        "Resume a local session",
         "local sessions",
         "local",
     )]
@@ -2388,9 +2388,9 @@ fn picker_catalogs_for_config(config: &AppConfig) -> PickerCatalogs {
 }
 
 fn session_catalog_for_config(config: &AppConfig) -> SessionCatalog {
-    match SessionMetadataStore::new(&config.sessions_dir).list() {
+    match SessionMetadataStore::new(&config.sessions_dir).list_recent() {
         Ok(records) => SessionCatalog {
-            items: crate::session_commands::tree_order_sessions(&records)
+            items: records
                 .into_iter()
                 .map(session_record_to_picker_item)
                 .collect(),
@@ -2496,23 +2496,36 @@ const fn pluralize(count: usize, singular: &'static str, plural: &'static str) -
     if count == 1 { singular } else { plural }
 }
 
-fn session_record_to_picker_item(
-    tree_record: crate::session_commands::SessionTreeRecord,
-) -> PickerItem {
-    let record = tree_record.record;
-    let label = record.name.clone().unwrap_or_else(|| record.id.clone());
-    let label = format!("{}{}", "  ".repeat(tree_record.depth), label);
-    let mut details = vec![record.id.clone()];
-    if let Some(parent_id) = &record.parent_id {
-        details.push(format!("parent={parent_id}"));
+fn session_record_to_picker_item(record: neo_agent_core::session::SessionRecord) -> PickerItem {
+    let label = record.title.clone().unwrap_or_else(|| record.id.clone());
+    let updated = record
+        .updated_at
+        .as_deref()
+        .map(relative_time_label)
+        .unwrap_or_default();
+    let workspace = record.workspace.clone().unwrap_or_default();
+    let prompt = record.last_user_prompt.clone().unwrap_or_default();
+    let description = format!("{} | {updated} | {workspace} | {prompt}", record.id);
+    PickerItem::new(record.id, label, Some(description))
+}
+
+fn relative_time_label(timestamp: &str) -> String {
+    let seconds = timestamp
+        .split_once('.')
+        .map_or(timestamp, |(seconds, _)| seconds);
+    let Ok(updated) = seconds.parse::<u64>() else {
+        return timestamp.to_owned();
+    };
+    let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
+        return timestamp.to_owned();
+    };
+    let elapsed = now.as_secs().saturating_sub(updated);
+    match elapsed {
+        0..=59 => format!("{elapsed}s ago"),
+        60..=3599 => format!("{}m ago", elapsed / 60),
+        3600..=86_399 => format!("{}h ago", elapsed / 3600),
+        _ => format!("{}d ago", elapsed / 86_400),
     }
-    if let Some(summary) = &record.summary {
-        details.push(summary.clone());
-    }
-    if !record.children.is_empty() {
-        details.push(format!("children={}", record.children.join(",")));
-    }
-    PickerItem::new(record.id, label, Some(details.join(" | ")))
 }
 
 async fn load_session_transcript(
@@ -3524,7 +3537,7 @@ command = "echo"
                 })
         );
         assert!(
-            by_value["/tree"]
+            by_value["/resume"]
                 .description
                 .as_deref()
                 .is_some_and(|description| {
@@ -3533,6 +3546,7 @@ command = "echo"
                         && description.contains("trust: local")
                 })
         );
+        assert!(!by_value.contains_key("/tree"));
         assert!(!by_value.contains_key("/sync"));
     }
 
@@ -3669,7 +3683,57 @@ command = "python3"
     }
 
     #[tokio::test]
-    async fn event_loop_slash_tree_opens_local_session_picker() {
+    async fn event_loop_slash_resume_opens_local_session_picker() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let mut controller = InteractiveController::new_with_sessions(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("record request")
+                        .push(request);
+                    Ok(Vec::<AgentEvent>::new())
+                }
+            },
+            PickerCatalogs {
+                session_items: vec![PickerItem::new("alpha", "Alpha", Some("root"))],
+                session_error: None,
+                model_items: Vec::new(),
+                model_error: None,
+            },
+            |session_id| async move {
+                Ok(LoadedSessionTranscript::new(
+                    session_id,
+                    Vec::new(),
+                    Vec::new(),
+                ))
+            },
+        );
+
+        controller.type_text("/resume");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("slash resume command runs locally");
+
+        assert!(matches!(
+            controller
+                .app()
+                .focused_overlay()
+                .map(|overlay| &overlay.kind),
+            Some(OverlayKind::SessionPicker(_))
+        ));
+        assert!(controller.app().prompt().text.is_empty());
+        assert!(requests.lock().expect("recorded requests").is_empty());
+    }
+
+    #[tokio::test]
+    async fn event_loop_slash_tree_is_not_a_local_command() {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured_requests = std::sync::Arc::clone(&requests);
         let mut controller = InteractiveController::new_with_sessions(
@@ -3705,16 +3769,9 @@ command = "python3"
         controller
             .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
             .await
-            .expect("slash tree command runs locally");
+            .expect("slash tree is not handled as resume");
 
-        assert!(matches!(
-            controller
-                .app()
-                .focused_overlay()
-                .map(|overlay| &overlay.kind),
-            Some(OverlayKind::SessionPicker(_))
-        ));
-        assert!(controller.app().prompt().text.is_empty());
+        assert!(controller.app().focused_overlay().is_none());
         assert!(requests.lock().expect("recorded requests").is_empty());
     }
 
@@ -5281,28 +5338,42 @@ command = "python3"
         let child = store
             .fork("alpha", Some("Parser branch".to_owned()))
             .expect("fork session");
+        store
+            .record_activity(
+                "alpha",
+                Some(temp.path().display().to_string()),
+                Some("hello".to_owned()),
+                "100".to_owned(),
+            )
+            .expect("record alpha activity");
+        store
+            .record_activity(
+                &child.id,
+                Some(temp.path().display().to_string()),
+                Some("child prompt".to_owned()),
+                "200".to_owned(),
+            )
+            .expect("record child activity");
 
         let config = test_config(temp.path(), sessions_dir);
         let catalog = session_catalog_for_config(&config);
         assert_eq!(catalog.error, None);
         assert_eq!(catalog.items.len(), 2);
-        assert_eq!(catalog.items[0].value, "alpha");
-        assert_eq!(catalog.items[0].label, "Alpha Session");
+        assert_eq!(catalog.items[0].value, child.id);
+        assert_eq!(catalog.items[0].label, "Parser branch");
         assert!(
             catalog.items[0]
                 .description
                 .as_deref()
-                .is_some_and(|description| {
-                    description.contains("alpha") && description.contains("Local branch summary")
-                })
+                .is_some_and(|description| description.contains("child prompt"))
         );
-        assert_eq!(catalog.items[1].value, child.id);
-        assert_eq!(catalog.items[1].label, "  Parser branch");
+        assert_eq!(catalog.items[1].value, "alpha");
+        assert_eq!(catalog.items[1].label, "Alpha Session");
         assert!(
             catalog.items[1]
                 .description
                 .as_deref()
-                .is_some_and(|description| description.contains("parent=alpha"))
+                .is_some_and(|description| description.contains("hello"))
         );
 
         let loaded = load_session_transcript("alpha".to_owned(), &config)

@@ -22,6 +22,7 @@ pub struct AppLayout {
     pub body: Rect,
     pub status: Rect,
     pub approval: Rect,
+    pub session_picker: Rect,
     pub prompt: Rect,
     pub footer: Rect,
 }
@@ -30,6 +31,11 @@ pub struct AppLayout {
 pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
     let prompt_height = prompt_height(app.prompt(), area.width);
     let footer_bar_height = u16::from(area.height > 0);
+    let session_picker_height = match app.focused_overlay().map(|overlay| &overlay.kind) {
+        Some(OverlayKind::SessionPicker(_)) => 16,
+        _ => 0,
+    }
+    .min(area.height.saturating_sub(3));
     let approval_overlay = match app.focused_overlay().map(|overlay| &overlay.kind) {
         Some(OverlayKind::Approval(request)) => Some(request),
         _ => None,
@@ -40,6 +46,7 @@ pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
         .min(area.height.saturating_sub(3));
     let bottom_height = prompt_height
         .saturating_add(footer_bar_height)
+        .saturating_add(session_picker_height)
         .saturating_add(approval_height);
     let body_y = area.y.saturating_add(1);
     let body_height = area.height.saturating_sub(1).saturating_sub(bottom_height);
@@ -61,9 +68,15 @@ pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
         width: area.width,
         height: approval_height,
     };
-    let prompt = Rect {
+    let session_picker = Rect {
         x: area.x,
         y: approval.y.saturating_add(approval.height),
+        width: area.width,
+        height: session_picker_height,
+    };
+    let prompt = Rect {
+        x: area.x,
+        y: session_picker.y.saturating_add(session_picker.height),
         width: area.width,
         height: prompt_height,
     };
@@ -78,6 +91,7 @@ pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
         body,
         status,
         approval,
+        session_picker,
         prompt,
         footer,
     }
@@ -1066,6 +1080,12 @@ impl Widget for &NeoTuiApp {
                 .render(layout.approval, buf);
         }
 
+        if let Some(overlay) = self.focused_overlay()
+            && let OverlayKind::SessionPicker(state) = &overlay.kind
+        {
+            render_session_picker(state, layout.session_picker, buf, self.theme());
+        }
+
         PromptWidget::new(self.prompt())
             .with_theme(self.theme())
             .render(layout.prompt, buf);
@@ -1073,10 +1093,86 @@ impl Widget for &NeoTuiApp {
         render_footer(self, layout.footer, buf);
 
         if let Some(overlay) = self.focused_overlay()
-            && !matches!(overlay.kind, OverlayKind::Approval(_))
+            && !matches!(
+                overlay.kind,
+                OverlayKind::Approval(_) | OverlayKind::SessionPicker(_)
+            )
         {
             render_overlay(overlay, area, layout.prompt.y, buf);
         }
+    }
+}
+
+fn render_session_picker(
+    state: &crate::SessionPickerState,
+    area: Rect,
+    buf: &mut Buffer,
+    theme: TuiTheme,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    Clear.render(area, buf);
+    let block = Block::default()
+        .title(" Sessions ")
+        .title_alignment(Alignment::Left)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.overlay_border));
+    let inner = block.inner(area);
+    block.render(area, buf);
+
+    let mut y = inner.y;
+    for item in state.list().visible_items().iter().take(4) {
+        if y.saturating_add(2) >= inner.bottom() {
+            break;
+        }
+        let selected = item.selected;
+        let marker = if selected { ">" } else { " " };
+        let mut fields = item
+            .item
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .split(" | ");
+        let id = fields.next().unwrap_or(&item.item.value);
+        let time = fields.next().unwrap_or("");
+        let workspace = fields.next().unwrap_or("");
+        let prompt = fields.next().unwrap_or("");
+        let title_line = format!("{marker} {}  {time}", item.item.label);
+        let meta_line = format!("  {id}  {workspace}");
+        let prompt_line = format!("  > {prompt}");
+        let title_style = if selected {
+            Style::default()
+                .fg(theme.selected_fg)
+                .bg(theme.selected_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.prompt)
+        };
+        write_line(inner, buf, y, &title_line, title_style);
+        y = y.saturating_add(1);
+        write_line(inner, buf, y, &meta_line, Style::default().fg(theme.muted));
+        y = y.saturating_add(1);
+        write_line(
+            inner,
+            buf,
+            y,
+            &prompt_line,
+            Style::default().fg(theme.muted),
+        );
+        y = y.saturating_add(1);
+    }
+
+    if inner.height > 0 {
+        let hint_y = inner.bottom().saturating_sub(1);
+        write_line(
+            inner,
+            buf,
+            hint_y,
+            "↑↓ navigate · Enter resume · Esc cancel · Ctrl+N fork",
+            Style::default().fg(theme.notice),
+        );
     }
 }
 
