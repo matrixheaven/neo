@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     ops::Range,
+    path::{Path, PathBuf},
 };
 
 use neo_agent_core::{AgentEvent, AgentMessage, CompactionPhase, Content, ImageRef};
@@ -244,6 +245,7 @@ pub struct NeoTuiApp {
     title: String,
     session_label: String,
     model_label: String,
+    workspace_root: PathBuf,
     context_window: Option<ContextWindow>,
     activity_frame: usize,
     transcript: ChatTranscript,
@@ -274,11 +276,13 @@ impl NeoTuiApp {
         title: impl Into<String>,
         session_label: impl Into<String>,
         model_label: impl Into<String>,
+        workspace_root: impl Into<PathBuf>,
     ) -> Self {
         Self {
             title: title.into(),
             session_label: session_label.into(),
             model_label: model_label.into(),
+            workspace_root: workspace_root.into(),
             context_window: None,
             activity_frame: 0,
             transcript: ChatTranscript::default(),
@@ -317,6 +321,11 @@ impl NeoTuiApp {
     #[must_use]
     pub fn model_label(&self) -> &str {
         &self.model_label
+    }
+
+    #[must_use]
+    pub fn workspace_root(&self) -> &Path {
+        self.workspace_root.as_path()
     }
 
     #[must_use]

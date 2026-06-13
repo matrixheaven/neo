@@ -24,7 +24,7 @@ fn render_app(width: u16, height: u16, app: &NeoTuiApp) -> Vec<String> {
 
 #[test]
 fn app_shell_renders_context_window_and_working_status() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
     app.prompt_mut()
         .apply_edit(neo_tui::PromptEdit::Insert("hello"));
@@ -38,7 +38,7 @@ fn app_shell_renders_context_window_and_working_status() {
 
 #[test]
 fn app_shell_working_status_hides_running_tool_names_from_chrome() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.apply_stream_update(StreamUpdate::ToolStarted {
         id: "tool-1".to_owned(),
         name: "shell.run".to_owned(),
@@ -58,7 +58,7 @@ fn app_shell_working_status_hides_running_tool_names_from_chrome() {
 
 #[test]
 fn app_shell_updates_context_usage_from_agent_event() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.set_context_window(Some(ContextWindow::new(200_000)));
 
     app.apply_agent_event(neo_agent_core::AgentEvent::TokenUsage {
@@ -79,7 +79,7 @@ fn app_shell_updates_context_usage_from_agent_event() {
 
 #[test]
 fn app_shell_maps_agent_core_approval_request_to_approval_overlay() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
     app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
         turn: 7,
@@ -105,7 +105,7 @@ fn app_shell_maps_agent_core_approval_request_to_approval_overlay() {
 
 #[test]
 fn app_shell_renders_approval_panel_above_composer_at_bottom() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.transcript_mut()
         .push(neo_tui::TranscriptItem::assistant("Earlier answer"));
     app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
@@ -151,7 +151,7 @@ fn app_shell_renders_approval_panel_above_composer_at_bottom() {
 
 #[test]
 fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
-    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]");
+    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
     app.transcript_mut()
         .push(neo_tui::TranscriptItem::assistant("Ready"));
     app.prompt_mut()
@@ -188,7 +188,7 @@ fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
 
 #[test]
 fn app_shell_syncs_transcript_view_to_keep_tail_visible_in_small_viewports() {
-    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]");
+    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
     for index in 0..36 {
         app.transcript_mut()
             .push(neo_tui::TranscriptItem::notice(format!(
@@ -212,7 +212,7 @@ fn app_shell_syncs_transcript_view_to_keep_tail_visible_in_small_viewports() {
 
 #[test]
 fn app_shell_maps_agent_core_shell_command_lifecycle_to_tool_status() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
     app.apply_agent_event(neo_agent_core::AgentEvent::ShellCommandStarted {
         turn: 1,
@@ -263,7 +263,7 @@ fn app_shell_maps_agent_core_shell_command_lifecycle_to_tool_status() {
 
 #[test]
 fn running_tool_call_is_rendered_in_transcript_before_finish() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
     app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
         turn: 1,
@@ -302,7 +302,7 @@ fn running_tool_call_is_rendered_in_transcript_before_finish() {
 
 #[test]
 fn stream_updates_do_not_force_tail_when_transcript_is_detached() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     for index in 0..24 {
         app.transcript_mut()
             .push(neo_tui::TranscriptItem::notice(format!(
@@ -332,7 +332,7 @@ fn stream_updates_do_not_force_tail_when_transcript_is_detached() {
 
 #[test]
 fn app_shell_preserves_tool_arguments_separately_from_result() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
     app.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
         turn: 1,
@@ -391,7 +391,7 @@ fn app_shell_preserves_tool_arguments_separately_from_result() {
 
 #[test]
 fn app_shell_failed_shell_transcript_keeps_exit_code_metadata() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
     app.apply_agent_event(neo_agent_core::AgentEvent::ShellCommandStarted {
         turn: 1,
@@ -431,7 +431,7 @@ fn app_shell_failed_shell_transcript_keeps_exit_code_metadata() {
 
 #[test]
 fn app_shell_maps_agent_core_queue_notice_and_compaction_boundary() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
     app.apply_agent_event(neo_agent_core::AgentEvent::QueueDrained {
         kind: neo_agent_core::QueueKind::FollowUp,
@@ -468,7 +468,7 @@ fn app_shell_maps_agent_core_queue_notice_and_compaction_boundary() {
 
 #[test]
 fn app_shell_updates_compaction_progress_in_place() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
     app.apply_agent_event(neo_agent_core::AgentEvent::CompactionStarted {
         reason: neo_agent_core::CompactionReason::Threshold,
@@ -501,7 +501,7 @@ fn app_shell_updates_compaction_progress_in_place() {
 
 #[test]
 fn app_shell_reduces_agent_core_streaming_message_and_turn_events() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
     app.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
         turn: 1,
@@ -530,7 +530,7 @@ fn app_shell_reduces_agent_core_streaming_message_and_turn_events() {
 
 #[test]
 fn app_shell_reduces_agent_core_thinking_events_without_polluting_answer_text() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
     app.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
         turn: 1,
@@ -577,7 +577,12 @@ fn app_shell_reduces_agent_core_thinking_events_without_polluting_answer_text() 
 
 #[test]
 fn app_shell_deduplicates_echoed_user_messages_for_active_turn() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "anthropic/deepseek-v4-pro[1m]");
+    let mut app = NeoTuiApp::new(
+        "neo",
+        "session-a",
+        "anthropic/deepseek-v4-pro[1m]",
+        "/tmp/neo-ws",
+    );
 
     app.prompt_mut()
         .apply_edit(neo_tui::PromptEdit::Insert("你好"));
@@ -605,7 +610,7 @@ fn app_shell_deduplicates_echoed_user_messages_for_active_turn() {
 
 #[test]
 fn app_shell_records_submissions_and_streaming_updates() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
     assert_eq!(app.mode(), AppMode::Editing);
     app.prompt_mut()
@@ -651,7 +656,7 @@ fn app_shell_records_submissions_and_streaming_updates() {
 
 #[test]
 fn app_loads_session_transcript_and_updates_label() {
-    let mut app = NeoTuiApp::new("neo", "new", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "new", "openai/gpt-4.1", "/tmp/neo-ws");
     app.apply_stream_update(StreamUpdate::AssistantStarted {
         id: "in-flight".to_owned(),
     });
@@ -699,7 +704,7 @@ fn app_loads_session_transcript_and_updates_label() {
 
 #[test]
 fn app_shell_renders_agent_core_image_content_as_safe_metadata_summary() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     let large_base64 = "a".repeat(256);
 
     app.apply_agent_event(neo_agent_core::AgentEvent::MessageAppended {
@@ -760,7 +765,7 @@ fn app_shell_renders_agent_core_image_content_as_safe_metadata_summary() {
 
 #[test]
 fn app_shell_stores_agent_core_images_as_sanitized_transcript_items() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     let encoded = "iVBORw0KGgo=".to_owned();
 
     app.apply_agent_event(neo_agent_core::AgentEvent::MessageAppended {
@@ -813,7 +818,7 @@ fn app_shell_stores_agent_core_images_as_sanitized_transcript_items() {
 
 #[test]
 fn app_shell_renders_byte_backed_images_with_negotiated_terminal_protocol() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.set_image_render_policy(ImageRenderPolicy::new(
         ImageProtocolPreference::Kitty,
         false,
@@ -856,7 +861,7 @@ fn app_shell_renders_byte_backed_images_with_negotiated_terminal_protocol() {
 
 #[test]
 fn modal_stack_tracks_focus_and_restores_previous_overlay() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
     let first = app.push_overlay(Overlay::new(
         "palette",
@@ -918,7 +923,7 @@ fn command_palette_session_and_model_pickers_filter_and_select_values() {
         "anthropic/claude-sonnet"
     );
 
-    let mut app = NeoTuiApp::new("neo", "new", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "new", "openai/gpt-4.1", "/tmp/neo-ws");
     app.open_command_palette([
         CommandSpec::new("sessions", "Sessions", Some("Open sessions")),
         CommandSpec::new("models", "Models", Some("Open models")),
@@ -955,7 +960,7 @@ fn command_palette_session_and_model_pickers_filter_and_select_values() {
 
 #[test]
 fn prompt_completion_overlay_confirms_selected_replacement() {
-    let mut app = NeoTuiApp::new("neo", "new", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "new", "openai/gpt-4.1", "/tmp/neo-ws");
     app.prompt_mut()
         .apply_edit(neo_tui::PromptEdit::Insert("open src/ma"));
     let prefix = app
@@ -987,7 +992,7 @@ fn prompt_completion_overlay_confirms_selected_replacement() {
 
 #[test]
 fn prompt_completion_overlay_renders_above_boxed_composer() {
-    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]");
+    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
     app.prompt_mut()
         .apply_edit(neo_tui::PromptEdit::Insert("/"));
     let prefix = app
@@ -1033,7 +1038,7 @@ fn prompt_completion_overlay_renders_above_boxed_composer() {
 
 #[test]
 fn session_picker_renders_bottom_docked_resume_panel_with_four_sessions() {
-    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]");
+    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
     app.open_session_picker((0..6).map(|index| {
         PickerItem::new(
             format!("session_{index}"),
@@ -1122,7 +1127,7 @@ fn command_palette_session_and_model_pickers_page_selection() {
 
 #[test]
 fn app_moves_focused_overlay_selection_by_page() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.push_overlay(Overlay::new(
         "palette",
         OverlayKind::CommandPalette(CommandPaletteState::new((0..10).map(|index| {
@@ -1153,7 +1158,7 @@ fn app_moves_focused_overlay_selection_by_page() {
 
 #[test]
 fn approval_overlay_exposes_selected_decision_without_runtime_logic() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     let request = app.request_approval(
         "approval-1",
         "Run command?",
@@ -1294,7 +1299,7 @@ fn transcript_renderer_does_not_classify_plain_plus_minus_text_as_diff() {
 
 #[test]
 fn app_widget_renders_header_transcript_prompt_and_top_overlay() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.transcript_mut().push(neo_tui::TranscriptItem::notice(
         "Welcome to neo terminal shell",
     ));

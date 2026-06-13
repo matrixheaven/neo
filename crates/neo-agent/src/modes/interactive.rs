@@ -365,7 +365,12 @@ impl InteractiveController {
         fork_session: SessionForker,
     ) -> Self {
         Self {
-            app: NeoTuiApp::new(title, session_label, model_label),
+            app: NeoTuiApp::new(
+                title,
+                session_label,
+                model_label,
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ),
             keybindings: KeybindingsManager::default(),
             run_turn,
             session_items: catalogs.session_items,

@@ -971,7 +971,7 @@ fn prompt_copy_uses_internal_buffer_without_mutating_editor_state() {
     assert_eq!(prompt.cursor, 5);
     assert_eq!(prompt.apply_edit(PromptEdit::Yank), None);
 
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.prompt_mut().apply_edit(PromptEdit::Insert("copy me"));
 
     assert_eq!(app.copy_prompt_text().as_deref(), Some("copy me"));
@@ -1002,7 +1002,7 @@ fn transcript_selection_copies_item_range_with_roles() {
 
 #[test]
 fn app_transcript_copy_uses_internal_buffer_and_clears_on_new_prompt() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.transcript_mut()
         .push(TranscriptItem::user("copy selected prompt"));
     app.transcript_mut()
@@ -1027,7 +1027,7 @@ fn app_transcript_copy_uses_internal_buffer_and_clears_on_new_prompt() {
 
 #[test]
 fn app_toggles_selected_transcript_tool_detail() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.transcript_mut().push(TranscriptItem::tool(
         "read",
         "expanded file content",
