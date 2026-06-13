@@ -53,6 +53,14 @@ struct ThemeColors {
     selected_fg: Option<String>,
     selected_bg: Option<String>,
     overlay_border: Option<String>,
+    footer_permission_allow: Option<String>,
+    footer_permission_ask: Option<String>,
+    footer_permission_deny: Option<String>,
+    footer_working: Option<String>,
+    footer_context_ok: Option<String>,
+    footer_context_warn: Option<String>,
+    footer_context_critical: Option<String>,
+    footer_hint: Option<String>,
 }
 
 pub fn resolve_theme(
@@ -331,6 +339,54 @@ fn apply_colors(theme: &mut TuiTheme, colors: &ThemeColors, path: &Path) -> anyh
         &mut theme.overlay_border,
         "overlay_border",
         colors.overlay_border.as_deref(),
+        path,
+    )?;
+    apply_color(
+        &mut theme.footer_permission_allow,
+        "footer_permission_allow",
+        colors.footer_permission_allow.as_deref(),
+        path,
+    )?;
+    apply_color(
+        &mut theme.footer_permission_ask,
+        "footer_permission_ask",
+        colors.footer_permission_ask.as_deref(),
+        path,
+    )?;
+    apply_color(
+        &mut theme.footer_permission_deny,
+        "footer_permission_deny",
+        colors.footer_permission_deny.as_deref(),
+        path,
+    )?;
+    apply_color(
+        &mut theme.footer_working,
+        "footer_working",
+        colors.footer_working.as_deref(),
+        path,
+    )?;
+    apply_color(
+        &mut theme.footer_context_ok,
+        "footer_context_ok",
+        colors.footer_context_ok.as_deref(),
+        path,
+    )?;
+    apply_color(
+        &mut theme.footer_context_warn,
+        "footer_context_warn",
+        colors.footer_context_warn.as_deref(),
+        path,
+    )?;
+    apply_color(
+        &mut theme.footer_context_critical,
+        "footer_context_critical",
+        colors.footer_context_critical.as_deref(),
+        path,
+    )?;
+    apply_color(
+        &mut theme.footer_hint,
+        "footer_hint",
+        colors.footer_hint.as_deref(),
         path,
     )?;
     Ok(())
