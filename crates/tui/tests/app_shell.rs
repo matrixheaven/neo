@@ -106,6 +106,7 @@ fn app_shell_maps_agent_core_approval_request_to_approval_overlay() {
 #[test]
 fn app_shell_renders_approval_panel_above_composer_at_bottom() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
     app.transcript_mut()
         .push(neo_tui::TranscriptItem::assistant("Earlier answer"));
     app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
@@ -125,14 +126,18 @@ fn app_shell_renders_approval_panel_above_composer_at_bottom() {
         .iter()
         .rposition(|line| line.contains("> "))
         .expect("composer renders");
-    let footer_row = lines
+    let status_row = lines
         .iter()
-        .rposition(|line| line.contains("neo") && line.contains("shift+enter"))
-        .expect("footer renders below composer");
+        .rposition(|line| line.contains("[ask]"))
+        .expect("footer status line renders");
+    let hint_row = lines
+        .iter()
+        .rposition(|line| line.contains("enter send"))
+        .expect("footer hint line renders");
 
     assert!(
-        footer_row > composer_row,
-        "footer should sit below the composer, composer={composer_row}, footer={footer_row}"
+        hint_row > composer_row,
+        "footer hint line should sit below the composer, composer={composer_row}, hint={hint_row}"
     );
     assert!(
         composer_row > approval_row,
@@ -147,11 +152,21 @@ fn app_shell_renders_approval_panel_above_composer_at_bottom() {
             .iter()
             .any(|line| line.contains("cargo test -p neo-tui"))
     );
+    assert!(status_row > approval_row);
+    assert!(lines.iter().any(|line| line.contains("ctx 12k/200k")));
+    let footer_lines = &lines[status_row.min(hint_row)..=status_row.max(hint_row)];
+    assert!(!footer_lines.iter().any(|line| line.contains("neo  ")));
+    assert!(
+        !footer_lines
+            .iter()
+            .any(|line| { line.contains("session-a") || line.contains("openai/gpt-4.1") })
+    );
 }
 
 #[test]
 fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
     let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
+    app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
     app.transcript_mut()
         .push(neo_tui::TranscriptItem::assistant("Ready"));
     app.prompt_mut()
@@ -162,28 +177,41 @@ fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
         .iter()
         .rposition(|line| line.contains("> /"))
         .expect("composer prompt renders");
-    let footer_row = lines
+    let status_row = lines
         .iter()
-        .rposition(|line| line.contains("neo") && line.contains("deepseek"))
-        .expect("neo footer renders");
+        .rposition(|line| line.contains("[ask]"))
+        .expect("footer status line renders");
+    let hint_row = lines
+        .iter()
+        .rposition(|line| line.contains("enter send"))
+        .expect("footer hint line renders");
 
     assert!(
         composer_row >= lines.len().saturating_sub(4),
         "composer should stay pinned near bottom, got row {composer_row}"
     );
     assert!(
-        footer_row > composer_row,
-        "footer should sit below composer, composer={composer_row}, footer={footer_row}"
+        hint_row > composer_row,
+        "footer hint line should sit below composer, composer={composer_row}, hint={hint_row}"
     );
     assert!(
         lines.iter().any(|line| line.contains("shift+enter")),
         "footer should advertise compact keyboard hints"
+    );
+    assert!(lines.iter().any(|line| line.contains("ctx 12k/200k")));
+    let footer_lines = &lines[status_row.min(hint_row)..=status_row.max(hint_row)];
+    assert!(!footer_lines.iter().any(|line| line.contains("neo  ")));
+    assert!(
+        !footer_lines.iter().any(|line| {
+            line.contains(" new ") || line.contains("anthropic/deepseek-v4-pro[1m]")
+        })
     );
     assert!(
         lines[composer_row.saturating_sub(1)].contains('┌')
             || lines[composer_row.saturating_sub(1)].contains('─'),
         "composer should render inside a bordered input box"
     );
+    assert!(status_row > composer_row);
 }
 
 #[test]
@@ -1298,7 +1326,7 @@ fn transcript_renderer_does_not_classify_plain_plus_minus_text_as_diff() {
 }
 
 #[test]
-fn app_widget_renders_header_transcript_prompt_and_top_overlay() {
+fn app_widget_renders_transcript_prompt_and_top_overlay() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.transcript_mut().push(neo_tui::TranscriptItem::notice(
         "Welcome to neo terminal shell",
@@ -1313,9 +1341,6 @@ fn app_widget_renders_header_transcript_prompt_and_top_overlay() {
 
     let lines = render_app(64, 18, &app);
 
-    assert!(lines.iter().any(|line| line.contains("neo")));
-    assert!(lines.iter().any(|line| line.contains("session-a")));
-    assert!(lines.iter().any(|line| line.contains("openai/gpt-4.1")));
     assert!(lines.iter().any(|line| line.contains("Welcome to neo")));
     assert!(lines.iter().any(|line| line.contains("Command Palette")));
     assert!(lines.iter().any(|line| line.contains("New session")));

@@ -1132,27 +1132,6 @@ impl Widget for &NeoTuiApp {
         }
 
         buf.set_style(area, Style::default().bg(self.theme().background));
-        let mut header_parts = vec![
-            self.title().to_owned(),
-            format!("session:{}", self.session_label()),
-            format!("model:{}", self.model_label()),
-        ];
-        if let Some(context) = self.context_window_label() {
-            header_parts.push(context);
-        }
-        if let Some(working) = self.working_label() {
-            header_parts.push(format!("● {working}"));
-        }
-        let header = header_parts.join("  ");
-        write_line(
-            area,
-            buf,
-            area.y,
-            &header,
-            Style::default()
-                .fg(self.theme().header)
-                .add_modifier(Modifier::BOLD),
-        );
 
         let approval_overlay = match self.focused_overlay().map(|overlay| &overlay.kind) {
             Some(OverlayKind::Approval(request)) => Some(request),
