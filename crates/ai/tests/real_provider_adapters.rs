@@ -214,6 +214,62 @@ fn tool_result_request(api: ApiKind, is_error: bool) -> ChatRequest {
     }
 }
 
+fn multi_tool_result_request(api: ApiKind) -> ChatRequest {
+    ChatRequest {
+        model: ModelSpec {
+            provider: ProviderId("provider".to_owned()),
+            model: "model-test".to_owned(),
+            api,
+            capabilities: ModelCapabilities::tool_chat(),
+        },
+        messages: vec![
+            ChatMessage::User {
+                content: vec![ContentPart::Text {
+                    text: "read this".to_owned(),
+                }],
+            },
+            ChatMessage::Assistant {
+                content: Vec::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "call-1".to_owned(),
+                        name: "read_file".to_owned(),
+                        arguments: json!({ "path": "Cargo.toml" }),
+                    },
+                    ToolCall {
+                        id: "call-2".to_owned(),
+                        name: "list_files".to_owned(),
+                        arguments: json!({ "path": "crates" }),
+                    },
+                ],
+            },
+            ChatMessage::ToolResult {
+                tool_call_id: "call-1".to_owned(),
+                content: vec![ContentPart::Text {
+                    text: "workspace manifest".to_owned(),
+                }],
+                is_error: false,
+            },
+            ChatMessage::ToolResult {
+                tool_call_id: "call-2".to_owned(),
+                content: vec![ContentPart::Text {
+                    text: "ai\nagent-core".to_owned(),
+                }],
+                is_error: false,
+            },
+        ],
+        tools: vec![
+            ToolSpec::string_arg("read_file", "Read a file", "path", "Path to read"),
+            ToolSpec::string_arg("list_files", "List files", "path", "Path to list"),
+        ],
+        options: RequestOptions {
+            max_tokens: Some(64),
+            retries: Some(0),
+            ..RequestOptions::default()
+        },
+    }
+}
+
 fn image_request(api: ApiKind, image: ImageData) -> ChatRequest {
     ChatRequest {
         model: ModelSpec {
@@ -1455,6 +1511,28 @@ async fn anthropic_messages_client_retries_retryable_http_responses() {
 }
 
 #[tokio::test]
+async fn anthropic_messages_client_reports_non_retryable_http_response_body() {
+    let server = MockServer::start(vec![format!(
+        "HTTP/1.1 400 Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        r#"{"error":{"message":"tool schema is invalid","type":"invalid_request_error"}}"#.len(),
+        r#"{"error":{"message":"tool schema is invalid","type":"invalid_request_error"}}"#
+    )]);
+    let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+
+    let err = client
+        .stream_chat(request(ApiKind::AnthropicMessages))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_err();
+
+    let text = err.to_string();
+    assert!(text.contains("http status 400"));
+    assert!(text.contains("tool schema is invalid"));
+}
+
+#[tokio::test]
 async fn anthropic_messages_client_serializes_tool_result_errors() {
     let server = MockServer::start(vec![sse_response(&[
         json!({ "type": "message_start", "message": { "id": "msg-tool-result" } }),
@@ -1476,6 +1554,41 @@ async fn anthropic_messages_client_serializes_tool_result_errors() {
     assert_eq!(tool_result["tool_use_id"], "call-1");
     assert_eq!(tool_result["content"], "permission denied");
     assert_eq!(tool_result["is_error"], true);
+}
+
+#[tokio::test]
+async fn anthropic_messages_client_groups_consecutive_tool_results_in_one_user_message() {
+    let server = MockServer::start(vec![sse_response(&[
+        json!({ "type": "message_start", "message": { "id": "msg-multi-tool-result" } }),
+        json!({ "type": "message_stop" }),
+    ])]);
+    let client = AnthropicMessagesClient::new(server.url.clone(), "test-key");
+
+    client
+        .stream_chat(multi_tool_result_request(ApiKind::AnthropicMessages))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    let sent = server.requests().pop().unwrap();
+    assert_eq!(sent.body["messages"].as_array().expect("messages").len(), 3);
+    let result_message = &sent.body["messages"][2];
+    assert_eq!(result_message["role"], "user");
+    assert_eq!(
+        result_message["content"].as_array().expect("content").len(),
+        2
+    );
+    assert_eq!(result_message["content"][0]["type"], "tool_result");
+    assert_eq!(result_message["content"][0]["tool_use_id"], "call-1");
+    assert_eq!(
+        result_message["content"][0]["content"],
+        "workspace manifest"
+    );
+    assert_eq!(result_message["content"][1]["type"], "tool_result");
+    assert_eq!(result_message["content"][1]["tool_use_id"], "call-2");
+    assert_eq!(result_message["content"][1]["content"], "ai\nagent-core");
 }
 
 #[tokio::test]

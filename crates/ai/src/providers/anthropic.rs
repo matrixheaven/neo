@@ -65,7 +65,15 @@ impl AnthropicMessagesClient {
         let response = builder.send().await.map_err(ProviderError::Transport)?;
         let status = response.status();
         if !status.is_success() {
-            return Err(ProviderError::HttpStatus(status.as_u16()));
+            let status = status.as_u16();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|err| format!("failed to read error body: {err}"));
+            return Err(ProviderError::HttpStatus {
+                status,
+                body: error_body_excerpt(&body),
+            });
         }
 
         Ok(response)
@@ -90,7 +98,7 @@ impl ModelClient for AnthropicMessagesClient {
 #[derive(Debug)]
 enum ProviderError {
     Header(String),
-    HttpStatus(u16),
+    HttpStatus { status: u16, body: String },
     Transport(reqwest::Error),
     Stream(String),
 }
@@ -98,7 +106,7 @@ enum ProviderError {
 impl ProviderError {
     const fn is_retryable(&self) -> bool {
         match self {
-            Self::HttpStatus(status) => *status == 429 || *status >= 500,
+            Self::HttpStatus { status, .. } => *status == 429 || *status >= 500,
             Self::Transport(_) => true,
             Self::Header(_) | Self::Stream(_) => false,
         }
@@ -107,9 +115,35 @@ impl ProviderError {
     fn into_ai_error(self) -> AiError {
         match self {
             Self::Header(message) | Self::Stream(message) => AiError::Stream(message),
-            Self::HttpStatus(status) => AiError::Stream(format!("http status {status}")),
+            Self::HttpStatus { status, body } => {
+                AiError::Stream(format_http_status_error(status, &body))
+            }
             Self::Transport(err) => AiError::Stream(format!("transport error: {err}")),
         }
+    }
+}
+
+const MAX_HTTP_ERROR_BODY_CHARS: usize = 4096;
+
+fn error_body_excerpt(body: &str) -> String {
+    let trimmed = body.trim();
+    let mut chars = trimmed.chars();
+    let excerpt = chars
+        .by_ref()
+        .take(MAX_HTTP_ERROR_BODY_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        format!("{excerpt}...")
+    } else {
+        excerpt
+    }
+}
+
+fn format_http_status_error(status: u16, body: &str) -> String {
+    if body.is_empty() {
+        format!("http status {status}")
+    } else {
+        format!("http status {status}: {body}")
     }
 }
 
@@ -142,11 +176,7 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
         "model": request.model.model,
         "stream": true,
         "max_tokens": request.options.max_tokens.unwrap_or(4096),
-        "messages": request
-            .messages
-            .iter()
-            .filter_map(|message| message_body(message, request.options.replay_reasoning))
-            .collect::<Result<Vec<_>, _>>()?,
+        "messages": message_bodies(&request.messages, request.options.replay_reasoning)?,
     });
 
     let system = request
@@ -221,18 +251,63 @@ fn message_body(
             tool_call_id,
             content,
             is_error,
-        } => Some(content_text(content, "tool result").map(|content| {
-            json!({
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": tool_call_id,
-                    "content": content,
-                    "is_error": is_error,
-                }],
-            })
-        })),
+        } => Some(
+            tool_result_block(tool_call_id, content, *is_error).map(|block| {
+                json!({
+                    "role": "user",
+                    "content": [block],
+                })
+            }),
+        ),
     }
+}
+
+fn message_bodies(
+    messages: &[ChatMessage],
+    replay_reasoning: bool,
+) -> Result<Vec<Value>, ProviderError> {
+    let mut bodies = Vec::new();
+    let mut index = 0;
+    while index < messages.len() {
+        if let ChatMessage::ToolResult { .. } = &messages[index] {
+            let mut content = Vec::new();
+            while let Some(ChatMessage::ToolResult {
+                tool_call_id,
+                content: result_content,
+                is_error,
+            }) = messages.get(index)
+            {
+                content.push(tool_result_block(tool_call_id, result_content, *is_error)?);
+                index += 1;
+            }
+            bodies.push(json!({
+                "role": "user",
+                "content": content,
+            }));
+            continue;
+        }
+
+        if let Some(body) = message_body(&messages[index], replay_reasoning) {
+            bodies.push(body?);
+        }
+        index += 1;
+    }
+    Ok(bodies)
+}
+
+fn tool_result_block(
+    tool_call_id: &str,
+    content: &[ContentPart],
+    is_error: bool,
+) -> Result<Value, ProviderError> {
+    content_text(content, "tool result").map(|content| {
+        json!({
+            "type": "tool_result",
+            "tool_use_id": tool_call_id,
+            "content": content,
+            "is_error": is_error,
+        })
+    })
 }
 
 fn user_content(content: &[ContentPart]) -> Result<Value, ProviderError> {
