@@ -37,6 +37,72 @@ fn app_shell_renders_context_window_and_working_status() {
 }
 
 #[test]
+fn app_shell_renders_startup_banner() {
+    let mut app = NeoTuiApp::new("neo", "test-session", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.transcript_mut().push(neo_tui::TranscriptItem::banner(
+        "Welcome to neo",
+        "test-session",
+        "openai/gpt-4.1",
+        "/tmp/neo-ws",
+    ));
+
+    let lines = render_app(80, 12, &app);
+
+    assert!(lines.iter().any(|line| line.contains("Welcome to neo")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Session: test-session"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Model: openai/gpt-4.1"))
+    );
+    assert!(lines.iter().any(|line| line.contains("Workspace:")));
+}
+
+#[test]
+fn app_shell_context_color_changes_by_threshold() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+
+    app.set_context_window(Some(ContextWindow::new(100_000).with_used_tokens(50_000)));
+    assert_eq!(app.context_color(), app.theme().footer_context_ok);
+
+    app.set_context_window(Some(ContextWindow::new(100_000).with_used_tokens(75_000)));
+    assert_eq!(app.context_color(), app.theme().footer_context_warn);
+
+    app.set_context_window(Some(ContextWindow::new(100_000).with_used_tokens(95_000)));
+    assert_eq!(app.context_color(), app.theme().footer_context_critical);
+}
+
+#[test]
+fn app_shell_footer_has_two_lines_when_tall() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
+
+    let lines = render_app(100, 12, &app);
+    let last = lines.len().saturating_sub(1);
+    let second_last = last.saturating_sub(1);
+
+    assert!(
+        lines[second_last].contains("[ask]"),
+        "status line should be the second-to-last row:\n{}",
+        lines.join("\n")
+    );
+    assert!(
+        lines[last].contains("enter send"),
+        "hint line should be the last row:\n{}",
+        lines.join("\n")
+    );
+    assert!(
+        lines[last].contains("ctx 12k/200k"),
+        "context label should render on the hint line:\n{}",
+        lines.join("\n")
+    );
+}
+
+#[test]
 fn app_shell_working_status_hides_running_tool_names_from_chrome() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.apply_stream_update(StreamUpdate::ToolStarted {

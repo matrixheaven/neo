@@ -3616,6 +3616,7 @@ fn session_files_in(sessions_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut entries = std::fs::read_dir(sessions_dir)
         .expect("read sessions")
         .map(|entry| entry.expect("session entry").path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
         .collect::<Vec<_>>();
     entries.sort();
     entries

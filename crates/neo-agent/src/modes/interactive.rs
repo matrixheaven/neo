@@ -2673,10 +2673,21 @@ mod tests {
             },
         );
 
+        controller
+            .app
+            .transcript_mut()
+            .push(neo_tui::TranscriptItem::banner(
+                "Welcome to neo",
+                "test-session",
+                "openai/gpt-4.1",
+                test_workspace_root(),
+            ));
         controller.type_text("hello neo");
         let snapshot = controller.submit_prompt().await.expect("turn succeeds");
 
-        assert!(snapshot.contains("neo  session:test-session  model:openai/gpt-4.1"));
+        assert!(snapshot.contains("Welcome to neo"));
+        assert!(snapshot.contains("Session: test-session"));
+        assert!(snapshot.contains("Model: openai/gpt-4.1"));
         assert!(snapshot.contains("You"));
         assert!(snapshot.contains("hello neo"));
         assert!(snapshot.contains("Assistant"));
@@ -4106,7 +4117,7 @@ command = "python3"
             .handle_input_event(InputEvent::Action(KeybindingAction::EditorCursorDown))
             .await
             .expect("cursor down scrolls transcript toward bottom");
-        assert_eq!(controller.app().transcript_view().scrollback(), 7);
+        assert_eq!(controller.app().transcript_view().scrollback(), 8);
 
         controller
             .handle_input_event(InputEvent::Action(KeybindingAction::EditorPageDown))

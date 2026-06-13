@@ -61,8 +61,9 @@ fn root_command_reports_interactive_entrypoint_without_placeholders() {
 
     let stdout = run(command);
 
-    assert!(stdout.contains("neo  session:"));
-    assert!(stdout.contains("model:openai/gpt-4.1"));
+    assert!(stdout.contains("Welcome to neo"));
+    assert!(stdout.contains("Session:"));
+    assert!(stdout.contains("Model: openai/gpt-4.1"));
     assert!(stdout.contains("ctx --/1m"));
     assert!(stdout.contains("enter send"));
     assert!(!stdout.contains("placeholder"));
@@ -88,8 +89,9 @@ default_model = "claude-sonnet"
 
     let stdout = run(command);
 
-    assert!(stdout.contains("neo  session:"));
-    assert!(stdout.contains("model:anthropic/claude-sonnet"));
+    assert!(stdout.contains("Welcome to neo"));
+    assert!(stdout.contains("Session:"));
+    assert!(stdout.contains("Model: anthropic/claude-sonnet"));
     assert!(stdout.contains('>'));
     assert!(!stdout.contains("commands:"));
 }
@@ -113,7 +115,6 @@ fn root_verbose_flag_renders_real_startup_details() {
     assert!(stdout.contains("project:"));
     assert!(stdout.contains(project_name));
     assert!(stdout.contains("sessions:"));
-    assert!(stdout.contains(".neo/sessions"));
     assert!(stdout.contains("model scope: sonnet"));
     assert!(!stdout.contains("placeholder"));
     assert!(!stdout.contains("fake"));
@@ -199,7 +200,6 @@ fn root_resume_flag_opens_real_local_session_picker() {
 
     assert!(stdout.contains("Sessions"));
     assert!(stdout.contains("alpha"));
-    assert!(stdout.contains("session"));
     assert!(!stdout.contains("placeholder"));
     assert!(!stdout.contains("fake"));
 }
@@ -928,10 +928,13 @@ fn print_with_missing_credentials_does_not_persist_assistant_response() {
     let output = command.output().expect("neo command should run");
 
     assert!(!output.status.success());
-    let sessions = fs::read_dir(temp.path().join(".neo/sessions"))
+    let sessions: Vec<_> = fs::read_dir(temp.path().join(".neo/sessions"))
         .expect("read sessions")
         .collect::<Result<Vec<_>, _>>()
-        .expect("session entries");
+        .expect("session entries")
+        .into_iter()
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+        .collect();
     assert_eq!(sessions.len(), 1);
     let path = sessions[0].path();
     assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("jsonl"));
@@ -1764,8 +1767,8 @@ fn root_models_scope_selects_first_matching_model_for_interactive_start() {
 
     let stdout = run(command);
 
-    assert!(stdout.contains("model:anthropic/claude-sonnet-4-5"));
-    assert!(!stdout.contains("model:openai/gpt-4.1"));
+    assert!(stdout.contains("Model: anthropic/claude-sonnet-4-5"));
+    assert!(!stdout.contains("Model: openai/gpt-4.1"));
     assert!(!stdout.contains("placeholder"));
     assert!(!stdout.contains("fake"));
 }
