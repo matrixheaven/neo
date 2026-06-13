@@ -1261,24 +1261,24 @@ fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
     let (permission_label, permission_color) = app.permission_badge();
     let muted = Style::default().fg(theme.muted);
     let working_style = Style::default().fg(theme.footer_working);
-    let hint_style = Style::default().fg(theme.footer_hint);
     let context_style = Style::default().fg(app.context_color());
 
-    // Two-line footer when space allows; otherwise just the hints/context line.
-    if area.height >= 2 {
-        let mut status_spans = vec![
-            Span::styled(
-                format!("[{permission_label}]"),
-                Style::default().fg(permission_color),
-            ),
-            Span::raw(" "),
-        ];
-        if let Some(working) = app.working_label() {
-            status_spans.push(Span::styled(format!("● {working}"), working_style));
-            status_spans.push(Span::raw(" "));
-        }
-        status_spans.push(Span::styled(app.cwd_label(), muted));
+    let mut status_spans = vec![
+        Span::styled(
+            format!("[{permission_label}]"),
+            Style::default().fg(permission_color),
+        ),
+        Span::raw(" "),
+    ];
+    if let Some(working) = app.working_label() {
+        status_spans.push(Span::styled(format!("● {working}"), working_style));
+        status_spans.push(Span::raw(" "));
+    }
+    status_spans.push(Span::styled(app.cwd_label(), muted));
 
+    let context_label = app.context_window_label();
+
+    if area.height >= 2 {
         let status_area = Rect {
             x: area.x,
             y: area.y,
@@ -1286,50 +1286,83 @@ fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
             height: 1,
         };
         render_truncated_line(status_spans, status_area, buf);
-    }
 
-    let hints_y = area.y.saturating_add(area.height.saturating_sub(1));
-    let narrow = area.width < 50;
-    let mut hints = if narrow {
-        "enter send · esc interrupt".to_owned()
-    } else {
-        "enter send · shift+enter newline · / commands".to_owned()
-    };
-    if !app.transcript_view().is_following_tail() && area.width >= 60 {
-        hints.push_str(" · new output below · end to jump");
-    }
+        let hints_y = area.y.saturating_add(1);
+        let hint_style = Style::default().fg(theme.footer_hint);
+        let narrow = area.width < 50;
+        let mut hints = if narrow {
+            "enter send · esc interrupt".to_owned()
+        } else {
+            "enter send · shift+enter newline · / commands".to_owned()
+        };
+        if !app.transcript_view().is_following_tail() && area.width >= 60 {
+            hints.push_str(" · new output below · end to jump");
+        }
 
-    let context_label = app.context_window_label();
-    let context_width = context_label
-        .as_ref()
-        .map(|label| visible_width(label))
-        .unwrap_or(0);
-    let gap: u16 = if context_width > 0 { 1 } else { 0 };
-    let left_width = area
-        .width
-        .saturating_sub(context_width as u16)
-        .saturating_sub(gap);
+        let context_width = context_label
+            .as_ref()
+            .map(|label| visible_width(label))
+            .unwrap_or(0);
+        let gap: u16 = if context_width > 0 { 1 } else { 0 };
+        let left_width = area
+            .width
+            .saturating_sub(context_width as u16)
+            .saturating_sub(gap);
 
-    let hints_area = Rect {
-        x: area.x,
-        y: hints_y,
-        width: left_width,
-        height: 1,
-    };
-    render_truncated_line(vec![Span::styled(hints, hint_style)], hints_area, buf);
-
-    if let Some(context_label) = context_label {
-        let context_area = Rect {
-            x: area.x.saturating_add(left_width).saturating_add(gap),
+        let hints_area = Rect {
+            x: area.x,
             y: hints_y,
-            width: context_width as u16,
+            width: left_width,
             height: 1,
         };
-        render_truncated_line_right(
-            vec![Span::styled(context_label, context_style)],
-            context_area,
-            buf,
-        );
+        render_truncated_line(vec![Span::styled(hints, hint_style)], hints_area, buf);
+
+        if let Some(context_label) = context_label {
+            let context_area = Rect {
+                x: area.x.saturating_add(left_width).saturating_add(gap),
+                y: hints_y,
+                width: context_width as u16,
+                height: 1,
+            };
+            render_truncated_line_right(
+                vec![Span::styled(context_label, context_style)],
+                context_area,
+                buf,
+            );
+        }
+    } else {
+        // Single-line footer: status left, context right (hints hidden).
+        let context_width = context_label
+            .as_ref()
+            .map(|label| visible_width(label))
+            .unwrap_or(0);
+        let gap: u16 = if context_width > 0 { 1 } else { 0 };
+        let left_width = area
+            .width
+            .saturating_sub(context_width as u16)
+            .saturating_sub(gap);
+
+        let status_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: left_width,
+            height: 1,
+        };
+        render_truncated_line(status_spans, status_area, buf);
+
+        if let Some(context_label) = context_label {
+            let context_area = Rect {
+                x: area.x.saturating_add(left_width).saturating_add(gap),
+                y: area.y,
+                width: context_width as u16,
+                height: 1,
+            };
+            render_truncated_line_right(
+                vec![Span::styled(context_label, context_style)],
+                context_area,
+                buf,
+            );
+        }
     }
 }
 

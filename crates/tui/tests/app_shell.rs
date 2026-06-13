@@ -103,6 +103,31 @@ fn app_shell_footer_has_two_lines_when_tall() {
 }
 
 #[test]
+fn app_shell_footer_collapses_to_status_and_context_on_short_terminal() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
+
+    let lines = render_app(100, 10, &app);
+    let last = lines.len().saturating_sub(1);
+
+    assert!(
+        lines[last].contains("[ask]"),
+        "single-line footer should still show status badge:\n{}",
+        lines.join("\n")
+    );
+    assert!(
+        lines[last].contains("ctx 12k/200k"),
+        "single-line footer should show context on the right:\n{}",
+        lines.join("\n")
+    );
+    assert!(
+        !lines[last].contains("enter send"),
+        "single-line footer should hide keyboard hints:\n{}",
+        lines.join("\n")
+    );
+}
+
+#[test]
 fn app_shell_working_status_hides_running_tool_names_from_chrome() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.apply_stream_update(StreamUpdate::ToolStarted {
