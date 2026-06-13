@@ -21,9 +21,9 @@ use neo_agent_core::{
     McpToolProvider, PermissionDecision, ToolRegistry,
 };
 use neo_ai::{
-    ApiKind, CredentialResolver, ImageData, ImageGenerationClient, ImageGenerationRequest,
-    ModelClient, ModelRegistry, ModelSpec, ProviderRegistry, ProviderSpec, ResolvedCredential,
-    providers::openai_images::OpenAiImagesClient,
+    ApiKind, ChatMessage, ContentPart, CredentialResolver, ImageData, ImageGenerationClient,
+    ImageGenerationRequest, ModelClient, ModelRegistry, ModelSpec, ProviderRegistry, ProviderSpec,
+    RequestOptions, ResolvedCredential, providers::openai_images::OpenAiImagesClient,
 };
 use reqwest::header;
 use serde::{Deserialize, Serialize};
@@ -1246,9 +1246,10 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
     let mut writer = SessionEventWriter::jsonl(&mut writer);
-    let (user_message, events) = append_user_event(prompt, &mut writer).await?;
+    let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
+    record_session_activity(config, &session_id, &prompt);
     let runtime = runtime_for_config(config, None).await?;
-    finish_prompt_turn(
+    let turn = finish_prompt_turn(
         user_message,
         AgentContext::new(),
         &mut writer,
@@ -1256,7 +1257,9 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
         events,
         session_id,
     )
-    .await
+    .await?;
+    record_initial_session_title(config, &turn, &prompt).await;
+    Ok(turn)
 }
 
 pub async fn run_prompt_ephemeral(
@@ -1265,7 +1268,7 @@ pub async fn run_prompt_ephemeral(
 ) -> anyhow::Result<PromptTurn> {
     let prompt = prompt.join(" ");
     let mut writer = SessionEventWriter::memory();
-    let (user_message, events) = append_user_event(prompt, &mut writer).await?;
+    let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
     let runtime = runtime_for_config(config, None).await?;
     finish_prompt_turn(
         user_message,
@@ -1334,9 +1337,10 @@ async fn run_prompt_with_exact_session_id(
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
     let mut writer = SessionEventWriter::jsonl(&mut writer);
-    let (user_message, events) = append_user_event(prompt, &mut writer).await?;
+    let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
+    record_session_activity(config, session_id, &prompt);
     let runtime = runtime_for_config(config, None).await?;
-    finish_prompt_turn(
+    let turn = finish_prompt_turn(
         user_message,
         AgentContext::new(),
         &mut writer,
@@ -1344,7 +1348,9 @@ async fn run_prompt_with_exact_session_id(
         events,
         session_id.to_owned(),
     )
-    .await
+    .await?;
+    record_initial_session_title(config, &turn, &prompt).await;
+    Ok(turn)
 }
 
 #[allow(dead_code)]
@@ -1362,7 +1368,8 @@ pub async fn run_prompt_in_session(
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
     let mut writer = SessionEventWriter::jsonl(&mut writer);
-    let (user_message, events) = append_user_event(prompt, &mut writer).await?;
+    let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
+    record_session_activity(config, session_id, &prompt);
     let runtime = runtime_for_config(config, None).await?;
     finish_prompt_turn(
         user_message,
@@ -1392,14 +1399,15 @@ pub async fn run_prompt_streaming(
     if let Some(session_id_tx) = session_id_tx {
         let _ = session_id_tx.send(session_id.clone());
     }
-    let (user_message, events) = append_user_event_jsonl(prompt, &mut writer).await?;
+    let (user_message, events) = append_user_event_jsonl(prompt.clone(), &mut writer).await?;
+    record_session_activity(config, &session_id, &prompt);
     let runtime = runtime_for_config(config, Some(approval_tx)).await?;
     let streaming = StreamingTurnIo {
         event_tx,
         session_id,
         cancel_token,
     };
-    finish_prompt_turn_streaming(
+    let turn = finish_prompt_turn_streaming(
         user_message,
         AgentContext::new(),
         &mut writer,
@@ -1407,7 +1415,9 @@ pub async fn run_prompt_streaming(
         events,
         streaming,
     )
-    .await
+    .await?;
+    record_initial_session_title(config, &turn, &prompt).await;
+    Ok(turn)
 }
 
 pub async fn run_prompt_in_session_streaming(
@@ -1430,7 +1440,8 @@ pub async fn run_prompt_in_session_streaming(
     if let Some(session_id_tx) = session_id_tx {
         let _ = session_id_tx.send(session_id.to_owned());
     }
-    let (user_message, events) = append_user_event_jsonl(prompt, &mut writer).await?;
+    let (user_message, events) = append_user_event_jsonl(prompt.clone(), &mut writer).await?;
+    record_session_activity(config, session_id, &prompt);
     let runtime = runtime_for_config(config, Some(approval_tx)).await?;
     let streaming = StreamingTurnIo {
         event_tx,
@@ -2041,6 +2052,104 @@ fn resolve_model(config: &AppConfig) -> anyhow::Result<ModelSpec> {
                 config.default_provider, config.default_model
             )
         })
+}
+
+fn record_session_activity(config: &AppConfig, session_id: &str, prompt: &str) {
+    let _ = SessionMetadataStore::new(&config.sessions_dir).record_activity(
+        session_id,
+        Some(config.project_dir.display().to_string()),
+        Some(one_line(prompt, 240)),
+        current_unix_timestamp(),
+    );
+}
+
+async fn record_initial_session_title(config: &AppConfig, turn: &PromptTurn, prompt: &str) {
+    let store = SessionMetadataStore::new(&config.sessions_dir);
+    let Ok(sessions) = store.list() else {
+        return;
+    };
+    let Some(record) = sessions
+        .into_iter()
+        .find(|session| session.id == turn.session_id)
+    else {
+        return;
+    };
+    if record.name.is_some() || record.title_model.is_some() {
+        return;
+    }
+
+    let fallback = one_line(prompt, 40);
+    let (title, model_label) =
+        match generate_session_title(config, prompt, &turn.assistant_text).await {
+            Ok((title, model_label)) if !title.is_empty() => (title, Some(model_label)),
+            _ => (fallback, None),
+        };
+    let _ = store.record_title(
+        &turn.session_id,
+        title,
+        model_label,
+        current_unix_timestamp(),
+    );
+}
+
+async fn generate_session_title(
+    config: &AppConfig,
+    prompt: &str,
+    assistant_text: &str,
+) -> anyhow::Result<(String, String)> {
+    let model = resolve_model(config)?;
+    let client = resolve_model_client(config, &model)?;
+    let model_label = format!("{}/{}", model.provider.0, model.model);
+    let request = neo_ai::ChatRequest {
+        model,
+        messages: vec![
+            ChatMessage::System {
+                content: vec![ContentPart::Text {
+                    text: "Generate a concise session title. Return only the title, no quotes."
+                        .to_owned(),
+                }],
+            },
+            ChatMessage::User {
+                content: vec![ContentPart::Text {
+                    text: format!(
+                        "User prompt:\n{}\n\nAssistant response:\n{}",
+                        one_line(prompt, 500),
+                        one_line(assistant_text, 500)
+                    ),
+                }],
+            },
+        ],
+        tools: Vec::new(),
+        options: RequestOptions {
+            max_tokens: Some(32),
+            temperature: Some(0.2),
+            ..RequestOptions::default()
+        },
+    };
+    let events = client.stream_chat(request).collect::<Vec<_>>().await;
+    let mut title = String::new();
+    for event in events {
+        if let neo_ai::AiStreamEvent::TextDelta { text } = event? {
+            title.push_str(&text);
+        }
+    }
+    Ok((clean_session_title(&title), model_label))
+}
+
+fn clean_session_title(title: &str) -> String {
+    one_line(title.trim().trim_matches(['"', '\'', '`']), 40)
+        .trim_matches(['*', '#'])
+        .trim()
+        .to_owned()
+}
+
+fn one_line(text: &str, max_chars: usize) -> String {
+    let mut line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() > max_chars {
+        line = line.chars().take(max_chars.saturating_sub(1)).collect();
+        line.push('…');
+    }
+    line
 }
 
 pub(crate) fn model_registry_for_config(config: &AppConfig) -> anyhow::Result<ModelRegistry> {
