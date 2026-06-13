@@ -47,6 +47,14 @@ pub struct TuiTheme {
     pub selected_fg: Color,
     pub selected_bg: Color,
     pub overlay_border: Color,
+    pub footer_permission_allow: Color,
+    pub footer_permission_ask: Color,
+    pub footer_permission_deny: Color,
+    pub footer_working: Color,
+    pub footer_context_ok: Color,
+    pub footer_context_warn: Color,
+    pub footer_context_critical: Color,
+    pub footer_hint: Color,
 }
 
 impl Default for TuiTheme {
@@ -84,6 +92,14 @@ impl Default for TuiTheme {
             selected_fg: Color::Black,
             selected_bg: Color::Rgb(88, 166, 255),
             overlay_border: Color::Rgb(88, 166, 255),
+            footer_permission_allow: Color::Rgb(65, 184, 131),
+            footer_permission_ask: Color::Rgb(88, 166, 255),
+            footer_permission_deny: Color::Rgb(248, 81, 73),
+            footer_working: Color::Rgb(88, 166, 255),
+            footer_context_ok: Color::Rgb(139, 148, 158),
+            footer_context_warn: Color::Rgb(210, 153, 34),
+            footer_context_critical: Color::Rgb(248, 81, 73),
+            footer_hint: Color::Rgb(139, 148, 158),
         }
     }
 }
@@ -187,6 +203,54 @@ impl TuiTheme {
     #[must_use]
     pub const fn with_notice(mut self, color: Color) -> Self {
         self.notice = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_footer_permission_allow(mut self, color: Color) -> Self {
+        self.footer_permission_allow = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_footer_permission_ask(mut self, color: Color) -> Self {
+        self.footer_permission_ask = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_footer_permission_deny(mut self, color: Color) -> Self {
+        self.footer_permission_deny = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_footer_working(mut self, color: Color) -> Self {
+        self.footer_working = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_footer_context_ok(mut self, color: Color) -> Self {
+        self.footer_context_ok = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_footer_context_warn(mut self, color: Color) -> Self {
+        self.footer_context_warn = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_footer_context_critical(mut self, color: Color) -> Self {
+        self.footer_context_critical = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_footer_hint(mut self, color: Color) -> Self {
+        self.footer_hint = color;
         self
     }
 }
