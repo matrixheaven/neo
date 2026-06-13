@@ -30,7 +30,13 @@ pub struct AppLayout {
 #[must_use]
 pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
     let prompt_height = prompt_height(app.prompt(), area.width);
-    let footer_bar_height = u16::from(area.height > 0);
+    let footer_bar_height = if area.height >= 12 {
+        2
+    } else if area.height >= 8 {
+        1
+    } else {
+        0
+    };
     let session_picker_height = match app.focused_overlay().map(|overlay| &overlay.kind) {
         Some(OverlayKind::SessionPicker(_)) => 16,
         _ => 0,
@@ -48,8 +54,8 @@ pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
         .saturating_add(footer_bar_height)
         .saturating_add(session_picker_height)
         .saturating_add(approval_height);
-    let body_y = area.y.saturating_add(1);
-    let body_height = area.height.saturating_sub(1).saturating_sub(bottom_height);
+    let body_y = area.y;
+    let body_height = area.height.saturating_sub(bottom_height);
     let body = Rect {
         x: area.x,
         y: body_y,
