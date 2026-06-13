@@ -494,7 +494,9 @@ fn print_session_id_flag_replays_existing_session_and_appends_turn() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![
         openai_response_sse("resp-session-id-1", "first answer"),
+        openai_response_sse("title-session-id-1", "test-title"),
         openai_response_sse("resp-session-id-2", "second answer"),
+        openai_response_sse("title-session-id-2", "test-title"),
     ]);
 
     let mut first = neo();
@@ -516,8 +518,8 @@ fn print_session_id_flag_replays_existing_session_and_appends_turn() {
     assert_eq!(run(second), "second answer\n");
 
     let requests = server.requests();
-    assert_eq!(requests.len(), 2);
-    let replayed = requests[1].body["input"]
+    assert_eq!(requests.len(), 3);
+    let replayed = requests[2].body["input"]
         .as_array()
         .expect("second request input");
     assert!(replayed.iter().any(|message| {
@@ -644,7 +646,9 @@ fn print_session_flag_replays_existing_session_by_local_id_and_appends_turn() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![
         openai_response_sse("resp-session-1", "first answer"),
+        openai_response_sse("title-session-1", "test-title"),
         openai_response_sse("resp-session-2", "continued answer"),
+        openai_response_sse("title-session-2", "test-title"),
     ]);
 
     let mut first = neo();
@@ -666,8 +670,8 @@ fn print_session_flag_replays_existing_session_by_local_id_and_appends_turn() {
     assert_eq!(run(second), "continued answer\n");
 
     let requests = server.requests();
-    assert_eq!(requests.len(), 2);
-    let replayed = requests[1].body["input"]
+    assert_eq!(requests.len(), 3);
+    let replayed = requests[2].body["input"]
         .as_array()
         .expect("second request input");
     assert!(replayed.iter().any(|message| {
@@ -686,7 +690,9 @@ fn print_session_flag_replays_existing_session_by_jsonl_path_and_appends_turn() 
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![
         openai_response_sse("resp-session-path-1", "first path answer"),
+        openai_response_sse("title-session-path-1", "test-title"),
         openai_response_sse("resp-session-path-2", "continued path answer"),
+        openai_response_sse("title-session-path-2", "test-title"),
     ]);
 
     let mut first = neo();
@@ -711,8 +717,8 @@ fn print_session_flag_replays_existing_session_by_jsonl_path_and_appends_turn() 
     assert_eq!(run(second), "continued path answer\n");
 
     let requests = server.requests();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].body["input"][2]["content"], "continue");
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[2].body["input"][2]["content"], "continue");
 }
 
 #[test]
@@ -720,7 +726,9 @@ fn run_session_flag_uses_existing_session_in_stable_json_output() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![
         openai_response_sse("resp-run-session-1", "first run answer"),
+        openai_response_sse("title-run-session-1", "test-title"),
         openai_response_sse("resp-run-session-2", "continued run answer"),
+        openai_response_sse("title-run-session-2", "test-title"),
     ]);
 
     let mut first = neo();
@@ -752,8 +760,8 @@ fn run_session_flag_uses_existing_session_in_stable_json_output() {
     assert!(stdout.contains("\"type\":\"session\""));
     assert!(stdout.contains("\"id\":\"run-existing\""));
     let requests = server.requests();
-    assert_eq!(requests.len(), 2);
-    let replayed = requests[1].body["input"]
+    assert_eq!(requests.len(), 3);
+    let replayed = requests[2].body["input"]
         .as_array()
         .expect("second request input");
     assert!(contains_responses_assistant_text(
@@ -770,8 +778,11 @@ fn print_continue_flag_replays_latest_session_and_appends_turn() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![
         openai_response_sse("resp-continue-old", "old answer"),
+        openai_response_sse("title-continue-old", "test-title"),
         openai_response_sse("resp-continue-latest", "latest answer"),
+        openai_response_sse("title-continue-latest", "test-title"),
         openai_response_sse("resp-continue-next", "continued latest"),
+        openai_response_sse("title-continue-next", "test-title"),
     ]);
 
     let mut old = neo();
@@ -802,8 +813,8 @@ fn print_continue_flag_replays_latest_session_and_appends_turn() {
     assert_eq!(run(continue_run), "continued latest\n");
 
     let requests = server.requests();
-    assert_eq!(requests.len(), 3);
-    let replayed = requests[2].body["input"]
+    assert_eq!(requests.len(), 5);
+    let replayed = requests[4].body["input"]
         .as_array()
         .expect("continued request input");
     assert!(replayed.iter().any(|message| {
@@ -827,7 +838,9 @@ fn print_continue_short_flag_replays_latest_session_and_appends_turn() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![
         openai_response_sse("resp-short-continue-1", "first answer"),
+        openai_response_sse("title-short-continue-1", "test-title"),
         openai_response_sse("resp-short-continue-2", "second answer"),
+        openai_response_sse("title-short-continue-2", "test-title"),
     ]);
 
     let mut first = neo();
@@ -849,8 +862,8 @@ fn print_continue_short_flag_replays_latest_session_and_appends_turn() {
     assert_eq!(run(second), "second answer\n");
 
     let requests = server.requests();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].body["input"][2]["content"], "second");
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[2].body["input"][2]["content"], "second");
 }
 
 #[test]
@@ -858,7 +871,9 @@ fn run_continue_flag_uses_latest_session_in_stable_json_output() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![
         openai_response_sse("resp-run-continue-1", "first answer"),
+        openai_response_sse("title-run-continue-1", "test-title"),
         openai_response_sse("resp-run-continue-2", "continued answer"),
+        openai_response_sse("title-run-continue-2", "test-title"),
     ]);
 
     let mut first = neo();
@@ -883,8 +898,8 @@ fn run_continue_flag_uses_latest_session_in_stable_json_output() {
     assert!(stdout.contains("\"type\":\"session\""));
     assert!(stdout.contains("\"id\":\"run-continue\""));
     let requests = server.requests();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].body["input"][2]["content"], "second");
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[2].body["input"][2]["content"], "second");
 }
 
 #[test]
@@ -920,7 +935,9 @@ fn print_name_short_flag_renames_continued_latest_session() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![
         openai_response_sse("resp-short-name-1", "first answer"),
+        openai_response_sse("title-short-name-1", "test-title"),
         openai_response_sse("resp-short-name-2", "second answer"),
+        openai_response_sse("title-short-name-2", "test-title"),
     ]);
 
     let mut first = neo();
@@ -983,7 +1000,9 @@ fn print_fork_flag_copies_existing_session_and_appends_turn_to_child() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![
         openai_response_sse("resp-fork-1", "parent answer"),
+        openai_response_sse("title-fork-1", "test-title"),
         openai_response_sse("resp-fork-2", "child answer"),
+        openai_response_sse("title-fork-2", "test-title"),
     ]);
 
     let mut parent = neo();
@@ -1026,8 +1045,8 @@ fn print_fork_flag_copies_existing_session_and_appends_turn_to_child() {
     assert!(child_content.contains("child answer"));
 
     let requests = server.requests();
-    assert_eq!(requests.len(), 2);
-    let replayed = requests[1].body["input"]
+    assert_eq!(requests.len(), 3);
+    let replayed = requests[2].body["input"]
         .as_array()
         .expect("fork request input");
     assert!(contains_responses_assistant_text(replayed, "parent answer"));
@@ -1041,7 +1060,9 @@ fn run_fork_flag_uses_child_session_in_stable_json_output_and_name_flag_names_ch
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![
         openai_response_sse("resp-run-fork-1", "parent answer"),
+        openai_response_sse("title-run-fork-1", "test-title"),
         openai_response_sse("resp-run-fork-2", "child json"),
+        openai_response_sse("title-run-fork-2", "test-title"),
     ]);
 
     let mut parent = neo();
