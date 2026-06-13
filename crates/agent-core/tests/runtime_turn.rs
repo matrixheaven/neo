@@ -3409,6 +3409,18 @@ fn capped_terminal_output_events_for_request(request: &ChatRequest) -> Vec<AiStr
                 "command": "printf term; printf '%s%s%s%s' inal -runtime -leak -tail; sleep 1"
             }),
         ),
+        Some(_) if last.contains("status: stopped") => vec![
+            AiStreamEvent::MessageStart {
+                id: format!("msg_{turn_index}"),
+            },
+            AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
         Some(handle) if last.contains("truncated: true") => terminal_tool_turn(
             turn_index,
             "tool_stop",
@@ -3434,18 +3446,7 @@ fn capped_terminal_output_events_for_request(request: &ChatRequest) -> Vec<AiStr
                 "max_output_bytes": 4
             }),
         ),
-        _ => vec![
-            AiStreamEvent::MessageStart {
-                id: format!("msg_{turn_index}"),
-            },
-            AiStreamEvent::TextDelta {
-                text: "done".to_owned(),
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: neo_ai::StopReason::EndTurn,
-                usage: None,
-            },
-        ],
+        _ => end_turn_done(turn_index),
     }
 }
 
@@ -3494,6 +3495,13 @@ fn terminal_lifecycle_events_for_request(request: &ChatRequest) -> Vec<AiStreamE
                 "rows": 9
             }),
         ),
+        Some(_)
+            if tool_results
+                .last()
+                .is_some_and(|content| content.contains("status: stopped")) =>
+        {
+            end_turn_done(turn_index)
+        }
         Some(handle)
             if tool_results
                 .last()
@@ -3538,19 +3546,23 @@ fn terminal_lifecycle_events_for_request(request: &ChatRequest) -> Vec<AiStreamE
                 }),
             )
         }
-        _ => vec![
-            AiStreamEvent::MessageStart {
-                id: format!("msg_{turn_index}"),
-            },
-            AiStreamEvent::TextDelta {
-                text: "done".to_owned(),
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: neo_ai::StopReason::EndTurn,
-                usage: None,
-            },
-        ],
+        _ => end_turn_done(turn_index),
     }
+}
+
+fn end_turn_done(turn_index: usize) -> Vec<AiStreamEvent> {
+    vec![
+        AiStreamEvent::MessageStart {
+            id: format!("msg_{turn_index}"),
+        },
+        AiStreamEvent::TextDelta {
+            text: "done".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]
 }
 
 fn terminal_tool_turn(

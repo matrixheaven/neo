@@ -1,6 +1,154 @@
 use neo_agent_core::{PermissionPolicy, ProcessSupervisor, ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_stop_returns_promptly_for_interactive_shell() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let supervisor = ProcessSupervisor::default();
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_process_supervisor(supervisor.clone());
+
+    let started = registry
+        .run(
+            "terminal",
+            &context,
+            json!({
+                "mode": "start",
+                "command": "bash --noprofile --norc"
+            }),
+        )
+        .await
+        .expect("terminal start should succeed");
+    let handle = started.details.as_ref().expect("start details")["handle"]
+        .as_str()
+        .expect("handle")
+        .to_owned();
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        registry.run(
+            "terminal",
+            &context,
+            json!({ "mode": "stop", "handle": handle }),
+        ),
+    )
+    .await
+    .expect("terminal stop should not block the async runtime")
+    .expect("terminal stop should succeed");
+
+    assert_eq!(supervisor.active_count().await, 0);
+}
+
+#[tokio::test]
+async fn terminal_read_waits_briefly_for_fresh_running_output() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let supervisor = ProcessSupervisor::default();
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_process_supervisor(supervisor.clone());
+
+    let started = registry
+        .run(
+            "terminal",
+            &context,
+            json!({
+                "mode": "start",
+                "command": "sleep 0.02; printf settle-output; sleep 1"
+            }),
+        )
+        .await
+        .expect("terminal start should succeed");
+    let handle = started.details.as_ref().expect("start details")["handle"]
+        .as_str()
+        .expect("handle")
+        .to_owned();
+
+    let read = registry
+        .run(
+            "terminal",
+            &context,
+            json!({ "mode": "read", "handle": handle, "max_output_bytes": 4096 }),
+        )
+        .await
+        .expect("terminal read should succeed");
+
+    assert!(
+        read.content.contains("settle-output"),
+        "terminal read should wait briefly for fresh running output: {read:?}"
+    );
+
+    registry
+        .run(
+            "terminal",
+            &context,
+            json!({ "mode": "stop", "handle": handle }),
+        )
+        .await
+        .expect("terminal stop should succeed");
+}
+
+#[tokio::test]
+async fn terminal_write_then_read_observes_interactive_shell_output() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let supervisor = ProcessSupervisor::default();
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_process_supervisor(supervisor.clone());
+
+    let started = registry
+        .run(
+            "terminal",
+            &context,
+            json!({
+                "mode": "start",
+                "command": "bash --noprofile --norc",
+                "cols": 44,
+                "rows": 9
+            }),
+        )
+        .await
+        .expect("terminal start should succeed");
+    let handle = started.details.as_ref().expect("start details")["handle"]
+        .as_str()
+        .expect("handle")
+        .to_owned();
+
+    registry
+        .run(
+            "terminal",
+            &context,
+            json!({
+                "mode": "write",
+                "handle": handle,
+                "input": "printf terminal-event-ok\\n\n"
+            }),
+        )
+        .await
+        .expect("terminal write should succeed");
+
+    let read = read_terminal_until(&registry, &context, &handle, "terminal-event-ok").await;
+    assert!(
+        read.contains("terminal-event-ok"),
+        "terminal read should include interactive shell output: {read:?}"
+    );
+
+    registry
+        .run(
+            "terminal",
+            &context,
+            json!({ "mode": "stop", "handle": handle }),
+        )
+        .await
+        .expect("terminal stop should succeed");
+}
+
 #[tokio::test]
 async fn terminal_tool_start_write_read_resize_and_stop_uses_real_pty() {
     let workspace = tempfile::tempdir().expect("workspace");

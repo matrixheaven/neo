@@ -9,13 +9,20 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::Mutex;
+use tokio::{
+    sync::Mutex,
+    task,
+    time::{Duration, Instant, sleep},
+};
 use uuid::Uuid;
 
 use super::{
     ProcessKind, Tool, ToolContext, ToolError, ToolFuture, ToolResult, cap_output, parse_input,
     schema,
 };
+
+const TERMINAL_READ_SETTLE_TIMEOUT: Duration = Duration::from_millis(100);
+const TERMINAL_READ_SETTLE_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -222,6 +229,9 @@ async fn read_terminal(
         .get_mut(handle)
         .ok_or_else(|| unknown_terminal(tool, handle))?;
     let status = session.child.try_wait().map_err(ToolError::Io)?;
+    if status.is_none() {
+        wait_for_fresh_output(Arc::clone(&session.output), session.read_offset).await;
+    }
     let output = {
         let output = session
             .output
@@ -248,6 +258,23 @@ async fn read_terminal(
         "output_truncated": output_truncated,
         "truncated": output_truncated,
     })))
+}
+
+async fn wait_for_fresh_output(output: Arc<StdMutex<Vec<u8>>>, read_offset: usize) {
+    if has_fresh_output(&output, read_offset) {
+        return;
+    }
+    let deadline = Instant::now() + TERMINAL_READ_SETTLE_TIMEOUT;
+    while Instant::now() < deadline {
+        sleep(TERMINAL_READ_SETTLE_INTERVAL).await;
+        if has_fresh_output(&output, read_offset) {
+            break;
+        }
+    }
+}
+
+fn has_fresh_output(output: &StdMutex<Vec<u8>>, read_offset: usize) -> bool {
+    output.lock().expect("terminal output lock poisoned").len() > read_offset
 }
 
 async fn resize_terminal(
@@ -291,26 +318,37 @@ async fn stop_terminal(
         .remove(handle)
         .ok_or_else(|| unknown_terminal(tool, handle))?;
     ctx.process_supervisor.unregister(handle).await;
-    Ok(stop_session(handle, session, "stopped", max_output_bytes))
+    Ok(stop_session_blocking(handle.to_owned(), session, "stopped", max_output_bytes).await)
 }
 
 async fn cleanup_terminal_session(handle: &str) {
     let Some(session) = TERMINALS.lock().await.remove(handle) else {
         return;
     };
-    let _ = stop_session(handle, session, "stopped", 0);
+    let _ = stop_session_blocking(handle.to_owned(), session, "stopped", 0).await;
+}
+
+async fn stop_session_blocking(
+    handle: String,
+    session: TerminalSession,
+    status: &'static str,
+    max_output_bytes: usize,
+) -> ToolResult {
+    task::spawn_blocking(move || stop_session(handle, session, status, max_output_bytes))
+        .await
+        .expect("terminal stop blocking task should not panic")
 }
 
 fn stop_session(
-    handle: &str,
+    handle: String,
     mut session: TerminalSession,
-    status: &str,
+    status: &'static str,
     max_output_bytes: usize,
 ) -> ToolResult {
-    let _ = session.child.kill();
-    let exit_status = session.child.wait().ok();
     drop(session.writer);
     drop(session.master);
+    let _ = session.child.kill();
+    let exit_status = session.child.wait().ok();
     if let Some(reader_thread) = session.reader_thread.take() {
         let _ = reader_thread.join();
     }
