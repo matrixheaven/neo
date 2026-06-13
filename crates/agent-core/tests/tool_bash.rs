@@ -1,6 +1,20 @@
-use neo_agent_core::{PermissionPolicy, ToolContext, ToolError, ToolRegistry};
+use neo_agent_core::{
+    DEFAULT_BASH_TIMEOUT, PermissionPolicy, ToolContext, ToolError, ToolRegistry,
+};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
+
+#[test]
+fn bash_default_timeout_allows_long_workspace_commands() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path()).expect("context");
+
+    assert_eq!(context.bash_timeout, DEFAULT_BASH_TIMEOUT);
+    assert_eq!(
+        context.bash_timeout,
+        std::time::Duration::from_secs(10 * 60)
+    );
+}
 
 #[tokio::test]
 async fn bash_background_start_poll_and_finish_returns_real_process_output() {

@@ -2,7 +2,7 @@ use neo_agent_core::session::{
     JsonlSessionReader, JsonlSessionWriter, SessionCompactionOptions, compact_jsonl_session,
 };
 use neo_agent_core::{
-    AgentContext, AgentEvent, AgentMessage, CompactionSummary, Content, StopReason,
+    AgentContext, AgentEvent, AgentMessage, AgentToolCall, CompactionSummary, Content, StopReason,
 };
 use serde_json::json;
 
@@ -251,6 +251,102 @@ fn write_jsonl_lines(path: &std::path::Path, lines: impl IntoIterator<Item = ser
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(path, format!("{content}\n")).expect("write jsonl session");
+}
+
+#[tokio::test]
+async fn jsonl_session_replay_context_drops_incomplete_trailing_tool_turn() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let mut writer = JsonlSessionWriter::create(&path)
+        .await
+        .expect("create session");
+
+    for event in [
+        AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("inspect project"),
+        },
+        AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                [],
+                [AgentToolCall {
+                    id: "call-1".to_owned(),
+                    name: "read".to_owned(),
+                    arguments: json!({ "path": "README.md" }),
+                }],
+                StopReason::ToolUse,
+            ),
+        },
+        AgentEvent::TurnFinished {
+            turn: 1,
+            stop_reason: StopReason::ToolUse,
+        },
+    ] {
+        writer.append(&event).await.expect("append event");
+    }
+    writer.flush().await.expect("flush");
+
+    let context = JsonlSessionReader::replay_context(&path)
+        .await
+        .expect("replay context");
+
+    assert_eq!(
+        context.messages(),
+        &[AgentMessage::user_text("inspect project")],
+        "only the incomplete assistant tool_use tail should be dropped"
+    );
+    assert_eq!(context.turns(), 1);
+}
+
+#[tokio::test]
+async fn jsonl_session_replay_context_keeps_complete_trailing_tool_turn() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let mut writer = JsonlSessionWriter::create(&path)
+        .await
+        .expect("create session");
+    let assistant = AgentMessage::assistant(
+        [],
+        [AgentToolCall {
+            id: "call-1".to_owned(),
+            name: "read".to_owned(),
+            arguments: json!({ "path": "README.md" }),
+        }],
+        StopReason::ToolUse,
+    );
+    let tool_result =
+        AgentMessage::tool_result("call-1", "read", [Content::text("README contents")], false);
+
+    for event in [
+        AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("inspect project"),
+        },
+        AgentEvent::MessageAppended {
+            message: assistant.clone(),
+        },
+        AgentEvent::MessageAppended {
+            message: tool_result.clone(),
+        },
+        AgentEvent::TurnFinished {
+            turn: 1,
+            stop_reason: StopReason::ToolUse,
+        },
+    ] {
+        writer.append(&event).await.expect("append event");
+    }
+    writer.flush().await.expect("flush");
+
+    let context = JsonlSessionReader::replay_context(&path)
+        .await
+        .expect("replay context");
+
+    assert_eq!(
+        context.messages(),
+        &[
+            AgentMessage::user_text("inspect project"),
+            assistant,
+            tool_result,
+        ]
+    );
 }
 
 #[tokio::test]

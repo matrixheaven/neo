@@ -6,11 +6,25 @@ use std::path::PathBuf;
 use crate::{AgentMessage, AgentToolCall, PermissionOperation, ToolResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentTokenUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+impl From<neo_ai::TokenUsage> for AgentTokenUsage {
+    fn from(value: neo_ai::TokenUsage) -> Self {
+        Self {
+            input_tokens: value.input_tokens,
+            output_tokens: value.output_tokens,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum StopReason {
     EndTurn,
     ToolUse,
     MaxTokens,
-    MaxTurns,
     Cancelled,
     Error,
 }
@@ -137,6 +151,10 @@ pub enum AgentEvent {
         status: String,
         exit_code: Option<i32>,
     },
+    TokenUsage {
+        turn: u32,
+        usage: AgentTokenUsage,
+    },
     SteeringQueued {
         message: AgentMessage,
     },
@@ -146,6 +164,15 @@ pub enum AgentEvent {
     QueueDrained {
         kind: QueueKind,
         count: usize,
+    },
+    CompactionStarted {
+        reason: CompactionReason,
+        tokens_before: usize,
+        message_count: usize,
+    },
+    CompactionProgress {
+        phase: CompactionPhase,
+        percent: u8,
     },
     CompactionApplied {
         summary: CompactionSummary,
@@ -171,6 +198,19 @@ pub enum AgentEvent {
 pub enum QueueKind {
     Steering,
     FollowUp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum CompactionReason {
+    Threshold,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum CompactionPhase {
+    Estimating,
+    SelectingBoundary,
+    Summarizing,
+    Applying,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

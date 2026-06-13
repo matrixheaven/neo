@@ -12,9 +12,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AgentEvent, AgentMessage, AgentToolCall, CompactionSummary, Content, PermissionDecision,
-    PermissionOperation, PermissionPolicy, ProcessSupervisor, QueueKind, StopReason, ToolContext,
-    ToolError, ToolRegistry, ToolResult,
+    AgentEvent, AgentMessage, AgentToolCall, CompactionPhase, CompactionReason, CompactionSummary,
+    Content, PermissionDecision, PermissionOperation, PermissionPolicy, ProcessSupervisor,
+    QueueKind, StopReason, ToolContext, ToolError, ToolRegistry, ToolResult,
 };
 
 pub type ContextTransform = Arc<dyn Fn(&[AgentMessage]) -> Vec<AgentMessage> + Send + Sync>;
@@ -65,7 +65,6 @@ pub struct AgentConfig {
     pub model: ModelSpec,
     pub workspace_root: Option<PathBuf>,
     pub system_prompt: Option<String>,
-    pub max_turns: u32,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -106,7 +105,6 @@ impl AgentConfig {
             model,
             workspace_root: None,
             system_prompt: None,
-            max_turns: 8,
             temperature: None,
             max_tokens: None,
             reasoning_effort: None,
@@ -130,12 +128,6 @@ impl AgentConfig {
     #[must_use]
     pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(system_prompt.into());
-        self
-    }
-
-    #[must_use]
-    pub fn with_max_turns(mut self, max_turns: u32) -> Self {
-        self.max_turns = max_turns;
         self
     }
 
@@ -372,7 +364,56 @@ impl AgentContext {
                 _ => {}
             }
         }
+        context.messages = drop_incomplete_trailing_tool_turn(context.messages);
         context
+    }
+}
+
+fn drop_incomplete_trailing_tool_turn(messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
+    let Some(assistant_index) = messages.iter().rposition(|message| {
+        matches!(
+            message,
+            AgentMessage::Assistant {
+                tool_calls,
+                stop_reason: StopReason::ToolUse,
+                ..
+            } if !tool_calls.is_empty()
+        )
+    }) else {
+        return messages;
+    };
+
+    if messages[assistant_index + 1..].iter().any(|message| {
+        matches!(
+            message,
+            AgentMessage::User { .. } | AgentMessage::Assistant { .. }
+        )
+    }) {
+        return messages;
+    }
+
+    let AgentMessage::Assistant { tool_calls, .. } = &messages[assistant_index] else {
+        return messages;
+    };
+    let mut missing_tool_result_ids = tool_calls
+        .iter()
+        .map(|tool_call| tool_call.id.as_str())
+        .collect::<Vec<_>>();
+    for message in &messages[assistant_index + 1..] {
+        let AgentMessage::ToolResult { tool_call_id, .. } = message else {
+            continue;
+        };
+        if let Some(index) = missing_tool_result_ids
+            .iter()
+            .position(|id| *id == tool_call_id)
+        {
+            missing_tool_result_ids.remove(index);
+        }
+    }
+    if missing_tool_result_ids.is_empty() {
+        messages
+    } else {
+        messages[..assistant_index].to_vec()
     }
 }
 
@@ -384,8 +425,6 @@ pub enum AgentRuntimeError {
     Tool(#[from] ToolError),
     #[error("runtime I/O failed: {0}")]
     Io(#[from] std::io::Error),
-    #[error("maximum turns reached")]
-    MaxTurns,
     #[error("turn cancelled")]
     Cancelled,
 }
@@ -446,11 +485,6 @@ impl AgentRuntime {
         if context.is_cancelled() {
             let turn = context.turns.saturating_add(1);
             return terminal_lifecycle_stream(turn, StopReason::Cancelled);
-        }
-
-        if context.turns >= self.config.max_turns {
-            let turn = context.turns.saturating_add(1);
-            return terminal_lifecycle_stream(turn, StopReason::MaxTurns);
         }
 
         let live_context = context.clone();
@@ -732,8 +766,7 @@ async fn run_agent_turn(
 
         maybe_compact(&config, emitter);
 
-        if let Some((turn, stop_reason)) = terminal_pre_model_stop(&config, emitter, &cancel_token)
-        {
+        if let Some((turn, stop_reason)) = terminal_pre_model_stop(emitter, &cancel_token) {
             final_turn = turn;
             final_stop_reason = stop_reason;
             break;
@@ -845,7 +878,6 @@ fn emit_run_finished(emitter: &mut EventEmitter, turn: u32, stop_reason: StopRea
 }
 
 fn terminal_pre_model_stop(
-    config: &AgentConfig,
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
 ) -> Option<(u32, StopReason)> {
@@ -856,15 +888,6 @@ fn terminal_pre_model_stop(
             stop_reason: StopReason::Cancelled,
         });
         return Some((turn, StopReason::Cancelled));
-    }
-
-    if emitter.context.turns >= config.max_turns {
-        let turn = emitter.context.turns.saturating_add(1);
-        emitter.emit(AgentEvent::TurnFinished {
-            turn,
-            stop_reason: StopReason::MaxTurns,
-        });
-        return Some((turn, StopReason::MaxTurns));
     }
 
     None
@@ -887,20 +910,81 @@ fn maybe_compact(config: &AgentConfig, emitter: &mut EventEmitter) {
     if estimated_tokens <= settings.max_estimated_tokens {
         return;
     }
+    emitter.emit(AgentEvent::CompactionStarted {
+        reason: CompactionReason::Threshold,
+        tokens_before: estimated_tokens,
+        message_count: emitter.context.messages().len(),
+    });
+    emitter.emit(AgentEvent::CompactionProgress {
+        phase: CompactionPhase::Estimating,
+        percent: 15,
+    });
     let keep_recent = settings
         .keep_recent_messages
         .min(emitter.context.messages().len());
-    let first_kept_message_index = emitter.context.messages().len().saturating_sub(keep_recent);
+    let first_kept_message_index = compact_keep_boundary(
+        emitter.context.messages(),
+        emitter.context.messages().len().saturating_sub(keep_recent),
+    );
     if first_kept_message_index == 0 {
         return;
     }
-    let compacted_messages = &emitter.context.messages()[..first_kept_message_index];
+    emitter.emit(AgentEvent::CompactionProgress {
+        phase: CompactionPhase::SelectingBoundary,
+        percent: 35,
+    });
+    emitter.emit(AgentEvent::CompactionProgress {
+        phase: CompactionPhase::Summarizing,
+        percent: 70,
+    });
+    let summary_text = summarize_messages(&emitter.context.messages()[..first_kept_message_index]);
     let summary = CompactionSummary {
-        summary: summarize_messages(compacted_messages),
+        summary: summary_text,
         tokens_before: estimated_tokens,
         first_kept_message_index,
     };
+    emitter.emit(AgentEvent::CompactionProgress {
+        phase: CompactionPhase::Applying,
+        percent: 90,
+    });
     emitter.emit(AgentEvent::CompactionApplied { summary });
+}
+
+fn compact_keep_boundary(messages: &[AgentMessage], proposed_index: usize) -> usize {
+    let mut index = proposed_index.min(messages.len());
+    while index < messages.len() && matches!(messages[index], AgentMessage::ToolResult { .. }) {
+        index += 1;
+    }
+
+    if let Some(AgentMessage::Assistant {
+        tool_calls,
+        stop_reason: StopReason::ToolUse,
+        ..
+    }) = index
+        .checked_sub(1)
+        .and_then(|previous| messages.get(previous))
+    {
+        let mut result_count = 0;
+        for message in &messages[index..] {
+            match message {
+                AgentMessage::ToolResult { .. } => result_count += 1,
+                AgentMessage::User { .. } | AgentMessage::Assistant { .. } => break,
+                AgentMessage::System { .. } => {}
+            }
+        }
+        if result_count < tool_calls.len() {
+            while index < messages.len()
+                && !matches!(
+                    messages[index],
+                    AgentMessage::User { .. } | AgentMessage::Assistant { .. }
+                )
+            {
+                index += 1;
+            }
+        }
+    }
+
+    index
 }
 
 fn estimate_messages_tokens(messages: &[AgentMessage]) -> usize {
@@ -1263,10 +1347,15 @@ impl ModelTurnState {
             AiStreamEvent::ToolCallEnd { id, arguments } => {
                 self.finish_tool_call(turn, id, arguments, emitter);
             }
-            AiStreamEvent::MessageEnd {
-                stop_reason,
-                usage: _,
-            } => self.finish_current_message(turn, stop_reason.into(), emitter),
+            AiStreamEvent::MessageEnd { stop_reason, usage } => {
+                if let Some(usage) = usage {
+                    emitter.emit(AgentEvent::TokenUsage {
+                        turn,
+                        usage: usage.into(),
+                    });
+                }
+                self.finish_current_message(turn, stop_reason.into(), emitter);
+            }
             AiStreamEvent::Error { message } => {
                 emitter.emit(AgentEvent::Error {
                     turn,

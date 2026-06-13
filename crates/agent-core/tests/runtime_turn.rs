@@ -100,6 +100,43 @@ async fn runtime_streams_one_turn_text_and_updates_context() {
 }
 
 #[tokio::test]
+async fn runtime_emits_provider_token_usage() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::MessageStart {
+            id: "msg_1".to_owned(),
+        },
+        AiStreamEvent::TextDelta {
+            text: "hello".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: Some(neo_ai::TokenUsage {
+                input_tokens: 123,
+                output_tokens: 45,
+            }),
+        },
+    ]);
+    let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("say hello"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert!(events.contains(&AgentEvent::TokenUsage {
+        turn: 1,
+        usage: neo_agent_core::AgentTokenUsage {
+            input_tokens: 123,
+            output_tokens: 45,
+        },
+    }));
+}
+
+#[tokio::test]
 async fn runtime_yields_model_events_before_model_stream_finishes() {
     let harness = DelayedHarness::new(vec![
         DelayedStep::Event(AiStreamEvent::MessageStart {
@@ -841,39 +878,169 @@ async fn runtime_can_compact_again_after_context_grows_past_threshold() {
 }
 
 #[tokio::test]
-async fn runtime_reports_max_turns_and_cancelled_without_calling_model() {
-    let harness = FakeHarness::from_events([]);
+async fn runtime_emits_compaction_lifecycle_events_before_applying_summary() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "first answer".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "second answer".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
     let runtime = AgentRuntime::new(
-        AgentConfig::for_model(harness.model()).with_max_turns(0),
+        AgentConfig::for_model(harness.model()).with_compaction(CompactionSettings::new(4, 1)),
         harness.client(),
     );
     let mut context = AgentContext::new();
 
-    let events = runtime
-        .run_turn(&mut context, AgentMessage::user_text("stop"))
+    runtime
+        .run_turn(
+            &mut context,
+            AgentMessage::user_text("first long prompt that seeds compaction"),
+        )
         .collect::<Vec<_>>()
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
-        .expect("max turn event");
+        .expect("first turn should succeed");
+
+    let events = runtime
+        .run_turn(
+            &mut context,
+            AgentMessage::user_text("second long prompt that triggers compaction"),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("second turn should succeed");
+
+    let lifecycle = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::CompactionStarted {
+                reason,
+                tokens_before,
+                message_count,
+            } => Some(format!("start:{reason:?}:{tokens_before}:{message_count}")),
+            AgentEvent::CompactionProgress { phase, percent } => {
+                Some(format!("progress:{phase:?}:{percent}"))
+            }
+            AgentEvent::CompactionApplied { summary } => Some(format!(
+                "applied:{}:{}",
+                summary.first_kept_message_index, summary.tokens_before
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
 
     assert_eq!(
-        events,
+        lifecycle,
         vec![
-            AgentEvent::RunStarted { turn: 1 },
-            AgentEvent::TurnFinished {
-                turn: 1,
-                stop_reason: StopReason::MaxTurns,
-            },
-            AgentEvent::RunFinished {
-                turn: 1,
-                stop_reason: StopReason::MaxTurns,
-            },
+            "start:Threshold:24:3",
+            "progress:Estimating:15",
+            "progress:SelectingBoundary:35",
+            "progress:Summarizing:70",
+            "progress:Applying:90",
+            "applied:2:24",
         ]
     );
-    assert!(harness.requests().is_empty());
+}
 
+#[tokio::test]
+async fn runtime_compaction_keeps_valid_tool_result_boundaries() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::MessageStart {
+            id: "msg_after_compaction".to_owned(),
+        },
+        AiStreamEvent::TextDelta {
+            text: "after compaction".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model()).with_compaction(CompactionSettings::new(1, 3)),
+        harness.client(),
+    );
+    let mut context = AgentContext::new();
+    context.append_message(AgentMessage::user_text("inspect"));
+    context.append_message(AgentMessage::assistant(
+        [],
+        [
+            AgentToolCall {
+                id: "tool_1".to_owned(),
+                name: "read".to_owned(),
+                arguments: json!({ "path": "a.rs" }),
+            },
+            AgentToolCall {
+                id: "tool_2".to_owned(),
+                name: "list".to_owned(),
+                arguments: json!({ "path": "src" }),
+            },
+        ],
+        StopReason::ToolUse,
+    ));
+    context.append_message(AgentMessage::tool_result(
+        "tool_1",
+        "read",
+        [Content::text("large content")],
+        false,
+    ));
+    context.append_message(AgentMessage::tool_result(
+        "tool_2",
+        "list",
+        [Content::text("file list")],
+        false,
+    ));
+
+    runtime
+        .run_turn(&mut context, AgentMessage::user_text("continue"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    let request = harness.requests().pop().expect("model request");
+    assert!(
+        !matches!(
+            request.messages.first(),
+            Some(neo_ai::ChatMessage::ToolResult { .. })
+        ),
+        "compaction must not keep orphaned tool results at the start of replay"
+    );
+    assert!(matches!(
+        request.messages.first(),
+        Some(neo_ai::ChatMessage::User { .. })
+    ));
+}
+
+#[tokio::test]
+async fn runtime_reports_cancelled_without_calling_model() {
+    let harness = FakeHarness::from_events([]);
     let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
+    let mut context = AgentContext::new();
     context.cancel();
     let events = runtime
         .run_turn(&mut context, AgentMessage::user_text("cancelled"))

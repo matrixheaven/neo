@@ -25,6 +25,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::PermissionPolicy;
 
+pub const DEFAULT_BASH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 pub use mcp::*;
 pub use process_supervisor::{ProcessKind, ProcessSupervisor};
 
@@ -72,7 +74,7 @@ impl ToolContext {
         Ok(Self {
             cwd,
             permissions: PermissionPolicy::default(),
-            bash_timeout: Duration::from_secs(30),
+            bash_timeout: DEFAULT_BASH_TIMEOUT,
             max_output_bytes: 64 * 1024,
             cancel_token: CancellationToken::new(),
             process_supervisor: ProcessSupervisor::default(),
