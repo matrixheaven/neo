@@ -120,6 +120,7 @@ pub(crate) struct InteractiveController {
     clipboard_writer: ClipboardWriter,
     always_approve: bool,
     completion_root: PathBuf,
+    workspace_root: PathBuf,
     pending_exit_confirmation: Option<ExitConfirmation>,
     suspend_requested: bool,
 }
@@ -279,6 +280,7 @@ impl InteractiveController {
         title: impl Into<String>,
         session_label: impl Into<String>,
         model_label: impl Into<String>,
+        workspace_root: impl Into<PathBuf>,
         run_turn: RunTurn,
     ) -> Self
     where
@@ -289,6 +291,7 @@ impl InteractiveController {
             title,
             session_label,
             model_label,
+            workspace_root,
             run_turn,
             PickerCatalogs::default(),
             empty_session_loader,
@@ -301,6 +304,7 @@ impl InteractiveController {
         title: impl Into<String>,
         session_label: impl Into<String>,
         model_label: impl Into<String>,
+        workspace_root: impl Into<PathBuf>,
         run_turn: RunTurn,
         catalogs: PickerCatalogs,
         load_session: LoadSession,
@@ -315,6 +319,7 @@ impl InteractiveController {
             title,
             session_label,
             model_label,
+            workspace_root,
             run_turn,
             catalogs,
             load_session,
@@ -326,6 +331,7 @@ impl InteractiveController {
         title: impl Into<String>,
         session_label: impl Into<String>,
         model_label: impl Into<String>,
+        workspace_root: impl Into<PathBuf>,
         run_turn: RunTurn,
         catalogs: PickerCatalogs,
         load_session: LoadSession,
@@ -348,6 +354,7 @@ impl InteractiveController {
             title,
             session_label,
             model_label,
+            workspace_root,
             run_turn,
             catalogs,
             load_session,
@@ -359,18 +366,15 @@ impl InteractiveController {
         title: impl Into<String>,
         session_label: impl Into<String>,
         model_label: impl Into<String>,
+        workspace_root: impl Into<PathBuf>,
         run_turn: TurnDriver,
         catalogs: PickerCatalogs,
         load_session: SessionLoader,
         fork_session: SessionForker,
     ) -> Self {
+        let workspace_root = workspace_root.into();
         Self {
-            app: NeoTuiApp::new(
-                title,
-                session_label,
-                model_label,
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            ),
+            app: NeoTuiApp::new(title, session_label, model_label, workspace_root.clone()),
             keybindings: KeybindingsManager::default(),
             run_turn,
             session_items: catalogs.session_items,
@@ -387,7 +391,8 @@ impl InteractiveController {
             resolved_approvals: BTreeMap::new(),
             clipboard_writer: Arc::new(write_system_clipboard),
             always_approve: false,
-            completion_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            completion_root: workspace_root.clone(),
+            workspace_root,
             pending_exit_confirmation: None,
             suspend_requested: false,
         }
@@ -420,6 +425,17 @@ impl InteractiveController {
             .set_image_capabilities(terminal_image_capabilities_for_policy(
                 config.tui.image_protocol,
                 |name| env::var(name),
+            ));
+        let title = self.app.title().to_owned();
+        let session_label = self.app.session_label().to_owned();
+        let model_label = self.app.model_label().to_owned();
+        self.app
+            .transcript_mut()
+            .push(neo_tui::TranscriptItem::banner(
+                format!("Welcome to {}", title),
+                session_label,
+                model_label,
+                self.workspace_root.clone(),
             ));
         if !options.verbose_startup {
             return;
@@ -2307,6 +2323,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         "neo",
         "new",
         format!("{}/{}", config.default_provider, config.default_model),
+        config.project_dir.clone(),
         run_turn,
         catalogs,
         load_session,
@@ -2620,12 +2637,17 @@ mod tests {
     use super::*;
     use crate::config::{Defaults, McpConfig, RuntimeConfig, ToolFilterConfig, TuiConfig};
 
+    fn test_workspace_root() -> PathBuf {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    }
+
     #[tokio::test]
     async fn controller_submits_prompt_reduces_turn_events_and_renders_snapshot() {
         let mut controller = InteractiveController::new(
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |request| async move {
                 assert_eq!(request.prompt, vec!["hello neo".to_owned()]);
                 assert_eq!(request.session_id, None);
@@ -2681,6 +2703,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |request| async move {
                 assert_eq!(request.prompt, vec!["hi".to_owned()]);
                 assert_eq!(request.session_id, None);
@@ -2751,6 +2774,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { anyhow::bail!("provider stream error: http status 400") },
         );
 
@@ -2795,6 +2819,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |request| async move {
                 assert_eq!(request.prompt, vec!["alpha\nbeta".to_owned()]);
                 Ok(vec![AgentEvent::TurnFinished {
@@ -2845,6 +2870,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move {
                 panic!("resize should not submit a turn");
                 #[allow(unreachable_code)]
@@ -2896,6 +2922,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
             PickerCatalogs {
                 session_items: vec![PickerItem::new("alpha", "Alpha", Some("session"))],
@@ -2952,6 +2979,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
         controller.set_clipboard_writer(Arc::new(|_text| Ok(())));
@@ -2974,6 +3002,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
             PickerCatalogs {
                 session_items: vec![PickerItem::new("alpha", "Alpha", Some("session"))],
@@ -3021,6 +3050,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
         controller.set_clipboard_writer(Arc::new(move |text| {
@@ -3079,6 +3109,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
         controller.set_clipboard_writer(Arc::new(|_text| {
@@ -3108,6 +3139,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
             PickerCatalogs {
                 session_items: vec![PickerItem::new("alpha", "Alpha", Some("session"))],
@@ -3151,6 +3183,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
 
@@ -3175,6 +3208,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
 
@@ -3197,6 +3231,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
 
@@ -3239,6 +3274,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
 
@@ -3262,6 +3298,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
         controller.completion_root = temp.path().to_path_buf();
@@ -3296,6 +3333,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
 
@@ -3324,6 +3362,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
 
@@ -3348,6 +3387,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
 
@@ -3464,6 +3504,7 @@ mod tests {
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
         controller.completion_root = temp.path().to_path_buf();
@@ -3695,6 +3736,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             move |request| {
                 let captured_requests = std::sync::Arc::clone(&captured_requests);
                 async move {
@@ -3745,6 +3787,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             move |request| {
                 let captured_requests = std::sync::Arc::clone(&captured_requests);
                 async move {
@@ -3786,6 +3829,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
             PickerCatalogs {
                 session_items: Vec::new(),
@@ -3828,6 +3872,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             move |request| {
                 let captured_requests = std::sync::Arc::clone(&captured_requests);
                 async move {
@@ -3904,6 +3949,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             move |request| {
                 let captured_requests = std::sync::Arc::clone(&captured_requests);
                 async move {
@@ -3959,6 +4005,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             move |request| {
                 let captured_requests = std::sync::Arc::clone(&captured_requests);
                 async move {
@@ -4016,6 +4063,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
         controller.completion_root = temp.path().to_path_buf();
@@ -4037,6 +4085,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
         for index in 0..10 {
@@ -4072,6 +4121,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
 
@@ -4126,6 +4176,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
         controller.app.transcript_view_mut().sync(30, 6);
@@ -4155,6 +4206,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
         controller
@@ -4182,6 +4234,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
             PickerCatalogs {
                 session_items: Vec::new(),
@@ -4222,6 +4275,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
         controller
@@ -4316,6 +4370,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
             PickerCatalogs {
                 session_items: Vec::new(),
@@ -4380,8 +4435,12 @@ command = "python3"
 
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured_requests = std::sync::Arc::clone(&requests);
-        let mut controller =
-            InteractiveController::new("neo", "test-session", "openai/gpt-4.1", move |request| {
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            move |request| {
                 let captured_requests = std::sync::Arc::clone(&captured_requests);
                 async move {
                     captured_requests
@@ -4390,7 +4449,8 @@ command = "python3"
                         .push(request);
                     Ok(Vec::<AgentEvent>::new())
                 }
-            });
+            },
+        );
         controller.completion_root = temp.path().to_path_buf();
 
         controller
@@ -4613,6 +4673,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             run_turn,
             PickerCatalogs::default(),
             Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
@@ -4681,6 +4742,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             run_turn,
             PickerCatalogs::default(),
             Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
@@ -4770,6 +4832,7 @@ command = "python3"
             "neo",
             "test-session",
             "openai/gpt-4.1",
+            test_workspace_root(),
             run_turn,
             PickerCatalogs::default(),
             Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
@@ -4814,6 +4877,7 @@ command = "python3"
             "neo",
             "new",
             "openai/gpt-4.1",
+            test_workspace_root(),
             move |request| {
                 let captured_requests = std::sync::Arc::clone(&captured_requests);
                 async move {
@@ -4951,6 +5015,7 @@ command = "python3"
             "neo",
             "new",
             "openai/gpt-4.1",
+            test_workspace_root(),
             run_turn,
             PickerCatalogs::default(),
             Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
@@ -5033,6 +5098,7 @@ command = "python3"
             "neo",
             "new",
             "openai/gpt-4.1",
+            test_workspace_root(),
             run_turn,
             PickerCatalogs::default(),
             Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
@@ -5082,6 +5148,7 @@ command = "python3"
             "neo",
             "new",
             "openai/gpt-4.1",
+            test_workspace_root(),
             move |request| {
                 let captured_requests = std::sync::Arc::clone(&captured_requests);
                 async move {
@@ -5184,6 +5251,7 @@ command = "python3"
             "neo",
             "new",
             "openai/gpt-4.1",
+            test_workspace_root(),
             move |request| {
                 let captured_requests = std::sync::Arc::clone(&captured_requests);
                 async move {
