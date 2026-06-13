@@ -3,7 +3,7 @@
 ## Implemented Surface
 
 - `AgentConfig::for_model` builds a runtime config with optional system prompt,
-  max turns, temperature, max tokens, and tool specs.
+  temperature, max tokens, and tool specs.
 - `AgentContext` stores messages, turn count, and cancellation state.
 - `AgentRuntime` consumes a `ModelClient`, converts context into
   `neo_ai::ChatRequest`, emits `AgentEvent` values, appends assistant/tool

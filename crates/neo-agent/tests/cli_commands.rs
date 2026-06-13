@@ -61,9 +61,10 @@ fn root_command_reports_interactive_entrypoint_without_placeholders() {
 
     let stdout = run(command);
 
-    assert!(stdout.contains("neo | session:"));
-    assert!(stdout.contains("model: openai/gpt-4.1"));
-    assert!(stdout.contains("Editing"));
+    assert!(stdout.contains("neo  session:"));
+    assert!(stdout.contains("model:openai/gpt-4.1"));
+    assert!(stdout.contains("ctx --/1m"));
+    assert!(stdout.contains("enter send"));
     assert!(!stdout.contains("placeholder"));
     assert!(!stdout.contains("fake"));
     assert!(!stdout.contains("commands: print, run"));
@@ -87,8 +88,8 @@ default_model = "claude-sonnet"
 
     let stdout = run(command);
 
-    assert!(stdout.contains("neo | session:"));
-    assert!(stdout.contains("model: anthropic/claude-sonnet"));
+    assert!(stdout.contains("neo  session:"));
+    assert!(stdout.contains("model:anthropic/claude-sonnet"));
     assert!(stdout.contains('>'));
     assert!(!stdout.contains("commands:"));
 }
@@ -1767,8 +1768,8 @@ fn root_models_scope_selects_first_matching_model_for_interactive_start() {
 
     let stdout = run(command);
 
-    assert!(stdout.contains("model: anthropic/claude-sonnet-4-5"));
-    assert!(!stdout.contains("model: openai/gpt-4.1"));
+    assert!(stdout.contains("model:anthropic/claude-sonnet-4-5"));
+    assert!(!stdout.contains("model:openai/gpt-4.1"));
     assert!(!stdout.contains("placeholder"));
     assert!(!stdout.contains("fake"));
 }

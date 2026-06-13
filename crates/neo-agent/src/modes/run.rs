@@ -252,6 +252,21 @@ impl StableJsonState {
                 "kind": format!("{kind:?}").to_lowercase(),
                 "count": count,
             })],
+            AgentEvent::CompactionStarted {
+                reason,
+                tokens_before,
+                message_count,
+            } => vec![json!({
+                "type": "compaction_start",
+                "reason": stable_compaction_reason(*reason),
+                "tokensBefore": tokens_before,
+                "messageCount": message_count,
+            })],
+            AgentEvent::CompactionProgress { phase, percent } => vec![json!({
+                "type": "compaction_update",
+                "phase": stable_compaction_phase(*phase),
+                "percent": percent,
+            })],
             AgentEvent::CompactionApplied { summary } => vec![json!({
                 "type": "compaction_end",
                 "reason": "threshold",
@@ -533,9 +548,23 @@ fn stable_stop_reason(stop_reason: neo_agent_core::StopReason) -> &'static str {
         neo_agent_core::StopReason::EndTurn => "end_turn",
         neo_agent_core::StopReason::ToolUse => "tool_use",
         neo_agent_core::StopReason::MaxTokens => "max_tokens",
-        neo_agent_core::StopReason::MaxTurns => "max_turns",
         neo_agent_core::StopReason::Cancelled => "cancelled",
         neo_agent_core::StopReason::Error => "error",
+    }
+}
+
+fn stable_compaction_reason(reason: neo_agent_core::CompactionReason) -> &'static str {
+    match reason {
+        neo_agent_core::CompactionReason::Threshold => "threshold",
+    }
+}
+
+fn stable_compaction_phase(phase: neo_agent_core::CompactionPhase) -> &'static str {
+    match phase {
+        neo_agent_core::CompactionPhase::Estimating => "estimating",
+        neo_agent_core::CompactionPhase::SelectingBoundary => "selecting_boundary",
+        neo_agent_core::CompactionPhase::Summarizing => "summarizing",
+        neo_agent_core::CompactionPhase::Applying => "applying",
     }
 }
 
@@ -1351,6 +1380,7 @@ pub async fn run_prompt_streaming(
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
     approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
+    session_id_tx: Option<mpsc::UnboundedSender<String>>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<PromptTurn> {
     let prompt = prompt.join(" ");
@@ -1359,6 +1389,9 @@ pub async fn run_prompt_streaming(
     let mut writer = JsonlSessionWriter::create(&session_path)
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
+    if let Some(session_id_tx) = session_id_tx {
+        let _ = session_id_tx.send(session_id.clone());
+    }
     let (user_message, events) = append_user_event_jsonl(prompt, &mut writer).await?;
     let runtime = runtime_for_config(config, Some(approval_tx)).await?;
     let streaming = StreamingTurnIo {
@@ -1383,6 +1416,7 @@ pub async fn run_prompt_in_session_streaming(
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
     approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
+    session_id_tx: Option<mpsc::UnboundedSender<String>>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<PromptTurn> {
     let prompt = prompt.join(" ");
@@ -1393,6 +1427,9 @@ pub async fn run_prompt_in_session_streaming(
     let mut writer = JsonlSessionWriter::open_append(&session_path)
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
+    if let Some(session_id_tx) = session_id_tx {
+        let _ = session_id_tx.send(session_id.to_owned());
+    }
     let (user_message, events) = append_user_event_jsonl(prompt, &mut writer).await?;
     let runtime = runtime_for_config(config, Some(approval_tx)).await?;
     let streaming = StreamingTurnIo {
@@ -1627,9 +1664,13 @@ fn agent_config_for_app(
         agent_config = agent_config.with_system_prompt(system_prompt);
     }
     if let Some(compaction) = &config.runtime.compaction {
+        let model_max_context_tokens = agent_config.model.capabilities.max_context_tokens;
         agent_config = agent_config.with_compaction(CompactionSettings {
             enabled: compaction.enabled,
-            max_estimated_tokens: compaction.max_estimated_tokens,
+            max_estimated_tokens: effective_compaction_max_estimated_tokens(
+                compaction.max_estimated_tokens,
+                model_max_context_tokens,
+            ),
             keep_recent_messages: compaction.keep_recent_messages,
         });
     }
@@ -1654,6 +1695,25 @@ fn agent_config_for_app(
         });
     }
     Ok(agent_config)
+}
+
+const LEGACY_DEFAULT_COMPACTION_MAX_ESTIMATED_TOKENS: usize = 32_000;
+const MODEL_CONTEXT_COMPACTION_NUMERATOR: usize = 4;
+const MODEL_CONTEXT_COMPACTION_DENOMINATOR: usize = 5;
+
+fn effective_compaction_max_estimated_tokens(
+    configured_max_estimated_tokens: usize,
+    model_max_context_tokens: Option<u32>,
+) -> usize {
+    if configured_max_estimated_tokens != LEGACY_DEFAULT_COMPACTION_MAX_ESTIMATED_TOKENS {
+        return configured_max_estimated_tokens;
+    }
+    let Some(model_max_context_tokens) = model_max_context_tokens else {
+        return configured_max_estimated_tokens;
+    };
+    let model_threshold = model_max_context_tokens as usize * MODEL_CONTEXT_COMPACTION_NUMERATOR
+        / MODEL_CONTEXT_COMPACTION_DENOMINATOR;
+    configured_max_estimated_tokens.max(model_threshold)
 }
 
 async fn tool_registry_for_config(config: &AppConfig) -> anyhow::Result<ToolRegistry> {
@@ -2052,7 +2112,9 @@ mod tests {
         StopReason, providers::fake::FakeModelClient,
     };
 
-    use super::{PromptApprovalRequest, agent_config_for_app, run_prompt_with_runtime};
+    use super::{
+        PromptApprovalRequest, StableJsonState, agent_config_for_app, run_prompt_with_runtime,
+    };
     use crate::config::{
         AppConfig, Defaults, McpConfig, ModelSelection, RuntimeCompactionConfig, RuntimeConfig,
         ToolFilterConfig, TuiConfig,
@@ -2141,6 +2203,200 @@ mod tests {
             })
         );
         assert!(agent_config.workspace_root.is_some());
+    }
+
+    #[test]
+    fn stable_json_maps_compaction_lifecycle_events() {
+        let mut state = StableJsonState::default();
+
+        assert_eq!(
+            state.map_event(&AgentEvent::CompactionStarted {
+                reason: neo_agent_core::CompactionReason::Threshold,
+                tokens_before: 12_345,
+                message_count: 8,
+            }),
+            vec![serde_json::json!({
+                "type": "compaction_start",
+                "reason": "threshold",
+                "tokensBefore": 12_345,
+                "messageCount": 8,
+            })]
+        );
+        assert_eq!(
+            state.map_event(&AgentEvent::CompactionProgress {
+                phase: neo_agent_core::CompactionPhase::Summarizing,
+                percent: 70,
+            }),
+            vec![serde_json::json!({
+                "type": "compaction_update",
+                "phase": "summarizing",
+                "percent": 70,
+            })]
+        );
+        assert_eq!(
+            state.map_event(&AgentEvent::CompactionApplied {
+                summary: neo_agent_core::CompactionSummary {
+                    summary: "Older context summarized.".to_owned(),
+                    tokens_before: 12_345,
+                    first_kept_message_index: 4,
+                },
+            }),
+            vec![serde_json::json!({
+                "type": "compaction_end",
+                "reason": "threshold",
+                "result": {
+                    "summary": "Older context summarized.",
+                    "tokens_before": 12_345,
+                    "first_kept_message_index": 4,
+                },
+                "aborted": false,
+                "willRetry": false,
+            })]
+        );
+    }
+
+    #[test]
+    fn agent_config_for_app_scales_legacy_default_compaction_to_model_context_window() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            default_model: "large-context-model".to_owned(),
+            default_provider: "anthropic".to_owned(),
+            api_base: None,
+            api_key: None,
+            api_key_env: None,
+            providers: BTreeMap::new(),
+            model_catalogs: Vec::new(),
+            model_scope: Vec::new(),
+            model_selection: ModelSelection::Default,
+            sessions_dir: temp.path().join(".neo/sessions"),
+            permissions: PermissionPolicy::default(),
+            defaults: Defaults {
+                mode: "interactive".to_owned(),
+            },
+            runtime: RuntimeConfig {
+                temperature: None,
+                max_tokens: None,
+                reasoning_effort: None,
+                replay_reasoning: true,
+                steering_queue_mode: QueueMode::All,
+                follow_up_queue_mode: QueueMode::All,
+                tool_execution_mode: ToolExecutionMode::Parallel,
+                compaction: Some(RuntimeCompactionConfig {
+                    enabled: true,
+                    max_estimated_tokens: 32_000,
+                    keep_recent_messages: 20,
+                }),
+            },
+            tui: TuiConfig::default(),
+            theme: crate::themes::ResolvedTheme::default(),
+            mcp: McpConfig::default(),
+            approve: false,
+            no_approve: false,
+            prompt_templates: Vec::new(),
+            skill_paths: Vec::new(),
+            extension_paths: Vec::new(),
+            no_extensions: false,
+            configured_prompt_templates: Vec::new(),
+            no_prompt_templates: false,
+            no_skills: false,
+            no_context_files: false,
+            offline: false,
+            system_prompt: None,
+            append_system_prompt: Vec::new(),
+            tool_filters: ToolFilterConfig::default(),
+            project_trusted: true,
+            project_dir: temp.path().to_path_buf(),
+            config_path: temp.path().join(".neo/config.toml"),
+        };
+        let model = ModelSpec {
+            provider: ProviderId("anthropic".to_owned()),
+            model: "large-context-model".to_owned(),
+            api: ApiKind::AnthropicMessages,
+            capabilities: ModelCapabilities::tool_chat().with_max_context_tokens(1_000_000),
+        };
+
+        let agent_config = agent_config_for_app(model, &config, None).expect("agent config");
+
+        assert_eq!(
+            agent_config.compaction,
+            Some(CompactionSettings {
+                enabled: true,
+                max_estimated_tokens: 800_000,
+                keep_recent_messages: 20,
+            })
+        );
+    }
+
+    #[test]
+    fn agent_config_for_app_keeps_explicit_custom_compaction_threshold() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            default_model: "large-context-model".to_owned(),
+            default_provider: "anthropic".to_owned(),
+            api_base: None,
+            api_key: None,
+            api_key_env: None,
+            providers: BTreeMap::new(),
+            model_catalogs: Vec::new(),
+            model_scope: Vec::new(),
+            model_selection: ModelSelection::Default,
+            sessions_dir: temp.path().join(".neo/sessions"),
+            permissions: PermissionPolicy::default(),
+            defaults: Defaults {
+                mode: "interactive".to_owned(),
+            },
+            runtime: RuntimeConfig {
+                temperature: None,
+                max_tokens: None,
+                reasoning_effort: None,
+                replay_reasoning: true,
+                steering_queue_mode: QueueMode::All,
+                follow_up_queue_mode: QueueMode::All,
+                tool_execution_mode: ToolExecutionMode::Parallel,
+                compaction: Some(RuntimeCompactionConfig {
+                    enabled: true,
+                    max_estimated_tokens: 12_000,
+                    keep_recent_messages: 16,
+                }),
+            },
+            tui: TuiConfig::default(),
+            theme: crate::themes::ResolvedTheme::default(),
+            mcp: McpConfig::default(),
+            approve: false,
+            no_approve: false,
+            prompt_templates: Vec::new(),
+            skill_paths: Vec::new(),
+            extension_paths: Vec::new(),
+            no_extensions: false,
+            configured_prompt_templates: Vec::new(),
+            no_prompt_templates: false,
+            no_skills: false,
+            no_context_files: false,
+            offline: false,
+            system_prompt: None,
+            append_system_prompt: Vec::new(),
+            tool_filters: ToolFilterConfig::default(),
+            project_trusted: true,
+            project_dir: temp.path().to_path_buf(),
+            config_path: temp.path().join(".neo/config.toml"),
+        };
+        let model = ModelSpec {
+            provider: ProviderId("anthropic".to_owned()),
+            model: "large-context-model".to_owned(),
+            api: ApiKind::AnthropicMessages,
+            capabilities: ModelCapabilities::tool_chat().with_max_context_tokens(1_000_000),
+        };
+
+        let agent_config = agent_config_for_app(model, &config, None).expect("agent config");
+
+        assert_eq!(
+            agent_config.compaction,
+            Some(CompactionSettings {
+                enabled: true,
+                max_estimated_tokens: 12_000,
+                keep_recent_messages: 16,
+            })
+        );
     }
 
     #[tokio::test]

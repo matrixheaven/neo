@@ -53,7 +53,6 @@ tool_execution_mode = "Parallel"
 
 [runtime.compaction]
 enabled = true
-max_estimated_tokens = 32000
 keep_recent_messages = 20
 
 [tui.keybindings]
@@ -140,7 +139,9 @@ The `[runtime]` table maps directly to `neo_agent_core::AgentConfig` for real
 provider-backed runs. `temperature`, `max_tokens`, and `reasoning_effort` are
 sent through `neo_ai::RequestOptions`; queue modes use `All` or `OneAtATime`;
 tool execution uses `Parallel` or `Sequential`; and optional compaction
-settings control the runtime's deterministic context compaction trigger.
+settings control the runtime's deterministic context compaction trigger. When
+`max_estimated_tokens` is omitted, Neo uses a model-window-aware threshold; the
+legacy `32000` default is treated as automatic for large-context models.
 Supported reasoning effort values are `minimal`, `low`, `medium`, `high`, and
 `xhigh`. OpenAI Responses serializes this as a Responses `reasoning` object;
 OpenAI-compatible Chat Completions serializes it as `reasoning_effort`.

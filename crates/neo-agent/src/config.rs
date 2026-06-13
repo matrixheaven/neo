@@ -521,7 +521,9 @@ impl FileRuntimeCompactionConfig {
     fn from_runtime(compaction: &RuntimeCompactionConfig) -> Self {
         Self {
             enabled: Some(compaction.enabled),
-            max_estimated_tokens: Some(compaction.max_estimated_tokens),
+            max_estimated_tokens: (compaction.max_estimated_tokens
+                != default_runtime_compaction_max_estimated_tokens())
+            .then_some(compaction.max_estimated_tokens),
             keep_recent_messages: Some(compaction.keep_recent_messages),
         }
     }
