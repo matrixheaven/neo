@@ -1,277 +1,199 @@
-# Configuration
+# Neo Provider/Model Configuration
 
-Configuration currently covers the wired `neo-agent` CLI surface and keeps
-provider/MCP extension points visible without treating development fixtures as
-production defaults.
+This document describes how to configure providers and models in Neo.
 
-## Current Precedence
+## Quick Start
 
-`neo-agent` currently resolves config in this order:
-
-1. CLI flags for a single invocation.
-2. `NEO_*` environment variables.
-3. Project config at `.neo/config.toml` or the path passed with `--config`.
-4. User-global config at `~/.neo/config.toml`.
-5. Built-in `openai/gpt-4.1` defaults.
-
-Project config is merged over user-global config field by field. Provider maps
-are merged by provider id, MCP servers are merged by server id with project
-entries taking precedence, and runtime options preserve global values when the
-project only overrides a subset. `sessions_dir` supports `~` expansion.
-
-## Project Config
-
-The current loader accepts this shape:
+Define providers and models directly in `config.toml` (usually `~/.neo/config.toml`
+or `.neo/config.toml` in your project):
 
 ```toml
-default_provider = "openai"
-default_model = "gpt-4.1"
-api_key_env = "OPENAI_API_KEY"
-sessions_dir = ".neo/sessions"
-model_catalogs = [".neo/models.json"]
-prompt_templates = ["prompts"]
+default_model = "openai/gpt-4.1"
 
+# ─── Providers ───
 [providers.openai]
-api_base = "https://api.openai.com/v1"
-api_key_env = "PROJECT_OPENAI_KEY"
+type = "openai-responses"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
 
-[permissions]
-file_read = "Allow"
-file_write = "Ask"
-shell = "Ask"
-tool = "Allow"
+[providers.anthropic]
+type = "anthropic"
+base_url = "https://api.anthropic.com/v1"
+api_key_env = "ANTHROPIC_API_KEY"
 
-[defaults]
-mode = "interactive"
+# Custom provider with inline API key
+[providers."my-local-llm"]
+type = "openai-compatible"
+base_url = "http://localhost:11434/v1"
+api_key = "sk-local-key"
 
-[runtime]
-temperature = 0.2
-max_tokens = 4096
-steering_queue_mode = "All"
-follow_up_queue_mode = "All"
-tool_execution_mode = "Parallel"
+# ─── Models ───
+[models."openai/gpt-4.1"]
+provider = "openai"
+model = "gpt-4.1"
+max_context_tokens = 1047576
+capabilities = ["streaming", "tools", "images", "reasoning"]
+display_name = "GPT-4.1"
 
-[runtime.compaction]
-enabled = true
-keep_recent_messages = 20
-
-[tui.keybindings]
-"tui.command.open" = ["ctrl+p"]
-"tui.session.open" = ["ctrl+r"]
-"tui.model.open" = ["ctrl+o"]
-
-[tui]
-image_protocol = "auto"
-fetch_remote_images = false
-
-[[mcp.servers]]
-id = "filesystem"
-enabled = true
-transport = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
-
-[[mcp.servers]]
-id = "remote-docs"
-enabled = true
-transport = "http"
-url = "https://mcp.example.test/rpc"
-
-[mcp.servers.headers]
-"x-neo-client" = "neo"
+[models."my-local-llm/llama3"]
+provider = "my-local-llm"
+model = "llama3.1:8b"
+max_context_tokens = 128000
+capabilities = ["streaming", "tools"]
+display_name = "Llama 3.1 8B"
 ```
 
-`api_key_env` names an environment variable. Provider-specific entries such as
-`[providers.openai].api_base` and `[providers.openai].api_key_env` override the
-base URL and environment variable name for that provider without storing secret
-values. Do not write raw API keys into config files.
-`neo-agent` resolves the configured model through the built-in
-`ModelRegistry::seeded()` entries plus any strict JSON `model_catalogs`, then
-uses `ProviderRegistry::production()` for provider clients. With the built-in
-defaults, set `OPENAI_API_KEY` before running provider-backed commands. Custom
-OpenAI-compatible deployments can add a model catalog entry and override
-`providers.<provider-id>.api_base` and `providers.<provider-id>.api_key_env`
-for a built-in provider id. Top-level `api_base` and `api_key_env`, plus
-`--api-base`, `NEO_API_BASE`, and `NEO_API_KEY_ENV`, remain selected-provider
-overrides and take precedence over provider-specific config for that invocation.
+## Provider Configuration
 
-User defaults can live in `~/.neo/config.toml`; project `.neo/config.toml`
-overrides them for that workspace.
+Each provider is defined in a `[providers.<id>]` table. The `<id>` is an
+arbitrary name you choose — it can be anything (e.g. `openai`, `anthropic`,
+`my-local-llm`, `work-gateway`).
 
-System prompt resources are plain local Markdown files. `neo print`, `neo run`,
-RPC `prompt`, and live TUI turns read `.neo/SYSTEM.md` as the system message
-sent before the user prompt. If the project file is absent, Neo falls back to
-`~/.neo/SYSTEM.md`. `.neo/APPEND_SYSTEM.md` and then `~/.neo/APPEND_SYSTEM.md`
-follow the same project-over-global precedence and append a second paragraph to
-the system prompt. Empty files are ignored, and no hosted marketplace state is
-inferred from these files.
-For a single invocation, `--system-prompt <TEXT_OR_PATH>` replaces discovered
-`SYSTEM.md`, and repeatable `--append-system-prompt <TEXT_OR_PATH>` replaces
-discovered `APPEND_SYSTEM.md` entries. If a CLI value is an existing path, Neo
-reads it as UTF-8; otherwise the value is treated as literal prompt text.
+### Fields
 
-Project context files follow the Pi-shaped `AGENTS.md` / `CLAUDE.md` contract.
-Neo always permits user-global `~/.neo/AGENTS.md` or `~/.neo/CLAUDE.md`; project
-and ancestor context files are loaded only when the project is trusted. Trust is
-stored in `~/.neo/trust.json` and managed with `neo trust
-status|approve|deny|clear`. `--approve` and `--no-approve` override the stored
-decision for one invocation, and `--no-context-files` disables these context
-files without disabling `SYSTEM.md`, `APPEND_SYSTEM.md`, or explicit prompt
-overrides.
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes | Protocol type (see below) |
+| `base_url` | string | Yes* | API base URL |
+| `api_key` | string | No | Inline API key (stored in config) |
+| `api_key_env` | string | No | Environment variable name for the key |
+| `api_base` | string | No | Legacy alias for `base_url` |
 
-`prompt_templates` accepts the same local selector shape as repeatable
-`--prompt-template`: template names, project-contained `.md` files, or
-non-recursive directories of `.md` prompt templates. Selectors from user-global
-and project config are merged, with duplicate selector strings loaded once, and
-CLI `--prompt-template` selectors are added for the current invocation.
-Prefix a selector with `-` to filter an auto-discovered local prompt template,
-for example `"-prompts/review.md"` excludes `.neo/prompts/review.md` from slash
-discovery and RPC command listing without requiring the file to exist. Negative
-selectors do not disable explicitly included positive selectors.
+\* `base_url` can be omitted for built-in providers that have a default URL.
 
-The default permissions mirror `neo_agent_core::PermissionPolicy::default()`:
-file reads are allowed, file writes ask, shell asks, and tools are allowed.
-Ask-mode operations emit approval request events in `neo-agent-core`; CLI modes
-can use static approve/deny handlers, and live interactive mode routes approval
-overlay choices back into the runtime's pending async approval handler.
+### Provider Types
 
-The `[runtime]` table maps directly to `neo_agent_core::AgentConfig` for real
-provider-backed runs. `temperature`, `max_tokens`, and `reasoning_effort` are
-sent through `neo_ai::RequestOptions`; queue modes use `All` or `OneAtATime`;
-tool execution uses `Parallel` or `Sequential`; and optional compaction
-settings control the runtime's deterministic context compaction trigger. When
-`max_estimated_tokens` is omitted, Neo uses a model-window-aware threshold; the
-legacy `32000` default is treated as automatic for large-context models.
-Supported reasoning effort values are `minimal`, `low`, `medium`, `high`, and
-`xhigh`. OpenAI Responses serializes this as a Responses `reasoning` object;
-OpenAI-compatible Chat Completions serializes it as `reasoning_effort`.
-For a single invocation, `--thinking <off|minimal|low|medium|high|xhigh>`
-overrides `runtime.reasoning_effort`; `off` removes the provider reasoning
-payload even when config sets a reasoning effort.
+| Type | Wire Protocol | Example Providers |
+|------|--------------|-------------------|
+| `openai-responses` | OpenAI Responses API | OpenAI |
+| `openai-chat` | OpenAI Chat Completions | OpenAI (legacy) |
+| `openai-compatible` | OpenAI-compatible Chat Completions | OpenRouter, Ollama, vLLM, local LLMs |
+| `anthropic` | Anthropic Messages API | Anthropic, Amazon Bedrock |
+| `google` | Google Generative AI | Google Gemini |
 
-For a single invocation, tool filters adjust the registry sent to the provider
-without persisting config:
+### API Key
 
-- `--no-tools` / `-nt` disables all built-in and MCP tools unless `--tools`
-  explicitly names tools to re-enable.
-- `--no-builtin-tools` / `-nbt` skips built-in defaults while preserving
-  configured MCP tools.
-- `--tools read,bash` / `-t read,bash` keeps only named registered tools.
-- `--exclude-tools read,bash` / `-xt read,bash` removes named registered tools
-  after any allowlist.
+You can specify the API key in two ways:
 
-Unknown tool names in an allowlist do not create tools; they are ignored unless
-a real built-in or MCP tool with that name is registered for the invocation.
+1. **Inline** (`api_key = "sk-..."`) — stored directly in config.toml.
+2. **Environment variable** (`api_key_env = "OPENAI_API_KEY"`) — reads from the
+   named environment variable at runtime.
 
-The `[tui.keybindings]` table maps `neo-tui` action IDs to arrays of normalized
-key IDs. TOML keys must be quoted because action IDs contain dots. Project
-bindings override user-global bindings per action, and each action's configured
-array replaces that action's default key list. Config loading and `config set`
-validate action IDs, key syntax, text-insertion reserved keys, and same-context
-conflicts before the interactive controller receives the resolved keybinding
-manager.
+If both are specified, `api_key` takes priority.
 
-The `[tui]` image settings control local transcript image handling.
-`image_protocol` accepts `auto`, `kitty`, `iterm2`, `sixel`, or `none`.
-`auto` uses conservative local terminal hints and does not claim full runtime
-protocol negotiation. `fetch_remote_images` defaults to false; when false, Neo
-will not fetch URL-only image generation outputs or remote transcript images.
-When true, remote image fetches still require HTTP(S), an image content type,
-and the built-in size guard.
+## Model Configuration
+
+Each model is defined in a `[models.<alias>]` table. The alias is typically
+`"provider/model"` but can be any string.
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `provider` | string | Yes | Must match a provider id |
+| `model` | string | Yes | Model ID sent to the API |
+| `max_context_tokens` | number | No | Context window size |
+| `max_output_tokens` | number | No | Max output tokens |
+| `capabilities` | string[] | No | Capability tags |
+| `display_name` | string | No | Human-readable name |
+
+### Capability Tags
+
+- `streaming` — supports SSE streaming
+- `tools` / `tool_use` — supports function/tool calling
+- `images` / `image_in` / `vision` — supports image inputs
+- `reasoning` / `thinking` — supports reasoning/thinking
+- `embeddings` / `embedding` — embedding model
+
+## CLI Commands
+
+### Provider management
+
+```bash
+# List configured providers
+neo provider list
+
+# Add a custom provider
+neo provider add my-llm --type openai-compatible --base-url http://localhost:11434/v1 --api-key sk-test
+
+# Remove a provider (also removes its models)
+neo provider remove my-llm
+
+# Browse models.dev catalog
+neo provider catalog list
+neo provider catalog list openai    # show models for a specific provider
+
+# Import a provider from models.dev
+neo provider catalog add openai --api-key sk-...
+neo provider catalog add anthropic --api-key sk-ant-... --default-model claude-sonnet-4-5
+```
+
+### Model management
+
+```bash
+# List configured models
+neo models list
+
+# Add a model
+neo models add "my-llm/codellama" --provider my-llm --model "codellama:13b" \
+  --max-context-tokens 4000 --capabilities streaming,tools,reasoning
+
+# Remove a model
+neo models remove "my-llm/codellama"
+
+# Set default model
+neo models set "openai/gpt-4.1"
+```
+
+## TUI Slash Commands
+
+In interactive mode:
+
+- `/model` — Open the model picker
+- `/provider` — Open the provider list
+- `/resume` — Open session picker
+
+## Importing from models.dev
+
+Neo integrates with [models.dev](https://models.dev) for provider discovery:
+
+```bash
+# See all available providers
+neo provider catalog list
+
+# Import a provider with all its models
+neo provider catalog add deepseek --api-key sk-...
+```
+
+This fetches the catalog, infers the wire type, and writes the provider +
+all its models to `config.toml` automatically.
+
+## JSON Catalog Files (Legacy)
+
+For backward compatibility, Neo still supports JSON catalog files via
+`model_catalogs`:
+
+```toml
+model_catalogs = [".neo/models.json"]
+```
+
+Models from JSON catalogs are loaded in addition to those defined in
+`config.toml`. New users should prefer `[models.<alias>]` tables.
 
 ## Environment Variables
 
-| Variable | Maps to |
-| --- | --- |
-| `NEO_MODEL` | `default_model` |
-| `NEO_PROVIDER` | `default_provider` |
-| `NEO_API_BASE` | `api_base` |
-| `NEO_API_KEY_ENV` | `api_key_env` |
-| `NEO_SESSIONS_DIR` | `sessions_dir` |
-| `NEO_MODE` | `defaults.mode` |
-| `NEO_CONFIG` | config file path |
-| `NEO_OFFLINE` | skip network-like extension update refreshes |
+| Variable | Description |
+|----------|-------------|
+| `NEO_MODEL` | Override default model |
+| `NEO_PROVIDER` | Override default provider |
+| `NEO_API_BASE` | Override base URL for selected provider |
+| `NEO_API_KEY_ENV` | Override API key env var name |
+| `NEO_CONFIG` | Path to config file |
 
-## MCP Config
+## Config Precedence
 
-`neo mcp list` reads configured server entries from `.neo/config.toml`.
-`neo print` and `neo run` discover enabled `transport = "stdio"`,
-`transport = "http"`, and `transport = "sse"` entries, register their remote
-tools as `mcp__<server>__<tool>` model functions, and call the original remote
-MCP tool names over a real JSON-RPC transport. Stdio servers reuse an
-initialized process session; HTTP/SSE servers send JSON-RPC POST requests and
-accept JSON or SSE `data:` JSON-RPC responses. `neo mcp resources <server>
-list` and `neo mcp resources <server> read <uri>` explicitly fetch resource
-catalogs and content from a configured enabled server. `neo mcp resources
-<server> watch <uri>` subscribes over stdio or over remote HTTP/SSE servers that
-return a live SSE subscribe response or a JSON subscribe ACK with an alternate
-SSE event-channel URL in `eventStreamUrl`, `event_stream_url`, or `event_url`,
-waits for real `notifications/resources/updated` messages, prints updated URIs,
-and unsubscribes before exiting. Relative event-channel URLs are resolved
-against the configured remote endpoint; malformed or non-HTTP(S) URLs are MCP
-protocol errors. The current shape includes:
-
-- Server id.
-- Transport type: `stdio`, `http`, or `sse`.
-- Command and arguments for local stdio servers.
-- URL and optional headers for remote HTTP/SSE servers.
-- Environment variables required by the server.
-- Whether the server is enabled by default.
-
-See [examples/config/mcp-server.toml](../examples/config/mcp-server.toml).
-
-## CLI Surface
-
-The `neo-agent` binary exposes:
-
-```bash
-neo config show
-neo config set <key> <value>
-neo --list-models [search]
-neo models list
-neo mcp list
-neo mcp resources <server-id> list
-neo mcp resources <server-id> read <uri>
-neo mcp resources <server-id> watch <uri> [--count <n>]
-neo skills show <path>
-neo extensions list [root]
-neo extensions install <path-or-git-url> --root <root>
-neo extensions update <extension-id> --root <root>
-neo extensions uninstall <extension-id> --root <root>
-neo extensions status <extension-id> --root <root>
-neo extensions enable <extension-id> --root <root>
-neo extensions disable <extension-id> --root <root>
-neo extensions call <extension-id> <method> [params] --root <root>
-neo sessions summarize <session-id>
-```
-
-Supported `config set` keys are:
-
-- `default_model` or `model`
-- `default_provider` or `provider`
-- `api_base`
-- `api_key_env`
-- `providers.<provider-id>.api_base`
-- `providers.<provider-id>.api_key_env`
-- `prompt_templates`
-- `sessions_dir`
-- `permissions.file_read` or `file_read`
-- `permissions.file_write` or `file_write`
-- `permissions.shell` or `shell`
-- `permissions.tool` or `tool`
-- `defaults.mode` or `mode`
-- `runtime.temperature` or `temperature`
-- `runtime.max_tokens` or `max_tokens`
-- `runtime.steering_queue_mode` or `steering_queue_mode`
-- `runtime.follow_up_queue_mode` or `follow_up_queue_mode`
-- `runtime.tool_execution_mode` or `tool_execution_mode`
-- `runtime.compaction.enabled` or `compaction.enabled`
-- `runtime.compaction.max_estimated_tokens` or `compaction.max_estimated_tokens`
-- `runtime.compaction.keep_recent_messages` or `compaction.keep_recent_messages`
-- `tui.keybindings.<tui-action-id>`
-
-Use TOML enum values `Allow`, `Ask`, or `Deny` for permission settings.
-Use `All` or `OneAtATime` for queue modes and `Parallel` or `Sequential` for
-tool execution mode.
-Use a TOML string array for keybinding overrides, for example
-`neo config set tui.keybindings.tui.command.open '["ctrl+g", "ctrl+p"]'`.
+1. CLI flags (`--model`, `--provider`, `--api-key`)
+2. Environment variables (`NEO_*`)
+3. Project config (`.neo/config.toml`)
+4. User-global config (`~/.neo/config.toml`)
+5. Built-in defaults

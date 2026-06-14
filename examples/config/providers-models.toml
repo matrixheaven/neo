@@ -1,0 +1,100 @@
+# Neo Configuration — Providers and Models
+#
+# This example demonstrates the full provider/model configuration system.
+# Copy this to ~/.neo/config.toml or .neo/config.toml and customize.
+
+# ─── Default Model ───
+# Format: "provider/model-alias" (matches a [models."..."] key)
+default_model = "openai/gpt-4.1"
+
+# ─── Providers ───
+# Each provider is a [providers.<id>] table.
+# The <id> is arbitrary — you choose the name.
+
+[providers.openai]
+type = "openai-responses"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+[providers.anthropic]
+type = "anthropic"
+base_url = "https://api.anthropic.com/v1"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[providers.google]
+type = "google"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+api_key_env = "GEMINI_API_KEY"
+
+# Custom provider using inline API key
+[providers.openrouter]
+type = "openai-compatible"
+base_url = "https://openrouter.ai/api/v1"
+api_key = "sk-or-v1-xxxxxxxxxxxxxxxx"
+
+# Local LLM (Ollama)
+[providers."local-ollama"]
+type = "openai-compatible"
+base_url = "http://localhost:11434/v1"
+api_key = "ollama"   # Ollama doesn't need a real key
+
+# ─── Models ───
+# Each model is a [models."<alias>"] table.
+# The alias typically follows "provider/model-name" convention.
+
+[models."openai/gpt-4.1"]
+provider = "openai"
+model = "gpt-4.1"
+max_context_tokens = 1047576
+capabilities = ["streaming", "tools", "images", "reasoning"]
+display_name = "GPT-4.1"
+
+[models."openai/gpt-4o-mini"]
+provider = "openai"
+model = "gpt-4o-mini"
+max_context_tokens = 128000
+capabilities = ["streaming", "tools", "images"]
+display_name = "GPT-4o mini"
+
+[models."anthropic/claude-sonnet-4-5"]
+provider = "anthropic"
+model = "claude-sonnet-4-5-20250514"
+max_context_tokens = 200000
+capabilities = ["streaming", "tools", "images", "reasoning"]
+display_name = "Claude Sonnet 4.5"
+
+[models."google/gemini-2.5-pro"]
+provider = "google"
+model = "gemini-2.5-pro"
+max_context_tokens = 1000000
+capabilities = ["streaming", "tools", "images", "reasoning"]
+display_name = "Gemini 2.5 Pro"
+
+# Custom model via OpenRouter
+[models."openrouter/deepseek-r1"]
+provider = "openrouter"
+model = "deepseek/deepseek-r1"
+max_context_tokens = 128000
+capabilities = ["streaming", "tools", "reasoning"]
+display_name = "DeepSeek R1"
+
+# Local model via Ollama
+[models."local-ollama/llama3"]
+provider = "local-ollama"
+model = "llama3.1:8b"
+max_context_tokens = 128000
+capabilities = ["streaming", "tools"]
+display_name = "Llama 3.1 8B (local)"
+
+# ─── Optional: Permissions ───
+[permissions]
+file_read = "Allow"
+file_write = "Ask"
+shell = "Ask"
+tool = "Allow"
+
+# ─── Optional: Runtime ───
+[runtime]
+temperature = 0.2
+max_tokens = 4096
+reasoning_effort = "medium"

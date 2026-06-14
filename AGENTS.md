@@ -4,9 +4,7 @@ This file is written for AI coding agents. It assumes you know nothing about the
 project. Use it to orient yourself before editing code, running tests, or writing
 documentation.
 
-
-
-@ [CX.md](../../.kimi-code/CX.md)  @[RTK.md](../../.kimi-code/RTK.md) 
+Read @ [CX.md](../../.kimi-code/CX.md)  @[RTK.md](../../.kimi-code/RTK.md) ，Use `cx` and `rtk` clito save tokens
 
 ## Project overview
 
@@ -188,8 +186,10 @@ crate.
 2. The runtime opens or creates a local JSONL session via
    `neo_agent_core::session`.
 3. The configured model is resolved through `neo_ai::ModelRegistry`
-   (seeded catalog + strict local JSON catalogs) and
-   `neo_ai::ProviderRegistry::production()`.
+   (seeded catalog + inline `[models.*]` TOML + legacy JSON catalogs) and
+   `neo_ai::ProviderRegistry` (built-in defaults + config-driven custom
+   providers). `ProviderResolver` selects the wire client by the provider's
+   declared `type`.
 4. `AgentRuntime` sends a `neo_ai::ChatRequest` to the selected `ModelClient`.
 5. Provider-native streams are normalized into `AiStreamEvent` values
    (`MessageStart`, `ThinkingStart/Delta/End`, `TextDelta`, `ToolCallStart`,
@@ -237,14 +237,31 @@ Project config merges over user-global config field by field. Provider maps are
 merged by provider id; MCP servers are merged by server id. Important sections:
 
 - `default_provider`, `default_model`, `api_key_env`, `api_base`.
-- `providers.<id>.api_base` / `api_key_env`.
-- `model_catalogs` — strict local JSON model catalogs.
+- `default_provider`, `default_model`, `api_key_env`, `api_base`.
+- `providers.<id>` — full provider definition with `type`, `base_url`,
+  `api_key` (inline) or `api_key_env` (environment variable).
+  Users can define arbitrary provider ids.
+- `models.<alias>` — inline model definitions with `provider`, `model`,
+  `max_context_tokens`, `capabilities`, `display_name`.
+- `model_catalogs` — legacy JSON model catalog files (still supported,
+  loaded in addition to inline `[models.*]` entries).
 - `permissions` — `Allow` / `Ask` / `Deny` for `file_read`, `file_write`,
   `shell`, `tool`.
 - `runtime` — `temperature`, `max_tokens`, `reasoning_effort`, queue modes,
   tool execution mode, compaction.
 - `tui` — `image_protocol`, `fetch_remote_images`, `keybindings`.
 - `mcp.servers` — stdio/HTTP/SSE MCP server entries.
+
+Provider types: `openai-responses`, `openai-compatible`, `openai-chat`,
+`anthropic`, `google`. The `ProviderResolver` selects the wire-protocol
+client based on the provider's declared `type`, not the model's `api` field.
+
+CLI provider/model management: `neo provider add/remove/list`,
+`neo provider catalog list/add` (models.dev integration),
+`neo models add/remove/list/set`.
+
+TUI slash commands: `/model` (model picker), `/provider` (provider list),
+`/resume` (session picker).
 
 System prompt resources:
 
@@ -257,8 +274,9 @@ project is trusted; trust is stored in `~/.neo/trust.json`.
 ## Security considerations
 
 - **No unsafe code**: workspace lint `unsafe_code = "forbid"`.
-- **Secrets**: API keys are read from environment variables, never from config
-  files. `neo config show` redacts MCP `env` and `headers` values.
+- **Secrets**: API keys can be stored inline in config (`api_key = "..."`) or
+  referenced via environment variables (`api_key_env = "OPENAI_API_KEY"`).
+  `neo config show` redacts `api_key`, MCP `env`, and `headers` values.
 - **Workspace containment**: built-in file tools resolve paths inside the
   workspace and reject parent-dir escapes.
 - **Shell tool**: requires explicit `permissions.shell` and can be set to
