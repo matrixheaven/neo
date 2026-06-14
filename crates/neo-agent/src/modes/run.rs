@@ -21,9 +21,10 @@ use neo_agent_core::{
     McpToolProvider, PermissionDecision, ToolRegistry,
 };
 use neo_ai::{
-    ApiKind, ChatMessage, ContentPart, CredentialResolver, ImageData, ImageGenerationClient,
-    ImageGenerationRequest, ModelClient, ModelRegistry, ModelSpec, ProviderRegistry, ProviderSpec,
-    RequestOptions, ResolvedCredential, providers::openai_images::OpenAiImagesClient,
+    ApiKind, ApiType, ChatMessage, ContentPart, CredentialResolver, ImageData,
+    ImageGenerationClient, ImageGenerationRequest, ModelClient, ModelRegistry, ModelSpec,
+    ProviderRegistry, ProviderSpec, RequestOptions, ResolvedCredential,
+    providers::openai_images::OpenAiImagesClient,
 };
 use reqwest::header;
 use serde::{Deserialize, Serialize};
@@ -961,15 +962,40 @@ fn resolve_provider_credential_from_env(
 
 fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: &AppConfig) {
     for (provider_id, provider_config) in &config.providers {
-        let Some(mut provider) = registry.get(provider_id).cloned() else {
-            continue;
+        let existing = registry.get(provider_id).cloned();
+        let provider = if let Some(mut p) = existing {
+            // Override existing built-in provider fields
+            if let Some(t) = &provider_config.provider_type {
+                p.provider_type = Some(t.clone());
+            }
+            if let Some(base_url) = provider_config.effective_base_url() {
+                p.base_url = Some(base_url.to_owned());
+            }
+            if let Some(key) = &provider_config.api_key {
+                p.api_key = Some(key.clone());
+            }
+            if let Some(env_name) = &provider_config.api_key_env {
+                p.api_key_env_vars = vec![env_name.clone()];
+            }
+            p
+        } else {
+            // Create a brand-new provider from config
+            let default_type = provider_config
+                .provider_type
+                .unwrap_or(ApiType::OpenAiCompatible);
+            let default_api = default_type.to_api_kind();
+            ProviderSpec {
+                id: provider_id.clone(),
+                display_name: provider_id.clone(),
+                api: default_api,
+                supported_apis: vec![default_api],
+                base_url: provider_config.effective_base_url().map(str::to_owned),
+                api_key: provider_config.api_key.clone(),
+                api_key_env_vars: provider_config.api_key_env.iter().cloned().collect(),
+                ambient_auth_env_vars: vec![],
+                provider_type: provider_config.provider_type.clone(),
+            }
         };
-        if let Some(base_url) = &provider_config.api_base {
-            provider.base_url = Some(base_url.clone());
-        }
-        if let Some(env_name) = &provider_config.api_key_env {
-            provider.api_key_env_vars = vec![env_name.clone()];
-        }
         registry.register(provider);
     }
 }
@@ -2154,12 +2180,77 @@ fn one_line(text: &str, max_chars: usize) -> String {
 
 pub(crate) fn model_registry_for_config(config: &AppConfig) -> anyhow::Result<ModelRegistry> {
     let mut registry = ModelRegistry::seeded();
+
+    // 1. Load models from config.toml [models.<alias>]
+    for (alias, model_cfg) in &config.models {
+        let spec = model_config_to_spec(alias, model_cfg, &config.providers)?;
+        registry.register(spec);
+    }
+
+    // 2. Load from JSON catalog files (backward compat)
     for path in &config.model_catalogs {
         registry
             .load_catalog_path(path)
             .map_err(anyhow::Error::from)?;
     }
     Ok(registry)
+}
+
+/// Convert a `[models.<alias>]` config entry into a `ModelSpec`.
+fn model_config_to_spec(
+    alias: &str,
+    cfg: &crate::config::ModelConfig,
+    providers: &BTreeMap<String, crate::config::ProviderConfig>,
+) -> anyhow::Result<ModelSpec> {
+    let provider_cfg = providers.get(&cfg.provider).ok_or_else(|| {
+        anyhow::anyhow!(
+            "model '{}' references unknown provider '{}'; define it in config.toml with [providers.{}]",
+            alias,
+            cfg.provider,
+            cfg.provider
+        )
+    })?;
+
+    // Derive ApiKind from provider's declared type
+    let api = provider_cfg
+        .provider_type
+        .unwrap_or(ApiType::OpenAiCompatible)
+        .to_api_kind();
+
+    // Parse capabilities from string list
+    let capabilities = parse_model_capabilities(&cfg.capabilities, cfg.max_context_tokens);
+
+    Ok(ModelSpec {
+        provider: neo_ai::ProviderId(cfg.provider.clone()),
+        model: cfg.model.clone(),
+        api,
+        capabilities,
+    })
+}
+
+/// Parse a capability string list into `ModelCapabilities`.
+fn parse_model_capabilities(
+    caps: &[String],
+    max_context_tokens: Option<u32>,
+) -> neo_ai::ModelCapabilities {
+    let mut mc = neo_ai::ModelCapabilities::tool_chat();
+    mc.streaming = false;
+    mc.tools = false;
+    mc.images = false;
+    mc.reasoning = false;
+    mc.embeddings = false;
+    for cap in caps {
+        match cap.trim().to_ascii_lowercase().as_str() {
+            "streaming" => mc.streaming = true,
+            "tools" | "tool_use" => mc.tools = true,
+            "images" | "image_in" | "vision" => mc.images = true,
+            "reasoning" | "thinking" => mc.reasoning = true,
+            "embeddings" | "embedding" => mc.embeddings = true,
+            _ => {}
+        }
+    }
+    mc.max_context_tokens = max_context_tokens;
+    mc
 }
 
 fn resolve_model_client(

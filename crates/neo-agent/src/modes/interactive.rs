@@ -21,9 +21,7 @@ use std::{
 use anyhow::{Context, Result};
 use crossterm::{
     Command as CrosstermCommand,
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    },
+    event::{self, DisableBracketedPaste, EnableBracketedPaste},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -972,11 +970,13 @@ impl InteractiveController {
         match command.id.as_str() {
             "sessions" => self.open_session_picker(),
             "models" => self.open_model_picker(),
+            "providers" => self.open_provider_picker(),
             "copy-prompt" => self.copy_prompt_to_clipboard(),
             "select-transcript" => self.app.select_visible_transcript_item(),
             "clear-transcript-selection" => self.app.clear_transcript_selection(),
             "copy-transcript-selection" => self.copy_transcript_selection_to_clipboard(),
             "session.exportHtml" => self.export_active_session_to_html().await?,
+            "fork" => self.fork_current_session().await?,
             "submit" => self.submit_current_prompt().await?,
             unknown => self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
                 text: format!("Unknown command: {unknown}"),
@@ -1019,6 +1019,14 @@ impl InteractiveController {
         };
         if prompt.trim() == "/resume" {
             self.open_session_picker();
+            return Ok(());
+        }
+        if prompt.trim() == "/model" {
+            self.open_model_picker();
+            return Ok(());
+        }
+        if prompt.trim() == "/provider" {
+            self.open_provider_picker();
             return Ok(());
         }
         let PromptSubmission {
@@ -1227,6 +1235,35 @@ impl InteractiveController {
         self.app.open_model_picker(self.model_items.clone());
     }
 
+    fn open_provider_picker(&mut self) {
+        let Some(config) = &self.local_config else {
+            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: "No config available".to_owned(),
+            });
+            return;
+        };
+        if config.providers.is_empty() {
+            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: "No configured providers".to_owned(),
+            });
+            return;
+        }
+        let items: Vec<PickerItem> = config
+            .providers
+            .iter()
+            .map(|(id, cfg)| {
+                let type_str = cfg
+                    .provider_type
+                    .map(neo_ai::ApiType::as_config_str)
+                    .unwrap_or("auto");
+                let label = format!("{id} ({type_str})");
+                let description = cfg.base_url.clone();
+                PickerItem::new(id.clone(), label, description)
+            })
+            .collect();
+        self.app.open_model_picker(items);
+    }
+
     async fn load_selected_session(&mut self) -> Result<()> {
         let Some(session) = self.app.confirm_session_picker() else {
             return Ok(());
@@ -1256,15 +1293,53 @@ impl InteractiveController {
         Ok(())
     }
 
-    fn apply_selected_model(&mut self) -> Result<()> {
-        let Some(model) = self.app.confirm_model_picker() else {
+    async fn fork_current_session(&mut self) -> Result<()> {
+        let Some(parent_id) = self.active_session_id.clone() else {
+            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: "No active session to fork".to_owned(),
+            });
             return Ok(());
         };
-        let selected = SelectedModel::from_picker_item(&model)?;
-        self.app.set_model_label(model.label);
-        self.app
-            .set_context_window(selected.max_context_tokens.map(ContextWindow::new));
-        self.active_model = Some(selected);
+        let forked = (self.fork_session)(parent_id.clone())
+            .await
+            .with_context(|| format!("failed to fork session {parent_id}"))?;
+        let child_id = forked.session_id.clone();
+        self.app.load_session_transcript(
+            forked.transcript.label,
+            forked.transcript.notices,
+            forked.transcript.messages,
+        );
+        self.active_session_id = Some(forked.session_id);
+        self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+            text: format!("Forked session {parent_id} to {child_id}"),
+        });
+        Ok(())
+    }
+
+    fn apply_selected_model(&mut self) -> Result<()> {
+        let Some(item) = self.app.confirm_model_picker() else {
+            return Ok(());
+        };
+        match SelectedModel::from_picker_item(&item) {
+            Ok(selected) => {
+                self.app.set_model_label(item.label);
+                self.app
+                    .set_context_window(selected.max_context_tokens.map(ContextWindow::new));
+                self.active_model = Some(selected);
+            }
+            Err(_) => {
+                // Not a model item (e.g. a provider from /provider) — show info.
+                let detail = item
+                    .description
+                    .as_deref()
+                    .filter(|d| !d.is_empty())
+                    .map(|d| format!(" — {d}"))
+                    .unwrap_or_default();
+                self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                    text: format!("Provider: {}{detail}", item.label),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -1416,12 +1491,21 @@ fn extension_command_completion_items(root: &Path) -> Result<Vec<PickerItem>> {
 }
 
 fn session_completion_items() -> Vec<PickerItem> {
-    [(
-        "/resume",
-        "Resume a local session",
-        "local sessions",
-        "local",
-    )]
+    [
+        (
+            "/resume",
+            "Resume a local session",
+            "local sessions",
+            "local",
+        ),
+        ("/model", "Switch active model", "model picker", "local"),
+        (
+            "/provider",
+            "View configured providers",
+            "provider picker",
+            "local",
+        ),
+    ]
     .into_iter()
     .map(|(value, description, provider, trust)| {
         PickerItem::new(
@@ -1925,9 +2009,19 @@ fn command_specs(project_dir: &Path) -> (Vec<CommandSpec>, Option<String>) {
         CommandSpec::new("sessions", "Open sessions", Some("Browse local sessions")),
         CommandSpec::new("models", "Open models", Some("Switch active model")),
         CommandSpec::new(
+            "providers",
+            "Open providers",
+            Some("View configured providers"),
+        ),
+        CommandSpec::new(
             "session.exportHtml",
             "Export session to HTML",
             Some("Write the active local session as sanitized HTML"),
+        ),
+        CommandSpec::new(
+            "fork",
+            "Fork session",
+            Some("Create a child fork of the current session"),
         ),
         CommandSpec::new(
             "copy-prompt",
@@ -2151,7 +2245,6 @@ impl RawTerminal {
             output,
             EnterAlternateScreen,
             EnableBracketedPaste,
-            EnableMouseCapture,
             EnableAlternateScroll
         )?;
         let backend = CrosstermBackend::new(output);
@@ -2196,7 +2289,6 @@ impl RawTerminal {
         let _ = execute!(
             self.terminal.backend_mut(),
             DisableAlternateScroll,
-            DisableMouseCapture,
             DisableBracketedPaste,
             LeaveAlternateScreen
         );
@@ -2210,7 +2302,6 @@ impl RawTerminal {
             self.terminal.backend_mut(),
             EnterAlternateScreen,
             EnableBracketedPaste,
-            EnableMouseCapture,
             EnableAlternateScroll
         )?;
         self.terminal.clear()?;
