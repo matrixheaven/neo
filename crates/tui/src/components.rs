@@ -1655,14 +1655,11 @@ fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
         let hints_y = area.y.saturating_add(1);
         let hint_style = Style::default().fg(theme.footer_hint);
         let narrow = area.width < 50;
-        let mut hints = if narrow {
-            "enter send · esc interrupt".to_owned()
+        let hints = if narrow {
+            "enter send · esc interrupt · scroll↑ for history".to_owned()
         } else {
-            "enter send · shift+enter newline · / commands".to_owned()
+            "enter send · shift+enter/ctrl+j newline · scroll↑ for history".to_owned()
         };
-        if !app.transcript_view().is_following_tail() && area.width >= 60 {
-            hints.push_str(" · new output below · pgdn to follow");
-        }
 
         let context_width: u16 = context_label
             .as_ref()

@@ -3,9 +3,7 @@ use std::{
     fmt,
 };
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
-
-const MOUSE_WHEEL_SCROLL_ROWS: usize = 3;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputEvent {
@@ -34,7 +32,6 @@ impl InputEvent {
         match event {
             Event::Paste(text) => Some(Self::Paste(text.clone())),
             Event::Key(key_event) => Self::from_key_event(*key_event),
-            Event::Mouse(mouse_event) => Self::from_mouse_event_kind(mouse_event.kind),
             Event::Resize(columns, rows) => Some(Self::Resize {
                 columns: *columns,
                 rows: *rows,
@@ -51,7 +48,6 @@ impl InputEvent {
         match event {
             Event::Paste(text) => Some(Self::Paste(text.clone())),
             Event::Key(key_event) => Self::from_key_event_with_keybindings(*key_event, keybindings),
-            Event::Mouse(mouse_event) => Self::from_mouse_event_kind(mouse_event.kind),
             Event::Resize(columns, rows) => Some(Self::Resize {
                 columns: *columns,
                 rows: *rows,
@@ -105,14 +101,6 @@ impl InputEvent {
         }
         Some(Self::Key(key))
     }
-
-    fn from_mouse_event_kind(kind: MouseEventKind) -> Option<Self> {
-        match kind {
-            MouseEventKind::ScrollUp => Some(Self::ScrollUp(MOUSE_WHEEL_SCROLL_ROWS)),
-            MouseEventKind::ScrollDown => Some(Self::ScrollDown(MOUSE_WHEEL_SCROLL_ROWS)),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -148,9 +136,6 @@ impl InputParser {
             Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
                 self.feed_key_event(*key_event)
             }
-            Event::Mouse(mouse_event) => InputEvent::from_mouse_event_kind(mouse_event.kind)
-                .into_iter()
-                .collect(),
             Event::Resize(columns, rows) => vec![InputEvent::Resize {
                 columns: *columns,
                 rows: *rows,
@@ -683,7 +668,11 @@ fn input_keybinding_definitions() -> Vec<KeybindingDefinition> {
     use KeybindingAction as Action;
 
     vec![
-        definition(Action::InputNewLine, &["shift+enter"], "Insert newline"),
+        definition(
+            Action::InputNewLine,
+            &["shift+enter", "ctrl+j"],
+            "Insert newline",
+        ),
         definition(Action::InputSubmit, &["enter"], "Submit input"),
         definition(Action::InputTab, &["tab"], "Tab"),
         definition(Action::InputCopy, &["ctrl+c"], "Copy selection"),

@@ -1,5 +1,5 @@
 use crate::{
-    config::{self, AppConfig},
+    config::{self, AppConfig, workspace_sessions_dir},
     prompt_templates::{
         PromptTemplateLocation, discover_prompt_template_commands, expand_prompt_template_args,
         load_project_prompt_templates,
@@ -8,7 +8,7 @@ use crate::{
 use std::{
     cell::RefCell,
     collections::{BTreeMap, VecDeque},
-    env, fmt, fs,
+    env, fs,
     future::{Future, Ready, ready},
     io::{IsTerminal as _, Stdout, Write as _, stdout},
     path::{Path, PathBuf},
@@ -20,10 +20,12 @@ use std::{
 
 use anyhow::{Context, Result};
 use crossterm::{
-    Command as CrosstermCommand,
-    event::{self, DisableBracketedPaste, EnableBracketedPaste},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, size},
 };
 use neo_agent_core::{
     AgentEvent, AgentMessage, PermissionDecision,
@@ -84,7 +86,7 @@ pub async fn execute_tty_with_startup(
         return Ok(Some(execute_with_startup(config, startup, options)));
     }
 
-    let terminal = RefCell::new(RawTerminal::enter()?);
+    let terminal = RefCell::new(InlineTerminal::enter()?);
     let mut controller = controller_for_config(config);
     controller.apply_startup_options(config, options);
     controller.apply_startup_action(startup);
@@ -2188,88 +2190,150 @@ const PROMPT_COMPLETION_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::InputCopy,
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EnableAlternateScroll;
-
-impl CrosstermCommand for EnableAlternateScroll {
-    fn write_ansi(&self, formatter: &mut impl fmt::Write) -> std::fmt::Result {
-        write!(formatter, "\x1b[?1007h")
-    }
-
-    #[cfg(windows)]
-    fn execute_winapi(&self) -> std::io::Result<()> {
-        Err(std::io::Error::other(
-            "EnableAlternateScroll must be emitted as ANSI",
-        ))
-    }
-
-    #[cfg(windows)]
-    fn is_ansi_code_supported(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DisableAlternateScroll;
-
-impl CrosstermCommand for DisableAlternateScroll {
-    fn write_ansi(&self, formatter: &mut impl fmt::Write) -> std::fmt::Result {
-        write!(formatter, "\x1b[?1007l")
-    }
-
-    #[cfg(windows)]
-    fn execute_winapi(&self) -> std::io::Result<()> {
-        Err(std::io::Error::other(
-            "DisableAlternateScroll must be emitted as ANSI",
-        ))
-    }
-
-    #[cfg(windows)]
-    fn is_ansi_code_supported(&self) -> bool {
-        true
-    }
-}
-
-struct RawTerminal {
+struct InlineTerminal {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     raw_mode: RawModeGuard,
     inline_image_cache: InlineImageRenderCache,
     last_area: Option<ratatui::layout::Rect>,
+    /// The row where the live viewport starts (0-based from top of screen).
+    viewport_top: u16,
 }
 
-impl RawTerminal {
+impl InlineTerminal {
     fn enter() -> Result<Self> {
         let raw_mode = RawModeGuard::enable()?;
         let mut output = stdout();
+        // Inline mode: no alternate screen, no mouse capture, no alternate scroll.
+        // Just raw mode + bracketed paste + keyboard enhancement. Content goes into
+        // terminal's native scrollback buffer.
         execute!(
             output,
-            EnterAlternateScreen,
             EnableBracketedPaste,
-            EnableAlternateScroll
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
         let backend = CrosstermBackend::new(output);
-        let mut terminal = Terminal::new(backend)?;
-        terminal.clear()?;
+        let terminal = Terminal::new(backend)?;
+
+        // Query cursor position to know where to anchor the viewport.
+        let (_cols, rows) = size()?;
+        let cursor_row = query_cursor_row().unwrap_or(rows.saturating_sub(1));
+
         Ok(Self {
             terminal,
             raw_mode,
             inline_image_cache: InlineImageRenderCache::default(),
             last_area: None,
+            viewport_top: cursor_row.min(rows.saturating_sub(1)),
         })
+    }
+
+    /// Insert finalized text lines into the terminal's native scrollback above
+    /// the viewport using DECSTBM scroll-region escape sequences.
+    fn insert_history_lines(&mut self, line_batches: &[Vec<String>]) -> Result<()> {
+        if line_batches.is_empty() {
+            return Ok(());
+        }
+
+        let (cols, rows) = size()?;
+        if rows == 0 {
+            return Ok(());
+        }
+
+        // Flatten all batches into a single list of lines.
+        let mut all_lines: Vec<&str> = Vec::new();
+        for batch in line_batches {
+            for line in batch {
+                all_lines.push(line.as_str());
+            }
+        }
+
+        let num_lines = all_lines.len() as u16;
+        let viewport_top = self.viewport_top;
+
+        if viewport_top == 0 {
+            // No room above viewport — just scroll viewport down.
+            // Emit blank lines to push viewport content down.
+            for _ in 0..num_lines {
+                self.terminal.backend_mut().write_all(b"\r\n")?;
+            }
+            self.viewport_top = self.viewport_top.saturating_add(num_lines).min(rows - 1);
+            return Ok(());
+        }
+
+        let writer = self.terminal.backend_mut();
+
+        // Step 1: If viewport isn't at the bottom, scroll it down to make room.
+        let viewport_bottom = viewport_top; // viewport occupies [viewport_top, rows)
+        if viewport_bottom < rows {
+            let scroll_amount = num_lines.min(rows - viewport_bottom);
+            let top_1based = viewport_top + 1;
+            write!(writer, "\x1b[{};{}r", top_1based, rows)?; // Set scroll region
+            write!(writer, "\x1b[{};{}H", 1, viewport_top + 1)?; // Move to viewport top
+            for _ in 0..scroll_amount {
+                writer.write_all(b"\x1bM")?; // Reverse index (scroll up within region)
+            }
+            write!(writer, "\x1b[r")?; // Reset scroll region
+            self.viewport_top = viewport_top + scroll_amount;
+        }
+
+        // Step 2: Write the history lines in the region above the viewport.
+        let new_viewport_top = self.viewport_top;
+        if new_viewport_top > 0 {
+            // Set scroll region to [1, viewport_top - 1]
+            write!(writer, "\x1b[1;{}r", new_viewport_top)?;
+            // Move cursor to just above viewport top
+            let cursor_target = new_viewport_top.saturating_sub(1);
+            write!(writer, "\x1b[{};1H", cursor_target + 1)?;
+
+            for line in &all_lines {
+                // Truncate line to terminal width
+                let truncated = if line.chars().count() > cols as usize {
+                    let truncated: String = line.chars().take(cols as usize).collect();
+                    truncated
+                } else {
+                    (*line).to_owned()
+                };
+                writer.write_all(b"\r\n")?;
+                writer.write_all(truncated.as_bytes())?;
+            }
+            write!(writer, "\x1b[r")?; // Reset scroll region
+        }
+
+        writer.flush()?;
+        Ok(())
     }
 
     fn draw(&mut self, app: &mut NeoTuiApp) -> Result<()> {
         app.advance_activity_frame();
+
+        // 1. Drain finalized items into scrollback
+        let history_batches = app.drain_pending_history_lines();
+        if !history_batches.is_empty() {
+            self.insert_history_lines(&history_batches)?;
+            self.terminal.backend_mut().flush()?;
+        }
+
+        // 2. Render the live viewport using ratatui.
+        // We render into the full screen area — the viewport occupies the bottom
+        // portion. Ratatui's double-buffer diff will only update changed cells.
+        let (cols, rows) = size()?;
+        if cols == 0 || rows == 0 {
+            return Ok(());
+        }
+
+        let area = ratatui::layout::Rect::new(0, 0, cols, rows);
+
         self.terminal.draw(|frame| {
-            let area = frame.area();
             app.sync_transcript_view_for_area(area);
             frame.render_widget(&*app, area);
         })?;
-        let area = self.terminal.get_frame().area();
+
+        // Handle inline image renders
+        let current_area = self.terminal.get_frame().area();
         if self
             .last_area
-            .replace(area)
-            .is_some_and(|last| last != area)
+            .replace(current_area)
+            .is_some_and(|last| last != current_area)
         {
             self.inline_image_cache.reset_for_full_redraw();
         }
@@ -2286,11 +2350,19 @@ impl RawTerminal {
     }
 
     fn leave(&mut self) {
+        // Move cursor to bottom of screen and write a newline so the shell
+        // prompt appears on a fresh line after our content.
+        let (_cols, rows) = match size() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let _ = write!(self.terminal.backend_mut(), "\x1b[{};1H\r\n", rows);
+        let _ = self.terminal.backend_mut().flush();
+
         let _ = execute!(
             self.terminal.backend_mut(),
-            DisableAlternateScroll,
+            PopKeyboardEnhancementFlags,
             DisableBracketedPaste,
-            LeaveAlternateScreen
         );
         let _ = self.terminal.show_cursor();
         self.raw_mode.disable();
@@ -2300,24 +2372,65 @@ impl RawTerminal {
         self.raw_mode.enable_raw()?;
         execute!(
             self.terminal.backend_mut(),
-            EnterAlternateScreen,
             EnableBracketedPaste,
-            EnableAlternateScroll
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
-        self.terminal.clear()?;
+        let (_cols, rows) = size()?;
+        let cursor_row = query_cursor_row().unwrap_or(rows.saturating_sub(1));
+        self.viewport_top = cursor_row.min(rows.saturating_sub(1));
         self.inline_image_cache.reset_for_full_redraw();
         self.last_area = None;
         Ok(())
     }
 }
 
-impl Drop for RawTerminal {
+/// Query the cursor row using Device Status Report (DSR 6n).
+/// Returns 0-based row, or None if the terminal doesn't respond.
+fn query_cursor_row() -> Option<u16> {
+    use std::io::{Read as _, Write as _};
+
+    // Write DSR request
+    {
+        let mut stdout = stdout();
+        stdout.write_all(b"\x1b[6n").ok()?;
+        stdout.flush().ok()?;
+    }
+
+    // Read the response: ESC [ <row> ; <col> R
+    // Give the terminal a brief moment to respond.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    let mut stdin = std::io::stdin();
+    let mut buf = [0u8; 32];
+    // Set stdin to non-blocking temporarily — but we're in raw mode so reads
+    // return available bytes. Just read what's there.
+    let n = stdin.read(&mut buf).ok()?;
+    if n == 0 {
+        return None;
+    }
+
+    let response = std::str::from_utf8(&buf[..n]).ok()?;
+    // Parse: ESC[<row>;<col>R
+    if !response.starts_with("\x1b[") {
+        return None;
+    }
+    let rest = &response[2..];
+    let end = rest.find('R')?;
+    let coords = &rest[..end];
+    let mut parts = coords.split(';');
+    let row_str = parts.next()?;
+    let row: u16 = row_str.parse().ok()?;
+    // Convert 1-based to 0-based
+    Some(row.saturating_sub(1))
+}
+
+impl Drop for InlineTerminal {
     fn drop(&mut self) {
         self.leave();
     }
 }
 
-impl RawTerminal {
+impl InlineTerminal {
     fn suspend(&mut self) -> Result<()> {
         self.leave();
         #[cfg(unix)]
@@ -2503,7 +2616,8 @@ fn picker_catalogs_for_config(config: &AppConfig) -> PickerCatalogs {
 }
 
 fn session_catalog_for_config(config: &AppConfig) -> SessionCatalog {
-    match SessionMetadataStore::new(&config.sessions_dir).list_recent() {
+    let bucket_dir = workspace_sessions_dir(config);
+    match SessionMetadataStore::new(&bucket_dir).list_recent() {
         Ok(records) => SessionCatalog {
             items: records
                 .into_iter()
@@ -2576,7 +2690,7 @@ fn startup_notices(config: &AppConfig) -> Vec<String> {
     let mut notices = vec![
         "Startup".to_owned(),
         format!("project: {}", config.project_dir.display()),
-        format!("sessions: {}", config.sessions_dir.display()),
+        format!("sessions: {}", workspace_sessions_dir(config).display()),
         format!(
             "model: {}/{}",
             config.default_provider, config.default_model
@@ -2655,7 +2769,7 @@ async fn load_session_transcript(
     if let Some(summary) = context.compaction_summary() {
         notices.push(format!("compaction: {}", summary.summary));
     }
-    if let Some(summary) = SessionMetadataStore::new(&config.sessions_dir)
+    if let Some(summary) = SessionMetadataStore::new(&workspace_sessions_dir(config))
         .list()
         .ok()
         .and_then(|sessions| {
@@ -2678,7 +2792,7 @@ async fn fork_session_transcript(
     parent_id: String,
     config: &AppConfig,
 ) -> Result<ForkedSessionTranscript> {
-    let session = SessionMetadataStore::new(&config.sessions_dir)
+    let session = SessionMetadataStore::new(&workspace_sessions_dir(config))
         .fork(&parent_id, None)
         .with_context(|| format!("failed to create local fork for session {parent_id}"))?;
     let child_id = session.id;
@@ -4611,9 +4725,11 @@ command = "python3"
     async fn command_palette_exports_active_session_to_html() {
         let temp = tempfile::tempdir().expect("tempdir");
         let sessions_dir = temp.path().join(".neo/sessions");
-        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let config = test_config(temp.path(), sessions_dir.clone());
+        let bucket_dir = workspace_sessions_dir(&config);
+        fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
         fs::write(
-            sessions_dir.join("alpha.jsonl"),
+            bucket_dir.join("alpha.jsonl"),
             concat!(
                 "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello <script>alert(1)</script>\"}}]}}}}\n",
                 "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"use **bold** safely\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
@@ -4662,7 +4778,7 @@ command = "python3"
             .await
             .expect("export command runs");
 
-        let export_path = sessions_dir.join("alpha.html");
+        let export_path = bucket_dir.join("alpha.html");
         let html = fs::read_to_string(&export_path).expect("read exported html");
         assert!(html.contains("<title>neo session alpha</title>"));
         assert!(html.contains("<strong>bold</strong>"));
@@ -5495,9 +5611,11 @@ command = "python3"
     async fn session_catalog_and_loader_use_real_local_session_store() {
         let temp = tempfile::tempdir().expect("tempdir");
         let sessions_dir = temp.path().join(".neo/sessions");
-        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        // Compute the workspace-scoped bucket directory that the code will use.
+        let bucket_dir = workspace_sessions_dir(&test_config(temp.path(), sessions_dir.clone()));
+        fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
         fs::write(
-            sessions_dir.join("alpha.jsonl"),
+            bucket_dir.join("alpha.jsonl"),
             concat!(
                 "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
                 "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi back\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
@@ -5505,7 +5623,7 @@ command = "python3"
         )
         .expect("write session jsonl");
 
-        let store = SessionMetadataStore::new(&sessions_dir);
+        let store = SessionMetadataStore::new(&bucket_dir);
         store
             .rename("alpha", "Alpha Session".to_owned())
             .expect("rename session");
@@ -5576,9 +5694,11 @@ command = "python3"
     async fn fork_session_transcript_copies_jsonl_metadata_and_loads_child() {
         let temp = tempfile::tempdir().expect("tempdir");
         let sessions_dir = temp.path().join(".neo/sessions");
-        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let config = test_config(temp.path(), sessions_dir.clone());
+        let bucket_dir = workspace_sessions_dir(&config);
+        fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
         fs::write(
-            sessions_dir.join("alpha.jsonl"),
+            bucket_dir.join("alpha.jsonl"),
             concat!(
                 "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
                 "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi back\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
@@ -5586,7 +5706,6 @@ command = "python3"
         )
         .expect("write session jsonl");
 
-        let config = test_config(temp.path(), sessions_dir.clone());
         let forked = fork_session_transcript("alpha".to_owned(), &config)
             .await
             .expect("fork session");
@@ -5599,12 +5718,12 @@ command = "python3"
         );
         assert_eq!(forked.transcript.messages.len(), 2);
         assert!(
-            sessions_dir
+            bucket_dir
                 .join(format!("{}.jsonl", forked.session_id))
                 .is_file()
         );
 
-        let sessions = SessionMetadataStore::new(&sessions_dir)
+        let sessions = SessionMetadataStore::new(&bucket_dir)
             .list()
             .expect("list sessions");
         let parent = sessions
@@ -5627,6 +5746,7 @@ command = "python3"
             api_key: None,
             api_key_env: None,
             providers: BTreeMap::new(),
+            models: BTreeMap::new(),
             model_catalogs: Vec::new(),
             model_scope: Vec::new(),
             model_selection: config::ModelSelection::Default,
