@@ -1159,11 +1159,17 @@ impl NeoTuiApp {
         };
         if let Some(index) = self.active_tools.iter().position(|tool| tool.id == id) {
             let mut tool = self.active_tools.remove(index);
+            if let Some(TranscriptItem::Tool { tool_run, .. }) =
+                self.transcript.items.get_mut(tool.transcript_index)
+            {
+                tool_run.live_output.clear();
+            }
             tool.result = Some(detail);
             tool.metadata = metadata;
             tool.presentation = ToolPresentationKind::Shell;
             tool.status = status;
-            self.transcript.push(tool.into_transcript_item());
+            self.transcript
+                .update_tool_run(tool.transcript_index, tool.into_transcript_item());
         } else {
             self.transcript.push(TranscriptItem::tool_run(
                 "shell.run",

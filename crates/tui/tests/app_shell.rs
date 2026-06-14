@@ -1495,3 +1495,233 @@ fn app_shell_streams_live_bash_output_and_clears_on_finish() {
     assert!(lines.iter().any(|line| line.contains("final result")));
     assert!(!lines.iter().any(|line| line.contains("line two")));
 }
+
+#[test]
+fn tool_call_lifecycle_does_not_duplicate_transcript_items() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+
+    // Model starts the tool call.
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "list".to_owned(),
+    });
+
+    // Arguments stream in.
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolCallArgumentsDelta {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        json_fragment: r#"{"path":"."}"#.to_owned(),
+    });
+
+    // Runtime starts executing.
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "list".to_owned(),
+        arguments: serde_json::json!({ "path": "." }),
+    });
+
+    let tool_count = app
+        .transcript()
+        .items()
+        .iter()
+        .filter(|item| matches!(item, neo_tui::TranscriptItem::Tool { .. }))
+        .count();
+    assert_eq!(
+        tool_count, 1,
+        "ToolExecutionStarted should update existing tool, not add another"
+    );
+
+    // Runtime finishes.
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "list".to_owned(),
+        result: neo_agent_core::ToolResult {
+            content: "file1\nfile2\nfile3".to_owned(),
+            is_error: false,
+            details: None,
+            terminate: false,
+        },
+    });
+
+    let tool_count = app
+        .transcript()
+        .items()
+        .iter()
+        .filter(|item| matches!(item, neo_tui::TranscriptItem::Tool { .. }))
+        .count();
+    assert_eq!(
+        tool_count, 1,
+        "ToolExecutionFinished should update existing tool, not add another"
+    );
+
+    assert!(matches!(
+        app.transcript().items().last(),
+        Some(neo_tui::TranscriptItem::Tool {
+            name,
+            status,
+            ..
+        }) if name == "list" && status == &neo_tui::ToolStatusKind::Succeeded
+    ));
+}
+
+#[test]
+fn tool_call_lifecycle_renders_single_header() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "list".to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolCallArgumentsDelta {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        json_fragment: r#"{"path":"."}"#.to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "list".to_owned(),
+        arguments: serde_json::json!({ "path": "." }),
+    });
+
+    let lines = render_app(100, 20, &app);
+    let using_headers: Vec<_> = lines
+        .iter()
+        .filter(|l| l.contains("● Using list"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        using_headers.len(),
+        1,
+        "expected exactly one running list header, got: {using_headers:?}"
+    );
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "list".to_owned(),
+        result: neo_agent_core::ToolResult {
+            content: (1..=25)
+                .map(|i| format!("file{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            is_error: false,
+            details: None,
+            terminate: false,
+        },
+    });
+
+    let lines = render_app(100, 20, &app);
+    let using_headers: Vec<_> = lines
+        .iter()
+        .filter(|l| l.contains("● Using list"))
+        .cloned()
+        .collect();
+    let used_headers: Vec<_> = lines
+        .iter()
+        .filter(|l| l.contains("✓ Used list"))
+        .cloned()
+        .collect();
+    assert!(
+        using_headers.is_empty(),
+        "running header should be gone: {using_headers:?}"
+    );
+    assert_eq!(
+        used_headers.len(),
+        1,
+        "expected exactly one used list header, got: {used_headers:?}"
+    );
+}
+
+#[test]
+fn tool_call_with_assistant_message_does_not_duplicate() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        turn: 1,
+        id: "msg-1".to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::TextDelta {
+        turn: 1,
+        text: "Let me explore the project structure.".to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "list".to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolCallArgumentsDelta {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        json_fragment: r#"{"path":"."}"#.to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolCallFinished {
+        turn: 1,
+        tool_call: neo_agent_core::AgentToolCall {
+            id: "tool-1".to_owned(),
+            name: "list".to_owned(),
+            arguments: serde_json::json!({"path":"."}),
+        },
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageFinished {
+        turn: 1,
+        id: "msg-1".to_owned(),
+        stop_reason: neo_agent_core::StopReason::ToolUse,
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "list".to_owned(),
+        arguments: serde_json::json!({"path":"."}),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "list".to_owned(),
+        result: neo_agent_core::ToolResult {
+            content: (1..=25)
+                .map(|i| format!("file{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            is_error: false,
+            details: None,
+            terminate: false,
+        },
+    });
+
+    let tool_count = app
+        .transcript()
+        .items()
+        .iter()
+        .filter(|item| matches!(item, neo_tui::TranscriptItem::Tool { name, .. } if name == "list"))
+        .count();
+    assert_eq!(
+        tool_count, 1,
+        "expected exactly one list tool item, got {tool_count}"
+    );
+
+    let lines = render_app(100, 20, &app);
+    let using_headers: Vec<_> = lines
+        .iter()
+        .filter(|l| l.contains("● Using list"))
+        .cloned()
+        .collect();
+    let used_headers: Vec<_> = lines
+        .iter()
+        .filter(|l| l.contains("✓ Used list"))
+        .cloned()
+        .collect();
+    assert!(
+        using_headers.is_empty(),
+        "running header should be gone: {using_headers:?}"
+    );
+    assert_eq!(
+        used_headers.len(),
+        1,
+        "expected exactly one used list header, got: {used_headers:?}"
+    );
+}
