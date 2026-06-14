@@ -40,6 +40,17 @@ fn render_widget_buffer<W: ratatui::widgets::Widget>(width: u16, height: u16, wi
     terminal.backend().buffer().clone()
 }
 
+fn find_cells(line: &[Cell], needle: &str) -> Option<usize> {
+    let chars: Vec<char> = needle.chars().collect();
+    line.windows(chars.len()).position(|window| {
+        window
+            .iter()
+            .map(|cell| cell.symbol().chars().next())
+            .collect::<Option<Vec<_>>>()
+            == Some(chars.clone())
+    })
+}
+
 fn strip_ansi_escapes(text: &str) -> String {
     let mut visible = String::new();
     let mut index = 0;
@@ -1598,6 +1609,57 @@ fn transcript_widget_shows_result_chip_when_tool_succeeds() {
             .iter()
             .any(|line| line.contains("... (1 more lines, ctrl+o to expand)"))
     );
+}
+
+#[test]
+fn transcript_widget_styles_tool_header_with_dim_key_arg_and_chip() {
+    let result = "line1\nline2\nline3\nline4".to_owned();
+    let transcript = ChatTranscript::from_items([TranscriptItem::tool_run(
+        "Read",
+        Some(r#"{"path":"src/lib.rs"}"#.to_owned()),
+        Some(result),
+        ToolStatusKind::Succeeded,
+        neo_tui::ToolRunMetadata::default(),
+        neo_tui::ToolPresentationKind::Text,
+    )]);
+
+    let buffer = render_widget_buffer(80, 8, TranscriptWidget::new(&transcript));
+    let line = buffer.content.chunks(80).next().expect("one line");
+
+    let name_needle = "Read";
+    let key_needle = "(src/lib.rs)";
+    let chip_needle = " · 4 lines";
+    let name_start = find_cells(line, name_needle).expect("tool name in header");
+    let key_start = find_cells(line, key_needle).expect("key arg in header");
+    let chip_start = find_cells(line, chip_needle).expect("chip in header");
+
+    let muted = Color::Rgb(139, 148, 158);
+    let succeeded = Color::Rgb(65, 184, 131);
+
+    for (i, cell) in line
+        .iter()
+        .enumerate()
+        .skip(name_start)
+        .take(name_needle.chars().count())
+    {
+        assert_eq!(cell.fg, succeeded, "tool name cell {i} should be succeeded");
+    }
+    for (i, cell) in line
+        .iter()
+        .enumerate()
+        .skip(key_start)
+        .take(key_needle.chars().count())
+    {
+        assert_eq!(cell.fg, muted, "key arg cell {i} should be muted");
+    }
+    for (i, cell) in line
+        .iter()
+        .enumerate()
+        .skip(chip_start)
+        .take(chip_needle.chars().count())
+    {
+        assert_eq!(cell.fg, muted, "chip cell {i} should be muted");
+    }
 }
 
 #[test]

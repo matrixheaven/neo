@@ -334,13 +334,13 @@ async fn stop_session_blocking(
     status: &'static str,
     max_output_bytes: usize,
 ) -> ToolResult {
-    task::spawn_blocking(move || stop_session(handle, session, status, max_output_bytes))
+    task::spawn_blocking(move || stop_session(&handle, session, status, max_output_bytes))
         .await
         .expect("terminal stop blocking task should not panic")
 }
 
 fn stop_session(
-    handle: String,
+    handle: &str,
     mut session: TerminalSession,
     status: &'static str,
     max_output_bytes: usize,

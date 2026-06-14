@@ -1334,15 +1334,15 @@ fn transcript_renderer_handles_markdownish_blocks_and_wrapping() {
 fn transcript_renderer_preserves_ordered_markers_and_task_states() {
     let renderer = TranscriptRenderer::new(40);
     let lines = renderer.render_markdownish("1. inspect\n2. implement\n- [ ] verify\n- [x] ship");
-    let rendered = lines
+    let displayed = lines
         .iter()
         .map(TranscriptLine::display_text)
         .collect::<Vec<_>>();
 
-    assert!(rendered.iter().any(|line| line == "1. inspect"));
-    assert!(rendered.iter().any(|line| line == "2. implement"));
-    assert!(rendered.iter().any(|line| line == "○ verify"));
-    assert!(rendered.iter().any(|line| line == "✓ ship"));
+    assert!(displayed.iter().any(|line| line == "1. inspect"));
+    assert!(displayed.iter().any(|line| line == "2. implement"));
+    assert!(displayed.iter().any(|line| line == "○ verify"));
+    assert!(displayed.iter().any(|line| line == "✓ ship"));
 }
 
 #[test]
@@ -1351,15 +1351,15 @@ fn transcript_renderer_renders_markdown_tables_without_separator_rows() {
     let lines = renderer.render_markdownish(
         "| File | Change |\n| --- | --- |\n| app.rs | remove footer tool status |\n| components.rs | render tool row |",
     );
-    let rendered = lines
+    let displayed = lines
         .iter()
         .map(TranscriptLine::display_text)
         .collect::<Vec<_>>();
 
-    assert!(rendered.iter().any(|line| line.contains("File")));
-    assert!(rendered.iter().any(|line| line.contains("app.rs")));
-    assert!(!rendered.iter().any(|line| line.contains("---")));
-    assert!(rendered.iter().all(|line| !line.starts_with('|')));
+    assert!(displayed.iter().any(|line| line.contains("File")));
+    assert!(displayed.iter().any(|line| line.contains("app.rs")));
+    assert!(!displayed.iter().any(|line| line.contains("---")));
+    assert!(displayed.iter().all(|line| !line.starts_with('|')));
 }
 
 #[test]
@@ -1455,9 +1455,9 @@ fn app_shell_streams_live_bash_output_and_clears_on_finish() {
         });
     }
 
-    let tool_run = match app.transcript().items().last() {
-        Some(neo_tui::TranscriptItem::Tool { tool_run, .. }) => tool_run,
-        _ => panic!("expected tool item"),
+    let Some(neo_tui::TranscriptItem::Tool { tool_run, .. }) = app.transcript().items().last()
+    else {
+        panic!("expected tool item");
     };
     assert_eq!(
         tool_run.live_output,
@@ -1483,9 +1483,9 @@ fn app_shell_streams_live_bash_output_and_clears_on_finish() {
         result: neo_agent_core::ToolResult::ok("final result"),
     });
 
-    let tool_run = match app.transcript().items().last() {
-        Some(neo_tui::TranscriptItem::Tool { tool_run, .. }) => tool_run,
-        _ => panic!("expected tool item"),
+    let Some(neo_tui::TranscriptItem::Tool { tool_run, .. }) = app.transcript().items().last()
+    else {
+        panic!("expected tool item");
     };
     assert!(tool_run.live_output.is_empty());
     assert_eq!(tool_run.result.as_deref(), Some("final result"));

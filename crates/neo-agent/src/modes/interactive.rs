@@ -327,6 +327,7 @@ impl InteractiveController {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_session_forker<RunTurn, Fut, LoadSession, LoadFut, ForkSession, ForkFut>(
         title: impl Into<String>,
         session_label: impl Into<String>,
@@ -362,6 +363,7 @@ impl InteractiveController {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_turn_driver(
         title: impl Into<String>,
         session_label: impl Into<String>,
@@ -432,7 +434,7 @@ impl InteractiveController {
         self.app
             .transcript_mut()
             .push(neo_tui::TranscriptItem::banner(
-                format!("Welcome to {}", title),
+                format!("Welcome to {title}"),
                 session_label,
                 model_label,
                 self.workspace_root.clone(),

@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 use std::collections::BTreeSet;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     ApprovalModal, ChatTranscript, DiffLine, DiffModel, NeoTuiApp, Overlay, OverlayKind,
@@ -33,10 +33,8 @@ pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
     let prompt_height = prompt_height(app.prompt(), area.width);
     let footer_bar_height = if area.height >= 12 {
         2
-    } else if area.height >= 8 {
-        1
     } else {
-        0
+        u16::from(area.height >= 8)
     };
     let session_picker_height = match app.focused_overlay().map(|overlay| &overlay.kind) {
         Some(OverlayKind::SessionPicker(_)) => 16,
@@ -48,8 +46,9 @@ pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
         _ => None,
     };
     let approval_height = approval_overlay
-        .map(|request| approval_panel_height(&request.modal, area.width))
-        .unwrap_or(0)
+        .map_or(0, |request| {
+            approval_panel_height(&request.modal, area.width)
+        })
         .min(area.height.saturating_sub(3));
     let bottom_height = prompt_height
         .saturating_add(footer_bar_height)
@@ -341,7 +340,10 @@ impl Widget for TranscriptWidget<'_> {
             if let Some(fill) = row.fill {
                 fill_line(area, buf, y, fill);
             }
-            write_line(area, buf, y, &row.text, row.style);
+            match &row.content {
+                RowContent::Plain(text) => write_line(area, buf, y, text, row.style),
+                RowContent::Spans(spans) => render_spans(area, buf, y, spans, row.style),
+            }
             y = y.saturating_add(1);
         }
     }
@@ -595,12 +597,6 @@ fn tool_render_rows(
     let verb = tool_status_verb(tool.status);
     let symbol = tool_status_symbol(tool.status);
 
-    let header = if key_arg.is_empty() {
-        format!("{symbol} {verb} {}{chip}", tool.name)
-    } else {
-        format!("{symbol} {verb} {} ({key_arg}){chip}", tool.name)
-    };
-
     let header_fg = match tool.status {
         ToolStatusKind::Pending => theme.pending,
         ToolStatusKind::Running => theme.accent,
@@ -608,15 +604,27 @@ fn tool_render_rows(
         ToolStatusKind::Failed => theme.failed,
         ToolStatusKind::Cancelled => theme.cancelled,
     };
-    let header_style = selected_style(
-        Style::default().fg(header_fg).add_modifier(Modifier::BOLD),
-        selected,
-        theme,
-    );
+    let header_base = selected_style(Style::default(), selected, theme);
+    let header_style = Style::default().fg(header_fg).add_modifier(Modifier::BOLD);
+    let muted_style = Style::default().fg(theme.muted);
     let body_style = selected_style(Style::default().fg(theme.notice), selected, theme);
     let error_style = selected_style(Style::default().fg(theme.failed), selected, theme);
 
-    let mut rows = vec![TranscriptRenderRow::new(header, header_style, None)];
+    let mut header_spans = vec![
+        Span::styled(format!("{symbol} {verb} "), header_style),
+        Span::styled(tool.name.clone(), header_style),
+    ];
+    if !key_arg.is_empty() {
+        header_spans.push(Span::styled(format!(" ({key_arg})"), muted_style));
+    }
+    if !chip.is_empty() {
+        header_spans.push(Span::styled(chip, muted_style));
+    }
+    let mut rows = vec![TranscriptRenderRow::new_spans(
+        header_spans,
+        header_base,
+        None,
+    )];
 
     let detail = tool.display_detail();
     if !detail.is_empty() {
@@ -665,15 +673,13 @@ fn diff_tool_render_rows(
 ) -> Vec<TranscriptRenderRow> {
     let stats = diff.stats();
     let file = diff.files().first();
-    let path = file
-        .map(|file| {
-            if file.new_path.is_empty() {
-                file.old_path.as_str()
-            } else {
-                file.new_path.as_str()
-            }
-        })
-        .unwrap_or(tool.name.as_str());
+    let path = file.map_or(tool.name.as_str(), |file| {
+        if file.new_path.is_empty() {
+            file.old_path.as_str()
+        } else {
+            file.new_path.as_str()
+        }
+    });
     let header = format!("◌ Edited {path} +{} -{}", stats.added, stats.removed);
     let mut rows = vec![TranscriptRenderRow::new(
         header,
@@ -809,10 +815,10 @@ fn tool_result_chip(tool: &ToolRunTranscript) -> String {
         return format!(" · {files} files");
     }
     if lower == "bash" || lower == "shell" {
-        if let Some(code) = tool.metadata.exit_code {
-            if code != 0 {
-                return format!(" · exit {code}");
-            }
+        if let Some(code) = tool.metadata.exit_code
+            && code != 0
+        {
+            return format!(" · exit {code}");
         }
         let bytes = result.len();
         return format!(" · {bytes} bytes");
@@ -841,8 +847,13 @@ fn fit_tool_line(text: &str, width: usize) -> String {
     clip_width(text, width.max(1))
 }
 
+enum RowContent {
+    Plain(String),
+    Spans(Vec<Span<'static>>),
+}
+
 struct TranscriptRenderRow {
-    text: String,
+    content: RowContent,
     style: Style,
     fill: Option<Style>,
 }
@@ -850,7 +861,15 @@ struct TranscriptRenderRow {
 impl TranscriptRenderRow {
     fn new(text: impl Into<String>, style: Style, fill: Option<Style>) -> Self {
         Self {
-            text: text.into(),
+            content: RowContent::Plain(text.into()),
+            style,
+            fill,
+        }
+    }
+
+    fn new_spans(spans: Vec<Span<'static>>, style: Style, fill: Option<Style>) -> Self {
+        Self {
+            content: RowContent::Spans(spans),
             style,
             fill,
         }
@@ -1296,6 +1315,7 @@ fn render_session_picker(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -1345,15 +1365,11 @@ fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
             hints.push_str(" · new output below · end to jump");
         }
 
-        let context_width = context_label
+        let context_width: u16 = context_label
             .as_ref()
-            .map(|label| visible_width(label))
-            .unwrap_or(0);
-        let gap: u16 = if context_width > 0 { 1 } else { 0 };
-        let left_width = area
-            .width
-            .saturating_sub(context_width as u16)
-            .saturating_sub(gap);
+            .map_or(0, |label| u16::try_from(visible_width(label)).unwrap_or(0));
+        let gap: u16 = u16::from(context_width > 0);
+        let left_width = area.width.saturating_sub(context_width).saturating_sub(gap);
 
         let hints_area = Rect {
             x: area.x,
@@ -1367,7 +1383,7 @@ fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
             let context_area = Rect {
                 x: area.x.saturating_add(left_width).saturating_add(gap),
                 y: hints_y,
-                width: context_width as u16,
+                width: context_width,
                 height: 1,
             };
             render_truncated_line_right(
@@ -1378,15 +1394,11 @@ fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
         }
     } else {
         // Single-line footer: status left, context right (hints hidden).
-        let context_width = context_label
+        let context_width: u16 = context_label
             .as_ref()
-            .map(|label| visible_width(label))
-            .unwrap_or(0);
-        let gap: u16 = if context_width > 0 { 1 } else { 0 };
-        let left_width = area
-            .width
-            .saturating_sub(context_width as u16)
-            .saturating_sub(gap);
+            .map_or(0, |label| u16::try_from(visible_width(label)).unwrap_or(0));
+        let gap: u16 = u16::from(context_width > 0);
+        let left_width = area.width.saturating_sub(context_width).saturating_sub(gap);
 
         let status_area = Rect {
             x: area.x,
@@ -1400,7 +1412,7 @@ fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
             let context_area = Rect {
                 x: area.x.saturating_add(left_width).saturating_add(gap),
                 y: area.y,
-                width: context_width as u16,
+                width: context_width,
                 height: 1,
             };
             render_truncated_line_right(
@@ -1555,6 +1567,39 @@ fn write_line(area: Rect, buf: &mut Buffer, y: u16, text: &str, style: Style) {
 
     let clipped = clip_width(text, usize::from(area.width));
     buf.set_string(area.x, y, clipped, style);
+}
+
+fn render_spans(area: Rect, buf: &mut Buffer, y: u16, spans: &[Span<'_>], base: Style) {
+    if area.width == 0 || y >= area.bottom() {
+        return;
+    }
+
+    let mut x = area.x;
+    let right = area.right();
+    for span in spans {
+        if x >= right {
+            break;
+        }
+        for grapheme in span.styled_graphemes(base) {
+            let symbol_width = grapheme.symbol.width();
+            if symbol_width == 0 {
+                continue;
+            }
+            let symbol_width = u16::try_from(symbol_width).unwrap_or(u16::MAX);
+            let next_x = x.saturating_add(symbol_width);
+            if next_x > right {
+                break;
+            }
+
+            buf[(x, y)]
+                .set_symbol(grapheme.symbol)
+                .set_style(grapheme.style);
+            for x_hidden in (x + 1)..next_x {
+                buf[(x_hidden, y)].reset();
+            }
+            x = next_x;
+        }
+    }
 }
 
 fn fill_line(area: Rect, buf: &mut Buffer, y: u16, style: Style) {

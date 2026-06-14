@@ -251,6 +251,7 @@ fn load_project_theme_files(project_dir: &Path) -> anyhow::Result<Vec<ResolvedTh
     Ok(themes)
 }
 
+#[allow(clippy::too_many_lines)]
 fn apply_colors(theme: &mut TuiTheme, colors: &ThemeColors, path: &Path) -> anyhow::Result<()> {
     apply_color(&mut theme.header, "header", colors.header.as_deref(), path)?;
     apply_color(&mut theme.prompt, "prompt", colors.prompt.as_deref(), path)?;

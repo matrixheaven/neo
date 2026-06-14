@@ -291,8 +291,7 @@ impl ContextWindow {
     pub fn label(self) -> String {
         let used = self
             .used_tokens
-            .map(format_token_count)
-            .unwrap_or_else(|| "--".to_owned());
+            .map_or_else(|| "--".to_owned(), format_token_count);
         format!("ctx {used}/{}", format_token_count(self.max_tokens))
     }
 }
@@ -1140,7 +1139,7 @@ impl NeoTuiApp {
                     elapsed: None,
                     truncated,
                 };
-                self.finish_shell_execution(id, detail, exit_code == Some(0), metadata);
+                self.finish_shell_execution(&id, detail, exit_code == Some(0), metadata);
             }
             _ => {}
         }
@@ -1148,7 +1147,7 @@ impl NeoTuiApp {
 
     fn finish_shell_execution(
         &mut self,
-        id: String,
+        id: &str,
         detail: String,
         success: bool,
         metadata: ToolRunMetadata,
@@ -1753,7 +1752,7 @@ fn take_completed_tool_result(completed_tool_result_ids: &mut Vec<String>, id: &
     }
 }
 
-const fn tool_presentation_kind(name: &str) -> ToolPresentationKind {
+fn tool_presentation_kind(name: &str) -> ToolPresentationKind {
     if name.eq_ignore_ascii_case("bash")
         || name.eq_ignore_ascii_case("shell")
         || name.eq_ignore_ascii_case("terminal")
@@ -2481,8 +2480,9 @@ impl TranscriptLine {
     pub fn display_text(&self) -> String {
         match self {
             Self::Blank => String::new(),
-            Self::Text { text } | Self::DiffHunk { text } => text.clone(),
-            Self::Heading { text, .. } => text.clone(),
+            Self::Text { text } | Self::DiffHunk { text } | Self::Heading { text, .. } => {
+                text.clone()
+            }
             Self::ListItem {
                 indent,
                 marker,
@@ -2515,6 +2515,7 @@ impl TranscriptRenderer {
     }
 
     #[must_use]
+    #[allow(clippy::needless_continue)]
     pub fn render_markdownish(&self, text: &str) -> Vec<TranscriptLine> {
         let mut lines = Vec::new();
         let mut code_language: Option<String> = None;
@@ -2838,7 +2839,7 @@ fn format_table_row(cells: &[String], widths: &[usize]) -> String {
             if index == last_index {
                 cell.clone()
             } else {
-                format!("{cell:<width$}", width = width)
+                format!("{cell:<width$}")
             }
         })
         .collect::<Vec<_>>()
@@ -3456,12 +3457,11 @@ impl PromptState {
         if self.history.is_empty() {
             return false;
         }
-        let index = match self.history_index {
-            Some(index) => index.saturating_sub(1),
-            None => {
-                self.history_draft = Some(self.snapshot());
-                self.history.len() - 1
-            }
+        let index = if let Some(index) = self.history_index {
+            index.saturating_sub(1)
+        } else {
+            self.history_draft = Some(self.snapshot());
+            self.history.len() - 1
         };
         self.history_index = Some(index);
         self.replace_with_history_text(index);
