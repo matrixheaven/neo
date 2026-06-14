@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     AgentEvent, AgentMessage, AgentToolCall, CompactionPhase, CompactionReason, CompactionSummary,
     Content, PermissionDecision, PermissionOperation, PermissionPolicy, ProcessSupervisor,
-    QueueKind, StopReason, ToolContext, ToolError, ToolRegistry, ToolResult,
+    QueueKind, StopReason, ToolContext, ToolError, ToolRegistry, ToolResult, ToolUpdateCallback,
 };
 
 pub type ContextTransform = Arc<dyn Fn(&[AgentMessage]) -> Vec<AgentMessage> + Send + Sync>;
@@ -741,9 +741,16 @@ struct EventSink {
     sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
 }
 
+impl EventSink {
+    /// Emit an event by value without needing `&mut self`.
+    fn emit_event(&self, event: AgentEvent) {
+        let _ = self.sender.send(Ok(event));
+    }
+}
+
 impl EventPublisher for EventSink {
     fn emit(&mut self, event: AgentEvent) {
-        let _ = self.sender.send(Ok(event));
+        self.emit_event(event);
     }
 }
 
@@ -1200,6 +1207,12 @@ async fn execute_tool_calls_parallel(
                     return Ok::<_, AgentRuntimeError>((index, tool_call, cancelled_tool_result()));
                 }
             };
+            let tool_context = tool_context.with_tool_update(make_tool_update_callback(
+                sink.clone(),
+                turn,
+                tool_call.id.clone(),
+                tool_call.name.clone(),
+            ));
             let mut result = run_tool_with_cancel(
                 registry,
                 &tool_call,
@@ -1516,10 +1529,40 @@ async fn prepare_and_run_tool(
     };
     match preparation {
         ToolPreparation::Run(context) => {
+            let context = context.with_tool_update(make_tool_update_callback(
+                emitter.sink(),
+                turn,
+                tool_call.id.clone(),
+                tool_call.name.clone(),
+            ));
             Ok(run_tool_with_cancel(registry, tool_call, &context, cancel_token).await)
         }
         ToolPreparation::Skip(result) => Ok(result),
     }
+}
+
+/// Creates a `ToolUpdateCallback` that emits `ToolExecutionUpdate` events
+/// through an `EventSink`. This lets tools (e.g. bash) stream intermediate
+/// output that the TUI renders live.
+fn make_tool_update_callback(
+    sink: EventSink,
+    turn: u32,
+    id: String,
+    name: String,
+) -> ToolUpdateCallback {
+    Arc::new(move |partial: &str| {
+        sink.emit_event(AgentEvent::ToolExecutionUpdate {
+            turn,
+            id: id.clone(),
+            name: name.clone(),
+            partial_result: ToolResult {
+                content: partial.to_owned(),
+                is_error: false,
+                details: None,
+                terminate: false,
+            },
+        });
+    })
 }
 
 async fn run_tool_with_cancel(

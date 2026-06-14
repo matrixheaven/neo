@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncBufReadExt, AsyncReadExt},
     process::{Child, Command},
     sync::Mutex,
     task::JoinHandle,
@@ -72,8 +72,13 @@ impl Tool for BashTool {
                     let timeout_ms = input.timeout_ms.unwrap_or_else(|| {
                         u64::try_from(ctx.bash_timeout.as_millis()).unwrap_or(u64::MAX)
                     });
-                    let output =
-                        run_command(ctx, &command, Duration::from_millis(timeout_ms)).await?;
+                    let output = run_command(
+                        ctx,
+                        &command,
+                        Duration::from_millis(timeout_ms),
+                        max_output_bytes,
+                    )
+                    .await?;
                     Ok(command_result(&output, max_output_bytes))
                 }
                 BashMode::Start => {
@@ -158,19 +163,78 @@ async fn run_command(
     ctx: &ToolContext,
     command: &str,
     timeout_duration: Duration,
+    stream_max_bytes: usize,
 ) -> Result<CommandOutput, ToolError> {
     let mut process = spawn_bash_process(ctx, command)?;
-    let mut stdout = process.child.stdout.take().expect("stdout was piped");
-    let mut stderr = process.child.stderr.take().expect("stderr was piped");
+    let stdout = process.child.stdout.take().expect("stdout was piped");
+    let stderr = process.child.stderr.take().expect("stderr was piped");
+
+    // Clone the optional update callback so the spawned reader tasks can
+    // stream lines without borrowing ctx. Each task gets its own clone of the
+    // Arc callback. Streamed content is capped to `stream_max_bytes` so it
+    // doesn't leak data that would be truncated in the final result.
+    let stdout_callback = ctx.tool_update.clone();
+    let stderr_callback = ctx.tool_update.clone();
 
     let stdout_task = tokio::spawn(async move {
+        let reader = tokio::io::BufReader::new(stdout);
         let mut buffer = Vec::new();
-        stdout.read_to_end(&mut buffer).await?;
+        let mut reader = reader;
+        let mut streamed: usize = 0;
+
+        // Read line-by-line, both accumulating for the final result and
+        // streaming through the update callback.
+        loop {
+            let mut line = Vec::new();
+            match reader.read_until(b'\n', &mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    buffer.extend_from_slice(&line);
+                    if streamed < stream_max_bytes {
+                        let remaining = stream_max_bytes - streamed;
+                        let chunk = if line.len() <= remaining {
+                            &line[..]
+                        } else {
+                            &line[..remaining]
+                        };
+                        let line_str = String::from_utf8_lossy(chunk);
+                        streamed += chunk.len();
+                        if let Some(callback) = &stdout_callback {
+                            callback(&line_str);
+                        }
+                    }
+                }
+            }
+        }
         Ok::<_, std::io::Error>(String::from_utf8_lossy(&buffer).into_owned())
     });
     let stderr_task = tokio::spawn(async move {
+        let reader = tokio::io::BufReader::new(stderr);
         let mut buffer = Vec::new();
-        stderr.read_to_end(&mut buffer).await?;
+        let mut reader = reader;
+        let mut streamed: usize = 0;
+        loop {
+            let mut line = Vec::new();
+            match reader.read_until(b'\n', &mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    buffer.extend_from_slice(&line);
+                    if streamed < stream_max_bytes {
+                        let remaining = stream_max_bytes - streamed;
+                        let chunk = if line.len() <= remaining {
+                            &line[..]
+                        } else {
+                            &line[..remaining]
+                        };
+                        let line_str = String::from_utf8_lossy(chunk);
+                        streamed += chunk.len();
+                        if let Some(callback) = &stderr_callback {
+                            callback(&line_str);
+                        }
+                    }
+                }
+            }
+        }
         Ok::<_, std::io::Error>(String::from_utf8_lossy(&buffer).into_owned())
     });
 

@@ -901,10 +901,18 @@ impl NeoTuiApp {
                 self.active_user_prompt = None;
                 self.active_assistant_buffer.clear();
                 self.active_thinking_buffer.clear();
-                self.active_tools.clear();
+                // NOTE: Do NOT clear active_tools here.
+                // The runtime emits TurnFinished after the *model* turn, but
+                // tool execution (ToolExecutionStarted/Finished) happens
+                // *afterwards*. Clearing here would orphan every tool that the
+                // model just requested, causing ToolExecutionStarted to push a
+                // duplicate TranscriptItem::Tool. Tools are cleaned up either
+                // individually by ToolExecutionFinished or collectively by
+                // RunFinished.
                 self.mode = self.overlay_mode();
             }
             StreamUpdate::RunFinished { turn, stop_reason } => {
+                self.active_tools.clear();
                 if let Some(text) = run_finished_notice(turn, stop_reason) {
                     self.transcript.push(TranscriptItem::notice(text));
                     self.transcript_selection = None;
@@ -1085,6 +1093,10 @@ impl NeoTuiApp {
                 success,
             });
             self.completed_tool_result_ids.push(id);
+        } else if take_completed_tool_result(&mut self.completed_tool_result_ids, &id) {
+            // Tool was already finished by shell events (ShellCommandFinished
+            // runs before ToolExecutionFinished in the runtime). The transcript
+            // is already up to date — skip.
         } else {
             self.transcript.push(TranscriptItem::tool_run(
                 name,
@@ -1170,6 +1182,10 @@ impl NeoTuiApp {
             tool.status = status;
             self.transcript
                 .update_tool_run(tool.transcript_index, tool.into_transcript_item());
+            // Mark as completed so the subsequent ToolExecutionFinished event
+            // (which the runtime emits with the same id) does not push a
+            // duplicate transcript item.
+            self.completed_tool_result_ids.push(id.to_owned());
         } else {
             self.transcript.push(TranscriptItem::tool_run(
                 "shell.run",
@@ -1716,13 +1732,6 @@ const fn base64_value(byte: u8) -> Option<u8> {
 }
 
 fn tool_result_detail(result: &neo_agent_core::ToolResult) -> String {
-    if let Some(details) = &result.details {
-        if result.content.is_empty() {
-            return details.to_string();
-        }
-        return format!("{}, details: {details}", result.content);
-    }
-
     result.content.clone()
 }
 

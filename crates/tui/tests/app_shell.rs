@@ -1459,6 +1459,7 @@ fn app_shell_streams_live_bash_output_and_clears_on_finish() {
     else {
         panic!("expected tool item");
     };
+    // live_output is a rolling 3-line buffer; oldest ("line one") is dropped.
     assert_eq!(
         tool_run.live_output,
         vec![
@@ -1469,12 +1470,29 @@ fn app_shell_streams_live_bash_output_and_clears_on_finish() {
     );
     assert!(tool_run.result.is_none());
 
-    let lines = render_app(80, 12, &app);
-    assert!(lines.iter().any(|line| line.contains("● Using bash")));
-    assert!(lines.iter().any(|line| line.contains("line two")));
-    assert!(lines.iter().any(|line| line.contains("line three")));
-    assert!(lines.iter().any(|line| line.contains("line four")));
-    assert!(!lines.iter().any(|line| line.contains("line one")));
+    // Running phase: header shows "Using bash", body shows `$ echo live`
+    // command prefix + live output lines.
+    let lines = render_app(80, 14, &app);
+    assert!(
+        lines.iter().any(|line| line.contains("● Using bash")),
+        "expected running bash header"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("$ echo live")),
+        "expected $ command prefix in body"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("line two")),
+        "expected live output line two"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("line four")),
+        "expected live output line four"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("line one")),
+        "oldest line should have been dropped from the rolling buffer"
+    );
 
     app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -1490,10 +1508,20 @@ fn app_shell_streams_live_bash_output_and_clears_on_finish() {
     assert!(tool_run.live_output.is_empty());
     assert_eq!(tool_run.result.as_deref(), Some("final result"));
 
-    let lines = render_app(80, 8, &app);
-    assert!(lines.iter().any(|line| line.contains("✓ Used bash")));
-    assert!(lines.iter().any(|line| line.contains("final result")));
-    assert!(!lines.iter().any(|line| line.contains("line two")));
+    // Finished: header shows "Used bash", body shows result (no live output).
+    let lines = render_app(80, 10, &app);
+    assert!(
+        lines.iter().any(|line| line.contains("✓ Used bash")),
+        "expected used bash header"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("final result")),
+        "expected final result in body"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("line two")),
+        "live output should be cleared after finish"
+    );
 }
 
 #[test]
@@ -1638,6 +1666,107 @@ fn tool_call_lifecycle_renders_single_header() {
 }
 
 #[test]
+fn bash_tool_does_not_duplicate_with_shell_events() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+
+    // Model turn
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageStarted {
+        turn: 1,
+        id: "msg-1".to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        name: "bash".to_owned(),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolCallFinished {
+        turn: 1,
+        tool_call: neo_agent_core::AgentToolCall {
+            id: "bash-1".to_owned(),
+            name: "bash".to_owned(),
+            arguments: serde_json::json!({"command": "echo hello"}),
+        },
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageFinished {
+        turn: 1,
+        id: "msg-1".to_owned(),
+        stop_reason: neo_agent_core::StopReason::ToolUse,
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageAppended {
+        message: neo_agent_core::AgentMessage::Assistant {
+            content: vec![],
+            tool_calls: vec![neo_agent_core::AgentToolCall {
+                id: "bash-1".to_owned(),
+                name: "bash".to_owned(),
+                arguments: serde_json::json!({"command": "echo hello"}),
+            }],
+            stop_reason: neo_agent_core::StopReason::ToolUse,
+        },
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::TurnFinished {
+        turn: 1,
+        stop_reason: neo_agent_core::StopReason::ToolUse,
+    });
+
+    // Tool execution starts
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        name: "bash".to_owned(),
+        arguments: serde_json::json!({"command": "echo hello"}),
+    });
+
+    // Shell-specific events (emitted for bash by the runtime)
+    app.apply_agent_event(neo_agent_core::AgentEvent::ShellCommandStarted {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        command: "echo hello".to_owned(),
+        cwd: std::path::PathBuf::from("/tmp/neo-ws"),
+    });
+
+    // Shell finishes FIRST (runtime emits ShellCommandFinished before
+    // ToolExecutionFinished)
+    app.apply_agent_event(neo_agent_core::AgentEvent::ShellCommandFinished {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        exit_code: Some(0),
+        stdout: "hello\n".to_owned(),
+        stderr: String::new(),
+        truncated: false,
+    });
+
+    // ToolExecutionFinished arrives SECOND with the same id
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        name: "bash".to_owned(),
+        result: neo_agent_core::ToolResult {
+            content: "exit_code: Some(0)\nstdout:\nhello\n\nstderr:\n\ntruncated: false\n"
+                .to_owned(),
+            is_error: false,
+            details: Some(serde_json::json!({
+                "exit_code": 0,
+                "stdout": "hello\n",
+                "stderr": "",
+                "truncated": false,
+            })),
+            terminate: false,
+        },
+    });
+
+    let tool_count = app
+        .transcript()
+        .items()
+        .iter()
+        .filter(|item| matches!(item, neo_tui::TranscriptItem::Tool { .. }))
+        .count();
+    assert_eq!(
+        tool_count, 1,
+        "bash tool should produce exactly one transcript item, got {tool_count}"
+    );
+}
+
+#[test]
 fn tool_call_with_assistant_message_does_not_duplicate() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
@@ -1670,6 +1799,26 @@ fn tool_call_with_assistant_message_does_not_duplicate() {
     app.apply_agent_event(neo_agent_core::AgentEvent::MessageFinished {
         turn: 1,
         id: "msg-1".to_owned(),
+        stop_reason: neo_agent_core::StopReason::ToolUse,
+    });
+    // --- The events below mirror the real runtime sequence ---
+    // After run_model_turn returns, the runtime emits MessageAppended
+    // (with the complete assistant message) and TurnFinished.
+    app.apply_agent_event(neo_agent_core::AgentEvent::MessageAppended {
+        message: neo_agent_core::AgentMessage::Assistant {
+            content: vec![neo_agent_core::Content::Text {
+                text: "Let me explore the project structure.".to_owned(),
+            }],
+            tool_calls: vec![neo_agent_core::AgentToolCall {
+                id: "tool-1".to_owned(),
+                name: "list".to_owned(),
+                arguments: serde_json::json!({"path":"."}),
+            }],
+            stop_reason: neo_agent_core::StopReason::ToolUse,
+        },
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::TurnFinished {
+        turn: 1,
         stop_reason: neo_agent_core::StopReason::ToolUse,
     });
     app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
@@ -1723,5 +1872,103 @@ fn tool_call_with_assistant_message_does_not_duplicate() {
         used_headers.len(),
         1,
         "expected exactly one used list header, got: {used_headers:?}"
+    );
+}
+
+#[test]
+fn consecutive_reads_render_as_group() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+
+    // Three consecutive read tool calls.
+    for (i, path) in ["src/main.rs", "src/cli.rs", "src/utils.rs"]
+        .iter()
+        .enumerate()
+    {
+        let id = format!("read-{i}");
+        app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+            turn: 1,
+            id: id.clone(),
+            name: "read".to_owned(),
+            arguments: serde_json::json!({ "path": path }),
+        });
+        app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id,
+            name: "read".to_owned(),
+            result: neo_agent_core::ToolResult {
+                content: "line1\nline2\nline3".to_owned(),
+                is_error: false,
+                details: None,
+                terminate: false,
+            },
+        });
+    }
+
+    let lines = render_app(100, 15, &app);
+
+    assert!(
+        lines.iter().any(|line| line.contains("✓ Read 3 files")),
+        "expected read group header, got: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("· 9 lines")),
+        "expected total lines chip"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("src/main.rs")),
+        "expected src/main.rs in group body"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("src/cli.rs")),
+        "expected src/cli.rs in group body"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("└─")),
+        "expected tree branch characters"
+    );
+    let used_read_count = lines
+        .iter()
+        .filter(|line| line.contains("✓ Used read"))
+        .count();
+    assert_eq!(
+        used_read_count, 0,
+        "should not show individual read headers when grouped"
+    );
+}
+
+#[test]
+fn single_read_renders_standalone() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "read-0".to_owned(),
+        name: "read".to_owned(),
+        arguments: serde_json::json!({ "path": "src/main.rs" }),
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "read-0".to_owned(),
+        name: "read".to_owned(),
+        result: neo_agent_core::ToolResult {
+            content: "line1\nline2\nline3".to_owned(),
+            is_error: false,
+            details: None,
+            terminate: false,
+        },
+    });
+
+    let lines = render_app(100, 10, &app);
+    assert!(
+        lines.iter().any(|line| line.contains("✓ Used read")),
+        "expected standalone read header"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("Read 1 files")),
+        "single read should not be grouped"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("· 3 lines")),
+        "expected line count chip"
     );
 }

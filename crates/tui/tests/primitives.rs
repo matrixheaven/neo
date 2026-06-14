@@ -1083,17 +1083,16 @@ fn transcript_widget_collapsed_tool_result_shows_preview_and_expand_hint() {
     let lines = render_widget(64, 8, TranscriptWidget::new(&transcript));
 
     assert!(lines.iter().any(|line| line.contains("✓ Used read")));
-    assert!(lines.iter().any(|line| line.contains("first file line")));
-    assert!(lines.iter().any(|line| line.contains("second file line")));
-    assert!(lines.iter().any(|line| line.contains("third file line")));
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("... (3 more lines, ctrl+o to expand)"))
-    );
+    assert!(lines.iter().any(|line| line.contains("· 6 lines")));
+    // Read body is hidden when collapsed — no content lines shown.
+    assert!(!lines.iter().any(|line| line.contains("first file line")));
     assert!(!lines.iter().any(|line| line.contains("fourth file line")));
-    assert!(!lines.iter().any(|line| line.contains("fifth file line")));
-    assert!(!lines.iter().any(|line| line.contains("sixth file line")));
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("... (3 more lines, ctrl+o to expand)")),
+        "read body should be hidden when collapsed"
+    );
     assert!(!lines.iter().any(|line| line.contains("succeeded")));
 }
 
@@ -1190,8 +1189,7 @@ fn transcript_widget_does_not_render_plain_read_output_as_edit_diff() {
     let lines = render_widget(72, 8, TranscriptWidget::new(&transcript));
 
     assert!(lines.iter().any(|line| line.contains("✓ Used read")));
-    assert!(lines.iter().any(|line| line.contains("[workspace]")));
-    assert!(lines.iter().any(|line| line.contains("\"crates/ai\"")));
+    // Read body is hidden when collapsed — no content shown, no diff misfire.
     assert!(!lines.iter().any(|line| line.contains("Edited")));
     assert!(!lines.iter().any(|line| line.contains("+0 -0")));
 }
@@ -1604,10 +1602,12 @@ fn transcript_widget_shows_result_chip_when_tool_succeeds() {
 
     assert!(lines.iter().any(|line| line.contains("✓ Used Read")));
     assert!(lines.iter().any(|line| line.contains("· 4 lines")));
+    // Read body is hidden when collapsed (chip conveys line count).
     assert!(
-        lines
+        !lines
             .iter()
-            .any(|line| line.contains("... (1 more lines, ctrl+o to expand)"))
+            .any(|line| line.contains("... (1 more lines, ctrl+o to expand)")),
+        "read body should be hidden when collapsed"
     );
 }
 
@@ -1700,15 +1700,15 @@ fn transcript_widget_collapses_tool_result_to_three_lines() {
     let lines = render_widget(64, 7, TranscriptWidget::new(&transcript));
 
     assert!(lines.iter().any(|line| line.contains("✓ Used Read")));
-    assert!(lines.iter().any(|line| line.contains("one")));
-    assert!(lines.iter().any(|line| line.contains("two")));
-    assert!(lines.iter().any(|line| line.contains("three")));
+    assert!(lines.iter().any(|line| line.contains("· 5 lines")));
+    // Read body is hidden when collapsed — no content lines, no expand hint.
+    assert!(!lines.iter().any(|line| line.contains("one")));
     assert!(!lines.iter().any(|line| line.contains("four")));
-    assert!(!lines.iter().any(|line| line.contains("five")));
     assert!(
-        lines
+        !lines
             .iter()
-            .any(|line| line.contains("... (2 more lines, ctrl+o to expand)"))
+            .any(|line| line.contains("... (2 more lines, ctrl+o to expand)")),
+        "read body should be hidden when collapsed"
     );
 }
 

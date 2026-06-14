@@ -5,7 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write as _};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
@@ -349,6 +349,7 @@ impl Widget for TranscriptWidget<'_> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn transcript_render_rows(
     transcript: &ChatTranscript,
     selection: Option<&TranscriptSelection>,
@@ -360,7 +361,11 @@ fn transcript_render_rows(
     let selected_range = selection.and_then(|selection| selection.range(transcript));
 
     let mut rows = Vec::new();
-    for (item_index, item) in items.iter().enumerate() {
+    let mut item_index = 0usize;
+    let items_len = items.len();
+    while item_index < items_len {
+        let item = &items[item_index];
+
         if item_index > 0 {
             rows.push(TranscriptRenderRow::blank());
         }
@@ -369,10 +374,48 @@ fn transcript_render_rows(
             .as_ref()
             .is_some_and(|range| range.contains(&item_index));
         let expanded = expanded_items.is_some_and(|expanded| expanded.contains(&item_index));
+
+        // Detect consecutive `read` tool items for ReadGroup rendering.
+        if let TranscriptItem::Tool { tool_run, .. } = item
+            && tool_run.name.eq_ignore_ascii_case("read")
+        {
+            let group_start = item_index;
+            let mut group_end = item_index + 1;
+            while group_end < items_len
+                && let TranscriptItem::Tool { tool_run, .. } = &items[group_end]
+                && tool_run.name.eq_ignore_ascii_case("read")
+            {
+                group_end += 1;
+            }
+
+            if group_end - group_start >= 2 {
+                let group_tools: Vec<&ToolRunTranscript> = items[group_start..group_end]
+                    .iter()
+                    .filter_map(|item| {
+                        if let TranscriptItem::Tool { tool_run, .. } = item {
+                            Some(tool_run)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                rows.extend(read_group_render_rows(
+                    &group_tools,
+                    group_start,
+                    selection,
+                    transcript,
+                    theme,
+                ));
+                item_index = group_end;
+                continue;
+            }
+        }
+
         if let TranscriptItem::Tool { tool_run, .. } = item {
             rows.extend(tool_render_rows(
                 tool_run, expanded, selected, theme, text_width,
             ));
+            item_index += 1;
             continue;
         }
 
@@ -392,10 +435,11 @@ fn transcript_render_rows(
                 selected,
                 theme,
             ));
+            item_index += 1;
             continue;
         }
 
-        let (label, content, style) = transcript_row(item, theme, expanded);
+        let (label, content, style) = transcript_row(item, theme);
         let style = selected_style(style, selected, theme);
         let fill = matches!(item, TranscriptItem::User { .. })
             .then_some(Style::default().bg(theme.user_bg));
@@ -458,6 +502,7 @@ fn transcript_render_rows(
                 ));
             }
         }
+        item_index += 1;
     }
 
     rows
@@ -588,7 +633,10 @@ fn tool_render_rows(
     theme: TuiTheme,
     text_width: usize,
 ) -> Vec<TranscriptRenderRow> {
-    if let Some(diff) = tool.result.as_deref().and_then(DiffModel::parse_unified) {
+    // Edit tools with a diff in the result get the rich diff renderer.
+    if tool.name.eq_ignore_ascii_case("edit")
+        && let Some(diff) = tool.result.as_deref().and_then(DiffModel::parse_unified)
+    {
         return diff_tool_render_rows(tool, &diff, expanded, selected, theme, text_width);
     }
 
@@ -626,13 +674,15 @@ fn tool_render_rows(
         None,
     )];
 
-    let detail = tool.display_detail();
+    // Per-tool-type body preview.
+    let detail = tool_body_preview(tool, expanded);
     if !detail.is_empty() {
         let detail_lines = detail.lines().collect::<Vec<_>>();
+        let preview_limit = tool_body_preview_limit(&tool.name, expanded);
         let visible_count = if expanded {
             detail_lines.len()
         } else {
-            detail_lines.len().min(TOOL_PREVIEW_LINES)
+            detail_lines.len().min(preview_limit)
         };
         for line in detail_lines.iter().take(visible_count) {
             for wrapped in wrap_width(line, text_width.saturating_sub(4).max(1)) {
@@ -661,6 +711,283 @@ fn tool_render_rows(
     }
 
     rows
+}
+
+/// Render a group of consecutive `read` tool calls as a single card.
+#[allow(clippy::too_many_lines)]
+fn read_group_render_rows(
+    tools: &[&ToolRunTranscript],
+    group_start: usize,
+    selection: Option<&TranscriptSelection>,
+    transcript: &ChatTranscript,
+    theme: TuiTheme,
+) -> Vec<TranscriptRenderRow> {
+    let count = tools.len();
+    let mut pending = 0usize;
+    let mut failed = 0usize;
+    let mut total_lines = 0usize;
+
+    for tool in tools {
+        match tool.status {
+            ToolStatusKind::Pending | ToolStatusKind::Running => pending += 1,
+            ToolStatusKind::Failed => failed += 1,
+            ToolStatusKind::Succeeded => {
+                let lines = tool
+                    .result
+                    .as_deref()
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .count();
+                total_lines += lines;
+            }
+            ToolStatusKind::Cancelled => {}
+        }
+    }
+
+    let all_done = pending == 0;
+    let (symbol, verb) = if !all_done {
+        ("●", "Reading")
+    } else if failed == count {
+        ("✗", "Read")
+    } else {
+        ("✓", "Read")
+    };
+
+    let header_fg = if !all_done {
+        theme.accent
+    } else if failed == count {
+        theme.failed
+    } else {
+        theme.succeeded
+    };
+    let header_style = Style::default().fg(header_fg).add_modifier(Modifier::BOLD);
+    let muted_style = Style::default().fg(theme.muted);
+    let body_style = Style::default().fg(theme.notice);
+    let error_body_style = Style::default().fg(theme.failed);
+
+    let mut header_spans = vec![
+        Span::styled(format!("{symbol} {verb} "), header_style),
+        Span::styled(format!("{count} files"), header_style),
+    ];
+    let chip = if !all_done {
+        String::new()
+    } else if failed > 0 && failed < count {
+        format!(" · {total_lines} lines · {failed} failed")
+    } else if failed == count {
+        " · failed".to_owned()
+    } else {
+        format!(" · {total_lines} lines")
+    };
+    if !chip.is_empty() {
+        header_spans.push(Span::styled(chip, muted_style));
+    }
+
+    let group_selected = selection.is_some_and(|s| {
+        s.range(transcript)
+            .is_some_and(|range| range.contains(&group_start))
+    });
+    let header_base = if group_selected {
+        Style::default().bg(theme.selection_bg)
+    } else {
+        Style::default()
+    };
+
+    let mut rows = vec![TranscriptRenderRow::new_spans(
+        header_spans,
+        header_base,
+        None,
+    )];
+
+    for (i, tool) in tools.iter().enumerate() {
+        let is_last = i == count - 1;
+        let branch = if is_last { "└─ " } else { "├─ " };
+
+        let path = tool_key_argument(tool);
+        let status_text = match tool.status {
+            ToolStatusKind::Pending | ToolStatusKind::Running => "reading…".to_owned(),
+            ToolStatusKind::Failed => "failed".to_owned(),
+            ToolStatusKind::Cancelled => "cancelled".to_owned(),
+            ToolStatusKind::Succeeded => {
+                let lines = tool
+                    .result
+                    .as_deref()
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .count();
+                format!("{lines} lines")
+            }
+        };
+
+        let style = if tool.status == ToolStatusKind::Failed {
+            error_body_style
+        } else {
+            body_style
+        };
+        rows.push(TranscriptRenderRow::new(
+            format!("  {branch}{path} · {status_text}"),
+            style,
+            None,
+        ));
+    }
+
+    rows
+}
+
+/// Returns the body content for a tool card, customized per tool type.
+/// When collapsed, some tools return an empty string (e.g. `read`) because
+/// the header chip is sufficient.
+fn tool_body_preview(tool: &ToolRunTranscript, expanded: bool) -> String {
+    let name = tool.name.to_lowercase();
+    match name.as_str() {
+        "read" => {
+            // Collapsed: empty (chip conveys line count). Expanded: full content.
+            if expanded {
+                return tool.result.clone().unwrap_or_default();
+            }
+            String::new()
+        }
+        "write" => {
+            // Show the content from arguments (what was written).
+            if let Some(args) = parse_tool_args(tool) {
+                if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
+                    return content.to_owned();
+                }
+            }
+            tool.display_detail()
+        }
+        "bash" | "shell" => bash_body_preview(tool),
+        "list" | "find" => {
+            // File listing — show the result lines.
+            tool.display_detail()
+        }
+        "grep" => grep_body_preview(tool, expanded),
+        _ => tool.display_detail(),
+    }
+}
+
+/// Returns the max number of body lines to show when collapsed, per tool type.
+fn tool_body_preview_limit(name: &str, _expanded: bool) -> usize {
+    match name.to_lowercase().as_str() {
+        "write" => 10,         // COMMAND_PREVIEW_LINES equivalent
+        "bash" | "shell" => 6, // command + live output lines
+        _ => TOOL_PREVIEW_LINES,
+    }
+}
+
+/// Parse the tool's arguments string as JSON.
+fn parse_tool_args(tool: &ToolRunTranscript) -> Option<serde_json::Value> {
+    let args = tool.arguments.as_deref()?.trim();
+    serde_json::from_str::<serde_json::Value>(args).ok()
+}
+
+/// Bash body: `$ command` prefix + stdout/stderr from metadata or live_output.
+fn bash_body_preview(tool: &ToolRunTranscript) -> String {
+    let mut body = String::new();
+
+    // Command prefix: `$ command` (first line), continuation lines indented.
+    if let Some(args) = parse_tool_args(tool) {
+        if let Some(command) = args.get("command").and_then(|v| v.as_str()) {
+            for (i, line) in command.lines().enumerate() {
+                let prefix = if i == 0 { "$ " } else { "  " };
+                body.push_str(prefix);
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+    }
+
+    // Prefer metadata stdout/stderr (set by finish_shell_execution after
+    // ShellCommandFinished). During the running phase, metadata is empty
+    // so we fall back to live_output (streamed via ToolExecutionUpdate).
+    let stdout = tool.metadata.stdout.as_deref().unwrap_or_default();
+    let stderr = tool.metadata.stderr.as_deref().unwrap_or_default();
+
+    let mut output = String::new();
+    if !stdout.is_empty() {
+        output.push_str(stdout);
+        if !stdout.ends_with('\n') {
+            output.push('\n');
+        }
+    }
+    if !stderr.is_empty() {
+        output.push_str(stderr);
+        if !stderr.ends_with('\n') {
+            output.push('\n');
+        }
+    }
+
+    // During running phase: use live_output if metadata is empty.
+    if output.is_empty() && !tool.live_output.is_empty() {
+        let live = tool.live_output.join("\n");
+        output.push_str(&live);
+        if !live.ends_with('\n') {
+            output.push('\n');
+        }
+    }
+
+    // If metadata and live_output are both empty, use result content as output.
+    if output.is_empty() {
+        if let Some(result) = tool.result.as_deref()
+            && !result.is_empty()
+        {
+            output.push_str(result);
+            if !result.ends_with('\n') {
+                output.push('\n');
+            }
+        }
+    }
+
+    if !output.trim().is_empty() {
+        body.push_str(&output);
+        return body.trim_end().to_owned();
+    }
+
+    // Absolute fallback (e.g. no command, no output).
+    if !body.trim().is_empty() {
+        return body.trim_end().to_owned();
+    }
+
+    tool.display_detail()
+}
+
+/// Grep body: show file paths from matching lines, deduplicated.
+fn grep_body_preview(tool: &ToolRunTranscript, expanded: bool) -> String {
+    let result = match tool.result.as_deref() {
+        Some(r) if !r.is_empty() => r,
+        _ => return tool.display_detail(),
+    };
+
+    if expanded {
+        return result.to_owned();
+    }
+
+    // Extract unique file paths from grep output (lines like `path:line:match`).
+    let mut seen = std::collections::BTreeSet::new();
+    let mut files = Vec::new();
+    for line in result.lines() {
+        if let Some(path) = line.split(':').next() {
+            if !path.is_empty() && seen.insert(path.to_owned()) {
+                files.push(path.to_owned());
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return result.to_owned();
+    }
+
+    let mut body = String::new();
+    let preview = files.len().min(TOOL_PREVIEW_LINES);
+    for path in files.iter().take(preview) {
+        body.push_str(path);
+        body.push('\n');
+    }
+    if files.len() > preview {
+        let _ = writeln!(body, "... ({} more files)", files.len() - preview);
+    }
+    body.trim_end().to_owned()
 }
 
 fn diff_tool_render_rows(
@@ -897,11 +1224,7 @@ fn selected_style(style: Style, selected: bool, theme: TuiTheme) -> Style {
     }
 }
 
-fn transcript_row(
-    item: &TranscriptItem,
-    theme: TuiTheme,
-    expanded: bool,
-) -> (&'static str, String, Style) {
+fn transcript_row(item: &TranscriptItem, theme: TuiTheme) -> (&'static str, String, Style) {
     match item {
         TranscriptItem::User { content } => {
             ("You", content.clone(), Style::default().fg(theme.user))
@@ -911,23 +1234,9 @@ fn transcript_row(
             assistant_display_text(thinking.as_deref(), content),
             Style::default().fg(theme.assistant),
         ),
-        TranscriptItem::Tool {
-            name,
-            detail,
-            status,
-            ..
-        } => {
-            let detail = if expanded {
-                detail.clone()
-            } else {
-                collapsed_tool_detail(*status, detail)
-            };
-            (
-                "Tool",
-                format!("{} {} ({})", status.marker(), name, detail),
-                status_style(*status, theme),
-            )
-        }
+        // Tool items are handled by tool_render_rows() before reaching here,
+        // so this branch is unreachable. Kept for exhaustiveness.
+        TranscriptItem::Tool { .. } => ("Tool", String::new(), Style::default()),
         TranscriptItem::Image { metadata, .. } => {
             ("Image", metadata.clone(), Style::default().fg(theme.notice))
         }
@@ -950,20 +1259,6 @@ fn format_token_count(tokens: usize) -> String {
         format!("{}k", tokens / 1_000)
     } else {
         tokens.to_string()
-    }
-}
-
-fn collapsed_tool_detail(status: ToolStatusKind, detail: &str) -> String {
-    let detail = detail.trim();
-    if detail.is_empty() {
-        return status.label().to_owned();
-    }
-
-    let line_count = detail.lines().count().max(1);
-    if line_count == 1 {
-        format!("{} · 1 line", status.label())
-    } else {
-        format!("{} · {line_count} lines", status.label())
     }
 }
 
@@ -1362,7 +1657,7 @@ fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
             "enter send · shift+enter newline · / commands".to_owned()
         };
         if !app.transcript_view().is_following_tail() && area.width >= 60 {
-            hints.push_str(" · new output below · end to jump");
+            hints.push_str(" · new output below · pgdn to follow");
         }
 
         let context_width: u16 = context_label

@@ -1,6 +1,7 @@
 mod bash;
 mod edit;
 mod find;
+mod glob;
 mod grep;
 mod list;
 mod mcp;
@@ -14,6 +15,7 @@ use std::{
     future::Future,
     path::{Component, Path, PathBuf},
     pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
@@ -31,6 +33,17 @@ pub use mcp::*;
 pub use process_supervisor::{ProcessKind, ProcessSupervisor};
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolResult, ToolError>> + Send + 'a>>;
+
+/// Callback invoked by tools to stream intermediate output while executing.
+///
+/// The callback receives a `partial_content` string (e.g. the latest line(s)
+/// from stdout/stderr). The runtime wires this to emit
+/// [`crate::AgentEvent::ToolExecutionUpdate`] so the TUI can display live
+/// output in the tool card body.
+///
+/// This is intentionally a simple boxed closure rather than a channel so that
+/// tools don't need to know about `AgentEvent` — they just push text.
+pub type ToolUpdateCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -58,7 +71,7 @@ pub enum ToolError {
     Regex(#[from] regex::Error),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolContext {
     pub cwd: PathBuf,
     pub permissions: PermissionPolicy,
@@ -66,6 +79,23 @@ pub struct ToolContext {
     pub max_output_bytes: usize,
     pub cancel_token: CancellationToken,
     pub process_supervisor: ProcessSupervisor,
+    /// Optional callback for streaming intermediate tool output (e.g. bash
+    /// stdout lines). Set by the runtime so tools can emit live updates.
+    pub tool_update: Option<ToolUpdateCallback>,
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("cwd", &self.cwd)
+            .field("permissions", &self.permissions)
+            .field("bash_timeout", &self.bash_timeout)
+            .field("max_output_bytes", &self.max_output_bytes)
+            .field("cancel_token", &self.cancel_token)
+            .field("process_supervisor", &self.process_supervisor)
+            .field("tool_update", &self.tool_update.is_some())
+            .finish()
+    }
 }
 
 impl ToolContext {
@@ -78,6 +108,7 @@ impl ToolContext {
             max_output_bytes: 64 * 1024,
             cancel_token: CancellationToken::new(),
             process_supervisor: ProcessSupervisor::default(),
+            tool_update: None,
         })
     }
 
@@ -106,8 +137,22 @@ impl ToolContext {
     }
 
     #[must_use]
+    pub fn with_tool_update(mut self, callback: ToolUpdateCallback) -> Self {
+        self.tool_update = Some(callback);
+        self
+    }
+
+    #[must_use]
     pub fn workspace_root(&self) -> &Path {
         &self.cwd
+    }
+
+    /// Push intermediate output through the tool update callback (if set).
+    /// Tools call this to stream live progress, e.g. bash stdout lines.
+    pub fn emit_update(&self, partial: &str) {
+        if let Some(callback) = &self.tool_update {
+            callback(partial);
+        }
     }
 
     pub fn ensure_file_read_allowed(&self) -> Result<(), ToolError> {
@@ -249,6 +294,7 @@ impl ToolRegistry {
         registry.register(list::ListTool);
         registry.register(grep::GrepTool);
         registry.register(find::FindTool);
+        registry.register(glob::GlobTool);
         registry.register(write::WriteTool);
         registry.register(edit::EditTool);
         registry.register(bash::BashTool);
