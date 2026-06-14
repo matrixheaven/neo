@@ -10,8 +10,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     ApprovalModal, ChatTranscript, DiffLine, DiffModel, NeoTuiApp, Overlay, OverlayKind,
-    PromptState, ToolRunTranscript, ToolStatus, ToolStatusKind, TranscriptItem, TranscriptLine,
-    TranscriptRenderer, TranscriptSelection, TranscriptView, TuiTheme,
+    PromptState, TodoPanel, ToolRunTranscript, ToolStatus, ToolStatusKind, TranscriptItem,
+    TranscriptLine, TranscriptRenderer, TranscriptSelection, TranscriptView, TuiTheme,
+    widgets::{QuestionDialogWidget, QuestionStateMachine},
 };
 
 const COMPACTION_BAR_WIDTH: usize = 30;
@@ -21,6 +22,7 @@ const DIFF_PREVIEW_LINES: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppLayout {
     pub body: Rect,
+    pub todo: Rect,
     pub status: Rect,
     pub approval: Rect,
     pub session_picker: Rect,
@@ -50,7 +52,15 @@ pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
             approval_panel_height(&request.modal, area.width)
         })
         .min(area.height.saturating_sub(3));
-    let bottom_height = prompt_height
+    let todo_height = if app.has_todos() {
+        TodoPanel::new(app.todo_items())
+            .with_theme(app.theme())
+            .height(area.width)
+    } else {
+        0
+    };
+    let bottom_height = todo_height
+        .saturating_add(prompt_height)
         .saturating_add(footer_bar_height)
         .saturating_add(session_picker_height)
         .saturating_add(approval_height);
@@ -62,9 +72,15 @@ pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
         width: area.width,
         height: body_height,
     };
-    let status = Rect {
+    let todo = Rect {
         x: area.x,
         y: body.y.saturating_add(body.height),
+        width: area.width,
+        height: todo_height,
+    };
+    let status = Rect {
+        x: area.x,
+        y: todo.y.saturating_add(todo.height),
         width: area.width,
         height: 0,
     };
@@ -95,6 +111,7 @@ pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
 
     AppLayout {
         body,
+        todo,
         status,
         approval,
         session_picker,
@@ -1502,6 +1519,10 @@ impl Widget for &NeoTuiApp {
             Some(OverlayKind::Approval(request)) => Some(request),
             _ => None,
         };
+        let question_overlay = match self.focused_overlay().map(|overlay| &overlay.kind) {
+            Some(OverlayKind::QuestionDialog(state)) => Some(state),
+            _ => None,
+        };
         let layout = app_layout(self, area);
         TranscriptWidget::new(self.transcript())
             .with_view(self.transcript_view())
@@ -1509,6 +1530,13 @@ impl Widget for &NeoTuiApp {
             .with_expanded_items(self.expanded_transcript_items())
             .with_theme(self.theme())
             .render(layout.body, buf);
+
+        // TodoPanel between transcript and input.
+        if self.has_todos() {
+            TodoPanel::new(self.todo_items())
+                .with_theme(self.theme())
+                .render(layout.todo, buf);
+        }
 
         if let Some(request) = approval_overlay {
             request
@@ -1530,10 +1558,15 @@ impl Widget for &NeoTuiApp {
 
         render_footer(self, layout.footer, buf);
 
-        if let Some(overlay) = self.focused_overlay()
+        // QuestionDialog: centered modal overlay.
+        if let Some(state) = question_overlay {
+            render_question_dialog(state, area, buf, self.theme());
+        } else if let Some(overlay) = self.focused_overlay()
             && !matches!(
                 overlay.kind,
-                OverlayKind::Approval(_) | OverlayKind::SessionPicker(_)
+                OverlayKind::Approval(_)
+                    | OverlayKind::SessionPicker(_)
+                    | OverlayKind::QuestionDialog(_)
             )
         {
             render_overlay(overlay, area, layout.prompt.y, buf);
@@ -1638,7 +1671,9 @@ fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
     if app.is_plan_mode() {
         status_spans.push(Span::styled(
             "[PLAN MODE]",
-            Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
         ));
         status_spans.push(Span::raw(" "));
     }
@@ -1787,6 +1822,27 @@ fn prompt_height(prompt: &PromptState, width: u16) -> u16 {
     u16::try_from(lines.saturating_add(2)).unwrap_or(8)
 }
 
+/// Render the question dialog as a centered modal.
+fn render_question_dialog(
+    state: &QuestionStateMachine,
+    area: Rect,
+    buf: &mut Buffer,
+    theme: TuiTheme,
+) {
+    let widget = QuestionDialogWidget::new(state, theme);
+    let width = area.width.saturating_sub(4).clamp(40, 72);
+    let height = widget.desired_height(area);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let dialog_area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    widget.render(dialog_area, buf);
+}
+
 fn render_overlay(overlay: &Overlay, area: Rect, composer_y: u16, buf: &mut Buffer) {
     let width = area.width.saturating_sub(4).clamp(20, 56);
     let lines = overlay_lines(overlay, usize::from(width.saturating_sub(2).max(1)));
@@ -1837,6 +1893,7 @@ fn overlay_title(overlay: &Overlay) -> &str {
         OverlayKind::ModelPicker(_) => "Models",
         OverlayKind::PromptCompletion(_) => "Completions",
         OverlayKind::Approval(_) => "Approval",
+        OverlayKind::QuestionDialog(_) => "Questions",
         OverlayKind::Message(_) => overlay.title.as_str(),
     }
 }
@@ -1849,6 +1906,7 @@ fn overlay_lines(overlay: &Overlay, width: usize) -> Vec<String> {
         }
         OverlayKind::PromptCompletion(state) => state.render_lines(width),
         OverlayKind::Approval(request) => wrap_width(&request.modal.body, width),
+        OverlayKind::QuestionDialog(_) => Vec::new(),
         OverlayKind::Message(message) => wrap_width(message, width),
     }
 }

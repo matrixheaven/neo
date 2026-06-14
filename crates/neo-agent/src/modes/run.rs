@@ -16,9 +16,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures::StreamExt;
 use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionMetadataStore};
 use neo_agent_core::{
-    AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, CompactionSettings, Content,
-    McpHttpConfig, McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter,
-    McpToolProvider, PermissionDecision, ToolRegistry,
+    AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool,
+    CompactionSettings, Content, McpHttpConfig, McpHttpToolAdapter, McpStdioConfig,
+    McpStdioToolAdapter, McpToolAdapter, McpToolProvider, PendingQuestion, PermissionDecision,
+    ToolRegistry,
 };
 use neo_ai::{
     ApiKind, ApiType, ChatMessage, ContentPart, CredentialResolver, ImageData,
@@ -1287,7 +1288,7 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
     let mut writer = SessionEventWriter::jsonl(&mut writer);
     let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
     record_session_activity(config, &session_id, &prompt);
-    let runtime = runtime_for_config(config, None).await?;
+    let runtime = runtime_for_config(config, None, None).await?;
     let turn = finish_prompt_turn(
         user_message,
         AgentContext::new(),
@@ -1308,7 +1309,7 @@ pub async fn run_prompt_ephemeral(
     let prompt = prompt.join(" ");
     let mut writer = SessionEventWriter::memory();
     let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
-    let runtime = runtime_for_config(config, None).await?;
+    let runtime = runtime_for_config(config, None, None).await?;
     finish_prompt_turn(
         user_message,
         AgentContext::new(),
@@ -1380,7 +1381,7 @@ async fn run_prompt_with_exact_session_id(
     let mut writer = SessionEventWriter::jsonl(&mut writer);
     let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
     record_session_activity(config, session_id, &prompt);
-    let runtime = runtime_for_config(config, None).await?;
+    let runtime = runtime_for_config(config, None, None).await?;
     let turn = finish_prompt_turn(
         user_message,
         AgentContext::new(),
@@ -1411,7 +1412,7 @@ pub async fn run_prompt_in_session(
     let mut writer = SessionEventWriter::jsonl(&mut writer);
     let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
     record_session_activity(config, session_id, &prompt);
-    let runtime = runtime_for_config(config, None).await?;
+    let runtime = runtime_for_config(config, None, None).await?;
     finish_prompt_turn(
         user_message,
         context,
@@ -1430,6 +1431,7 @@ pub async fn run_prompt_streaming(
     approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
     session_id_tx: Option<mpsc::UnboundedSender<String>>,
     cancel_token: CancellationToken,
+    question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
 ) -> anyhow::Result<PromptTurn> {
     let prompt = prompt.join(" ");
     let session_path = create_session_path(config).await?;
@@ -1442,7 +1444,7 @@ pub async fn run_prompt_streaming(
     }
     let (user_message, events) = append_user_event_jsonl(prompt.clone(), &mut writer).await?;
     record_session_activity(config, &session_id, &prompt);
-    let runtime = runtime_for_config(config, Some(approval_tx)).await?;
+    let runtime = runtime_for_config(config, Some(approval_tx), question_tx).await?;
     let streaming = StreamingTurnIo {
         event_tx,
         session_id,
@@ -1469,6 +1471,7 @@ pub async fn run_prompt_in_session_streaming(
     approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
     session_id_tx: Option<mpsc::UnboundedSender<String>>,
     cancel_token: CancellationToken,
+    question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
 ) -> anyhow::Result<PromptTurn> {
     let prompt = prompt.join(" ");
     let session_path = session_commands::session_path(session_id, config)?;
@@ -1483,7 +1486,7 @@ pub async fn run_prompt_in_session_streaming(
     }
     let (user_message, events) = append_user_event_jsonl(prompt.clone(), &mut writer).await?;
     record_session_activity(config, session_id, &prompt);
-    let runtime = runtime_for_config(config, Some(approval_tx)).await?;
+    let runtime = runtime_for_config(config, Some(approval_tx), question_tx).await?;
     let streaming = StreamingTurnIo {
         event_tx,
         session_id: session_id.to_owned(),
@@ -1503,10 +1506,14 @@ pub async fn run_prompt_in_session_streaming(
 async fn runtime_for_config(
     config: &AppConfig,
     approval_tx: Option<mpsc::UnboundedSender<PromptApprovalRequest>>,
+    question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
 ) -> anyhow::Result<AgentRuntime> {
     let model = resolve_model(config)?;
     let client = resolve_model_client(config, &model)?;
-    let tools = tool_registry_for_config(config).await?;
+    let mut tools = tool_registry_for_config(config).await?;
+    if let Some(question_tx) = question_tx {
+        tools.register(AskUserTool::new(question_tx));
+    }
     Ok(AgentRuntime::with_tools(
         agent_config_for_app(model, config, approval_tx)?,
         client,

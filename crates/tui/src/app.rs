@@ -9,8 +9,9 @@ use neo_agent_core::{AgentEvent, AgentMessage, CompactionPhase, Content, ImageRe
 use ratatui::{layout::Rect, style::Color};
 
 use crate::{
-    ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities, TranscriptWidget,
-    app_layout,
+    ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities, TodoDisplayItem,
+    TodoDisplayStatus, TranscriptWidget, app_layout,
+    widgets::{QuestionDialogAction, QuestionResult, QuestionStateMachine},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,6 +337,8 @@ pub struct NeoTuiApp {
     theme: TuiTheme,
     /// Current agent mode indicator (for footer display)
     plan_mode_active: bool,
+    /// Current todo list for the TodoPanel.
+    todo_items: Vec<TodoDisplayItem>,
 }
 
 impl NeoTuiApp {
@@ -374,6 +377,7 @@ impl NeoTuiApp {
             image_capabilities: TerminalImageCapabilities::default(),
             theme: TuiTheme::default(),
             plan_mode_active: false,
+            todo_items: Vec::new(),
         }
     }
 
@@ -481,6 +485,25 @@ impl NeoTuiApp {
     #[must_use]
     pub const fn is_plan_mode(&self) -> bool {
         self.plan_mode_active
+    }
+
+    #[must_use]
+    pub fn todo_items(&self) -> &[TodoDisplayItem] {
+        &self.todo_items
+    }
+
+    pub fn set_todo_items(&mut self, items: Vec<TodoDisplayItem>) {
+        self.todo_items = items;
+    }
+
+    #[must_use]
+    pub fn has_todos(&self) -> bool {
+        !self.todo_items.is_empty()
+    }
+
+    /// Clear the todo panel (e.g. when all items are done).
+    pub fn clear_todos(&mut self) {
+        self.todo_items.clear();
     }
 
     #[must_use]
@@ -933,6 +956,17 @@ impl NeoTuiApp {
             StreamUpdate::PlanModeChanged { active } => {
                 self.plan_mode_active = active;
             }
+            StreamUpdate::TodoUpdated { todos } => {
+                // Auto-clear when all done.
+                if !todos.is_empty() && todos.iter().all(|t| t.status == TodoDisplayStatus::Done) {
+                    self.todo_items.clear();
+                } else {
+                    self.todo_items = todos;
+                }
+            }
+            StreamUpdate::QuestionRequested { id, questions } => {
+                self.push_question_overlay(id, questions);
+            }
         }
         self.follow_tail_after_transcript_change();
     }
@@ -1006,11 +1040,54 @@ impl NeoTuiApp {
             | AgentEvent::MessageFinished { .. }
             | AgentEvent::TerminalSessionStarted { .. }
             | AgentEvent::TerminalSessionOutput { .. }
-            | AgentEvent::TerminalSessionFinished { .. }
-            | AgentEvent::PlanModeEntered { .. }
-            | AgentEvent::PlanModeExited { .. }
-            | AgentEvent::TodoUpdated { .. }
-            | AgentEvent::QuestionRequested { .. } => {}
+            | AgentEvent::TerminalSessionFinished { .. } => {}
+            AgentEvent::PlanModeEntered { .. } => {
+                self.plan_mode_active = true;
+            }
+            AgentEvent::PlanModeExited { .. } => {
+                self.plan_mode_active = false;
+            }
+            AgentEvent::TodoUpdated { todos, .. } => {
+                let display: Vec<TodoDisplayItem> = todos
+                    .iter()
+                    .map(|t| TodoDisplayItem {
+                        title: t.title.clone(),
+                        status: match t.status.as_str() {
+                            "in_progress" => TodoDisplayStatus::InProgress,
+                            "done" => TodoDisplayStatus::Done,
+                            _ => TodoDisplayStatus::Pending,
+                        },
+                    })
+                    .collect();
+                // Auto-clear when all done (kimi-code behavior).
+                if !display.is_empty()
+                    && display.iter().all(|t| t.status == TodoDisplayStatus::Done)
+                {
+                    self.todo_items.clear();
+                } else {
+                    self.todo_items = display;
+                }
+            }
+            AgentEvent::QuestionRequested { id, questions, .. } => {
+                let display: Vec<crate::QuestionDisplayData> = questions
+                    .iter()
+                    .map(|q| crate::QuestionDisplayData {
+                        question: q.question.clone(),
+                        header: q.header.clone(),
+                        body: q.body.clone(),
+                        options: q
+                            .options
+                            .iter()
+                            .map(|o| crate::QuestionDisplayOption {
+                                label: o.label.clone(),
+                                description: o.description.clone(),
+                            })
+                            .collect(),
+                        multi_select: q.multi_select,
+                    })
+                    .collect();
+                self.push_question_overlay(id, display);
+            }
         }
     }
 
@@ -1640,6 +1717,94 @@ impl NeoTuiApp {
         Some(result)
     }
 
+    // -- Question dialog overlay ---------------------------------------------
+
+    pub fn push_question_overlay(
+        &mut self,
+        id: impl Into<String>,
+        questions: Vec<crate::QuestionDisplayData>,
+    ) -> OverlayId {
+        let state = QuestionStateMachine::new(id, questions);
+        self.push_overlay(Overlay::new(
+            "questions",
+            OverlayKind::QuestionDialog(state),
+        ))
+    }
+
+    #[must_use]
+    pub fn question_dialog_state(&self) -> Option<&QuestionStateMachine> {
+        let overlay = self.focused_overlay()?;
+        match &overlay.kind {
+            OverlayKind::QuestionDialog(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn question_dialog_is_focused(&self) -> bool {
+        self.focused_overlay()
+            .is_some_and(|o| matches!(o.kind, OverlayKind::QuestionDialog(_)))
+    }
+
+    /// Process a crossterm key event in the question dialog.
+    /// Returns the action produced (None if no question dialog is focused).
+    #[must_use]
+    pub fn handle_question_dialog_key(
+        &mut self,
+        event: crossterm::event::KeyEvent,
+    ) -> Option<QuestionDialogAction> {
+        let id = self.focused_overlay?;
+        let action = {
+            let overlay = self.overlays.iter_mut().find(|o| o.id == id)?;
+            let OverlayKind::QuestionDialog(state) = &mut overlay.kind else {
+                return None;
+            };
+            state.handle_key(event)
+        };
+        if matches!(
+            action,
+            QuestionDialogAction::Submit(_) | QuestionDialogAction::Cancel
+        ) {
+            self.close_overlay(id);
+        }
+        Some(action)
+    }
+
+    /// Confirm / submit the question dialog. Returns answers if all questions
+    /// were answered.
+    pub fn confirm_question(&mut self) -> Option<QuestionResult> {
+        let id = self.focused_overlay?;
+        let result = {
+            let overlay = self.focused_overlay()?;
+            let OverlayKind::QuestionDialog(state) = &overlay.kind else {
+                return None;
+            };
+            if !state.is_complete() {
+                return None;
+            }
+            QuestionResult {
+                id: state.id.clone(),
+                answers: state.compile_answers(),
+            }
+        };
+        self.close_overlay(id);
+        Some(result)
+    }
+
+    /// Cancel the question dialog. Returns the question id.
+    pub fn cancel_question(&mut self) -> Option<String> {
+        let id = self.focused_overlay?;
+        let question_id = {
+            let overlay = self.focused_overlay()?;
+            let OverlayKind::QuestionDialog(state) = &overlay.kind else {
+                return None;
+            };
+            state.id.clone()
+        };
+        self.close_overlay(id);
+        Some(question_id)
+    }
+
     pub fn move_overlay_selection_down(&mut self) {
         self.with_focused_overlay_mut(Overlay::move_selection_down);
     }
@@ -1667,7 +1832,10 @@ impl NeoTuiApp {
 
     fn overlay_mode(&self) -> AppMode {
         if let Some(overlay) = self.focused_overlay() {
-            if matches!(overlay.kind, OverlayKind::Approval(_)) {
+            if matches!(
+                overlay.kind,
+                OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_)
+            ) {
                 AppMode::Approval
             } else {
                 AppMode::Overlay
@@ -1875,6 +2043,13 @@ pub enum StreamUpdate {
     PlanModeChanged {
         active: bool,
     },
+    TodoUpdated {
+        todos: Vec<TodoDisplayItem>,
+    },
+    QuestionRequested {
+        id: String,
+        questions: Vec<crate::QuestionDisplayData>,
+    },
 }
 
 fn run_finished_notice(turn: u32, stop_reason: neo_agent_core::StopReason) -> Option<String> {
@@ -1927,6 +2102,7 @@ impl Overlay {
             }
             OverlayKind::PromptCompletion(state) => state.move_down(),
             OverlayKind::Approval(request) => request.move_down(),
+            OverlayKind::QuestionDialog(state) => state.move_cursor_down(),
             OverlayKind::Message(_) => {}
         }
     }
@@ -1939,6 +2115,7 @@ impl Overlay {
             }
             OverlayKind::PromptCompletion(state) => state.move_up(),
             OverlayKind::Approval(request) => request.move_up(),
+            OverlayKind::QuestionDialog(state) => state.move_cursor_up(),
             OverlayKind::Message(_) => {}
         }
     }
@@ -1950,7 +2127,8 @@ impl Overlay {
                 state.page_down();
             }
             OverlayKind::PromptCompletion(state) => state.page_down(),
-            OverlayKind::Approval(_) | OverlayKind::Message(_) => {}
+            OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_) | OverlayKind::Message(_) => {
+            }
         }
     }
 
@@ -1961,7 +2139,8 @@ impl Overlay {
                 state.page_up();
             }
             OverlayKind::PromptCompletion(state) => state.page_up(),
-            OverlayKind::Approval(_) | OverlayKind::Message(_) => {}
+            OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_) | OverlayKind::Message(_) => {
+            }
         }
     }
 }
@@ -1973,6 +2152,7 @@ pub enum OverlayKind {
     ModelPicker(ModelPickerState),
     PromptCompletion(PromptCompletionState),
     Approval(ApprovalRequestModal),
+    QuestionDialog(QuestionStateMachine),
     Message(String),
 }
 

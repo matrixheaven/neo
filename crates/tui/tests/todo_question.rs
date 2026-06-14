@@ -1,0 +1,333 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use neo_tui::{
+    NeoTuiApp, QuestionDialogAction, QuestionDisplayData, QuestionDisplayOption,
+    QuestionStateMachine, TodoDisplayItem, TodoDisplayStatus, select_visible_todos,
+};
+use ratatui::{Terminal, backend::TestBackend, buffer::Cell};
+
+fn render_app(width: u16, height: u16, app: &NeoTuiApp) -> Vec<String> {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("test backend is valid");
+    terminal
+        .draw(|frame| frame.render_widget(app, frame.area()))
+        .expect("app renders");
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .chunks(width as usize)
+        .map(|line| line.iter().map(Cell::symbol).collect::<String>())
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// TodoPanel rendering tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn todo_panel_renders_with_items() {
+    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    app.set_todo_items(vec![
+        TodoDisplayItem::new("Write code", TodoDisplayStatus::InProgress),
+        TodoDisplayItem::new("Test code", TodoDisplayStatus::Pending),
+        TodoDisplayItem::new("Deploy", TodoDisplayStatus::Done),
+    ]);
+
+    let lines = render_app(60, 20, &app);
+
+    assert!(
+        lines.iter().any(|l| l.contains("Todo")),
+        "todo panel title should be visible"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("Write code")),
+        "in-progress todo should be visible"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("Test code")),
+        "pending todo should be visible"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("Deploy")),
+        "done todo should be visible"
+    );
+}
+
+#[test]
+fn todo_panel_smart_truncation_shows_more_indicator() {
+    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    app.set_todo_items(
+        (0..7)
+            .map(|i| {
+                TodoDisplayItem::new(
+                    &format!("task-{i}"),
+                    if i == 0 {
+                        TodoDisplayStatus::InProgress
+                    } else {
+                        TodoDisplayStatus::Pending
+                    },
+                )
+            })
+            .collect(),
+    );
+
+    let lines = render_app(60, 25, &app);
+
+    assert!(
+        lines.iter().any(|l| l.contains("more")),
+        "truncation indicator should be visible"
+    );
+}
+
+#[test]
+fn todo_panel_not_rendered_when_empty() {
+    let app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    let lines = render_app(60, 12, &app);
+
+    assert!(
+        !lines.iter().any(|l| l.trim().contains("Todo")),
+        "todo panel should not be rendered when empty"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// QuestionDialog state machine tests
+// ---------------------------------------------------------------------------
+
+fn make_single_question() -> Vec<QuestionDisplayData> {
+    vec![QuestionDisplayData {
+        question: "Which option?".into(),
+        header: Some("Choice".into()),
+        body: None,
+        options: vec![
+            QuestionDisplayOption {
+                label: "Yes".into(),
+                description: None,
+            },
+            QuestionDisplayOption {
+                label: "No".into(),
+                description: None,
+            },
+        ],
+        multi_select: false,
+    }]
+}
+
+fn make_two_questions() -> Vec<QuestionDisplayData> {
+    vec![
+        QuestionDisplayData {
+            question: "Q1?".into(),
+            header: Some("H1".into()),
+            body: None,
+            options: vec![QuestionDisplayOption {
+                label: "A".into(),
+                description: None,
+            }],
+            multi_select: false,
+        },
+        QuestionDisplayData {
+            question: "Q2?".into(),
+            header: Some("H2".into()),
+            body: None,
+            options: vec![
+                QuestionDisplayOption {
+                    label: "X".into(),
+                    description: None,
+                },
+                QuestionDisplayOption {
+                    label: "Y".into(),
+                    description: None,
+                },
+            ],
+            multi_select: true,
+        },
+    ]
+}
+
+#[test]
+fn app_pushes_question_overlay() {
+    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay("q-123", make_single_question());
+
+    assert!(app.question_dialog_is_focused());
+    assert!(app.question_dialog_state().is_some());
+}
+
+#[test]
+fn app_confirm_question_returns_answers() {
+    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay("q-1", make_single_question());
+
+    // Answer the question
+    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let result = app.confirm_question();
+    assert!(result.is_some());
+    let result = result.unwrap();
+    assert_eq!(result.id, "q-1");
+    assert_eq!(result.answers, vec!["Yes"]);
+    assert!(!app.question_dialog_is_focused());
+}
+
+#[test]
+fn app_cancel_question_returns_id() {
+    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay("q-456", make_single_question());
+
+    let id = app.cancel_question();
+    assert_eq!(id, Some("q-456".to_owned()));
+    assert!(!app.question_dialog_is_focused());
+}
+
+#[test]
+fn question_dialog_esc_cancels() {
+    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay("q-1", make_single_question());
+
+    let action = app
+        .handle_question_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert_eq!(action, QuestionDialogAction::Cancel);
+    assert!(!app.question_dialog_is_focused());
+}
+
+#[test]
+fn question_dialog_renders() {
+    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay("q-1", make_two_questions());
+
+    let lines = render_app(80, 25, &app);
+
+    assert!(
+        lines.iter().any(|l| l.contains("Q1")),
+        "question text should be visible"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("A")),
+        "option should be visible"
+    );
+}
+
+#[test]
+fn question_dialog_tab_navigation_through_keys() {
+    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay("q-1", make_two_questions());
+
+    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.question_dialog_state().unwrap().active_tab == 1);
+
+    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert!(app.question_dialog_state().unwrap().on_submit_tab());
+
+    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert!(!app.question_dialog_state().unwrap().on_submit_tab());
+}
+
+#[test]
+fn question_dialog_number_key_selection() {
+    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay("q-1", make_single_question());
+
+    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+
+    let state = app.question_dialog_state().unwrap();
+    assert!(state.questions[0].selected[1]);
+    assert!(!state.questions[0].selected[0]);
+}
+
+#[test]
+fn question_dialog_full_flow_two_questions() {
+    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay("q-full", make_two_questions());
+
+    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+    let action = app
+        .handle_question_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+
+    match action {
+        QuestionDialogAction::Submit(result) => {
+            assert_eq!(result.id, "q-full");
+            assert_eq!(result.answers, vec!["A", "X, Y"]);
+        }
+        _ => panic!("expected Submit action"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// QuestionStateMachine direct tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn state_machine_multi_select_other_option() {
+    let mut state = QuestionStateMachine::new("q-1", make_two_questions());
+    state.active_tab = 1;
+    state.cursor = 2;
+
+    state.toggle_current();
+    assert!(state.questions[1].other_selected);
+    assert!(state.other_editing);
+
+    state.insert_char('Z');
+    assert_eq!(state.questions[1].other_text, "Z");
+
+    state.toggle_current();
+    assert!(!state.questions[1].other_selected);
+    assert!(!state.other_editing);
+}
+
+#[test]
+fn state_machine_scroll_sync() {
+    let options: Vec<QuestionDisplayOption> = (0..10)
+        .map(|i| QuestionDisplayOption {
+            label: format!("opt-{i}"),
+            description: None,
+        })
+        .collect();
+
+    let questions = vec![QuestionDisplayData {
+        question: "Pick many".into(),
+        header: None,
+        body: None,
+        options,
+        multi_select: true,
+    }];
+
+    let mut state = QuestionStateMachine::new("q-scroll", questions);
+
+    for _ in 0..7 {
+        state.move_cursor_down();
+    }
+
+    assert!(state.scroll > 0);
+    assert!(state.cursor >= state.scroll);
+}
+
+// ---------------------------------------------------------------------------
+// TodoPanel select_visible_todos tests via public API
+// ---------------------------------------------------------------------------
+
+#[test]
+fn select_visible_prioritises_in_progress_and_latest_done() {
+    let todos = vec![
+        TodoDisplayItem::new("p1", TodoDisplayStatus::Pending),
+        TodoDisplayItem::new("p2", TodoDisplayStatus::Pending),
+        TodoDisplayItem::new("ip1", TodoDisplayStatus::InProgress),
+        TodoDisplayItem::new("p3", TodoDisplayStatus::Pending),
+        TodoDisplayItem::new("d1", TodoDisplayStatus::Done),
+        TodoDisplayItem::new("d2", TodoDisplayStatus::Done),
+        TodoDisplayItem::new("p4", TodoDisplayStatus::Pending),
+    ];
+
+    let visible = select_visible_todos(&todos, 5);
+    assert_eq!(visible.len(), 5);
+    assert!(visible.contains(&2));
+    assert!(visible.contains(&5));
+    assert_eq!(visible, vec![0, 1, 2, 3, 5]);
+}

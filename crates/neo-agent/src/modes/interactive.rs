@@ -29,7 +29,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use neo_agent_core::{
-    AgentEvent, AgentMessage, PermissionDecision,
+    AgentEvent, AgentMessage, PendingQuestion, PermissionDecision, QuestionResponse,
     session::{JsonlSessionReader, SessionMetadataStore},
 };
 use neo_tui::{
@@ -118,6 +118,8 @@ pub(crate) struct InteractiveController {
     active_turn: Option<RunningTurn>,
     pending_approvals: BTreeMap<String, oneshot::Sender<PermissionDecision>>,
     resolved_approvals: BTreeMap<String, PermissionDecision>,
+    /// Pending `AskUser` question response channels, keyed by question id.
+    pending_questions: BTreeMap<String, oneshot::Sender<QuestionResponse>>,
     clipboard_writer: ClipboardWriter,
     always_approve: bool,
     completion_root: PathBuf,
@@ -131,6 +133,8 @@ pub(crate) struct TurnChannels {
     approvals: mpsc::UnboundedSender<crate::modes::run::PromptApprovalRequest>,
     session_ids: mpsc::UnboundedSender<String>,
     cancel_token: CancellationToken,
+    /// Channel sender for `AskUserTool`'s reverse-RPC questions.
+    questions: mpsc::UnboundedSender<PendingQuestion>,
 }
 
 impl TurnChannels {
@@ -145,6 +149,8 @@ struct RunningTurn {
     session_ids: mpsc::UnboundedReceiver<String>,
     task: JoinHandle<Result<TurnOutcome>>,
     cancel_token: CancellationToken,
+    /// Receiver for `AskUserTool`'s reverse-RPC questions.
+    questions: mpsc::UnboundedReceiver<PendingQuestion>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,6 +398,7 @@ impl InteractiveController {
             active_turn: None,
             pending_approvals: BTreeMap::new(),
             resolved_approvals: BTreeMap::new(),
+            pending_questions: BTreeMap::new(),
             clipboard_writer: Arc::new(write_system_clipboard),
             always_approve: false,
             completion_root: workspace_root.clone(),
@@ -664,6 +671,10 @@ impl InteractiveController {
                     if let Some(result) = self.app.confirm_approval() {
                         self.resolve_approval(&result);
                     }
+                } else if self.app.question_dialog_state().is_some() {
+                    if let Some(result) = self.app.confirm_question() {
+                        self.resolve_question(&result.id, result.answers);
+                    }
                 } else if self.app.selected_session().is_some() {
                     self.load_selected_session().await?;
                 } else if self.app.selected_model().is_some() {
@@ -718,6 +729,14 @@ impl InteractiveController {
     }
 
     fn cancel_focused_overlay(&mut self) -> bool {
+        // Check if the focused overlay is a question dialog and handle its
+        // cancellation (drops response_tx → AskUserTool gets "cancelled").
+        if self.app.question_dialog_is_focused() {
+            if let Some(id) = self.app.cancel_question() {
+                self.pending_questions.remove(&id);
+            }
+            return true;
+        }
         let Some(overlay) = self.app.close_focused_overlay() else {
             return false;
         };
@@ -1077,12 +1096,14 @@ impl InteractiveController {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (approval_tx, approval_rx) = mpsc::unbounded_channel();
         let (session_id_tx, session_id_rx) = mpsc::unbounded_channel();
+        let (question_tx, question_rx) = mpsc::unbounded_channel::<PendingQuestion>();
         let cancel_token = CancellationToken::new();
         let channels = TurnChannels {
             events: event_tx.clone(),
             approvals: approval_tx,
             session_ids: session_id_tx,
             cancel_token: cancel_token.clone(),
+            questions: question_tx,
         };
         let future = (self.run_turn)(
             TurnRequest::new(vec![prompt], self.active_session_id.clone(), {
@@ -1103,6 +1124,7 @@ impl InteractiveController {
             session_ids: session_id_rx,
             task,
             cancel_token,
+            questions: question_rx,
         });
         self.drain_active_turn().await
     }
@@ -1121,6 +1143,7 @@ impl InteractiveController {
         }
         self.pending_approvals.clear();
         self.resolved_approvals.clear();
+        self.pending_questions.clear();
         if let Ok(result) =
             tokio::time::timeout(Duration::from_secs(2), self.wait_for_active_turn()).await
         {
@@ -1141,6 +1164,9 @@ impl InteractiveController {
         }
         while let Ok(approval) = turn.approvals.try_recv() {
             self.register_pending_approval(approval);
+        }
+        while let Ok(pending) = turn.questions.try_recv() {
+            self.register_pending_question(pending);
         }
         while let Ok(event) = turn.events.try_recv() {
             match event {
@@ -1163,6 +1189,9 @@ impl InteractiveController {
             }
             while let Ok(approval) = turn.approvals.try_recv() {
                 self.register_pending_approval(approval);
+            }
+            while let Ok(pending) = turn.questions.try_recv() {
+                self.register_pending_question(pending);
             }
             while let Ok(event) = turn.events.try_recv() {
                 match event {
@@ -1230,6 +1259,31 @@ impl InteractiveController {
         }
     }
 
+    /// Register a pending AskUser question. Stores the oneshot response channel
+    /// and synthesizes a `QuestionRequested` event for the TUI so it can display
+    /// the question dialog.
+    fn register_pending_question(&mut self, pending: PendingQuestion) {
+        let id = pending.id.clone();
+        let questions = pending.questions.clone();
+        // Synthesize a QuestionRequested event for the TUI to display the dialog.
+        // The TUI's apply_agent_event will push a question overlay (implemented by
+        // the TUI subagent).
+        self.app.apply_agent_event(AgentEvent::QuestionRequested {
+            turn: 0,
+            id: id.clone(),
+            questions,
+        });
+        self.pending_questions.insert(id, pending.response_tx);
+    }
+
+    /// Resolve a pending question by sending the user's answers through the
+    /// stored oneshot channel.
+    fn resolve_question(&mut self, id: &str, answers: Vec<String>) {
+        if let Some(tx) = self.pending_questions.remove(id) {
+            let _ = tx.send(QuestionResponse { answers });
+        }
+    }
+
     fn abort_active_turn(&mut self) {
         if let Some(turn) = self.active_turn.take() {
             turn.cancel_token.cancel();
@@ -1237,6 +1291,7 @@ impl InteractiveController {
         }
         self.pending_approvals.clear();
         self.resolved_approvals.clear();
+        self.pending_questions.clear();
     }
 
     fn open_session_picker(&mut self) {
@@ -2394,6 +2449,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     channels.approvals,
                     Some(channels.session_ids),
                     channels.cancel_token,
+                    Some(channels.questions),
                 )
                 .await?;
                 Ok(TurnOutcome::session(turn.session_id))
@@ -2405,6 +2461,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     channels.approvals,
                     Some(channels.session_ids),
                     channels.cancel_token,
+                    Some(channels.questions),
                 )
                 .await?;
                 Ok(TurnOutcome::session(turn.session_id))
