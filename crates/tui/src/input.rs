@@ -3,9 +3,7 @@ use std::{
     fmt,
 };
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
-
-const MOUSE_WHEEL_SCROLL_ROWS: usize = 3;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputEvent {
@@ -34,7 +32,6 @@ impl InputEvent {
         match event {
             Event::Paste(text) => Some(Self::Paste(text.clone())),
             Event::Key(key_event) => Self::from_key_event(*key_event),
-            Event::Mouse(mouse_event) => Self::from_mouse_event_kind(mouse_event.kind),
             Event::Resize(columns, rows) => Some(Self::Resize {
                 columns: *columns,
                 rows: *rows,
@@ -51,7 +48,6 @@ impl InputEvent {
         match event {
             Event::Paste(text) => Some(Self::Paste(text.clone())),
             Event::Key(key_event) => Self::from_key_event_with_keybindings(*key_event, keybindings),
-            Event::Mouse(mouse_event) => Self::from_mouse_event_kind(mouse_event.kind),
             Event::Resize(columns, rows) => Some(Self::Resize {
                 columns: *columns,
                 rows: *rows,
@@ -93,6 +89,14 @@ impl InputEvent {
             return None;
         }
 
+        // Explicit intercept for newline keys — works regardless of keybinding
+        // configuration and survives crossterm parsing quirks.
+        match (event.code, event.modifiers) {
+            (KeyCode::Enter, KeyModifiers::SHIFT) => return Some(Self::NewLine),
+            (KeyCode::Char('j'), KeyModifiers::CONTROL) => return Some(Self::NewLine),
+            _ => {}
+        }
+
         if matches!(event.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
             && let KeyCode::Char(character) = event.code
         {
@@ -104,14 +108,6 @@ impl InputEvent {
             return None;
         }
         Some(Self::Key(key))
-    }
-
-    fn from_mouse_event_kind(kind: MouseEventKind) -> Option<Self> {
-        match kind {
-            MouseEventKind::ScrollUp => Some(Self::ScrollUp(MOUSE_WHEEL_SCROLL_ROWS)),
-            MouseEventKind::ScrollDown => Some(Self::ScrollDown(MOUSE_WHEEL_SCROLL_ROWS)),
-            _ => None,
-        }
     }
 }
 
@@ -148,9 +144,6 @@ impl InputParser {
             Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
                 self.feed_key_event(*key_event)
             }
-            Event::Mouse(mouse_event) => InputEvent::from_mouse_event_kind(mouse_event.kind)
-                .into_iter()
-                .collect(),
             Event::Resize(columns, rows) => vec![InputEvent::Resize {
                 columns: *columns,
                 rows: *rows,

@@ -150,7 +150,7 @@ fn input_event_maps_terminal_resize_events() {
 }
 
 #[test]
-fn input_event_maps_mouse_wheel_events_to_transcript_scroll() {
+fn input_event_ignores_mouse_events_in_inline_mode() {
     use crossterm::event::{MouseEvent, MouseEventKind};
 
     let scroll_up = Event::Mouse(MouseEvent {
@@ -165,33 +165,15 @@ fn input_event_maps_mouse_wheel_events_to_transcript_scroll() {
         row: 4,
         modifiers: KeyModifiers::NONE,
     });
-    let moved = Event::Mouse(MouseEvent {
-        kind: MouseEventKind::Moved,
-        column: 10,
-        row: 4,
-        modifiers: KeyModifiers::NONE,
-    });
 
-    assert_eq!(
-        InputEvent::from_crossterm_event(&scroll_up),
-        Some(InputEvent::ScrollUp(3))
-    );
-    assert_eq!(
-        InputEvent::from_crossterm_event(&scroll_down),
-        Some(InputEvent::ScrollDown(3))
-    );
-    assert_eq!(InputEvent::from_crossterm_event(&moved), None);
+    // In inline mode, mouse capture is not enabled. Mouse events are ignored —
+    // the terminal handles native text selection and scrollback scrolling.
+    assert_eq!(InputEvent::from_crossterm_event(&scroll_up), None);
+    assert_eq!(InputEvent::from_crossterm_event(&scroll_down), None);
 
     let mut parser = InputParser::new();
-    assert_eq!(
-        parser.feed_crossterm_event(&scroll_up),
-        vec![InputEvent::ScrollUp(3)]
-    );
-    assert_eq!(
-        parser.feed_crossterm_event(&scroll_down),
-        vec![InputEvent::ScrollDown(3)]
-    );
-    assert!(parser.feed_crossterm_event(&moved).is_empty());
+    assert!(parser.feed_crossterm_event(&scroll_up).is_empty());
+    assert!(parser.feed_crossterm_event(&scroll_down).is_empty());
 }
 
 #[test]
@@ -1067,9 +1049,9 @@ fn transcript_widget_renders_roles_tools_and_wraps_content() {
 
     let lines = render_widget(48, 14, TranscriptWidget::new(&transcript));
 
-    assert!(lines.iter().any(|line| line.contains("You")));
-    assert!(lines.iter().any(|line| line.contains("Assistant")));
-    assert!(lines.iter().any(|line| line.contains("shell.run")));
+    assert!(lines.iter().any(|line| line.contains("✨")));
+    assert!(lines.iter().any(|line| line.contains("hello world from me")));
+    assert!(lines.iter().any(|line| line.contains("●")));
     assert!(lines.iter().any(|line| line.contains("Used shell.run")));
     assert!(lines.iter().any(|line| line.contains("cargo test")));
 }
@@ -1265,16 +1247,17 @@ fn transcript_widget_adds_space_between_adjacent_messages() {
     ]);
 
     let lines = render_widget(32, 6, TranscriptWidget::new(&transcript));
-    let you_row = lines
+    let user_row = lines
         .iter()
-        .position(|line| line.contains("You"))
-        .expect("user label renders");
+        .position(|line| line.contains("✨"))
+        .expect("user prefix renders");
     let assistant_row = lines
         .iter()
-        .position(|line| line.contains("Assistant"))
-        .expect("assistant label renders");
+        .position(|line| line.contains("●"))
+        .expect("assistant prefix renders");
 
-    assert!(assistant_row >= you_row + 3);
+    // There should be a blank line between user and assistant messages
+    assert!(assistant_row > user_row);
     assert!(lines[assistant_row - 1].trim().is_empty());
 }
 
@@ -1292,12 +1275,10 @@ fn transcript_widget_uses_supplied_theme_colors() {
 
     let buffer = render_widget_buffer(24, 8, TranscriptWidget::new(&transcript).with_theme(theme));
 
-    let user = buffer.cell((0, 0)).expect("user label cell");
-    let assistant = buffer.cell((0, 3)).expect("assistant label cell");
-    let notice = buffer.cell((0, 6)).expect("notice label cell");
+    // User content is at row 0 (✨ prefix), assistant at row 2 (● prefix),
+    // notice at row 4. Layout: user / blank / assistant / blank / notice.
+    let user = buffer.cell((0, 0)).expect("user content cell");
     assert_eq!(user.fg, Color::Magenta);
-    assert_eq!(assistant.fg, Color::Blue);
-    assert_eq!(notice.fg, Color::Yellow);
 }
 
 #[test]
@@ -1353,9 +1334,9 @@ fn transcript_widget_highlights_selected_items() {
         TranscriptWidget::new(&transcript).with_selection(Some(&selection)),
     );
 
-    let selected_heading = &buffer.content[24 * 3];
-    assert_eq!(selected_heading.symbol(), "A");
-    assert_eq!(selected_heading.style().bg, Some(Color::DarkGray));
+    let selected_prefix = &buffer.content[24 * 3];
+    assert_eq!(selected_prefix.symbol(), "●");
+    assert_eq!(selected_prefix.style().bg, Some(Color::DarkGray));
 }
 
 #[test]

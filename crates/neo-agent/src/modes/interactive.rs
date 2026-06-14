@@ -21,12 +21,11 @@ use std::{
 use anyhow::{Context, Result};
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-        EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, size},
 };
 use neo_agent_core::{
     AgentEvent, AgentMessage, PendingQuestion, PermissionDecision, QuestionResponse,
@@ -38,7 +37,7 @@ use neo_tui::{
     KeybindingsManager, NeoTuiApp, PickerItem, PromptEdit, TerminalImageCapabilities,
 };
 use ratatui::{
-    Terminal,
+    Terminal, TerminalOptions, Viewport,
     backend::{CrosstermBackend, TestBackend},
     buffer::Cell,
 };
@@ -2295,23 +2294,23 @@ impl NeoTerminal {
     fn enter() -> Result<Self> {
         let raw_mode = RawModeGuard::enable()?;
         let mut output = stdout();
-        // Alternate screen + mouse capture (for scroll wheel) + bracketed paste
-        // + keyboard enhancement.
-        //
-        // Mouse capture enables scroll wheel events. To select/copy text,
-        // hold Shift while dragging — this is standard TUI behavior (same as
-        // vim, tmux, htop, etc.) and works in all major terminals (iTerm2,
-        // Terminal.app, Kitty, Ghostty, GNOME Terminal).
+        // Inline mode: no alternate screen, no mouse capture.
+        // Content renders in the terminal's primary buffer and flows into
+        // native scrollback. Text selection works natively (no Shift needed).
+        // Mouse wheel scrolls the terminal's scrollback natively.
         execute!(
             output,
-            EnterAlternateScreen,
             EnableBracketedPaste,
-            EnableMouseCapture,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
+        let (_cols, rows) = size()?;
         let backend = CrosstermBackend::new(output);
-        let mut terminal = Terminal::new(backend)?;
-        terminal.clear()?;
+        let terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(rows),
+            },
+        )?;
         Ok(Self {
             terminal,
             raw_mode,
@@ -2322,6 +2321,9 @@ impl NeoTerminal {
 
     fn draw(&mut self, app: &mut NeoTuiApp) -> Result<()> {
         app.advance_activity_frame();
+        // CRITICAL: Do NOT do any terminal writes outside of ratatui's draw().
+        // The Inline viewport handles scrollback scrolling via append_lines internally.
+        // Manual writes (insert_history_lines, scroll regions, etc.) cause double rendering.
         self.terminal.draw(|frame| {
             let area = frame.area();
             app.sync_transcript_view_for_area(area);
@@ -2351,10 +2353,11 @@ impl NeoTerminal {
         let _ = execute!(
             self.terminal.backend_mut(),
             PopKeyboardEnhancementFlags,
-            DisableMouseCapture,
             DisableBracketedPaste,
-            LeaveAlternateScreen
         );
+        // Write \r\n so the shell prompt appears on a fresh line.
+        let _ = write!(self.terminal.backend_mut(), "\r\n");
+        let _ = self.terminal.backend_mut().flush();
         let _ = self.terminal.show_cursor();
         self.raw_mode.disable();
     }
@@ -2363,12 +2366,9 @@ impl NeoTerminal {
         self.raw_mode.enable_raw()?;
         execute!(
             self.terminal.backend_mut(),
-            EnterAlternateScreen,
             EnableBracketedPaste,
-            EnableMouseCapture,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
-        self.terminal.clear()?;
         self.inline_image_cache.reset_for_full_redraw();
         self.last_area = None;
         Ok(())

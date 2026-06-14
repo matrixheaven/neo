@@ -460,35 +460,48 @@ fn transcript_render_rows(
         let style = selected_style(style, selected, theme);
         let fill = matches!(item, TranscriptItem::User { .. })
             .then_some(Style::default().bg(theme.user_bg));
-        rows.push(TranscriptRenderRow::new(
-            label,
-            style.add_modifier(Modifier::BOLD),
-            fill,
-        ));
+
+        // Blank line separator before each message (like kimi-code)
+        if !rows.is_empty() {
+            rows.push(TranscriptRenderRow::blank());
+        }
 
         if let TranscriptItem::Assistant { thinking, content } = item {
+            // Assistant: ● prefix on first content line
+            let prefix = "● ";
             if let Some(thinking) = thinking.as_deref().filter(|thinking| !thinking.is_empty()) {
-                for line in wrap_width(thinking, text_width) {
-                    rows.push(TranscriptRenderRow::new(
-                        format!("  {line}"),
-                        selected_style(
-                            Style::default()
-                                .fg(theme.thinking)
-                                .add_modifier(Modifier::ITALIC),
-                            selected,
-                            theme,
-                        ),
-                        None,
-                    ));
+                let think_style = selected_style(
+                    Style::default()
+                        .fg(theme.thinking)
+                        .add_modifier(Modifier::ITALIC),
+                    selected,
+                    theme,
+                );
+                for (i, line) in wrap_width(thinking, text_width.saturating_sub(2)).into_iter().enumerate() {
+                    let text = if i == 0 {
+                        format!("{prefix}{line}")
+                    } else {
+                        format!("  {line}")
+                    };
+                    rows.push(TranscriptRenderRow::new(text, think_style, None));
                 }
                 if !content.is_empty() {
                     rows.push(TranscriptRenderRow::blank());
                 }
             }
 
-            for line in TranscriptRenderer::new(text_width).render_markdownish(content) {
+            for (i, line) in TranscriptRenderer::new(text_width)
+                .render_markdownish(content)
+                .into_iter()
+                .enumerate()
+            {
+                let text = if i == 0 && thinking.as_deref().filter(|t| !t.is_empty()).is_none() {
+                    format!("{prefix}{}", line.display_text())
+                } else {
+                    format!("  {}", line.display_text())
+                };
                 rows.push(TranscriptRenderRow::new(
-                    format!("  {}", line.display_text()),
+                    text,
                     selected_style(transcript_line_style(&line, style, theme), selected, theme),
                     None,
                 ));
@@ -511,13 +524,31 @@ fn transcript_render_rows(
             );
             rows.extend(compact_rows);
         } else {
-            for line in TranscriptRenderer::new(text_width).render_markdownish(&content) {
+            // User / Notice / Image: inline prefix on first content line
+            let prefix = match item {
+                TranscriptItem::User { .. } => "✨ ",
+                _ => "",
+            };
+            for (i, line) in TranscriptRenderer::new(text_width)
+                .render_markdownish(&content)
+                .into_iter()
+                .enumerate()
+            {
+                let text = if i == 0 && !prefix.is_empty() {
+                    format!("{prefix}{}", line.display_text())
+                } else if i == 0 {
+                    line.display_text().to_owned()
+                } else {
+                    format!("  {}", line.display_text())
+                };
                 rows.push(TranscriptRenderRow::new(
-                    format!("  {}", line.display_text()),
+                    text,
                     selected_style(transcript_line_style(&line, style, theme), selected, theme),
-                    None,
+                    if i == 0 { fill } else { None },
                 ));
             }
+            // Suppress unused variable warning
+            let _ = &label;
         }
         item_index += 1;
     }
