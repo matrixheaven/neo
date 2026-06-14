@@ -1,7 +1,11 @@
+use std::sync::{Arc, Mutex};
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use super::{Tool, ToolContext, ToolResult, parse_input, schema};
+use crate::TodoEventData;
 
 /// A single todo item tracked by the model.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -33,6 +37,25 @@ impl TodoStatus {
             Self::Pending => "\u{25CB}", // ○
             Self::InProgress => "\u{25CF}", // ●
             Self::Done => "\u{2713}", // ✓
+        }
+    }
+
+    /// Returns the serialisable string key matching `#[serde(rename_all)]`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in_progress",
+            Self::Done => "done",
+        }
+    }
+}
+
+impl From<&TodoItem> for TodoEventData {
+    fn from(item: &TodoItem) -> Self {
+        Self {
+            title: item.title.clone(),
+            status: item.status.as_str().to_owned(),
         }
     }
 }
@@ -70,7 +93,46 @@ fn format_todos(todos: &[TodoItem]) -> String {
     out.trim_end_matches('\n').to_owned()
 }
 
-pub struct TodoTool;
+/// Tool that manages a structured todo list.
+///
+/// Holds shared state (`Arc<Mutex<Vec<TodoEventData>>>`) so that the runtime
+/// can read the latest todos after execution and emit `AgentEvent::TodoUpdated`
+/// for persistence. The structured data is also returned in
+/// [`ToolResult::details`] as a JSON bridge.
+pub struct TodoTool {
+    state: Arc<Mutex<Vec<TodoEventData>>>,
+}
+
+impl Default for TodoTool {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl TodoTool {
+    /// Create a new `TodoTool` with its own internal state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a `TodoTool` that shares the given state Arc.
+    ///
+    /// Use this when the caller (e.g. the runtime) also holds a clone of the
+    /// same Arc so it can read current todos directly.
+    #[must_use]
+    pub fn with_state(state: Arc<Mutex<Vec<TodoEventData>>>) -> Self {
+        Self { state }
+    }
+
+    /// Read the current todos from shared state (for testing / external queries).
+    #[must_use]
+    pub fn current_todos(&self) -> Vec<TodoEventData> {
+        self.state.lock().map_or_else(|_| Vec::new(), |guard| guard.clone())
+    }
+}
 
 impl Tool for TodoTool {
     fn name(&self) -> &'static str {
@@ -93,9 +155,24 @@ impl Tool for TodoTool {
         Box::pin(async move {
             let input: TodoInput = parse_input(self.name(), input)?;
             let formatted = format_todos(&input.todos);
+
+            // Convert to event data for persistence.
+            let event_todos: Vec<TodoEventData> =
+                input.todos.iter().map(TodoEventData::from).collect();
+
+            // Update shared state.
+            if let Ok(mut state) = self.state.lock() {
+                (*state).clone_from(&event_todos);
+            }
+
             // Stream the formatted list for live TUI display.
             ctx.emit_update(&formatted);
-            Ok(ToolResult::ok(formatted))
+
+            // Return structured data in details so the runtime can emit
+            // AgentEvent::TodoUpdated.
+            Ok(ToolResult::ok(formatted).with_details(json!({
+                "todos": event_todos,
+            })))
         })
     }
 }
@@ -112,6 +189,13 @@ mod tests {
         assert_eq!(TodoStatus::Pending.glyph(), "\u{25CB}");
         assert_eq!(TodoStatus::InProgress.glyph(), "\u{25CF}");
         assert_eq!(TodoStatus::Done.glyph(), "\u{2713}");
+    }
+
+    #[test]
+    fn as_str_mapping() {
+        assert_eq!(TodoStatus::Pending.as_str(), "pending");
+        assert_eq!(TodoStatus::InProgress.as_str(), "in_progress");
+        assert_eq!(TodoStatus::Done.as_str(), "done");
     }
 
     #[test]
@@ -204,7 +288,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_formats_and_returns() {
-        let tool = TodoTool;
+        let tool = TodoTool::new();
         let ctx = ToolContext::new(std::env::current_dir().unwrap())
             .unwrap()
             .with_permission_policy(PermissionPolicy::allow_all());
@@ -222,7 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_empty_array_clears() {
-        let tool = TodoTool;
+        let tool = TodoTool::new();
         let ctx = ToolContext::new(std::env::current_dir().unwrap())
             .unwrap()
             .with_permission_policy(PermissionPolicy::allow_all());
@@ -250,7 +334,7 @@ mod tests {
             .with_permission_policy(PermissionPolicy::allow_all())
             .with_tool_update(callback);
 
-        let tool = TodoTool;
+        let tool = TodoTool::new();
         let input = json!({
             "todos": [{ "title": "Task", "status": "pending" }]
         });
@@ -263,7 +347,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_invalid_input_is_error() {
-        let tool = TodoTool;
+        let tool = TodoTool::new();
         let ctx = ToolContext::new(std::env::current_dir().unwrap())
             .unwrap()
             .with_permission_policy(PermissionPolicy::allow_all());
@@ -274,7 +358,8 @@ mod tests {
 
     #[test]
     fn schema_has_todos_array() {
-        let schema = TodoTool.input_schema();
+        let tool = TodoTool::new();
+        let schema = tool.input_schema();
         let props = schema
             .get("properties")
             .expect("properties")
@@ -286,5 +371,61 @@ mod tests {
         assert!(required.is_some_and(|arr| {
             arr.iter().any(|v| v.as_str() == Some("todos"))
         }));
+    }
+
+    #[tokio::test]
+    async fn execute_includes_structured_details() {
+        let tool = TodoTool::new();
+        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+            .unwrap()
+            .with_permission_policy(PermissionPolicy::allow_all());
+        let input = json!({
+            "todos": [
+                { "title": "Task A", "status": "done" },
+                { "title": "Task B", "status": "pending" }
+            ]
+        });
+        let result = tool.execute(&ctx, input).await.expect("execute");
+        let details = result.details.expect("details should be present");
+        let todos = details.get("todos").expect("todos in details");
+        let parsed: Vec<TodoEventData> =
+            serde_json::from_value(todos.clone()).expect("parse todos");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].title, "Task A");
+        assert_eq!(parsed[0].status, "done");
+        assert_eq!(parsed[1].title, "Task B");
+        assert_eq!(parsed[1].status, "pending");
+    }
+
+    #[tokio::test]
+    async fn execute_updates_shared_state() {
+        let shared: Arc<Mutex<Vec<TodoEventData>>> = Arc::new(Mutex::new(Vec::new()));
+        let tool = TodoTool::with_state(Arc::clone(&shared));
+        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+            .unwrap()
+            .with_permission_policy(PermissionPolicy::allow_all());
+        let input = json!({
+            "todos": [{ "title": "Shared task", "status": "in_progress" }]
+        });
+        let _ = tool.execute(&ctx, input).await.expect("execute");
+
+        let state = shared.lock().unwrap();
+        assert_eq!(state.len(), 1);
+        assert_eq!(state[0].title, "Shared task");
+        assert_eq!(state[0].status, "in_progress");
+    }
+
+    #[test]
+    fn current_todos_reflects_state() {
+        let shared: Arc<Mutex<Vec<TodoEventData>>> = Arc::new(Mutex::new(vec![
+            TodoEventData {
+                title: "X".into(),
+                status: "done".into(),
+            },
+        ]));
+        let tool = TodoTool::with_state(shared);
+        let todos = tool.current_todos();
+        assert_eq!(todos.len(), 1);
+        assert_eq!(todos[0].title, "X");
     }
 }

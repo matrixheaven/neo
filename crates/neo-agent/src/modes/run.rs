@@ -979,21 +979,34 @@ fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: 
             }
             p
         } else {
-            // Create a brand-new provider from config
-            let default_type = provider_config
-                .provider_type
-                .unwrap_or(ApiType::OpenAiCompatible);
-            let default_api = default_type.to_api_kind();
+            // Create a brand-new provider from config.
+            // When type is not specified, accept ALL api kinds so the model's
+            // own `api` field determines the wire protocol (backward compat
+            // with legacy config that only has api_base + api_key).
+            let provider_type = provider_config.provider_type;
+            let (default_api, supported) = match provider_type {
+                Some(t) => {
+                    let k = t.to_api_kind();
+                    (k, vec![k])
+                }
+                None => (ApiKind::OpenAiCompatible, vec![
+                    ApiKind::OpenAiResponses,
+                    ApiKind::OpenAiChatCompletions,
+                    ApiKind::AnthropicMessages,
+                    ApiKind::GoogleGenerativeAi,
+                    ApiKind::OpenAiCompatible,
+                ]),
+            };
             ProviderSpec {
                 id: provider_id.clone(),
                 display_name: provider_id.clone(),
                 api: default_api,
-                supported_apis: vec![default_api],
+                supported_apis: supported,
                 base_url: provider_config.effective_base_url().map(str::to_owned),
                 api_key: provider_config.api_key.clone(),
                 api_key_env_vars: provider_config.api_key_env.iter().cloned().collect(),
                 ambient_auth_env_vars: vec![],
-                provider_type: provider_config.provider_type.clone(),
+                provider_type,
             }
         };
         registry.register(provider);

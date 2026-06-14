@@ -571,7 +571,12 @@ impl InteractiveController {
                 if self.cancel_focused_overlay() {
                     return Ok(false);
                 }
-                return Ok(true);
+                if self.active_turn.is_some() {
+                    self.cancel_active_turn().await?;
+                    self.show_notice("Interrupted");
+                }
+                // When idle, ESC is a no-op (never exits the app).
+                return Ok(false);
             }
             InputEvent::Interrupt => {
                 if self.active_turn.is_some() {
@@ -670,9 +675,14 @@ impl InteractiveController {
                 }
             }
             KeybindingAction::SelectCancel => {
-                if !self.cancel_focused_overlay() {
-                    return Ok(true);
+                if self.cancel_focused_overlay() {
+                    return Ok(false);
                 }
+                if self.active_turn.is_some() {
+                    self.cancel_active_turn().await?;
+                    self.show_notice("Interrupted");
+                }
+                // When idle, ESC is a no-op (never exits the app).
             }
             KeybindingAction::EditorCursorUp | KeybindingAction::EditorCursorDown => {
                 unreachable!("prompt history actions are handled before overlay actions")
@@ -2841,7 +2851,8 @@ mod tests {
                         InputEvent::Insert('h'),
                         InputEvent::Insert('i'),
                         InputEvent::Submit,
-                        InputEvent::Cancel,
+                        InputEvent::Interrupt,
+                        InputEvent::Interrupt,
                     ]
                     .into_iter(),
                 },
@@ -2892,7 +2903,9 @@ mod tests {
                         InputEvent::Submit,
                         InputEvent::Insert('o'),
                         InputEvent::Insert('k'),
-                        InputEvent::Cancel,
+                        InputEvent::Interrupt,
+                        InputEvent::Interrupt,
+                        InputEvent::Interrupt,
                     ]),
                 },
             )
@@ -2944,7 +2957,8 @@ mod tests {
                     events: vec![
                         InputEvent::Paste("alpha\nbeta".to_owned()),
                         InputEvent::Submit,
-                        InputEvent::Cancel,
+                        InputEvent::Interrupt,
+                        InputEvent::Interrupt,
                     ]
                     .into_iter(),
                 },
@@ -2996,7 +3010,9 @@ mod tests {
                             columns: 100,
                             rows: 30,
                         },
-                        InputEvent::Cancel,
+                        InputEvent::Interrupt,
+                        InputEvent::Interrupt,
+                        InputEvent::Interrupt,
                     ]
                     .into_iter(),
                 },
@@ -3004,7 +3020,7 @@ mod tests {
             .await
             .expect("event loop succeeds");
 
-        assert_eq!(rendered.len(), 3);
+        assert_eq!(rendered.len(), 4);
         assert!(rendered[1].contains("> h"));
         assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
     }
@@ -3052,9 +3068,19 @@ mod tests {
                 .expect("insert succeeds");
         }
 
+        let mut last_prompt_text = String::new();
+        let mut last_prompt_cursor = 0usize;
+
         controller
             .run_terminal_loop(
-                |_app| Ok(()),
+                |app| {
+                    let prompt = app.prompt();
+                    if !prompt.text.is_empty() {
+                        last_prompt_text = prompt.text.clone();
+                        last_prompt_cursor = prompt.cursor;
+                    }
+                    Ok(())
+                },
                 FakeEvents {
                     events: vec![
                         InputEvent::Action(KeybindingAction::InputCopy),
@@ -3065,7 +3091,9 @@ mod tests {
                         InputEvent::Action(KeybindingAction::EditorUndo),
                         InputEvent::Action(KeybindingAction::EditorUndo),
                         InputEvent::Action(KeybindingAction::InputTab),
-                        InputEvent::Action(KeybindingAction::SelectCancel),
+                        InputEvent::Interrupt,
+                        InputEvent::Interrupt,
+                        InputEvent::Interrupt,
                     ]
                     .into_iter(),
                 },
@@ -3074,8 +3102,8 @@ mod tests {
             .expect("event loop succeeds");
 
         assert_eq!(controller.app().copy_buffer(), Some("hello brave world"));
-        assert_eq!(controller.app().prompt().text, "hello \tworld");
-        assert_eq!(controller.app().prompt().cursor, 7);
+        assert_eq!(last_prompt_text, "hello \tworld");
+        assert_eq!(last_prompt_cursor, 7);
     }
 
     #[tokio::test]
@@ -3508,6 +3536,100 @@ mod tests {
         assert!(!should_exit);
         assert_eq!(controller.app().prompt().text, "/");
         assert!(controller.app().focused_overlay().is_none());
+    }
+
+    #[tokio::test]
+    async fn event_loop_escape_cancels_active_turn() {
+        use std::{collections::VecDeque, sync::Arc as StdArc};
+
+        struct ScriptedEvents {
+            events: VecDeque<Option<InputEvent>>,
+        }
+
+        impl TerminalEvents for ScriptedEvents {
+            fn next_input_event(&mut self) -> Result<InputEvent> {
+                self.poll_input_event(Duration::from_millis(0))?
+                    .ok_or_else(|| anyhow::anyhow!("expected scripted input"))
+            }
+
+            fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+                Ok(self.events.pop_front().unwrap_or(Some(InputEvent::Interrupt)))
+            }
+        }
+
+        let captured_token = StdArc::new(std::sync::Mutex::new(None));
+        let observed_token = StdArc::clone(&captured_token);
+        let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+            let observed_token = StdArc::clone(&observed_token);
+            Box::pin(async move {
+                *observed_token.lock().expect("token lock") = Some(channels.cancel_token.clone());
+                channels.send_event(AgentEvent::TextDelta {
+                    turn: 1,
+                    text: "started".to_owned(),
+                });
+                channels.cancel_token.cancelled().await;
+                Ok(TurnOutcome::default())
+            })
+        });
+        let mut controller = InteractiveController::new_with_turn_driver(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            run_turn,
+            PickerCatalogs::default(),
+            Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        );
+
+        controller.type_text("cancel me");
+        controller
+            .run_terminal_loop(
+                |_app| Ok(()),
+                ScriptedEvents {
+                    events: VecDeque::from([
+                        Some(InputEvent::Submit),
+                        None,
+                        // ESC should cancel the active turn
+                        Some(InputEvent::Cancel),
+                        // After cancellation the app is idle; two Interrupts to exit
+                        Some(InputEvent::Interrupt),
+                        Some(InputEvent::Interrupt),
+                    ]),
+                },
+            )
+            .await
+            .expect("escape cancels turn and loop exits");
+
+        let token = captured_token
+            .lock()
+            .expect("token lock")
+            .clone()
+            .expect("turn token captured");
+        assert!(token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn event_loop_escape_is_noop_when_idle() {
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+
+        controller.type_text("hello");
+
+        // ESC when idle (no overlay, no active turn) should be a no-op
+        let should_exit = controller
+            .handle_input_event(InputEvent::Cancel)
+            .await
+            .expect("escape is no-op when idle");
+
+        assert!(!should_exit, "ESC should not exit the app when idle");
+        // Prompt text should be preserved (ESC is not clearing it)
+        assert_eq!(controller.app().prompt().text, "hello");
     }
 
     #[tokio::test]
@@ -4458,7 +4580,8 @@ command = "python3"
                 FakeEvents {
                     events: vec![
                         InputEvent::Action(KeybindingAction::SelectCancel),
-                        InputEvent::Action(KeybindingAction::SelectCancel),
+                        InputEvent::Interrupt,
+                        InputEvent::Interrupt,
                     ]
                     .into_iter(),
                 },
@@ -4736,7 +4859,7 @@ command = "python3"
             }
 
             fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
-                Ok(self.events.pop_front().unwrap_or(Some(InputEvent::Cancel)))
+                Ok(self.events.pop_front().unwrap_or(Some(InputEvent::Interrupt)))
             }
         }
 
@@ -4797,7 +4920,8 @@ command = "python3"
                         None,
                         Some(InputEvent::Action(KeybindingAction::SelectConfirm)),
                         None,
-                        Some(InputEvent::Cancel),
+                        Some(InputEvent::Interrupt),
+                        Some(InputEvent::Interrupt),
                     ]),
                 },
             )
@@ -4827,7 +4951,7 @@ command = "python3"
             }
 
             fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
-                Ok(self.events.pop_front().unwrap_or(Some(InputEvent::Cancel)))
+                Ok(self.events.pop_front().unwrap_or(Some(InputEvent::Interrupt)))
             }
         }
 
@@ -4894,7 +5018,7 @@ command = "python3"
             }
 
             fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
-                Ok(self.events.pop_front().unwrap_or(Some(InputEvent::Cancel)))
+                Ok(self.events.pop_front().unwrap_or(Some(InputEvent::Interrupt)))
             }
         }
 

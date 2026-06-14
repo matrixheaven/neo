@@ -1,3 +1,4 @@
+mod ask_user;
 mod bash;
 mod edit;
 mod find;
@@ -33,6 +34,14 @@ pub const DEFAULT_BASH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 pub use mcp::*;
 pub use process_supervisor::{ProcessKind, ProcessSupervisor};
+
+// Re-export AskUser tool types for external use (TUI / CLI layer).
+pub use ask_user::{
+    AskUserInput, AskUserOptionInput, AskUserQuestionInput, AskUserTool, PendingQuestion,
+    QuestionResponse,
+};
+// Re-export Todo tool types.
+pub use todo::{TodoInput, TodoItem, TodoStatus, TodoTool};
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolResult, ToolError>> + Send + 'a>>;
 
@@ -297,7 +306,7 @@ impl ToolRegistry {
         registry.register(grep::GrepTool);
         registry.register(find::FindTool);
         registry.register(glob::GlobTool);
-        registry.register(todo::TodoTool);
+        registry.register(self::todo::TodoTool::new());
         registry.register(write::WriteTool);
         registry.register(edit::EditTool);
         registry.register(bash::BashTool);

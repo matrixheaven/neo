@@ -192,6 +192,67 @@ pub enum AgentEvent {
         turn: u32,
         message: String,
     },
+    /// Plan mode was entered — read-only exploration plus plan file writes.
+    PlanModeEntered {
+        turn: u32,
+    },
+    /// Plan mode was exited — normal tool access restored.
+    PlanModeExited {
+        turn: u32,
+    },
+    /// Structured todo list was updated (for persistence + TUI panel).
+    TodoUpdated {
+        turn: u32,
+        todos: Vec<TodoEventData>,
+    },
+    /// `AskUser` question request (reverse-RPC from tool to host).
+    QuestionRequested {
+        turn: u32,
+        id: String,
+        questions: Vec<QuestionEventData>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Value types for new events
+// ---------------------------------------------------------------------------
+
+/// Serializable representation of a single todo item, used in
+/// [`AgentEvent::TodoUpdated`]. Kept in `events.rs` so that persistence
+/// does not depend on the `tools` module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TodoEventData {
+    /// Short, human-readable description of the task.
+    pub title: String,
+    /// Current status: `"pending"`, `"in_progress"`, or `"done"`.
+    pub status: String,
+}
+
+/// Serializable representation of a single question in an `AskUser` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct QuestionEventData {
+    /// The question text (should end with `?`).
+    pub question: String,
+    /// Optional short header displayed above the question (max ~12 chars).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// Optional longer body / context for the question.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// Available options the user can choose from.
+    pub options: Vec<QuestionOptionData>,
+    /// Whether the user may select multiple options.
+    pub multi_select: bool,
+}
+
+/// Serializable representation of a single option in a question.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct QuestionOptionData {
+    /// Short label shown as the choice.
+    pub label: String,
+    /// Optional description explaining the option.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -218,4 +279,131 @@ pub struct CompactionSummary {
     pub summary: String,
     pub tokens_before: usize,
     pub first_kept_message_index: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn todo_event_data_serializes() {
+        let data = TodoEventData {
+            title: "Task".into(),
+            status: "in_progress".into(),
+        };
+        let json = serde_json::to_string(&data).expect("serialize");
+        assert!(json.contains("\"title\":\"Task\""));
+        assert!(json.contains("\"status\":\"in_progress\""));
+        let back: TodoEventData = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(data, back);
+    }
+
+    #[test]
+    fn question_event_data_serializes() {
+        let data = QuestionEventData {
+            question: "Which?".into(),
+            header: Some("Choice".into()),
+            body: None,
+            options: vec![QuestionOptionData {
+                label: "A".into(),
+                description: Some("desc".into()),
+            }],
+            multi_select: false,
+        };
+        let json = serde_json::to_string(&data).expect("serialize");
+        assert!(json.contains("\"question\":\"Which?\""));
+        assert!(json.contains("\"multi_select\":false"));
+        // body is None and should be skipped.
+        assert!(!json.contains("\"body\""));
+        let back: QuestionEventData = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(data, back);
+    }
+
+    #[test]
+    fn plan_mode_entered_serializes() {
+        let event = AgentEvent::PlanModeEntered { turn: 3 };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"PlanModeEntered\""));
+        assert!(json.contains("\"turn\":3"));
+        let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(event, back);
+    }
+
+    #[test]
+    fn plan_mode_exited_serializes() {
+        let event = AgentEvent::PlanModeExited { turn: 5 };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"PlanModeExited\""));
+        let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(event, back);
+    }
+
+    #[test]
+    fn todo_updated_serializes() {
+        let event = AgentEvent::TodoUpdated {
+            turn: 2,
+            todos: vec![
+                TodoEventData {
+                    title: "A".into(),
+                    status: "done".into(),
+                },
+                TodoEventData {
+                    title: "B".into(),
+                    status: "pending".into(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"TodoUpdated\""));
+        assert!(json.contains("\"todos\""));
+        let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(event, back);
+    }
+
+    #[test]
+    fn question_requested_serializes() {
+        let event = AgentEvent::QuestionRequested {
+            turn: 1,
+            id: "q-123".into(),
+            questions: vec![QuestionEventData {
+                question: "Test?".into(),
+                header: None,
+                body: None,
+                options: vec![
+                    QuestionOptionData {
+                        label: "Yes".into(),
+                        description: None,
+                    },
+                    QuestionOptionData {
+                        label: "No".into(),
+                        description: None,
+                    },
+                ],
+                multi_select: false,
+            }],
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"QuestionRequested\""));
+        assert!(json.contains("\"q-123\""));
+        let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(event, back);
+    }
+
+    #[test]
+    fn todo_event_data_eq() {
+        let a = TodoEventData {
+            title: "X".into(),
+            status: "done".into(),
+        };
+        let b = TodoEventData {
+            title: "X".into(),
+            status: "done".into(),
+        };
+        let c = TodoEventData {
+            title: "X".into(),
+            status: "pending".into(),
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
 }

@@ -1006,7 +1006,11 @@ impl NeoTuiApp {
             | AgentEvent::MessageFinished { .. }
             | AgentEvent::TerminalSessionStarted { .. }
             | AgentEvent::TerminalSessionOutput { .. }
-            | AgentEvent::TerminalSessionFinished { .. } => {}
+            | AgentEvent::TerminalSessionFinished { .. }
+            | AgentEvent::PlanModeEntered { .. }
+            | AgentEvent::PlanModeExited { .. }
+            | AgentEvent::TodoUpdated { .. }
+            | AgentEvent::QuestionRequested { .. } => {}
         }
     }
 

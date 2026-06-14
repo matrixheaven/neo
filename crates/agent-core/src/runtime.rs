@@ -1,4 +1,8 @@
-use std::{future::Future, path::PathBuf, sync::Arc};
+use std::{
+    future::Future,
+    path::PathBuf,
+    sync::{Arc, Mutex, RwLock},
+};
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream, stream::FuturesUnordered};
 use neo_ai::{
@@ -13,8 +17,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     AgentEvent, AgentMessage, AgentToolCall, CompactionPhase, CompactionReason, CompactionSummary,
-    Content, PermissionDecision, PermissionOperation, PermissionPolicy, ProcessSupervisor,
-    QueueKind, StopReason, ToolContext, ToolError, ToolRegistry, ToolResult, ToolUpdateCallback,
+    Content, PermissionDecision, PermissionOperation, PermissionPolicy, PlanModeState,
+    ProcessSupervisor, QueueKind, StopReason, TodoEventData, ToolContext, ToolError, ToolRegistry,
+    ToolResult, ToolUpdateCallback, check_plan_mode_guard,
 };
 
 pub type ContextTransform = Arc<dyn Fn(&[AgentMessage]) -> Vec<AgentMessage> + Send + Sync>;
@@ -96,6 +101,20 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub async_approval_handler: Option<AsyncApprovalHandler>,
+    /// Shared plan-mode state. Checked before every tool call via
+    /// [`check_plan_mode_guard`]. Updated when the model calls
+    /// `enter_plan_mode` / `exit_plan_mode`.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub plan_mode: Arc<RwLock<PlanModeState>>,
+    /// Home directory used for plan file creation (e.g. `~/.neo`).
+    /// Falls back to `workspace_root` if unset.
+    pub home_dir: Option<PathBuf>,
+    /// Shared todo list state. Written by `TodoTool`, read for event emission
+    /// after each tool call batch, and restored on resume replay.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub todos: Arc<Mutex<Vec<TodoEventData>>>,
 }
 
 impl AgentConfig {
@@ -122,6 +141,9 @@ impl AgentConfig {
             async_after_tool_call: None,
             approval_handler: None,
             async_approval_handler: None,
+            plan_mode: Arc::new(RwLock::new(PlanModeState::default())),
+            home_dir: None,
+            todos: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -239,6 +261,28 @@ impl AgentConfig {
         self.async_approval_handler = Some(Arc::new(move |request| handler(request).boxed()));
         self
     }
+
+    /// Set the home directory used for plan file creation.
+    #[must_use]
+    pub fn with_home_dir(mut self, home_dir: impl Into<PathBuf>) -> Self {
+        self.home_dir = Some(home_dir.into());
+        self
+    }
+
+    /// Replace the shared plan-mode state. Useful when constructing from a
+    /// pre-existing state (e.g. after replay).
+    #[must_use]
+    pub fn with_plan_mode(mut self, plan_mode: Arc<RwLock<PlanModeState>>) -> Self {
+        self.plan_mode = plan_mode;
+        self
+    }
+
+    /// Replace the shared todo list state.
+    #[must_use]
+    pub fn with_todos(mut self, todos: Arc<Mutex<Vec<TodoEventData>>>) -> Self {
+        self.todos = todos;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -267,6 +311,12 @@ pub struct AgentContext {
     steering_queue: Vec<AgentMessage>,
     follow_up_queue: Vec<AgentMessage>,
     compaction_summary: Option<CompactionSummary>,
+    /// Whether plan mode was active at the end of the last replayed/exected turn.
+    #[serde(default)]
+    plan_mode_active: bool,
+    /// Latest todo list state, restored on resume replay.
+    #[serde(default)]
+    todos: Vec<TodoEventData>,
 }
 
 impl AgentContext {
@@ -319,6 +369,18 @@ impl AgentContext {
         self.follow_up_queue.len()
     }
 
+    /// Whether plan mode is currently active (from replayed state).
+    #[must_use]
+    pub fn is_plan_mode_active(&self) -> bool {
+        self.plan_mode_active
+    }
+
+    /// Latest todo list from replayed state.
+    #[must_use]
+    pub fn todos(&self) -> &[TodoEventData] {
+        &self.todos
+    }
+
     pub fn cancel(&mut self) {
         self.cancelled = true;
     }
@@ -361,6 +423,16 @@ impl AgentContext {
                 AgentEvent::CompactionApplied { summary } => {
                     context.apply_compaction(summary.clone());
                 }
+                AgentEvent::PlanModeEntered { .. } => {
+                    context.plan_mode_active = true;
+                }
+                AgentEvent::PlanModeExited { .. } => {
+                    context.plan_mode_active = false;
+                }
+                AgentEvent::TodoUpdated { todos, .. } => {
+                    context.todos.clone_from(todos);
+                }
+                // QuestionRequested is interactive — not replayed.
                 _ => {}
             }
         }
@@ -721,6 +793,15 @@ impl EventEmitter {
             AgentEvent::CompactionApplied { summary } => {
                 context.apply_compaction(summary.clone());
             }
+            AgentEvent::PlanModeEntered { .. } => {
+                context.plan_mode_active = true;
+            }
+            AgentEvent::PlanModeExited { .. } => {
+                context.plan_mode_active = false;
+            }
+            AgentEvent::TodoUpdated { todos, .. } => {
+                context.todos.clone_from(todos);
+            }
             _ => {}
         }
     }
@@ -754,6 +835,7 @@ impl EventPublisher for EventSink {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_agent_turn(
     model: Arc<dyn ModelClient>,
     config: AgentConfig,
@@ -838,6 +920,49 @@ async fn run_agent_turn(
                 result.is_error,
             );
             emitter.emit(AgentEvent::MessageAppended { message });
+        }
+        // Intercept plan-mode tools and todo tool to emit structured events.
+        for (tool_call, result) in &tool_results {
+            if result.terminate {
+                match tool_call.name.as_str() {
+                    "enter_plan_mode" => {
+                        let mut pm = config.plan_mode.write().unwrap();
+                        let homedir = config
+                            .home_dir
+                            .as_deref()
+                            .or(config.workspace_root.as_deref());
+                        if let Some(home) = homedir {
+                            if pm.enter(home).is_ok() {
+                                drop(pm);
+                                emitter.emit(AgentEvent::PlanModeEntered { turn });
+                            }
+                        } else {
+                            // No home_dir — activate without a plan file.
+                            pm.is_active = true;
+                            drop(pm);
+                            emitter.emit(AgentEvent::PlanModeEntered { turn });
+                        }
+                    }
+                    "exit_plan_mode" => {
+                        let mut pm = config.plan_mode.write().unwrap();
+                        pm.exit();
+                        drop(pm);
+                        emitter.emit(AgentEvent::PlanModeExited { turn });
+                    }
+                    _ => {}
+                }
+            }
+            if tool_call.name == "todo" && !result.is_error
+                && let Some(details) = &result.details
+                && let Some(todos_val) = details.get("todos")
+                && let Ok(todos) = serde_json::from_value::<Vec<TodoEventData>>(todos_val.clone())
+            {
+                // Sync shared todo state.
+                if let Ok(mut shared) = config.todos.lock() {
+                    shared.clone_from(&todos);
+                }
+                emitter.emit(AgentEvent::TodoUpdated { turn, todos });
+            }
         }
         if terminates_tool_batch(&tool_results) {
             break;
@@ -1591,6 +1716,21 @@ async fn prepare_tool_context(
     tool_call: &AgentToolCall,
     emitter: &mut impl EventPublisher,
 ) -> ToolPreparation {
+    // --- Plan-mode guard: check BEFORE normal permission policy ---
+    {
+        let plan_mode = config.plan_mode.read().unwrap();
+        if plan_mode.is_active {
+            let decision =
+                check_plan_mode_guard(&plan_mode, &tool_call.name, &tool_call.arguments);
+            if decision == PermissionDecision::Deny {
+                return ToolPreparation::Skip(ToolResult::error(format!(
+                    "blocked by plan mode: {} is read-only while planning",
+                    tool_call.name
+                )));
+            }
+        }
+    }
+
     let mut context = base_context.clone();
     if let Some(result) = permission_result_for_decision(
         config.tool_permission_policy.tool,
