@@ -20,12 +20,13 @@ use std::{
 
 use anyhow::{Context, Result};
 use crossterm::{
+    cursor::MoveTo,
     event::{
         self, DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, size},
+    terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size},
 };
 use neo_agent_core::{
     AgentEvent, AgentMessage, PermissionDecision,
@@ -2211,12 +2212,23 @@ impl InlineTerminal {
             EnableBracketedPaste,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
-        let backend = CrosstermBackend::new(output);
-        let terminal = Terminal::new(backend)?;
 
         // Query cursor position to know where to anchor the viewport.
         let (_cols, rows) = size()?;
         let cursor_row = query_cursor_row().unwrap_or(rows.saturating_sub(1));
+        let viewport_top = cursor_row.min(rows.saturating_sub(1));
+
+        // Clear from the cursor position to the bottom of the screen so existing
+        // terminal content doesn't overlap with our viewport. This is the same
+        // technique codex uses: clear_after_position → ClearType::FromCursorDown.
+        execute!(
+            output,
+            MoveTo(0, viewport_top),
+            Clear(ClearType::FromCursorDown)
+        )?;
+
+        let backend = CrosstermBackend::new(output);
+        let terminal = Terminal::new(backend)?;
 
         Ok(Self {
             terminal,
