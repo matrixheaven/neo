@@ -1,18 +1,11 @@
-use ratatui::{
-    buffer::Buffer,
-    layout::{Alignment, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Widget},
-};
+use crate::ansi::{Rect, Style};
 use std::{collections::BTreeSet, fmt::Write as _};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 use crate::{
-    ApprovalModal, ChatTranscript, DiffLine, DiffModel, NeoTuiApp, Overlay, OverlayKind,
-    PromptState, TodoPanel, ToolRunTranscript, ToolStatus, ToolStatusKind, TranscriptItem,
-    TranscriptLine, TranscriptRenderer, TranscriptSelection, TranscriptView, TuiTheme,
-    widgets::{QuestionDialogWidget, QuestionStateMachine},
+    ApprovalModal, ChatTranscript, DiffLine, DiffModel, NeoTuiApp, OverlayKind, PromptState,
+    TodoPanel, ToolRunTranscript, ToolStatusKind, TranscriptItem, TranscriptLine,
+    TranscriptRenderer, TranscriptSelection, TranscriptView, TuiTheme,
 };
 
 const COMPACTION_BAR_WIDTH: usize = 30;
@@ -334,34 +327,17 @@ impl<'a> TranscriptWidget<'a> {
     }
 }
 
-impl Widget for TranscriptWidget<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let text_width = usize::from(area.width.saturating_sub(2).max(1));
-        let rows = transcript_render_rows(
-            self.transcript,
-            self.selection,
-            self.expanded_items,
-            self.theme,
-            text_width,
-        );
+/// A lightweight styled text fragment.
+struct Span {
+    content: String,
+    style: Style,
+}
 
-        let range = self.view.map_or_else(
-            || bottom_row_range(rows.len(), usize::from(area.height)),
-            |view| view.visible_row_range(rows.len(), usize::from(area.height)),
-        );
-        let mut y = area.y;
-        for row in &rows[range] {
-            if y >= area.bottom() {
-                break;
-            }
-            if let Some(fill) = row.fill {
-                fill_line(area, buf, y, fill);
-            }
-            match &row.content {
-                RowContent::Plain(text) => write_line(area, buf, y, text, row.style),
-                RowContent::Spans(spans) => render_spans(area, buf, y, spans, row.style),
-            }
-            y = y.saturating_add(1);
+impl Span {
+    fn styled(content: impl Into<String>, style: Style) -> Self {
+        Self {
+            content: content.into(),
+            style,
         }
     }
 }
@@ -471,9 +447,7 @@ fn transcript_render_rows(
             let prefix = "● ";
             if let Some(thinking) = thinking.as_deref().filter(|thinking| !thinking.is_empty()) {
                 let think_style = selected_style(
-                    Style::default()
-                        .fg(theme.thinking)
-                        .add_modifier(Modifier::ITALIC),
+                    Style::default().fg(theme.thinking).italic(),
                     selected,
                     theme,
                 );
@@ -619,9 +593,7 @@ fn banner_render_rows(
 ) -> Vec<TranscriptRenderRow> {
     let border_style = selected_style(Style::default().fg(theme.surface_border), selected, theme);
     let header_style = selected_style(
-        Style::default()
-            .fg(theme.header)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(theme.header).bold(),
         selected,
         theme,
     );
@@ -701,7 +673,7 @@ fn tool_render_rows(
         ToolStatusKind::Cancelled => theme.cancelled,
     };
     let header_base = selected_style(Style::default(), selected, theme);
-    let header_style = Style::default().fg(header_fg).add_modifier(Modifier::BOLD);
+    let header_style = Style::default().fg(header_fg).bold();
     let muted_style = Style::default().fg(theme.muted);
     let body_style = selected_style(Style::default().fg(theme.notice), selected, theme);
     let error_style = selected_style(Style::default().fg(theme.failed), selected, theme);
@@ -809,7 +781,7 @@ fn read_group_render_rows(
     } else {
         theme.succeeded
     };
-    let header_style = Style::default().fg(header_fg).add_modifier(Modifier::BOLD);
+    let header_style = Style::default().fg(header_fg).bold();
     let muted_style = Style::default().fg(theme.muted);
     let body_style = Style::default().fg(theme.notice);
     let error_body_style = Style::default().fg(theme.failed);
@@ -1074,9 +1046,7 @@ fn diff_tool_render_rows(
         rows.push(TranscriptRenderRow::new(
             format!("  {}", hunk.header),
             selected_style(
-                Style::default()
-                    .fg(theme.diff_hunk)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.diff_hunk).bold(),
                 selected,
                 theme,
             ),
@@ -1228,7 +1198,7 @@ fn fit_tool_line(text: &str, width: usize) -> String {
 
 enum RowContent {
     Plain(String),
-    Spans(Vec<Span<'static>>),
+    Spans(Vec<Span>),
 }
 
 struct TranscriptRenderRow {
@@ -1246,7 +1216,7 @@ impl TranscriptRenderRow {
         }
     }
 
-    fn new_spans(spans: Vec<Span<'static>>, style: Style, fill: Option<Style>) -> Self {
+    fn new_spans(spans: Vec<Span>, style: Style, fill: Option<Style>) -> Self {
         Self {
             content: RowContent::Spans(spans),
             style,
@@ -1257,15 +1227,6 @@ impl TranscriptRenderRow {
     fn blank() -> Self {
         Self::new("", Style::default(), None)
     }
-}
-
-fn bottom_row_range(row_count: usize, height: usize) -> std::ops::Range<usize> {
-    if height == 0 || row_count == 0 {
-        return 0..0;
-    }
-
-    let window = height.min(row_count);
-    row_count - window..row_count
 }
 
 fn selected_style(style: Style, selected: bool, theme: TuiTheme) -> Style {
@@ -1330,507 +1291,10 @@ fn transcript_line_style(line: &TranscriptLine, base: Style, theme: TuiTheme) ->
         TranscriptLine::DiffFileHeader { marker: '-', .. } | TranscriptLine::DiffRemoved { .. } => {
             Style::default().fg(theme.diff_removed)
         }
-        TranscriptLine::DiffHunk { .. } => Style::default()
-            .fg(theme.diff_hunk)
-            .add_modifier(Modifier::BOLD),
+        TranscriptLine::DiffHunk { .. } => Style::default().fg(theme.diff_hunk).bold(),
         TranscriptLine::DiffContext { .. } => Style::default().fg(theme.diff_context),
         _ => base,
     }
-}
-
-pub struct StatusWidget<'a> {
-    statuses: &'a [ToolStatus],
-    theme: TuiTheme,
-}
-
-impl<'a> StatusWidget<'a> {
-    #[must_use]
-    pub fn new(statuses: &'a [ToolStatus]) -> Self {
-        Self {
-            statuses,
-            theme: TuiTheme::default(),
-        }
-    }
-
-    #[must_use]
-    pub const fn with_theme(mut self, theme: TuiTheme) -> Self {
-        self.theme = theme;
-        self
-    }
-}
-
-impl Widget for StatusWidget<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        for (index, status) in self
-            .statuses
-            .iter()
-            .enumerate()
-            .take(usize::from(area.height))
-        {
-            let Ok(row) = u16::try_from(index) else {
-                break;
-            };
-            let detail = status.detail.as_deref().unwrap_or("");
-            let separator = if detail.is_empty() { "" } else { " - " };
-            let line = format!(
-                "{} {} {}{}{}",
-                status.kind.marker(),
-                status.name,
-                status.kind.label(),
-                separator,
-                detail
-            );
-            write_line(
-                area,
-                buf,
-                area.y + row,
-                &line,
-                status_style(status.kind, self.theme),
-            );
-        }
-    }
-}
-
-pub struct PromptWidget<'a> {
-    prompt: &'a PromptState,
-    theme: TuiTheme,
-}
-
-impl<'a> PromptWidget<'a> {
-    #[must_use]
-    pub fn new(prompt: &'a PromptState) -> Self {
-        Self {
-            prompt,
-            theme: TuiTheme::default(),
-        }
-    }
-
-    #[must_use]
-    pub const fn with_theme(mut self, theme: TuiTheme) -> Self {
-        self.theme = theme;
-        self
-    }
-}
-
-impl Widget for PromptWidget<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-
-        buf.set_style(area, Style::default().bg(self.theme.composer_bg));
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.overlay_border));
-        let inner = block.inner(area);
-        block.render(area, buf);
-
-        let mut display = String::from("> ");
-        for (index, character) in self.prompt.text.chars().enumerate() {
-            if index == self.prompt.cursor {
-                display.push('▏');
-            }
-            display.push(character);
-        }
-        if self.prompt.cursor >= self.prompt.text.chars().count() {
-            display.push('▏');
-        }
-
-        let width = usize::from(inner.width.max(1));
-        for (row, line) in wrap_width(&display, width)
-            .into_iter()
-            .enumerate()
-            .take(usize::from(inner.height))
-        {
-            let Ok(row) = u16::try_from(row) else {
-                break;
-            };
-            write_line(
-                inner,
-                buf,
-                inner.y + row,
-                &line,
-                Style::default().fg(self.theme.prompt),
-            );
-        }
-    }
-}
-
-impl Widget for ApprovalModal {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        Clear.render(area, buf);
-        buf.set_style(area, Style::default().bg(self.theme.approval_bg));
-
-        let block = Block::default()
-            .title(" Action required ")
-            .title_alignment(Alignment::Left)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.approval_border));
-        let inner = block.inner(area);
-        block.render(area, buf);
-
-        let content_area = Rect {
-            x: inner.x.saturating_add(1),
-            y: inner.y,
-            width: inner.width.saturating_sub(2).max(1),
-            height: inner.height,
-        };
-        let text_width = usize::from(content_area.width.max(1));
-        let mut y = inner.y;
-        write_line(
-            content_area,
-            buf,
-            y,
-            &self.title,
-            Style::default()
-                .fg(self.theme.approval_title)
-                .add_modifier(Modifier::BOLD),
-        );
-        y = y.saturating_add(1);
-
-        for line in wrap_width(&self.body, text_width) {
-            if y >= content_area.bottom() {
-                return;
-            }
-            write_line(content_area, buf, y, &line, Style::default());
-            y = y.saturating_add(1);
-        }
-
-        y = y.saturating_add(1);
-        if y < content_area.bottom() {
-            let hints = self
-                .options
-                .iter()
-                .enumerate()
-                .map(|(index, option)| format!("{}. {}", index + 1, option.label))
-                .collect::<Vec<_>>()
-                .join(" · ");
-            write_line(
-                content_area,
-                buf,
-                y,
-                &hints,
-                Style::default().fg(self.theme.notice),
-            );
-            y = y.saturating_add(1);
-        }
-        for (index, option) in self.options.iter().enumerate() {
-            if y >= content_area.bottom() {
-                break;
-            }
-            let marker = if index == self.selected { ">" } else { " " };
-            let style = if index == self.selected {
-                Style::default()
-                    .fg(self.theme.selected_fg)
-                    .bg(self.theme.selected_bg)
-            } else {
-                Style::default().fg(self.theme.prompt)
-            };
-            write_line(
-                content_area,
-                buf,
-                y,
-                &format!("{marker} {}", option.label),
-                style,
-            );
-            y = y.saturating_add(1);
-        }
-    }
-}
-
-impl Widget for &NeoTuiApp {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-
-        buf.set_style(area, Style::default().bg(self.theme().background));
-
-        let approval_overlay = match self.focused_overlay().map(|overlay| &overlay.kind) {
-            Some(OverlayKind::Approval(request)) => Some(request),
-            _ => None,
-        };
-        let question_overlay = match self.focused_overlay().map(|overlay| &overlay.kind) {
-            Some(OverlayKind::QuestionDialog(state)) => Some(state),
-            _ => None,
-        };
-        let layout = app_layout(self, area);
-        TranscriptWidget::new(self.transcript())
-            .with_view(self.transcript_view())
-            .with_selection(self.transcript_selection())
-            .with_expanded_items(self.expanded_transcript_items())
-            .with_theme(self.theme())
-            .render(layout.body, buf);
-
-        // TodoPanel between transcript and input.
-        if self.has_todos() {
-            TodoPanel::new(self.todo_items())
-                .with_theme(self.theme())
-                .render(layout.todo, buf);
-        }
-
-        if let Some(request) = approval_overlay {
-            request
-                .modal
-                .clone()
-                .with_theme(self.theme())
-                .render(layout.approval, buf);
-        }
-
-        if let Some(overlay) = self.focused_overlay()
-            && let OverlayKind::SessionPicker(state) = &overlay.kind
-        {
-            render_session_picker(state, layout.session_picker, buf, self.theme());
-        }
-
-        PromptWidget::new(self.prompt())
-            .with_theme(self.theme())
-            .render(layout.prompt, buf);
-
-        render_footer(self, layout.footer, buf);
-
-        // QuestionDialog: centered modal overlay.
-        if let Some(state) = question_overlay {
-            render_question_dialog(state, area, buf, self.theme());
-        } else if let Some(overlay) = self.focused_overlay()
-            && !matches!(
-                overlay.kind,
-                OverlayKind::Approval(_)
-                    | OverlayKind::SessionPicker(_)
-                    | OverlayKind::QuestionDialog(_)
-            )
-        {
-            render_overlay(overlay, area, layout.prompt.y, buf);
-        }
-    }
-}
-
-fn render_session_picker(
-    state: &crate::SessionPickerState,
-    area: Rect,
-    buf: &mut Buffer,
-    theme: TuiTheme,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-
-    Clear.render(area, buf);
-    let block = Block::default()
-        .title(" Sessions ")
-        .title_alignment(Alignment::Left)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.overlay_border));
-    let inner = block.inner(area);
-    block.render(area, buf);
-
-    let mut y = inner.y;
-    for item in state.list().visible_items().iter().take(4) {
-        if y.saturating_add(2) >= inner.bottom() {
-            break;
-        }
-        let selected = item.selected;
-        let marker = if selected { ">" } else { " " };
-        let mut fields = item
-            .item
-            .description
-            .as_deref()
-            .unwrap_or_default()
-            .split(" | ");
-        let id = fields.next().unwrap_or(&item.item.value);
-        let time = fields.next().unwrap_or("");
-        let workspace = fields.next().unwrap_or("");
-        let prompt = fields.next().unwrap_or("");
-        let title_line = format!("{marker} {}  {time}", item.item.label);
-        let meta_line = format!("  {id}  {workspace}");
-        let prompt_line = format!("  > {prompt}");
-        let title_style = if selected {
-            Style::default()
-                .fg(theme.selected_fg)
-                .bg(theme.selected_bg)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.prompt)
-        };
-        write_line(inner, buf, y, &title_line, title_style);
-        y = y.saturating_add(1);
-        write_line(inner, buf, y, &meta_line, Style::default().fg(theme.muted));
-        y = y.saturating_add(1);
-        write_line(
-            inner,
-            buf,
-            y,
-            &prompt_line,
-            Style::default().fg(theme.muted),
-        );
-        y = y.saturating_add(1);
-    }
-
-    if inner.height > 0 {
-        let hint_y = inner.bottom().saturating_sub(1);
-        write_line(
-            inner,
-            buf,
-            hint_y,
-            "↑↓ navigate · Enter resume · Esc cancel · Ctrl+N fork",
-            Style::default().fg(theme.notice),
-        );
-    }
-}
-
-#[allow(clippy::too_many_lines)]
-fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-
-    buf.set_style(area, Style::default().bg(app.theme().background));
-
-    let theme = app.theme();
-    let (permission_label, permission_color) = app.permission_badge();
-    let muted = Style::default().fg(theme.muted);
-    let working_style = Style::default().fg(theme.footer_working);
-    let context_style = Style::default().fg(app.context_color());
-
-    let mut status_spans = vec![
-        Span::styled(
-            format!("[{permission_label}]"),
-            Style::default().fg(permission_color),
-        ),
-        Span::raw(" "),
-    ];
-    if app.is_plan_mode() {
-        status_spans.push(Span::styled(
-            "[PLAN MODE]",
-            Style::default()
-                .fg(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        ));
-        status_spans.push(Span::raw(" "));
-    }
-    if let Some(working) = app.working_label() {
-        status_spans.push(Span::styled(format!("● {working}"), working_style));
-        status_spans.push(Span::raw(" "));
-    }
-    status_spans.push(Span::styled(app.cwd_label(), muted));
-
-    let context_label = app.context_window_label();
-
-    if area.height >= 2 {
-        let status_area = Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width,
-            height: 1,
-        };
-        render_truncated_line(status_spans, status_area, buf);
-
-        let hints_y = area.y.saturating_add(1);
-        let hint_style = Style::default().fg(theme.footer_hint);
-        let narrow = area.width < 50;
-        let hints = if narrow {
-            "enter send · esc interrupt".to_owned()
-        } else {
-            "enter send · shift+enter/ctrl+j newline · / commands".to_owned()
-        };
-
-        let context_width: u16 = context_label
-            .as_ref()
-            .map_or(0, |label| u16::try_from(visible_width(label)).unwrap_or(0));
-        let gap: u16 = u16::from(context_width > 0);
-        let left_width = area.width.saturating_sub(context_width).saturating_sub(gap);
-
-        let hints_area = Rect {
-            x: area.x,
-            y: hints_y,
-            width: left_width,
-            height: 1,
-        };
-        render_truncated_line(vec![Span::styled(hints, hint_style)], hints_area, buf);
-
-        if let Some(context_label) = context_label {
-            let context_area = Rect {
-                x: area.x.saturating_add(left_width).saturating_add(gap),
-                y: hints_y,
-                width: context_width,
-                height: 1,
-            };
-            render_truncated_line_right(
-                vec![Span::styled(context_label, context_style)],
-                context_area,
-                buf,
-            );
-        }
-    } else {
-        // Single-line footer: status left, context right (hints hidden).
-        let context_width: u16 = context_label
-            .as_ref()
-            .map_or(0, |label| u16::try_from(visible_width(label)).unwrap_or(0));
-        let gap: u16 = u16::from(context_width > 0);
-        let left_width = area.width.saturating_sub(context_width).saturating_sub(gap);
-
-        let status_area = Rect {
-            x: area.x,
-            y: area.y,
-            width: left_width,
-            height: 1,
-        };
-        render_truncated_line(status_spans, status_area, buf);
-
-        if let Some(context_label) = context_label {
-            let context_area = Rect {
-                x: area.x.saturating_add(left_width).saturating_add(gap),
-                y: area.y,
-                width: context_width,
-                height: 1,
-            };
-            render_truncated_line_right(
-                vec![Span::styled(context_label, context_style)],
-                context_area,
-                buf,
-            );
-        }
-    }
-}
-
-fn render_truncated_line(spans: Vec<Span<'_>>, area: Rect, buf: &mut Buffer) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let line = Line::from(truncate_spans(spans, usize::from(area.width)));
-    Paragraph::new(line).render(area, buf);
-}
-
-fn render_truncated_line_right(spans: Vec<Span<'_>>, area: Rect, buf: &mut Buffer) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let line = Line::from(truncate_spans(spans, usize::from(area.width)));
-    Paragraph::new(line)
-        .alignment(Alignment::Right)
-        .render(area, buf);
-}
-
-fn truncate_spans(spans: Vec<Span<'_>>, max_width: usize) -> Vec<Span<'_>> {
-    let mut used = 0;
-    let mut out = Vec::new();
-    for span in spans {
-        let width = visible_width(&span.content);
-        if used + width <= max_width {
-            used += width;
-            out.push(span);
-        } else {
-            let remaining = max_width.saturating_sub(used);
-            if remaining > 0 {
-                out.push(Span::styled(
-                    clip_width(&span.content, remaining),
-                    span.style,
-                ));
-            }
-            break;
-        }
-    }
-    out
 }
 
 fn approval_panel_height(modal: &ApprovalModal, width: u16) -> u16 {
@@ -1851,163 +1315,6 @@ fn prompt_height(prompt: &PromptState, width: u16) -> u16 {
         .len()
         .clamp(1, 6);
     u16::try_from(lines.saturating_add(2)).unwrap_or(8)
-}
-
-/// Render the question dialog as a centered modal.
-fn render_question_dialog(
-    state: &QuestionStateMachine,
-    area: Rect,
-    buf: &mut Buffer,
-    theme: TuiTheme,
-) {
-    let widget = QuestionDialogWidget::new(state, theme);
-    let width = area.width.saturating_sub(4).clamp(40, 72);
-    let height = widget.desired_height(area);
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(height) / 2;
-    let dialog_area = Rect {
-        x,
-        y,
-        width,
-        height,
-    };
-    widget.render(dialog_area, buf);
-}
-
-fn render_overlay(overlay: &Overlay, area: Rect, composer_y: u16, buf: &mut Buffer) {
-    let width = area.width.saturating_sub(4).clamp(20, 56);
-    let lines = overlay_lines(overlay, usize::from(width.saturating_sub(2).max(1)));
-    let content_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-    let height = content_height.saturating_add(2).min(area.height).max(3);
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = if matches!(overlay.kind, OverlayKind::PromptCompletion(_)) {
-        composer_y
-            .saturating_sub(height)
-            .max(area.y.saturating_add(1))
-    } else {
-        area.y + area.height.saturating_sub(height) / 2
-    };
-    let overlay_area = Rect {
-        x,
-        y,
-        width,
-        height,
-    };
-
-    if let OverlayKind::Approval(request) = &overlay.kind {
-        request.modal.clone().render(overlay_area, buf);
-        return;
-    }
-
-    Clear.render(overlay_area, buf);
-    let title = overlay_title(overlay);
-    let block = Block::default()
-        .title(title)
-        .title_alignment(Alignment::Center)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue));
-    let inner = block.inner(overlay_area);
-    block.render(overlay_area, buf);
-
-    for (index, line) in lines.iter().enumerate().take(usize::from(inner.height)) {
-        let Ok(row) = u16::try_from(index) else {
-            break;
-        };
-        write_line(inner, buf, inner.y + row, line, Style::default());
-    }
-}
-
-fn overlay_title(overlay: &Overlay) -> &str {
-    match overlay.kind {
-        OverlayKind::CommandPalette(_) => "Command Palette",
-        OverlayKind::SessionPicker(_) => "Sessions",
-        OverlayKind::ModelPicker(_) => "Models",
-        OverlayKind::PromptCompletion(_) => "Completions",
-        OverlayKind::Approval(_) => "Approval",
-        OverlayKind::QuestionDialog(_) => "Questions",
-        OverlayKind::Message(_) => overlay.title.as_str(),
-    }
-}
-
-fn overlay_lines(overlay: &Overlay, width: usize) -> Vec<String> {
-    match &overlay.kind {
-        OverlayKind::CommandPalette(state) => state.render_lines(width),
-        OverlayKind::SessionPicker(state) | OverlayKind::ModelPicker(state) => {
-            state.render_lines(width)
-        }
-        OverlayKind::PromptCompletion(state) => state.render_lines(width),
-        OverlayKind::Approval(request) => wrap_width(&request.modal.body, width),
-        OverlayKind::QuestionDialog(_) => Vec::new(),
-        OverlayKind::Message(message) => wrap_width(message, width),
-    }
-}
-
-fn status_style(kind: ToolStatusKind, theme: TuiTheme) -> Style {
-    match kind {
-        ToolStatusKind::Pending => Style::default().fg(theme.pending),
-        ToolStatusKind::Running => Style::default().fg(theme.accent),
-        ToolStatusKind::Succeeded => Style::default().fg(theme.succeeded),
-        ToolStatusKind::Failed => Style::default().fg(theme.failed),
-        ToolStatusKind::Cancelled => Style::default().fg(theme.cancelled),
-    }
-}
-
-fn write_line(area: Rect, buf: &mut Buffer, y: u16, text: &str, style: Style) {
-    if area.width == 0 || y >= area.bottom() {
-        return;
-    }
-
-    let clipped = clip_width(text, usize::from(area.width));
-    buf.set_string(area.x, y, clipped, style);
-}
-
-fn render_spans(area: Rect, buf: &mut Buffer, y: u16, spans: &[Span<'_>], base: Style) {
-    if area.width == 0 || y >= area.bottom() {
-        return;
-    }
-
-    let mut x = area.x;
-    let right = area.right();
-    for span in spans {
-        if x >= right {
-            break;
-        }
-        for grapheme in span.styled_graphemes(base) {
-            let symbol_width = grapheme.symbol.width();
-            if symbol_width == 0 {
-                continue;
-            }
-            let symbol_width = u16::try_from(symbol_width).unwrap_or(u16::MAX);
-            let next_x = x.saturating_add(symbol_width);
-            if next_x > right {
-                break;
-            }
-
-            buf[(x, y)]
-                .set_symbol(grapheme.symbol)
-                .set_style(grapheme.style);
-            for x_hidden in (x + 1)..next_x {
-                buf[(x_hidden, y)].reset();
-            }
-            x = next_x;
-        }
-    }
-}
-
-fn fill_line(area: Rect, buf: &mut Buffer, y: u16, style: Style) {
-    if area.width == 0 || y >= area.bottom() {
-        return;
-    }
-
-    buf.set_style(
-        Rect {
-            x: area.x,
-            y,
-            width: area.width,
-            height: 1,
-        },
-        style,
-    );
 }
 
 fn clip_width(text: &str, max_width: usize) -> String {

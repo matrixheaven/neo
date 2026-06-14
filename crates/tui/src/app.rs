@@ -6,7 +6,7 @@ use std::{
 };
 
 use neo_agent_core::{AgentEvent, AgentMessage, CompactionPhase, Content, ImageRef};
-use ratatui::{layout::Rect, style::Color};
+use crate::ansi::{Color, Rect};
 
 use crate::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities, TodoDisplayItem,
@@ -645,7 +645,7 @@ impl NeoTuiApp {
     }
 
     pub fn sync_transcript_view_for_area(&mut self, area: Rect) {
-        let body = app_layout(self, area).body;
+        let body = app_layout(self, area.into()).body;
         let content_rows = TranscriptWidget::new(&self.transcript)
             .with_selection(self.transcript_selection.as_ref())
             .with_expanded_items(&self.expanded_transcript_items)

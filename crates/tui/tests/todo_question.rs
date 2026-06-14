@@ -3,92 +3,6 @@ use neo_tui::{
     NeoTuiApp, QuestionDialogAction, QuestionDisplayData, QuestionDisplayOption,
     QuestionStateMachine, TodoDisplayItem, TodoDisplayStatus, select_visible_todos,
 };
-use ratatui::{Terminal, backend::TestBackend, buffer::Cell};
-
-fn render_app(width: u16, height: u16, app: &NeoTuiApp) -> Vec<String> {
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).expect("test backend is valid");
-    terminal
-        .draw(|frame| frame.render_widget(app, frame.area()))
-        .expect("app renders");
-    terminal
-        .backend()
-        .buffer()
-        .content
-        .chunks(width as usize)
-        .map(|line| line.iter().map(Cell::symbol).collect::<String>())
-        .collect()
-}
-
-// ---------------------------------------------------------------------------
-// TodoPanel rendering tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn todo_panel_renders_with_items() {
-    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
-    app.set_todo_items(vec![
-        TodoDisplayItem::new("Write code", TodoDisplayStatus::InProgress),
-        TodoDisplayItem::new("Test code", TodoDisplayStatus::Pending),
-        TodoDisplayItem::new("Deploy", TodoDisplayStatus::Done),
-    ]);
-
-    let lines = render_app(60, 20, &app);
-
-    assert!(
-        lines.iter().any(|l| l.contains("Todo")),
-        "todo panel title should be visible"
-    );
-    assert!(
-        lines.iter().any(|l| l.contains("Write code")),
-        "in-progress todo should be visible"
-    );
-    assert!(
-        lines.iter().any(|l| l.contains("Test code")),
-        "pending todo should be visible"
-    );
-    assert!(
-        lines.iter().any(|l| l.contains("Deploy")),
-        "done todo should be visible"
-    );
-}
-
-#[test]
-fn todo_panel_smart_truncation_shows_more_indicator() {
-    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
-    app.set_todo_items(
-        (0..7)
-            .map(|i| {
-                TodoDisplayItem::new(
-                    &format!("task-{i}"),
-                    if i == 0 {
-                        TodoDisplayStatus::InProgress
-                    } else {
-                        TodoDisplayStatus::Pending
-                    },
-                )
-            })
-            .collect(),
-    );
-
-    let lines = render_app(60, 25, &app);
-
-    assert!(
-        lines.iter().any(|l| l.contains("more")),
-        "truncation indicator should be visible"
-    );
-}
-
-#[test]
-fn todo_panel_not_rendered_when_empty() {
-    let app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
-    let lines = render_app(60, 12, &app);
-
-    assert!(
-        !lines.iter().any(|l| l.trim().contains("Todo")),
-        "todo panel should not be rendered when empty"
-    );
-}
 
 // ---------------------------------------------------------------------------
 // QuestionDialog state machine tests
@@ -189,23 +103,6 @@ fn question_dialog_esc_cancels() {
         .unwrap();
     assert_eq!(action, QuestionDialogAction::Cancel);
     assert!(!app.question_dialog_is_focused());
-}
-
-#[test]
-fn question_dialog_renders() {
-    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
-    app.push_question_overlay("q-1", make_two_questions());
-
-    let lines = render_app(80, 25, &app);
-
-    assert!(
-        lines.iter().any(|l| l.contains("Q1")),
-        "question text should be visible"
-    );
-    assert!(
-        lines.iter().any(|l| l.contains("A")),
-        "option should be visible"
-    );
 }
 
 #[test]

@@ -60,3 +60,22 @@ pedantic = { level = "warn", priority = -1 }
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
+
+# ── Build-speed profiles ──────────────────────────────────────────────
+# Faster incremental builds & test compilation:
+#   - incremental compilation enabled (dev default, explicit for clarity)
+#   - limited debug-info for dependencies (line tables only) to cut codegen
+#   - separate debug info for local crates so backtraces are still useful
+[profile.dev]
+incremental = true
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = 0
+
+[profile.test]
+incremental = true
+debug = "line-tables-only"
+
+[profile.test.package."*"]
+debug = 0

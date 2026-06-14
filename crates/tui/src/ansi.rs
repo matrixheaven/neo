@@ -1,5 +1,5 @@
 //! ANSI escape code helpers for the custom diff renderer.
-//! Self-contained — no ratatui dependency.
+//! Self-contained ANSI utilities.
 
 use unicode_width::UnicodeWidthChar;
 
@@ -29,6 +29,45 @@ pub enum Color {
     White,
     Rgb(u8, u8, u8),
     Indexed(u8),
+}
+
+/// A rectangular region used for layout calculations.
+///
+/// A simple rectangle used for layout calculations.
+/// from external dependencies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Rect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl Rect {
+    #[must_use]
+    pub const fn new(x: u16, y: u16, width: u16, height: u16) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[must_use]
+    pub const fn bottom(&self) -> u16 {
+        self.y + self.height
+    }
+
+    #[must_use]
+    pub const fn right(&self) -> u16 {
+        self.x + self.width
+    }
+
+    #[must_use]
+    pub const fn area(&self) -> u32 {
+        self.width as u32 * self.height as u32
+    }
 }
 
 /// A text style for rendering.

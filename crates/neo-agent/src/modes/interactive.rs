@@ -2295,7 +2295,7 @@ impl NeoTerminal {
         }
 
         // Sync transcript view dimensions
-        app.sync_transcript_view_for_area(ratatui::layout::Rect::new(0, 0, cols, rows));
+        app.sync_transcript_view_for_area(neo_tui::Rect::new(0, 0, cols, rows));
 
         // Render app state to Vec<String> (ANSI-styled lines)
         let (lines, cursor) = render_app_lines(app, cols, rows);
@@ -2668,7 +2668,7 @@ fn render_terminal_fallback(app: &mut NeoTuiApp) -> String {
     let width = 80u16;
     let height = 24u16;
 
-    app.sync_transcript_view_for_area(ratatui::layout::Rect::new(0, 0, width, height));
+    app.sync_transcript_view_for_area(neo_tui::Rect::new(0, 0, width, height));
 
     let (lines, _cursor) = render_app_lines(app, width, height);
     let text = lines

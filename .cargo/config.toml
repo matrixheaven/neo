@@ -1,0 +1,9 @@
+[build]
+# sccache: cache compiled artifacts across rebuilds (especially dependencies).
+rustc-wrapper = "sccache"
+# Use lld (via homebrew) for dramatically faster linking on macOS.
+# Benchmark: 51s -> 7s for incremental builds.
+rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/Cellar/lld@20/20.1.8/bin/ld64.lld"]
+
+[term]
+quiet = false

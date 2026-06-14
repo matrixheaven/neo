@@ -1,7 +1,7 @@
 //! Convert [`NeoTuiApp`] state into `Vec<String>` for the custom diff renderer.
 //!
 //! This module renders the app **entirely** through the project's own [`ansi`]
-//! module — no ratatui `Buffer` or `Widget` is involved. Each output line is a
+//! module. Each output line is a
 //! complete ANSI-styled string suitable for [`InlineRenderer`](crate::renderer::InlineRenderer).
 //!
 //! ## Layout
@@ -30,62 +30,11 @@ use crate::{
 
 // ─── Color conversion ───────────────────────────────────────────────────
 
-/// Convert a ratatui [`Color`](ratatui::style::Color) to the project's own
-/// [`AnsiColor`].
-///
-/// `TuiTheme` still carries ratatui color values, so every theme field must
-/// pass through this helper before it can be used with [`paint`] or
-/// [`AnsiStyle`].
-#[must_use]
-pub fn ratatui_color_to_ansi(c: ratatui::style::Color) -> AnsiColor {
-    use ratatui::style::Color as R;
-    match c {
-        R::Reset => AnsiColor::Reset,
-        R::Black => AnsiColor::Black,
-        R::Red => AnsiColor::Red,
-        R::Green => AnsiColor::Green,
-        R::Yellow => AnsiColor::Yellow,
-        R::Blue => AnsiColor::Blue,
-        R::Magenta => AnsiColor::Magenta,
-        R::Cyan => AnsiColor::Cyan,
-        R::Gray => AnsiColor::Gray,
-        R::DarkGray => AnsiColor::DarkGray,
-        R::LightRed => AnsiColor::LightRed,
-        R::LightGreen => AnsiColor::LightGreen,
-        R::LightYellow => AnsiColor::LightYellow,
-        R::LightBlue => AnsiColor::LightBlue,
-        R::LightMagenta => AnsiColor::LightMagenta,
-        R::LightCyan => AnsiColor::LightCyan,
-        R::White => AnsiColor::White,
-        R::Rgb(r, g, b) => AnsiColor::Rgb(r, g, b),
-        R::Indexed(n) => AnsiColor::Indexed(n),
-    }
-}
-
-/// Short alias to keep theme field conversions readable.
-const fn tc(c: ratatui::style::Color) -> AnsiColor {
-    // Delegate at runtime — `const fn` can't call non-const `ratatui_color_to_ansi`.
-    match c {
-        ratatui::style::Color::Reset => AnsiColor::Reset,
-        ratatui::style::Color::Black => AnsiColor::Black,
-        ratatui::style::Color::Red => AnsiColor::Red,
-        ratatui::style::Color::Green => AnsiColor::Green,
-        ratatui::style::Color::Yellow => AnsiColor::Yellow,
-        ratatui::style::Color::Blue => AnsiColor::Blue,
-        ratatui::style::Color::Magenta => AnsiColor::Magenta,
-        ratatui::style::Color::Cyan => AnsiColor::Cyan,
-        ratatui::style::Color::Gray => AnsiColor::Gray,
-        ratatui::style::Color::DarkGray => AnsiColor::DarkGray,
-        ratatui::style::Color::LightRed => AnsiColor::LightRed,
-        ratatui::style::Color::LightGreen => AnsiColor::LightGreen,
-        ratatui::style::Color::LightYellow => AnsiColor::LightYellow,
-        ratatui::style::Color::LightBlue => AnsiColor::LightBlue,
-        ratatui::style::Color::LightMagenta => AnsiColor::LightMagenta,
-        ratatui::style::Color::LightCyan => AnsiColor::LightCyan,
-        ratatui::style::Color::White => AnsiColor::White,
-        ratatui::style::Color::Rgb(r, g, b) => AnsiColor::Rgb(r, g, b),
-        ratatui::style::Color::Indexed(n) => AnsiColor::Indexed(n),
-    }
+/// `TuiTheme` now stores `ansi::Color` values directly, so theme fields are
+/// already the correct type.  This function is a simple identity alias kept
+/// for readability at call sites.
+const fn tc(c: AnsiColor) -> AnsiColor {
+    c
 }
 
 // ─── Main entry point ────────────────────────────────────────────────────
@@ -671,7 +620,7 @@ fn render_footer(app: &NeoTuiApp, width: usize, footer_rows: u16) -> Vec<String>
 
     let theme = app.theme();
     let (perm_label, perm_color) = app.permission_badge();
-    let perm_ansi = ratatui_color_to_ansi(perm_color);
+    let perm_ansi = perm_color;
 
     // ── Build the status (left) portion ─────────────────────────────
     let mut left_parts: Vec<String> = Vec::new();
@@ -721,7 +670,7 @@ fn render_footer(app: &NeoTuiApp, width: usize, footer_rows: u16) -> Vec<String>
 
     // ── Context label (right-aligned) ───────────────────────────────
     let context_label = app.context_window_label();
-    let context_ansi = ratatui_color_to_ansi(app.context_color());
+    let context_ansi = app.context_color();
     let context_styled = context_label
         .as_ref()
         .map(|label| paint(label, AnsiStyle::default().fg(context_ansi)));
@@ -859,28 +808,6 @@ mod tests {
     use super::*;
     use crate::PromptState;
     use std::path::PathBuf;
-
-    #[test]
-    fn color_conversion_rgb() {
-        let ansi = ratatui_color_to_ansi(ratatui::style::Color::Rgb(1, 2, 3));
-        assert_eq!(ansi, AnsiColor::Rgb(1, 2, 3));
-    }
-
-    #[test]
-    fn color_conversion_named() {
-        assert_eq!(
-            ratatui_color_to_ansi(ratatui::style::Color::Cyan),
-            AnsiColor::Cyan
-        );
-        assert_eq!(
-            ratatui_color_to_ansi(ratatui::style::Color::White),
-            AnsiColor::White
-        );
-        assert_eq!(
-            ratatui_color_to_ansi(ratatui::style::Color::Reset),
-            AnsiColor::Reset
-        );
-    }
 
     #[test]
     fn footer_height_thresholds() {

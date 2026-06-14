@@ -22,7 +22,6 @@ neo-ai = { path = "../ai" }
 neo-extensions = { path = "../extensions" }
 neo-tui = { path = "../tui" }
 neo-sdk = { path = "../sdk" }
-ratatui.workspace = true
 reqwest.workspace = true
 rustix.workspace = true
 serde.workspace = true

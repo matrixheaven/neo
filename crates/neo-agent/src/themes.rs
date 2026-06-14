@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use neo_tui::TuiTheme;
-use ratatui::style::Color;
+use neo_tui::ansi::Color;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

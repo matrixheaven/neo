@@ -8,6 +8,7 @@ pub mod input;
 pub mod renderer;
 pub mod widgets;
 
+pub use ansi::Rect;
 pub use app::*;
 pub use app_renderer::render_app_lines;
 pub use components::*;

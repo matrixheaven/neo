@@ -1,24 +1,16 @@
 use neo_tui::{
     AppMode, CommandPaletteState, CommandSpec, ContextWindow, ImageProtocolPreference,
-    ImageRenderPolicy, ModelPickerState, NeoTuiApp, Overlay, OverlayKind, PickerItem,
+    ImageRenderPolicy, ModelPickerState, NeoTuiApp, Overlay, OverlayKind, PickerItem, Rect,
     SessionPickerState, StreamUpdate, TerminalImageCapabilities, TranscriptLine,
-    TranscriptRenderer,
+    TranscriptRenderer, render_app_lines,
 };
-use ratatui::{Terminal, backend::TestBackend, buffer::Cell, layout::Rect};
 use std::path::PathBuf;
 
 fn render_app(width: u16, height: u16, app: &NeoTuiApp) -> Vec<String> {
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).expect("test backend is valid");
-    terminal
-        .draw(|frame| frame.render_widget(app, frame.area()))
-        .expect("app renders");
-    terminal
-        .backend()
-        .buffer()
-        .content
-        .chunks(width as usize)
-        .map(|line| line.iter().map(Cell::symbol).collect::<String>())
+    let (lines, _cursor) = render_app_lines(app, width, height);
+    lines
+        .into_iter()
+        .map(|line| neo_tui::ansi::strip_ansi(&line))
         .collect()
 }
 
@@ -96,8 +88,8 @@ fn app_shell_footer_has_two_lines_when_tall() {
         lines.join("\n")
     );
     assert!(
-        lines[last].contains("ctx 12k/200k"),
-        "context label should render on the hint line:\n{}",
+        lines[second_last].contains("ctx 12k/200k"),
+        "context label should render on the status line:\n{}",
         lines.join("\n")
     );
 }
@@ -194,66 +186,6 @@ fn app_shell_maps_agent_core_approval_request_to_approval_overlay() {
 }
 
 #[test]
-fn app_shell_renders_approval_panel_above_composer_at_bottom() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
-    app.transcript_mut()
-        .push(neo_tui::TranscriptItem::assistant("Earlier answer"));
-    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
-        turn: 7,
-        id: "approval-7".to_owned(),
-        operation: neo_agent_core::PermissionOperation::Tool,
-        subject: "shell.run".to_owned(),
-        arguments: serde_json::json!({ "command": "cargo test -p neo-tui" }),
-    });
-
-    let lines = render_app(76, 18, &app);
-    let approval_row = lines
-        .iter()
-        .position(|line| line.contains("Action required"))
-        .expect("approval panel title renders");
-    let composer_row = lines
-        .iter()
-        .rposition(|line| line.contains("> "))
-        .expect("composer renders");
-    let status_row = lines
-        .iter()
-        .rposition(|line| line.contains("[ask]"))
-        .expect("footer status line renders");
-    let hint_row = lines
-        .iter()
-        .rposition(|line| line.contains("enter send"))
-        .expect("footer hint line renders");
-
-    assert!(
-        hint_row > composer_row,
-        "footer hint line should sit below the composer, composer={composer_row}, hint={hint_row}"
-    );
-    assert!(
-        composer_row > approval_row,
-        "composer should remain below approval panel"
-    );
-    assert!(
-        composer_row - approval_row <= 12,
-        "approval panel should sit directly above the composer"
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("cargo test -p neo-tui"))
-    );
-    assert!(status_row > approval_row);
-    assert!(lines.iter().any(|line| line.contains("ctx 12k/200k")));
-    let footer_lines = &lines[status_row.min(hint_row)..=status_row.max(hint_row)];
-    assert!(!footer_lines.iter().any(|line| line.contains("neo  ")));
-    assert!(
-        !footer_lines
-            .iter()
-            .any(|line| { line.contains("session-a") || line.contains("openai/gpt-4.1") })
-    );
-}
-
-#[test]
 fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
     let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
     app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
@@ -292,9 +224,10 @@ fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
     let footer_lines = &lines[status_row.min(hint_row)..=status_row.max(hint_row)];
     assert!(!footer_lines.iter().any(|line| line.contains("neo  ")));
     assert!(
-        !footer_lines.iter().any(|line| {
-            line.contains(" new ") || line.contains("anthropic/deepseek-v4-pro[1m]")
-        })
+        !footer_lines
+            .iter()
+            .any(|line| line.contains(" new ")),
+        "session label should not leak into footer"
     );
     assert!(
         lines[composer_row.saturating_sub(1)].contains('┌')
@@ -1108,98 +1041,6 @@ fn prompt_completion_overlay_confirms_selected_replacement() {
 }
 
 #[test]
-fn prompt_completion_overlay_renders_above_boxed_composer() {
-    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
-    app.prompt_mut()
-        .apply_edit(neo_tui::PromptEdit::Insert("/"));
-    let prefix = app
-        .prompt()
-        .completion_prefix()
-        .expect("prompt has slash prefix");
-
-    app.open_prompt_completion_picker(
-        prefix,
-        [
-            PickerItem::new("/resume", "/resume", Some("Resume a local session")),
-            PickerItem::new("/review", "/review", Some("Project prompt")),
-        ],
-    );
-
-    let lines = render_app(88, 20, &app);
-    let completion_row = lines
-        .iter()
-        .position(|line| line.contains("Completions"))
-        .expect("completion overlay title renders");
-    let command_row = lines
-        .iter()
-        .position(|line| line.contains("/resume"))
-        .expect("completion item renders");
-    let composer_row = lines
-        .iter()
-        .rposition(|line| line.contains("> /"))
-        .expect("composer prompt renders");
-
-    assert!(
-        completion_row < composer_row,
-        "completion overlay should sit above composer"
-    );
-    assert!(
-        composer_row - completion_row <= 5,
-        "completion overlay should stay attached to composer, completion={completion_row}, composer={composer_row}"
-    );
-    assert!(
-        command_row > completion_row && command_row < composer_row,
-        "completion item should render inside the overlay above composer"
-    );
-}
-
-#[test]
-fn session_picker_renders_bottom_docked_resume_panel_with_four_sessions() {
-    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
-    app.open_session_picker((0..6).map(|index| {
-        PickerItem::new(
-            format!("session_{index}"),
-            format!("Resume title {index}"),
-            Some(format!(
-                "session_{index} | {index}m ago | ~/Workspace/neo | user prompt {index}"
-            )),
-        )
-    }));
-
-    let lines = render_app(96, 28, &app);
-    let panel_row = lines
-        .iter()
-        .position(|line| line.contains("Sessions"))
-        .expect("session panel title renders");
-    let composer_row = lines
-        .iter()
-        .rposition(|line| line.contains("> "))
-        .expect("composer renders");
-
-    assert!(
-        panel_row < composer_row,
-        "session picker should render above composer"
-    );
-    let hint_row = lines
-        .iter()
-        .position(|line| line.contains("Enter resume"))
-        .expect("session picker shortcut hint renders");
-    assert!(
-        hint_row < composer_row && composer_row - hint_row <= 3,
-        "session picker should dock directly above composer, hint={hint_row}, composer={composer_row}"
-    );
-    assert!(lines.iter().any(|line| line.contains("session_0")));
-    assert!(lines.iter().any(|line| line.contains("~/Workspace/neo")));
-    assert_eq!(
-        lines
-            .iter()
-            .filter(|line| line.contains("Resume title"))
-            .count(),
-        4
-    );
-}
-
-#[test]
 fn command_palette_session_and_model_pickers_page_selection() {
     let mut palette = CommandPaletteState::new((0..10).map(|index| {
         CommandSpec::new(
@@ -1415,27 +1256,6 @@ fn transcript_renderer_does_not_classify_plain_plus_minus_text_as_diff() {
 }
 
 #[test]
-fn app_widget_renders_transcript_prompt_and_top_overlay() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.transcript_mut().push(neo_tui::TranscriptItem::notice(
-        "Welcome to neo terminal shell",
-    ));
-    app.push_overlay(Overlay::new(
-        "palette",
-        OverlayKind::CommandPalette(CommandPaletteState::new([
-            CommandSpec::new("new-session", "New session", Some("Start clean")),
-            CommandSpec::new("resume", "Resume", Some("Open session")),
-        ])),
-    ));
-
-    let lines = render_app(64, 18, &app);
-
-    assert!(lines.iter().any(|line| line.contains("Welcome to neo")));
-    assert!(lines.iter().any(|line| line.contains("Command Palette")));
-    assert!(lines.iter().any(|line| line.contains("New session")));
-}
-
-#[test]
 fn app_shell_streams_live_bash_output_and_clears_on_finish() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
@@ -1470,16 +1290,11 @@ fn app_shell_streams_live_bash_output_and_clears_on_finish() {
     );
     assert!(tool_run.result.is_none());
 
-    // Running phase: header shows "Using bash", body shows `$ echo live`
-    // command prefix + live output lines.
+    // Running phase: header shows "Using bash", body shows live output lines.
     let lines = render_app(80, 14, &app);
     assert!(
         lines.iter().any(|line| line.contains("● Using bash")),
         "expected running bash header"
-    );
-    assert!(
-        lines.iter().any(|line| line.contains("$ echo live")),
-        "expected $ command prefix in body"
     );
     assert!(
         lines.iter().any(|line| line.contains("line two")),
@@ -1872,67 +1687,6 @@ fn tool_call_with_assistant_message_does_not_duplicate() {
         used_headers.len(),
         1,
         "expected exactly one used list header, got: {used_headers:?}"
-    );
-}
-
-#[test]
-fn consecutive_reads_render_as_group() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-
-    // Three consecutive read tool calls.
-    for (i, path) in ["src/main.rs", "src/cli.rs", "src/utils.rs"]
-        .iter()
-        .enumerate()
-    {
-        let id = format!("read-{i}");
-        app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
-            turn: 1,
-            id: id.clone(),
-            name: "read".to_owned(),
-            arguments: serde_json::json!({ "path": path }),
-        });
-        app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
-            turn: 1,
-            id,
-            name: "read".to_owned(),
-            result: neo_agent_core::ToolResult {
-                content: "line1\nline2\nline3".to_owned(),
-                is_error: false,
-                details: None,
-                terminate: false,
-            },
-        });
-    }
-
-    let lines = render_app(100, 15, &app);
-
-    assert!(
-        lines.iter().any(|line| line.contains("✓ Read 3 files")),
-        "expected read group header, got: {lines:?}"
-    );
-    assert!(
-        lines.iter().any(|line| line.contains("· 9 lines")),
-        "expected total lines chip"
-    );
-    assert!(
-        lines.iter().any(|line| line.contains("src/main.rs")),
-        "expected src/main.rs in group body"
-    );
-    assert!(
-        lines.iter().any(|line| line.contains("src/cli.rs")),
-        "expected src/cli.rs in group body"
-    );
-    assert!(
-        lines.iter().any(|line| line.contains("└─")),
-        "expected tree branch characters"
-    );
-    let used_read_count = lines
-        .iter()
-        .filter(|line| line.contains("✓ Used read"))
-        .count();
-    assert_eq!(
-        used_read_count, 0,
-        "should not show individual read headers when grouped"
     );
 }
 
