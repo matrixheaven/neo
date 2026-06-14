@@ -15,7 +15,7 @@ use crate::{
 };
 
 const COMPACTION_BAR_WIDTH: usize = 30;
-const TOOL_PREVIEW_LINES: usize = 4;
+const TOOL_PREVIEW_LINES: usize = 3;
 const DIFF_PREVIEW_LINES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,11 +369,7 @@ fn transcript_render_rows(
         let expanded = expanded_items.is_some_and(|expanded| expanded.contains(&item_index));
         if let TranscriptItem::Tool { tool_run, .. } = item {
             rows.extend(tool_render_rows(
-                tool_run,
-                expanded,
-                selected,
-                theme,
-                text_width,
+                tool_run, expanded, selected, theme, text_width,
             ));
             continue;
         }
@@ -594,44 +590,68 @@ fn tool_render_rows(
         return diff_tool_render_rows(tool, &diff, expanded, selected, theme, text_width);
     }
 
-    let header = format!(
-        "{} Use {}",
-        tool_status_symbol(tool.status),
-        tool_call_label(tool)
-    );
-    let style = selected_style(status_style(tool.status, theme), selected, theme);
-    let muted = selected_style(Style::default().fg(theme.notice), selected, theme);
-    let mut rows = vec![TranscriptRenderRow::new(header, style, None)];
-    let detail = tool.display_detail();
-    if detail.is_empty() {
-        return rows;
-    }
+    let key_arg = tool_key_argument(tool);
+    let chip = tool_result_chip(tool);
+    let verb = tool_status_verb(tool.status);
+    let symbol = tool_status_symbol(tool.status);
 
-    let detail_lines = detail.lines().collect::<Vec<_>>();
-    let visible_count = if expanded {
-        detail_lines.len()
+    let header = if key_arg.is_empty() {
+        format!("{symbol} {verb} {}{chip}", tool.name)
     } else {
-        detail_lines.len().min(TOOL_PREVIEW_LINES)
+        format!("{symbol} {verb} {} ({key_arg}){chip}", tool.name)
     };
-    for line in detail_lines.iter().take(visible_count) {
-        for wrapped in wrap_width(line, text_width.saturating_sub(4).max(1)) {
+
+    let header_fg = match tool.status {
+        ToolStatusKind::Pending => theme.pending,
+        ToolStatusKind::Running => theme.accent,
+        ToolStatusKind::Succeeded => theme.succeeded,
+        ToolStatusKind::Failed => theme.failed,
+        ToolStatusKind::Cancelled => theme.cancelled,
+    };
+    let header_style = selected_style(
+        Style::default().fg(header_fg).add_modifier(Modifier::BOLD),
+        selected,
+        theme,
+    );
+    let body_style = selected_style(Style::default().fg(theme.notice), selected, theme);
+    let error_style = selected_style(Style::default().fg(theme.failed), selected, theme);
+
+    let mut rows = vec![TranscriptRenderRow::new(header, header_style, None)];
+
+    let detail = tool.display_detail();
+    if !detail.is_empty() {
+        let detail_lines = detail.lines().collect::<Vec<_>>();
+        let visible_count = if expanded {
+            detail_lines.len()
+        } else {
+            detail_lines.len().min(TOOL_PREVIEW_LINES)
+        };
+        for line in detail_lines.iter().take(visible_count) {
+            for wrapped in wrap_width(line, text_width.saturating_sub(4).max(1)) {
+                let style = if tool.status == ToolStatusKind::Failed {
+                    error_style
+                } else {
+                    body_style
+                };
+                rows.push(TranscriptRenderRow::new(
+                    format!("  {wrapped}"),
+                    style,
+                    None,
+                ));
+            }
+        }
+        if !expanded && detail_lines.len() > visible_count {
             rows.push(TranscriptRenderRow::new(
-                format!("  └─ {wrapped}"),
-                muted,
+                format!(
+                    "  ... ({} more lines, ctrl+o to expand)",
+                    detail_lines.len() - visible_count
+                ),
+                body_style,
                 None,
             ));
         }
     }
-    if !expanded && detail_lines.len() > visible_count {
-        rows.push(TranscriptRenderRow::new(
-            format!(
-                "     … {} more lines, ctrl+o expand",
-                detail_lines.len() - visible_count
-            ),
-            muted,
-            None,
-        ));
-    }
+
     rows
 }
 
@@ -729,14 +749,6 @@ fn diff_tool_render_rows(
     rows
 }
 
-fn tool_call_label(tool: &ToolRunTranscript) -> String {
-    let arguments = tool.arguments.as_deref().unwrap_or_default().trim();
-    if arguments.is_empty() {
-        return format!("{}()", tool.name);
-    }
-    format!("{}({})", tool.name, one_line(arguments))
-}
-
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -750,7 +762,6 @@ fn tool_status_symbol(status: ToolStatusKind) -> &'static str {
     }
 }
 
-#[allow(dead_code)] // wired in Task 3
 fn tool_status_verb(status: ToolStatusKind) -> &'static str {
     match status {
         ToolStatusKind::Pending | ToolStatusKind::Running => "Using",
@@ -760,7 +771,6 @@ fn tool_status_verb(status: ToolStatusKind) -> &'static str {
     }
 }
 
-#[allow(dead_code)] // wired in Task 3
 fn tool_key_argument(tool: &ToolRunTranscript) -> String {
     let arguments = tool.arguments.as_deref().unwrap_or_default().trim();
     if arguments.is_empty() {
@@ -779,7 +789,6 @@ fn tool_key_argument(tool: &ToolRunTranscript) -> String {
     one_line(arguments)
 }
 
-#[allow(dead_code)] // wired in Task 3
 fn tool_result_chip(tool: &ToolRunTranscript) -> String {
     let result = match tool.result.as_deref() {
         Some(r) if !r.is_empty() => r,
