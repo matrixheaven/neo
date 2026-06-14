@@ -1,0 +1,394 @@
+//! ANSI escape code helpers for the custom diff renderer.
+//! Self-contained — no ratatui dependency.
+
+use unicode_width::UnicodeWidthChar;
+
+/// Reset all attributes to terminal default.
+pub const RESET: &str = "\x1b[0m";
+
+/// A color value for rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Color {
+    #[default]
+    Reset,
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    Gray,
+    DarkGray,
+    LightRed,
+    LightGreen,
+    LightYellow,
+    LightBlue,
+    LightMagenta,
+    LightCyan,
+    White,
+    Rgb(u8, u8, u8),
+    Indexed(u8),
+}
+
+/// A text style for rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Style {
+    pub fg: Option<Color>,
+    pub bg: Option<Color>,
+    pub bold: bool,
+    pub dim: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub blink: bool,
+    pub reversed: bool,
+    pub crossed_out: bool,
+}
+
+impl Style {
+    #[must_use]
+    pub fn fg(mut self, color: Color) -> Self {
+        self.fg = Some(color);
+        self
+    }
+
+    #[must_use]
+    pub fn bg(mut self, color: Color) -> Self {
+        self.bg = Some(color);
+        self
+    }
+
+    #[must_use]
+    pub fn bold(mut self) -> Self {
+        self.bold = true;
+        self
+    }
+
+    #[must_use]
+    pub fn dim(mut self) -> Self {
+        self.dim = true;
+        self
+    }
+
+    #[must_use]
+    pub fn italic(mut self) -> Self {
+        self.italic = true;
+        self
+    }
+
+    #[must_use]
+    pub fn underline(mut self) -> Self {
+        self.underline = true;
+        self
+    }
+
+    /// Is this the default (empty) style?
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self == &Style::default()
+    }
+}
+
+/// Convert a `Color` to an ANSI foreground escape sequence.
+#[must_use]
+pub fn fg_to_ansi(color: Color) -> String {
+    match color {
+        Color::Reset => "\x1b[39m".to_owned(),
+        Color::Black => "\x1b[30m".to_owned(),
+        Color::Red => "\x1b[31m".to_owned(),
+        Color::Green => "\x1b[32m".to_owned(),
+        Color::Yellow => "\x1b[33m".to_owned(),
+        Color::Blue => "\x1b[34m".to_owned(),
+        Color::Magenta => "\x1b[35m".to_owned(),
+        Color::Cyan => "\x1b[36m".to_owned(),
+        Color::Gray => "\x1b[90m".to_owned(),
+        Color::DarkGray => "\x1b[90m".to_owned(),
+        Color::LightRed => "\x1b[91m".to_owned(),
+        Color::LightGreen => "\x1b[92m".to_owned(),
+        Color::LightYellow => "\x1b[93m".to_owned(),
+        Color::LightBlue => "\x1b[94m".to_owned(),
+        Color::LightMagenta => "\x1b[95m".to_owned(),
+        Color::LightCyan => "\x1b[96m".to_owned(),
+        Color::White => "\x1b[97m".to_owned(),
+        Color::Rgb(r, g, b) => format!("\x1b[38;2;{r};{g};{b}m"),
+        Color::Indexed(n) => format!("\x1b[38;5;{n}m"),
+    }
+}
+
+/// Convert a `Color` to an ANSI background escape sequence.
+#[must_use]
+pub fn bg_to_ansi(color: Color) -> String {
+    match color {
+        Color::Reset => "\x1b[49m".to_owned(),
+        Color::Black => "\x1b[40m".to_owned(),
+        Color::Red => "\x1b[41m".to_owned(),
+        Color::Green => "\x1b[42m".to_owned(),
+        Color::Yellow => "\x1b[43m".to_owned(),
+        Color::Blue => "\x1b[44m".to_owned(),
+        Color::Magenta => "\x1b[45m".to_owned(),
+        Color::Cyan => "\x1b[46m".to_owned(),
+        Color::Gray => "\x1b[100m".to_owned(),
+        Color::DarkGray => "\x1b[100m".to_owned(),
+        Color::LightRed => "\x1b[101m".to_owned(),
+        Color::LightGreen => "\x1b[102m".to_owned(),
+        Color::LightYellow => "\x1b[103m".to_owned(),
+        Color::LightBlue => "\x1b[104m".to_owned(),
+        Color::LightMagenta => "\x1b[105m".to_owned(),
+        Color::LightCyan => "\x1b[106m".to_owned(),
+        Color::White => "\x1b[107m".to_owned(),
+        Color::Rgb(r, g, b) => format!("\x1b[48;2;{r};{g};{b}m"),
+        Color::Indexed(n) => format!("\x1b[48;5;{n}m"),
+    }
+}
+
+/// Convert a `Style` to ANSI escape sequences (fg + bg + modifiers).
+#[must_use]
+pub fn style_to_ansi(style: Style) -> String {
+    if style.is_empty() {
+        return String::new();
+    }
+    let mut buf = String::new();
+    if let Some(color) = style.fg {
+        if color != Color::Reset {
+            buf.push_str(&fg_to_ansi(color));
+        }
+    }
+    if let Some(color) = style.bg {
+        if color != Color::Reset {
+            buf.push_str(&bg_to_ansi(color));
+        }
+    }
+    if style.bold {
+        buf.push_str("\x1b[1m");
+    }
+    if style.dim {
+        buf.push_str("\x1b[2m");
+    }
+    if style.italic {
+        buf.push_str("\x1b[3m");
+    }
+    if style.underline {
+        buf.push_str("\x1b[4m");
+    }
+    if style.blink {
+        buf.push_str("\x1b[5m");
+    }
+    if style.reversed {
+        buf.push_str("\x1b[7m");
+    }
+    if style.crossed_out {
+        buf.push_str("\x1b[9m");
+    }
+    buf
+}
+
+/// Apply a style to text: prefix with ANSI codes, suffix with RESET.
+#[must_use]
+pub fn paint(text: &str, style: Style) -> String {
+    let ansi = style_to_ansi(style);
+    if ansi.is_empty() {
+        text.to_owned()
+    } else {
+        format!("{ansi}{text}{RESET}")
+    }
+}
+
+/// Strip ANSI escape sequences from a string and return the visible text.
+#[must_use]
+pub fn strip_ansi(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            result.push(ch);
+            continue;
+        }
+        // Skip escape sequence: ESC [ ... letter  OR  ESC ] ... BEL
+        match chars.peek() {
+            Some('[') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '\x07' {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                chars.next();
+            }
+        }
+    }
+    result
+}
+
+/// Visible width of a string (ANSI escapes stripped, unicode-width aware).
+#[must_use]
+pub fn visible_width(s: &str) -> usize {
+    strip_ansi(s)
+        .chars()
+        .map(|c| c.width().unwrap_or(0))
+        .sum()
+}
+
+/// Wrap plain text (no ANSI) to a maximum visible width.
+#[must_use]
+pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_owned()];
+    }
+    let mut result = Vec::new();
+    for paragraph in text.split('\n') {
+        if paragraph.is_empty() {
+            result.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        let mut current_width = 0usize;
+        for word in paragraph.split(' ') {
+            let word_width: usize = word.chars().map(|c| c.width().unwrap_or(0)).sum();
+            if current_width == 0 {
+                current = word.to_owned();
+                current_width = word_width;
+            } else if current_width + 1 + word_width <= width {
+                current.push(' ');
+                current.push_str(word);
+                current_width += 1 + word_width;
+            } else {
+                result.push(std::mem::take(&mut current));
+                current = word.to_owned();
+                current_width = word_width;
+            }
+        }
+        if !current.is_empty() || result.is_empty() {
+            result.push(current);
+        }
+    }
+    result
+}
+
+/// Pad a string with spaces to fill exactly `width` visible columns.
+#[must_use]
+pub fn pad_to_width(text: &str, width: usize) -> String {
+    let vis = visible_width(text);
+    if vis >= width {
+        text.to_owned()
+    } else {
+        format!("{text}{}", " ".repeat(width - vis))
+    }
+}
+
+/// Truncate a string to `width` visible columns, appending "…" if truncated.
+#[must_use]
+pub fn truncate_to_width(text: &str, width: usize) -> String {
+    let stripped = strip_ansi(text);
+    let w: usize = stripped.chars().map(|c| c.width().unwrap_or(0)).sum();
+    if w <= width {
+        return text.to_owned();
+    }
+    let mut result = String::new();
+    let mut current = 0usize;
+    for c in stripped.chars() {
+        let cw = c.width().unwrap_or(0);
+        if current + cw > width.saturating_sub(1) {
+            break;
+        }
+        result.push(c);
+        current += cw;
+    }
+    if width > 0 {
+        result.push('…');
+    }
+    result
+}
+
+/// A styled line of text (content + style).
+#[derive(Debug, Clone, Default)]
+pub struct StyledLine {
+    pub text: String,
+    pub style: Style,
+}
+
+impl StyledLine {
+    #[must_use]
+    pub fn new(text: impl Into<String>, style: Style) -> Self {
+        Self {
+            text: text.into(),
+            style,
+        }
+    }
+
+    /// Convert to a single ANSI-styled string.
+    #[must_use]
+    pub fn to_ansi(&self) -> String {
+        paint(&self.text, self.style)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rgb_foreground() {
+        assert_eq!(fg_to_ansi(Color::Rgb(255, 0, 0)), "\x1b[38;2;255;0;0m");
+    }
+
+    #[test]
+    fn named_colors() {
+        assert_eq!(fg_to_ansi(Color::Green), "\x1b[32m");
+        assert_eq!(fg_to_ansi(Color::White), "\x1b[97m");
+    }
+
+    #[test]
+    fn style_to_ansi_combines() {
+        let style = Style::default().fg(Color::Red).bold();
+        let ansi = style_to_ansi(style);
+        assert!(ansi.contains("\x1b[31m"));
+        assert!(ansi.contains("\x1b[1m"));
+    }
+
+    #[test]
+    fn empty_style_produces_nothing() {
+        assert!(style_to_ansi(Style::default()).is_empty());
+    }
+
+    #[test]
+    fn paint_wraps_with_reset() {
+        let styled = paint("hello", Style::default().fg(Color::Blue));
+        assert!(styled.starts_with("\x1b[34m"));
+        assert!(styled.ends_with(RESET));
+    }
+
+    #[test]
+    fn visible_width_strips_ansi() {
+        assert_eq!(visible_width("\x1b[31mhello\x1b[0m"), 5);
+    }
+
+    #[test]
+    fn wrap_text_basic() {
+        assert_eq!(wrap_text("hello world", 5), vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn wrap_text_preserves_empty_lines() {
+        assert_eq!(wrap_text("a\n\nb", 80), vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn pad_to_width_adds_spaces() {
+        assert_eq!(pad_to_width("hi", 5), "hi   ");
+    }
+
+    #[test]
+    fn truncate_adds_ellipsis() {
+        assert_eq!(truncate_to_width("hello world", 8), "hello w…");
+    }
+}

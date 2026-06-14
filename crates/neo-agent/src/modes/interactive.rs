@@ -10,7 +10,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     env, fs,
     future::{Future, Ready, ready},
-    io::{IsTerminal as _, Stdout, Write as _, stdout},
+    io::{IsTerminal as _, Write as _, stdout},
     path::{Path, PathBuf},
     pin::Pin,
     process::{Command, Stdio},
@@ -20,12 +20,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, size},
+    event,
+    terminal::size,
 };
 use neo_agent_core::{
     AgentEvent, AgentMessage, PendingQuestion, PermissionDecision, QuestionResponse,
@@ -33,14 +29,11 @@ use neo_agent_core::{
 };
 use neo_tui::{
     ApprovalChoice, ApprovalResult, CommandSpec, ContextWindow, ImageProtocolPreference,
-    ImageRenderPolicy, InlineImageRenderCache, InputEvent, InputParser, KeyId, KeybindingAction,
-    KeybindingsManager, NeoTuiApp, PickerItem, PromptEdit, TerminalImageCapabilities,
+    ImageRenderPolicy, InlineRenderer, InputEvent, InputParser, KeyId,
+    KeybindingAction, KeybindingsManager, NeoTuiApp, PickerItem, PromptEdit,
+    TerminalImageCapabilities, render_app_lines,
 };
-use ratatui::{
-    Terminal, TerminalOptions, Viewport,
-    backend::{CrosstermBackend, TestBackend},
-    buffer::Cell,
-};
+
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -2284,117 +2277,41 @@ const PROMPT_COMPLETION_ACTION_PRIORITY: &[KeybindingAction] = &[
 ];
 
 struct NeoTerminal {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
-    raw_mode: RawModeGuard,
-    inline_image_cache: InlineImageRenderCache,
-    last_area: Option<ratatui::layout::Rect>,
+    renderer: InlineRenderer,
 }
 
 impl NeoTerminal {
     fn enter() -> Result<Self> {
-        let raw_mode = RawModeGuard::enable()?;
-        let mut output = stdout();
-        // Inline mode: no alternate screen, no mouse capture.
-        // Content renders in the terminal's primary buffer and flows into
-        // native scrollback. Text selection works natively (no Shift needed).
-        // Mouse wheel scrolls the terminal's scrollback natively.
-        execute!(
-            output,
-            EnableBracketedPaste,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        )?;
-        let (_cols, rows) = size()?;
-        let backend = CrosstermBackend::new(output);
-        let terminal = Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Inline(rows),
-            },
-        )?;
-        Ok(Self {
-            terminal,
-            raw_mode,
-            inline_image_cache: InlineImageRenderCache::default(),
-            last_area: None,
-        })
+        let renderer = InlineRenderer::enter()?;
+        Ok(Self { renderer })
     }
 
     fn draw(&mut self, app: &mut NeoTuiApp) -> Result<()> {
         app.advance_activity_frame();
 
-        // 1. Push newly-finalized transcript items into terminal scrollback
-        //    using ratatui's insert_before(). This scrolls old content into
-        //    the terminal's native scrollback, making room for new content.
-        let committed_indices = app.drain_newly_committed();
-        for idx in &committed_indices {
-            let item = app.transcript().items().get(*idx);
-            if let Some(item) = item {
-                let lines = transcript_item_to_lines(item, app.theme());
-                let height = u16::try_from(lines.len()).unwrap_or(1);
-                let theme = app.theme();
-                self.terminal.insert_before(height, |buf| {
-                    let mut y = 0u16;
-                    for (text, style) in &lines {
-                        if y >= height {
-                            break;
-                        }
-                        buf.set_string(0, y, text, *style);
-                        y += 1;
-                    }
-                    let _ = theme;
-                })?;
-            }
+        let (cols, rows) = size()?;
+        if cols == 0 || rows == 0 {
+            return Ok(());
         }
 
-        // 2. Render the live viewport — only uncommitted items + prompt + footer.
-        self.terminal.draw(|frame| {
-            let area = frame.area();
-            app.sync_transcript_view_for_area(area);
-            frame.render_widget(&*app, area);
-        })?;
+        // Sync transcript view dimensions
+        app.sync_transcript_view_for_area(ratatui::layout::Rect::new(0, 0, cols, rows));
 
-        let area = self.terminal.get_frame().area();
-        if self
-            .last_area
-            .replace(area)
-            .is_some_and(|last| last != area)
-        {
-            self.inline_image_cache.reset_for_full_redraw();
-        }
-        for render in self
-            .inline_image_cache
-            .take_pending(app.inline_image_renders())
-        {
-            self.terminal
-                .backend_mut()
-                .write_all(render.escape_sequence.as_bytes())?;
-        }
-        self.terminal.backend_mut().flush()?;
+        // Render app state to Vec<String> (ANSI-styled lines)
+        let (lines, cursor) = render_app_lines(app, cols, rows);
+
+        // Diff-render to terminal
+        self.renderer.render(lines, cursor)?;
+
         Ok(())
     }
 
     fn leave(&mut self) {
-        let _ = execute!(
-            self.terminal.backend_mut(),
-            PopKeyboardEnhancementFlags,
-            DisableBracketedPaste,
-        );
-        // Write \r\n so the shell prompt appears on a fresh line.
-        let _ = write!(self.terminal.backend_mut(), "\r\n");
-        let _ = self.terminal.backend_mut().flush();
-        let _ = self.terminal.show_cursor();
-        self.raw_mode.disable();
+        self.renderer.leave();
     }
 
     fn reenter(&mut self) -> Result<()> {
-        self.raw_mode.enable_raw()?;
-        execute!(
-            self.terminal.backend_mut(),
-            EnableBracketedPaste,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        )?;
-        self.inline_image_cache.reset_for_full_redraw();
-        self.last_area = None;
+        self.renderer.suspend_resume()?;
         Ok(())
     }
 }
@@ -2402,13 +2319,13 @@ impl NeoTerminal {
 
 impl Drop for NeoTerminal {
     fn drop(&mut self) {
-        self.leave();
+        self.renderer.leave();
     }
 }
 
 impl NeoTerminal {
     fn suspend(&mut self) -> Result<()> {
-        self.leave();
+        self.renderer.suspend_prepare();
         #[cfg(unix)]
         {
             rustix::process::kill_current_process_group(rustix::process::Signal::TSTP)?;
@@ -2418,145 +2335,6 @@ impl NeoTerminal {
             eprintln!("Suspend to background is not supported on this platform");
         }
         self.reenter()
-    }
-}
-
-/// Convert a finalized TranscriptItem into styled text lines for scrollback insertion.
-/// Each line is (text, ratatui Style).
-fn transcript_item_to_lines(
-    item: &neo_tui::TranscriptItem,
-    theme: neo_tui::TuiTheme,
-) -> Vec<(String, ratatui::style::Style)> {
-    use ratatui::style::{Modifier, Style};
-    use neo_tui::TranscriptItem;
-
-    match item {
-        TranscriptItem::User { content } => {
-            let style = Style::default().fg(theme.user).add_modifier(Modifier::BOLD);
-            let mut lines = vec![("✨ ".to_owned(), style)];
-            for line in content.lines() {
-                lines.push((format!("  {line}"), Style::default().fg(theme.user)));
-            }
-            lines
-                .into_iter()
-                .map(|(t, s)| (t, s))
-                .collect()
-        }
-        TranscriptItem::Assistant { thinking, content } => {
-            let mut lines = Vec::new();
-            if let Some(thinking) = thinking.as_deref().filter(|t| !t.is_empty()) {
-                let style = Style::default().fg(theme.thinking).add_modifier(Modifier::ITALIC);
-                for line in thinking.lines() {
-                    lines.push((format!("  {line}"), style));
-                }
-                if !content.is_empty() {
-                    lines.push((String::new(), Style::default()));
-                }
-            }
-            let style = Style::default().fg(theme.assistant);
-            for (i, line) in content.lines().enumerate() {
-                let prefix = if i == 0 && thinking.as_deref().filter(|t| !t.is_empty()).is_none() {
-                    "● "
-                } else if i == 0 {
-                    "● "
-                } else {
-                    "  "
-                };
-                lines.push((format!("{prefix}{line}"), style));
-            }
-            lines
-        }
-        TranscriptItem::Notice { content } => {
-            content
-                .lines()
-                .map(|l| (l.to_owned(), Style::default().fg(theme.notice)))
-                .collect()
-        }
-        TranscriptItem::Banner {
-            title,
-            session_label,
-            model_label,
-            workspace_root,
-        } => {
-            let style = Style::default().fg(theme.header);
-            vec![
-                (format!("── {title} ──"), style),
-                (format!("session: {session_label}"), style),
-                (format!("model: {model_label}"), style),
-                (format!("workspace: {}", workspace_root.display()), style),
-            ]
-        }
-        TranscriptItem::Compaction {
-            compacted_message_count,
-            tokens_before,
-            ..
-        } => {
-            vec![(
-                format!("── compacted {compacted_message_count} messages ({tokens_before} tokens) ──"),
-                Style::default().fg(theme.accent),
-            )]
-        }
-        TranscriptItem::Tool {
-            name,
-            detail,
-            status,
-            ..
-        } => {
-            use neo_tui::ToolStatusKind;
-            let (marker, color) = match status {
-                ToolStatusKind::Succeeded => ("✓", theme.success),
-                ToolStatusKind::Failed => ("✗", theme.danger),
-                ToolStatusKind::Running => ("●", theme.accent),
-                ToolStatusKind::Pending => ("○", theme.muted),
-                ToolStatusKind::Cancelled => ("⊘", theme.muted),
-            };
-            let style = Style::default().fg(color);
-            let mut lines = vec![(format!("{marker} Used {name}"), style)];
-            if !detail.is_empty() {
-                for line in detail.lines().take(5) {
-                    lines.push((format!("  {line}"), Style::default().fg(theme.muted)));
-                }
-            }
-            lines
-        }
-        TranscriptItem::Image { alt, .. } => {
-            vec![(
-                format!("[image: {}]", alt.as_deref().unwrap_or("inline")),
-                Style::default().fg(theme.notice),
-            )]
-        }
-    }
-}
-
-struct RawModeGuard {
-    active: bool,
-}
-
-impl RawModeGuard {
-    fn enable() -> Result<Self> {
-        enable_raw_mode()?;
-        Ok(Self { active: true })
-    }
-
-    fn enable_raw(&mut self) -> Result<()> {
-        if !self.active {
-            enable_raw_mode()?;
-            self.active = true;
-        }
-        Ok(())
-    }
-
-    fn disable(&mut self) {
-        if self.active {
-            let _ = disable_raw_mode();
-            self.active = false;
-        }
-    }
-}
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        self.disable();
     }
 }
 
@@ -2887,32 +2665,21 @@ async fn fork_session_transcript(
 }
 
 fn render_terminal_fallback(app: &mut NeoTuiApp) -> String {
-    let width = 80;
-    let height = 24;
-    let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).expect("test backend is valid");
-    terminal
-        .draw(|frame| {
-            let area = frame.area();
-            app.sync_transcript_view_for_area(area);
-            frame.render_widget(&*app, area);
-        })
-        .expect("fallback app render succeeds");
+    let width = 80u16;
+    let height = 24u16;
 
-    let lines = terminal
-        .backend()
-        .buffer()
-        .content
-        .chunks(width as usize)
-        .map(|line| {
-            line.iter()
-                .map(Cell::symbol)
-                .collect::<String>()
-                .trim_end()
-                .to_owned()
+    app.sync_transcript_view_for_area(ratatui::layout::Rect::new(0, 0, width, height));
+
+    let (lines, _cursor) = render_app_lines(app, width, height);
+    let text = lines
+        .iter()
+        .map(|l| {
+            // Strip ANSI for plain-text fallback
+            let stripped = neo_tui::ansi::strip_ansi(l);
+            stripped.trim_end().to_owned()
         })
         .collect::<Vec<_>>();
-    format!("{}\n", lines.join("\n").trim_end())
+    format!("{}\n", text.join("\n").trim_end())
 }
 
 #[cfg(test)]
