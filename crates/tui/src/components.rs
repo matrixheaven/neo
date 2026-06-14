@@ -266,7 +266,6 @@ pub struct TranscriptWidget<'a> {
     view: Option<&'a TranscriptView>,
     selection: Option<&'a TranscriptSelection>,
     expanded_items: Option<&'a BTreeSet<usize>>,
-    activity_frame: usize,
     theme: TuiTheme,
 }
 
@@ -278,7 +277,6 @@ impl<'a> TranscriptWidget<'a> {
             view: None,
             selection: None,
             expanded_items: None,
-            activity_frame: 0,
             theme: TuiTheme::default(),
         }
     }
@@ -302,12 +300,6 @@ impl<'a> TranscriptWidget<'a> {
     }
 
     #[must_use]
-    pub const fn with_activity_frame(mut self, activity_frame: usize) -> Self {
-        self.activity_frame = activity_frame;
-        self
-    }
-
-    #[must_use]
     pub const fn with_theme(mut self, theme: TuiTheme) -> Self {
         self.theme = theme;
         self
@@ -319,7 +311,6 @@ impl<'a> TranscriptWidget<'a> {
             self.transcript,
             self.selection,
             self.expanded_items,
-            self.activity_frame,
             self.theme,
             usize::from(width.saturating_sub(2).max(1)),
         )
@@ -334,7 +325,6 @@ impl Widget for TranscriptWidget<'_> {
             self.transcript,
             self.selection,
             self.expanded_items,
-            self.activity_frame,
             self.theme,
             text_width,
         );
@@ -361,7 +351,6 @@ fn transcript_render_rows(
     transcript: &ChatTranscript,
     selection: Option<&TranscriptSelection>,
     expanded_items: Option<&BTreeSet<usize>>,
-    activity_frame: usize,
     theme: TuiTheme,
     text_width: usize,
 ) -> Vec<TranscriptRenderRow> {
@@ -383,7 +372,6 @@ fn transcript_render_rows(
                 tool_run,
                 expanded,
                 selected,
-                activity_frame,
                 theme,
                 text_width,
             ));
@@ -599,7 +587,6 @@ fn tool_render_rows(
     tool: &ToolRunTranscript,
     expanded: bool,
     selected: bool,
-    activity_frame: usize,
     theme: TuiTheme,
     text_width: usize,
 ) -> Vec<TranscriptRenderRow> {
@@ -608,10 +595,9 @@ fn tool_render_rows(
     }
 
     let header = format!(
-        "{} Use {}{}",
-        tool_status_symbol(tool.status, activity_frame),
-        tool_call_label(tool),
-        tool_status_suffix(tool.status)
+        "{} Use {}",
+        tool_status_symbol(tool.status),
+        tool_call_label(tool)
     );
     let style = selected_style(status_style(tool.status, theme), selected, theme);
     let muted = selected_style(Style::default().fg(theme.notice), selected, theme);
@@ -755,24 +741,76 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn tool_status_symbol(status: ToolStatusKind, activity_frame: usize) -> &'static str {
+fn tool_status_symbol(status: ToolStatusKind) -> &'static str {
     match status {
-        ToolStatusKind::Failed => "×",
-        ToolStatusKind::Cancelled => "×",
-        ToolStatusKind::Pending | ToolStatusKind::Running => {
-            const FRAMES: [&str; 4] = ["·", "∙", "•", "∙"];
-            FRAMES[activity_frame % FRAMES.len()]
-        }
-        ToolStatusKind::Succeeded => "●",
+        ToolStatusKind::Pending | ToolStatusKind::Running => "●",
+        ToolStatusKind::Succeeded => "✓",
+        ToolStatusKind::Failed => "✗",
+        ToolStatusKind::Cancelled => "⊘",
     }
 }
 
-fn tool_status_suffix(status: ToolStatusKind) -> &'static str {
+#[allow(dead_code)] // wired in Task 3
+fn tool_status_verb(status: ToolStatusKind) -> &'static str {
     match status {
-        ToolStatusKind::Pending => "      pending",
-        ToolStatusKind::Running => "      running",
-        _ => "",
+        ToolStatusKind::Pending | ToolStatusKind::Running => "Using",
+        ToolStatusKind::Succeeded => "Used",
+        ToolStatusKind::Failed => "Failed",
+        ToolStatusKind::Cancelled => "Cancelled",
     }
+}
+
+#[allow(dead_code)] // wired in Task 3
+fn tool_key_argument(tool: &ToolRunTranscript) -> String {
+    let arguments = tool.arguments.as_deref().unwrap_or_default().trim();
+    if arguments.is_empty() {
+        return String::new();
+    }
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) {
+        let candidates = ["path", "command", "pattern", "glob", "query"];
+        for key in candidates {
+            if let Some(v) = value.get(key).and_then(|v| v.as_str()) {
+                return one_line(v);
+            }
+        }
+    }
+
+    one_line(arguments)
+}
+
+#[allow(dead_code)] // wired in Task 3
+fn tool_result_chip(tool: &ToolRunTranscript) -> String {
+    let result = match tool.result.as_deref() {
+        Some(r) if !r.is_empty() => r,
+        _ => return String::new(),
+    };
+
+    let lower = tool.name.to_lowercase();
+    if lower == "read" || lower == "write" || lower == "edit" {
+        let lines = result.lines().count();
+        return format!(" · {lines} lines");
+    }
+    if lower == "grep" {
+        let matches = result.lines().count();
+        return format!(" · {matches} matches");
+    }
+    if lower == "find" || lower == "glob" || lower == "list" {
+        let files = result.lines().count();
+        return format!(" · {files} files");
+    }
+    if lower == "bash" || lower == "shell" {
+        if let Some(code) = tool.metadata.exit_code {
+            if code != 0 {
+                return format!(" · exit {code}");
+            }
+        }
+        let bytes = result.len();
+        return format!(" · {bytes} bytes");
+    }
+
+    let bytes = result.len();
+    format!(" · {bytes} bytes")
 }
 
 fn diff_old_start(header: &str) -> Option<usize> {
@@ -1142,7 +1180,6 @@ impl Widget for &NeoTuiApp {
             .with_view(self.transcript_view())
             .with_selection(self.transcript_selection())
             .with_expanded_items(self.expanded_transcript_items())
-            .with_activity_frame(self.activity_frame())
             .with_theme(self.theme())
             .render(layout.body, buf);
 
@@ -1495,7 +1532,7 @@ fn overlay_lines(overlay: &Overlay, width: usize) -> Vec<String> {
 fn status_style(kind: ToolStatusKind, theme: TuiTheme) -> Style {
     match kind {
         ToolStatusKind::Pending => Style::default().fg(theme.pending),
-        ToolStatusKind::Running => Style::default().fg(theme.running),
+        ToolStatusKind::Running => Style::default().fg(theme.accent),
         ToolStatusKind::Succeeded => Style::default().fg(theme.succeeded),
         ToolStatusKind::Failed => Style::default().fg(theme.failed),
         ToolStatusKind::Cancelled => Style::default().fg(theme.cancelled),

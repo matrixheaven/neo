@@ -143,8 +143,7 @@ fn app_shell_working_status_hides_running_tool_names_from_chrome() {
     let lines = render_app(100, 12, &app);
     assert!(!lines.iter().any(|line| line.contains("running shell.run")));
     assert!(!lines.iter().any(|line| line.contains("shell.run running")));
-    assert!(lines.iter().any(|line| line.contains("Use shell.run")));
-    assert!(lines.iter().any(|line| line.contains("running")));
+    assert!(lines.iter().any(|line| line.contains("● Use shell.run")));
 }
 
 #[test]
@@ -414,8 +413,7 @@ fn running_tool_call_is_rendered_in_transcript_before_finish() {
     ));
 
     let lines = render_app(100, 12, &app);
-    assert!(lines.iter().any(|line| line.contains("Use list")));
-    assert!(lines.iter().any(|line| line.contains("running")));
+    assert!(lines.iter().any(|line| line.contains("● Use list")));
     assert!(!lines.iter().any(|line| line.contains("list running")));
 }
 

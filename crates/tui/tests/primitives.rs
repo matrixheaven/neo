@@ -1070,7 +1070,7 @@ fn transcript_widget_collapsed_tool_result_shows_preview_and_expand_hint() {
 
     let lines = render_widget(64, 8, TranscriptWidget::new(&transcript));
 
-    assert!(lines.iter().any(|line| line.contains("● Use read(")));
+    assert!(lines.iter().any(|line| line.contains("✓ Use read(")));
     assert!(lines.iter().any(|line| line.contains("first file line")));
     assert!(lines.iter().any(|line| line.contains("second file line")));
     assert!(lines.iter().any(|line| line.contains("third file line")));
@@ -1100,7 +1100,7 @@ fn transcript_widget_expanded_tool_result_shows_full_output() {
         TranscriptWidget::new(&transcript).with_expanded_items(&expanded),
     );
 
-    assert!(lines.iter().any(|line| line.contains("● Use read(")));
+    assert!(lines.iter().any(|line| line.contains("✓ Use read(")));
     assert!(lines.iter().any(|line| line.contains("first file line")));
     assert!(lines.iter().any(|line| line.contains("second file line")));
     assert!(lines.iter().any(|line| line.contains("third file line")));
@@ -1177,7 +1177,7 @@ fn transcript_widget_does_not_render_plain_read_output_as_edit_diff() {
 
     let lines = render_widget(72, 8, TranscriptWidget::new(&transcript));
 
-    assert!(lines.iter().any(|line| line.contains("● Use read(")));
+    assert!(lines.iter().any(|line| line.contains("✓ Use read(")));
     assert!(lines.iter().any(|line| line.contains("[workspace]")));
     assert!(lines.iter().any(|line| line.contains("\"crates/ai\"")));
     assert!(!lines.iter().any(|line| line.contains("Edited")));
@@ -1559,7 +1559,7 @@ fn status_widget_renders_tool_state_without_runtime_details() {
 }
 
 #[test]
-fn transcript_widget_animates_running_tool_marker_in_place() {
+fn transcript_widget_renders_running_tool_marker_in_place() {
     let transcript = ChatTranscript::from_items([TranscriptItem::tool_run(
         "list",
         Some(r#"{"path":"crates/tui/src"}"#.to_owned()),
@@ -1569,21 +1569,9 @@ fn transcript_widget_animates_running_tool_marker_in_place() {
         neo_tui::ToolPresentationKind::Text,
     )]);
 
-    let frame_zero = render_widget(
-        80,
-        4,
-        TranscriptWidget::new(&transcript).with_activity_frame(0),
-    );
-    let frame_two = render_widget(
-        80,
-        4,
-        TranscriptWidget::new(&transcript).with_activity_frame(2),
-    );
+    let lines = render_widget(80, 4, TranscriptWidget::new(&transcript));
 
-    assert!(frame_zero.iter().any(|line| line.contains("· Use list")));
-    assert!(frame_two.iter().any(|line| line.contains("• Use list")));
-    assert!(frame_zero.iter().any(|line| line.contains("running")));
-    assert!(frame_two.iter().any(|line| line.contains("running")));
+    assert!(lines.iter().any(|line| line.contains("● Use list")));
 }
 
 #[test]
