@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod config_ops;
 mod extension_commands;
 mod extension_tools;
 mod modes;
@@ -22,9 +23,9 @@ use anyhow::Context as _;
 
 use crate::{
     cli::{
-        Cli, Command, ConfigCommand, ExtensionCommand, ImageCommand, LIST_MODELS_NO_SEARCH,
-        McpCommand, ModelCommand, PromptPackageCommand, SessionCommand, SkillCommand,
-        ThemePackageCommand, TrustCommand,
+        CatalogCommand, Cli, Command, ConfigCommand, ExtensionCommand, ImageCommand,
+        LIST_MODELS_NO_SEARCH, McpCommand, ModelCommand, PromptPackageCommand, ProviderCommand,
+        SessionCommand, SkillCommand, ThemePackageCommand, TrustCommand,
     },
     config::{AppConfig, ConfigOverrides},
 };
@@ -197,6 +198,85 @@ async fn dispatch_command(
         },
         Some(Command::Models { command }) => match command {
             ModelCommand::List { json } => modes::run::list_models_with_options(config, json),
+            ModelCommand::Add {
+                alias,
+                provider,
+                model,
+                max_context_tokens,
+                capabilities,
+                display_name,
+            } => config_ops::add_model(
+                &config.config_path,
+                &alias,
+                config::ModelConfig {
+                    provider,
+                    model,
+                    max_context_tokens,
+                    max_output_tokens: None,
+                    capabilities: if capabilities.is_empty() {
+                        vec!["streaming".to_owned(), "tools".to_owned()]
+                    } else {
+                        capabilities
+                    },
+                    display_name,
+                },
+            ),
+            ModelCommand::Remove { alias } => config_ops::remove_model(&config.config_path, &alias),
+            ModelCommand::Set { alias } => {
+                config_ops::set_default_model(&config.config_path, &alias)
+            }
+        },
+        Some(Command::Provider { command }) => match command {
+            ProviderCommand::List { json: _ } => config_ops::list_providers(&config.config_path),
+            ProviderCommand::Add {
+                provider_id,
+                r#type,
+                base_url,
+                api_key,
+                api_key_env,
+            } => {
+                let provider_type = r#type
+                    .as_deref()
+                    .map(|t| {
+                        neo_ai::ApiType::from_config_str(t)
+                            .ok_or_else(|| anyhow::anyhow!("unsupported provider type: {t}"))
+                    })
+                    .transpose()?;
+                config_ops::add_provider(
+                    &config.config_path,
+                    &provider_id,
+                    config::ProviderConfig {
+                        provider_type,
+                        base_url,
+                        api_key,
+                        api_key_env,
+                        api_base: None,
+                    },
+                )
+            }
+            ProviderCommand::Remove { provider_id } => {
+                config_ops::remove_provider(&config.config_path, &provider_id)
+            }
+            ProviderCommand::Catalog { command } => match command {
+                CatalogCommand::List {
+                    provider_id,
+                    filter,
+                    json: _,
+                } => list_catalog_providers(provider_id.as_deref(), filter.as_deref()).await,
+                CatalogCommand::Add {
+                    provider_id,
+                    api_key,
+                    default_model,
+                } => {
+                    config_ops::catalog_add_provider(
+                        &config.config_path,
+                        &provider_id,
+                        api_key.as_deref(),
+                        default_model.as_deref(),
+                    )
+                    .await
+                }
+            },
         },
         Some(Command::Images { command }) => match command {
             ImageCommand::Generate {
@@ -531,4 +611,72 @@ fn resolve_default_extension_root(config: &AppConfig, root: PathBuf) -> PathBuf 
     } else {
         root
     }
+}
+
+/// Fetch and display providers from the models.dev catalog.
+async fn list_catalog_providers(
+    provider_id: Option<&str>,
+    filter: Option<&str>,
+) -> anyhow::Result<String> {
+    let catalog = neo_ai::catalog::fetch_catalog()
+        .await
+        .context("failed to fetch models.dev catalog")?;
+
+    // If a specific provider is requested, show its models
+    if let Some(pid) = provider_id {
+        let entry = catalog
+            .get(pid)
+            .ok_or_else(|| anyhow::anyhow!("provider '{pid}' not found in models.dev catalog"))?;
+        let wire = neo_ai::catalog::infer_api_type(entry);
+        let name = entry.name.as_deref().unwrap_or(pid);
+        let wire_str = wire.as_ref().map_or("unsupported", |t| t.as_config_str());
+
+        let models = neo_ai::catalog::catalog_provider_models(entry);
+        let mut out = format!("{name} ({pid})  wire={wire_str}  models={}\n", models.len());
+        for m in &models {
+            let ctx = m
+                .max_context_tokens
+                .map_or("?".to_owned(), |n| n.to_string());
+            let caps = m.capabilities.join(",");
+            let display = m.name.as_deref().unwrap_or(&m.id);
+            out.push_str(&format!(
+                "  {id:<40} {display:<30} ctx={ctx:<10} [{caps}]\n",
+                id = m.id
+            ));
+        }
+        return Ok(out);
+    }
+
+    // List all providers
+    let mut entries: Vec<_> = catalog.values().collect();
+    entries.sort_by_key(|e| e.id.clone());
+
+    let mut out = String::new();
+    for entry in entries {
+        // Apply filter
+        if let Some(f) = filter {
+            let f_lower = f.to_ascii_lowercase();
+            let id_match = entry.id.to_ascii_lowercase().contains(&f_lower);
+            let name_match = entry
+                .name
+                .as_deref()
+                .is_some_and(|n| n.to_ascii_lowercase().contains(&f_lower));
+            if !id_match && !name_match {
+                continue;
+            }
+        }
+
+        let wire = neo_ai::catalog::infer_api_type(entry);
+        if wire.is_none() {
+            continue; // Skip unsupported providers
+        }
+        let wire_str = wire.as_ref().map_or("?", |t| t.as_config_str());
+        let name = entry.name.as_deref().unwrap_or(&entry.id);
+        let model_count = entry.models.len();
+        out.push_str(&format!(
+            "{id:<25} wire={wire_str:<18} models={model_count:<4} {name}\n",
+            id = entry.id
+        ));
+    }
+    Ok(out)
 }

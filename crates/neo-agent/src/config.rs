@@ -235,6 +235,8 @@ pub struct AppConfig {
     pub api_key: Option<String>,
     pub api_key_env: Option<String>,
     pub providers: BTreeMap<String, ProviderConfig>,
+    /// Models defined inline in config.toml `[models.<alias>]`.
+    pub models: BTreeMap<String, ModelConfig>,
     pub model_catalogs: Vec<PathBuf>,
     #[serde(skip)]
     pub model_scope: Vec<String>,
@@ -360,8 +362,61 @@ impl Default for RuntimeCompactionConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderConfig {
-    pub api_base: Option<String>,
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub provider_type: Option<neo_ai::ApiType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Inline API key stored directly in config.toml.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Environment variable name that holds the API key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
+    /// Legacy alias for `api_base` (used by `api_base` top-level override).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_base: Option<String>,
+}
+
+impl ProviderConfig {
+    /// Returns the effective base URL: `base_url` takes priority, then `api_base`.
+    #[must_use]
+    pub fn effective_base_url(&self) -> Option<&str> {
+        self.base_url.as_deref().or(self.api_base.as_deref())
+    }
+
+    /// Produce a redacted copy for `config show`.
+    #[must_use]
+    pub fn redacted(&self) -> Self {
+        let mut copy = self.clone();
+        if copy.api_key.is_some() {
+            copy.api_key = Some("[REDACTED]".to_owned());
+        }
+        copy
+    }
+}
+
+/// A model definition in `config.toml` `[models.<alias>]`.
+///
+/// Each model references a provider by id and specifies the actual model ID
+/// sent to the API, context window, and capabilities.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelConfig {
+    /// Provider id — must match a key in `[providers.<id>]`.
+    pub provider: String,
+    /// Actual model ID sent to the provider API.
+    pub model: String,
+    /// Maximum context window in tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<u32>,
+    /// Maximum output tokens (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    /// Capability tags: `"streaming"`, `"tools"`, `"images"`, `"reasoning"`.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Human-readable display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -426,21 +481,23 @@ const fn default_runtime_compaction_keep_recent_messages() -> usize {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct FileConfig {
-    default_model: Option<String>,
-    default_provider: Option<String>,
-    api_base: Option<String>,
-    api_key_env: Option<String>,
-    providers: Option<BTreeMap<String, ProviderConfig>>,
-    model_scope: Option<Vec<String>>,
-    model_catalogs: Option<Vec<PathBuf>>,
-    prompt_templates: Option<Vec<String>>,
-    sessions_dir: Option<PathBuf>,
-    permissions: Option<PermissionPolicy>,
-    defaults: Option<FileDefaults>,
-    runtime: Option<FileRuntimeConfig>,
-    tui: Option<FileTuiConfig>,
-    mcp: Option<McpConfig>,
+pub(crate) struct FileConfig {
+    pub(crate) default_model: Option<String>,
+    pub(crate) default_provider: Option<String>,
+    pub(crate) api_base: Option<String>,
+    pub(crate) api_key_env: Option<String>,
+    pub(crate) providers: Option<BTreeMap<String, ProviderConfig>>,
+    /// Models defined inline via `[models.<alias>]` tables.
+    pub(crate) models: Option<BTreeMap<String, ModelConfig>>,
+    pub(crate) model_scope: Option<Vec<String>>,
+    pub(crate) model_catalogs: Option<Vec<PathBuf>>,
+    pub(crate) prompt_templates: Option<Vec<String>>,
+    pub(crate) sessions_dir: Option<PathBuf>,
+    pub(crate) permissions: Option<PermissionPolicy>,
+    pub(crate) defaults: Option<FileDefaults>,
+    pub(crate) runtime: Option<FileRuntimeConfig>,
+    pub(crate) tui: Option<FileTuiConfig>,
+    pub(crate) mcp: Option<McpConfig>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -479,7 +536,7 @@ struct FileRuntimeCompactionConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct FileTuiConfig {
+pub(crate) struct FileTuiConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     image_protocol: Option<ImageProtocolPreference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -561,6 +618,7 @@ impl AppConfig {
             .or(file_config.default_provider)
             .unwrap_or_else(|| DEFAULT_PROVIDER.to_owned());
         let providers = file_config.providers.unwrap_or_default();
+        let models = file_config.models.unwrap_or_default();
         let api_base = overrides
             .api_base
             .or(env_overrides.api_base)
@@ -618,6 +676,7 @@ impl AppConfig {
             api_key: overrides.api_key,
             api_key_env,
             providers,
+            models,
             model_catalogs,
             model_scope,
             model_selection: ModelSelection::from_explicit(explicit_model),
@@ -723,12 +782,20 @@ fn provider_api_key_env(
 }
 
 pub fn show(config: &AppConfig) -> anyhow::Result<String> {
+    let providers = (!config.providers.is_empty()).then(|| {
+        config
+            .providers
+            .iter()
+            .map(|(id, cfg)| (id.clone(), cfg.redacted()))
+            .collect()
+    });
     let snapshot = FileConfig {
         default_model: Some(config.default_model.clone()),
         default_provider: Some(config.default_provider.clone()),
         api_base: config.api_base.clone(),
         api_key_env: config.api_key_env.clone(),
-        providers: (!config.providers.is_empty()).then(|| config.providers.clone()),
+        providers,
+        models: (!config.models.is_empty()).then(|| config.models.clone()),
         model_scope: (!config.model_scope.is_empty()).then(|| config.model_scope.clone()),
         model_catalogs: (!config.model_catalogs.is_empty()).then(|| config.model_catalogs.clone()),
         prompt_templates: (!config.configured_prompt_templates.is_empty())
@@ -819,6 +886,15 @@ pub fn set(key: &str, value: &str) -> anyhow::Result<String> {
                 .or_default();
             provider.api_base = Some(value.to_owned());
         }
+        key if key.starts_with("providers.") && key.ends_with(".base_url") => {
+            let provider_id = parse_provider_key(key, ".base_url")?;
+            let provider = config
+                .providers
+                .get_or_insert_with(BTreeMap::new)
+                .entry(provider_id.to_owned())
+                .or_default();
+            provider.base_url = Some(value.to_owned());
+        }
         key if key.starts_with("providers.") && key.ends_with(".api_key_env") => {
             let provider_id = parse_provider_key(key, ".api_key_env")?;
             let provider = config
@@ -827,6 +903,26 @@ pub fn set(key: &str, value: &str) -> anyhow::Result<String> {
                 .entry(provider_id.to_owned())
                 .or_default();
             provider.api_key_env = Some(value.to_owned());
+        }
+        key if key.starts_with("providers.") && key.ends_with(".api_key") => {
+            let provider_id = parse_provider_key(key, ".api_key")?;
+            let provider = config
+                .providers
+                .get_or_insert_with(BTreeMap::new)
+                .entry(provider_id.to_owned())
+                .or_default();
+            provider.api_key = Some(value.to_owned());
+        }
+        key if key.starts_with("providers.") && key.ends_with(".type") => {
+            let provider_id = parse_provider_key(key, ".type")?;
+            let api_type = neo_ai::ApiType::from_config_str(value)
+                .ok_or_else(|| anyhow::anyhow!("unsupported provider type: {value}"))?;
+            let provider = config
+                .providers
+                .get_or_insert_with(BTreeMap::new)
+                .entry(provider_id.to_owned())
+                .or_default();
+            provider.provider_type = Some(api_type);
         }
         "sessions_dir" => config.sessions_dir = Some(PathBuf::from(value)),
         "prompt_templates" => {
@@ -947,6 +1043,7 @@ fn merge_file_configs(base: FileConfig, layer: FileConfig) -> FileConfig {
         api_base: layer.api_base.or(base.api_base),
         api_key_env: layer.api_key_env.or(base.api_key_env),
         providers: merge_provider_configs(base.providers, layer.providers),
+        models: merge_model_configs(base.models, layer.models),
         model_scope: merge_string_lists(base.model_scope, layer.model_scope),
         model_catalogs: merge_path_lists(base.model_catalogs, layer.model_catalogs),
         prompt_templates: merge_string_lists(base.prompt_templates, layer.prompt_templates),
@@ -982,8 +1079,27 @@ fn merge_provider_configs(
 
 fn merge_provider_config(base: ProviderConfig, layer: ProviderConfig) -> ProviderConfig {
     ProviderConfig {
-        api_base: layer.api_base.or(base.api_base),
+        provider_type: layer.provider_type.or(base.provider_type),
+        base_url: layer.base_url.or(base.base_url),
+        api_key: layer.api_key.or(base.api_key),
         api_key_env: layer.api_key_env.or(base.api_key_env),
+        api_base: layer.api_base.or(base.api_base),
+    }
+}
+
+fn merge_model_configs(
+    base: Option<BTreeMap<String, ModelConfig>>,
+    layer: Option<BTreeMap<String, ModelConfig>>,
+) -> Option<BTreeMap<String, ModelConfig>> {
+    match (base, layer) {
+        (None, None) => None,
+        (Some(models), None) | (None, Some(models)) => Some(models),
+        (Some(mut base), Some(layer)) => {
+            for (alias, cfg) in layer {
+                base.insert(alias, cfg);
+            }
+            Some(base)
+        }
     }
 }
 
@@ -1428,7 +1544,7 @@ impl TuiConfig {
     }
 }
 
-fn find_config_path() -> anyhow::Result<PathBuf> {
+pub(crate) fn find_config_path() -> anyhow::Result<PathBuf> {
     Ok(env::current_dir()?.join(CONFIG_DIR).join(CONFIG_FILE))
 }
 
@@ -1468,7 +1584,7 @@ fn resolve_project_path(project_dir: &Path, path: PathBuf) -> PathBuf {
     }
 }
 
-fn read_file_config(path: &Path) -> anyhow::Result<FileConfig> {
+pub(crate) fn read_file_config(path: &Path) -> anyhow::Result<FileConfig> {
     if !path.exists() {
         return Ok(FileConfig::default());
     }
@@ -1478,7 +1594,7 @@ fn read_file_config(path: &Path) -> anyhow::Result<FileConfig> {
     toml::from_str(&content).with_context(|| format!("failed to parse config {}", path.display()))
 }
 
-fn write_file_config(path: &Path, config: &FileConfig) -> anyhow::Result<()> {
+pub(crate) fn write_file_config(path: &Path, config: &FileConfig) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create config directory {}", parent.display()))?;

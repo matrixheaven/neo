@@ -228,6 +228,10 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommand,
+    },
     Models {
         #[command(subcommand)]
         command: ModelCommand,
@@ -310,6 +314,74 @@ pub enum ModelCommand {
     List {
         #[arg(long)]
         json: bool,
+    },
+    Add {
+        alias: String,
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        model: String,
+        #[arg(long, value_name = "TOKENS")]
+        max_context_tokens: Option<u32>,
+        #[arg(long, value_delimiter = ',')]
+        capabilities: Vec<String>,
+        #[arg(long)]
+        display_name: Option<String>,
+    },
+    Remove {
+        alias: String,
+    },
+    Set {
+        alias: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProviderCommand {
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Add {
+        provider_id: String,
+        #[arg(long, value_name = "TYPE")]
+        r#type: Option<String>,
+        #[arg(long, value_name = "URL")]
+        base_url: Option<String>,
+        #[arg(long, value_name = "KEY")]
+        api_key: Option<String>,
+        #[arg(long, value_name = "ENV_VAR")]
+        api_key_env: Option<String>,
+    },
+    Remove {
+        provider_id: String,
+    },
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CatalogCommand {
+    /// List providers available on models.dev.
+    List {
+        /// Show models for a specific provider.
+        provider_id: Option<String>,
+        /// Filter providers by substring.
+        #[arg(long)]
+        filter: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import a provider and its models from models.dev.
+    Add {
+        provider_id: String,
+        #[arg(long, value_name = "KEY")]
+        api_key: Option<String>,
+        /// Set a specific model as default after import.
+        #[arg(long, value_name = "MODEL_ID")]
+        default_model: Option<String>,
     },
 }
 
