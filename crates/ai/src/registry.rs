@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    AiError, ApiKind, ModelCapabilities, ModelClient, ModelSpec, ProviderId,
+    AiError, ApiKind, ApiType, ModelCapabilities, ModelClient, ModelSpec, ProviderId,
     providers::{
         anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
         openai_compatible::OpenAiCompatibleClient, openai_responses::OpenAiResponsesClient,
@@ -794,8 +794,15 @@ pub struct ProviderSpec {
     pub api: ApiKind,
     pub supported_apis: Vec<ApiKind>,
     pub base_url: Option<String>,
+    /// Inline API key stored in config (e.g. `api_key = "sk-..."`).
+    /// Takes priority over `api_key_env_vars` during credential resolution.
+    pub api_key: Option<String>,
     pub api_key_env_vars: Vec<String>,
     pub ambient_auth_env_vars: Vec<Vec<String>>,
+    /// Protocol type declared in config.toml `[providers.<id>].type`.
+    /// When set, the resolver uses this to select the client instead of
+    /// the model's `api` field.
+    pub provider_type: Option<ApiType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -834,6 +841,11 @@ impl ProviderRegistry {
     }
 
     pub fn register(&mut self, provider: ProviderSpec) {
+        self.providers.insert(provider.id.clone(), provider);
+    }
+
+    /// Insert or replace a provider by id.
+    pub fn upsert(&mut self, provider: ProviderSpec) {
         self.providers.insert(provider.id.clone(), provider);
     }
 
@@ -903,23 +915,38 @@ pub struct ProviderResolver {
 impl ProviderResolver {
     pub fn resolve(&self, model: &ModelSpec) -> Result<Arc<dyn ModelClient>, AiError> {
         let provider = self.registry.get(&model.provider.0).ok_or_else(|| {
-            AiError::Configuration(format!("provider {} is not registered", model.provider.0))
+            AiError::Configuration(format!(
+                "provider {} is not registered. Define it in config.toml with [providers.{}]",
+                model.provider.0, model.provider.0
+            ))
         })?;
 
-        if !provider.supports_api(&model.api) {
+        // When the provider has a declared `provider_type`, use it to select the
+        // client. Otherwise fall back to the model's `api` field (legacy path).
+        let effective_api = provider
+            .provider_type
+            .as_ref()
+            .map_or(model.api, |t| t.to_api_kind());
+
+        if !provider.supports_api(&effective_api) && provider.provider_type.is_none() {
             return Err(AiError::Configuration(format!(
                 "provider {} does not support model API {:?}",
                 provider.id, model.api
             )));
         }
 
-        let api_key = api_key_from_provider(provider, &self.env).ok_or_else(|| {
-            let reason = missing_reason(provider);
-            AiError::Configuration(format!(
-                "missing credentials for provider {} ({reason})",
-                provider.id
-            ))
-        })?;
+        // Credential: inline api_key > env vars > ambient auth
+        let api_key = provider
+            .api_key
+            .clone()
+            .or_else(|| api_key_from_provider(provider, &self.env))
+            .ok_or_else(|| {
+                let reason = missing_reason(provider);
+                AiError::Configuration(format!(
+                    "missing credentials for provider {} ({reason})",
+                    provider.id
+                ))
+            })?;
 
         let base_url = provider.base_url.as_deref().ok_or_else(|| {
             AiError::Configuration(format!(
@@ -928,7 +955,7 @@ impl ProviderResolver {
             ))
         })?;
 
-        match model.api {
+        match effective_api {
             ApiKind::OpenAiResponses => Ok(Arc::new(OpenAiResponsesClient::new(base_url, api_key))),
             ApiKind::AnthropicMessages => {
                 Ok(Arc::new(AnthropicMessagesClient::new(base_url, api_key)))
@@ -1118,12 +1145,21 @@ fn provider(
     api_key_env_vars: &[&str],
     ambient_auth_env_vars: &[&[&str]],
 ) -> ProviderSpec {
+    let provider_type = match api {
+        ApiKind::OpenAiResponses => Some(ApiType::OpenAiResponses),
+        ApiKind::AnthropicMessages => Some(ApiType::Anthropic),
+        ApiKind::GoogleGenerativeAi => Some(ApiType::Google),
+        ApiKind::OpenAiChatCompletions => Some(ApiType::OpenAiChat),
+        ApiKind::OpenAiCompatible => Some(ApiType::OpenAiCompatible),
+        ApiKind::Local => None,
+    };
     ProviderSpec {
         id: id.to_owned(),
         display_name: display_name.to_owned(),
         api,
         supported_apis: supported_apis.to_vec(),
         base_url: base_url.map(str::to_owned),
+        api_key: None,
         api_key_env_vars: api_key_env_vars
             .iter()
             .map(|value| (*value).to_owned())
@@ -1132,5 +1168,6 @@ fn provider(
             .iter()
             .map(|group| group.iter().map(|value| (*value).to_owned()).collect())
             .collect(),
+        provider_type,
     }
 }

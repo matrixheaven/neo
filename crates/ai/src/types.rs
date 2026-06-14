@@ -7,7 +7,7 @@ use crate::{AiError, RequestOptions};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderId(pub String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ApiKind {
     OpenAiResponses,
     OpenAiChatCompletions,
@@ -15,6 +15,88 @@ pub enum ApiKind {
     GoogleGenerativeAi,
     OpenAiCompatible,
     Local,
+}
+
+/// Provider protocol type — the user-facing type declared in `config.toml`
+/// `[providers.<id>].type`. It determines which wire-protocol client is used.
+/// This is the config-level counterpart of [`ApiKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ApiType {
+    /// OpenAI Responses API (`/responses` endpoint).
+    #[serde(rename = "openai-responses")]
+    OpenAiResponses,
+    /// OpenAI Chat Completions — third-party compatible endpoints.
+    #[serde(rename = "openai-compatible")]
+    OpenAiCompatible,
+    /// OpenAI Chat Completions — native OpenAI endpoint.
+    #[serde(rename = "openai-chat")]
+    OpenAiChat,
+    /// Anthropic Messages API.
+    #[serde(rename = "anthropic")]
+    Anthropic,
+    /// Google Generative AI.
+    #[serde(rename = "google")]
+    Google,
+}
+
+impl Default for ApiType {
+    fn default() -> Self {
+        Self::OpenAiCompatible
+    }
+}
+
+impl ApiType {
+    /// Convert to the internal [`ApiKind`] used by `ModelSpec`.
+    #[must_use]
+    pub const fn to_api_kind(self) -> ApiKind {
+        match self {
+            Self::OpenAiResponses => ApiKind::OpenAiResponses,
+            Self::OpenAiCompatible => ApiKind::OpenAiCompatible,
+            Self::OpenAiChat => ApiKind::OpenAiChatCompletions,
+            Self::Anthropic => ApiKind::AnthropicMessages,
+            Self::Google => ApiKind::GoogleGenerativeAi,
+        }
+    }
+
+    /// Parse from a config string (case-insensitive, kebab-case preferred).
+    /// Accepts both `"openai-responses"` and `"OpenAiResponses"` style names.
+    #[must_use]
+    pub fn from_config_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "openai-responses" | "openairesponses" => Some(Self::OpenAiResponses),
+            "openai-compatible" | "openaicompatible" | "openai-completions" => {
+                Some(Self::OpenAiCompatible)
+            }
+            "openai-chat"
+            | "openaichat"
+            | "openai-chat-completions"
+            | "openaichatcompletions"
+            | "openai" => Some(Self::OpenAiChat),
+            "anthropic" | "anthropic-messages" | "anthropicmessages" => Some(Self::Anthropic),
+            "google" | "google-generative-ai" | "googlegenerativeai" | "google-genai" => {
+                Some(Self::Google)
+            }
+            _ => None,
+        }
+    }
+
+    /// Convert to a kebab-case config string.
+    #[must_use]
+    pub const fn as_config_str(self) -> &'static str {
+        match self {
+            Self::OpenAiResponses => "openai-responses",
+            Self::OpenAiCompatible => "openai-compatible",
+            Self::OpenAiChat => "openai-chat",
+            Self::Anthropic => "anthropic",
+            Self::Google => "google",
+        }
+    }
+}
+
+/// Parse an [`ApiKind`] from a config-style string, used by legacy JSON catalogs.
+#[must_use]
+pub fn api_kind_from_str(s: &str) -> Option<ApiKind> {
+    ApiType::from_config_str(s).map(ApiType::to_api_kind)
 }
 
 #[allow(clippy::struct_excessive_bools)]

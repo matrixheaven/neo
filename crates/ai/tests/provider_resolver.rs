@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use neo_ai::{
     AiError, ApiKind, CredentialResolver, CredentialSource, ModelCapabilities, ModelSpec,
-    ProviderId, registry::ProviderRegistry,
+    ProviderId,
+    registry::{ProviderRegistry, ProviderSpec},
 };
 
 fn model(provider: &str, name: &str, api: ApiKind) -> ModelSpec {
@@ -185,66 +186,82 @@ fn provider_resolver_builds_real_clients_by_model_api() {
 
 #[test]
 fn provider_resolver_rejects_model_api_mismatches() {
-    let registry = ProviderRegistry::production();
-    let env = BTreeMap::from([
-        ("OPENAI_API_KEY".to_owned(), "openai-key".to_owned()),
-        ("ANTHROPIC_API_KEY".to_owned(), "anthropic-key".to_owned()),
-        ("GEMINI_API_KEY".to_owned(), "google-key".to_owned()),
-    ]);
+    // When a provider has NO provider_type, the model's api must be supported.
+    // We test with a custom provider that has no provider_type.
+    let mut registry = ProviderRegistry::production();
+    registry.register(ProviderSpec {
+        id: "legacy-provider".to_owned(),
+        display_name: "Legacy".to_owned(),
+        api: ApiKind::OpenAiResponses,
+        supported_apis: vec![ApiKind::OpenAiResponses],
+        base_url: Some("https://api.example.com/v1".to_owned()),
+        api_key: None,
+        api_key_env_vars: vec!["LEGACY_KEY".to_owned()],
+        ambient_auth_env_vars: vec![],
+        provider_type: None,
+    });
+    let env = BTreeMap::from([("LEGACY_KEY".to_owned(), "legacy-key".to_owned())]);
     let resolver = registry.resolver_from(env);
 
-    let Err(openai_mismatch) =
-        resolver.resolve(&model("openai", "bad-claude", ApiKind::AnthropicMessages))
-    else {
-        panic!("openai provider must reject anthropic messages models");
+    let Err(mismatch) = resolver.resolve(&model(
+        "legacy-provider",
+        "bad-claude",
+        ApiKind::AnthropicMessages,
+    )) else {
+        panic!("legacy provider must reject anthropic messages models");
     };
-    assert!(matches!(openai_mismatch, AiError::Configuration(_)));
+    assert!(matches!(mismatch, AiError::Configuration(_)));
     assert!(
-        openai_mismatch
+        mismatch
             .to_string()
-            .contains("provider openai does not support model API AnthropicMessages")
+            .contains("provider legacy-provider does not support model API AnthropicMessages")
     );
 
-    let Err(anthropic_mismatch) =
-        resolver.resolve(&model("anthropic", "bad-gpt", ApiKind::OpenAiResponses))
-    else {
-        panic!("anthropic provider must reject openai responses models");
-    };
+    // When a provider HAS provider_type, the type is used instead of model.api.
+    // An OpenAI provider with provider_type=OpenAiResponses will use OpenAiResponses
+    // regardless of what the model's api field says.
+    let registry2 = ProviderRegistry::production();
+    let env2 = BTreeMap::from([("OPENAI_API_KEY".to_owned(), "openai-key".to_owned())]);
+    let resolver2 = registry2.resolver_from(env2);
+    // This should succeed because provider_type=OpenAiResponses overrides model.api
+    let result = resolver2.resolve(&model("openai", "some-model", ApiKind::AnthropicMessages));
     assert!(
-        anthropic_mismatch
-            .to_string()
-            .contains("provider anthropic does not support model API OpenAiResponses")
-    );
-
-    let Err(google_mismatch) =
-        resolver.resolve(&model("google", "bad-chat", ApiKind::OpenAiCompatible))
-    else {
-        panic!("google provider must reject openai-compatible models");
-    };
-    assert!(
-        google_mismatch
-            .to_string()
-            .contains("provider google does not support model API OpenAiCompatible")
+        result.is_ok(),
+        "provider_type should override model.api mismatch"
     );
 }
 
 #[test]
 fn provider_resolver_reports_api_mismatch_before_credential_lookup() {
-    let registry = ProviderRegistry::production();
+    // With a legacy provider (no provider_type), API mismatch fails before credential lookup.
+    let mut registry = ProviderRegistry::production();
+    registry.register(ProviderSpec {
+        id: "legacy-provider".to_owned(),
+        display_name: "Legacy".to_owned(),
+        api: ApiKind::OpenAiResponses,
+        supported_apis: vec![ApiKind::OpenAiResponses],
+        base_url: Some("https://api.example.com/v1".to_owned()),
+        api_key: None,
+        api_key_env_vars: vec!["LEGACY_KEY".to_owned()],
+        ambient_auth_env_vars: vec![],
+        provider_type: None,
+    });
     let resolver = registry.resolver_from(BTreeMap::new());
 
-    let Err(mismatch) =
-        resolver.resolve(&model("openai", "bad-claude", ApiKind::AnthropicMessages))
-    else {
+    let Err(mismatch) = resolver.resolve(&model(
+        "legacy-provider",
+        "bad-claude",
+        ApiKind::AnthropicMessages,
+    )) else {
         panic!("api mismatch should fail before credential lookup");
     };
 
     assert!(
         mismatch
             .to_string()
-            .contains("provider openai does not support model API AnthropicMessages")
+            .contains("provider legacy-provider does not support model API AnthropicMessages")
     );
-    assert!(!mismatch.to_string().contains("OPENAI_API_KEY"));
+    assert!(!mismatch.to_string().contains("LEGACY_KEY"));
 }
 
 #[test]

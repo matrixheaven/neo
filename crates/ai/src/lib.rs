@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod catalog;
 pub mod env_api_keys;
 pub mod error;
 pub mod image_generation;
@@ -26,3 +27,4 @@ pub use registry::{
 pub use stream::collect_tool_arguments;
 pub use tool_schema::schema_for;
 pub use types::*;
+pub use types::{ApiType, api_kind_from_str};
