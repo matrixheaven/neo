@@ -1663,9 +1663,9 @@ fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
         let hint_style = Style::default().fg(theme.footer_hint);
         let narrow = area.width < 50;
         let hints = if narrow {
-            "enter send · esc interrupt · scroll↑ for history".to_owned()
+            "enter send · esc interrupt".to_owned()
         } else {
-            "enter send · shift+enter/ctrl+j newline · scroll↑ for history".to_owned()
+            "enter send · shift+enter/ctrl+j newline · / commands".to_owned()
         };
 
         let context_width: u16 = context_label

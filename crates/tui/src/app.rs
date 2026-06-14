@@ -318,13 +318,6 @@ pub struct NeoTuiApp {
     transcript_view: TranscriptView,
     transcript_selection: Option<TranscriptSelection>,
     expanded_transcript_items: BTreeSet<usize>,
-    /// Number of transcript items already pushed to terminal scrollback.
-    /// Items `[0, committed_count)` are finalized in scrollback.
-    /// Items `[committed_count, len)` are live (rendered in viewport).
-    committed_count: usize,
-    /// Pending finalized items waiting to be drained into scrollback.
-    /// Each entry is (item_index, rendered text lines).
-    pending_history_lines: Vec<Vec<String>>,
     prompt: PromptState,
     copy_buffer: Option<String>,
     mode: AppMode,
@@ -364,8 +357,6 @@ impl NeoTuiApp {
             transcript_view: TranscriptView::new(),
             transcript_selection: None,
             expanded_transcript_items: BTreeSet::new(),
-            committed_count: 0,
-            pending_history_lines: Vec::new(),
             prompt: PromptState::default(),
             copy_buffer: None,
             mode: AppMode::Editing,
@@ -636,82 +627,6 @@ impl NeoTuiApp {
             .sync(content_rows, usize::from(body.height));
     }
 
-    // ── Inline rendering support ──────────────────────────────────
-
-    /// Returns `true` if the app is in inline rendering mode (no alternate screen).
-    /// In this mode, finalized transcript items are pushed to the terminal's native
-    /// scrollback and only live content is rendered in the viewport.
-    #[must_use]
-    pub fn inline_mode(&self) -> bool {
-        true
-    }
-
-    /// Returns the slice of transcript items that are "live" (not yet committed to
-    /// scrollback). These are rendered in the viewport.
-    #[must_use]
-    pub fn live_transcript_items(&self) -> &[TranscriptItem] {
-        let start = self.committed_count.min(self.transcript.items().len());
-        &self.transcript.items()[start..]
-    }
-
-    /// Returns `true` if a transcript item at the given index is "finalized" — i.e.
-    /// it should be committed to scrollback.
-    #[must_use]
-    fn is_item_finalized(&self, index: usize) -> bool {
-        let Some(item) = self.transcript.items().get(index) else {
-            return false;
-        };
-        match item {
-            TranscriptItem::User { .. } => true,
-            TranscriptItem::Notice { .. } => true,
-            TranscriptItem::Banner { .. } => true,
-            TranscriptItem::Compaction { .. } => true,
-            TranscriptItem::Image { .. } => true,
-            TranscriptItem::Assistant { .. } => {
-                // Assistant is finalized if it's not the currently-streaming one
-                // (i.e., active_assistant_id is None or this isn't the last item)
-                self.active_assistant_id.is_none() || index < self.transcript.items().len() - 1
-            }
-            TranscriptItem::Tool { status, .. } => {
-                // Tool is finalized if it's succeeded/failed and not in active_tools
-                !matches!(status, ToolStatusKind::Pending | ToolStatusKind::Running)
-            }
-        }
-    }
-
-    /// Scan the transcript for newly-finalized items and queue them for scrollback
-    /// insertion. Returns the pending history lines (each item becomes a Vec of
-    /// plain-text lines). Called by the render loop before each draw.
-    pub fn drain_pending_history_lines(&mut self) -> Vec<Vec<String>> {
-        let items = self.transcript.items();
-        let mut new_pending = Vec::new();
-
-        while self.committed_count < items.len() && self.is_item_finalized(self.committed_count) {
-            let lines = transcript_item_to_text_lines(&items[self.committed_count]);
-            if !lines.is_empty() {
-                new_pending.push(lines);
-            }
-            self.committed_count += 1;
-        }
-
-        // Also drain any previously-queued lines
-        new_pending.append(&mut self.pending_history_lines);
-        new_pending
-    }
-
-    /// Queue history lines for immediate flush (e.g., on session resume).
-    pub fn queue_history_lines(&mut self, lines: Vec<String>) {
-        if !lines.is_empty() {
-            self.pending_history_lines.push(lines);
-        }
-    }
-
-    /// Reset committed state (used when loading a new session transcript).
-    pub fn reset_committed(&mut self) {
-        self.committed_count = 0;
-        self.pending_history_lines.clear();
-    }
-
     pub fn select_visible_transcript_item(&mut self) {
         let range = self.transcript_view.visible_range(&self.transcript, 1);
         let Some(index) = range.end.checked_sub(1) else {
@@ -766,8 +681,6 @@ impl NeoTuiApp {
         self.transcript_view = TranscriptView::new();
         self.transcript_selection = None;
         self.expanded_transcript_items.clear();
-        self.committed_count = 0;
-        self.pending_history_lines.clear();
         self.prompt = PromptState::default();
         self.active_assistant_id = None;
         self.active_user_prompt = None;
@@ -3128,84 +3041,6 @@ impl TranscriptItem {
             session_label: session_label.into(),
             model_label: model_label.into(),
             workspace_root: workspace_root.into(),
-        }
-    }
-}
-
-/// Convert a finalized `TranscriptItem` into plain-text lines for terminal scrollback.
-/// These are written to the terminal's native scrollback via scroll-region escape sequences.
-#[must_use]
-fn transcript_item_to_text_lines(item: &TranscriptItem) -> Vec<String> {
-    match item {
-        TranscriptItem::User { content } => {
-            let mut lines = vec!["> ".to_owned()];
-            lines.extend(content.lines().map(|l| l.to_owned()));
-            if content.is_empty() {
-                lines = vec!["> ".to_owned()];
-            }
-            lines
-        }
-        TranscriptItem::Assistant { thinking, content } => {
-            let mut lines = Vec::new();
-            if let Some(thinking) = thinking
-                && !thinking.is_empty()
-            {
-                lines.push("(thinking)".to_owned());
-                lines.extend(thinking.lines().map(|l| format!("  {l}")));
-                lines.push(String::new());
-            }
-            if !content.is_empty() {
-                lines.extend(content.lines().map(String::from));
-            }
-            if lines.is_empty() {
-                lines.push(String::new());
-            }
-            lines
-        }
-        TranscriptItem::Tool {
-            name,
-            detail,
-            status,
-            ..
-        } => {
-            let marker = match status {
-                ToolStatusKind::Succeeded => "✓",
-                ToolStatusKind::Failed => "✗",
-                ToolStatusKind::Running => "●",
-                ToolStatusKind::Pending => "○",
-                ToolStatusKind::Cancelled => "⊘",
-            };
-            let mut lines = vec![format!("{marker} {name}")];
-            if !detail.is_empty() {
-                lines.extend(detail.lines().map(|l| format!("  {l}")));
-            }
-            lines
-        }
-        TranscriptItem::Notice { content } => content.lines().map(String::from).collect(),
-        TranscriptItem::Banner {
-            title,
-            session_label,
-            model_label,
-            workspace_root,
-        } => {
-            vec![
-                format!("── {title} ──"),
-                format!("session: {session_label}"),
-                format!("model: {model_label}"),
-                format!("workspace: {}", workspace_root.display()),
-            ]
-        }
-        TranscriptItem::Compaction {
-            compacted_message_count,
-            tokens_before,
-            ..
-        } => {
-            vec![format!(
-                "── compacted {compacted_message_count} messages ({tokens_before} tokens) ──"
-            )]
-        }
-        TranscriptItem::Image { alt, .. } => {
-            vec![format!("[image: {}]", alt.as_deref().unwrap_or("inline"))]
         }
     }
 }

@@ -25,7 +25,7 @@ use crossterm::{
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, size},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use neo_agent_core::{
     AgentEvent, AgentMessage, PermissionDecision,
@@ -37,7 +37,7 @@ use neo_tui::{
     KeybindingsManager, NeoTuiApp, PickerItem, PromptEdit, TerminalImageCapabilities,
 };
 use ratatui::{
-    Terminal, TerminalOptions, Viewport,
+    Terminal,
     backend::{CrosstermBackend, TestBackend},
     buffer::Cell,
 };
@@ -86,7 +86,7 @@ pub async fn execute_tty_with_startup(
         return Ok(Some(execute_with_startup(config, startup, options)));
     }
 
-    let terminal = RefCell::new(InlineTerminal::enter()?);
+    let terminal = RefCell::new(NeoTerminal::enter()?);
     let mut controller = controller_for_config(config);
     controller.apply_startup_options(config, options);
     controller.apply_startup_action(startup);
@@ -2218,147 +2218,44 @@ const PROMPT_COMPLETION_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::InputCopy,
 ];
 
-struct InlineTerminal {
+struct NeoTerminal {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     raw_mode: RawModeGuard,
     inline_image_cache: InlineImageRenderCache,
     last_area: Option<ratatui::layout::Rect>,
-    /// The row where the live viewport starts (0-based from top of screen).
-    viewport_top: u16,
 }
 
-impl InlineTerminal {
+impl NeoTerminal {
     fn enter() -> Result<Self> {
         let raw_mode = RawModeGuard::enable()?;
         let mut output = stdout();
-        // Inline mode: no alternate screen, no mouse capture, no alternate scroll.
-        // Just raw mode + bracketed paste + keyboard enhancement. Content goes into
-        // terminal's native scrollback buffer.
+        // Alternate screen + bracketed paste + keyboard enhancement.
+        // No mouse capture — terminal native text selection works.
         execute!(
             output,
+            EnterAlternateScreen,
             EnableBracketedPaste,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
-
-        // Use ratatui's Inline viewport — it draws only the bottom N rows of the
-        // terminal, scrolling existing content into scrollback automatically.
-        // This prevents overlap with pre-existing terminal content.
-        let (_cols, rows) = size()?;
-        let viewport_height = rows; // Use full terminal height as the inline viewport
         let backend = CrosstermBackend::new(output);
-        let terminal = Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Inline(viewport_height),
-            },
-        )?;
-
+        let mut terminal = Terminal::new(backend)?;
+        terminal.clear()?;
         Ok(Self {
             terminal,
             raw_mode,
             inline_image_cache: InlineImageRenderCache::default(),
             last_area: None,
-            viewport_top: 0,
         })
-    }
-
-    /// Insert finalized text lines into the terminal's native scrollback above
-    /// the viewport using DECSTBM scroll-region escape sequences.
-    fn insert_history_lines(&mut self, line_batches: &[Vec<String>]) -> Result<()> {
-        if line_batches.is_empty() {
-            return Ok(());
-        }
-
-        let (cols, rows) = size()?;
-        if rows == 0 {
-            return Ok(());
-        }
-
-        // Flatten all batches into a single list of lines.
-        let mut all_lines: Vec<&str> = Vec::new();
-        for batch in line_batches {
-            for line in batch {
-                all_lines.push(line.as_str());
-            }
-        }
-
-        let num_lines = all_lines.len() as u16;
-        let viewport_top = self.viewport_top;
-
-        if viewport_top == 0 {
-            // No room above viewport — just scroll viewport down.
-            // Emit blank lines to push viewport content down.
-            for _ in 0..num_lines {
-                self.terminal.backend_mut().write_all(b"\r\n")?;
-            }
-            self.viewport_top = self.viewport_top.saturating_add(num_lines).min(rows - 1);
-            return Ok(());
-        }
-
-        let writer = self.terminal.backend_mut();
-
-        // Step 1: If viewport isn't at the bottom, scroll it down to make room.
-        let viewport_bottom = viewport_top; // viewport occupies [viewport_top, rows)
-        if viewport_bottom < rows {
-            let scroll_amount = num_lines.min(rows - viewport_bottom);
-            let top_1based = viewport_top + 1;
-            write!(writer, "\x1b[{};{}r", top_1based, rows)?; // Set scroll region
-            write!(writer, "\x1b[{};{}H", 1, viewport_top + 1)?; // Move to viewport top
-            for _ in 0..scroll_amount {
-                writer.write_all(b"\x1bM")?; // Reverse index (scroll up within region)
-            }
-            write!(writer, "\x1b[r")?; // Reset scroll region
-            self.viewport_top = viewport_top + scroll_amount;
-        }
-
-        // Step 2: Write the history lines in the region above the viewport.
-        let new_viewport_top = self.viewport_top;
-        if new_viewport_top > 0 {
-            // Set scroll region to [1, viewport_top - 1]
-            write!(writer, "\x1b[1;{}r", new_viewport_top)?;
-            // Move cursor to just above viewport top
-            let cursor_target = new_viewport_top.saturating_sub(1);
-            write!(writer, "\x1b[{};1H", cursor_target + 1)?;
-
-            for line in &all_lines {
-                // Truncate line to terminal width
-                let truncated = if line.chars().count() > cols as usize {
-                    let truncated: String = line.chars().take(cols as usize).collect();
-                    truncated
-                } else {
-                    (*line).to_owned()
-                };
-                writer.write_all(b"\r\n")?;
-                writer.write_all(truncated.as_bytes())?;
-            }
-            write!(writer, "\x1b[r")?; // Reset scroll region
-        }
-
-        writer.flush()?;
-        Ok(())
     }
 
     fn draw(&mut self, app: &mut NeoTuiApp) -> Result<()> {
         app.advance_activity_frame();
-
-        // 1. Drain finalized items into scrollback
-        let history_batches = app.drain_pending_history_lines();
-        if !history_batches.is_empty() {
-            self.insert_history_lines(&history_batches)?;
-            self.terminal.backend_mut().flush()?;
-        }
-
-        // 2. Render the live viewport using ratatui's Inline viewport.
-        // ratatui handles the inline area, cursor positioning, and diff rendering.
-        let area = self.terminal.get_frame().area();
-
         self.terminal.draw(|frame| {
-            let frame_area = frame.area();
-            app.sync_transcript_view_for_area(frame_area);
-            frame.render_widget(&*app, frame_area);
+            let area = frame.area();
+            app.sync_transcript_view_for_area(area);
+            frame.render_widget(&*app, area);
         })?;
-
-        // Handle inline image renders
+        let area = self.terminal.get_frame().area();
         if self
             .last_area
             .replace(area)
@@ -2379,19 +2276,11 @@ impl InlineTerminal {
     }
 
     fn leave(&mut self) {
-        // Move cursor to bottom of screen and write a newline so the shell
-        // prompt appears on a fresh line after our content.
-        let (_cols, rows) = match size() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let _ = write!(self.terminal.backend_mut(), "\x1b[{};1H\r\n", rows);
-        let _ = self.terminal.backend_mut().flush();
-
         let _ = execute!(
             self.terminal.backend_mut(),
             PopKeyboardEnhancementFlags,
             DisableBracketedPaste,
+            LeaveAlternateScreen
         );
         let _ = self.terminal.show_cursor();
         self.raw_mode.disable();
@@ -2401,9 +2290,11 @@ impl InlineTerminal {
         self.raw_mode.enable_raw()?;
         execute!(
             self.terminal.backend_mut(),
+            EnterAlternateScreen,
             EnableBracketedPaste,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
+        self.terminal.clear()?;
         self.inline_image_cache.reset_for_full_redraw();
         self.last_area = None;
         Ok(())
@@ -2411,13 +2302,13 @@ impl InlineTerminal {
 }
 
 
-impl Drop for InlineTerminal {
+impl Drop for NeoTerminal {
     fn drop(&mut self) {
         self.leave();
     }
 }
 
-impl InlineTerminal {
+impl NeoTerminal {
     fn suspend(&mut self) -> Result<()> {
         self.leave();
         #[cfg(unix)]
