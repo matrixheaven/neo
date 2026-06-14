@@ -8,6 +8,7 @@ mod prompt_templates;
 mod resources;
 mod rpc_mode;
 mod session_commands;
+mod session_migrate;
 mod skill_commands;
 mod themes;
 mod trust;
@@ -62,6 +63,13 @@ fn normalize_pi_style_args(
 
 async fn dispatch(cli: Cli) -> anyhow::Result<String> {
     let config = AppConfig::load(ConfigOverrides::from_cli(&cli))?;
+
+    // Migrate legacy sessions from {project_dir}/.neo/sessions/ to the new
+    // workspace-scoped layout. Idempotent — no-op if already migrated.
+    if let Err(error) = session_migrate::migrate_legacy_sessions(&config) {
+        tracing::warn!("session migration failed (continuing): {error:#}");
+    }
+
     if !cli.export.is_empty() {
         return dispatch_export(&cli.export).await;
     }

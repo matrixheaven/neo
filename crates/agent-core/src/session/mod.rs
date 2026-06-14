@@ -13,6 +13,14 @@ use uuid::Uuid;
 
 use crate::{AgentContext, AgentEvent, AgentMessage, CompactionSummary, Content};
 
+pub mod index;
+pub mod workspace;
+
+pub use index::{SessionIndex, SessionIndexEntry, SessionIndexError};
+pub use workspace::{
+    encode_workdir_key, normalize_workdir, slugify_basename, workspace_sessions_dir,
+};
+
 const SESSION_FORMAT_NAME: &str = "neo.session.jsonl";
 const SESSION_SCHEMA_VERSION: u32 = 1;
 const SESSION_METADATA_KIND: &str = "session_metadata";

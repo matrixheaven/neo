@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, bail};
+use neo_agent_core::session::workspace_sessions_dir as compute_workspace_sessions_dir;
 use neo_agent_core::{PermissionPolicy, QueueMode, ToolExecutionMode};
 use neo_ai::{ModelRegistry, ModelSpec, ReasoningEffort};
 use neo_tui::{ImageProtocolPreference, KeyId, KeybindingAction, KeybindingsManager};
@@ -501,38 +502,38 @@ pub(crate) struct FileConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct FileDefaults {
-    mode: Option<String>,
+pub(crate) struct FileDefaults {
+    pub(crate) mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct FileRuntimeConfig {
+pub(crate) struct FileRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    temperature: Option<f64>,
+    pub(crate) temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
+    pub(crate) max_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    replay_reasoning: Option<bool>,
+    pub(crate) replay_reasoning: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    steering_queue_mode: Option<QueueMode>,
+    pub(crate) steering_queue_mode: Option<QueueMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    follow_up_queue_mode: Option<QueueMode>,
+    pub(crate) follow_up_queue_mode: Option<QueueMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    tool_execution_mode: Option<ToolExecutionMode>,
+    pub(crate) tool_execution_mode: Option<ToolExecutionMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    compaction: Option<FileRuntimeCompactionConfig>,
+    pub(crate) compaction: Option<FileRuntimeCompactionConfig>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct FileRuntimeCompactionConfig {
+pub(crate) struct FileRuntimeCompactionConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    enabled: Option<bool>,
+    pub(crate) enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_estimated_tokens: Option<usize>,
+    pub(crate) max_estimated_tokens: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    keep_recent_messages: Option<usize>,
+    pub(crate) keep_recent_messages: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -653,7 +654,11 @@ impl AppConfig {
             .map(expand_user_path)
             .or(env_overrides.sessions_dir)
             .or_else(|| file_config.sessions_dir.map(expand_user_path))
-            .unwrap_or_else(|| project_dir.join(CONFIG_DIR).join("sessions"));
+            .unwrap_or_else(|| {
+                neo_home()
+                    .map(|home| home.join("sessions"))
+                    .unwrap_or_else(|| project_dir.join(CONFIG_DIR).join("sessions"))
+            });
         let permissions = file_config.permissions.unwrap_or_default();
         let runtime = runtime_from_file(file_config.runtime);
         let runtime = apply_runtime_overrides(runtime, thinking_override);
@@ -1560,6 +1565,22 @@ fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME")
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
+}
+
+/// Resolve the neo home directory: `$NEO_HOME` if set, otherwise `~/.neo`.
+pub(crate) fn neo_home() -> Option<PathBuf> {
+    env::var_os("NEO_HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join(CONFIG_DIR)))
+}
+
+/// Compute the workspace-scoped sessions directory for a given config.
+///
+/// Given the central `sessions_dir` (e.g. `~/.neo/sessions`) and the
+/// project directory, returns `<sessions_dir>/wd_<slug>_<hash12>/`.
+pub(crate) fn workspace_sessions_dir(config: &AppConfig) -> PathBuf {
+    compute_workspace_sessions_dir(&config.sessions_dir, &config.project_dir)
 }
 
 fn expand_user_path(path: PathBuf) -> PathBuf {

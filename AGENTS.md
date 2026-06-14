@@ -201,6 +201,37 @@ crate.
 8. Session events are appended to local JSONL so `resume` can reconstruct
    conversation and tool state.
 
+### Session storage and workspace scoping
+
+Sessions are stored in a **centralized, workspace-scoped** layout under
+`~/.neo/sessions/` (or `$NEO_HOME/sessions/`). Each workspace (project
+directory) gets a deterministic bucket directory:
+
+```
+~/.neo/sessions/
+├── wd_neo_eb208ec56c5c/          ← bucket for /path/to/neo
+│   ├── 1718370000000.jsonl       ← session transcript
+│   ├── sessions.metadata.json    ← per-bucket metadata index
+│   └── ...
+├── wd_myproject_a1b2c3d4e5f6/    ← bucket for /path/to/myproject
+│   └── ...
+└── session_index.jsonl           ← global index (session ID → location)
+```
+
+The bucket name is `wd_<slug>_<hash12>` where `<slug>` is derived from the
+directory basename and `<hash12>` is the first 12 hex chars of SHA-256 of the
+canonicalized absolute path. This ensures:
+- `/resume` only shows sessions from the **current workspace**
+- Different projects with the same basename get different buckets
+- The `NEO_HOME` env var overrides the home directory (`~/.neo` by default)
+
+On startup, `migrate_legacy_sessions()` automatically moves any sessions from
+the old `{project_dir}/.neo/sessions/` layout into the new bucket directory.
+Migration is idempotent.
+
+The global `session_index.jsonl` enables `neo resume <session_id>` to locate
+sessions across workspaces.
+
 ### Built-in tools
 
 Registered by `neo_agent_core::ToolRegistry::with_builtin_tools()`:
@@ -319,19 +350,10 @@ marketplace fixtures.
 
 ## Current workspace health (as of last exploration)
 
-The repository had uncommitted modifications across several crates when this
-file was written. A full workspace check currently fails:
-
-- `crates/agent-core/src/session/mod.rs` has a borrow-check error (`id` moved
-  and then borrowed).
-- `crates/neo-agent/src/modes/interactive.rs` references symbols
-  (`tree_order_sessions`, `SessionTreeRecord`) that do not exist in
-  `crates/neo-agent/src/session_commands.rs`.
-
-Consequently, `cargo check --workspace` and `cargo run -p xtask -- check
---workspace` do not pass. The narrower `cargo run -p xtask -- check` (xtask
-only) succeeds. Fix the compile errors before running the full workspace gate or
-the release smoke tests.
+The workspace compiles and all tests in `neo-agent-core` and `neo-agent` pass
+as of the workspace-scoped session storage refactor. The `neo-ai` crate has
+some pre-existing clippy warnings (missing backticks, collapsible `if`) that
+are unrelated to session management.
 
 <!-- icm:start -->
 

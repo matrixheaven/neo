@@ -12,15 +12,13 @@ use neo_agent_core::{AgentMessage, Content};
 use neo_sdk::{ExportConversation, ExportMessage, HtmlExportOptions, export_html as render_html};
 use serde::Serialize;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, workspace_sessions_dir};
 
 pub fn list(config: &AppConfig) -> anyhow::Result<String> {
-    let sessions = metadata_store(config).list().with_context(|| {
-        format!(
-            "failed to read sessions directory {}",
-            config.sessions_dir.display()
-        )
-    })?;
+    let bucket_dir = workspace_sessions_dir(config);
+    let sessions = metadata_store(config)
+        .list()
+        .with_context(|| format!("failed to read sessions directory {}", bucket_dir.display()))?;
 
     if sessions.is_empty() {
         Ok("no sessions\n".to_owned())
@@ -179,14 +177,10 @@ pub(crate) async fn export_json_artifact(
     let path = session_path(&session_id, config)?;
     anyhow::ensure!(path.exists(), "session {session_ref:?} does not exist");
 
+    let bucket_dir = workspace_sessions_dir(config);
     let record = metadata_store(config)
         .list()
-        .with_context(|| {
-            format!(
-                "failed to read sessions directory {}",
-                config.sessions_dir.display()
-            )
-        })?
+        .with_context(|| format!("failed to read sessions directory {}", bucket_dir.display()))?
         .into_iter()
         .find(|session| session.id == session_id)
         .ok_or_else(|| anyhow::anyhow!("session {session_ref:?} does not exist"))?;
@@ -237,7 +231,8 @@ fn render_messages_html(title: String, messages: &[AgentMessage]) -> anyhow::Res
 
 pub fn session_path(session_ref: &str, config: &AppConfig) -> anyhow::Result<PathBuf> {
     let session_id = resolve_session_id(session_ref, config)?;
-    Ok(config.sessions_dir.join(format!("{session_id}.jsonl")))
+    let bucket_dir = workspace_sessions_dir(config);
+    Ok(bucket_dir.join(format!("{session_id}.jsonl")))
 }
 
 pub fn resolve_session_id(session_ref: &str, config: &AppConfig) -> anyhow::Result<String> {
@@ -245,13 +240,9 @@ pub fn resolve_session_id(session_ref: &str, config: &AppConfig) -> anyhow::Resu
         return Ok(session_id);
     }
 
+    let bucket_dir = workspace_sessions_dir(config);
     let exact_id = validate_session_id(session_ref).is_ok();
-    if exact_id
-        && config
-            .sessions_dir
-            .join(format!("{session_ref}.jsonl"))
-            .is_file()
-    {
+    if exact_id && bucket_dir.join(format!("{session_ref}.jsonl")).is_file() {
         return Ok(session_ref.to_owned());
     }
 
@@ -294,28 +285,53 @@ fn session_id_from_jsonl_path(
     } else {
         env::current_dir()?.join(raw)
     };
-    let path = path
-        .canonicalize()
-        .with_context(|| format!("failed to resolve session path {}", raw.display()))?;
-    let sessions_dir = config.sessions_dir.canonicalize().with_context(|| {
-        format!(
-            "failed to resolve sessions dir {}",
-            config.sessions_dir.display()
-        )
-    })?;
-    anyhow::ensure!(
-        path.starts_with(&sessions_dir),
-        "session path {} is outside sessions dir {}",
-        path.display(),
-        sessions_dir.display()
-    );
+
+    // Extract session_id from file stem regardless of canonicalization.
     let session_id = path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .ok_or_else(|| anyhow::anyhow!("invalid session path {}", path.display()))?;
-    validate_session_id(session_id)
-        .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
-    Ok(Some(session_id.to_owned()))
+
+    // Try canonicalize for path-containment checks. If the file doesn't exist
+    // (e.g. it was migrated to a bucket), fall back to the un-canonicalized path.
+    let canonical = path.canonicalize();
+    let check_path = canonical.as_deref().unwrap_or(&path);
+
+    // Accept paths inside the workspace-scoped bucket directory (primary).
+    let bucket_dir = workspace_sessions_dir(config);
+    if let Ok(bucket_canonical) = bucket_dir.canonicalize() {
+        if check_path.starts_with(&bucket_canonical) || path.starts_with(&bucket_dir) {
+            validate_session_id(session_id)
+                .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
+            return Ok(Some(session_id.to_owned()));
+        }
+    }
+
+    // Also accept paths directly under the sessions root (legacy/compat).
+    let sessions_root = &config.sessions_dir;
+    if let Ok(root_canonical) = sessions_root.canonicalize() {
+        if check_path.starts_with(&root_canonical) {
+            validate_session_id(session_id)
+                .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
+            return Ok(Some(session_id.to_owned()));
+        }
+    }
+
+    // Also accept paths that look like they were under a project's sessions
+    // directory. We check containment broadly by looking for ".neo/sessions/"
+    // in the path, which covers both legacy and canonicalized variants.
+    // This is a fallback for migrated files whose original path no longer exists.
+    if path.to_string_lossy().contains(".neo/sessions/") {
+        validate_session_id(session_id)
+            .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
+        return Ok(Some(session_id.to_owned()));
+    }
+
+    anyhow::bail!(
+        "session path {} is outside sessions dir {}",
+        path.display(),
+        bucket_dir.display()
+    );
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -340,7 +356,8 @@ pub(crate) struct SessionExportJsonMetadata {
 }
 
 fn metadata_store(config: &AppConfig) -> SessionMetadataStore {
-    SessionMetadataStore::new(&config.sessions_dir)
+    let bucket_dir = workspace_sessions_dir(config);
+    SessionMetadataStore::new(&bucket_dir)
 }
 
 fn format_message(message: &AgentMessage) -> String {

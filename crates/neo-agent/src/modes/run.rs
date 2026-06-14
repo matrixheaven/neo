@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     cli::RunOutput,
-    config::{self, AppConfig, McpServerConfig},
+    config::{self, AppConfig, McpServerConfig, workspace_sessions_dir},
     extension_tools, resources, session_commands,
 };
 
@@ -1326,7 +1326,8 @@ pub async fn run_prompt_with_session_target(
         }
         SessionTarget::Fork(session_ref) => {
             let parent_id = session_commands::resolve_session_id(session_ref, config)?;
-            let child = SessionMetadataStore::new(&config.sessions_dir)
+            let bucket_dir = workspace_sessions_dir(config);
+            let child = SessionMetadataStore::new(&bucket_dir)
                 .fork(&parent_id, None)
                 .with_context(|| format!("failed to fork session {session_ref}"))?;
             run_prompt_in_session(&child.id, prompt, config).await
@@ -1342,7 +1343,8 @@ pub fn apply_session_name(
     let Some(session_name) = session_name else {
         return Ok(());
     };
-    SessionMetadataStore::new(&config.sessions_dir)
+    let bucket_dir = workspace_sessions_dir(config);
+    SessionMetadataStore::new(&bucket_dir)
         .rename(session_id, session_name.to_owned())
         .with_context(|| format!("failed to name session {session_id}"))?;
     Ok(())
@@ -1962,12 +1964,13 @@ fn process_exists(target: &str) -> bool {
 }
 
 async fn create_session_path(config: &AppConfig) -> anyhow::Result<std::path::PathBuf> {
-    tokio::fs::create_dir_all(&config.sessions_dir)
+    let bucket_dir = workspace_sessions_dir(config);
+    tokio::fs::create_dir_all(&bucket_dir)
         .await
         .with_context(|| {
             format!(
                 "failed to create sessions directory {}",
-                config.sessions_dir.display()
+                bucket_dir.display()
             )
         })?;
 
@@ -1978,7 +1981,7 @@ async fn create_session_path(config: &AppConfig) -> anyhow::Result<std::path::Pa
         } else {
             format!("-{counter}")
         };
-        let path = config.sessions_dir.join(format!(
+        let path = bucket_dir.join(format!(
             "{}{suffix}.jsonl",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
@@ -1997,15 +2000,16 @@ async fn exact_session_path(
 ) -> anyhow::Result<std::path::PathBuf> {
     neo_agent_core::session::validate_session_id(session_id)
         .with_context(|| format!("invalid session id {session_id:?}"))?;
-    tokio::fs::create_dir_all(&config.sessions_dir)
+    let bucket_dir = workspace_sessions_dir(config);
+    tokio::fs::create_dir_all(&bucket_dir)
         .await
         .with_context(|| {
             format!(
                 "failed to create sessions directory {}",
-                config.sessions_dir.display()
+                bucket_dir.display()
             )
         })?;
-    Ok(config.sessions_dir.join(format!("{session_id}.jsonl")))
+    Ok(bucket_dir.join(format!("{session_id}.jsonl")))
 }
 
 fn session_id_from_path(path: &Path) -> anyhow::Result<String> {
@@ -2016,13 +2020,10 @@ fn session_id_from_path(path: &Path) -> anyhow::Result<String> {
 }
 
 fn latest_session_id(config: &AppConfig) -> anyhow::Result<String> {
+    let bucket_dir = workspace_sessions_dir(config);
     let mut latest: Option<(std::time::SystemTime, String)> = None;
-    let entries = std::fs::read_dir(&config.sessions_dir).with_context(|| {
-        format!(
-            "failed to read sessions directory {}",
-            config.sessions_dir.display()
-        )
-    })?;
+    let entries = std::fs::read_dir(&bucket_dir)
+        .with_context(|| format!("failed to read sessions directory {}", bucket_dir.display()))?;
 
     for entry in entries {
         let entry = entry?;
@@ -2050,7 +2051,7 @@ fn latest_session_id(config: &AppConfig) -> anyhow::Result<String> {
 
     latest
         .map(|(_, session_id)| session_id)
-        .with_context(|| format!("no sessions found in {}", config.sessions_dir.display()))
+        .with_context(|| format!("no sessions found in {}", bucket_dir.display()))
 }
 
 fn resolve_model(config: &AppConfig) -> anyhow::Result<ModelSpec> {
@@ -2081,7 +2082,8 @@ fn resolve_model(config: &AppConfig) -> anyhow::Result<ModelSpec> {
 }
 
 fn record_session_activity(config: &AppConfig, session_id: &str, prompt: &str) {
-    let _ = SessionMetadataStore::new(&config.sessions_dir).record_activity(
+    let bucket_dir = workspace_sessions_dir(config);
+    let _ = SessionMetadataStore::new(&bucket_dir).record_activity(
         session_id,
         Some(config.project_dir.display().to_string()),
         Some(one_line(prompt, 240)),
@@ -2090,7 +2092,8 @@ fn record_session_activity(config: &AppConfig, session_id: &str, prompt: &str) {
 }
 
 async fn record_initial_session_title(config: &AppConfig, turn: &PromptTurn, prompt: &str) {
-    let store = SessionMetadataStore::new(&config.sessions_dir);
+    let bucket_dir = workspace_sessions_dir(config);
+    let store = SessionMetadataStore::new(&bucket_dir);
     let Ok(sessions) = store.list() else {
         return;
     };
@@ -2330,6 +2333,7 @@ mod tests {
             api_key: None,
             api_key_env: None,
             providers: BTreeMap::new(),
+            models: BTreeMap::new(),
             model_catalogs: Vec::new(),
             model_scope: Vec::new(),
             model_selection: ModelSelection::Default,
@@ -2465,6 +2469,7 @@ mod tests {
             api_key: None,
             api_key_env: None,
             providers: BTreeMap::new(),
+            models: BTreeMap::new(),
             model_catalogs: Vec::new(),
             model_scope: Vec::new(),
             model_selection: ModelSelection::Default,
@@ -2537,6 +2542,7 @@ mod tests {
             api_key: None,
             api_key_env: None,
             providers: BTreeMap::new(),
+            models: BTreeMap::new(),
             model_catalogs: Vec::new(),
             model_scope: Vec::new(),
             model_selection: ModelSelection::Default,
@@ -2609,6 +2615,7 @@ mod tests {
             api_key: None,
             api_key_env: None,
             providers: BTreeMap::new(),
+            models: BTreeMap::new(),
             model_catalogs: Vec::new(),
             model_scope: Vec::new(),
             model_selection: ModelSelection::Default,

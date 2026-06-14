@@ -12,7 +12,7 @@ use neo_sdk::{
 use serde_json::{Value, json};
 
 use crate::{
-    config::{self, AppConfig},
+    config::{self, AppConfig, workspace_sessions_dir},
     modes::run,
     prompt_templates::{self, PromptTemplateLocation},
     session_commands,
@@ -191,7 +191,7 @@ async fn handle_sessions_get(
             );
         }
     };
-    let path = config.sessions_dir.join(format!("{session_id}.jsonl"));
+    let path = workspace_sessions_dir(config).join(format!("{session_id}.jsonl"));
     if !path.exists() {
         return push_rpc_message(
             output,
@@ -297,7 +297,7 @@ async fn handle_sessions_export_html(
             );
         }
     };
-    let path = config.sessions_dir.join(format!("{session_id}.jsonl"));
+    let path = workspace_sessions_dir(config).join(format!("{session_id}.jsonl"));
     if !path.exists() {
         return push_rpc_message(
             output,
@@ -429,7 +429,7 @@ fn handle_set_session_name(
             );
         }
     };
-    let path = config.sessions_dir.join(format!("{session_id}.jsonl"));
+    let path = workspace_sessions_dir(config).join(format!("{session_id}.jsonl"));
     if !path.exists() {
         return push_rpc_message(
             output,
@@ -496,7 +496,7 @@ async fn handle_get_messages(
             );
         }
     };
-    let path = config.sessions_dir.join(format!("{session_id}.jsonl"));
+    let path = workspace_sessions_dir(config).join(format!("{session_id}.jsonl"));
 
     if !path.exists() {
         return push_rpc_message(
@@ -579,7 +579,7 @@ async fn handle_prompt(
 }
 
 fn session_store(config: &AppConfig) -> SessionMetadataStore {
-    SessionMetadataStore::new(&config.sessions_dir)
+    SessionMetadataStore::new(&workspace_sessions_dir(config))
 }
 
 fn rpc_session_record(record: SessionRecord) -> RpcSessionRecord {
@@ -632,7 +632,8 @@ fn state_payload(config: &AppConfig) -> Value {
 }
 
 fn session_count(config: &AppConfig) -> usize {
-    let Ok(entries) = std::fs::read_dir(&config.sessions_dir) else {
+    let bucket_dir = workspace_sessions_dir(config);
+    let Ok(entries) = std::fs::read_dir(&bucket_dir) else {
         return 0;
     };
     entries

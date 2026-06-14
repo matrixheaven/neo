@@ -22,7 +22,7 @@ struct MockSseServer {
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
 }
 
-static ISOLATED_HOMES: OnceLock<Mutex<Vec<TempDir>>> = OnceLock::new();
+// (ISOLATED_HOMES removed — isolation is now per-thread via thread_local)
 
 impl MockSseServer {
     fn start(responses: Vec<String>) -> Self {
@@ -60,14 +60,17 @@ fn neo() -> Command {
 }
 
 fn isolated_home() -> std::path::PathBuf {
-    let home = TempDir::new().expect("isolated home");
-    let path = home.path().to_path_buf();
-    ISOLATED_HOMES
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-        .expect("isolated home lock")
-        .push(home);
-    path
+    thread_local! {
+        static HOME: std::cell::OnceCell<(TempDir, std::path::PathBuf)> = std::cell::OnceCell::new();
+    }
+    HOME.with(|cell| {
+        let (_, path) = cell.get_or_init(|| {
+            let home = TempDir::new().expect("isolated home");
+            let path = home.path().to_path_buf();
+            (home, path)
+        });
+        path.clone()
+    })
 }
 
 fn run_with_stdin(mut command: Command, stdin: &str) -> String {
@@ -431,7 +434,7 @@ fn rpc_sessions_get_returns_local_session_metadata_and_messages() {
         messages[0]["result"]["path"]
             .as_str()
             .expect("session path")
-            .ends_with(".neo/sessions/alpha-main.jsonl")
+            .ends_with("alpha-main.jsonl")
     );
     assert_eq!(
         messages[0]["result"]["messages"].as_array().unwrap().len(),

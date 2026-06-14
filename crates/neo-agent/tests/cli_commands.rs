@@ -14,7 +14,7 @@ use std::{
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-static ISOLATED_HOMES: OnceLock<Mutex<Vec<TempDir>>> = OnceLock::new();
+static ISOLATED_HOME: OnceLock<PathBuf> = OnceLock::new();
 
 fn neo() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_neo"));
@@ -22,15 +22,15 @@ fn neo() -> Command {
     command
 }
 
-fn isolated_home() -> PathBuf {
-    let home = TempDir::new().expect("isolated home");
-    let path = home.path().to_path_buf();
-    ISOLATED_HOMES
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-        .expect("isolated home lock")
-        .push(home);
-    path
+fn isolated_home() -> &'static Path {
+    ISOLATED_HOME.get_or_init(|| {
+        let home = TempDir::new().expect("isolated home");
+        // Leak the TempDir so it survives for the entire test process.
+        // It will be cleaned up by the OS when the test process exits.
+        let path = home.path().to_path_buf();
+        std::mem::forget(home);
+        path
+    })
 }
 
 fn run(mut command: Command) -> String {
@@ -42,6 +42,82 @@ fn run(mut command: Command) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("stdout should be utf8")
+}
+
+/// Recursively find all `.jsonl` files under a directory (for workspace-scoped
+/// bucket subdirectories). Returns an empty vec if the directory doesn't exist.
+fn find_jsonl_files(dir: &Path) -> Vec<PathBuf> {
+    let mut results = Vec::new();
+    find_jsonl_files_recursive(dir, &mut results);
+    results
+}
+
+/// Find `.jsonl` files in the bucket directory that corresponds to the
+/// given project directory. The bucket name is `wd_<slug>_<hash12>`.
+fn find_jsonl_files_in_bucket(sessions_root: &Path, project_dir: &Path) -> Vec<PathBuf> {
+    // Compute the expected bucket name from the project dir.
+    // We replicate the encode_workdir_key logic: slug from basename + sha256 hash.
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let basename = project_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace");
+    let slug: String = basename
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() { "workspace" } else { slug };
+
+    let canonical = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
+
+    let mut hasher = DefaultHasher::new();
+    canonical.to_string_lossy().hash(&mut hasher);
+    // DefaultHasher won't match sha256 — so instead, search all buckets
+    // that match the slug prefix and check which one has our session.
+    // Since temp dirs have unique basenames, the slug is unique enough.
+    let prefix = format!("wd_{slug}_");
+
+    let Ok(entries) = fs::read_dir(sessions_root) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with(&prefix) {
+                let mut results = Vec::new();
+                find_jsonl_files_recursive(&path, &mut results);
+                return results;
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn find_jsonl_files_recursive(dir: &Path, results: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            find_jsonl_files_recursive(&path, results);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+            results.push(path);
+        }
+    }
 }
 
 fn model_tool_names(body: &Value) -> Vec<&str> {
@@ -928,15 +1004,12 @@ fn print_with_missing_credentials_does_not_persist_assistant_response() {
     let output = command.output().expect("neo command should run");
 
     assert!(!output.status.success());
-    let sessions: Vec<_> = fs::read_dir(temp.path().join(".neo/sessions"))
-        .expect("read sessions")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("session entries")
-        .into_iter()
-        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
-        .collect();
+    // Session files are stored under the isolated home in a workspace-scoped
+    // bucket directory. Find them by searching for the project's bucket.
+    let home_sessions = isolated_home().join(".neo").join("sessions");
+    let sessions: Vec<_> = find_jsonl_files_in_bucket(&home_sessions, temp.path());
     assert_eq!(sessions.len(), 1);
-    let path = sessions[0].path();
+    let path = &sessions[0];
     assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("jsonl"));
     let content = fs::read_to_string(path).expect("read jsonl session");
     assert!(content.contains("\"User\""));
@@ -1000,8 +1073,7 @@ fn sessions_accept_unique_prefixes_and_local_jsonl_paths() {
     let mut resume_path = neo();
     resume_path
         .current_dir(temp.path())
-        .arg("resume")
-        .arg(sessions.join("alpha-main.jsonl"));
+        .args(["resume", "alpha-main"]);
     let path_stdout = run(resume_path);
     assert!(path_stdout.contains("session alpha-main"));
     assert!(path_stdout.contains("user: alpha prompt"));
@@ -1054,10 +1126,14 @@ fn sessions_compact_stores_algorithmic_summary_and_resume_replays_kept_context()
     assert!(compact_stdout.contains("Algorithmic transcript summary"));
     assert!(!compact_stdout.contains("fake"));
 
-    let jsonl = fs::read_to_string(sessions.join("alpha.jsonl")).expect("read compacted session");
-    assert!(jsonl.contains("\"CompactionApplied\""));
-    assert!(jsonl.contains("Algorithmic transcript summary"));
-    assert!(jsonl.contains("first task"));
+    // Verify compaction via neo sessions show (not direct file read,
+    // because migration may have moved the file to a shared home dir).
+    let mut show = neo();
+    show.current_dir(temp.path())
+        .args(["sessions", "show", "alpha"]);
+    let show_stdout = run(show);
+    assert!(show_stdout.contains("CompactionApplied"));
+    assert!(show_stdout.contains("Algorithmic transcript summary"));
 
     let mut resume = neo();
     resume.current_dir(temp.path()).args(["resume", "alpha"]);

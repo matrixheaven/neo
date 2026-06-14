@@ -106,14 +106,49 @@ fn contains_responses_assistant_text(messages: &[Value], text: &str) -> bool {
     })
 }
 
+/// Each test thread gets its own stable isolated home directory so that
+/// multiple `neo()` calls within the same test share the same sessions root.
 fn isolated_home_path() -> std::path::PathBuf {
-    static NEXT_HOME_ID: AtomicU64 = AtomicU64::new(0);
-    let id = NEXT_HOME_ID.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!("neo-e2e-home-{nanos}-{id}"))
+    thread_local! {
+        static HOME: std::cell::OnceCell<std::path::PathBuf> = std::cell::OnceCell::new();
+    }
+    HOME.with(|cell| {
+        cell.get_or_init(|| {
+            static NEXT_HOME_ID: AtomicU64 = AtomicU64::new(0);
+            let id = NEXT_HOME_ID.fetch_add(1, Ordering::Relaxed);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos();
+            std::env::temp_dir().join(format!("neo-e2e-home-{nanos}-{id}"))
+        })
+        .clone()
+    })
+}
+
+/// Find a session file by ID in the isolated home's sessions tree.
+/// Sessions live in workspace-scoped bucket subdirectories after migration.
+fn find_session_jsonl(session_id: &str) -> std::path::PathBuf {
+    let sessions_root = isolated_home_path().join(".neo").join("sessions");
+    let filename = format!("{session_id}.jsonl");
+    // Direct file (shouldn't happen with new layout, but check anyway).
+    let direct = sessions_root.join(&filename);
+    if direct.is_file() {
+        return direct;
+    }
+    // Search bucket subdirectories.
+    if let Ok(entries) = std::fs::read_dir(&sessions_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let candidate = path.join(&filename);
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+    }
+    direct // Return the path even if it doesn't exist for error reporting.
 }
 
 fn write_scoped_openai_model_catalog(temp: &TempDir) {
@@ -482,7 +517,7 @@ fn print_session_id_flag_creates_exact_session_file() {
     let stdout = run(command);
 
     assert_eq!(stdout, "exact session\n");
-    let session_path = temp.path().join(".neo/sessions/alpha-123.jsonl");
+    let session_path = find_session_jsonl("alpha-123");
     assert!(session_path.is_file());
     let content = std::fs::read_to_string(session_path).expect("read exact session");
     assert!(content.contains("remember exact"));
@@ -631,11 +666,7 @@ fn run_session_id_flag_uses_exact_session_id_in_stable_json_output() {
 
     assert!(stdout.contains("\"type\":\"session\""));
     assert!(stdout.contains("\"id\":\"run-alpha-123\""));
-    assert!(
-        temp.path()
-            .join(".neo/sessions/run-alpha-123.jsonl")
-            .is_file()
-    );
+    assert!(find_session_jsonl("run-alpha-123").is_file());
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].body["input"][0]["content"], "stable json");
@@ -704,7 +735,7 @@ fn print_session_flag_replays_existing_session_by_jsonl_path_and_appends_turn() 
         .args(["--session-id", "path-alpha", "print", "first"]);
     assert_eq!(run(first), "first path answer\n");
 
-    let session_path = temp.path().join(".neo/sessions/path-alpha.jsonl");
+    let session_path = find_session_jsonl("path-alpha");
     let mut second = neo();
     second
         .current_dir(temp.path())
@@ -824,12 +855,11 @@ fn print_continue_flag_replays_latest_session_and_appends_turn() {
     assert!(replayed.iter().any(|message| {
         message["role"] == "user" && message["content"].as_str() == Some("next")
     }));
-    let old_content = std::fs::read_to_string(temp.path().join(".neo/sessions/old-session.jsonl"))
-        .expect("read old session");
+    let old_content =
+        std::fs::read_to_string(find_session_jsonl("old-session")).expect("read old session");
     assert!(!old_content.contains("continued latest"));
     let latest_content =
-        std::fs::read_to_string(temp.path().join(".neo/sessions/latest-session.jsonl"))
-            .expect("read latest session");
+        std::fs::read_to_string(find_session_jsonl("latest-session")).expect("read latest session");
     assert!(latest_content.contains("continued latest"));
 }
 
@@ -1035,12 +1065,10 @@ fn print_fork_flag_copies_existing_session_and_appends_turn_to_child() {
     assert_ne!(child_id, "fork-parent");
 
     let parent_content =
-        std::fs::read_to_string(temp.path().join(".neo/sessions/fork-parent.jsonl"))
-            .expect("read parent session");
+        std::fs::read_to_string(find_session_jsonl("fork-parent")).expect("read parent session");
     assert!(!parent_content.contains("child answer"));
     let child_content =
-        std::fs::read_to_string(temp.path().join(format!(".neo/sessions/{child_id}.jsonl")))
-            .expect("read child session");
+        std::fs::read_to_string(find_session_jsonl(&child_id)).expect("read child session");
     assert!(child_content.contains("parent answer"));
     assert!(child_content.contains("child answer"));
 
@@ -3630,17 +3658,35 @@ args = [{script}]
 }
 
 fn session_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    session_files_in(&root.join(".neo/sessions"))
+    // Sessions are stored under the isolated home in workspace-scoped bucket dirs.
+    let home_sessions = isolated_home_path().join(".neo/sessions");
+    let mut entries = Vec::new();
+    collect_jsonl_recursive(&home_sessions, &mut entries);
+    // Also check project-local (legacy layout, or --session-dir override).
+    collect_jsonl_recursive(&root.join(".neo/sessions"), &mut entries);
+    entries.sort();
+    entries
 }
 
 fn session_files_in(sessions_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut entries = std::fs::read_dir(sessions_dir)
-        .expect("read sessions")
-        .map(|entry| entry.expect("session entry").path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
-        .collect::<Vec<_>>();
+    let mut entries = Vec::new();
+    collect_jsonl_recursive(sessions_dir, &mut entries);
     entries.sort();
     entries
+}
+
+fn collect_jsonl_recursive(dir: &std::path::Path, results: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_jsonl_recursive(&path, results);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+            results.push(path);
+        }
+    }
 }
 
 fn model_tool_names(body: &Value) -> Vec<&str> {

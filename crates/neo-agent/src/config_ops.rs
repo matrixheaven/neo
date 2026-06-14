@@ -7,7 +7,7 @@ use std::path::Path;
 
 use anyhow::Context;
 
-use crate::config::{FileConfig, ModelConfig, ProviderConfig, read_file_config, write_file_config};
+use crate::config::{ModelConfig, ProviderConfig, read_file_config, write_file_config};
 
 /// Add or replace a provider in config.toml.
 pub fn add_provider(
@@ -208,38 +208,6 @@ pub fn list_providers(config_path: &Path) -> anyhow::Result<String> {
     }
     if !default_model.is_empty() {
         out.push_str(&format!("\nDefault model: {default_model}\n"));
-    }
-    Ok(out)
-}
-
-/// List models in config.toml as a formatted string.
-pub fn list_models(config_path: &Path) -> anyhow::Result<String> {
-    let file_config = read_file_config(config_path)?;
-    let models = file_config.models.unwrap_or_default();
-    let default_model = file_config.default_model.unwrap_or_default();
-
-    if models.is_empty() {
-        return Ok(
-            "no models configured in config.toml. Use `neo model add` or `neo provider catalog add`.\n"
-                .to_owned(),
-        );
-    }
-
-    let mut out = String::new();
-    for (alias, cfg) in &models {
-        let ctx = cfg
-            .max_context_tokens
-            .map_or("?".to_owned(), |n| n.to_string());
-        let caps = cfg.capabilities.join(",");
-        let current = if default_model == *alias {
-            " ← current"
-        } else {
-            ""
-        };
-        let display = cfg.display_name.as_deref().unwrap_or(&cfg.model);
-        out.push_str(&format!(
-            "{alias:<40} {display:<30} ctx={ctx:<10} [{caps}]{current}\n"
-        ));
     }
     Ok(out)
 }
