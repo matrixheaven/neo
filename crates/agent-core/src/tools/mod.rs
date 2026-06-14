@@ -5,6 +5,7 @@ mod glob;
 mod grep;
 mod list;
 mod mcp;
+mod plan_mode;
 mod process_supervisor;
 mod read;
 mod terminal;
@@ -301,6 +302,8 @@ impl ToolRegistry {
         registry.register(edit::EditTool);
         registry.register(bash::BashTool);
         registry.register(terminal::TerminalTool);
+        registry.register(plan_mode::EnterPlanModeTool);
+        registry.register(plan_mode::ExitPlanModeTool);
         registry
     }
 

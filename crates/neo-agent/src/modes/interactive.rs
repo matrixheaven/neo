@@ -20,13 +20,12 @@ use std::{
 
 use anyhow::{Context, Result};
 use crossterm::{
-    cursor::MoveTo,
     event::{
         self, DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size},
+    terminal::{disable_raw_mode, enable_raw_mode, size},
 };
 use neo_agent_core::{
     AgentEvent, AgentMessage, PermissionDecision,
@@ -38,7 +37,7 @@ use neo_tui::{
     KeybindingsManager, NeoTuiApp, PickerItem, PromptEdit, TerminalImageCapabilities,
 };
 use ratatui::{
-    Terminal,
+    Terminal, TerminalOptions, Viewport,
     backend::{CrosstermBackend, TestBackend},
     buffer::Cell,
 };
@@ -980,6 +979,17 @@ impl InteractiveController {
             "copy-transcript-selection" => self.copy_transcript_selection_to_clipboard(),
             "session.exportHtml" => self.export_active_session_to_html().await?,
             "fork" => self.fork_current_session().await?,
+            "plan" => {
+                let currently_active = self.app.is_plan_mode();
+                self.app.set_plan_mode(!currently_active);
+                self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                    text: if !currently_active {
+                        " Entered plan mode — read-only until you exit".to_string()
+                    } else {
+                        "Exited plan mode".to_string()
+                    },
+                });
+            }
             "submit" => self.submit_current_prompt().await?,
             unknown => self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
                 text: format!("Unknown command: {unknown}"),
@@ -1030,6 +1040,18 @@ impl InteractiveController {
         }
         if prompt.trim() == "/provider" {
             self.open_provider_picker();
+            return Ok(());
+        }
+        if prompt.trim() == "/plan" {
+            let currently_active = self.app.is_plan_mode();
+            self.app.set_plan_mode(!currently_active);
+            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: if !currently_active {
+                    " Entered plan mode — read-only until you exit".to_string()
+                } else {
+                    "Exited plan mode".to_string()
+                },
+            });
             return Ok(());
         }
         let PromptSubmission {
@@ -2047,6 +2069,11 @@ fn command_specs(project_dir: &Path) -> (Vec<CommandSpec>, Option<String>) {
             Some("Remove transcript selection"),
         ),
         CommandSpec::new("submit", "Submit prompt", Some("Submit the current prompt")),
+        CommandSpec::new(
+            "plan",
+            "Toggle plan mode",
+            Some("Read-only mode for investigation and planning"),
+        ),
     ];
     let mut templates = match load_project_prompt_templates(project_dir) {
         Ok(templates) => templates,
@@ -2213,29 +2240,25 @@ impl InlineTerminal {
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
 
-        // Query cursor position to know where to anchor the viewport.
+        // Use ratatui's Inline viewport — it draws only the bottom N rows of the
+        // terminal, scrolling existing content into scrollback automatically.
+        // This prevents overlap with pre-existing terminal content.
         let (_cols, rows) = size()?;
-        let cursor_row = query_cursor_row().unwrap_or(rows.saturating_sub(1));
-        let viewport_top = cursor_row.min(rows.saturating_sub(1));
-
-        // Clear from the cursor position to the bottom of the screen so existing
-        // terminal content doesn't overlap with our viewport. This is the same
-        // technique codex uses: clear_after_position → ClearType::FromCursorDown.
-        execute!(
-            output,
-            MoveTo(0, viewport_top),
-            Clear(ClearType::FromCursorDown)
-        )?;
-
+        let viewport_height = rows; // Use full terminal height as the inline viewport
         let backend = CrosstermBackend::new(output);
-        let terminal = Terminal::new(backend)?;
+        let terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(viewport_height),
+            },
+        )?;
 
         Ok(Self {
             terminal,
             raw_mode,
             inline_image_cache: InlineImageRenderCache::default(),
             last_area: None,
-            viewport_top: cursor_row.min(rows.saturating_sub(1)),
+            viewport_top: 0,
         })
     }
 
@@ -2325,27 +2348,21 @@ impl InlineTerminal {
             self.terminal.backend_mut().flush()?;
         }
 
-        // 2. Render the live viewport using ratatui.
-        // We render into the full screen area — the viewport occupies the bottom
-        // portion. Ratatui's double-buffer diff will only update changed cells.
-        let (cols, rows) = size()?;
-        if cols == 0 || rows == 0 {
-            return Ok(());
-        }
-
-        let area = ratatui::layout::Rect::new(0, 0, cols, rows);
+        // 2. Render the live viewport using ratatui's Inline viewport.
+        // ratatui handles the inline area, cursor positioning, and diff rendering.
+        let area = self.terminal.get_frame().area();
 
         self.terminal.draw(|frame| {
-            app.sync_transcript_view_for_area(area);
-            frame.render_widget(&*app, area);
+            let frame_area = frame.area();
+            app.sync_transcript_view_for_area(frame_area);
+            frame.render_widget(&*app, frame_area);
         })?;
 
         // Handle inline image renders
-        let current_area = self.terminal.get_frame().area();
         if self
             .last_area
-            .replace(current_area)
-            .is_some_and(|last| last != current_area)
+            .replace(area)
+            .is_some_and(|last| last != area)
         {
             self.inline_image_cache.reset_for_full_redraw();
         }
@@ -2387,54 +2404,12 @@ impl InlineTerminal {
             EnableBracketedPaste,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
-        let (_cols, rows) = size()?;
-        let cursor_row = query_cursor_row().unwrap_or(rows.saturating_sub(1));
-        self.viewport_top = cursor_row.min(rows.saturating_sub(1));
         self.inline_image_cache.reset_for_full_redraw();
         self.last_area = None;
         Ok(())
     }
 }
 
-/// Query the cursor row using Device Status Report (DSR 6n).
-/// Returns 0-based row, or None if the terminal doesn't respond.
-fn query_cursor_row() -> Option<u16> {
-    use std::io::{Read as _, Write as _};
-
-    // Write DSR request
-    {
-        let mut stdout = stdout();
-        stdout.write_all(b"\x1b[6n").ok()?;
-        stdout.flush().ok()?;
-    }
-
-    // Read the response: ESC [ <row> ; <col> R
-    // Give the terminal a brief moment to respond.
-    std::thread::sleep(std::time::Duration::from_millis(10));
-
-    let mut stdin = std::io::stdin();
-    let mut buf = [0u8; 32];
-    // Set stdin to non-blocking temporarily — but we're in raw mode so reads
-    // return available bytes. Just read what's there.
-    let n = stdin.read(&mut buf).ok()?;
-    if n == 0 {
-        return None;
-    }
-
-    let response = std::str::from_utf8(&buf[..n]).ok()?;
-    // Parse: ESC[<row>;<col>R
-    if !response.starts_with("\x1b[") {
-        return None;
-    }
-    let rest = &response[2..];
-    let end = rest.find('R')?;
-    let coords = &rest[..end];
-    let mut parts = coords.split(';');
-    let row_str = parts.next()?;
-    let row: u16 = row_str.parse().ok()?;
-    // Convert 1-based to 0-based
-    Some(row.saturating_sub(1))
-}
 
 impl Drop for InlineTerminal {
     fn drop(&mut self) {

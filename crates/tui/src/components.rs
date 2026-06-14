@@ -1635,6 +1635,13 @@ fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
         ),
         Span::raw(" "),
     ];
+    if app.is_plan_mode() {
+        status_spans.push(Span::styled(
+            "[PLAN MODE]",
+            Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
+        ));
+        status_spans.push(Span::raw(" "));
+    }
     if let Some(working) = app.working_label() {
         status_spans.push(Span::styled(format!("● {working}"), working_style));
         status_spans.push(Span::raw(" "));

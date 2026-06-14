@@ -341,6 +341,8 @@ pub struct NeoTuiApp {
     image_render_policy: ImageRenderPolicy,
     image_capabilities: TerminalImageCapabilities,
     theme: TuiTheme,
+    /// Current agent mode indicator (for footer display)
+    plan_mode_active: bool,
 }
 
 impl NeoTuiApp {
@@ -380,6 +382,7 @@ impl NeoTuiApp {
             image_render_policy: ImageRenderPolicy::default(),
             image_capabilities: TerminalImageCapabilities::default(),
             theme: TuiTheme::default(),
+            plan_mode_active: false,
         }
     }
 
@@ -478,6 +481,15 @@ impl NeoTuiApp {
     #[must_use]
     pub const fn mode(&self) -> AppMode {
         self.mode
+    }
+
+    pub fn set_plan_mode(&mut self, active: bool) {
+        self.plan_mode_active = active;
+    }
+
+    #[must_use]
+    pub const fn is_plan_mode(&self) -> bool {
+        self.plan_mode_active
     }
 
     #[must_use]
@@ -1004,6 +1016,9 @@ impl NeoTuiApp {
                     self.transcript.push(TranscriptItem::notice(text));
                     self.transcript_selection = None;
                 }
+            }
+            StreamUpdate::PlanModeChanged { active } => {
+                self.plan_mode_active = active;
             }
         }
         self.follow_tail_after_transcript_change();
@@ -1939,6 +1954,9 @@ pub enum StreamUpdate {
     RunFinished {
         turn: u32,
         stop_reason: neo_agent_core::StopReason,
+    },
+    PlanModeChanged {
+        active: bool,
     },
 }
 

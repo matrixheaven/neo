@@ -1972,3 +1972,56 @@ fn single_read_renders_standalone() {
         "expected line count chip"
     );
 }
+
+// ── Plan Mode tests ──────────────────────────────────────────
+
+#[test]
+fn plan_mode_starts_inactive() {
+    let app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    assert!(!app.is_plan_mode());
+}
+
+#[test]
+fn plan_mode_can_be_activated() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_plan_mode(true);
+    assert!(app.is_plan_mode());
+    app.set_plan_mode(false);
+    assert!(!app.is_plan_mode());
+}
+
+#[test]
+fn plan_mode_stream_update_activates_state() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.apply_stream_update(StreamUpdate::PlanModeChanged { active: true });
+    assert!(app.is_plan_mode());
+    app.apply_stream_update(StreamUpdate::PlanModeChanged { active: false });
+    assert!(!app.is_plan_mode());
+}
+
+#[test]
+fn plan_mode_indicator_renders_in_footer_when_active() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_plan_mode(true);
+
+    let lines = render_app(100, 12, &app);
+
+    assert!(
+        lines.iter().any(|line| line.contains("[PLAN MODE]")),
+        "footer should show [PLAN MODE] indicator:\n{}",
+        lines.join("\n")
+    );
+}
+
+#[test]
+fn plan_mode_indicator_absent_when_inactive() {
+    let app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+
+    let lines = render_app(100, 12, &app);
+
+    assert!(
+        !lines.iter().any(|line| line.contains("[PLAN MODE]")),
+        "footer should NOT show [PLAN MODE] indicator when inactive:\n{}",
+        lines.join("\n")
+    );
+}
