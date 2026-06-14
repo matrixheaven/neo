@@ -2237,6 +2237,7 @@ pub struct ToolRunTranscript {
     pub name: String,
     pub arguments: Option<String>,
     pub result: Option<String>,
+    pub live_output: Vec<String>,
     pub status: ToolStatusKind,
     pub metadata: ToolRunMetadata,
     pub presentation: ToolPresentationKind,
@@ -2245,6 +2246,9 @@ pub struct ToolRunTranscript {
 impl ToolRunTranscript {
     #[must_use]
     pub fn display_detail(&self) -> String {
+        if !self.live_output.is_empty() {
+            return self.live_output.join("\n");
+        }
         self.result
             .as_ref()
             .filter(|result| !result.is_empty())
@@ -2862,6 +2866,7 @@ impl TranscriptItem {
             } else {
                 Some(detail.clone())
             },
+            live_output: Vec::new(),
             status,
             metadata: ToolRunMetadata::default(),
             presentation: ToolPresentationKind::Text,
@@ -2888,6 +2893,7 @@ impl TranscriptItem {
             name: name.clone(),
             arguments,
             result,
+            live_output: Vec::new(),
             status,
             metadata,
             presentation,
