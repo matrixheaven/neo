@@ -37,6 +37,9 @@ pub struct TuiTheme {
     pub diff_context: Color,
     pub selection_bg: Color,
     pub pending: Color,
+    /// No longer used for the running tool header; the new tool card uses
+    /// [`Self::accent`] for running tools. Kept for backward compatibility
+    /// with user themes.
     pub running: Color,
     pub succeeded: Color,
     pub failed: Color,
