@@ -850,20 +850,28 @@ fn tool_body_preview(tool: &ToolRunTranscript, expanded: bool) -> String {
         }
         "write" => {
             // Show the content from arguments (what was written).
-            if let Some(args) = parse_tool_args(tool) {
-                if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
-                    return content.to_owned();
-                }
+            if let Some(args) = parse_tool_args(tool)
+                && let Some(content) = args.get("content").and_then(|v| v.as_str())
+            {
+                return content.to_owned();
             }
-            tool.display_detail()
+            // If args aren't available, show the result text.
+            tool.result.clone().unwrap_or_default()
         }
         "bash" | "shell" => bash_body_preview(tool),
         "list" | "find" => {
             // File listing — show the result lines.
-            tool.display_detail()
+            tool.result.clone().unwrap_or_default()
         }
         "grep" => grep_body_preview(tool, expanded),
-        _ => tool.display_detail(),
+        _ => {
+            // Generic tools and MCP tools: show raw result text.
+            if tool.live_output.is_empty() {
+                tool.result.clone().unwrap_or_default()
+            } else {
+                tool.live_output.join("\n")
+            }
+        }
     }
 }
 
@@ -944,19 +952,15 @@ fn bash_body_preview(tool: &ToolRunTranscript) -> String {
         return body.trim_end().to_owned();
     }
 
-    // Absolute fallback (e.g. no command, no output).
-    if !body.trim().is_empty() {
-        return body.trim_end().to_owned();
-    }
-
-    tool.display_detail()
+    // Absolute fallback (e.g. no command, no output): show raw result.
+    tool.result.clone().unwrap_or_default()
 }
 
 /// Grep body: show file paths from matching lines, deduplicated.
 fn grep_body_preview(tool: &ToolRunTranscript, expanded: bool) -> String {
     let result = match tool.result.as_deref() {
         Some(r) if !r.is_empty() => r,
-        _ => return tool.display_detail(),
+        _ => return tool.live_output.join("\n"),
     };
 
     if expanded {
