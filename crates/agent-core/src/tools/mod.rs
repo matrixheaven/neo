@@ -8,6 +8,7 @@ mod mcp;
 mod process_supervisor;
 mod read;
 mod terminal;
+mod todo;
 mod write;
 
 use std::{
@@ -295,6 +296,7 @@ impl ToolRegistry {
         registry.register(grep::GrepTool);
         registry.register(find::FindTool);
         registry.register(glob::GlobTool);
+        registry.register(todo::TodoTool);
         registry.register(write::WriteTool);
         registry.register(edit::EditTool);
         registry.register(bash::BashTool);
