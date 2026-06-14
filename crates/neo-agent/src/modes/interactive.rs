@@ -2321,14 +2321,38 @@ impl NeoTerminal {
 
     fn draw(&mut self, app: &mut NeoTuiApp) -> Result<()> {
         app.advance_activity_frame();
-        // CRITICAL: Do NOT do any terminal writes outside of ratatui's draw().
-        // The Inline viewport handles scrollback scrolling via append_lines internally.
-        // Manual writes (insert_history_lines, scroll regions, etc.) cause double rendering.
+
+        // 1. Push newly-finalized transcript items into terminal scrollback
+        //    using ratatui's insert_before(). This scrolls old content into
+        //    the terminal's native scrollback, making room for new content.
+        let committed_indices = app.drain_newly_committed();
+        for idx in &committed_indices {
+            let item = app.transcript().items().get(*idx);
+            if let Some(item) = item {
+                let lines = transcript_item_to_lines(item, app.theme());
+                let height = u16::try_from(lines.len()).unwrap_or(1);
+                let theme = app.theme();
+                self.terminal.insert_before(height, |buf| {
+                    let mut y = 0u16;
+                    for (text, style) in &lines {
+                        if y >= height {
+                            break;
+                        }
+                        buf.set_string(0, y, text, *style);
+                        y += 1;
+                    }
+                    let _ = theme;
+                })?;
+            }
+        }
+
+        // 2. Render the live viewport — only uncommitted items + prompt + footer.
         self.terminal.draw(|frame| {
             let area = frame.area();
             app.sync_transcript_view_for_area(area);
             frame.render_widget(&*app, area);
         })?;
+
         let area = self.terminal.get_frame().area();
         if self
             .last_area
@@ -2394,6 +2418,113 @@ impl NeoTerminal {
             eprintln!("Suspend to background is not supported on this platform");
         }
         self.reenter()
+    }
+}
+
+/// Convert a finalized TranscriptItem into styled text lines for scrollback insertion.
+/// Each line is (text, ratatui Style).
+fn transcript_item_to_lines(
+    item: &neo_tui::TranscriptItem,
+    theme: neo_tui::TuiTheme,
+) -> Vec<(String, ratatui::style::Style)> {
+    use ratatui::style::{Modifier, Style};
+    use neo_tui::TranscriptItem;
+
+    match item {
+        TranscriptItem::User { content } => {
+            let style = Style::default().fg(theme.user).add_modifier(Modifier::BOLD);
+            let mut lines = vec![("✨ ".to_owned(), style)];
+            for line in content.lines() {
+                lines.push((format!("  {line}"), Style::default().fg(theme.user)));
+            }
+            lines
+                .into_iter()
+                .map(|(t, s)| (t, s))
+                .collect()
+        }
+        TranscriptItem::Assistant { thinking, content } => {
+            let mut lines = Vec::new();
+            if let Some(thinking) = thinking.as_deref().filter(|t| !t.is_empty()) {
+                let style = Style::default().fg(theme.thinking).add_modifier(Modifier::ITALIC);
+                for line in thinking.lines() {
+                    lines.push((format!("  {line}"), style));
+                }
+                if !content.is_empty() {
+                    lines.push((String::new(), Style::default()));
+                }
+            }
+            let style = Style::default().fg(theme.assistant);
+            for (i, line) in content.lines().enumerate() {
+                let prefix = if i == 0 && thinking.as_deref().filter(|t| !t.is_empty()).is_none() {
+                    "● "
+                } else if i == 0 {
+                    "● "
+                } else {
+                    "  "
+                };
+                lines.push((format!("{prefix}{line}"), style));
+            }
+            lines
+        }
+        TranscriptItem::Notice { content } => {
+            content
+                .lines()
+                .map(|l| (l.to_owned(), Style::default().fg(theme.notice)))
+                .collect()
+        }
+        TranscriptItem::Banner {
+            title,
+            session_label,
+            model_label,
+            workspace_root,
+        } => {
+            let style = Style::default().fg(theme.header);
+            vec![
+                (format!("── {title} ──"), style),
+                (format!("session: {session_label}"), style),
+                (format!("model: {model_label}"), style),
+                (format!("workspace: {}", workspace_root.display()), style),
+            ]
+        }
+        TranscriptItem::Compaction {
+            compacted_message_count,
+            tokens_before,
+            ..
+        } => {
+            vec![(
+                format!("── compacted {compacted_message_count} messages ({tokens_before} tokens) ──"),
+                Style::default().fg(theme.accent),
+            )]
+        }
+        TranscriptItem::Tool {
+            name,
+            detail,
+            status,
+            ..
+        } => {
+            use neo_tui::ToolStatusKind;
+            let (marker, color) = match status {
+                ToolStatusKind::Succeeded => ("✓", theme.success),
+                ToolStatusKind::Failed => ("✗", theme.danger),
+                ToolStatusKind::Running => ("●", theme.accent),
+                ToolStatusKind::Pending => ("○", theme.muted),
+                ToolStatusKind::Cancelled => ("⊘", theme.muted),
+            };
+            let style = Style::default().fg(color);
+            let mut lines = vec![(format!("{marker} Used {name}"), style)];
+            if !detail.is_empty() {
+                for line in detail.lines().take(5) {
+                    lines.push((format!("  {line}"), Style::default().fg(theme.muted)));
+                }
+            }
+            lines
+        }
+        TranscriptItem::Image { alt, .. } => {
+            vec![(
+                format!("[image: {}]", alt.as_deref().unwrap_or("inline")),
+                Style::default().fg(theme.notice),
+            )]
+        }
     }
 }
 

@@ -319,6 +319,10 @@ pub struct NeoTuiApp {
     transcript_view: TranscriptView,
     transcript_selection: Option<TranscriptSelection>,
     expanded_transcript_items: BTreeSet<usize>,
+    /// Number of transcript items already pushed to terminal scrollback via
+    /// `insert_before`. Items `[0, committed_count)` are in scrollback.
+    /// Items `[committed_count, len)` are live (rendered in the viewport).
+    committed_count: usize,
     prompt: PromptState,
     copy_buffer: Option<String>,
     mode: AppMode,
@@ -360,6 +364,7 @@ impl NeoTuiApp {
             transcript_view: TranscriptView::new(),
             transcript_selection: None,
             expanded_transcript_items: BTreeSet::new(),
+            committed_count: 0,
             prompt: PromptState::default(),
             copy_buffer: None,
             mode: AppMode::Editing,
@@ -650,6 +655,57 @@ impl NeoTuiApp {
             .sync(content_rows, usize::from(body.height));
     }
 
+    // ── Inline viewport: committed item management ──
+
+    /// Returns `true` if the transcript item at `index` is finalized (ready to
+    /// be pushed to scrollback).
+    #[must_use]
+    fn is_item_finalized(&self, index: usize) -> bool {
+        let Some(item) = self.transcript.items().get(index) else {
+            return false;
+        };
+        match item {
+            TranscriptItem::User { .. }
+            | TranscriptItem::Notice { .. }
+            | TranscriptItem::Banner { .. }
+            | TranscriptItem::Compaction { .. }
+            | TranscriptItem::Image { .. } => true,
+            TranscriptItem::Assistant { .. } => {
+                // Finalized if not the currently-streaming message
+                self.active_assistant_id.is_none() || index < self.transcript.items().len() - 1
+            }
+            TranscriptItem::Tool { status, .. } => {
+                !matches!(status, ToolStatusKind::Pending | ToolStatusKind::Running)
+            }
+        }
+    }
+
+    /// Returns the indices of newly-finalized items that should be pushed to
+    /// scrollback. Advances `committed_count`.
+    pub fn drain_newly_committed(&mut self) -> Vec<usize> {
+        let mut indices = Vec::new();
+        while self.committed_count < self.transcript.items().len()
+            && self.is_item_finalized(self.committed_count)
+        {
+            indices.push(self.committed_count);
+            self.committed_count += 1;
+        }
+        indices
+    }
+
+    /// Returns the slice of transcript items that are "live" (not yet committed
+    /// to scrollback). These are what the viewport widget should render.
+    #[must_use]
+    pub fn live_transcript_items(&self) -> &[TranscriptItem] {
+        let start = self.committed_count.min(self.transcript.items().len());
+        &self.transcript.items()[start..]
+    }
+
+    /// Reset committed state (used when loading a new session transcript).
+    pub fn reset_committed(&mut self) {
+        self.committed_count = 0;
+    }
+
     pub fn select_visible_transcript_item(&mut self) {
         let range = self.transcript_view.visible_range(&self.transcript, 1);
         let Some(index) = range.end.checked_sub(1) else {
@@ -704,6 +760,7 @@ impl NeoTuiApp {
         self.transcript_view = TranscriptView::new();
         self.transcript_selection = None;
         self.expanded_transcript_items.clear();
+        self.committed_count = 0;
         self.prompt = PromptState::default();
         self.active_assistant_id = None;
         self.active_user_prompt = None;
