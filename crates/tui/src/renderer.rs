@@ -298,7 +298,7 @@ impl InlineRenderer {
         output: &mut Stdout,
         cursor: Option<CursorPos>,
         total_lines: usize,
-        height: usize,
+        _height: usize,
     ) -> std::io::Result<()> {
         let Some(cursor) = cursor else {
             // Hide cursor

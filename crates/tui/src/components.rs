@@ -328,6 +328,7 @@ impl<'a> TranscriptWidget<'a> {
 }
 
 /// A lightweight styled text fragment.
+#[allow(dead_code)]
 struct Span {
     content: String,
     style: Style,
@@ -1196,11 +1197,13 @@ fn fit_tool_line(text: &str, width: usize) -> String {
     clip_width(text, width.max(1))
 }
 
+#[allow(dead_code)]
 enum RowContent {
     Plain(String),
     Spans(Vec<Span>),
 }
 
+#[allow(dead_code)]
 struct TranscriptRenderRow {
     content: RowContent,
     style: Style,

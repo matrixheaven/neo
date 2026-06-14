@@ -2306,6 +2306,7 @@ impl NeoTerminal {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn leave(&mut self) {
         self.renderer.leave();
     }
