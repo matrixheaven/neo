@@ -1056,7 +1056,7 @@ fn transcript_widget_renders_roles_tools_and_wraps_content() {
     assert!(lines.iter().any(|line| line.contains("You")));
     assert!(lines.iter().any(|line| line.contains("Assistant")));
     assert!(lines.iter().any(|line| line.contains("shell.run")));
-    assert!(lines.iter().any(|line| line.contains("Use shell.run")));
+    assert!(lines.iter().any(|line| line.contains("Used shell.run")));
     assert!(lines.iter().any(|line| line.contains("cargo test")));
 }
 
@@ -1070,16 +1070,16 @@ fn transcript_widget_collapsed_tool_result_shows_preview_and_expand_hint() {
 
     let lines = render_widget(64, 8, TranscriptWidget::new(&transcript));
 
-    assert!(lines.iter().any(|line| line.contains("✓ Use read(")));
+    assert!(lines.iter().any(|line| line.contains("✓ Used read")));
     assert!(lines.iter().any(|line| line.contains("first file line")));
     assert!(lines.iter().any(|line| line.contains("second file line")));
     assert!(lines.iter().any(|line| line.contains("third file line")));
-    assert!(lines.iter().any(|line| line.contains("fourth file line")));
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("… 2 more lines, ctrl+o expand"))
+            .any(|line| line.contains("... (3 more lines, ctrl+o to expand)"))
     );
+    assert!(!lines.iter().any(|line| line.contains("fourth file line")));
     assert!(!lines.iter().any(|line| line.contains("fifth file line")));
     assert!(!lines.iter().any(|line| line.contains("sixth file line")));
     assert!(!lines.iter().any(|line| line.contains("succeeded")));
@@ -1100,7 +1100,7 @@ fn transcript_widget_expanded_tool_result_shows_full_output() {
         TranscriptWidget::new(&transcript).with_expanded_items(&expanded),
     );
 
-    assert!(lines.iter().any(|line| line.contains("✓ Use read(")));
+    assert!(lines.iter().any(|line| line.contains("✓ Used read")));
     assert!(lines.iter().any(|line| line.contains("first file line")));
     assert!(lines.iter().any(|line| line.contains("second file line")));
     assert!(lines.iter().any(|line| line.contains("third file line")));
@@ -1109,7 +1109,7 @@ fn transcript_widget_expanded_tool_result_shows_full_output() {
     assert!(
         !lines
             .iter()
-            .any(|line| line.contains("more lines, ctrl+o expand"))
+            .any(|line| line.contains("more lines, ctrl+o to expand"))
     );
 }
 
@@ -1177,7 +1177,7 @@ fn transcript_widget_does_not_render_plain_read_output_as_edit_diff() {
 
     let lines = render_widget(72, 8, TranscriptWidget::new(&transcript));
 
-    assert!(lines.iter().any(|line| line.contains("✓ Use read(")));
+    assert!(lines.iter().any(|line| line.contains("✓ Used read")));
     assert!(lines.iter().any(|line| line.contains("[workspace]")));
     assert!(lines.iter().any(|line| line.contains("\"crates/ai\"")));
     assert!(!lines.iter().any(|line| line.contains("Edited")));
@@ -1571,7 +1571,82 @@ fn transcript_widget_renders_running_tool_marker_in_place() {
 
     let lines = render_widget(80, 4, TranscriptWidget::new(&transcript));
 
-    assert!(lines.iter().any(|line| line.contains("● Use list")));
+    assert!(lines.iter().any(|line| line.contains("● Using list")));
+    assert!(lines.iter().any(|line| line.contains("(crates/tui/src)")));
+    assert!(!lines.iter().any(|line| line.contains("running")));
+}
+
+#[test]
+fn transcript_widget_shows_result_chip_when_tool_succeeds() {
+    let result = "line1\nline2\nline3\nline4".to_owned();
+    let transcript = ChatTranscript::from_items([TranscriptItem::tool_run(
+        "Read",
+        Some(r#"{"path":"src/lib.rs"}"#.to_owned()),
+        Some(result),
+        ToolStatusKind::Succeeded,
+        neo_tui::ToolRunMetadata::default(),
+        neo_tui::ToolPresentationKind::Text,
+    )]);
+
+    let lines = render_widget(80, 8, TranscriptWidget::new(&transcript));
+
+    assert!(lines.iter().any(|line| line.contains("✓ Used Read")));
+    assert!(lines.iter().any(|line| line.contains("· 4 lines")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("... (1 more lines, ctrl+o to expand)"))
+    );
+}
+
+#[test]
+fn transcript_widget_tints_failed_tool_output_red() {
+    let result = "error: something went wrong".to_owned();
+    let transcript = ChatTranscript::from_items([TranscriptItem::tool_run(
+        "Bash",
+        Some(r#"{"command":"cargo test"}"#.to_owned()),
+        Some(result),
+        ToolStatusKind::Failed,
+        neo_tui::ToolRunMetadata {
+            exit_code: Some(101),
+            ..Default::default()
+        },
+        neo_tui::ToolPresentationKind::Text,
+    )]);
+
+    let buffer = render_widget_buffer(80, 4, TranscriptWidget::new(&transcript));
+    let has_red = buffer
+        .content
+        .chunks(80)
+        .any(|line| line.iter().any(|cell| cell.fg == Color::Rgb(248, 81, 73)));
+    assert!(has_red);
+}
+
+#[test]
+fn transcript_widget_collapses_tool_result_to_three_lines() {
+    let result = "one\ntwo\nthree\nfour\nfive".to_owned();
+    let transcript = ChatTranscript::from_items([TranscriptItem::tool_run(
+        "Read",
+        Some(r#"{"path":"src/lib.rs"}"#.to_owned()),
+        Some(result),
+        ToolStatusKind::Succeeded,
+        neo_tui::ToolRunMetadata::default(),
+        neo_tui::ToolPresentationKind::Text,
+    )]);
+
+    let lines = render_widget(64, 7, TranscriptWidget::new(&transcript));
+
+    assert!(lines.iter().any(|line| line.contains("✓ Used Read")));
+    assert!(lines.iter().any(|line| line.contains("one")));
+    assert!(lines.iter().any(|line| line.contains("two")));
+    assert!(lines.iter().any(|line| line.contains("three")));
+    assert!(!lines.iter().any(|line| line.contains("four")));
+    assert!(!lines.iter().any(|line| line.contains("five")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("... (2 more lines, ctrl+o to expand)"))
+    );
 }
 
 #[test]
