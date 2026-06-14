@@ -150,7 +150,7 @@ fn input_event_maps_terminal_resize_events() {
 }
 
 #[test]
-fn input_event_ignores_mouse_events_when_mouse_capture_disabled() {
+fn input_event_maps_mouse_wheel_events_to_transcript_scroll() {
     use crossterm::event::{MouseEvent, MouseEventKind};
 
     let scroll_up = Event::Mouse(MouseEvent {
@@ -172,15 +172,25 @@ fn input_event_ignores_mouse_events_when_mouse_capture_disabled() {
         modifiers: KeyModifiers::NONE,
     });
 
-    // Mouse capture is disabled so the app no longer processes mouse events.
-    // The terminal emulator handles native text selection and scroll natively.
-    assert_eq!(InputEvent::from_crossterm_event(&scroll_up), None);
-    assert_eq!(InputEvent::from_crossterm_event(&scroll_down), None);
+    assert_eq!(
+        InputEvent::from_crossterm_event(&scroll_up),
+        Some(InputEvent::ScrollUp(3))
+    );
+    assert_eq!(
+        InputEvent::from_crossterm_event(&scroll_down),
+        Some(InputEvent::ScrollDown(3))
+    );
     assert_eq!(InputEvent::from_crossterm_event(&moved), None);
 
     let mut parser = InputParser::new();
-    assert!(parser.feed_crossterm_event(&scroll_up).is_empty());
-    assert!(parser.feed_crossterm_event(&scroll_down).is_empty());
+    assert_eq!(
+        parser.feed_crossterm_event(&scroll_up),
+        vec![InputEvent::ScrollUp(3)]
+    );
+    assert_eq!(
+        parser.feed_crossterm_event(&scroll_down),
+        vec![InputEvent::ScrollDown(3)]
+    );
     assert!(parser.feed_crossterm_event(&moved).is_empty());
 }
 

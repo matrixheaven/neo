@@ -21,8 +21,9 @@ use std::{
 use anyhow::{Context, Result};
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -2229,12 +2230,18 @@ impl NeoTerminal {
     fn enter() -> Result<Self> {
         let raw_mode = RawModeGuard::enable()?;
         let mut output = stdout();
-        // Alternate screen + bracketed paste + keyboard enhancement.
-        // No mouse capture — terminal native text selection works.
+        // Alternate screen + mouse capture (for scroll wheel) + bracketed paste
+        // + keyboard enhancement.
+        //
+        // Mouse capture enables scroll wheel events. To select/copy text,
+        // hold Shift while dragging — this is standard TUI behavior (same as
+        // vim, tmux, htop, etc.) and works in all major terminals (iTerm2,
+        // Terminal.app, Kitty, Ghostty, GNOME Terminal).
         execute!(
             output,
             EnterAlternateScreen,
             EnableBracketedPaste,
+            EnableMouseCapture,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
         let backend = CrosstermBackend::new(output);
@@ -2279,6 +2286,7 @@ impl NeoTerminal {
         let _ = execute!(
             self.terminal.backend_mut(),
             PopKeyboardEnhancementFlags,
+            DisableMouseCapture,
             DisableBracketedPaste,
             LeaveAlternateScreen
         );
@@ -2292,6 +2300,7 @@ impl NeoTerminal {
             self.terminal.backend_mut(),
             EnterAlternateScreen,
             EnableBracketedPaste,
+            EnableMouseCapture,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
         self.terminal.clear()?;
