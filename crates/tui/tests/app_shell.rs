@@ -1434,3 +1434,64 @@ fn app_widget_renders_transcript_prompt_and_top_overlay() {
     assert!(lines.iter().any(|line| line.contains("Command Palette")));
     assert!(lines.iter().any(|line| line.contains("New session")));
 }
+
+#[test]
+fn app_shell_streams_live_bash_output_and_clears_on_finish() {
+    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "bash".to_owned(),
+        arguments: serde_json::json!({ "command": "echo live" }),
+    });
+
+    for line in ["line one", "line two", "line three", "line four"] {
+        app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionUpdate {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            name: "bash".to_owned(),
+            partial_result: neo_agent_core::ToolResult::ok(line),
+        });
+    }
+
+    let tool_run = match app.transcript().items().last() {
+        Some(neo_tui::TranscriptItem::Tool { tool_run, .. }) => tool_run,
+        _ => panic!("expected tool item"),
+    };
+    assert_eq!(
+        tool_run.live_output,
+        vec![
+            "line two".to_owned(),
+            "line three".to_owned(),
+            "line four".to_owned(),
+        ]
+    );
+    assert!(tool_run.result.is_none());
+
+    let lines = render_app(80, 12, &app);
+    assert!(lines.iter().any(|line| line.contains("● Using bash")));
+    assert!(lines.iter().any(|line| line.contains("line two")));
+    assert!(lines.iter().any(|line| line.contains("line three")));
+    assert!(lines.iter().any(|line| line.contains("line four")));
+    assert!(!lines.iter().any(|line| line.contains("line one")));
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "bash".to_owned(),
+        result: neo_agent_core::ToolResult::ok("final result"),
+    });
+
+    let tool_run = match app.transcript().items().last() {
+        Some(neo_tui::TranscriptItem::Tool { tool_run, .. }) => tool_run,
+        _ => panic!("expected tool item"),
+    };
+    assert!(tool_run.live_output.is_empty());
+    assert_eq!(tool_run.result.as_deref(), Some("final result"));
+
+    let lines = render_app(80, 8, &app);
+    assert!(lines.iter().any(|line| line.contains("✓ Used bash")));
+    assert!(lines.iter().any(|line| line.contains("final result")));
+    assert!(!lines.iter().any(|line| line.contains("line two")));
+}

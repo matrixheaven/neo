@@ -4,9 +4,10 @@ use crossterm::event::{
 use neo_tui::{
     ApprovalChoice, ApprovalModal, ApprovalOption, ChatTranscript, InputEvent, InputParser, KeyId,
     KeybindingAction, KeybindingsManager, ListMarker, NeoTuiApp, PromptEdit, PromptState,
-    PromptWidget, SelectItem, SelectListState, StatusWidget, ToolStatus, ToolStatusKind,
-    TranscriptItem, TranscriptLine, TranscriptRenderer, TranscriptSelection, TranscriptView,
-    TranscriptWidget, TuiTheme, truncate_width, visible_width, wrap_width,
+    PromptWidget, SelectItem, SelectListState, StatusWidget, ToolPresentationKind, ToolRunMetadata,
+    ToolRunTranscript, ToolStatus, ToolStatusKind, TranscriptItem, TranscriptLine,
+    TranscriptRenderer, TranscriptSelection, TranscriptView, TranscriptWidget, TuiTheme,
+    truncate_width, visible_width, wrap_width,
 };
 use ratatui::{
     Terminal,
@@ -1730,4 +1731,58 @@ fn approval_modal_renders_as_action_panel_with_structured_choice_copy() {
     assert!(lines.iter().any(|line| line.contains("1. Approve once")));
     assert!(lines.iter().any(|line| line.contains("2. Deny")));
     assert!(lines.iter().any(|line| line.contains("3. Always approve")));
+}
+
+#[test]
+fn transcript_widget_streams_live_bash_output_into_running_card() {
+    let running = TranscriptItem::Tool {
+        name: "bash".to_owned(),
+        detail: String::new(),
+        status: ToolStatusKind::Running,
+        tool_run: ToolRunTranscript {
+            name: "bash".to_owned(),
+            arguments: Some(r#"{"command":"echo live"}"#.to_owned()),
+            result: None,
+            live_output: vec![
+                "line one".to_owned(),
+                "line two".to_owned(),
+                "line three".to_owned(),
+            ],
+            status: ToolStatusKind::Running,
+            metadata: ToolRunMetadata::default(),
+            presentation: ToolPresentationKind::Text,
+        },
+    };
+
+    let transcript = ChatTranscript::from_items([running]);
+    let lines = render_widget(80, 6, TranscriptWidget::new(&transcript));
+
+    assert!(lines.iter().any(|line| line.contains("● Using bash")));
+    assert!(lines.iter().any(|line| line.contains("line one")));
+    assert!(lines.iter().any(|line| line.contains("line two")));
+    assert!(lines.iter().any(|line| line.contains("line three")));
+
+    let finished = TranscriptItem::Tool {
+        name: "bash".to_owned(),
+        detail: String::new(),
+        status: ToolStatusKind::Succeeded,
+        tool_run: ToolRunTranscript {
+            name: "bash".to_owned(),
+            arguments: Some(r#"{"command":"echo live"}"#.to_owned()),
+            result: Some("final result".to_owned()),
+            live_output: Vec::new(),
+            status: ToolStatusKind::Succeeded,
+            metadata: ToolRunMetadata::default(),
+            presentation: ToolPresentationKind::Text,
+        },
+    };
+
+    let transcript = ChatTranscript::from_items([finished]);
+    let lines = render_widget(80, 4, TranscriptWidget::new(&transcript));
+
+    assert!(lines.iter().any(|line| line.contains("✓ Used bash")));
+    assert!(lines.iter().any(|line| line.contains("final result")));
+    assert!(!lines.iter().any(|line| line.contains("line one")));
+    assert!(!lines.iter().any(|line| line.contains("line two")));
+    assert!(!lines.iter().any(|line| line.contains("line three")));
 }

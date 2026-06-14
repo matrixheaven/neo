@@ -773,11 +773,13 @@ impl NeoTuiApp {
             }
             StreamUpdate::ToolStarted { id, name, detail } => {
                 self.transcript_selection = None;
+                let presentation = tool_presentation_kind(&name);
                 if let Some(tool) = self.active_tools.iter_mut().find(|tool| tool.id == id) {
                     tool.name = name;
                     tool.arguments = Some(detail);
                     tool.result = None;
                     tool.metadata = ToolRunMetadata::default();
+                    tool.presentation = presentation;
                     tool.status = ToolStatusKind::Running;
                     self.transcript.update_tool_run(
                         tool.transcript_index,
@@ -791,7 +793,7 @@ impl NeoTuiApp {
                         arguments: Some(detail),
                         result: None,
                         metadata: ToolRunMetadata::default(),
-                        presentation: ToolPresentationKind::Text,
+                        presentation,
                         status: ToolStatusKind::Running,
                         transcript_index,
                     };
@@ -801,11 +803,28 @@ impl NeoTuiApp {
             }
             StreamUpdate::ToolUpdated { id, detail } => {
                 if let Some(tool) = self.active_tools.iter_mut().find(|tool| tool.id == id) {
-                    tool.result = Some(detail);
-                    self.transcript.update_tool_run(
-                        tool.transcript_index,
-                        tool.clone().into_transcript_item(),
-                    );
+                    if tool.status == ToolStatusKind::Running
+                        && tool.presentation == ToolPresentationKind::Shell
+                    {
+                        if let Some(TranscriptItem::Tool { tool_run, .. }) =
+                            self.transcript.items.get_mut(tool.transcript_index)
+                        {
+                            tool_run
+                                .live_output
+                                .extend(detail.lines().map(ToOwned::to_owned));
+                            if tool_run.live_output.len() > 3 {
+                                let excess = tool_run.live_output.len() - 3;
+                                tool_run.live_output.rotate_left(excess);
+                                tool_run.live_output.truncate(3);
+                            }
+                        }
+                    } else {
+                        tool.result = Some(detail);
+                        self.transcript.update_tool_run(
+                            tool.transcript_index,
+                            tool.clone().into_transcript_item(),
+                        );
+                    }
                 }
             }
             StreamUpdate::ToolFinished {
@@ -820,6 +839,11 @@ impl NeoTuiApp {
                 };
                 if let Some(index) = self.active_tools.iter().position(|tool| tool.id == id) {
                     let mut tool = self.active_tools.remove(index);
+                    if let Some(TranscriptItem::Tool { tool_run, .. }) =
+                        self.transcript.items.get_mut(tool.transcript_index)
+                    {
+                        tool_run.live_output.clear();
+                    }
                     tool.result = Some(detail);
                     tool.status = status;
                     self.transcript
@@ -988,16 +1012,28 @@ impl NeoTuiApp {
             AgentEvent::ToolCallArgumentsDelta {
                 id, json_fragment, ..
             } => {
-                self.apply_stream_update(StreamUpdate::ToolUpdated {
-                    id,
-                    detail: json_fragment,
-                });
+                if let Some(tool) = self.active_tools.iter_mut().find(|tool| tool.id == id) {
+                    tool.arguments
+                        .get_or_insert_default()
+                        .push_str(&json_fragment);
+                    self.transcript.update_tool_run(
+                        tool.transcript_index,
+                        tool.clone().into_transcript_item(),
+                    );
+                }
             }
             AgentEvent::ToolCallFinished { tool_call, .. } => {
-                self.apply_stream_update(StreamUpdate::ToolUpdated {
-                    id: tool_call.id,
-                    detail: tool_call.arguments.to_string(),
-                });
+                if let Some(tool) = self
+                    .active_tools
+                    .iter_mut()
+                    .find(|tool| tool.id == tool_call.id)
+                {
+                    tool.arguments = Some(tool_call.arguments.to_string());
+                    self.transcript.update_tool_run(
+                        tool.transcript_index,
+                        tool.clone().into_transcript_item(),
+                    );
+                }
             }
             _ => {}
         }
@@ -1711,6 +1747,17 @@ fn take_completed_tool_result(completed_tool_result_ids: &mut Vec<String>, id: &
         true
     } else {
         false
+    }
+}
+
+const fn tool_presentation_kind(name: &str) -> ToolPresentationKind {
+    if name.eq_ignore_ascii_case("bash")
+        || name.eq_ignore_ascii_case("shell")
+        || name.eq_ignore_ascii_case("terminal")
+    {
+        ToolPresentationKind::Shell
+    } else {
+        ToolPresentationKind::Text
     }
 }
 
