@@ -34,9 +34,8 @@ fn render_runtime_shell(width: u16, height: u16, app: &NeoTuiApp) -> (Vec<String
     runtime.render_tick();
 
     let transcript = runtime
-        .committed_ansi_lines()
+        .frame_ansi_lines()
         .into_iter()
-        .chain(runtime.live_ansi_lines())
         .map(|line| neo_tui::ansi::strip_ansi(&line))
         .collect();
     let chrome = runtime_chrome_ansi_lines(app, usize::from(width))
@@ -347,7 +346,12 @@ fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
 }
 
 #[test]
-fn app_shell_runtime_bounds_live_rows_to_keep_tail_visible_in_small_viewports() {
+fn app_shell_runtime_frame_keeps_latest_live_row_visible() {
+    // The runtime no longer clamps the live region: in the pi-tui single-buffer
+    // model, the InlineRenderer decides what fits the viewport and scrolls the
+    // rest into scrollback. The runtime just composes the full body. This test
+    // verifies the latest streaming row is present in the composed frame so the
+    // renderer can keep the tail visible.
     let mut runtime = neo_tui::NeoTuiRuntime::new(80, 12);
     runtime.set_live_chrome_height(5);
     for index in 0..36 {
@@ -355,25 +359,17 @@ fn app_shell_runtime_bounds_live_rows_to_keep_tail_visible_in_small_viewports() 
         runtime.append_assistant_delta(&format!("history line {index}"));
     }
 
-    let output = runtime.render_output().expect("render output");
-    let lines: Vec<String> = output
-        .live
+    let lines: Vec<String> = runtime
+        .render_frame(80, 12)
+        .expect("render frame")
         .iter()
-        .map(|line| neo_tui::ansi::strip_ansi(&line.to_ansi()))
+        .map(|line| neo_tui::ansi::strip_ansi(line))
         .collect();
 
     assert!(
         lines.iter().any(|line| line.contains("history line 35")),
-        "latest runtime live row should remain visible after the body overflows:\n{}",
+        "latest runtime live row should be present in the composed frame:\n{}",
         lines.join("\n")
-    );
-    assert!(
-        lines
-            .iter()
-            .filter(|line| line.contains("history line "))
-            .count()
-            < 36,
-        "runtime should not keep all live rows visible once the live region overflows"
     );
 }
 

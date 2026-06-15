@@ -1,11 +1,12 @@
 use crate::core::{Finalization, Line};
+use crate::wrap_width;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptEntry {
     Banner(String),
     User(String),
     Assistant {
-        thinking: Option<String>,
+        thinking: String,
         content: String,
         finalized: bool,
     },
@@ -34,7 +35,7 @@ impl TranscriptEntry {
     #[must_use]
     pub fn assistant_live(content: impl Into<String>) -> Self {
         Self::Assistant {
-            thinking: None,
+            thinking: String::new(),
             content: content.into(),
             finalized: false,
         }
@@ -43,7 +44,7 @@ impl TranscriptEntry {
     #[must_use]
     pub fn assistant_final(content: impl Into<String>) -> Self {
         Self::Assistant {
-            thinking: None,
+            thinking: String::new(),
             content: content.into(),
             finalized: true,
         }
@@ -82,48 +83,63 @@ impl TranscriptEntry {
     }
 
     #[must_use]
-    pub fn render(&self, _width: usize) -> Vec<Line> {
+    pub fn render(&self, width: usize) -> Vec<Line> {
+        // Every `Line` returned here MUST map to exactly one terminal row:
+        // content is split on `\n` and soft-wrapped to `width` so no line ever
+        // carries an embedded newline. The renderer's diff/scroll math treats
+        // each `Vec<String>` entry as one screen row, so an un-split long line
+        // would corrupt the coordinate model and garble streaming output.
+        let inner_width = width.max(1);
         match self {
-            Self::Banner(title) => {
-                vec![Line::raw(title.clone())]
-            }
+            Self::Banner(title) => wrap_width(title, inner_width)
+                .into_iter()
+                .map(Line::raw)
+                .collect(),
             Self::User(content) => {
                 let mut rows = Vec::new();
                 rows.push(Line::raw("You"));
-                rows.push(Line::raw(content.clone()));
+                rows.extend(wrap_width(content, inner_width).into_iter().map(Line::raw));
                 rows
             }
-            Self::Notice(content) => {
-                vec![Line::raw(content.clone())]
-            }
+            Self::Notice(content) => wrap_width(content, inner_width)
+                .into_iter()
+                .map(Line::raw)
+                .collect(),
             Self::Assistant {
                 thinking,
                 content,
                 finalized,
             } => {
                 let mut rows = Vec::new();
-                if *finalized
-                    && content.is_empty()
-                    && thinking.as_ref().map_or(true, |t| t.is_empty())
-                {
+                if *finalized && content.is_empty() && thinking.is_empty() {
                     return rows;
                 }
-                if let Some(thinking) = thinking.as_ref().filter(|value| !value.is_empty()) {
-                    rows.push(Line::raw(format!("● {thinking}")));
+                if !thinking.is_empty() {
+                    rows.extend(
+                        wrap_width(&format!("● {thinking}"), inner_width)
+                            .into_iter()
+                            .map(Line::raw),
+                    );
                 }
                 if !content.is_empty() {
                     if *finalized {
                         rows.push(Line::raw("Assistant"));
                     }
-                    rows.push(Line::raw(content.clone()));
+                    rows.extend(wrap_width(content, inner_width).into_iter().map(Line::raw));
                 }
                 rows
             }
             Self::ToolCallRunning { name, detail } => {
-                vec![Line::raw(format!("● Using {name} ({detail})"))]
+                wrap_width(&format!("● Using {name} ({detail})"), inner_width)
+                    .into_iter()
+                    .map(Line::raw)
+                    .collect()
             }
             Self::ToolCallFinished { name, detail } => {
-                vec![Line::raw(format!("✓ Used {name} ({detail})"))]
+                wrap_width(&format!("✓ Used {name} ({detail})"), inner_width)
+                    .into_iter()
+                    .map(Line::raw)
+                    .collect()
             }
         }
     }

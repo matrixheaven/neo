@@ -9,7 +9,9 @@ agent-core runtime that can be tested without a terminal UI.
 neo-agent CLI/TUI
   -> neo-agent-core runtime, sessions, permissions, tools, MCP
       -> neo-ai provider-neutral model and stream contracts
-  -> neo-tui terminal UI primitives
+  -> neo-tui terminal UI primitives (crossterm-based component tree)
+  -> neo-sdk JSONL RPC, skill loading, HTML export
+  -> neo-extensions local extension discovery/runner/lifecycle
 xtask maintenance commands
 ```
 
@@ -21,11 +23,23 @@ xtask maintenance commands
   OpenAI-compatible, and OpenAI-style image generation network clients.
 - `neo-ai::providers::fake::FakeModelClient` records requests and replays stream events for tests.
 - `neo-agent-core` contains a runtime turn loop, fake harness, permissions,
-  built-in tools, MCP adapters, reasoning event persistence, and JSONL session
-  helpers.
+  built-in tools (read, list, grep, find, glob, write, edit, bash, terminal,
+  todo, enter_plan_mode, exit_plan_mode), MCP adapters, reasoning event
+  persistence, and JSONL session helpers.
 - `neo-agent` exposes the local command-line and TUI surface.
-- `neo-tui` owns terminal rendering, transcript selection, and conservative
-  inline image protocol rendering.
+- `neo-tui` owns terminal rendering via a component-tree architecture:
+  - `core/`: `Component` trait, `Line`/`Span` styled primitives, `Container`,
+    `RenderScheduler`, `TerminalRenderer` with differential rendering.
+  - `transcript/`: `TranscriptController`, tool call lifecycle tracking,
+    per-tool-type renderers, LCS-based inline diff preview.
+  - `runtime.rs`: `NeoTuiRuntime` bridging `AgentEvent` to terminal output.
+  - `streaming.rs`: `StreamingController` for tool call state during streaming.
+  - `widgets/`: `QuestionStateMachine` (multi-question dialog), `TodoPanel`.
+  - `image.rs`: Kitty, iTerm2, and Sixel inline image encoding.
+- `neo-sdk` provides JSONL RPC frame types, skill manifest loading, and safe
+  Markdown-to-HTML export.
+- `neo-extensions` provides local extension discovery, installation, lifecycle
+  (enable/disable), and stdio JSONL runner.
 - `xtask check` verifies the stable developer tooling slice, and
   `xtask release-smoke` exercises local-only CLI surfaces.
 
@@ -42,8 +56,8 @@ xtask maintenance commands
 8. Session events are persisted so `resume` can rebuild conversation and tool
    state from local JSONL history.
 
-The current Rust surface implements parts of this flow. See [Gap Map](gap/INDEX.md)
-for the module-by-module parity status.
+The current Rust surface implements all major components of this flow. See the
+individual crate docs in `docs/` for module-by-module status.
 
 ## Design Principles
 

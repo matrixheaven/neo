@@ -37,4 +37,5 @@ docs checks. It does not start cloud services or marketplace fixtures.
 - [Providers](docs/providers.md)
 - [Tools](docs/tools.md)
 - [Sessions](docs/sessions.md)
-- [Pi parity gap map](docs/gap/INDEX.md)
+- [MCP](docs/mcp.md)
+- [Local Assets](docs/packages.md)

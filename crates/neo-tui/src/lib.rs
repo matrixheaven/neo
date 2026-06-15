@@ -16,7 +16,7 @@ pub use app::*;
 pub use components::*;
 pub use core::{
     Component, Container, Expandable, Finalization, GutterContainer, InputResult, Line, RenderKind,
-    RenderScheduler, Span, TerminalRenderer, Text,
+    RenderScheduler, Span, Text,
 };
 pub use diff::*;
 pub use image::*;

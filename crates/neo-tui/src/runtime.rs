@@ -3,18 +3,12 @@ use std::collections::BTreeMap;
 use neo_agent_core::AgentEvent;
 
 use crate::ansi::{Style, paint, truncate_to_width, visible_width};
-use crate::core::{Expandable, Finalization, Line, RenderKind, RenderScheduler, TerminalRenderer};
+use crate::core::{Expandable, Finalization, Line, RenderKind, RenderScheduler};
 use crate::renderer::CURSOR_MARKER;
 use crate::transcript::{ToolCallComponent, ToolCallState, TranscriptController, TranscriptEntry};
 use crate::{NeoTuiApp, PromptState, ToolStatusKind, wrap_width};
 
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 5;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderOutput {
-    pub committed: Vec<Line>,
-    pub live: Vec<Line>,
-}
 
 #[derive(Debug)]
 pub struct NeoTuiRuntime {
@@ -23,11 +17,21 @@ pub struct NeoTuiRuntime {
     live_chrome_height: usize,
     transcript: TranscriptController,
     scheduler: RenderScheduler,
-    terminal: TerminalRenderer,
     tool_output_expanded: bool,
     tools: BTreeMap<String, ToolCallComponent>,
     tool_order: Vec<String>,
     streaming_tool_args: BTreeMap<String, String>,
+    /// Finalized content that has already been pushed into scrollback by the
+    /// renderer. Kept here so every frame re-exports the full history: in the
+    /// pi-tui single-buffer model the renderer diffs the *whole* frame against
+    /// the previous one and scrolls overflow into the terminal scrollback via
+    /// `\r\n`. Without this buffer, drained finalized rows would vanish on the
+    /// next frame and the renderer would blank them.
+    history: Vec<String>,
+    /// Cache of the last composed body frame (ANSI strings, no chrome), so
+    /// tests can inspect rendered output via [`frame_ansi_lines`] without
+    /// re-running the scheduler.
+    last_frame: Vec<String>,
 }
 
 impl NeoTuiRuntime {
@@ -39,11 +43,12 @@ impl NeoTuiRuntime {
             live_chrome_height: DEFAULT_LIVE_CHROME_HEIGHT,
             transcript: TranscriptController::new(),
             scheduler: RenderScheduler::new(),
-            terminal: TerminalRenderer::new(width, height),
             tool_output_expanded: false,
             tools: BTreeMap::new(),
             tool_order: Vec::new(),
             streaming_tool_args: BTreeMap::new(),
+            history: Vec::new(),
+            last_frame: Vec::new(),
         }
     }
 
@@ -210,38 +215,90 @@ impl NeoTuiRuntime {
     pub fn resize(&mut self, width: usize, height: usize) {
         self.width = width;
         self.height = height;
-        self.terminal.resize(width, height);
         self.scheduler.request(RenderKind::ForceFull);
     }
 
     pub fn render_tick(&mut self) {
-        let _ = self.render_output();
+        let _ = self.render_frame(self.width, self.height);
     }
 
-    pub fn render_output(&mut self) -> Option<RenderOutput> {
-        self.scheduler.take_next()?;
-
-        let mut committed = self.transcript.drain_finalized_rows(self.width);
-        let mut live = self.transcript.render_live_rows(self.width);
-        if live.is_empty() {
-            committed.extend(self.drain_finalized_tool_rows());
-        } else {
-            live.extend(self.render_tool_rows());
-        }
-        self.terminal.commit_rows(&committed);
-
-        if live.is_empty() {
-            live.extend(self.render_tool_rows());
-        }
-        live = clamp_tail(live, self.available_live_rows());
-        self.terminal.render_live_region(&live, None);
-
-        Some(RenderOutput { committed, live })
-    }
-
+    /// Render a single flat frame of all non-chrome content lines as ANSI
+    /// strings: finalized transcript rows, finalized tool cards, live
+    /// transcript rows, then live tool cards.
+    ///
+    /// The chrome (prompt box + footer) depends on [`NeoTuiApp`] state and is
+    /// appended by the caller via [`runtime_chrome_ansi_lines`] before the
+    /// whole frame is handed to [`crate::renderer::InlineRenderer::render`].
+    /// This mirrors pi-tui's single-buffer model: every screen line lives in
+    /// one `Vec<String>`, so the renderer can diff the whole frame and rewrite
+    /// only what changed.
+    ///
+    /// Returns `None` when the scheduler has no pending render.
     #[must_use]
-    pub const fn terminal(&self) -> &TerminalRenderer {
-        &self.terminal
+    pub fn render_frame(&mut self, width: usize, height: usize) -> Option<Vec<String>> {
+        self.scheduler.take_next()?;
+        self.width = width;
+        self.height = height;
+
+        let lines = self.compose_body_lines(width);
+        self.last_frame.clone_from(&lines);
+        Some(lines)
+    }
+
+    /// Build the non-chrome body lines without consuming a scheduler slot.
+    /// Shared between [`render_frame`] (live path) and [`frame_ansi_lines`]
+    /// (read-only snapshot for tests).
+    ///
+    /// In the pi-tui single-buffer model the renderer must see the *full*
+    /// content on every frame so it can diff against the previous frame and
+    /// scroll overflow into the terminal scrollback via `\r\n`. So we keep a
+    /// `history` buffer of finalized rows and re-export it every frame,
+    /// followed by the current live region (streaming assistant text + live
+    /// tool cards + finalized tool cards). The chrome (prompt box + footer) is
+    /// appended by the caller.
+    fn compose_body_lines(&mut self, width: usize) -> Vec<String> {
+        // 1. Drain newly finalized transcript rows into history (they will not
+        //    change again). They stay in history so future frames still show
+        //    them until the renderer scrolls them off-screen.
+        for line in self.transcript.drain_finalized_rows(width) {
+            self.history.push(line.to_ansi());
+        }
+
+        // 2. Drain newly finalized tool cards into history, interleaved after
+        //    any finalized transcript rows above. This only drains when there
+        //    is no live transcript tail, matching the previous semantics.
+        let live_rows = self.transcript.render_live_rows(width);
+        if live_rows.is_empty() {
+            for line in self.drain_finalized_tool_rows() {
+                self.history.push(line.to_ansi());
+            }
+        }
+
+        // 3. Compose the frame: history + live region. The live region is the
+        //    still-streaming assistant text plus live tool cards. Finalized
+        //    tool cards that became live-only (when there IS a live transcript
+        //    tail) are rendered inline here.
+        let mut frame: Vec<String> = self.history.clone();
+        let mut live = live_rows;
+        if !live.is_empty() {
+            live.extend(self.render_tool_rows());
+        }
+        if live.is_empty() {
+            live.extend(self.render_tool_rows());
+        }
+        for line in live {
+            frame.push(line.to_ansi());
+        }
+
+        frame
+    }
+
+    /// Read-only snapshot of the most recently rendered body frame (ANSI
+    /// strings, no chrome). Returns an empty vec before the first render.
+    /// Used by tests that need to inspect what the runtime would draw.
+    #[must_use]
+    pub fn frame_ansi_lines(&self) -> Vec<String> {
+        self.last_frame.clone()
     }
 
     #[must_use]
@@ -257,24 +314,6 @@ impl NeoTuiRuntime {
     #[must_use]
     pub const fn dimensions(&self) -> (usize, usize) {
         (self.width, self.height)
-    }
-
-    #[must_use]
-    pub fn live_ansi_lines(&self) -> Vec<String> {
-        self.terminal
-            .live_rows()
-            .iter()
-            .map(Line::to_ansi)
-            .collect()
-    }
-
-    #[must_use]
-    pub fn committed_ansi_lines(&self) -> Vec<String> {
-        self.terminal
-            .committed_rows()
-            .iter()
-            .map(Line::to_ansi)
-            .collect()
     }
 
     fn upsert_tool(
@@ -348,21 +387,6 @@ impl NeoTuiRuntime {
         }
         rows
     }
-
-    fn available_live_rows(&self) -> usize {
-        if self.height > self.live_chrome_height {
-            self.height - self.live_chrome_height
-        } else {
-            self.height
-        }
-    }
-}
-
-fn clamp_tail(mut rows: Vec<Line>, max_rows: usize) -> Vec<Line> {
-    if rows.len() > max_rows {
-        rows.drain(..rows.len() - max_rows);
-    }
-    rows
 }
 
 #[must_use]

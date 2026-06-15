@@ -27,7 +27,7 @@ impl TranscriptController {
             content.push_str(text);
         } else {
             self.live.push(TranscriptEntry::Assistant {
-                thinking: None,
+                thinking: String::new(),
                 content: text.to_owned(),
                 finalized: false,
             });

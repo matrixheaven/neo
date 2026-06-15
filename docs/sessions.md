@@ -5,6 +5,35 @@ exportable, and resumable from local JSONL history.
 
 ## Storage
 
+Sessions are stored in a **centralized, workspace-scoped** layout under
+`~/.neo/sessions/` (or `$NEO_HOME/sessions/`). Each workspace (project
+directory) gets a deterministic bucket directory:
+
+```
+~/.neo/sessions/
+├── wd_neo_eb208ec56c5c/          ← bucket for /path/to/neo
+│   ├── 1718370000000.jsonl       ← session transcript
+│   ├── sessions.metadata.json    ← per-bucket metadata index
+│   └── ...
+├── wd_myproject_a1b2c3d4e5f6/    ← bucket for /path/to/myproject
+│   └── ...
+└── session_index.jsonl           ← global index (session ID → location)
+```
+
+The bucket name is `wd_<slug>_<hash12>` where `<slug>` is derived from the
+directory basename and `<hash12>` is the first 12 hex chars of SHA-256 of the
+canonicalized absolute path. This ensures:
+- `/resume` only shows sessions from the **current workspace**
+- Different projects with the same basename get different buckets
+- The `NEO_HOME` env var overrides the home directory (`~/.neo` by default)
+
+On startup, `migrate_legacy_sessions()` automatically moves any sessions from
+the old `{project_dir}/.neo/sessions/` layout into the new bucket directory.
+Migration is idempotent.
+
+The global `session_index.jsonl` enables `neo resume <session_id>` to locate
+sessions across workspaces.
+
 `neo-agent-core` provides JSONL helpers under `neo_agent_core::session`:
 
 - `JsonlSessionWriter::create(path)`
@@ -15,9 +44,13 @@ exportable, and resumable from local JSONL history.
 - `JsonlSessionReader::replay_context(path)`
 - `compact_jsonl_session(path, options)`
 - `SessionMetadataStore::list()`
+- `SessionMetadataStore::list_recent()`
 - `SessionMetadataStore::fork(parent_id, name)`
 - `SessionMetadataStore::rename(session_id, name)`
 - `SessionMetadataStore::summarize(session_id, summary)`
+- `SessionMetadataStore::record_summary(session_id, summary, source)`
+- `SessionMetadataStore::record_activity(session_id, prompt)`
+- `SessionMetadataStore::record_title(session_id, title, model)`
 
 New JSONL files start with a `session_metadata` record containing the
 `neo.session.jsonl` format name, schema version, and creation timestamp.
@@ -73,8 +106,9 @@ neo sessions export-json <session-ref>
 neo resume <session-ref>
 ```
 
-Session directory defaults to `.neo/sessions` and can be changed with
-`sessions_dir` or `NEO_SESSIONS_DIR`.
+Session directory defaults to `~/.neo/sessions/` with workspace-scoped bucket
+subdirectories. Can be overridden with `sessions_dir` or `NEO_SESSIONS_DIR`.
+Legacy `{project_dir}/.neo/sessions/` layouts are migrated automatically.
 
 `export-html` replays `MessageAppended` events and renders a standalone HTML
 conversation with `neo-sdk`'s safe Markdown renderer. `export-json` replays the

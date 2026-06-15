@@ -68,8 +68,7 @@ Key files at the root:
 │   ├── rust/                  # Cargo crate with runnable Rust examples
 │   ├── config/                # example TOML config files
 │   └── tools/                 # example tool schemas
-├── docs/                      # Markdown documentation and gap map
-│   └── gap/                   # module-by-module pi parity status
+├── docs/                      # Markdown documentation
 ├── xtask/                     # maintenance command runner
 └── target/                    # build output
 ```
@@ -248,6 +247,71 @@ Registered by `neo_agent_core::ToolRegistry::with_builtin_tools()`:
 The `ask_user` tool is available but not registered by default (requires a
 channel sender for reverse-RPC user questions).
 
+### TUI capabilities
+
+The interactive TUI mode (`neo-agent` with no subcommand) provides:
+
+- **Transcript rendering**: differential rendering of assistant text, thinking
+  blocks, tool call cards, and images with syntax highlighting.
+- **Inline image protocols**: Kitty Graphics, iTerm2 inline images, and Sixel
+  encoding for terminal image display.
+- **Session picker**: `ctrl+r` or `/tree` opens a local session picker.
+- **Model picker**: `/model` opens a model selection dialog.
+- **Session fork**: `ctrl+n` in the session picker forks the selected session.
+- **Transcript selection copy**: `ctrl+shift+c` copies selected transcript text.
+- **Paste buffering**: bracketed-paste handling for multi-line input.
+- **Theme support**: customizable color themes via `.neo/themes/*.json` or
+  `~/.neo/themes/*.json`.
+- **Keybinding customization**: configurable keybindings via config.
+- **Approval dialog**: interactive permission approval for tool execution.
+- **Question dialog**: multi-question interactive dialogs via `ask_user` tool.
+
+### Image generation
+
+`neo images generate` uses OpenAI-style image endpoints for models that
+advertise image-generation capability in the local model catalog:
+
+```bash
+neo images generate "a compact terminal workstation" \
+  --model openai/gpt-image-1 \
+  --output .neo/generated/workstation.png
+```
+
+### Prompt templates
+
+Project prompt templates live in `.neo/prompts/*.md` and are invoked by slash
+name. User-global templates live in `~/.neo/prompts/*.md`:
+
+```bash
+neo prompts list
+neo prompts preview review
+neo --prompt-template review print src/lib.rs
+```
+
+### Trust management
+
+Project context files (`AGENTS.md`, `CLAUDE.md`) are loaded only when the
+project is trusted; trust is stored in `~/.neo/trust.json`:
+
+```bash
+neo trust status
+neo trust approve
+neo trust deny
+neo trust clear
+```
+
+### RPC mode
+
+`neo rpc` accepts JSONL request frames for local session clients:
+
+```bash
+neo rpc
+```
+
+Supports `get_commands`, `sessions.list`, `sessions.get`, `get_messages`,
+`sessions.export_html`, `sessions.export_json`, and `neo.session.export_json`
+methods.
+
 ### Extension and MCP boundaries
 
 - Local extensions expose tools through JSONL RPC `tools.list` and are
@@ -270,7 +334,6 @@ Config precedence:
 Project config merges over user-global config field by field. Provider maps are
 merged by provider id; MCP servers are merged by server id. Important sections:
 
-- `default_provider`, `default_model`, `api_key_env`, `api_base`.
 - `default_provider`, `default_model`, `api_key_env`, `api_base`.
 - `providers.<id>` — full provider definition with `type`, `base_url`,
   `api_key` (inline) or `api_key_env` (environment variable).
@@ -295,7 +358,16 @@ CLI provider/model management: `neo provider add/remove/list`,
 `neo models add/remove/list/set`.
 
 TUI slash commands: `/model` (model picker), `/provider` (provider list),
-`/resume` (session picker).
+`/resume` (session picker), `/tree` (session picker).
+
+CLI session management: `neo sessions list/show/rename/fork/summarize/compact/export-html/export-json`.
+
+CLI extension management: `neo extensions install/update/uninstall/list/status/enable/disable/call`.
+
+CLI MCP management: `neo mcp list`, `neo mcp servers add/remove/enable/disable/health/start/stop`,
+`neo mcp tools <server>`, `neo mcp resources <server> list/read/watch`.
+
+CLI image generation: `neo images generate --model <provider/model> --output <path>`.
 
 System prompt resources:
 
@@ -343,8 +415,6 @@ marketplace fixtures.
 
 - Documentation lives in `docs/`; start with `docs/index.md` and
   `docs/quickstart.md`.
-- The gap map in `docs/gap/` tracks pi-parity status per module; check it
-  before assuming a missing capability is a docs omission versus a code gap.
 - The repo uses a generated catalog schema artifact convention. If a generated
   schema exists, `cargo run -p xtask -- catalog check` validates it.
 - Example code is in `examples/rust/` as a separate workspace crate.

@@ -152,6 +152,32 @@ In interactive mode:
 - `/model` — Open the model picker
 - `/provider` — Open the provider list
 - `/resume` — Open session picker
+- `/tree` — Open session picker
+
+## Themes
+
+Project themes live under `.neo/themes/*.json` and define color overrides:
+
+```bash
+neo themes list
+neo themes preview night-owl
+neo --theme .neo/themes/night-owl.json
+```
+
+Theme JSON files use a `colors` object with named color values (hex, ANSI
+names, or `Reset`).
+
+## Keybindings
+
+Custom keybindings can be configured in `config.toml`:
+
+```toml
+[tui.keybindings]
+# Maps key combinations to actions
+```
+
+Available actions include `session_picker_open`, `model_picker_open`,
+`transcript_copy_selection`, and `session_fork`.
 
 ## Importing from models.dev
 

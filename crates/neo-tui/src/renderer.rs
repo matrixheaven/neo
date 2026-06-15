@@ -1,8 +1,10 @@
 //! Custom differential renderer for inline terminal output.
 //!
-//! This is a Rust port of pi-tui's `doRender()` algorithm. It renders content
-//! as `Vec<String>` (each string = one terminal line with embedded ANSI codes),
-//! diffs against the previous frame, and writes only changed lines.
+//! This is a 1:1 Rust port of pi-tui's `TUI.doRender()` / `fullRender()` /
+//! `positionHardwareCursor()` algorithm (see `docs/pi/packages/tui/src/tui.ts`).
+//! It renders content as `Vec<String>` (each string = one terminal line with
+//! embedded ANSI codes), diffs against the previous frame, and writes only
+//! changed lines.
 //!
 //! When content grows past the screen bottom, `\r\n` pushes old lines into the
 //! terminal's native scrollback buffer — no alternate screen needed.
@@ -39,6 +41,7 @@ pub struct InlineRenderer {
     previous_lines: Vec<String>,
     /// Content row index of the top of the visible viewport.
     viewport_top: usize,
+    previous_viewport_top: usize,
     /// Current hardware cursor position in **screen row** coordinates.
     /// 0 = top of screen, height-1 = bottom.
     hardware_cursor_row: usize,
@@ -46,19 +49,11 @@ pub struct InlineRenderer {
     previous_height: u16,
     /// Whether this is the first render (no diff, just output everything).
     first_render: bool,
-}
-
-/// Result of computing what terminal operations are needed for a frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RenderDiff {
-    /// Number of `\r\n` to emit to scroll content into scrollback.
-    scroll_amount: usize,
-    /// First content row that changed.
-    first_changed: usize,
-    /// Last content row that changed.
-    last_changed: usize,
-    /// Whether to do a full redraw instead of incremental.
-    full_redraw: bool,
+    /// Track terminal's working area (max lines ever rendered). Mirrors
+    /// pi-tui's `maxLinesRendered`: grows but doesn't shrink unless cleared.
+    max_lines_rendered: usize,
+    /// Logical end-of-content row (mirrors pi-tui's `cursorRow`).
+    cursor_row: usize,
 }
 
 impl InlineRenderer {
@@ -74,29 +69,31 @@ impl InlineRenderer {
         Ok(Self {
             previous_lines: Vec::new(),
             viewport_top: 0,
+            previous_viewport_top: 0,
             hardware_cursor_row: 0,
             previous_width: 0,
             previous_height: 0,
             first_render: true,
+            max_lines_rendered: 0,
+            cursor_row: 0,
         })
     }
 
     /// Restore terminal state.
     pub fn leave(&mut self) {
         let mut output = stdout();
-        // Move cursor to the last content row on screen, then write \r\n
-        let last_screen_row = self
-            .previous_lines
-            .len()
-            .saturating_sub(1)
-            .saturating_sub(self.viewport_top);
-        let row_diff = last_screen_row as isize - self.hardware_cursor_row as isize;
-        if row_diff > 0 {
-            let _ = write!(output, "\x1b[{row_diff}B");
-        } else if row_diff < 0 {
-            let _ = write!(output, "\x1b[{}A", -row_diff);
+        // Move cursor to the end of the content to prevent overwriting on exit.
+        // 1:1 port of pi-tui's `stop()`.
+        if !self.previous_lines.is_empty() {
+            let target_row = self.previous_lines.len(); // Line after the last content
+            let line_diff = target_row as isize - self.hardware_cursor_row as isize;
+            if line_diff > 0 {
+                let _ = write!(output, "\x1b[{line_diff}B");
+            } else if line_diff < 0 {
+                let _ = write!(output, "\x1b[{}A", (-line_diff));
+            }
+            let _ = write!(output, "\r\n");
         }
-        let _ = write!(output, "\r\n");
         let _ = output.flush();
 
         let _ = execute!(output, PopKeyboardEnhancementFlags, DisableBracketedPaste,);
@@ -119,11 +116,18 @@ impl InlineRenderer {
         // Force full redraw after resume
         self.first_render = true;
         self.previous_lines.clear();
+        self.viewport_top = 0;
+        self.previous_viewport_top = 0;
+        self.hardware_cursor_row = 0;
+        self.max_lines_rendered = 0;
+        self.cursor_row = 0;
         Ok(())
     }
 
     /// Render a frame. `new_lines` contains all content lines (with ANSI codes).
     /// `cursor` is the optional prompt cursor position in the rendered content.
+    ///
+    /// This is a 1:1 port of pi-tui's `TUI.doRender()`.
     pub fn render(
         &mut self,
         new_lines: Vec<String>,
@@ -138,245 +142,395 @@ impl InlineRenderer {
         let width_changed = self.previous_width != 0 && self.previous_width != width;
         let height_changed = self.previous_height != 0 && self.previous_height != height_u16;
 
+        // The previous buffer length is how many content rows the old viewport
+        // covered. On a height change we recompute the previous viewport top so
+        // the bottom stays anchored.
+        let previous_buffer_length = if self.previous_height > 0 {
+            self.previous_viewport_top + usize::from(self.previous_height)
+        } else {
+            height
+        };
+        let mut prev_viewport_top = if height_changed {
+            previous_buffer_length.saturating_sub(height)
+        } else {
+            self.previous_viewport_top
+        };
+        let mut viewport_top = prev_viewport_top;
+        let mut hardware_cursor_row = self.hardware_cursor_row;
+
+        // Helper: line diff (in screen rows) from the current cursor to a
+        // target content row. Mirrors pi-tui's `computeLineDiff` closure; kept
+        // as a free function so the loop body can mutate the viewport state.
+        let compute_line_diff =
+            |target_row: usize, hwc: usize, prev_vt: usize, vt: usize| -> isize {
+                let current_screen_row = hwc as isize - prev_vt as isize;
+                let target_screen_row = target_row as isize - vt as isize;
+                target_screen_row - current_screen_row
+            };
+
+        let cursor_pos = cursor;
+        let new_lines_ref = &new_lines;
+
         let mut output = stdout();
 
-        // First render or size change → full redraw
-        if self.first_render || width_changed || height_changed {
-            self.full_render(&mut output, &new_lines, height, cursor)?;
+        // First render - just output everything without clearing (assumes clean screen)
+        if self.previous_lines.is_empty() && !width_changed && !height_changed {
+            self.full_render(
+                &mut output,
+                false,
+                new_lines_ref,
+                height,
+                height_u16,
+                width,
+                cursor_pos,
+            )?;
             self.first_render = false;
-            self.previous_width = width;
-            self.previous_height = height_u16;
             return Ok(());
         }
 
-        // Compute what operations are needed
-        let diff = compute_render_diff(
-            &self.previous_lines,
-            &new_lines,
-            self.viewport_top,
-            self.hardware_cursor_row,
-            height,
-        );
+        // First render flag (e.g. after suspend_resume) → full redraw without clear.
+        if self.first_render {
+            self.full_render(
+                &mut output,
+                false,
+                new_lines_ref,
+                height,
+                height_u16,
+                width,
+                cursor_pos,
+            )?;
+            self.first_render = false;
+            return Ok(());
+        }
 
-        // No changes — just reposition cursor
-        if diff.first_changed == diff.last_changed
-            && diff.first_changed == usize::MAX
-            && diff.scroll_amount == 0
-        {
-            self.position_cursor(&mut output, cursor, new_lines.len())?;
+        // Width changes always need a full re-render because wrapping changes.
+        if width_changed {
+            self.full_render(
+                &mut output,
+                true,
+                new_lines_ref,
+                height,
+                height_u16,
+                width,
+                cursor_pos,
+            )?;
+            return Ok(());
+        }
+
+        // Height changes need a full re-render to keep the viewport aligned.
+        if height_changed {
+            self.full_render(
+                &mut output,
+                true,
+                new_lines_ref,
+                height,
+                height_u16,
+                width,
+                cursor_pos,
+            )?;
+            return Ok(());
+        }
+
+        // Find first and last changed lines
+        let mut first_changed: i64 = -1;
+        let mut last_changed: i64 = -1;
+        let max_lines = new_lines.len().max(self.previous_lines.len());
+        for i in 0..max_lines {
+            let old_line = self.previous_lines.get(i).map(String::as_str).unwrap_or("");
+            let new_line = new_lines.get(i).map(String::as_str).unwrap_or("");
+            if old_line != new_line {
+                if first_changed == -1 {
+                    first_changed = i as i64;
+                }
+                last_changed = i as i64;
+            }
+        }
+        let appended_lines = new_lines.len() > self.previous_lines.len();
+        if appended_lines {
+            if first_changed == -1 {
+                first_changed = self.previous_lines.len() as i64;
+            }
+            last_changed = (new_lines.len() - 1) as i64;
+        }
+        let append_start = appended_lines
+            && first_changed == self.previous_lines.len() as i64
+            && first_changed > 0;
+
+        // No changes - but still need to update hardware cursor position if it moved
+        if first_changed == -1 {
+            self.position_hardware_cursor(&mut output, cursor_pos, new_lines.len())?;
+            self.previous_viewport_top = prev_viewport_top;
+            self.previous_height = height_u16;
             self.previous_lines = new_lines;
             return Ok(());
         }
 
-        // Build the terminal output buffer
-        let mut buf = String::with_capacity(4096);
-        buf.push_str("\x1b[?2026h"); // Begin synchronized output
+        let first_changed_u = first_changed as usize;
+        let last_changed_u = last_changed as usize;
 
-        let mut viewport_top = self.viewport_top;
-        let hw_cursor = self.hardware_cursor_row; // screen row
-
-        // Handle scrolling: if content grew past viewport, emit \r\n
-        if diff.scroll_amount > 0 {
-            // Move cursor to bottom of screen first
-            let move_down = height.saturating_sub(1).saturating_sub(hw_cursor);
-            if move_down > 0 {
-                buf.push_str(&format!("\x1b[{move_down}B"));
+        // All changes are in deleted lines (nothing to render, just clear)
+        if first_changed_u >= new_lines.len() {
+            if self.previous_lines.len() > new_lines.len() {
+                let mut buffer = String::new();
+                buffer.push_str("\x1b[?2026h");
+                // Move to end of new content (clamp to 0 for empty content)
+                let target_row = new_lines.len().saturating_sub(1);
+                if target_row < prev_viewport_top {
+                    self.full_render(
+                        &mut output,
+                        true,
+                        new_lines_ref,
+                        height,
+                        height_u16,
+                        width,
+                        cursor_pos,
+                    )?;
+                    return Ok(());
+                }
+                let line_diff = compute_line_diff(
+                    target_row,
+                    hardware_cursor_row,
+                    prev_viewport_top,
+                    viewport_top,
+                );
+                if line_diff > 0 {
+                    buffer.push_str(&format!("\x1b[{line_diff}B"));
+                } else if line_diff < 0 {
+                    buffer.push_str(&format!("\x1b[{}A", (-line_diff)));
+                }
+                buffer.push('\r');
+                // Clear extra lines without scrolling
+                let extra_lines = self.previous_lines.len() - new_lines.len();
+                if extra_lines > height {
+                    self.full_render(
+                        &mut output,
+                        true,
+                        new_lines_ref,
+                        height,
+                        height_u16,
+                        width,
+                        cursor_pos,
+                    )?;
+                    return Ok(());
+                }
+                if extra_lines > 0 {
+                    buffer.push_str("\x1b[1B");
+                }
+                for i in 0..extra_lines {
+                    buffer.push_str("\r\x1b[2K");
+                    if i < extra_lines - 1 {
+                        buffer.push_str("\x1b[1B");
+                    }
+                }
+                if extra_lines > 0 {
+                    buffer.push_str(&format!("\x1b[{extra_lines}A"));
+                }
+                buffer.push_str("\x1b[?2026l");
+                let _ = output.write_all(buffer.as_bytes());
+                let _ = output.flush();
+                self.cursor_row = target_row;
+                self.hardware_cursor_row = target_row;
             }
-            // Emit \r\n to push old lines into scrollback
-            for _ in 0..diff.scroll_amount {
-                buf.push_str("\r\n");
-            }
-            viewport_top += diff.scroll_amount;
+            self.position_hardware_cursor(&mut output, cursor_pos, new_lines.len())?;
+            self.previous_lines = new_lines;
+            self.previous_width = width;
+            self.previous_height = height_u16;
+            self.previous_viewport_top = prev_viewport_top;
+            return Ok(());
         }
 
-        // Move cursor to the screen position of first_changed
-        let target_screen_row = diff.first_changed.saturating_sub(viewport_top);
-        // Current cursor position: after scroll we're at the bottom row
-        let current_screen_row = if diff.scroll_amount > 0 {
-            height.saturating_sub(1)
+        // Differential rendering can only touch what was actually visible.
+        // If the first changed line is above the previous viewport, full redraw.
+        if first_changed_u < prev_viewport_top {
+            self.full_render(
+                &mut output,
+                true,
+                new_lines_ref,
+                height,
+                height_u16,
+                width,
+                cursor_pos,
+            )?;
+            return Ok(());
+        }
+
+        // Render from first changed line to end
+        let mut buffer = String::with_capacity(4096);
+        buffer.push_str("\x1b[?2026h"); // Begin synchronized output
+        let prev_viewport_bottom = prev_viewport_top + height - 1;
+        let move_target_row = if append_start {
+            first_changed_u.saturating_sub(1)
         } else {
-            hw_cursor
+            first_changed_u
         };
-        let row_diff = target_screen_row as isize - current_screen_row as isize;
-        if row_diff > 0 {
-            buf.push_str(&format!("\x1b[{row_diff}B"));
-        } else if row_diff < 0 {
-            buf.push_str(&format!("\x1b[{}A", -row_diff));
-        }
-        buf.push('\r'); // Return to column 0
-
-        // Rewrite changed lines
-        let render_end = diff.last_changed.min(new_lines.len().saturating_sub(1));
-        for i in diff.first_changed..=render_end {
-            if i > diff.first_changed {
-                buf.push_str("\r\n");
+        if move_target_row > prev_viewport_bottom {
+            let current_screen_row = (hardware_cursor_row as isize - prev_viewport_top as isize)
+                .clamp(0, (height - 1) as isize) as usize;
+            let move_to_bottom = height - 1 - current_screen_row;
+            if move_to_bottom > 0 {
+                buffer.push_str(&format!("\x1b[{move_to_bottom}B"));
             }
-            buf.push_str("\x1b[2K"); // Clear line
-            if let Some(line) = new_lines.get(i) {
-                buf.push_str(line);
+            let scroll = move_target_row - prev_viewport_bottom;
+            for _ in 0..scroll {
+                buffer.push_str("\r\n");
             }
+            prev_viewport_top += scroll;
+            viewport_top += scroll;
+            hardware_cursor_row = move_target_row;
         }
 
-        // If content shrank, clear extra lines
-        if new_lines.len() < self.previous_lines.len() {
-            let extra = self.previous_lines.len() - new_lines.len();
-            for _ in 0..extra {
-                buf.push_str("\r\n\x1b[2K");
-            }
-            // Move back up to end of content
-            buf.push_str(&format!("\x1b[{extra}A"));
+        // Move cursor to first changed line (use hardware_cursor_row for actual position)
+        let line_diff = compute_line_diff(
+            move_target_row,
+            hardware_cursor_row,
+            prev_viewport_top,
+            viewport_top,
+        );
+        if line_diff > 0 {
+            buffer.push_str(&format!("\x1b[{line_diff}B")); // Move down
+        } else if line_diff < 0 {
+            buffer.push_str(&format!("\x1b[{}A", (-line_diff))); // Move up
         }
 
-        buf.push_str("\x1b[?2026l"); // End synchronized output
+        if append_start {
+            buffer.push_str("\r\n"); // Move to column 0 on a fresh line
+        } else {
+            buffer.push('\r'); // Move to column 0
+        }
+
+        // Only render changed lines (first_changed to last_changed), not all lines to end.
+        let render_end = last_changed_u.min(new_lines.len().saturating_sub(1));
+        for i in first_changed_u..=render_end {
+            if i > first_changed_u {
+                buffer.push_str("\r\n");
+            }
+            buffer.push_str("\x1b[2K"); // Clear current line
+            buffer.push_str(&new_lines[i]);
+        }
+
+        // Track where cursor ended up after rendering
+        let mut final_cursor_row = render_end;
+
+        // If we had more lines before, clear them and move cursor back
+        if self.previous_lines.len() > new_lines.len() {
+            // Move to end of new content first if we stopped before it
+            if render_end + 1 < new_lines.len() {
+                let move_down = new_lines.len() - 1 - render_end;
+                buffer.push_str(&format!("\x1b[{move_down}B"));
+                final_cursor_row = new_lines.len() - 1;
+            }
+            let extra_lines = self.previous_lines.len() - new_lines.len();
+            for _ in new_lines.len()..self.previous_lines.len() {
+                buffer.push_str("\r\n\x1b[2K");
+            }
+            // Move cursor back to end of new content
+            buffer.push_str(&format!("\x1b[{extra_lines}A"));
+        }
+
+        buffer.push_str("\x1b[?2026l"); // End synchronized output
 
         // Write entire buffer at once
-        output.write_all(buf.as_bytes())?;
+        let _ = output.write_all(buffer.as_bytes());
         let _ = output.flush();
 
-        // Update state — hardware_cursor_row is screen row of last written line
-        self.hardware_cursor_row = render_end.saturating_sub(viewport_top);
-        self.viewport_top = viewport_top;
+        // Track cursor position for next render
+        self.cursor_row = new_lines.len().saturating_sub(1);
+        self.hardware_cursor_row = final_cursor_row;
+        self.max_lines_rendered = self.max_lines_rendered.max(new_lines.len());
+        self.previous_viewport_top =
+            prev_viewport_top.max(final_cursor_row.saturating_sub(height - 1));
+
+        // Position hardware cursor for IME
+        self.position_hardware_cursor(&mut output, cursor_pos, new_lines.len())?;
+
         self.previous_lines = new_lines;
-
-        // Position cursor for prompt
-        self.position_cursor(&mut output, cursor, self.previous_lines.len())?;
-
         self.previous_width = width;
         self.previous_height = height_u16;
-
         Ok(())
     }
 
     /// Full redraw: output all lines from scratch.
+    /// 1:1 port of pi-tui's `fullRender()`.
     fn full_render(
         &mut self,
         output: &mut Stdout,
-        lines: &[String],
+        clear: bool,
+        new_lines: &[String],
         height: usize,
-        cursor: Option<CursorPos>,
+        height_u16: u16,
+        width: u16,
+        cursor_pos: Option<CursorPos>,
     ) -> std::io::Result<()> {
-        let mut buf = String::with_capacity(8192);
-        buf.push_str("\x1b[?2026h");
-
-        // Output all lines
-        for (i, line) in lines.iter().enumerate() {
-            if i > 0 {
-                buf.push_str("\r\n");
-            }
-            buf.push_str(line);
+        let mut buffer = String::with_capacity(8192);
+        buffer.push_str("\x1b[?2026h");
+        if clear {
+            buffer.push_str("\x1b[2J\x1b[H\x1b[3J"); // Clear screen, home, clear scrollback
         }
-
-        buf.push_str("\x1b[?2026l");
-
-        output.write_all(buf.as_bytes())?;
+        for (i, line) in new_lines.iter().enumerate() {
+            if i > 0 {
+                buffer.push_str("\r\n");
+            }
+            buffer.push_str(line);
+        }
+        buffer.push_str("\x1b[?2026l");
+        let _ = output.write_all(buffer.as_bytes());
         let _ = output.flush();
 
-        // Update state
-        self.viewport_top = lines.len().saturating_sub(height);
-        // hardware_cursor_row = screen row of last content line
-        let last_content_row = lines.len().saturating_sub(1);
-        self.hardware_cursor_row = last_content_row.saturating_sub(self.viewport_top);
-        self.previous_lines = lines.to_vec();
-
-        // Position cursor
-        self.position_cursor(output, cursor, lines.len())?;
-
+        self.cursor_row = new_lines.len().saturating_sub(1);
+        self.hardware_cursor_row = self.cursor_row;
+        if clear {
+            self.max_lines_rendered = new_lines.len();
+        } else {
+            self.max_lines_rendered = self.max_lines_rendered.max(new_lines.len());
+        }
+        let buffer_length = height.max(new_lines.len());
+        self.previous_viewport_top = buffer_length.saturating_sub(height);
+        self.position_hardware_cursor(output, cursor_pos, new_lines.len())?;
+        self.previous_lines = new_lines.to_vec();
+        self.previous_width = width;
+        self.previous_height = height_u16;
         Ok(())
     }
 
-    /// Position the hardware cursor at the prompt cursor location.
-    /// `cursor.row` is a content row; we convert to screen row internally.
-    fn position_cursor(
+    /// Position the hardware cursor for IME candidate window.
+    /// 1:1 port of pi-tui's `positionHardwareCursor`.
+    fn position_hardware_cursor(
         &mut self,
         output: &mut Stdout,
-        cursor: Option<CursorPos>,
+        cursor_pos: Option<CursorPos>,
         total_lines: usize,
     ) -> std::io::Result<()> {
-        let Some(cursor) = cursor else {
-            // Hide cursor
-            write!(output, "\x1b[?25l")?;
-            output.flush()?;
+        if cursor_pos.is_none() || total_lines == 0 {
+            let _ = write!(output, "\x1b[?25l"); // Hide cursor
+            let _ = output.flush();
             return Ok(());
-        };
-
-        // Show cursor
-        write!(output, "\x1b[?25h")?;
-
-        // Clamp cursor row and convert content row → screen row
-        let target_content_row = cursor.row.min(total_lines.saturating_sub(1));
-        let target_screen_row = target_content_row.saturating_sub(self.viewport_top);
-
-        let row_diff = target_screen_row as isize - self.hardware_cursor_row as isize;
-        if row_diff > 0 {
-            write!(output, "\x1b[{row_diff}B")?;
-        } else if row_diff < 0 {
-            write!(output, "\x1b[{}A", -row_diff)?;
         }
-        // Move to cursor column (1-indexed)
-        write!(output, "\x1b[{}G", cursor.col + 1)?;
+        let cursor_pos = cursor_pos.unwrap();
 
-        output.flush()?;
-        self.hardware_cursor_row = target_screen_row;
+        // Clamp cursor position to valid range
+        let target_row = cursor_pos.row.min(total_lines - 1);
+        let target_col = cursor_pos.col;
+
+        // Move cursor from current position to target
+        let row_delta = target_row as isize - self.hardware_cursor_row as isize;
+        let mut buffer = String::new();
+        if row_delta > 0 {
+            buffer.push_str(&format!("\x1b[{row_delta}B")); // Move down
+        } else if row_delta < 0 {
+            buffer.push_str(&format!("\x1b[{}A", (-row_delta))); // Move up
+        }
+        // Move to absolute column (1-indexed)
+        buffer.push_str(&format!("\x1b[{}G", target_col + 1));
+        // Show cursor (pi-tui shows it when a cursor position exists)
+        buffer.push_str("\x1b[?25h");
+
+        if !buffer.is_empty() {
+            let _ = output.write_all(buffer.as_bytes());
+            let _ = output.flush();
+        }
+
+        self.hardware_cursor_row = target_row;
         Ok(())
-    }
-}
-
-/// Pure function: compute what terminal operations are needed for this frame.
-/// This is extracted from `render()` so it can be unit tested.
-fn compute_render_diff(
-    prev_lines: &[String],
-    new_lines: &[String],
-    viewport_top: usize,
-    _hardware_cursor_row: usize,
-    height: usize,
-) -> RenderDiff {
-    // Find first and last changed lines
-    let mut first_changed: usize = usize::MAX;
-    let mut last_changed: usize = 0;
-    let max_lines = new_lines.len().max(prev_lines.len());
-    for i in 0..max_lines {
-        let old = prev_lines.get(i).map(String::as_str).unwrap_or("");
-        let new = new_lines.get(i).map(String::as_str).unwrap_or("");
-        if old != new {
-            if first_changed == usize::MAX {
-                first_changed = i;
-            }
-            last_changed = i;
-        }
-    }
-
-    // Content grew: mark all new lines as changed
-    let appended = new_lines.len() > prev_lines.len();
-    if appended && first_changed == usize::MAX {
-        first_changed = prev_lines.len();
-    }
-    if appended {
-        last_changed = new_lines.len() - 1;
-    }
-
-    // No changes at all
-    if first_changed == usize::MAX {
-        return RenderDiff {
-            scroll_amount: 0,
-            first_changed: usize::MAX,
-            last_changed: usize::MAX,
-            full_redraw: false,
-        };
-    }
-
-    // Determine scroll amount: if new content extends past viewport bottom
-    let viewport_bottom = viewport_top + height;
-    let scroll_amount = if last_changed >= viewport_bottom {
-        last_changed.saturating_sub(viewport_bottom) + 1
-    } else {
-        0
-    };
-
-    RenderDiff {
-        scroll_amount,
-        first_changed,
-        last_changed,
-        full_redraw: false,
     }
 }
 
@@ -395,79 +549,5 @@ mod tests {
         let pos = CursorPos { row: 1, col: 2 };
         let pos2 = pos;
         assert_eq!(pos, pos2);
-    }
-
-    #[test]
-    fn compute_diff_no_changes() {
-        let prev = vec!["a".to_owned(), "b".to_owned()];
-        let new = vec!["a".to_owned(), "b".to_owned()];
-        let diff = compute_render_diff(&prev, &new, 0, 0, 24);
-        assert_eq!(diff.first_changed, usize::MAX);
-        assert_eq!(diff.scroll_amount, 0);
-    }
-
-    #[test]
-    fn compute_diff_single_line_change() {
-        let prev = vec!["a".to_owned(), "b".to_owned()];
-        let new = vec!["a".to_owned(), "B".to_owned()];
-        let diff = compute_render_diff(&prev, &new, 0, 0, 24);
-        assert_eq!(diff.first_changed, 1);
-        assert_eq!(diff.last_changed, 1);
-        assert_eq!(diff.scroll_amount, 0);
-    }
-
-    #[test]
-    fn compute_diff_content_grew() {
-        let prev = vec!["a".to_owned()];
-        let new = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
-        let diff = compute_render_diff(&prev, &new, 0, 0, 24);
-        assert_eq!(diff.first_changed, 1);
-        assert_eq!(diff.last_changed, 2);
-    }
-
-    #[test]
-    fn compute_diff_scroll_when_exceeds_viewport() {
-        let prev = vec!["line0".to_owned()];
-        let new: Vec<String> = (0..30).map(|i| format!("line{i}")).collect();
-        let diff = compute_render_diff(&prev, &new, 0, 0, 10);
-        assert!(diff.scroll_amount > 0);
-        // last_changed (29) >= viewport_bottom (0+10=10)
-        assert_eq!(diff.scroll_amount, 29 - 10 + 1); // = 20
-    }
-
-    #[test]
-    fn compute_diff_no_scroll_within_viewport() {
-        let prev = vec!["a".to_owned()];
-        let new = vec!["a".to_owned(), "b".to_owned()];
-        let diff = compute_render_diff(&prev, &new, 0, 0, 24);
-        assert_eq!(diff.scroll_amount, 0);
-    }
-
-    #[test]
-    fn compute_diff_content_shrunk() {
-        let prev = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
-        let new = vec!["a".to_owned()];
-        let diff = compute_render_diff(&prev, &new, 0, 0, 24);
-        assert_eq!(diff.first_changed, 1);
-        assert_eq!(diff.last_changed, 2);
-    }
-
-    #[test]
-    fn compute_diff_with_viewport_top_nonzero() {
-        // Content already scrolled: viewport_top = 5
-        let prev: Vec<String> = (0..10).map(|i| format!("line{i}")).collect();
-        let new: Vec<String> = (0..10)
-            .map(|i| {
-                if i == 7 {
-                    "CHANGED".to_owned()
-                } else {
-                    format!("line{i}")
-                }
-            })
-            .collect();
-        let diff = compute_render_diff(&prev, &new, 5, 0, 24);
-        assert_eq!(diff.first_changed, 7);
-        assert_eq!(diff.last_changed, 7);
-        assert_eq!(diff.scroll_amount, 0); // 7 < 5+24
     }
 }

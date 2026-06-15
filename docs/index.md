@@ -12,14 +12,15 @@ policy, terminal UI, and developer tooling can evolve independently.
 - [Providers](providers.md) - model/provider abstraction, request options, production resolver, and test client.
 - [Tools](tools.md) - implemented built-in tools, schemas, permissions, and runtime boundary.
 - [Sessions](sessions.md) - JSONL event persistence and current resume expectations.
-- [MCP](mcp.md) - conceptual Model Context Protocol interface.
+- [MCP](mcp.md) - Model Context Protocol interface, adapters, and safety rules.
 - [Local Assets](packages.md) - local extensions, prompt templates, themes, and unsupported distribution surfaces.
-- [Gap Map](gap/INDEX.md) - module-by-module pi parity map.
 
 ## Repository Map
 
 - `crates/neo-ai` owns provider-neutral chat, stream, model, and tool schema types.
 - `crates/neo-agent-core` owns runtime loops, tools, permissions, sessions, and MCP adapters.
+- `crates/neo-sdk` owns JSONL RPC frame types, skill manifest loading, and HTML export.
+- `crates/neo-extensions` owns local extension discovery, installation, lifecycle, and runner.
 - `crates/neo-tui` owns reusable terminal UI primitives.
 - `crates/neo-agent` is the CLI/TUI binary.
 - `xtask` contains repository maintenance commands.
@@ -29,5 +30,4 @@ policy, terminal UI, and developer tooling can evolve independently.
 
 The project is early-stage and other workers may be changing crate APIs while
 docs are updated. Documentation in this directory separates implemented Rust
-surface from pi-inspired future behavior. Use the [gap map](gap/INDEX.md) when
-deciding whether a missing capability is a docs omission or a code gap.
+surface from future behavior.

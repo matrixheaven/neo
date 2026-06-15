@@ -1,7 +1,7 @@
 use neo_tui::ansi::{Color, Style};
 use neo_tui::core::{
     Component, Container, Finalization, GutterContainer, InputResult, Line, RenderKind,
-    RenderScheduler, Span, TerminalRenderer, Text,
+    RenderScheduler, Span, Text,
 };
 
 struct StaticComponent {
@@ -119,17 +119,4 @@ fn scheduler_promotes_force_full_over_incremental() {
     assert!(scheduler.requires_full_redraw());
     assert_eq!(scheduler.take_next(), Some(RenderKind::ForceFull));
     assert!(!scheduler.requires_full_redraw());
-}
-
-#[test]
-fn terminal_renderer_keeps_committed_rows_separate_from_live_rows() {
-    let mut renderer = TerminalRenderer::new(80, 24);
-    renderer.commit_rows(&[Line::raw("banner"), Line::raw("first tool")]);
-    renderer.render_live_region(&[Line::raw("> prompt")], None);
-
-    assert_eq!(
-        renderer.committed_rows(),
-        &[Line::raw("banner"), Line::raw("first tool")]
-    );
-    assert_eq!(renderer.live_rows(), &[Line::raw("> prompt")]);
 }

@@ -2344,18 +2344,12 @@ const PROMPT_COMPLETION_ACTION_PRIORITY: &[KeybindingAction] = &[
 
 struct NeoTerminal {
     renderer: InlineRenderer,
-    runtime_renderer: neo_tui::TerminalRenderer,
 }
 
 impl NeoTerminal {
     fn enter() -> Result<Self> {
         let renderer = InlineRenderer::enter()?;
-        let (cols, rows) = size()?;
-        let runtime_renderer = neo_tui::TerminalRenderer::new(usize::from(cols), usize::from(rows));
-        Ok(Self {
-            renderer,
-            runtime_renderer,
-        })
+        Ok(Self { renderer })
     }
 
     fn draw_runtime(
@@ -2363,7 +2357,31 @@ impl NeoTerminal {
         app: &NeoTuiApp,
         runtime: &mut neo_tui::NeoTuiRuntime,
     ) -> Result<()> {
-        draw_kimi_runtime(&mut self.runtime_renderer, app, runtime)
+        let (cols, rows) = size()?;
+        if cols == 0 || rows == 0 {
+            return Ok(());
+        }
+        let width = usize::from(cols);
+        runtime.resize(width, usize::from(rows));
+        runtime.request_render(neo_tui::core::RenderKind::Incremental);
+        let Some(mut lines) = runtime.render_frame(width, usize::from(rows)) else {
+            return Ok(());
+        };
+        // Append the chrome (prompt box + footer). The chrome cursor row is
+        // relative to the chrome block, so offset it by the body length to get
+        // a content-row index for the whole frame.
+        let body_len = lines.len();
+        let (chrome_lines, cursor) = neo_tui::runtime_chrome_ansi_lines(app, width);
+        lines.extend(chrome_lines);
+        let cursor = cursor.map(|cursor| neo_tui::CursorPos {
+            row: body_len + cursor.row,
+            col: cursor.col,
+        });
+        // Single-buffer differential render (pi-tui model): hand the whole
+        // frame to InlineRenderer::render, which diffs against the previous
+        // frame and rewrites only changed lines in place.
+        self.renderer.render(lines, cursor)?;
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -2372,65 +2390,18 @@ impl NeoTerminal {
     }
 
     fn reenter(&mut self) -> Result<()> {
+        // Force a full redraw on the next render so the resumed session paints
+        // cleanly after the terminal state was disturbed by SIGTSTP.
         self.renderer.suspend_resume()?;
-        self.runtime_renderer = runtime_renderer_for_terminal_size()?;
         Ok(())
     }
 }
 
-fn runtime_renderer_for_terminal_size() -> Result<neo_tui::TerminalRenderer> {
-    let (cols, rows) = size()?;
-    Ok(neo_tui::TerminalRenderer::new(
-        usize::from(cols),
-        usize::from(rows),
-    ))
-}
-
-fn draw_kimi_runtime(
-    renderer: &mut neo_tui::TerminalRenderer,
-    app: &NeoTuiApp,
-    runtime: &mut neo_tui::NeoTuiRuntime,
-) -> Result<()> {
-    let (cols, rows) = size()?;
-    if cols == 0 || rows == 0 {
-        return Ok(());
-    }
-    renderer.resize(usize::from(cols), usize::from(rows));
-    draw_kimi_runtime_with_writer(renderer, &mut stdout(), app, runtime, cols, rows)
-}
-
-fn draw_kimi_runtime_with_writer<W: std::io::Write>(
-    renderer: &mut neo_tui::TerminalRenderer,
-    writer: &mut W,
-    app: &NeoTuiApp,
-    runtime: &mut neo_tui::NeoTuiRuntime,
-    cols: u16,
-    rows: u16,
-) -> Result<()> {
-    if cols == 0 || rows == 0 {
-        return Ok(());
-    }
-    let width = usize::from(cols);
-    runtime.resize(width, usize::from(rows));
-    renderer.resize(width, usize::from(rows));
-    runtime.request_render(neo_tui::core::RenderKind::Incremental);
-    if let Some(output) = runtime.render_output() {
-        renderer.write_commit(writer, &output.committed)?;
-        let mut live_rows = output.live;
-        let live_count = live_rows.len();
-        let (chrome_lines, cursor) = neo_tui::runtime_chrome_ansi_lines(app, width);
-        let cursor = cursor.map(|cursor| neo_tui::CursorPos {
-            row: live_count + cursor.row,
-            col: cursor.col,
-        });
-        live_rows.extend(chrome_lines.into_iter().map(neo_tui::Line::raw));
-        renderer.write_live_region(writer, &live_rows, cursor)?;
-    }
-    Ok(())
-}
-
+/// Compose the full frame (body + chrome) as ANSI strings, without writing to
+/// the terminal. Used by tests that need to inspect what would be drawn.
 #[cfg(test)]
-fn render_kimi_runtime_lines(
+fn compose_runtime_frame(
+    app: &NeoTuiApp,
     runtime: &mut neo_tui::NeoTuiRuntime,
     cols: u16,
     rows: u16,
@@ -2438,10 +2409,13 @@ fn render_kimi_runtime_lines(
     if cols == 0 || rows == 0 {
         return None;
     }
-
-    runtime.resize(usize::from(cols), usize::from(rows));
-    runtime.render_tick();
-    Some(runtime.live_ansi_lines())
+    let width = usize::from(cols);
+    runtime.resize(width, usize::from(rows));
+    runtime.request_render(neo_tui::core::RenderKind::Incremental);
+    let mut lines = runtime.render_frame(width, usize::from(rows))?;
+    let (chrome_lines, _cursor) = neo_tui::runtime_chrome_ansi_lines(app, width);
+    lines.extend(chrome_lines);
+    Some(lines)
 }
 
 impl Drop for NeoTerminal {
@@ -2861,12 +2835,11 @@ fn render_runtime_snapshot(
 ) -> String {
     runtime.resize(width, height);
     runtime.request_render(neo_tui::core::RenderKind::Incremental);
-    let _ = runtime.render_output();
+    let _ = runtime.render_frame(width, height);
 
     let mut lines = runtime
-        .committed_ansi_lines()
+        .frame_ansi_lines()
         .into_iter()
-        .chain(runtime.live_ansi_lines())
         .map(|line| neo_tui::ansi::strip_ansi(&line).trim_end().to_owned())
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
@@ -3006,18 +2979,24 @@ mod tests {
 
     #[test]
     fn kimi_runtime_bridge_exposes_live_rows_without_replacing_default_draw_path() {
+        let mut app = NeoTuiApp::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+        );
         let mut runtime = neo_tui::NeoTuiRuntime::new(80, 12);
         runtime.push_transcript(TranscriptEntry::tool_call_running("Bash", "cargo test"));
 
         let lines =
-            render_kimi_runtime_lines(&mut runtime, 80, 12).expect("non-zero terminal size");
+            compose_runtime_frame(&mut app, &mut runtime, 80, 12).expect("non-zero terminal size");
 
         assert!(lines.iter().any(|line| line.contains("Using Bash")));
-        assert_eq!(render_kimi_runtime_lines(&mut runtime, 0, 12), None);
+        assert_eq!(compose_runtime_frame(&mut app, &mut runtime, 0, 12), None);
     }
 
     #[test]
-    fn kimi_runtime_draw_uses_one_terminal_renderer_for_commit_and_live_rows() {
+    fn kimi_runtime_draw_composes_body_then_chrome_in_one_frame() {
         let mut app = NeoTuiApp::new(
             "neo",
             "test-session",
@@ -3029,28 +3008,20 @@ mod tests {
         let mut runtime = neo_tui::NeoTuiRuntime::new(80, 12);
         runtime.push_banner("Welcome to neo");
         runtime.push_transcript(TranscriptEntry::tool_call_running("Bash", "cargo test"));
-        let mut renderer = neo_tui::TerminalRenderer::new(80, 12);
-        let mut output = Vec::new();
 
-        draw_kimi_runtime_with_writer(&mut renderer, &mut output, &app, &mut runtime, 80, 12)
-            .expect("runtime draw writes to buffer");
+        let lines = compose_runtime_frame(&mut app, &mut runtime, 80, 12)
+            .expect("runtime frame composes body + chrome");
 
-        let output = String::from_utf8(output).expect("utf8");
-        assert!(output.contains("Welcome to neo"));
-        assert!(output.contains("Using Bash"));
-        assert!(output.contains("\r\nWelcome to neo\x1b[?2026h\r\n\x1b[2K"));
-        assert!(!output.contains("Welcome to neo\x1b[?2026h\x1b[2K"));
-        assert!(
-            renderer
-                .committed_rows()
-                .contains(&neo_tui::Line::raw("Welcome to neo"))
-        );
-        assert!(
-            renderer
-                .live_rows()
-                .iter()
-                .any(|line| line.to_ansi().contains("Using Bash"))
-        );
+        let joined = lines.join("\n");
+        // Banner (finalized) appears in the body before the running tool card,
+        // which appears before the prompt chrome.
+        let welcome = joined.find("Welcome to neo").expect("welcome in body");
+        let tool = joined.find("Using Bash").expect("running tool in body");
+        let prompt = joined.find("> next").expect("prompt chrome at tail");
+        assert!(welcome < tool, "banner should precede the tool card");
+        assert!(tool < prompt, "tool card should precede the prompt chrome");
+        // The running tool card is live (● Using), not finalized (✓ Used).
+        assert!(!joined.contains("Used Bash"));
     }
 
     #[test]
@@ -3088,31 +3059,19 @@ mod tests {
         let mut runtime = neo_tui::NeoTuiRuntime::new(80, 12);
         runtime.push_banner("Welcome to neo");
         replay_session_into_kimi_runtime(&mut runtime, &transcript);
-        let mut renderer = neo_tui::TerminalRenderer::new(80, 12);
-        let mut output = Vec::new();
 
-        draw_kimi_runtime_with_writer(&mut renderer, &mut output, &app, &mut runtime, 80, 12)
-            .expect("runtime draw writes replay into buffer");
+        let lines = compose_runtime_frame(&mut app, &mut runtime, 80, 12)
+            .expect("runtime frame composes replay");
 
-        let output = String::from_utf8(output).expect("utf8");
-        let welcome = output.find("Welcome to neo").expect("welcome committed");
-        let prompt = output.find("> next").expect("prompt chrome live row");
-        let tool = output
+        let joined = lines.join("\n");
+        let welcome = joined.find("Welcome to neo").expect("welcome in body");
+        let prompt = joined.find("> next").expect("prompt chrome live row");
+        let tool = joined
             .find("Used Read (README.md)")
             .expect("tool committed");
         assert!(welcome < tool);
         assert!(tool < prompt);
-        assert!(!output.contains("Using Read"));
-        assert!(!output.contains("\x1b[2J"));
-        assert!(renderer.committed_rows().iter().any(|line| {
-            neo_tui::ansi::strip_ansi(&line.to_ansi()).contains("Used Read (README.md)")
-        }));
-        assert!(
-            renderer
-                .live_rows()
-                .iter()
-                .any(|line| { neo_tui::ansi::strip_ansi(&line.to_ansi()).contains("> next") })
-        );
+        assert!(!joined.contains("Using Read"));
     }
 
     #[tokio::test]
@@ -5546,12 +5505,10 @@ command = "python3"
         );
 
         replay_session_into_kimi_runtime(&mut runtime, &transcript);
-        let output = runtime.render_output().expect("render output");
-        let rendered = output
-            .committed
-            .iter()
-            .chain(output.live.iter())
-            .map(neo_tui::core::Line::to_ansi)
+        let rendered = runtime
+            .render_frame(80, 12)
+            .expect("render frame")
+            .into_iter()
             .map(|line| neo_tui::ansi::strip_ansi(&line))
             .collect::<Vec<_>>()
             .join("\n");
