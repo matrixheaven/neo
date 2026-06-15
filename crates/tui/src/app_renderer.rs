@@ -84,6 +84,18 @@ pub fn render_app_lines(
     lines.extend(prompt_lines);
     lines.extend(footer_lines);
 
+    // SAFETY CLAMP: ensure no line exceeds the terminal width.
+    // If a line is wider than `width`, the terminal will auto-wrap it into
+    // multiple physical rows, which breaks the diff renderer's "one String =
+    // one terminal row" assumption. Truncate any overflowing lines.
+    let max_w = width as usize;
+    for line in &mut lines {
+        let vw = crate::ansi::visible_width(line);
+        if vw > max_w {
+            *line = crate::ansi::truncate_to_width(line, max_w);
+        }
+    }
+
     // The prompt cursor row is relative to the prompt block.
     // Offset it by the number of body lines so it points into the final list.
     let cursor = prompt_cursor.map(|c| CursorPos {
@@ -148,6 +160,15 @@ fn render_body(app: &NeoTuiApp, body_height: usize, text_width: usize) -> Vec<St
         for sl in styled {
             lines.push(sl.to_ansi());
         }
+    }
+
+    // SAFETY CLAMP: ensure body never exceeds its allocated height.
+    // Multi-line items (long assistant messages, tool output, diffs) may
+    // produce more rows than body_height. If so, keep only the last
+    // body_height rows so prompt/footer are never pushed off screen.
+    if lines.len() > body_height {
+        let start = lines.len() - body_height;
+        lines = lines[start..].to_vec();
     }
 
     lines

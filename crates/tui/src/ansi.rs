@@ -278,6 +278,7 @@ pub fn visible_width(s: &str) -> usize {
 }
 
 /// Wrap plain text (no ANSI) to a maximum visible width.
+/// Uses word-wrapping by default, but hard-wraps words that exceed `width`.
 #[must_use]
 pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
@@ -293,6 +294,33 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
         let mut current_width = 0usize;
         for word in paragraph.split(' ') {
             let word_width: usize = word.chars().map(|c| c.width().unwrap_or(0)).sum();
+
+            // Hard-wrap words that are wider than the available width
+            if word_width > width {
+                // Push any accumulated content first
+                if !current.is_empty() {
+                    result.push(std::mem::take(&mut current));
+                    current_width = 0;
+                }
+                // Hard-wrap the long word
+                let mut line = String::new();
+                let mut line_w = 0usize;
+                for c in word.chars() {
+                    let cw = c.width().unwrap_or(0);
+                    if line_w + cw > width && !line.is_empty() {
+                        result.push(std::mem::take(&mut line));
+                        line_w = 0;
+                    }
+                    line.push(c);
+                    line_w += cw;
+                }
+                if !line.is_empty() {
+                    current = line;
+                    current_width = line_w;
+                }
+                continue;
+            }
+
             if current_width == 0 {
                 current = word.to_owned();
                 current_width = word_width;
