@@ -6,6 +6,8 @@ documentation.
 
 Read @ [CX.md](../../.kimi-code/CX.md)  @[RTK.md](../../.kimi-code/RTK.md) ，Use `cx` and `rtk` clito save tokens
 
+Swarm mode : Parallel at least 3 subagent swarm to finish a job
+
 ## Project overview
 
 Neo is a Rust-native, local AI coding agent monorepo inspired by `pi`. It is

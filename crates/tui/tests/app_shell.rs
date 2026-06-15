@@ -375,6 +375,7 @@ fn stream_updates_do_not_force_tail_when_transcript_is_detached() {
         id: "tool-1".to_owned(),
         detail: "done".to_owned(),
         success: true,
+        details: None,
     });
 
     assert_eq!(app.transcript_view().scrollback(), before);
@@ -686,6 +687,7 @@ fn app_shell_records_submissions_and_streaming_updates() {
         id: "tool-1".to_owned(),
         detail: "exit 0".to_owned(),
         success: true,
+        details: None,
     });
     app.apply_stream_update(StreamUpdate::TurnFinished);
 

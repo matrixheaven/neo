@@ -10,7 +10,7 @@ use crate::ansi::{Color, Rect};
 
 use crate::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities, TodoDisplayItem,
-    TodoDisplayStatus, TranscriptWidget, app_layout,
+    TodoDisplayStatus, app_layout,
     widgets::{QuestionDialogAction, QuestionResult, QuestionStateMachine},
 };
 
@@ -646,11 +646,9 @@ impl NeoTuiApp {
 
     pub fn sync_transcript_view_for_area(&mut self, area: Rect) {
         let body = app_layout(self, area.into()).body;
-        let content_rows = TranscriptWidget::new(&self.transcript)
-            .with_selection(self.transcript_selection.as_ref())
-            .with_expanded_items(&self.expanded_transcript_items)
-            .with_theme(self.theme)
-            .row_count(body.width);
+        // Use the unified render_transcript_rows() for row counting —
+        // same function that produces actual display output.
+        let content_rows = crate::app_renderer::render_transcript_rows(self, usize::from(body.width)).len();
         self.transcript_view
             .sync(content_rows, usize::from(body.height));
     }
@@ -886,6 +884,7 @@ impl NeoTuiApp {
                         name,
                         arguments: Some(detail),
                         result: None,
+                        details: None,
                         metadata: ToolRunMetadata::default(),
                         presentation,
                         status: ToolStatusKind::Running,
@@ -925,6 +924,7 @@ impl NeoTuiApp {
                 id,
                 detail,
                 success,
+                details,
             } => {
                 let status = if success {
                     ToolStatusKind::Succeeded
@@ -939,6 +939,7 @@ impl NeoTuiApp {
                         tool_run.live_output.clear();
                     }
                     tool.result = Some(detail);
+                    tool.details = details;
                     tool.status = status;
                     self.transcript
                         .update_tool_run(tool.transcript_index, tool.into_transcript_item());
@@ -1239,11 +1240,13 @@ impl NeoTuiApp {
     ) {
         let success = !result.is_error;
         let detail = tool_result_detail(result);
+        let details = result.details.clone();
         if self.active_tools.iter().any(|tool| tool.id == id) {
             self.apply_stream_update(StreamUpdate::ToolFinished {
                 id: id.clone(),
                 detail,
                 success,
+                details,
             });
             self.completed_tool_result_ids.push(id);
         } else if take_completed_tool_result(&mut self.completed_tool_result_ids, &id) {
@@ -2028,6 +2031,7 @@ struct ActiveTool {
     name: String,
     arguments: Option<String>,
     result: Option<String>,
+    details: Option<serde_json::Value>,
     metadata: ToolRunMetadata,
     presentation: ToolPresentationKind,
     status: ToolStatusKind,
@@ -2048,14 +2052,28 @@ impl ActiveTool {
     }
 
     fn into_transcript_item(self) -> TranscriptItem {
-        TranscriptItem::tool_run(
+        let item = TranscriptItem::tool_run(
             self.name,
             self.arguments,
             self.result,
             self.status,
             self.metadata,
             self.presentation,
-        )
+        );
+        // Attach details if present
+        if let Some(details) = self.details {
+            if let TranscriptItem::Tool { tool_run, .. } = &item {
+                let mut run = tool_run.clone();
+                run.details = Some(details);
+                return TranscriptItem::Tool {
+                    name: run.name.clone(),
+                    detail: run.display_detail(),
+                    status: run.status,
+                    tool_run: run,
+                };
+            }
+        }
+        item
     }
 }
 
@@ -2080,6 +2098,7 @@ pub enum StreamUpdate {
         id: String,
         detail: String,
         success: bool,
+        details: Option<serde_json::Value>,
     },
     Notice {
         text: String,
@@ -2560,6 +2579,8 @@ pub struct ToolRunTranscript {
     pub name: String,
     pub arguments: Option<String>,
     pub result: Option<String>,
+    /// Structured tool result details (e.g. edit diff, shell exit info).
+    pub details: Option<serde_json::Value>,
     pub live_output: Vec<String>,
     pub status: ToolStatusKind,
     pub metadata: ToolRunMetadata,
@@ -3191,6 +3212,7 @@ impl TranscriptItem {
             } else {
                 Some(detail.clone())
             },
+            details: None,
             live_output: Vec::new(),
             status,
             metadata: ToolRunMetadata::default(),
@@ -3218,6 +3240,7 @@ impl TranscriptItem {
             name: name.clone(),
             arguments,
             result,
+            details: None,
             live_output: Vec::new(),
             status,
             metadata,

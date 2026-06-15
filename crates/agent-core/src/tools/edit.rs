@@ -1,6 +1,7 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
+use similar::{Algorithm, ChangeTag, TextDiff};
 
 use super::{Tool, ToolContext, ToolFuture, ToolResult, parse_input, schema};
 
@@ -66,63 +67,54 @@ fn edit_details(input: &EditInput, before: &str, after: &str) -> serde_json::Val
 }
 
 fn unified_diff(path: &str, before: &str, after: &str) -> String {
-    let before_lines = split_lines(before);
-    let after_lines = split_lines(after);
-    let table = lcs_table(&before_lines, &after_lines);
-    let mut diff = format!("--- {path}\n+++ {path}\n@@\n");
-    append_diff_lines(
-        &before_lines,
-        &after_lines,
-        &table,
-        before_lines.len(),
-        after_lines.len(),
-        &mut diff,
-    );
-    diff
-}
+    let diff = TextDiff::configure()
+        .algorithm(Algorithm::Myers)
+        .diff_lines(before, after);
 
-fn split_lines(text: &str) -> Vec<&str> {
-    text.split_inclusive('\n').collect()
-}
+    let mut result = format!("--- {path}\n+++ {path}\n");
 
-fn lcs_table(before: &[&str], after: &[&str]) -> Vec<Vec<usize>> {
-    let mut table = vec![vec![0; after.len() + 1]; before.len() + 1];
-    for i in 0..before.len() {
-        for (j, after_line) in after.iter().enumerate() {
-            if before[i] == *after_line {
-                table[i + 1][j + 1] = table[i][j] + 1;
-            } else {
-                table[i + 1][j + 1] = table[i + 1][j].max(table[i][j + 1]);
+    for group in diff.grouped_ops(3) {
+        let (first, last) = (group.first().unwrap(), group.last().unwrap());
+
+        let (old_line, old_count) = hunk_range(
+            first.old_range().start,
+            last.old_range().end - first.old_range().start,
+        );
+        let (new_line, new_count) = hunk_range(
+            first.new_range().start,
+            last.new_range().end - first.new_range().start,
+        );
+
+        result.push_str(&format!(
+            "@@ -{old_line},{old_count} +{new_line},{new_count} @@\n"
+        ));
+
+        for op in &group {
+            for change in diff.iter_changes(op) {
+                let prefix = match change.tag() {
+                    ChangeTag::Equal => ' ',
+                    ChangeTag::Delete => '-',
+                    ChangeTag::Insert => '+',
+                };
+                let line = change.value();
+                result.push(prefix);
+                result.push_str(line);
+                if !line.ends_with('\n') {
+                    result.push('\n');
+                }
             }
         }
     }
-    table
+
+    result
 }
 
-fn append_diff_lines(
-    before: &[&str],
-    after: &[&str],
-    table: &[Vec<usize>],
-    i: usize,
-    j: usize,
-    diff: &mut String,
-) {
-    if i > 0 && j > 0 && before[i - 1] == after[j - 1] {
-        append_diff_lines(before, after, table, i - 1, j - 1, diff);
-        push_diff_line(diff, ' ', before[i - 1]);
-    } else if j > 0 && (i == 0 || table[i][j - 1] >= table[i - 1][j]) {
-        append_diff_lines(before, after, table, i, j - 1, diff);
-        push_diff_line(diff, '+', after[j - 1]);
-    } else if i > 0 {
-        append_diff_lines(before, after, table, i - 1, j, diff);
-        push_diff_line(diff, '-', before[i - 1]);
-    }
-}
-
-fn push_diff_line(diff: &mut String, prefix: char, line: &str) {
-    diff.push(prefix);
-    diff.push_str(line);
-    if !line.ends_with('\n') {
-        diff.push('\n');
+/// Convert a 0-based half-open `[start, start+len)` range into the `(line, count)`
+/// pair used in unified-diff hunk headers (`@@ -line,count +line,count @@`).
+fn hunk_range(start: usize, len: usize) -> (usize, usize) {
+    if len == 0 {
+        (start, 0)
+    } else {
+        (start + 1, len)
     }
 }

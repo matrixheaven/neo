@@ -62,15 +62,15 @@ missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 
 # ── Build-speed profiles ──────────────────────────────────────────────
-# Faster incremental builds & test compilation:
-#   - incremental compilation enabled (dev default, explicit for clarity)
-#   - limited debug-info for dependencies (line tables only) to cut codegen
-#   - separate debug info for local crates so backtraces are still useful
+# Workspace members: incremental compilation for fast local edits.
+# Dependencies: incremental OFF so sccache can cache them across
+# branch switches, cargo clean, and profile changes.
 [profile.dev]
 incremental = true
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
+incremental = false
 debug = 0
 
 [profile.test]
@@ -78,4 +78,5 @@ incremental = true
 debug = "line-tables-only"
 
 [profile.test.package."*"]
+incremental = false
 debug = 0

@@ -131,41 +131,60 @@ fn calc_prompt_height(text: &str, width: u16) -> u16 {
 
 // ─── Body / Transcript rendering ─────────────────────────────────────────
 
+/// Render ALL transcript items into display rows. This is the **single source
+/// of truth** for both row counting (used by `sync_transcript_view_for_area`)
+/// and actual rendering (used by `render_body`).
+///
+/// Returns a `Vec<StyledLine>` — one entry per terminal row.
+#[must_use]
+pub fn render_transcript_rows(app: &NeoTuiApp, width: usize) -> Vec<StyledLine> {
+    let transcript = app.transcript();
+    let theme = app.theme();
+    let text_width = width.max(1);
+
+    let mut rows = Vec::new();
+    for (index, item) in transcript.items().iter().enumerate() {
+        // Blank separator between items
+        if !rows.is_empty() {
+            rows.push(StyledLine::new(String::new(), AnsiStyle::default()));
+        }
+        let styled = transcript_item_to_lines(item, theme, text_width);
+        // Apply selection highlight if this item is selected
+        let _ = app.transcript_selection(); // selection handled in transcript_item_to_lines
+        let _ = index;
+        rows.extend(styled);
+    }
+    rows
+}
+
 /// Render the visible transcript items into styled lines.
 fn render_body(app: &NeoTuiApp, body_height: usize, text_width: usize) -> Vec<String> {
     let transcript = app.transcript();
     let view = app.transcript_view();
-    let theme = app.theme();
 
     if body_height == 0 || transcript.is_empty() {
         return Vec::new();
     }
 
-    // `visible_range` gives us a window of *item indices* based on the
-    // configured scroll offset. Each item may expand to multiple display lines.
-    let range = view.visible_range(transcript, body_height);
+    // Render ALL items to rows (single source of truth)
+    let all_rows = render_transcript_rows(app, text_width);
 
-    let mut lines = Vec::new();
-    for index in range {
-        let Some(item) = transcript.items().get(index) else {
-            continue;
-        };
-
-        // Blank separator between items.
-        if !lines.is_empty() {
-            lines.push(String::new());
-        }
-
-        let styled = transcript_item_to_lines(item, theme, text_width);
-        for sl in styled {
-            lines.push(sl.to_ansi());
-        }
+    if all_rows.is_empty() {
+        return Vec::new();
     }
 
+    // Use row-based visible_row_range to slice the rendered rows.
+    // This correctly handles multi-line items.
+    let range = view.visible_row_range(all_rows.len(), body_height);
+    let start = range.start.min(all_rows.len());
+    let end = range.end.min(all_rows.len());
+
+    let mut lines: Vec<String> = all_rows[start..end]
+        .iter()
+        .map(StyledLine::to_ansi)
+        .collect();
+
     // SAFETY CLAMP: ensure body never exceeds its allocated height.
-    // Multi-line items (long assistant messages, tool output, diffs) may
-    // produce more rows than body_height. If so, keep only the last
-    // body_height rows so prompt/footer are never pushed off screen.
     if lines.len() > body_height {
         let start = lines.len() - body_height;
         lines = lines[start..].to_vec();
