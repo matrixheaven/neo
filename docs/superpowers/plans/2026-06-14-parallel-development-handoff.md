@@ -8,7 +8,7 @@
 ## 当前状态
 
 - **正在进行的重构**: `feat/tool-call-transcript` (tool-call-transcript-implementation.md)
-- **触碰的文件**: `crates/tui/src/app.rs`、`crates/tui/src/components.rs`、`crates/neo-agent/src/modes/interactive.rs`、`crates/tui/tests/primitives.rs`
+- **触碰的文件**: `crates/neo-tui/src/app.rs`、`crates/neo-tui/src/components.rs`、`crates/neo-agent/src/modes/interactive.rs`、`crates/neo-tui/tests/primitives.rs`
 - **建议**: 等该重构 merge 后再启动 Task A/B/C,Task D 可立即启动
 
 ---
@@ -69,13 +69,13 @@ CommandSpec::new("fork", "Fork the current session")
 显示可用 session 列表,让用户选择 fork 源。
 
 #### 3. Fork 成功后显示 banner
-**文件**: `crates/tui/src/app.rs`
+**文件**: `crates/neo-tui/src/app.rs`
 
 在 fork 成功后 push `TranscriptItem::Banner` 提示用户新 session ID。
 
 ### 参考
 - kimi-code 实现: `apps/kimi-code/src/tui/commands/session.ts` (handleForkCommand)
-- neo 现有 fork 逻辑: `crates/agent-core/src/session/jsonl.rs:446-476`
+- neo 现有 fork 逻辑: `crates/neo-agent-core/src/session/jsonl.rs:446-476`
 
 ---
 
@@ -92,7 +92,7 @@ CommandSpec::new("fork", "Fork the current session")
 ### 需要做的
 
 #### 1. 新建 todo tool
-**文件**: `crates/agent-core/src/tools/todo.rs` (新建)
+**文件**: `crates/neo-agent-core/src/tools/todo.rs` (新建)
 
 参考 kimi-code 的 `TodoListTool`:
 ```rust
@@ -120,7 +120,7 @@ register(TodoTool::new());
 ```
 
 #### 2. TUI 渲染
-**文件**: `crates/tui/src/components.rs` (新建 `todo_panel` 组件)
+**文件**: `crates/neo-tui/src/components.rs` (新建 `todo_panel` 组件)
 
 参考 kimi-code 的 `TodoPanelComponent`:
 - 状态符号: `in_progress`=`●`, `done`=`✓`, `pending`=`○`
@@ -150,7 +150,7 @@ register(TodoTool::new());
 ### 需要做的
 
 #### 1. 新建 PlanMode 状态机
-**文件**: `crates/agent-core/src/mode/plan.rs` (新建模块)
+**文件**: `crates/neo-agent-core/src/mode/plan.rs` (新建模块)
 
 参考 kimi-code 的 `PlanMode` 类:
 ```rust
@@ -176,7 +176,7 @@ impl PlanMode {
 ```
 
 #### 2. 加权限策略
-**文件**: `crates/agent-core/src/permissions/policies/plan_mode_guard.rs` (新建)
+**文件**: `crates/neo-agent-core/src/permissions/policies/plan_mode_guard.rs` (新建)
 
 参考 kimi-code 的 `PlanModeGuardDenyPermissionPolicy`:
 ```rust
@@ -205,7 +205,7 @@ impl PermissionPolicy for PlanModeGuardPolicy {
 ```
 
 #### 3. 新建 AskUser 工具
-**文件**: `crates/agent-core/src/tools/ask_user.rs` (新建)
+**文件**: `crates/neo-agent-core/src/tools/ask_user.rs` (新建)
 
 参考 kimi-code 的 `AskUserQuestionTool`:
 ```rust
@@ -226,7 +226,7 @@ impl Tool for AskUserQuestionTool {
 **注意**:需要实现 reverse-RPC 双向通道(LLM → Host → TUI → 用户 → Host → LLM)。
 
 #### 4. TUI 提问卡片
-**文件**: `crates/tui/src/components/question_dialog.rs` (新建)
+**文件**: `crates/neo-tui/src/components/question_dialog.rs` (新建)
 
 参考 kimi-code 的 `QuestionDialogComponent`:
 - 渲染选项卡片(数字键 1-9 选择)
@@ -257,7 +257,7 @@ pub enum AgentMode {
 在 footer (components.rs) 显示 mode 指示器。
 
 #### 6. EnterPlanMode / ExitPlanMode 工具
-**文件**: `crates/agent-core/src/tools/plan_mode.rs` (新建)
+**文件**: `crates/neo-agent-core/src/tools/plan_mode.rs` (新建)
 
 - `EnterPlanMode`: 无参数,进入 plan mode
 - `ExitPlanMode`: 可带 `options: [{label, description}]` 多选项,触发审批
@@ -290,7 +290,7 @@ pub enum AgentMode {
 如需调整,直接修改 `grep.rs`。
 
 #### 2. (可选) 新建 GlobTool
-**文件**: `crates/agent-core/src/tools/glob.rs` (新建)
+**文件**: `crates/neo-agent-core/src/tools/glob.rs` (新建)
 
 参考 kimi-code 的 `GlobTool`:
 ```rust
@@ -323,7 +323,7 @@ register(GlobTool::new());
 ### 参考
 - kimi-code Glob: `packages/agent-core/src/tools/builtin/file/glob.ts`
 - kimi-code Grep: `packages/agent-core/src/tools/builtin/file/grep.ts`
-- neo 现有 Grep: `crates/agent-core/src/tools/grep.rs`
+- neo 现有 Grep: `crates/neo-agent-core/src/tools/grep.rs`
 
 ---
 
@@ -359,12 +359,12 @@ register(GlobTool::new());
 ## 附录:关键文件快速索引
 
 ### neo 侧
-- Session: `crates/agent-core/src/session/jsonl.rs`
-- Tools: `crates/agent-core/src/tools/mod.rs`
+- Session: `crates/neo-agent-core/src/session/jsonl.rs`
+- Tools: `crates/neo-agent-core/src/tools/mod.rs`
 - Slash 命令: `crates/neo-agent/src/prompt_templates.rs`
 - Command palette: `crates/neo-agent/src/modes/interactive.rs:1921-1967` (command_specs), `:959-984` (run_selected_command)
-- TUI transcript: `crates/tui/src/app.rs:2194-2233` (TranscriptItem), `:2959+` (ChatTranscript)
-- TUI 渲染: `crates/tui/src/components.rs:264-273` (TranscriptWidget), `:598-650` (tool_render_rows)
+- TUI transcript: `crates/neo-tui/src/app.rs:2194-2233` (TranscriptItem), `:2959+` (ChatTranscript)
+- TUI 渲染: `crates/neo-tui/src/components.rs:264-273` (TranscriptWidget), `:598-650` (tool_render_rows)
 
 ### kimi-code 侧
 - Fork: `apps/kimi-code/src/tui/commands/session.ts`, `packages/agent-core/src/session/store/session-store.ts`

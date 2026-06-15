@@ -3,7 +3,7 @@
 **Status:** Approved for implementation  
 **Date:** 2026-06-13  
 **Author:** Agent design session  
-**Scope:** `crates/tui`, `crates/neo-agent/src/modes/interactive.rs`, themes, tests
+**Scope:** `crates/neo-tui`, `crates/neo-agent/src/modes/interactive.rs`, themes, tests
 
 ---
 
@@ -155,11 +155,11 @@ Theme JSON files can override any of these. Existing themes that do not specify 
 
 | File | Change |
 |---|---|
-| `crates/tui/src/components.rs` | Remove header row from `app_layout()`; remove header render block; rewrite `render_footer()` as two lines; add banner render path for `TranscriptItem::Banner`. |
-| `crates/tui/src/app.rs` | Add `workspace_root` to `NeoTuiApp`; add semantic footer colors to `TuiTheme`; add helper methods for footer segments (`permission_badge()`, `working_label()`, `context_color()`). |
+| `crates/neo-tui/src/components.rs` | Remove header row from `app_layout()`; remove header render block; rewrite `render_footer()` as two lines; add banner render path for `TranscriptItem::Banner`. |
+| `crates/neo-tui/src/app.rs` | Add `workspace_root` to `NeoTuiApp`; add semantic footer colors to `TuiTheme`; add helper methods for footer segments (`permission_badge()`, `working_label()`, `context_color()`). |
 | `crates/neo-agent/src/themes.rs` | Deserialize new semantic color keys with defaults. |
 | `crates/neo-agent/src/modes/interactive.rs` | Pass `workspace_root` into `NeoTuiApp::new`; ensure startup notices are rendered as the banner item. |
-| `crates/tui/tests/app_shell.rs` | Update assertions: no top header, footer has two lines, banner appears in transcript. |
+| `crates/neo-tui/tests/app_shell.rs` | Update assertions: no top header, footer has two lines, banner appears in transcript. |
 
 ### 5.2 Layout Geometry
 
@@ -203,7 +203,7 @@ Footer height:
 
 ## 8. Testing Plan
 
-1. **Unit tests** in `crates/tui/tests/app_shell.rs`:
+1. **Unit tests** in `crates/neo-tui/tests/app_shell.rs`:
    - Assert no top header row is rendered.
    - Assert footer has exactly two rows when height ≥ 12.
    - Assert startup banner is the first transcript item.

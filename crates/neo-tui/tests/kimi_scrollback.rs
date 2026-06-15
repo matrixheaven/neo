@@ -35,7 +35,7 @@ fn live_tool_rows_stay_out_of_committed_scrollback() {
 
     controller.push(TranscriptEntry::tool_call_running(
         "Read",
-        "crates/tui/src/app.rs",
+        "crates/neo-tui/src/app.rs",
     ));
 
     let committed = controller.drain_finalized_rows(80);
@@ -47,7 +47,7 @@ fn live_tool_rows_stay_out_of_committed_scrollback() {
         controller
             .render_live_rows(80)
             .iter()
-            .any(|row| row == &Line::raw("● Using Read (crates/tui/src/app.rs)"))
+            .any(|row| row == &Line::raw("● Using Read (crates/neo-tui/src/app.rs)"))
     );
 }
 
@@ -79,7 +79,7 @@ fn finished_tool_rows_commit_once_they_are_prefix_finalized() {
 
     controller.push(TranscriptEntry::tool_call_finished(
         "Read",
-        "crates/tui/src/app.rs",
+        "crates/neo-tui/src/app.rs",
     ));
 
     let first_commit = controller.drain_finalized_rows(80);
@@ -87,7 +87,7 @@ fn finished_tool_rows_commit_once_they_are_prefix_finalized() {
 
     assert_eq!(
         first_commit,
-        vec![Line::raw("✓ Used Read (crates/tui/src/app.rs)")]
+        vec![Line::raw("✓ Used Read (crates/neo-tui/src/app.rs)")]
     );
     assert!(second_commit.is_empty());
     assert!(controller.live_entries().is_empty());

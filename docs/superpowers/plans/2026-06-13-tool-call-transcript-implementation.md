@@ -14,22 +14,22 @@
 
 | File | Responsibility |
 |------|---------------|
-| `crates/tui/src/app.rs` | Extend `ToolRunTranscript` / `ActiveTool` with `live_output` and helper constructors. |
-| `crates/tui/src/components.rs` | New `tool_render_rows` header/body renderer, new helper functions for symbols/verbs/chips/key-args. |
+| `crates/neo-tui/src/app.rs` | Extend `ToolRunTranscript` / `ActiveTool` with `live_output` and helper constructors. |
+| `crates/neo-tui/src/components.rs` | New `tool_render_rows` header/body renderer, new helper functions for symbols/verbs/chips/key-args. |
 | `crates/neo-agent/src/modes/interactive.rs` | Route `ToolExecutionUpdate` events into `live_output`; flush on `ToolExecutionFinished`. |
-| `crates/tui/tests/primitives.rs` | Update existing transcript assertions; add new tests for header/chip/live-output behavior. |
+| `crates/neo-tui/tests/primitives.rs` | Update existing transcript assertions; add new tests for header/chip/live-output behavior. |
 
 ---
 
 ## Task 1: Extend ToolRunTranscript with live_output
 
 **Files:**
-- Modify: `crates/tui/src/app.rs:2236-2259`
-- Test: `crates/tui/tests/primitives.rs`
+- Modify: `crates/neo-tui/src/app.rs:2236-2259`
+- Test: `crates/neo-tui/tests/primitives.rs`
 
 - [ ] **Step 1: Add `live_output` field to `ToolRunTranscript`**
 
-In `crates/tui/src/app.rs`, change:
+In `crates/neo-tui/src/app.rs`, change:
 
 ```rust
 pub struct ToolRunTranscript {
@@ -97,7 +97,7 @@ Expected: compiles, existing tests may fail on header text (expected at this sta
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tui/src/app.rs
+git add crates/neo-tui/src/app.rs
 git commit -m "feat(tui): add live_output field to ToolRunTranscript"
 ```
 
@@ -106,12 +106,12 @@ git commit -m "feat(tui): add live_output field to ToolRunTranscript"
 ## Task 2: Add helper functions for header text, symbols, and chips
 
 **Files:**
-- Modify: `crates/tui/src/components.rs`
-- Test: `crates/tui/tests/primitives.rs`
+- Modify: `crates/neo-tui/src/components.rs`
+- Test: `crates/neo-tui/tests/primitives.rs`
 
 - [ ] **Step 1: Replace `tool_status_symbol` to return static symbols**
 
-In `crates/tui/src/components.rs`, replace `tool_status_symbol` with:
+In `crates/neo-tui/src/components.rs`, replace `tool_status_symbol` with:
 
 ```rust
 fn tool_status_symbol(status: ToolStatusKind) -> &'static str {
@@ -232,7 +232,7 @@ Expected: compiles (helpers unused is OK at this stage).
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/tui/src/components.rs
+git add crates/neo-tui/src/components.rs
 git commit -m "feat(tui): add tool card helpers for symbols, verbs, chips, and key args"
 ```
 
@@ -241,8 +241,8 @@ git commit -m "feat(tui): add tool card helpers for symbols, verbs, chips, and k
 ## Task 3: Rewrite tool_render_rows to build the new card
 
 **Files:**
-- Modify: `crates/tui/src/components.rs:598-650`
-- Test: `crates/tui/tests/primitives.rs`
+- Modify: `crates/neo-tui/src/components.rs:598-650`
+- Test: `crates/neo-tui/tests/primitives.rs`
 
 - [ ] **Step 1: Update `tool_render_rows` signature and header**
 
@@ -345,7 +345,7 @@ fn tool_render_rows(
 Search for the call site:
 
 ```bash
-grep -n "tool_render_rows" crates/tui/src/components.rs
+grep -n "tool_render_rows" crates/neo-tui/src/components.rs
 ```
 
 Remove the `activity_frame` argument from the call.
@@ -361,7 +361,7 @@ Expected: tests around "● Use read(" and "running" fail; fix them in Task 4.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/tui/src/components.rs
+git add crates/neo-tui/src/components.rs
 git commit -m "feat(tui): render tool calls as in-place updating cards"
 ```
 
@@ -370,14 +370,14 @@ git commit -m "feat(tui): render tool calls as in-place updating cards"
 ## Task 4: Update tests for the new transcript format
 
 **Files:**
-- Modify: `crates/tui/tests/primitives.rs`
+- Modify: `crates/neo-tui/tests/primitives.rs`
 
 - [ ] **Step 1: Update assertions that look for old header text**
 
 Search for old patterns:
 
 ```bash
-grep -n '"● Use read(' crates/tui/tests/primitives.rs
+grep -n '"● Use read(' crates/neo-tui/tests/primitives.rs
 ```
 
 Change lines like:
@@ -401,7 +401,7 @@ Replace the existing test around line 1562 with:
 fn transcript_widget_renders_running_tool_card_in_place() {
     let transcript = ChatTranscript::from_items([TranscriptItem::tool_run(
         "list",
-        Some(r#"{"path":"crates/tui/src"}"#.to_owned()),
+        Some(r#"{"path":"crates/neo-tui/src"}"#.to_owned()),
         None,
         ToolStatusKind::Running,
         neo_tui::ToolRunMetadata::default(),
@@ -415,7 +415,7 @@ fn transcript_widget_renders_running_tool_card_in_place() {
     );
 
     assert!(frame.iter().any(|line| line.contains("● Using list")));
-    assert!(frame.iter().any(|line| line.contains("(crates/tui/src)")));
+    assert!(frame.iter().any(|line| line.contains("(crates/neo-tui/src)")));
     assert!(!frame.iter().any(|line| line.contains("running")));
 }
 ```
@@ -484,7 +484,7 @@ Expected: all TUI tests pass.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/tui/tests/primitives.rs
+git add crates/neo-tui/tests/primitives.rs
 git commit -m "test(tui): update assertions for new tool-call transcript cards"
 ```
 
@@ -493,11 +493,11 @@ git commit -m "test(tui): update assertions for new tool-call transcript cards"
 ## Task 5: Route live Bash output into the card
 
 **Files:**
-- Modify: `crates/tui/src/app.rs`
+- Modify: `crates/neo-tui/src/app.rs`
 
 - [ ] **Step 1: Modify `StreamUpdate::ToolUpdated` to append shell live output**
 
-In `crates/tui/src/app.rs`, change the `ToolUpdated` arm from:
+In `crates/neo-tui/src/app.rs`, change the `ToolUpdated` arm from:
 
 ```rust
 StreamUpdate::ToolUpdated { id, detail } => {
@@ -563,7 +563,7 @@ Expected: pass.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/tui/src/app.rs
+git add crates/neo-tui/src/app.rs
 git commit -m "feat(tui): stream live bash output into running tool cards"
 ```
 
@@ -572,8 +572,8 @@ git commit -m "feat(tui): stream live bash output into running tool cards"
 ## Task 6: Clean up unused theme fields and dead code
 
 **Files:**
-- Modify: `crates/tui/src/app.rs`
-- Modify: `crates/tui/src/components.rs`
+- Modify: `crates/neo-tui/src/app.rs`
+- Modify: `crates/neo-tui/src/components.rs`
 - Modify: `crates/neo-agent/src/themes.rs`
 
 - [ ] **Step 1: Remove `tool_status_suffix` if still present**
@@ -585,7 +585,7 @@ It was replaced in Task 2; ensure it is deleted.
 Search:
 
 ```bash
-grep -n "activity_frame" crates/tui/src/components.rs crates/tui/src/app.rs
+grep -n "activity_frame" crates/neo-tui/src/components.rs crates/neo-tui/src/app.rs
 ```
 
 If `TranscriptWidget` only used `activity_frame` for the spinner, remove the field and `with_activity_frame` method. If other components still need it (e.g. thinking spinner), keep it.

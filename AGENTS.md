@@ -38,12 +38,11 @@ Key files at the root:
   time, sync, net).
 - **Networking**: `reqwest` with `rustls-tls`, streaming, JSON.
 - **CLI**: `clap` derive-based parser in `crates/neo-agent/src/cli.rs`.
-- **TUI**: `ratatui` + `crossterm`, with inline image protocols
-  (Kitty, iTerm2, Sixel) and bracketed-paste handling.
+- **TUI**: `crossterm`-based custom terminal renderer (`InlineRenderer`) with
+  differential rendering, inline image protocols (Kitty, iTerm2, Sixel),
+  bracketed-paste handling, and a component-tree architecture.
 - **Serialization / schemas**: `serde`, `serde_json`, `schemars`, `toml`.
 - **Markdown**: `pulldown-cmark` for rendering and export.
-- **Database**: `rusqlite` (bundled) where persistent structured storage is
-  needed.
 - **Tracing**: `tracing` / `tracing-subscriber`.
 - **Provider protocols**: OpenAI Responses, OpenAI-compatible Chat Completions,
   Anthropic Messages, Google Generative AI, OpenAI-style image generation,
@@ -79,11 +78,11 @@ Key files at the root:
 
 | Crate | Package name | Public API role |
 |-------|--------------|-----------------|
-| `crates/ai` | `neo-ai` | Provider-neutral `ChatRequest`, `ModelClient`, `AiStreamEvent`, registries, reasoning options, image generation, `FakeModelClient`. |
-| `crates/agent-core` | `neo-agent-core` | `AgentRuntime`, `AgentContext`, `ToolRegistry`, built-in tools, `PermissionPolicy`, `FakeHarness`, JSONL session helpers, MCP adapters. |
-| `crates/sdk` | `neo-sdk` | JSONL RPC frame types, skill manifest helpers, safe Markdown-to-HTML export. |
-| `crates/extensions` | `neo-extensions` | `neo-extension.toml` discovery, installation, lifecycle, stdio JSONL runner. |
-| `crates/tui` | `neo-tui` | Reusable terminal UI components, input handling, diff rendering, inline image encoding. |
+| `crates/neo-ai` | `neo-ai` | Provider-neutral `ChatRequest`, `ModelClient`, `AiStreamEvent`, registries, reasoning options, image generation, `FakeModelClient`. |
+| `crates/neo-agent-core` | `neo-agent-core` | `AgentRuntime`, `AgentContext`, `ToolRegistry`, built-in tools, `PermissionPolicy`, `FakeHarness`, JSONL session helpers, MCP adapters. |
+| `crates/neo-sdk` | `neo-sdk` | JSONL RPC frame types, skill manifest helpers, safe Markdown-to-HTML export. |
+| `crates/neo-extensions` | `neo-extensions` | `neo-extension.toml` discovery, installation, lifecycle, stdio JSONL runner. |
+| `crates/neo-tui` | `neo-tui` | Reusable terminal UI components, input handling, diff rendering, inline image encoding. |
 | `crates/neo-agent` | `neo-agent` | The `neo` binary. Parses args, loads config, dispatches to `print`/`run`/`resume`/sessions/extensions/MCP/RPC/TUI modes. |
 | `xtask` | `xtask` | Maintenance commands: check, parity, release-smoke, catalog check. |
 
@@ -156,7 +155,7 @@ cargo test -p xtask
 - Prefer typed Rust interfaces first; add wire protocols (MCP, JSON-RPC, JSONL)
   at crate boundaries.
 - Keep provider-specific code behind `ModelClient` implementations in
-  `crates/ai/src/providers/`.
+  `crates/neo-ai/src/providers/`.
 - Keep model-facing tool schemas small and stable; avoid leaking runtime
   internals into schemas.
 - Session events are normalized `AgentEvent` values; JSONL persistence should not
@@ -169,7 +168,7 @@ crate.
 - Use `neo_ai::providers::fake::FakeModelClient` and
   `neo_agent_core::harness::FakeHarness` for deterministic model-driven tests.
 - Integration tests for CLI surfaces are in `crates/neo-agent/tests/`.
-- TUI tests use a simulated terminal shell in `crates/tui/tests/`.
+- TUI tests use a simulated terminal shell in `crates/neo-tui/tests/`.
 - The `xtask` parity gate validates that docs, examples, and source stay
   consistent:
   - Local Markdown link checks.
@@ -238,14 +237,16 @@ sessions across workspaces.
 
 Registered by `neo_agent_core::ToolRegistry::with_builtin_tools()`:
 
-- `read`, `list`, `grep`, `find` — file read tools.
+- `read`, `list`, `grep`, `find`, `glob` — file read/search tools.
 - `write`, `edit` — file write tools (`edit` returns a unified diff in details).
 - `bash` — shell execution with foreground/background modes and process-group
   cleanup.
 - `terminal` — PTY session tool (`start`, `write`, `read`, `resize`, `stop`).
+- `todo` — task list management with `pending`/`in_progress`/`done` statuses.
+- `enter_plan_mode`, `exit_plan_mode` — read-only planning mode toggle.
 
-All file paths are resolved inside `ToolContext::workspace_root()`; escaping the
-workspace is rejected before execution.
+The `ask_user` tool is available but not registered by default (requires a
+channel sender for reverse-RPC user questions).
 
 ### Extension and MCP boundaries
 

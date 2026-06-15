@@ -18,9 +18,9 @@ policy, terminal UI, and developer tooling can evolve independently.
 
 ## Repository Map
 
-- `crates/ai` owns provider-neutral chat, stream, model, and tool schema types.
-- `crates/agent-core` owns runtime loops, tools, permissions, sessions, and MCP adapters.
-- `crates/tui` owns reusable terminal UI primitives.
+- `crates/neo-ai` owns provider-neutral chat, stream, model, and tool schema types.
+- `crates/neo-agent-core` owns runtime loops, tools, permissions, sessions, and MCP adapters.
+- `crates/neo-tui` owns reusable terminal UI primitives.
 - `crates/neo-agent` is the CLI/TUI binary.
 - `xtask` contains repository maintenance commands.
 - `docs` and `examples` contain the public operating model for contributors.

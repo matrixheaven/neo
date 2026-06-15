@@ -9,8 +9,8 @@ publish = false
 
 [dependencies]
 futures.workspace = true
-neo-agent-core = { path = "../../crates/agent-core" }
-neo-ai = { path = "../../crates/ai" }
+neo-agent-core = { path = "../../crates/neo-agent-core" }
+neo-ai = { path = "../../crates/neo-ai" }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

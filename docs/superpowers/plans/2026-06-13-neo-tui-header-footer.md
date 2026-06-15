@@ -14,27 +14,27 @@
 
 | File | Responsibility |
 |---|---|
-| `crates/tui/src/app.rs` | `NeoTuiApp` state, `TuiTheme` semantic colors, `TranscriptItem::Banner` variant, helper methods for footer labels. |
-| `crates/tui/src/components.rs` | Layout geometry (`app_layout`), footer rendering (`render_footer`), main `Widget` impl, banner render path. |
-| `crates/tui/src/transcript_renderer.rs` | (if exists) Render `TranscriptItem::Banner` as a boxed card; otherwise add inline render logic in `components.rs`. |
+| `crates/neo-tui/src/app.rs` | `NeoTuiApp` state, `TuiTheme` semantic colors, `TranscriptItem::Banner` variant, helper methods for footer labels. |
+| `crates/neo-tui/src/components.rs` | Layout geometry (`app_layout`), footer rendering (`render_footer`), main `Widget` impl, banner render path. |
+| `crates/neo-tui/src/transcript_renderer.rs` | (if exists) Render `TranscriptItem::Banner` as a boxed card; otherwise add inline render logic in `components.rs`. |
 | `crates/neo-agent/src/themes.rs` | Deserialize new footer semantic color keys from theme JSON. |
 | `crates/neo-agent/src/modes/interactive.rs` | Pass `workspace_root` into `NeoTuiApp::new`; push `TranscriptItem::Banner` on startup. |
-| `crates/tui/tests/app_shell.rs` | Update assertions: no top header, two-line footer, banner present, context thresholds. |
+| `crates/neo-tui/tests/app_shell.rs` | Update assertions: no top header, two-line footer, banner present, context thresholds. |
 
 ---
 
 ### Task 1: Add `workspace_root` to `NeoTuiApp`
 
 **Files:**
-- Modify: `crates/tui/src/app.rs:243-269` (`NeoTuiApp` struct)
-- Modify: `crates/tui/src/app.rs:273-310` (`NeoTuiApp::new`)
-- Modify: `crates/tui/src/app.rs` (add getter `workspace_root()`)
-- Test: `crates/tui/tests/app_shell.rs` (update constructors)
+- Modify: `crates/neo-tui/src/app.rs:243-269` (`NeoTuiApp` struct)
+- Modify: `crates/neo-tui/src/app.rs:273-310` (`NeoTuiApp::new`)
+- Modify: `crates/neo-tui/src/app.rs` (add getter `workspace_root()`)
+- Test: `crates/neo-tui/tests/app_shell.rs` (update constructors)
 
 - [ ] **Step 1: Add field and constructor parameter**
 
 ```rust
-// In crates/tui/src/app.rs, inside pub struct NeoTuiApp
+// In crates/neo-tui/src/app.rs, inside pub struct NeoTuiApp
 pub struct NeoTuiApp {
     title: String,
     session_label: String,
@@ -62,7 +62,7 @@ pub fn new(
 }
 ```
 
-Add `use std::path::PathBuf;` at the top of `crates/tui/src/app.rs` if not already present.
+Add `use std::path::PathBuf;` at the top of `crates/neo-tui/src/app.rs` if not already present.
 
 - [ ] **Step 2: Add getter**
 
@@ -79,14 +79,14 @@ impl NeoTuiApp {
 - [ ] **Step 3: Update test constructors**
 
 ```rust
-// In crates/tui/tests/app_shell.rs
+// In crates/neo-tui/tests/app_shell.rs
 // Replace every:
 let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1");
 // with:
 let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 ```
 
-Use `rg 'NeoTuiApp::new\(' crates/tui/tests` to find all occurrences.
+Use `rg 'NeoTuiApp::new\(' crates/neo-tui/tests` to find all occurrences.
 
 - [ ] **Step 4: Run crate tests to verify signature change compiles**
 
@@ -99,7 +99,7 @@ Expected: compile succeeds; existing tests still pass (header/footer content ass
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tui/src/app.rs crates/tui/tests/app_shell.rs
+git add crates/neo-tui/src/app.rs crates/neo-tui/tests/app_shell.rs
 git commit -m "refactor(tui): add workspace_root to NeoTuiApp"
 ```
 
@@ -108,9 +108,9 @@ git commit -m "refactor(tui): add workspace_root to NeoTuiApp"
 ### Task 2: Add `TranscriptItem::Banner` variant
 
 **Files:**
-- Modify: `crates/tui/src/app.rs:2081-2113` (`TranscriptItem` enum)
-- Modify: `crates/tui/src/app.rs` (add constructor)
-- Modify: `crates/tui/src/components.rs` (render banner)
+- Modify: `crates/neo-tui/src/app.rs:2081-2113` (`TranscriptItem` enum)
+- Modify: `crates/neo-tui/src/app.rs` (add constructor)
+- Modify: `crates/neo-tui/src/components.rs` (render banner)
 
 - [ ] **Step 1: Extend the enum**
 
@@ -184,7 +184,7 @@ If there is no existing banner test, skip to Task 9 where tests are added.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tui/src/app.rs crates/tui/src/components.rs
+git add crates/neo-tui/src/app.rs crates/neo-tui/src/components.rs
 git commit -m "feat(tui): add TranscriptItem::Banner variant and render path"
 ```
 
@@ -193,9 +193,9 @@ git commit -m "feat(tui): add TranscriptItem::Banner variant and render path"
 ### Task 3: Add semantic footer colors to `TuiTheme`
 
 **Files:**
-- Modify: `crates/tui/src/app.rs:15-49` (`TuiTheme` struct)
-- Modify: `crates/tui/src/app.rs:51-88` (`Default` impl)
-- Modify: `crates/tui/src/app.rs:90-191` (add `with_*` methods)
+- Modify: `crates/neo-tui/src/app.rs:15-49` (`TuiTheme` struct)
+- Modify: `crates/neo-tui/src/app.rs:51-88` (`Default` impl)
+- Modify: `crates/neo-tui/src/app.rs:90-191` (add `with_*` methods)
 
 - [ ] **Step 1: Add fields**
 
@@ -305,7 +305,7 @@ Expected: no errors.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tui/src/app.rs
+git add crates/neo-tui/src/app.rs
 git commit -m "feat(tui): add semantic footer colors to TuiTheme"
 ```
 
@@ -411,7 +411,7 @@ git commit -m "feat(themes): deserialize footer semantic colors from JSON"
 ### Task 5: Remove header row and make footer two rows in layout
 
 **Files:**
-- Modify: `crates/tui/src/components.rs:31-98` (`app_layout`)
+- Modify: `crates/neo-tui/src/components.rs:31-98` (`app_layout`)
 
 - [ ] **Step 1: Update `app_layout` geometry**
 
@@ -447,7 +447,7 @@ Expected: tests compile; some may fail because footer content is still one line.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/tui/src/components.rs
+git add crates/neo-tui/src/components.rs
 git commit -m "feat(tui): remove header row and reserve two footer rows"
 ```
 
@@ -456,8 +456,8 @@ git commit -m "feat(tui): remove header row and reserve two footer rows"
 ### Task 6: Rewrite `render_footer` as two semantic lines
 
 **Files:**
-- Modify: `crates/tui/src/components.rs:1185-1214` (`render_footer`)
-- Modify: `crates/tui/src/app.rs` (add footer helper methods)
+- Modify: `crates/neo-tui/src/components.rs:1185-1214` (`render_footer`)
+- Modify: `crates/neo-tui/src/app.rs` (add footer helper methods)
 
 - [ ] **Step 1: Add footer helper methods to `NeoTuiApp`**
 
@@ -585,7 +585,7 @@ fn render_footer(app: &NeoTuiApp, area: Rect, buf: &mut Buffer) {
 
 - [ ] **Step 3: Add helper render functions and imports**
 
-Add these imports at the top of `crates/tui/src/components.rs`:
+Add these imports at the top of `crates/neo-tui/src/components.rs`:
 
 ```rust
 use ratatui::{
@@ -636,7 +636,7 @@ Expected: tests compile. Some tests that asserted old footer strings will fail u
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tui/src/components.rs crates/tui/src/app.rs
+git add crates/neo-tui/src/components.rs crates/neo-tui/src/app.rs
 git commit -m "feat(tui): rewrite footer as two semantic lines"
 ```
 
@@ -645,7 +645,7 @@ git commit -m "feat(tui): rewrite footer as two semantic lines"
 ### Task 7: Remove header render block from `Widget` impl
 
 **Files:**
-- Modify: `crates/tui/src/components.rs:1033-1104` (`impl Widget for &NeoTuiApp`)
+- Modify: `crates/neo-tui/src/components.rs:1033-1104` (`impl Widget for &NeoTuiApp`)
 
 - [ ] **Step 1: Delete header drawing code**
 
@@ -689,7 +689,7 @@ Expected: tests run; header-specific assertions removed in Task 9 should now pas
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/tui/src/components.rs
+git add crates/neo-tui/src/components.rs
 git commit -m "feat(tui): remove persistent header render block"
 ```
 
@@ -776,7 +776,7 @@ git commit -m "feat(neo-agent): push startup banner and pass workspace root to T
 ### Task 9: Update tests for new layout
 
 **Files:**
-- Modify: `crates/tui/tests/app_shell.rs`
+- Modify: `crates/neo-tui/tests/app_shell.rs`
 
 - [ ] **Step 1: Update existing assertions**
 
@@ -861,7 +861,7 @@ Expected: all tests pass.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/tui/tests/app_shell.rs
+git add crates/neo-tui/tests/app_shell.rs
 git commit -m "test(tui): update app_shell tests for banner and two-line footer"
 ```
 

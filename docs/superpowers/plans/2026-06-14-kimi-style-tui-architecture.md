@@ -16,27 +16,27 @@
 
 | File | Responsibility |
 |------|----------------|
-| `crates/tui/src/core/mod.rs` | Public module for the new component-tree core. |
-| `crates/tui/src/core/line.rs` | `Line`, `Span`, style conversion, width-safe rendering helpers. |
-| `crates/tui/src/core/text.rs` | `Text` component and hard wrapping for plain/styled lines. |
-| `crates/tui/src/core/component.rs` | `Component`, `InputResult`, `Finalization`, `Expandable`. |
-| `crates/tui/src/core/container.rs` | `Container` and `GutterContainer` vertical stack components. |
-| `crates/tui/src/core/scheduler.rs` | `RenderScheduler`, `RenderKind`, coalesced render requests. |
-| `crates/tui/src/core/terminal.rs` | Pure `TerminalRenderer` state model for commit/live-region rendering. |
-| `crates/tui/src/transcript/mod.rs` | Public module for transcript component system. |
-| `crates/tui/src/transcript/messages.rs` | Banner, user, assistant, thinking, notice components. |
-| `crates/tui/src/transcript/tool_call.rs` | `ToolCallComponent` lifecycle and header/body rendering. |
-| `crates/tui/src/transcript/tool_renderers.rs` | Tool renderer registry and Read/Write/Edit/Bash renderers. |
-| `crates/tui/src/transcript/diff_preview.rs` | Kimi-style clustered Edit diff preview. |
-| `crates/tui/src/transcript/controller.rs` | `TranscriptController` finalized-prefix draining. |
-| `crates/tui/src/streaming.rs` | `StreamingController` for live AgentEvent/tool lifecycle updates. |
-| `crates/tui/src/runtime.rs` | `NeoTuiRuntime` glue around state, containers, scheduler, renderer. |
-| `crates/tui/src/lib.rs` | Export new component-tree/runtime modules; do not expose a second interactive renderer. |
+| `crates/neo-tui/src/core/mod.rs` | Public module for the new component-tree core. |
+| `crates/neo-tui/src/core/line.rs` | `Line`, `Span`, style conversion, width-safe rendering helpers. |
+| `crates/neo-tui/src/core/text.rs` | `Text` component and hard wrapping for plain/styled lines. |
+| `crates/neo-tui/src/core/component.rs` | `Component`, `InputResult`, `Finalization`, `Expandable`. |
+| `crates/neo-tui/src/core/container.rs` | `Container` and `GutterContainer` vertical stack components. |
+| `crates/neo-tui/src/core/scheduler.rs` | `RenderScheduler`, `RenderKind`, coalesced render requests. |
+| `crates/neo-tui/src/core/terminal.rs` | Pure `TerminalRenderer` state model for commit/live-region rendering. |
+| `crates/neo-tui/src/transcript/mod.rs` | Public module for transcript component system. |
+| `crates/neo-tui/src/transcript/messages.rs` | Banner, user, assistant, thinking, notice components. |
+| `crates/neo-tui/src/transcript/tool_call.rs` | `ToolCallComponent` lifecycle and header/body rendering. |
+| `crates/neo-tui/src/transcript/tool_renderers.rs` | Tool renderer registry and Read/Write/Edit/Bash renderers. |
+| `crates/neo-tui/src/transcript/diff_preview.rs` | Kimi-style clustered Edit diff preview. |
+| `crates/neo-tui/src/transcript/controller.rs` | `TranscriptController` finalized-prefix draining. |
+| `crates/neo-tui/src/streaming.rs` | `StreamingController` for live AgentEvent/tool lifecycle updates. |
+| `crates/neo-tui/src/runtime.rs` | `NeoTuiRuntime` glue around state, containers, scheduler, renderer. |
+| `crates/neo-tui/src/lib.rs` | Export new component-tree/runtime modules; do not expose a second interactive renderer. |
 | `crates/neo-agent/src/modes/interactive.rs` | Switch draw/event path to `NeoTuiRuntime` as the single interactive renderer. |
-| `crates/tui/tests/kimi_core.rs` | Core component/text/container/scheduler tests. |
-| `crates/tui/tests/kimi_scrollback.rs` | Transcript commit/live-region scrollback tests. |
-| `crates/tui/tests/kimi_tool_cards.rs` | Tool-call lifecycle and renderer parity tests. |
-| `crates/tui/tests/kimi_runtime.rs` | Runtime/replay/live integration tests. |
+| `crates/neo-tui/tests/kimi_core.rs` | Core component/text/container/scheduler tests. |
+| `crates/neo-tui/tests/kimi_scrollback.rs` | Transcript commit/live-region scrollback tests. |
+| `crates/neo-tui/tests/kimi_tool_cards.rs` | Tool-call lifecycle and renderer parity tests. |
+| `crates/neo-tui/tests/kimi_runtime.rs` | Runtime/replay/live integration tests. |
 | `docs/gap/tui.md` | Update after implementation to describe the new architecture. |
 
 ---
@@ -55,15 +55,15 @@
 ## Task 1: Add Core Row and Component Primitives
 
 **Files:**
-- Create: `crates/tui/src/core/mod.rs`
-- Create: `crates/tui/src/core/line.rs`
-- Create: `crates/tui/src/core/component.rs`
-- Modify: `crates/tui/src/lib.rs`
-- Test: `crates/tui/tests/kimi_core.rs`
+- Create: `crates/neo-tui/src/core/mod.rs`
+- Create: `crates/neo-tui/src/core/line.rs`
+- Create: `crates/neo-tui/src/core/component.rs`
+- Modify: `crates/neo-tui/src/lib.rs`
+- Test: `crates/neo-tui/tests/kimi_core.rs`
 
 - [ ] **Step 1: Write failing tests for `Line`, `Span`, and component finalization**
 
-Create `crates/tui/tests/kimi_core.rs` with:
+Create `crates/neo-tui/tests/kimi_core.rs` with:
 
 ```rust
 use neo_tui::ansi::{Color, Style};
@@ -136,7 +136,7 @@ error[E0432]: unresolved import `neo_tui::core`
 
 - [ ] **Step 3: Create `core/mod.rs`**
 
-Create `crates/tui/src/core/mod.rs`:
+Create `crates/neo-tui/src/core/mod.rs`:
 
 ```rust
 pub mod component;
@@ -148,7 +148,7 @@ pub use line::{Line, Span};
 
 - [ ] **Step 4: Create `core/component.rs`**
 
-Create `crates/tui/src/core/component.rs`:
+Create `crates/neo-tui/src/core/component.rs`:
 
 ```rust
 use crate::InputEvent;
@@ -190,7 +190,7 @@ pub trait Expandable {
 
 - [ ] **Step 5: Create `core/line.rs`**
 
-Create `crates/tui/src/core/line.rs`:
+Create `crates/neo-tui/src/core/line.rs`:
 
 ```rust
 use unicode_width::UnicodeWidthChar;
@@ -292,9 +292,9 @@ impl Line {
 }
 ```
 
-- [ ] **Step 6: Update `crates/tui/src/lib.rs` to export the new core module**
+- [ ] **Step 6: Update `crates/neo-tui/src/lib.rs` to export the new core module**
 
-Replace `crates/tui/src/lib.rs` with a version that adds:
+Replace `crates/neo-tui/src/lib.rs` with a version that adds:
 
 ```rust
 pub mod core;
@@ -328,14 +328,14 @@ Expected: the core primitives tests pass.
 ## Task 2: Add Container and Text Components
 
 **Files:**
-- Create: `crates/tui/src/core/container.rs`
-- Create: `crates/tui/src/core/text.rs`
-- Modify: `crates/tui/src/core/mod.rs`
-- Test: `crates/tui/tests/kimi_core.rs`
+- Create: `crates/neo-tui/src/core/container.rs`
+- Create: `crates/neo-tui/src/core/text.rs`
+- Modify: `crates/neo-tui/src/core/mod.rs`
+- Test: `crates/neo-tui/tests/kimi_core.rs`
 
 - [ ] **Step 1: Write failing tests for vertical stacking and width-aware wrapping**
 
-Append to `crates/tui/tests/kimi_core.rs`:
+Append to `crates/neo-tui/tests/kimi_core.rs`:
 
 ```rust
 use neo_tui::core::{Container, GutterContainer, Text};
@@ -380,7 +380,7 @@ fn text_wraps_by_visible_width() {
 
 - [ ] **Step 2: Add `core/container.rs`**
 
-Create `crates/tui/src/core/container.rs`:
+Create `crates/neo-tui/src/core/container.rs`:
 
 ```rust
 use super::{Component, Finalization, Line};
@@ -451,7 +451,7 @@ impl GutterContainer {
 
 - [ ] **Step 3: Add `core/text.rs`**
 
-Create `crates/tui/src/core/text.rs`:
+Create `crates/neo-tui/src/core/text.rs`:
 
 ```rust
 use unicode_width::UnicodeWidthChar;
@@ -523,7 +523,7 @@ impl Component for Text {
 
 - [ ] **Step 4: Export the new core modules**
 
-Update `crates/tui/src/core/mod.rs` to add:
+Update `crates/neo-tui/src/core/mod.rs` to add:
 
 ```rust
 pub mod container;
@@ -554,14 +554,14 @@ Expected: no formatting regressions before moving on.
 ## Task 3: Add Render Scheduler and Terminal Renderer
 
 **Files:**
-- Create: `crates/tui/src/core/scheduler.rs`
-- Create: `crates/tui/src/core/terminal.rs`
-- Modify: `crates/tui/src/core/mod.rs`
-- Test: `crates/tui/tests/kimi_core.rs`
+- Create: `crates/neo-tui/src/core/scheduler.rs`
+- Create: `crates/neo-tui/src/core/terminal.rs`
+- Modify: `crates/neo-tui/src/core/mod.rs`
+- Test: `crates/neo-tui/tests/kimi_core.rs`
 
 - [ ] **Step 1: Write failing tests for render coalescing and live-region preservation**
 
-Append to `crates/tui/tests/kimi_core.rs`:
+Append to `crates/neo-tui/tests/kimi_core.rs`:
 
 ```rust
 use neo_tui::core::{RenderKind, RenderScheduler, TerminalRenderer};
@@ -606,7 +606,7 @@ fn terminal_renderer_keeps_committed_rows_separate_from_live_rows() {
 
 - [ ] **Step 2: Add `core/scheduler.rs`**
 
-Create `crates/tui/src/core/scheduler.rs`:
+Create `crates/neo-tui/src/core/scheduler.rs`:
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -663,7 +663,7 @@ impl RenderScheduler {
 
 - [ ] **Step 3: Add `core/terminal.rs`**
 
-Create `crates/tui/src/core/terminal.rs`:
+Create `crates/neo-tui/src/core/terminal.rs`:
 
 ```rust
 use crate::renderer::CursorPos;
@@ -729,7 +729,7 @@ impl TerminalRenderer {
 
 - [ ] **Step 4: Export the new scheduler and terminal modules**
 
-Update `crates/tui/src/core/mod.rs`:
+Update `crates/neo-tui/src/core/mod.rs`:
 
 ```rust
 pub mod scheduler;
@@ -763,15 +763,15 @@ Expected: all core tests pass.
 ## Task 4: Add Transcript Commit and Live-Region Draining
 
 **Files:**
-- Create: `crates/tui/src/transcript/mod.rs`
-- Create: `crates/tui/src/transcript/controller.rs`
-- Create: `crates/tui/src/transcript/messages.rs`
-- Modify: `crates/tui/src/lib.rs`
-- Test: `crates/tui/tests/kimi_scrollback.rs`
+- Create: `crates/neo-tui/src/transcript/mod.rs`
+- Create: `crates/neo-tui/src/transcript/controller.rs`
+- Create: `crates/neo-tui/src/transcript/messages.rs`
+- Modify: `crates/neo-tui/src/lib.rs`
+- Test: `crates/neo-tui/tests/kimi_scrollback.rs`
 
 - [ ] **Step 1: Write failing tests for finalized transcript commit**
 
-Create `crates/tui/tests/kimi_scrollback.rs`:
+Create `crates/neo-tui/tests/kimi_scrollback.rs`:
 
 ```rust
 use neo_tui::core::{Finalization, Line, TerminalRenderer};
@@ -797,7 +797,7 @@ fn live_tool_rows_stay_out_of_committed_scrollback() {
     let mut controller = TranscriptController::new();
     let mut terminal = TerminalRenderer::new(80, 24);
 
-    controller.push(TranscriptEntry::tool_call_running("Read", "crates/tui/src/app.rs"));
+    controller.push(TranscriptEntry::tool_call_running("Read", "crates/neo-tui/src/app.rs"));
 
     let committed = controller.drain_finalized_rows(80);
     terminal.commit_rows(&committed);
@@ -809,7 +809,7 @@ fn live_tool_rows_stay_out_of_committed_scrollback() {
 
 - [ ] **Step 2: Add `transcript/mod.rs`**
 
-Create `crates/tui/src/transcript/mod.rs`:
+Create `crates/neo-tui/src/transcript/mod.rs`:
 
 ```rust
 pub mod controller;
@@ -820,7 +820,7 @@ pub use controller::{TranscriptController, TranscriptEntry};
 
 - [ ] **Step 3: Add `transcript/controller.rs`**
 
-Create `crates/tui/src/transcript/controller.rs`:
+Create `crates/neo-tui/src/transcript/controller.rs`:
 
 ```rust
 use crate::core::{Finalization, Line};
@@ -940,7 +940,7 @@ impl TranscriptController {
 
 - [ ] **Step 4: Export the transcript module**
 
-Update `crates/tui/src/lib.rs` with:
+Update `crates/neo-tui/src/lib.rs` with:
 
 ```rust
 pub mod transcript;
@@ -968,14 +968,14 @@ Expected: formatting remains clean before adding tool cards.
 ## Task 5: Add Kimi-style ToolCallComponent and Tool Renderer Registry
 
 **Files:**
-- Create: `crates/tui/src/transcript/tool_call.rs`
-- Create: `crates/tui/src/transcript/tool_renderers.rs`
-- Modify: `crates/tui/src/transcript/mod.rs`
-- Test: `crates/tui/tests/kimi_tool_cards.rs`
+- Create: `crates/neo-tui/src/transcript/tool_call.rs`
+- Create: `crates/neo-tui/src/transcript/tool_renderers.rs`
+- Modify: `crates/neo-tui/src/transcript/mod.rs`
+- Test: `crates/neo-tui/tests/kimi_tool_cards.rs`
 
 - [ ] **Step 1: Write failing tests for tool card lifecycle**
 
-Create `crates/tui/tests/kimi_tool_cards.rs`:
+Create `crates/neo-tui/tests/kimi_tool_cards.rs`:
 
 ```rust
 use neo_tui::ToolStatusKind;
@@ -993,7 +993,7 @@ fn tool_call_renders_running_header_and_key_arg() {
     let mut card = ToolCallComponent::new(ToolCallState {
         id: "tool-1".to_owned(),
         name: "Read".to_owned(),
-        arguments: Some(r#"{"path":"crates/tui/src/app.rs"}"#.to_owned()),
+        arguments: Some(r#"{"path":"crates/neo-tui/src/app.rs"}"#.to_owned()),
         result: None,
         details: None,
         status: ToolStatusKind::Running,
@@ -1001,7 +1001,7 @@ fn tool_call_renders_running_header_and_key_arg() {
     });
 
     let rows = plain(card.render(80));
-    assert!(rows.iter().any(|line| line.contains("● Using Read (crates/tui/src/app.rs)")));
+    assert!(rows.iter().any(|line| line.contains("● Using Read (crates/neo-tui/src/app.rs)")));
     assert_eq!(card.finalization(), Finalization::Live);
 }
 
@@ -1048,7 +1048,7 @@ fn ctrl_o_expansion_switches_preview_limit() {
 
 - [ ] **Step 2: Add module exports**
 
-Update `crates/tui/src/transcript/mod.rs`:
+Update `crates/neo-tui/src/transcript/mod.rs`:
 
 ```rust
 pub mod controller;
@@ -1062,7 +1062,7 @@ pub use tool_call::{ToolCallComponent, ToolCallState};
 
 - [ ] **Step 3: Add `ToolCallState` and `ToolCallComponent` skeleton**
 
-Create `crates/tui/src/transcript/tool_call.rs`:
+Create `crates/neo-tui/src/transcript/tool_call.rs`:
 
 ```rust
 use crate::ToolStatusKind;
@@ -1170,7 +1170,7 @@ impl Component for ToolCallComponent {
 
 - [ ] **Step 4: Add basic tool renderer registry helpers**
 
-Create `crates/tui/src/transcript/tool_renderers.rs`:
+Create `crates/neo-tui/src/transcript/tool_renderers.rs`:
 
 ```rust
 use crate::ToolStatusKind;
@@ -1289,14 +1289,14 @@ Expected: all new focused tests pass before continuing.
 ## Task 6: Add Clustered Edit Diff Preview
 
 **Files:**
-- Create: `crates/tui/src/transcript/diff_preview.rs`
-- Modify: `crates/tui/src/transcript/mod.rs`
-- Modify: `crates/tui/src/transcript/tool_renderers.rs`
-- Test: `crates/tui/tests/kimi_tool_cards.rs`
+- Create: `crates/neo-tui/src/transcript/diff_preview.rs`
+- Modify: `crates/neo-tui/src/transcript/mod.rs`
+- Modify: `crates/neo-tui/src/transcript/tool_renderers.rs`
+- Test: `crates/neo-tui/tests/kimi_tool_cards.rs`
 
 - [ ] **Step 1: Add failing tests for Kimi-style diff clusters**
 
-Append to `crates/tui/tests/kimi_tool_cards.rs`:
+Append to `crates/neo-tui/tests/kimi_tool_cards.rs`:
 
 ```rust
 use neo_tui::transcript::diff_preview::render_diff_lines_clustered;
@@ -1343,7 +1343,7 @@ fn edit_tool_card_renders_finalized_clustered_diff_from_args() {
 
 - [ ] **Step 2: Export `diff_preview`**
 
-Update `crates/tui/src/transcript/mod.rs`:
+Update `crates/neo-tui/src/transcript/mod.rs`:
 
 ```rust
 pub mod diff_preview;
@@ -1351,7 +1351,7 @@ pub mod diff_preview;
 
 - [ ] **Step 3: Create `transcript/diff_preview.rs`**
 
-Create `crates/tui/src/transcript/diff_preview.rs`:
+Create `crates/neo-tui/src/transcript/diff_preview.rs`:
 
 ```rust
 use crate::core::Line;
@@ -1497,7 +1497,7 @@ fn format_diff_row(line: &DiffLine) -> Line {
 
 - [ ] **Step 4: Route Edit cards to clustered diff renderer**
 
-Modify `crates/tui/src/transcript/tool_renderers.rs` in `render_tool_body` before generic result rendering:
+Modify `crates/neo-tui/src/transcript/tool_renderers.rs` in `render_tool_body` before generic result rendering:
 
 ```rust
 if state.name.eq_ignore_ascii_case("Edit") {
@@ -1563,13 +1563,13 @@ Expected: both pass.
 ## Task 7: Add Write Preview and Bash Live Tail Behavior
 
 **Files:**
-- Modify: `crates/tui/src/transcript/tool_renderers.rs`
-- Modify: `crates/tui/src/transcript/tool_call.rs`
-- Test: `crates/tui/tests/kimi_tool_cards.rs`
+- Modify: `crates/neo-tui/src/transcript/tool_renderers.rs`
+- Modify: `crates/neo-tui/src/transcript/tool_call.rs`
+- Test: `crates/neo-tui/tests/kimi_tool_cards.rs`
 
 - [ ] **Step 1: Add failing tests for Write cap and Bash live tail**
 
-Append to `crates/tui/tests/kimi_tool_cards.rs`:
+Append to `crates/neo-tui/tests/kimi_tool_cards.rs`:
 
 ```rust
 #[test]
@@ -1622,7 +1622,7 @@ fn bash_running_card_shows_live_output_tail() {
 
 - [ ] **Step 2: Add Write renderer branch**
 
-In `crates/tui/src/transcript/tool_renderers.rs`, add this branch before generic result rendering:
+In `crates/neo-tui/src/transcript/tool_renderers.rs`, add this branch before generic result rendering:
 
 ```rust
 if state.name.eq_ignore_ascii_case("Write") {
@@ -1734,13 +1734,13 @@ Expected: all tool-card tests pass.
 ## Task 8: Add StreamingController for In-place Event Updates
 
 **Files:**
-- Create: `crates/tui/src/streaming.rs`
-- Modify: `crates/tui/src/lib.rs`
-- Test: `crates/tui/tests/kimi_runtime.rs`
+- Create: `crates/neo-tui/src/streaming.rs`
+- Modify: `crates/neo-tui/src/lib.rs`
+- Test: `crates/neo-tui/tests/kimi_runtime.rs`
 
 - [ ] **Step 1: Write failing tests for event lifecycle updates**
 
-Create `crates/tui/tests/kimi_runtime.rs`:
+Create `crates/neo-tui/tests/kimi_runtime.rs`:
 
 ```rust
 use neo_agent_core::{AgentEvent, ToolResult};
@@ -1791,11 +1791,11 @@ fn streaming_controller_keeps_running_tool_live() {
 }
 ```
 
-If the exact `AgentEvent` field names differ, adjust the test to the current definitions in `crates/agent-core/src/events.rs` before implementation. Keep the test's semantic assertions: one card per id, running is live, final result is finalized.
+If the exact `AgentEvent` field names differ, adjust the test to the current definitions in `crates/neo-agent-core/src/events.rs` before implementation. Keep the test's semantic assertions: one card per id, running is live, final result is finalized.
 
 - [ ] **Step 2: Create `streaming.rs`**
 
-Create `crates/tui/src/streaming.rs`:
+Create `crates/neo-tui/src/streaming.rs`:
 
 ```rust
 use std::collections::BTreeMap;
@@ -1896,7 +1896,7 @@ impl StreamingController {
 
 - [ ] **Step 3: Add read-only accessors to `ToolCallComponent`**
 
-In `crates/tui/src/transcript/tool_call.rs`, add:
+In `crates/neo-tui/src/transcript/tool_call.rs`, add:
 
 ```rust
 impl ToolCallComponent {
@@ -1914,7 +1914,7 @@ impl ToolCallComponent {
 
 - [ ] **Step 4: Export the streaming module**
 
-Update `crates/tui/src/lib.rs`:
+Update `crates/neo-tui/src/lib.rs`:
 
 ```rust
 pub mod streaming;
@@ -1936,13 +1936,13 @@ Expected: pass after adjusting any `AgentEvent` constructor names to current sou
 ## Task 9: Add NeoTuiRuntime Commit/Render Glue
 
 **Files:**
-- Create: `crates/tui/src/runtime.rs`
-- Modify: `crates/tui/src/lib.rs`
-- Test: `crates/tui/tests/kimi_runtime.rs`
+- Create: `crates/neo-tui/src/runtime.rs`
+- Modify: `crates/neo-tui/src/lib.rs`
+- Test: `crates/neo-tui/tests/kimi_runtime.rs`
 
 - [ ] **Step 1: Add failing runtime test for scrollback plus live rows**
 
-Append to `crates/tui/tests/kimi_runtime.rs`:
+Append to `crates/neo-tui/tests/kimi_runtime.rs`:
 
 ```rust
 use neo_tui::core::{Line, RenderKind};
@@ -1971,7 +1971,7 @@ fn runtime_commits_finalized_rows_and_keeps_live_region_bounded() {
 
 - [ ] **Step 2: Create `runtime.rs`**
 
-Create `crates/tui/src/runtime.rs`:
+Create `crates/neo-tui/src/runtime.rs`:
 
 ```rust
 use crate::core::{Line, RenderKind, RenderScheduler, TerminalRenderer};
@@ -2056,7 +2056,7 @@ fn clamp_tail(mut rows: Vec<Line>, max_rows: usize) -> Vec<Line> {
 
 - [ ] **Step 3: Export runtime module**
 
-Update `crates/tui/src/lib.rs`:
+Update `crates/neo-tui/src/lib.rs`:
 
 ```rust
 pub mod runtime;
@@ -2092,13 +2092,13 @@ Expected: all pass.
 ## Task 10: Wire Runtime into Interactive Terminal Behind a Feature Flag
 
 **Files:**
-- Modify: `crates/tui/src/runtime.rs`
+- Modify: `crates/neo-tui/src/runtime.rs`
 - Modify: `crates/neo-agent/src/modes/interactive.rs`
-- Test: `crates/tui/tests/kimi_runtime.rs`
+- Test: `crates/neo-tui/tests/kimi_runtime.rs`
 
 - [ ] **Step 1: Add runtime render output conversion test**
 
-Append to `crates/tui/tests/kimi_runtime.rs`:
+Append to `crates/neo-tui/tests/kimi_runtime.rs`:
 
 ```rust
 #[test]
@@ -2114,7 +2114,7 @@ fn runtime_exposes_ansi_live_rows_for_terminal_writer() {
 
 - [ ] **Step 2: Add live ANSI conversion methods**
 
-In `crates/tui/src/runtime.rs`, add:
+In `crates/neo-tui/src/runtime.rs`, add:
 
 ```rust
 impl NeoTuiRuntime {
@@ -2173,13 +2173,13 @@ Replace `NeoTerminal::draw()` call sites with the runtime draw path and delete u
 ## Task 11: Implement Real Native Scrollback Commit Writer
 
 **Files:**
-- Modify: `crates/tui/src/core/terminal.rs`
-- Modify: `crates/tui/src/renderer.rs` if shared cursor/raw-mode helpers are needed
-- Test: `crates/tui/tests/kimi_core.rs`
+- Modify: `crates/neo-tui/src/core/terminal.rs`
+- Modify: `crates/neo-tui/src/renderer.rs` if shared cursor/raw-mode helpers are needed
+- Test: `crates/neo-tui/tests/kimi_core.rs`
 
 - [ ] **Step 1: Add pure output-buffer tests for commit writer**
 
-Append to `crates/tui/tests/kimi_core.rs`:
+Append to `crates/neo-tui/tests/kimi_core.rs`:
 
 ```rust
 #[test]
@@ -2207,7 +2207,7 @@ fn terminal_renderer_live_buffer_clears_only_live_lines() {
 
 - [ ] **Step 2: Add pure buffer builders**
 
-In `crates/tui/src/core/terminal.rs`, add:
+In `crates/neo-tui/src/core/terminal.rs`, add:
 
 ```rust
 impl TerminalRenderer {
@@ -2271,12 +2271,12 @@ Expected: pass and confirm no clear-screen escape is used for normal commits.
 
 **Files:**
 - Modify: `crates/neo-agent/src/modes/interactive.rs`
-- Modify: `crates/tui/src/runtime.rs`
-- Test: `crates/tui/tests/kimi_runtime.rs`
+- Modify: `crates/neo-tui/src/runtime.rs`
+- Test: `crates/neo-tui/tests/kimi_runtime.rs`
 
 - [ ] **Step 1: Add runtime method to consume committed rows for writing**
 
-In `crates/tui/src/runtime.rs`, add a method that returns newly committed rows instead of only storing them internally:
+In `crates/neo-tui/src/runtime.rs`, add a method that returns newly committed rows instead of only storing them internally:
 
 ```rust
 pub struct RenderOutput {
@@ -2302,7 +2302,7 @@ Update `render_tick()` to call `render_output()` and discard the returned rows.
 
 - [ ] **Step 2: Add a test for returned committed rows**
 
-Append to `crates/tui/tests/kimi_runtime.rs`:
+Append to `crates/neo-tui/tests/kimi_runtime.rs`:
 
 ```rust
 #[test]
@@ -2361,14 +2361,14 @@ Expected: compiles.
 ## Task 13: Map Existing NeoTuiApp Events into NeoTuiRuntime
 
 **Files:**
-- Modify: `crates/tui/src/runtime.rs`
-- Modify: `crates/tui/src/streaming.rs`
+- Modify: `crates/neo-tui/src/runtime.rs`
+- Modify: `crates/neo-tui/src/streaming.rs`
 - Modify: `crates/neo-agent/src/modes/interactive.rs`
-- Test: `crates/tui/tests/kimi_runtime.rs`
+- Test: `crates/neo-tui/tests/kimi_runtime.rs`
 
 - [ ] **Step 1: Add runtime event mapping tests**
 
-Append to `crates/tui/tests/kimi_runtime.rs`:
+Append to `crates/neo-tui/tests/kimi_runtime.rs`:
 
 ```rust
 #[test]
@@ -2387,7 +2387,7 @@ fn runtime_maps_user_and_assistant_events_to_transcript_entries() {
 
 - [ ] **Step 2: Add simple runtime transcript APIs**
 
-In `crates/tui/src/runtime.rs`, add:
+In `crates/neo-tui/src/runtime.rs`, add:
 
 ```rust
 impl NeoTuiRuntime {
@@ -2407,7 +2407,7 @@ impl NeoTuiRuntime {
 
 - [ ] **Step 3: Add `apply_agent_event` passthrough for tools**
 
-In `crates/tui/src/runtime.rs`, add:
+In `crates/neo-tui/src/runtime.rs`, add:
 
 ```rust
 impl NeoTuiRuntime {
@@ -2478,14 +2478,14 @@ Expected: compiles with both old and new TUI state present.
 ## Task 14: Complete Runtime Ownership of Transcript Rendering
 
 **Files:**
-- Modify: `crates/tui/src/runtime.rs`
-- Modify: `crates/tui/src/streaming.rs`
+- Modify: `crates/neo-tui/src/runtime.rs`
+- Modify: `crates/neo-tui/src/streaming.rs`
 - Modify: `crates/neo-agent/src/modes/interactive.rs`
-- Test: `crates/tui/tests/kimi_runtime.rs`
+- Test: `crates/neo-tui/tests/kimi_runtime.rs`
 
 - [ ] **Step 1: Add test for assistant streaming finalization**
 
-Append to `crates/tui/tests/kimi_runtime.rs`:
+Append to `crates/neo-tui/tests/kimi_runtime.rs`:
 
 ```rust
 #[test]
@@ -2508,7 +2508,7 @@ fn runtime_keeps_streaming_assistant_live_until_finalized() {
 
 - [ ] **Step 2: Add assistant streaming fields to runtime**
 
-In `crates/tui/src/runtime.rs`, add fields:
+In `crates/neo-tui/src/runtime.rs`, add fields:
 
 ```rust
 active_assistant: Option<String>,
@@ -2522,7 +2522,7 @@ active_assistant: None,
 
 - [ ] **Step 3: Add assistant lifecycle methods**
 
-In `crates/tui/src/runtime.rs`, add:
+In `crates/neo-tui/src/runtime.rs`, add:
 
 ```rust
 impl NeoTuiRuntime {
@@ -2600,7 +2600,7 @@ Expected: pass.
 
 **Files:**
 - Modify: `crates/neo-agent/src/modes/interactive.rs`
-- Test: `crates/tui/tests/kimi_runtime.rs`
+- Test: `crates/neo-tui/tests/kimi_runtime.rs`
 
 - [ ] **Step 1: Add a manual smoke checklist to code comments**
 
@@ -2653,7 +2653,7 @@ fn ensure_kimi_runtime(&mut self) {
 }
 ```
 
-If `NeoTuiApp::title()` is not public, add a minimal getter in `crates/tui/src/app.rs`:
+If `NeoTuiApp::title()` is not public, add a minimal getter in `crates/neo-tui/src/app.rs`:
 
 ```rust
 #[must_use]
@@ -2697,15 +2697,15 @@ Expected: CLI help still works. Do not run a live model call as an automated tes
 ## Task 16: Add Ctrl+O Global Expansion to Runtime Components
 
 **Files:**
-- Modify: `crates/tui/src/runtime.rs`
-- Modify: `crates/tui/src/transcript/controller.rs`
-- Modify: `crates/tui/src/transcript/tool_call.rs`
+- Modify: `crates/neo-tui/src/runtime.rs`
+- Modify: `crates/neo-tui/src/transcript/controller.rs`
+- Modify: `crates/neo-tui/src/transcript/tool_call.rs`
 - Modify: `crates/neo-agent/src/modes/interactive.rs`
-- Test: `crates/tui/tests/kimi_tool_cards.rs`
+- Test: `crates/neo-tui/tests/kimi_tool_cards.rs`
 
 - [ ] **Step 1: Add expansion test**
 
-Append to `crates/tui/tests/kimi_tool_cards.rs`:
+Append to `crates/neo-tui/tests/kimi_tool_cards.rs`:
 
 ```rust
 #[test]
@@ -2718,7 +2718,7 @@ fn runtime_global_expansion_affects_future_tool_cards() {
 
 - [ ] **Step 2: Add runtime expansion state**
 
-In `crates/tui/src/runtime.rs`, add field:
+In `crates/neo-tui/src/runtime.rs`, add field:
 
 ```rust
 tool_output_expanded: bool,
@@ -2779,13 +2779,13 @@ Expected: pass/compile.
 ## Task 17: Replay Uses the Same Runtime Path
 
 **Files:**
-- Modify: `crates/tui/src/runtime.rs`
+- Modify: `crates/neo-tui/src/runtime.rs`
 - Modify: `crates/neo-agent/src/modes/interactive.rs`
-- Test: `crates/tui/tests/kimi_runtime.rs`
+- Test: `crates/neo-tui/tests/kimi_runtime.rs`
 
 - [ ] **Step 1: Add replay parity test**
 
-Append to `crates/tui/tests/kimi_runtime.rs`:
+Append to `crates/neo-tui/tests/kimi_runtime.rs`:
 
 ```rust
 #[test]
@@ -2803,7 +2803,7 @@ fn replayed_messages_commit_through_same_runtime_path() {
 
 - [ ] **Step 2: Add replay methods**
 
-In `crates/tui/src/runtime.rs`, add:
+In `crates/neo-tui/src/runtime.rs`, add:
 
 ```rust
 impl NeoTuiRuntime {
@@ -2853,9 +2853,9 @@ Expected: pass/compile.
 
 **Files:**
 - Modify: `crates/neo-agent/src/modes/interactive.rs`
-- Modify: `crates/tui/src/lib.rs`
-- Modify: `crates/tui/src/app.rs`
-- Modify: `crates/tui/src/app_renderer.rs` if it still exists
+- Modify: `crates/neo-tui/src/lib.rs`
+- Modify: `crates/neo-tui/src/app.rs`
+- Modify: `crates/neo-tui/src/app_renderer.rs` if it still exists
 - Test: shell assertions plus existing Rust tests
 
 - [ ] **Step 1: Verify the one-screen renderer is no longer used by interactive mode**
@@ -2863,7 +2863,7 @@ Expected: pass/compile.
 Run:
 
 ```bash
-grep -R "render_app_lines" -n crates/neo-agent/src crates/tui/src \
+grep -R "render_app_lines" -n crates/neo-agent/src crates/neo-tui/src \
   | grep -v "fn render_app_lines" \
   | grep -v "mod app_renderer" || true
 ```
@@ -2878,11 +2878,11 @@ If the command prints a call or public export, remove it or migrate the caller t
 
 - [ ] **Step 2: Delete or migrate `app_renderer.rs`**
 
-Remove `crates/tui/src/app_renderer.rs` if no non-interactive caller remains. If a small helper is still needed, move that helper into the new component/runtime modules and delete the full-frame transcript renderer from the public surface. Do not keep it as a second renderer, fixture renderer, or comparison path.
+Remove `crates/neo-tui/src/app_renderer.rs` if no non-interactive caller remains. If a small helper is still needed, move that helper into the new component/runtime modules and delete the full-frame transcript renderer from the public surface. Do not keep it as a second renderer, fixture renderer, or comparison path.
 
 - [ ] **Step 3: Remove dead scrollback ownership from `NeoTuiApp` after runtime owns commits**
 
-In `crates/tui/src/app.rs`, remove these fields and methods if no caller remains:
+In `crates/neo-tui/src/app.rs`, remove these fields and methods if no caller remains:
 
 ```rust
 committed_count: usize,
@@ -2906,14 +2906,14 @@ If either method is still used by a non-interactive test, update that test to us
 
 - [ ] **Step 4: Remove any remaining `render_app_lines` export**
 
-If `crates/tui/src/lib.rs` still exports `render_app_lines`, remove the export and migrate downstream callers to `NeoTuiRuntime`. The crate should not advertise a second transcript renderer.
+If `crates/neo-tui/src/lib.rs` still exports `render_app_lines`, remove the export and migrate downstream callers to `NeoTuiRuntime`. The crate should not advertise a second transcript renderer.
 
 - [ ] **Step 5: Search for stale `committed_count` and old live-transcript plumbing**
 
 Run:
 
 ```bash
-grep -R "committed_count\|drain_newly_committed\|live_transcript_items" -n crates/tui/src crates/neo-agent/src || true
+grep -R "committed_count\|drain_newly_committed\|live_transcript_items" -n crates/neo-tui/src crates/neo-agent/src || true
 ```
 
 Expected:
@@ -3150,7 +3150,7 @@ Then perform this exact manual script:
 1. Wait for the startup banner to render.
 2. Send a prompt that causes several read/search/tool events, for example:
    ```text
-   inspect README.md, Cargo.toml, and crates/tui/src/lib.rs, then summarize them briefly
+   inspect README.md, Cargo.toml, and crates/neo-tui/src/lib.rs, then summarize them briefly
    ```
 3. Wait until output exceeds one screen.
 4. Use the terminal emulator's native scrollback gesture or scrollbar.
@@ -3158,7 +3158,7 @@ Then perform this exact manual script:
 6. While the model is streaming, confirm only the bottom live region updates; committed rows above it should not flicker or disappear.
 7. Trigger a tool call with a larger output, for example:
    ```text
-   list the public modules exported by crates/tui/src/lib.rs and show the command you used
+   list the public modules exported by crates/neo-tui/src/lib.rs and show the command you used
    ```
 8. Toggle tool expansion with the final keybinding documented in Task 19.
 9. Verify collapsed cards show a bounded preview and expanded cards show additional output without losing native scrollback.
@@ -3215,10 +3215,10 @@ Do not claim manual smoke passed unless it was actually run in a real terminal.
 ## Task 21: Final Code Review Pass Before Handoff
 
 **Files:**
-- Inspect: `crates/tui/src/core/*.rs`
-- Inspect: `crates/tui/src/transcript/*.rs`
-- Inspect: `crates/tui/src/streaming.rs`
-- Inspect: `crates/tui/src/runtime.rs`
+- Inspect: `crates/neo-tui/src/core/*.rs`
+- Inspect: `crates/neo-tui/src/transcript/*.rs`
+- Inspect: `crates/neo-tui/src/streaming.rs`
+- Inspect: `crates/neo-tui/src/runtime.rs`
 - Inspect: `crates/neo-agent/src/modes/interactive.rs`
 - Inspect: `docs/gap/tui.md`
 
@@ -3228,10 +3228,10 @@ Run:
 
 ```bash
 grep -R "T[B]D\|T[O]DO\|F[I]XME\|implement [l]ater\|st[u]b\|place[h]older" -n \
-  crates/tui/src/core \
-  crates/tui/src/transcript \
-  crates/tui/src/streaming.rs \
-  crates/tui/src/runtime.rs \
+  crates/neo-tui/src/core \
+  crates/neo-tui/src/transcript \
+  crates/neo-tui/src/streaming.rs \
+  crates/neo-tui/src/runtime.rs \
   crates/neo-agent/src/modes/interactive.rs \
   docs/gap/tui.md || true
 ```
@@ -3249,7 +3249,7 @@ If output appears in new code, either remove the incomplete marker or replace it
 Run:
 
 ```bash
-grep -R "StreamingUIController\|ProcessTerminal\|pi-tui\|kimi-code/apps" -n crates/tui/src crates/neo-agent/src || true
+grep -R "StreamingUIController\|ProcessTerminal\|pi-tui\|kimi-code/apps" -n crates/neo-tui/src crates/neo-agent/src || true
 ```
 
 Expected:
@@ -3265,7 +3265,7 @@ If implementation copied TypeScript names that do not fit Rust conventions, rena
 Run:
 
 ```bash
-grep -R "render_live_region\|commit_rows\|render_output" -n crates/tui/src crates/neo-agent/src
+grep -R "render_live_region\|commit_rows\|render_output" -n crates/neo-tui/src crates/neo-agent/src
 ```
 
 Verify these boundaries manually:
@@ -3285,7 +3285,7 @@ If `interactive.rs` directly filters transcript history by terminal height, remo
 Run:
 
 ```bash
-grep -R "MAX_PROGRESS_LINES\|MAX_LIVE_OUTPUT_CHARS\|RESULT_PREVIEW_LINES\|COMMAND_PREVIEW_LINES" -n crates/tui/src/transcript crates/tui/src/streaming.rs
+grep -R "MAX_PROGRESS_LINES\|MAX_LIVE_OUTPUT_CHARS\|RESULT_PREVIEW_LINES\|COMMAND_PREVIEW_LINES" -n crates/neo-tui/src/transcript crates/neo-tui/src/streaming.rs
 ```
 
 Expected constants or equivalent values:
@@ -3304,7 +3304,7 @@ If names differ, ensure the values and behavior match: running cards must not gr
 Run:
 
 ```bash
-sed -n '1,140p' crates/tui/src/lib.rs
+sed -n '1,140p' crates/neo-tui/src/lib.rs
 ```
 
 Expected export shape:

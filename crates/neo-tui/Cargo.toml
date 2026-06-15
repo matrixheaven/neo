@@ -1,5 +1,5 @@
 [package]
-name = "neo-extensions"
+name = "neo-tui"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -7,15 +7,16 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-neo-sdk = { path = "../sdk" }
+crossterm.workspace = true
+neo-agent-core = { path = "../neo-agent-core" }
+pulldown-cmark.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
+syntect.workspace = true
 tokio.workspace = true
-toml.workspace = true
+unicode-width = "0.2.0"
 
 [dev-dependencies]
-tempfile.workspace = true
 
 [lints]
 workspace = true

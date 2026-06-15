@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "crates/ai",
-    "crates/agent-core",
-    "crates/sdk",
-    "crates/extensions",
-    "crates/tui",
+    "crates/neo-ai",
+    "crates/neo-agent-core",
+    "crates/neo-sdk",
+    "crates/neo-extensions",
+    "crates/neo-tui",
     "crates/neo-agent",
     "examples/rust",
     "xtask"

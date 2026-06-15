@@ -14,7 +14,7 @@ fn tool_call_renders_running_header_and_key_arg() {
     let mut card = ToolCallComponent::new(ToolCallState {
         id: "tool-1".to_owned(),
         name: "Read".to_owned(),
-        arguments: Some(r#"{"path":"crates/tui/src/app.rs"}"#.to_owned()),
+        arguments: Some(r#"{"path":"crates/neo-tui/src/app.rs"}"#.to_owned()),
         result: None,
         details: None,
         status: ToolStatusKind::Running,
@@ -24,7 +24,7 @@ fn tool_call_renders_running_header_and_key_arg() {
     let rows = plain(card.render(80));
     assert!(
         rows.iter()
-            .any(|line| line.contains("● Using Read (crates/tui/src/app.rs)"))
+            .any(|line| line.contains("● Using Read (crates/neo-tui/src/app.rs)"))
     );
     assert_eq!(card.finalization(), Finalization::Live);
 }

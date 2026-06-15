@@ -436,7 +436,7 @@ fn running_tool_call_is_rendered_in_transcript_before_finish() {
         turn: 1,
         id: "tool-1".to_owned(),
         name: "list".to_owned(),
-        arguments: serde_json::json!({ "path": "crates/tui/src" }),
+        arguments: serde_json::json!({ "path": "crates/neo-tui/src" }),
     });
 
     assert_eq!(
@@ -457,7 +457,7 @@ fn running_tool_call_is_rendered_in_transcript_before_finish() {
         }) if name == "list"
             && status == &neo_tui::ToolStatusKind::Running
             && tool_run.arguments.as_deref().is_some_and(|arguments| {
-                arguments.contains("crates/tui/src")
+                arguments.contains("crates/neo-tui/src")
             })
     ));
 

@@ -9,9 +9,9 @@ Design approved. Awaiting implementation plan.
 In Neo's interactive TUI, every in-flight tool call currently renders as a duplicated orange-yellow line:
 
 ```text
-● Use bash(find crates/ai/src -name '*.rs' -type f 2>/dev/null | sort)      running
-● Use bash(find crates/agent-core/src -name '*.rs' -type f 2>/dev/null | sort)      running
-● Use bash(find crates/sdk/src -name '*.rs' -type f 2>/dev/null | sort)      running
+● Use bash(find crates/neo-ai/src -name '*.rs' -type f 2>/dev/null | sort)      running
+● Use bash(find crates/neo-agent-core/src -name '*.rs' -type f 2>/dev/null | sort)      running
+● Use bash(find crates/neo-sdk/src -name '*.rs' -type f 2>/dev/null | sort)      running
 ```
 
 These lines accumulate because the rendering layer appends a fresh "running" row on each frame instead of updating a single stateful card in place. The result is noisy, wastes vertical space, and obscures the actual transcript.
@@ -46,9 +46,9 @@ Replace the duplicated "Use XXXX running" lines with a single stateful tool-call
 The header is exactly one terminal line. It updates in place.
 
 ```text
-● Using Read (crates/tui/src/components.rs)
+● Using Read (crates/neo-tui/src/components.rs)
 ● Using Bash (find crates -name '*.rs' | sort)
-✓ Used Read (crates/tui/src/components.rs) · 128 lines
+✓ Used Read (crates/neo-tui/src/components.rs) · 128 lines
 ✗ Failed Bash (cargo test -p neo-tui) · exit 101
 ⊘ Cancelled Read (large.log)
 ```
@@ -76,7 +76,7 @@ Color mapping:
 ### Card Anatomy
 
 ```text
-● Using Read (crates/tui/src/components.rs)
+● Using Read (crates/neo-tui/src/components.rs)
   use ratatui::{
       widgets::{Block, Borders, Paragraph, Wrap},
       style::{Color, Style, Modifier},
@@ -92,7 +92,7 @@ Color mapping:
 ### Collapsed Finished Card
 
 ```text
-✓ Used Read (crates/tui/src/components.rs) · 128 lines
+✓ Used Read (crates/neo-tui/src/components.rs) · 128 lines
   pub fn render_transcript(...) {
       let rows = build_rows(transcript);
       widget.render(area, buf);
@@ -115,7 +115,7 @@ Live output is capped to the last 3 lines and is cleared when the final result a
 ```text
 ✗ Failed Bash (cargo test -p neo-tui) · exit 101
   error[E0061]: this method takes 2 arguments but 1 argument was supplied
-    --> crates/tui/src/components.rs:612:14
+    --> crates/neo-tui/src/components.rs:612:14
   ... (8 more lines, ctrl+o to expand)
 ```
 
@@ -233,7 +233,7 @@ The argument is one-lined and truncated to fit the header width.
 
 ## Testing
 
-- Unit tests in `crates/tui/tests/primitives.rs` update expected header strings from `● Use read(` to `● Using Read` and assert no duplicate "running" suffix.
+- Unit tests in `crates/neo-tui/tests/primitives.rs` update expected header strings from `● Use read(` to `● Using Read` and assert no duplicate "running" suffix.
 - New tests assert:
   - Header color matches status.
   - Chip appears only when finished.
@@ -243,7 +243,7 @@ The argument is one-lined and truncated to fit the header width.
 
 ## Migration Notes
 
-- Remove `tool_status_suffix` and the old `running`/`pending` suffix strings from `crates/tui/src/components.rs`.
+- Remove `tool_status_suffix` and the old `running`/`pending` suffix strings from `crates/neo-tui/src/components.rs`.
 - Keep `tool_status_symbol` but change its output to the new static symbols.
 - Update `status_style` so that `Running` maps to `theme.accent` instead of `theme.running`.
 - Existing user themes can keep `running`; the new UI ignores it for the running header and uses `accent` instead.
@@ -262,6 +262,6 @@ The argument is one-lined and truncated to fit the header width.
 
 ## References
 
-- Current Neo TUI rendering: `crates/tui/src/components.rs`, `crates/tui/src/app.rs`.
-- Current Neo event handling: `crates/neo-agent/src/modes/interactive.rs`, `crates/agent-core/src/events.rs`.
+- Current Neo TUI rendering: `crates/neo-tui/src/components.rs`, `crates/neo-tui/src/app.rs`.
+- Current Neo event handling: `crates/neo-agent/src/modes/interactive.rs`, `crates/neo-agent-core/src/events.rs`.
 - Reference implementation: `kimi-code/apps/kimi-code/src/tui/components/messages/tool-call.ts`.

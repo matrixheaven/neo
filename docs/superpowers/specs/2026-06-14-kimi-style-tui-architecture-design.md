@@ -15,10 +15,10 @@ Neo currently loses historical TUI content when output exceeds one screen. After
 The root cause is architectural:
 
 1. `crates/neo-agent/src/modes/interactive.rs::NeoTerminal::draw()` calls `render_app_lines(app, cols, rows)`.
-2. `crates/tui/src/app_renderer.rs::render_app_lines()` computes a body height from the current terminal height.
+2. `crates/neo-tui/src/app_renderer.rs::render_app_lines()` computes a body height from the current terminal height.
 3. `render_body()` slices transcript rows to the currently visible row range and clamps them to that body height.
-4. `crates/tui/src/renderer.rs::InlineRenderer::render()` receives only a screen-sized frame, so old rows are already gone before the renderer can emit them into native scrollback.
-5. The existing `committed_count`, `drain_newly_committed()`, and `live_transcript_items()` design in `crates/tui/src/app.rs` is not wired into the active render path.
+4. `crates/neo-tui/src/renderer.rs::InlineRenderer::render()` receives only a screen-sized frame, so old rows are already gone before the renderer can emit them into native scrollback.
+5. The existing `committed_count`, `drain_newly_committed()`, and `live_transcript_items()` design in `crates/neo-tui/src/app.rs` is not wired into the active render path.
 
 As a result, Neo overwrites one screen-sized frame instead of committing finalized history into terminal scrollback.
 
@@ -92,7 +92,7 @@ The main interactive loop should route events into controllers, mark components 
 
 ### Component model
 
-Create a lightweight component system in `crates/tui`:
+Create a lightweight component system in `crates/neo-tui`:
 
 ```rust
 trait Component {
@@ -311,8 +311,8 @@ ToolCallComponent
 Header examples:
 
 ```text
-● Using Read (crates/tui/src/app.rs)
-✓ Used Read (crates/tui/src/app.rs) · 420 lines
+● Using Read (crates/neo-tui/src/app.rs)
+✓ Used Read (crates/neo-tui/src/app.rs) · 420 lines
 ✗ Failed Bash (cargo test -p neo-tui) · exit 101
 ```
 
@@ -360,13 +360,13 @@ The registry prevents `app_renderer.rs::render_tool_lines()` from becoming a lar
 While args are streaming, do not render partial diffs. Render a stable progress line:
 
 ```text
-Preparing changes for crates/tui/src/app.rs... 12.4 KB · 3s elapsed
+Preparing changes for crates/neo-tui/src/app.rs... 12.4 KB · 3s elapsed
 ```
 
 After args finalize, render a clustered diff from `old_string`, `new_string`, and `path`/`file_path`:
 
 ```text
-+12 -4 crates/tui/src/app.rs
++12 -4 crates/neo-tui/src/app.rs
   120   context
   121 - old line
   122 + new line
@@ -407,8 +407,8 @@ Initially implement single read cards. Later, add same-step `ReadGroupComponent`
 
 ```text
 ✓ Read 4 files · 830 lines
-  ├─ crates/tui/src/app.rs · 420 lines
-  ├─ crates/tui/src/renderer.rs · 180 lines
+  ├─ crates/neo-tui/src/app.rs · 420 lines
+  ├─ crates/neo-tui/src/renderer.rs · 180 lines
   └─ ...
 ```
 

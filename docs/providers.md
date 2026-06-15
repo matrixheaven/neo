@@ -210,7 +210,7 @@ values. `neo_agent_core::FakeHarness` wraps the same idea for runtime tests.
 
 ## Adding a Provider
 
-1. Add a provider module under `crates/ai/src/providers`.
+1. Add a provider module under `crates/neo-ai/src/providers`.
 2. Implement `ModelClient` for the adapter.
 3. Register production provider metadata in `ProviderRegistry` when the adapter
    is ready for production resolution.
