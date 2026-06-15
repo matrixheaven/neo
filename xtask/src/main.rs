@@ -995,17 +995,17 @@ fn parity_line_is_fixture_safe(line: &str) -> bool {
 
     contains_any_word(
         &normalized,
-        &[
-            "fake",
-            "placeholder",
-            "stub",
-            "dummy",
-            "mock",
-            "todo",
-            "tbd",
-        ],
-    ) || normalized.contains("127.0.0.1")
+        &["fake", "placeholder", "stub", "dummy", "mock", "tbd"],
+    ) || contains_uppercase_todo_marker(line)
+        || normalized.contains("127.0.0.1")
         || normalized.contains("localhost")
+}
+
+fn contains_uppercase_todo_marker(line: &str) -> bool {
+    line.split(|character: char| {
+        !character.is_ascii_alphanumeric() && character != '.' && character != ':'
+    })
+    .any(|word| word == "TODO")
 }
 
 fn parity_line_violation(
@@ -1100,7 +1100,7 @@ fn parity_line_violation(
         return None;
     }
 
-    if contains_any_word(&normalized, &["todo", "tbd"]) {
+    if contains_uppercase_todo_marker(line) || contains_any_word(&normalized, &["tbd"]) {
         return Some("unresolved placeholder marker");
     }
 

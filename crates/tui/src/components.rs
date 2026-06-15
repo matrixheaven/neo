@@ -452,7 +452,10 @@ fn transcript_render_rows(
                     selected,
                     theme,
                 );
-                for (i, line) in wrap_width(thinking, text_width.saturating_sub(2)).into_iter().enumerate() {
+                for (i, line) in wrap_width(thinking, text_width.saturating_sub(2))
+                    .into_iter()
+                    .enumerate()
+                {
                     let text = if i == 0 {
                         format!("{prefix}{line}")
                     } else {
@@ -593,11 +596,7 @@ fn banner_render_rows(
     theme: TuiTheme,
 ) -> Vec<TranscriptRenderRow> {
     let border_style = selected_style(Style::default().fg(theme.surface_border), selected, theme);
-    let header_style = selected_style(
-        Style::default().fg(theme.header).bold(),
-        selected,
-        theme,
-    );
+    let header_style = selected_style(Style::default().fg(theme.header).bold(), selected, theme);
     let muted_style = selected_style(Style::default().fg(theme.muted), selected, theme);
 
     let inner_width = text_width.saturating_sub(2).max(1);
@@ -1046,11 +1045,7 @@ fn diff_tool_render_rows(
     for hunk in &file.hunks {
         rows.push(TranscriptRenderRow::new(
             format!("  {}", hunk.header),
-            selected_style(
-                Style::default().fg(theme.diff_hunk).bold(),
-                selected,
-                theme,
-            ),
+            selected_style(Style::default().fg(theme.diff_hunk).bold(), selected, theme),
             None,
         ));
         let mut old_line = diff_old_start(&hunk.header).unwrap_or(1);

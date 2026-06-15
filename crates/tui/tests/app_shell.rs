@@ -2,16 +2,135 @@ use neo_tui::{
     AppMode, CommandPaletteState, CommandSpec, ContextWindow, ImageProtocolPreference,
     ImageRenderPolicy, ModelPickerState, NeoTuiApp, Overlay, OverlayKind, PickerItem, Rect,
     SessionPickerState, StreamUpdate, TerminalImageCapabilities, TranscriptLine,
-    TranscriptRenderer, render_app_lines,
+    TranscriptRenderer, runtime_chrome_ansi_lines,
 };
 use std::path::PathBuf;
 
 fn render_app(width: u16, height: u16, app: &NeoTuiApp) -> Vec<String> {
-    let (lines, _cursor) = render_app_lines(app, width, height);
-    lines
+    let (mut transcript, chrome) = render_runtime_shell(width, height, app);
+    transcript.extend(chrome);
+    transcript
+}
+
+fn render_runtime_shell(width: u16, height: u16, app: &NeoTuiApp) -> (Vec<String>, Vec<String>) {
+    let mut runtime = neo_tui::NeoTuiRuntime::new(width.into(), height.into());
+    let layout = neo_tui::app_layout(app, Rect::new(0, 0, width, height));
+    runtime.set_live_chrome_height(usize::from(
+        layout
+            .todo
+            .height
+            .saturating_add(layout.approval.height)
+            .saturating_add(layout.session_picker.height)
+            .saturating_add(layout.prompt.height)
+            .saturating_add(layout.footer.height),
+    ));
+
+    for item in app.transcript().items() {
+        push_runtime_item(&mut runtime, item);
+    }
+    if runtime.transcript().live_entries().is_empty() && app.tool_statuses().is_empty() {
+        runtime.request_render(neo_tui::RenderKind::Incremental);
+    }
+    runtime.render_tick();
+
+    let transcript = runtime
+        .committed_ansi_lines()
+        .into_iter()
+        .chain(runtime.live_ansi_lines())
+        .map(|line| neo_tui::ansi::strip_ansi(&line))
+        .collect();
+    let chrome = runtime_chrome_ansi_lines(app, usize::from(width))
+        .0
         .into_iter()
         .map(|line| neo_tui::ansi::strip_ansi(&line))
-        .collect()
+        .collect();
+    (transcript, chrome)
+}
+
+fn push_runtime_item(runtime: &mut neo_tui::NeoTuiRuntime, item: &neo_tui::TranscriptItem) {
+    match item {
+        neo_tui::TranscriptItem::User { content } => runtime.push_user_message(content),
+        neo_tui::TranscriptItem::Assistant { content, .. } => {
+            runtime.push_assistant_final(content.clone())
+        }
+        neo_tui::TranscriptItem::Tool {
+            name,
+            status,
+            tool_run,
+            ..
+        } => {
+            runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+                turn: 0,
+                id: runtime_tool_id(tool_run),
+                name: name.clone(),
+                arguments: runtime_tool_arguments(tool_run),
+            });
+            if !tool_run.live_output.is_empty() {
+                runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionUpdate {
+                    turn: 0,
+                    id: runtime_tool_id(tool_run),
+                    name: name.clone(),
+                    partial_result: neo_agent_core::ToolResult::ok(tool_run.live_output.join("\n")),
+                });
+            }
+            if matches!(
+                status,
+                neo_tui::ToolStatusKind::Succeeded
+                    | neo_tui::ToolStatusKind::Failed
+                    | neo_tui::ToolStatusKind::Cancelled
+            ) {
+                runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+                    turn: 0,
+                    id: runtime_tool_id(tool_run),
+                    name: name.clone(),
+                    result: neo_agent_core::ToolResult {
+                        content: tool_run.result.clone().unwrap_or_default(),
+                        is_error: *status != neo_tui::ToolStatusKind::Succeeded,
+                        details: tool_run.details.clone(),
+                        terminate: false,
+                    },
+                });
+            }
+        }
+        neo_tui::TranscriptItem::Image { metadata, .. } => runtime.append_notice(metadata.clone()),
+        neo_tui::TranscriptItem::Compaction {
+            compacted_message_count,
+            tokens_before,
+            ..
+        } => runtime.append_notice(format!(
+            "Compacted {compacted_message_count} messages ({tokens_before} tokens)"
+        )),
+        neo_tui::TranscriptItem::Notice { content } => runtime.append_notice(content.clone()),
+        neo_tui::TranscriptItem::Banner {
+            title,
+            session_label,
+            model_label,
+            workspace_root,
+        } => {
+            runtime.push_banner(title.clone());
+            runtime.append_notice(format!("Session: {session_label}"));
+            runtime.append_notice(format!("Model: {model_label}"));
+            runtime.append_notice(format!("Workspace: {}", workspace_root.display()));
+        }
+    }
+}
+
+fn runtime_tool_id(tool_run: &neo_tui::ToolRunTranscript) -> String {
+    format!(
+        "{}:{}",
+        tool_run.name,
+        tool_run.arguments.as_deref().unwrap_or_default()
+    )
+}
+
+fn runtime_tool_arguments(tool_run: &neo_tui::ToolRunTranscript) -> serde_json::Value {
+    tool_run
+        .arguments
+        .as_deref()
+        .and_then(|arguments| serde_json::from_str(arguments).ok())
+        .unwrap_or_else(|| {
+            serde_json::Value::String(tool_run.arguments.clone().unwrap_or_default())
+        })
 }
 
 #[test]
@@ -95,28 +214,20 @@ fn app_shell_footer_has_two_lines_when_tall() {
 }
 
 #[test]
-fn app_shell_footer_collapses_to_status_and_context_on_short_terminal() {
+fn app_shell_renders_chrome_prompt_and_footer_lines_on_short_terminal() {
     let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
 
-    let lines = render_app(100, 10, &app);
-    let last = lines.len().saturating_sub(1);
+    let (_, chrome) = render_runtime_shell(100, 10, &app);
 
-    assert!(
-        lines[last].contains("[ask]"),
-        "single-line footer should still show status badge:\n{}",
-        lines.join("\n")
-    );
-    assert!(
-        lines[last].contains("ctx 12k/200k"),
-        "single-line footer should show context on the right:\n{}",
-        lines.join("\n")
-    );
-    assert!(
-        !lines[last].contains("enter send"),
-        "single-line footer should hide keyboard hints:\n{}",
-        lines.join("\n")
-    );
+    assert!(chrome.len() >= 5);
+    let footer_row = &chrome[chrome.len() - 2];
+    let hint_row = &chrome[chrome.len() - 1];
+    assert!(footer_row.contains("[ask]"));
+    assert!(footer_row.contains("ctx 12k/200k"));
+    assert!(hint_row.contains("enter send"));
+    assert!(hint_row.contains("/ commands"));
+    assert!(chrome.iter().any(|line| line.starts_with("┌")));
 }
 
 #[test]
@@ -224,9 +335,7 @@ fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
     let footer_lines = &lines[status_row.min(hint_row)..=status_row.max(hint_row)];
     assert!(!footer_lines.iter().any(|line| line.contains("neo  ")));
     assert!(
-        !footer_lines
-            .iter()
-            .any(|line| line.contains(" new ")),
+        !footer_lines.iter().any(|line| line.contains(" new ")),
         "session label should not leak into footer"
     );
     assert!(
@@ -238,26 +347,33 @@ fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
 }
 
 #[test]
-fn app_shell_syncs_transcript_view_to_keep_tail_visible_in_small_viewports() {
-    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
+fn app_shell_runtime_bounds_live_rows_to_keep_tail_visible_in_small_viewports() {
+    let mut runtime = neo_tui::NeoTuiRuntime::new(80, 12);
+    runtime.set_live_chrome_height(5);
     for index in 0..36 {
-        app.transcript_mut()
-            .push(neo_tui::TranscriptItem::notice(format!(
-                "history line {index}"
-            )));
+        runtime.start_assistant_message();
+        runtime.append_assistant_delta(&format!("history line {index}"));
     }
 
-    app.sync_transcript_view_for_area(Rect::new(0, 0, 80, 12));
+    let output = runtime.render_output().expect("render output");
+    let lines: Vec<String> = output
+        .live
+        .iter()
+        .map(|line| neo_tui::ansi::strip_ansi(&line.to_ansi()))
+        .collect();
 
-    let lines = render_app(80, 12, &app);
     assert!(
         lines.iter().any(|line| line.contains("history line 35")),
-        "latest transcript row should remain visible after the body overflows:\n{}",
+        "latest runtime live row should remain visible after the body overflows:\n{}",
         lines.join("\n")
     );
     assert!(
-        !lines.iter().any(|line| line.contains("history line 0")),
-        "oldest row should be clipped from the viewport once tail-follow is synced"
+        lines
+            .iter()
+            .filter(|line| line.contains("history line "))
+            .count()
+            < 36,
+        "runtime should not keep all live rows visible once the live region overflows"
     );
 }
 

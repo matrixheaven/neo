@@ -30,6 +30,7 @@ api_key_env = "GEMINI_API_KEY"
 [providers.openrouter]
 type = "openai-compatible"
 base_url = "https://openrouter.ai/api/v1"
+# xtask-parity: allow fake-token-example - documented placeholder, not a real credential.
 api_key = "sk-or-v1-xxxxxxxxxxxxxxxx"
 
 # Local LLM (Ollama)

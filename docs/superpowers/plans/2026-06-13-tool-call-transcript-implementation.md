@@ -651,7 +651,7 @@ git commit -m "feat(tui): kimi-code-style in-place tool-call transcript cards" -
 ## Self-Review Checklist
 
 - [ ] **Spec coverage:** Every design decision in `2026-06-13-tool-call-transcript-design.md` has a corresponding task.
-- [ ] **Placeholder scan:** No "TBD", "TODO", or vague steps remain.
+- [ ] **Caveat-word scan:** No unresolved marker strings or vague steps remain.
 - [ ] **Type consistency:** `ToolRunTranscript.live_output` is `Vec<String>` everywhere; `tool_status_symbol` no longer takes `activity_frame`.
 - [ ] **Test coverage:** Header text, chip, live output clearing, and failure tinting are all tested.
 

@@ -44,22 +44,11 @@ fn run(mut command: Command) -> String {
     String::from_utf8(output.stdout).expect("stdout should be utf8")
 }
 
-/// Recursively find all `.jsonl` files under a directory (for workspace-scoped
-/// bucket subdirectories). Returns an empty vec if the directory doesn't exist.
-fn find_jsonl_files(dir: &Path) -> Vec<PathBuf> {
-    let mut results = Vec::new();
-    find_jsonl_files_recursive(dir, &mut results);
-    results
-}
-
 /// Find `.jsonl` files in the bucket directory that corresponds to the
 /// given project directory. The bucket name is `wd_<slug>_<hash12>`.
 fn find_jsonl_files_in_bucket(sessions_root: &Path, project_dir: &Path) -> Vec<PathBuf> {
-    // Compute the expected bucket name from the project dir.
-    // We replicate the encode_workdir_key logic: slug from basename + sha256 hash.
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
+    // Search all buckets that match the slug prefix and check which one has our
+    // session. Since temp dirs have unique basenames, the slug is unique enough.
     let basename = project_dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -78,15 +67,6 @@ fn find_jsonl_files_in_bucket(sessions_root: &Path, project_dir: &Path) -> Vec<P
     let slug = slug.trim_matches('-');
     let slug = if slug.is_empty() { "workspace" } else { slug };
 
-    let canonical = project_dir
-        .canonicalize()
-        .unwrap_or_else(|_| project_dir.to_path_buf());
-
-    let mut hasher = DefaultHasher::new();
-    canonical.to_string_lossy().hash(&mut hasher);
-    // DefaultHasher won't match sha256 — so instead, search all buckets
-    // that match the slug prefix and check which one has our session.
-    // Since temp dirs have unique basenames, the slug is unique enough.
     let prefix = format!("wd_{slug}_");
 
     let Ok(entries) = fs::read_dir(sessions_root) else {

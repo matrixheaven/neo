@@ -1,6 +1,4 @@
-use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use neo_tui::{
     ChatTranscript, InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager,
     ListMarker, NeoTuiApp, PromptEdit, PromptState, SelectItem, SelectListState, ToolStatusKind,

@@ -99,11 +99,7 @@ impl InlineRenderer {
         let _ = write!(output, "\r\n");
         let _ = output.flush();
 
-        let _ = execute!(
-            output,
-            PopKeyboardEnhancementFlags,
-            DisableBracketedPaste,
-        );
+        let _ = execute!(output, PopKeyboardEnhancementFlags, DisableBracketedPaste,);
         let _ = disable_raw_mode();
     }
 
@@ -461,7 +457,13 @@ mod tests {
         // Content already scrolled: viewport_top = 5
         let prev: Vec<String> = (0..10).map(|i| format!("line{i}")).collect();
         let new: Vec<String> = (0..10)
-            .map(|i| if i == 7 { "CHANGED".to_owned() } else { format!("line{i}") })
+            .map(|i| {
+                if i == 7 {
+                    "CHANGED".to_owned()
+                } else {
+                    format!("line{i}")
+                }
+            })
             .collect();
         let diff = compute_render_diff(&prev, &new, 5, 0, 24);
         assert_eq!(diff.first_changed, 7);

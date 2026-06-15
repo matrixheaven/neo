@@ -5,6 +5,27 @@ Target: `crates/tui`.
 
 ## Implemented high-priority parity
 
+### Kimi-style interactive renderer
+
+Status: Implemented in code. Neo now has a Kimi Code/pi-tui-inspired component-tree runtime, and the normal live TTY path initializes `NeoTuiRuntime` before drawing through the runtime renderer.
+
+Implemented pieces:
+
+- component primitives, containers, transcript entries, mounted tool-call components, and runtime scheduling form the active interactive renderer path;
+- finalized banner, user, assistant, and finished tool-card rows are committed to native terminal scrollback;
+- active assistant/tool/editor/footer rows stay in a bounded live region;
+- tool calls are mounted components that update in place while running, accumulate streamed argument fragments, keep bounded live output, and drain finished cards into committed transcript rows;
+- Edit previews use clustered diffs;
+- Write previews are capped so large files do not resize the live region unpredictably;
+- Bash output keeps a bounded live tail and stores the final output in the finished tool card;
+- replayed user, assistant, historical tool-call, and tool-result session messages are rebuilt through the runtime replay path.
+
+Automated terminal-buffer smoke coverage exercises the remaining real-terminal-adjacent behavior without claiming manual smoke: scrollback commit ordering, full-redraw avoidance, bounded live rows, argument streaming, tool finalization, replayed tool calls/results, and prompt/footer live-region sequencing are verified through pure buffers in `crates/tui/tests/kimi_scrollback.rs`, `crates/tui/tests/kimi_runtime.rs`, and `crates/neo-agent/src/modes/interactive.rs` tests.
+
+The viewport-sliced `render_app_lines` path is removed from interactive rendering. Interactive mode has a single live TTY renderer path through `NeoTuiRuntime`, so finalized transcript history is not split across two maintained renderers.
+
+Tool-card expansion follows Neo's active keybinding table. In the current runtime path, the action mapped to `Ctrl+O` toggles global tool output expansion; `/model` remains the model picker path.
+
 - Prompt editor primitives now support insert, backspace/delete, character movement, word movement, word deletion, and delete-to-line-start/end.
 - Keybinding helpers now expose normalized key IDs, default TUI action mappings, user override resolution, and conflict detection.
 - `neo-agent` now reads `[tui.keybindings]` overrides from project/global
@@ -31,10 +52,10 @@ Target: `crates/tui`.
   into real prompt and overlay primitives for word movement, word deletion,
   delete-to-line-start/end, submit/newline, approval selection up/down,
   overlay page-up/page-down selection, approval confirm, overlay cancel, exit
-  cancel, filesystem-backed prompt Tab completion with literal-tab fallback,
-  prompt undo, kill-ring yank, an internal prompt copy buffer, and live
-  prompt-text copy to the OS clipboard with internal-buffer fallback when the
-  system clipboard is unavailable. In editing mode,
+  cancel, filesystem-backed prompt Tab completion with literal-tab insertion
+  when no completion exists, prompt undo, kill-ring yank, an internal prompt
+  copy buffer, and live prompt-text copy to the OS clipboard with an internal
+  buffer path when the system clipboard is unavailable. In editing mode,
   Up/Down/PageUp/PageDown scroll the transcript viewport.
 - The live interactive loop opens a local session picker with `ctrl+r` or the
   exact `/tree` slash command, using real `SessionMetadataStore` records

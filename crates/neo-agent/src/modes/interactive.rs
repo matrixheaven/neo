@@ -19,19 +19,17 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use crossterm::{
-    event,
-    terminal::size,
-};
+use crossterm::{event, terminal::size};
 use neo_agent_core::{
-    AgentEvent, AgentMessage, PendingQuestion, PermissionDecision, QuestionResponse,
+    AgentEvent, AgentMessage, Content, PendingQuestion, PermissionDecision, QuestionResponse,
+    ToolResult,
     session::{JsonlSessionReader, SessionMetadataStore},
 };
 use neo_tui::{
     ApprovalChoice, ApprovalResult, CommandSpec, ContextWindow, ImageProtocolPreference,
-    ImageRenderPolicy, InlineRenderer, InputEvent, InputParser, KeyId,
-    KeybindingAction, KeybindingsManager, NeoTuiApp, PickerItem, PromptEdit,
-    TerminalImageCapabilities, render_app_lines,
+    ImageRenderPolicy, InlineRenderer, InputEvent, InputParser, KeyId, KeybindingAction,
+    KeybindingsManager, NeoTuiApp, NeoTuiRuntime, PickerItem, PromptEdit,
+    TerminalImageCapabilities,
 };
 
 use tokio::{
@@ -67,6 +65,7 @@ pub fn execute_with_startup(
     let mut controller = controller_for_config(config);
     controller.apply_startup_options(config, options);
     controller.apply_startup_action(startup);
+    controller.ensure_kimi_runtime();
     controller.render_snapshot()
 }
 
@@ -86,7 +85,7 @@ pub async fn execute_tty_with_startup(
     let events = CrosstermEvents::new(controller.keybindings.clone());
     controller
         .run_terminal_loop_with_suspend(
-            |app| terminal.borrow_mut().draw(app),
+            |app, runtime| terminal.borrow_mut().draw_runtime(app, runtime),
             || terminal.borrow_mut().suspend(),
             events,
         )
@@ -96,6 +95,7 @@ pub async fn execute_tty_with_startup(
 
 pub(crate) struct InteractiveController {
     app: NeoTuiApp,
+    kimi_runtime: Option<neo_tui::NeoTuiRuntime>,
     keybindings: KeybindingsManager,
     run_turn: TurnDriver,
     session_items: Vec<PickerItem>,
@@ -376,6 +376,7 @@ impl InteractiveController {
         let workspace_root = workspace_root.into();
         Self {
             app: NeoTuiApp::new(title, session_label, model_label, workspace_root.clone()),
+            kimi_runtime: None,
             keybindings: KeybindingsManager::default(),
             run_turn,
             session_items: catalogs.session_items,
@@ -419,6 +420,7 @@ impl InteractiveController {
 
     pub fn apply_startup_options(&mut self, config: &AppConfig, options: InteractiveOptions) {
         self.app.set_theme(config.theme.theme);
+        self.app.set_permission_decision(config.permissions.shell);
         self.app.set_image_render_policy(ImageRenderPolicy::new(
             config.tui.image_protocol,
             config.tui.fetch_remote_images,
@@ -449,8 +451,19 @@ impl InteractiveController {
             ));
     }
 
+    fn ensure_kimi_runtime(&mut self) {
+        if self.kimi_runtime.is_some() {
+            return;
+        }
+        let (cols, rows) = size().unwrap_or((80, 24));
+        let mut runtime = NeoTuiRuntime::new(usize::from(cols), usize::from(rows));
+        runtime.push_banner(format!("Welcome to {}", self.app.title()));
+        self.kimi_runtime = Some(runtime);
+    }
+
     #[allow(dead_code)]
     pub async fn submit_prompt(&mut self) -> Result<String> {
+        self.ensure_kimi_runtime();
         self.submit_current_prompt().await?;
         self.wait_for_active_turn().await?;
         Ok(self.render_snapshot())
@@ -459,7 +472,17 @@ impl InteractiveController {
     #[cfg(test)]
     pub async fn run_terminal_loop(
         &mut self,
-        render: impl FnMut(&mut NeoTuiApp) -> Result<()>,
+        mut render: impl FnMut(&mut NeoTuiApp) -> Result<()>,
+        events: impl TerminalEvents,
+    ) -> Result<()> {
+        self.run_terminal_loop_with_suspend(|app, _runtime| render(app), || Ok(()), events)
+            .await
+    }
+
+    #[cfg(test)]
+    pub async fn run_terminal_loop_with_runtime(
+        &mut self,
+        render: impl FnMut(&mut NeoTuiApp, &mut neo_tui::NeoTuiRuntime) -> Result<()>,
         events: impl TerminalEvents,
     ) -> Result<()> {
         self.run_terminal_loop_with_suspend(render, || Ok(()), events)
@@ -468,11 +491,16 @@ impl InteractiveController {
 
     async fn run_terminal_loop_with_suspend(
         &mut self,
-        mut render: impl FnMut(&mut NeoTuiApp) -> Result<()>,
+        mut render: impl FnMut(&mut NeoTuiApp, &mut neo_tui::NeoTuiRuntime) -> Result<()>,
         mut suspend: impl FnMut() -> Result<()>,
         mut events: impl TerminalEvents,
     ) -> Result<()> {
-        render(&mut self.app)?;
+        self.ensure_kimi_runtime();
+        let runtime = self
+            .kimi_runtime
+            .as_mut()
+            .expect("NeoTuiRuntime is initialized before rendering");
+        render(&mut self.app, runtime)?;
         loop {
             match events.poll_input_event(Duration::from_millis(50))? {
                 Some(event) => {
@@ -485,19 +513,31 @@ impl InteractiveController {
                             self.wait_for_active_turn().await?;
                         }
                         if had_active_turn {
-                            render(&mut self.app)?;
+                            let runtime = self
+                                .kimi_runtime
+                                .as_mut()
+                                .expect("NeoTuiRuntime remains initialized while rendering");
+                            render(&mut self.app, runtime)?;
                         }
                         break;
                     }
                     if self.take_suspend_requested() {
                         suspend()?;
-                        render(&mut self.app)?;
+                        let runtime = self
+                            .kimi_runtime
+                            .as_mut()
+                            .expect("NeoTuiRuntime remains initialized after suspend");
+                        render(&mut self.app, runtime)?;
                     }
                 }
                 None => tokio::task::yield_now().await,
             }
             self.drain_active_turn().await?;
-            render(&mut self.app)?;
+            let runtime = self
+                .kimi_runtime
+                .as_mut()
+                .expect("NeoTuiRuntime remains initialized while rendering");
+            render(&mut self.app, runtime)?;
         }
         Ok(())
     }
@@ -644,7 +684,11 @@ impl InteractiveController {
                 }
             }
             KeybindingAction::ModelPickerOpen => {
-                if !self.app.toggle_selected_transcript_detail() {
+                let toggled_runtime_tool = self
+                    .kimi_runtime
+                    .as_mut()
+                    .is_some_and(NeoTuiRuntime::toggle_tool_output_expanded);
+                if !toggled_runtime_tool && !self.app.toggle_selected_transcript_detail() {
                     self.open_model_picker();
                 }
             }
@@ -1085,6 +1129,9 @@ impl InteractiveController {
             self.local_config.as_ref(),
             &self.completion_root,
         )?;
+        if let Some(runtime) = &mut self.kimi_runtime {
+            runtime.push_user_message(prompt.clone());
+        }
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (approval_tx, approval_rx) = mpsc::unbounded_channel();
         let (session_id_tx, session_id_rx) = mpsc::unbounded_channel();
@@ -1211,11 +1258,15 @@ impl InteractiveController {
     fn set_active_session_id(&mut self, session_id: String) {
         self.active_session_id = Some(session_id.clone());
         self.app.set_session_label(session_id);
+        self.ensure_kimi_runtime();
     }
 
     fn apply_turn_event(&mut self, event: AgentEvent) {
         if self.always_approve && matches!(event, AgentEvent::ApprovalRequested { .. }) {
             return;
+        }
+        if let Some(runtime) = &mut self.kimi_runtime {
+            runtime.apply_agent_event(event.clone());
         }
         self.app.apply_agent_event(event);
     }
@@ -1354,6 +1405,7 @@ impl InteractiveController {
         let loaded = (self.load_session)(session.value.clone())
             .await
             .with_context(|| format!("failed to load session {}", session.value))?;
+        self.rebuild_kimi_runtime_from_session(&loaded);
         self.app
             .load_session_transcript(loaded.label, loaded.notices, loaded.messages);
         self.active_session_id = Some(session.value);
@@ -1367,6 +1419,7 @@ impl InteractiveController {
         let forked = (self.fork_session)(parent.value.clone())
             .await
             .with_context(|| format!("failed to fork session {}", parent.value))?;
+        self.rebuild_kimi_runtime_from_session(&forked.transcript);
         self.app.load_session_transcript(
             forked.transcript.label,
             forked.transcript.notices,
@@ -1387,6 +1440,7 @@ impl InteractiveController {
             .await
             .with_context(|| format!("failed to fork session {parent_id}"))?;
         let child_id = forked.session_id.clone();
+        self.rebuild_kimi_runtime_from_session(&forked.transcript);
         self.app.load_session_transcript(
             forked.transcript.label,
             forked.transcript.notices,
@@ -1397,6 +1451,14 @@ impl InteractiveController {
             text: format!("Forked session {parent_id} to {child_id}"),
         });
         Ok(())
+    }
+
+    fn rebuild_kimi_runtime_from_session(&mut self, loaded: &LoadedSessionTranscript) {
+        let (cols, rows) = size().unwrap_or((80, 24));
+        let mut runtime = NeoTuiRuntime::new(usize::from(cols), usize::from(rows));
+        runtime.push_banner(format!("Welcome to {}", self.app.title()));
+        replay_session_into_kimi_runtime(&mut runtime, loaded);
+        self.kimi_runtime = Some(runtime);
     }
 
     fn apply_selected_model(&mut self) -> Result<()> {
@@ -1441,8 +1503,12 @@ impl InteractiveController {
 
     #[must_use]
     pub fn render_snapshot(&self) -> String {
-        let mut app = self.app.clone();
-        render_terminal_fallback(&mut app)
+        let mut runtime = self.runtime_snapshot_source();
+        render_runtime_snapshot(&self.app, &mut runtime, 80, 24)
+    }
+
+    fn runtime_snapshot_source(&self) -> NeoTuiRuntime {
+        runtime_from_app_snapshot(&self.app, 80, 24)
     }
 }
 
@@ -2278,32 +2344,26 @@ const PROMPT_COMPLETION_ACTION_PRIORITY: &[KeybindingAction] = &[
 
 struct NeoTerminal {
     renderer: InlineRenderer,
+    runtime_renderer: neo_tui::TerminalRenderer,
 }
 
 impl NeoTerminal {
     fn enter() -> Result<Self> {
         let renderer = InlineRenderer::enter()?;
-        Ok(Self { renderer })
+        let (cols, rows) = size()?;
+        let runtime_renderer = neo_tui::TerminalRenderer::new(usize::from(cols), usize::from(rows));
+        Ok(Self {
+            renderer,
+            runtime_renderer,
+        })
     }
 
-    fn draw(&mut self, app: &mut NeoTuiApp) -> Result<()> {
-        app.advance_activity_frame();
-
-        let (cols, rows) = size()?;
-        if cols == 0 || rows == 0 {
-            return Ok(());
-        }
-
-        // Sync transcript view dimensions
-        app.sync_transcript_view_for_area(neo_tui::Rect::new(0, 0, cols, rows));
-
-        // Render app state to Vec<String> (ANSI-styled lines)
-        let (lines, cursor) = render_app_lines(app, cols, rows);
-
-        // Diff-render to terminal
-        self.renderer.render(lines, cursor)?;
-
-        Ok(())
+    fn draw_runtime(
+        &mut self,
+        app: &NeoTuiApp,
+        runtime: &mut neo_tui::NeoTuiRuntime,
+    ) -> Result<()> {
+        draw_kimi_runtime(&mut self.runtime_renderer, app, runtime)
     }
 
     #[allow(dead_code)]
@@ -2313,10 +2373,76 @@ impl NeoTerminal {
 
     fn reenter(&mut self) -> Result<()> {
         self.renderer.suspend_resume()?;
+        self.runtime_renderer = runtime_renderer_for_terminal_size()?;
         Ok(())
     }
 }
 
+fn runtime_renderer_for_terminal_size() -> Result<neo_tui::TerminalRenderer> {
+    let (cols, rows) = size()?;
+    Ok(neo_tui::TerminalRenderer::new(
+        usize::from(cols),
+        usize::from(rows),
+    ))
+}
+
+fn draw_kimi_runtime(
+    renderer: &mut neo_tui::TerminalRenderer,
+    app: &NeoTuiApp,
+    runtime: &mut neo_tui::NeoTuiRuntime,
+) -> Result<()> {
+    let (cols, rows) = size()?;
+    if cols == 0 || rows == 0 {
+        return Ok(());
+    }
+    renderer.resize(usize::from(cols), usize::from(rows));
+    draw_kimi_runtime_with_writer(renderer, &mut stdout(), app, runtime, cols, rows)
+}
+
+fn draw_kimi_runtime_with_writer<W: std::io::Write>(
+    renderer: &mut neo_tui::TerminalRenderer,
+    writer: &mut W,
+    app: &NeoTuiApp,
+    runtime: &mut neo_tui::NeoTuiRuntime,
+    cols: u16,
+    rows: u16,
+) -> Result<()> {
+    if cols == 0 || rows == 0 {
+        return Ok(());
+    }
+    let width = usize::from(cols);
+    runtime.resize(width, usize::from(rows));
+    renderer.resize(width, usize::from(rows));
+    runtime.request_render(neo_tui::core::RenderKind::Incremental);
+    if let Some(output) = runtime.render_output() {
+        renderer.write_commit(writer, &output.committed)?;
+        let mut live_rows = output.live;
+        let live_count = live_rows.len();
+        let (chrome_lines, cursor) = neo_tui::runtime_chrome_ansi_lines(app, width);
+        let cursor = cursor.map(|cursor| neo_tui::CursorPos {
+            row: live_count + cursor.row,
+            col: cursor.col,
+        });
+        live_rows.extend(chrome_lines.into_iter().map(neo_tui::Line::raw));
+        renderer.write_live_region(writer, &live_rows, cursor)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn render_kimi_runtime_lines(
+    runtime: &mut neo_tui::NeoTuiRuntime,
+    cols: u16,
+    rows: u16,
+) -> Option<Vec<String>> {
+    if cols == 0 || rows == 0 {
+        return None;
+    }
+
+    runtime.resize(usize::from(cols), usize::from(rows));
+    runtime.render_tick();
+    Some(runtime.live_ansi_lines())
+}
 
 impl Drop for NeoTerminal {
     fn drop(&mut self) {
@@ -2652,6 +2778,68 @@ async fn load_session_transcript(
     ))
 }
 
+fn message_content_text(content: &[Content]) -> String {
+    content
+        .iter()
+        .filter_map(Content::as_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn replay_session_into_kimi_runtime(runtime: &mut NeoTuiRuntime, loaded: &LoadedSessionTranscript) {
+    for notice in &loaded.notices {
+        runtime.push_transcript(neo_tui::transcript::TranscriptEntry::notice(notice.clone()));
+    }
+    for message in &loaded.messages {
+        match message {
+            AgentMessage::User { content } => {
+                let text = message_content_text(content);
+                if !text.is_empty() {
+                    runtime.replay_user_message(text);
+                }
+            }
+            AgentMessage::Assistant {
+                content,
+                tool_calls,
+                ..
+            } => {
+                let text = message_content_text(content);
+                if !text.is_empty() {
+                    runtime.replay_assistant_message(text);
+                }
+                for tool_call in tool_calls {
+                    runtime.apply_agent_event(AgentEvent::ToolExecutionStarted {
+                        turn: 0,
+                        id: tool_call.id.clone(),
+                        name: tool_call.name.clone(),
+                        arguments: tool_call.arguments.clone(),
+                    });
+                }
+            }
+            AgentMessage::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                is_error,
+            } => {
+                let text = message_content_text(content);
+                runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
+                    turn: 0,
+                    id: tool_call_id.clone(),
+                    name: tool_name.clone(),
+                    result: ToolResult {
+                        content: text,
+                        is_error: *is_error,
+                        details: None,
+                        terminate: false,
+                    },
+                });
+            }
+            AgentMessage::System { .. } => {}
+        }
+    }
+}
+
 async fn fork_session_transcript(
     parent_id: String,
     config: &AppConfig,
@@ -2665,26 +2853,141 @@ async fn fork_session_transcript(
     Ok(ForkedSessionTranscript::new(child_id, loaded))
 }
 
-fn render_terminal_fallback(app: &mut NeoTuiApp) -> String {
-    let width = 80u16;
-    let height = 24u16;
+fn render_runtime_snapshot(
+    app: &NeoTuiApp,
+    runtime: &mut NeoTuiRuntime,
+    width: usize,
+    height: usize,
+) -> String {
+    runtime.resize(width, height);
+    runtime.request_render(neo_tui::core::RenderKind::Incremental);
+    let _ = runtime.render_output();
 
-    app.sync_transcript_view_for_area(neo_tui::Rect::new(0, 0, width, height));
-
-    let (lines, _cursor) = render_app_lines(app, width, height);
-    let text = lines
-        .iter()
-        .map(|l| {
-            // Strip ANSI for plain-text fallback
-            let stripped = neo_tui::ansi::strip_ansi(l);
-            stripped.trim_end().to_owned()
-        })
+    let mut lines = runtime
+        .committed_ansi_lines()
+        .into_iter()
+        .chain(runtime.live_ansi_lines())
+        .map(|line| neo_tui::ansi::strip_ansi(&line).trim_end().to_owned())
+        .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
-    format!("{}\n", text.join("\n").trim_end())
+    lines.extend(render_runtime_overlay_snapshot(app, width));
+    format!("{}\n", lines.join("\n").trim_end())
+}
+
+fn runtime_from_app_snapshot(app: &NeoTuiApp, width: usize, height: usize) -> NeoTuiRuntime {
+    let mut runtime = NeoTuiRuntime::new(width, height);
+    for item in app.transcript().items() {
+        match item {
+            neo_tui::TranscriptItem::User { content } => runtime.replay_user_message(content),
+            neo_tui::TranscriptItem::Assistant { content, .. } => {
+                runtime.replay_assistant_message(content);
+            }
+            neo_tui::TranscriptItem::Notice { content } => runtime.append_notice(content),
+            neo_tui::TranscriptItem::Tool {
+                name,
+                detail,
+                status,
+                tool_run,
+            } => replay_transcript_tool_item(&mut runtime, name, detail, *status, tool_run),
+            neo_tui::TranscriptItem::Image { metadata, .. } => runtime.append_notice(metadata),
+            neo_tui::TranscriptItem::Compaction {
+                compacted_message_count,
+                tokens_before,
+                ..
+            } => runtime.append_notice(format!(
+                "Compaction: {compacted_message_count} messages · {tokens_before} tokens"
+            )),
+            neo_tui::TranscriptItem::Banner {
+                title,
+                session_label,
+                model_label,
+                ..
+            } => {
+                runtime.push_banner(title);
+                runtime.append_notice(format!("Session: {session_label}"));
+                runtime.append_notice(format!("Model: {model_label}"));
+            }
+        }
+    }
+    runtime
+}
+
+fn replay_transcript_tool_item(
+    runtime: &mut NeoTuiRuntime,
+    name: &str,
+    detail: &str,
+    status: neo_tui::ToolStatusKind,
+    tool_run: &neo_tui::ToolRunTranscript,
+) {
+    let id = format!(
+        "snapshot-tool-{}",
+        runtime.transcript().live_entries().len()
+    );
+    let arguments_value = tool_run
+        .arguments
+        .as_deref()
+        .map(|s| {
+            serde_json::from_str::<serde_json::Value>(s)
+                .unwrap_or(serde_json::Value::String(s.to_owned()))
+        })
+        .unwrap_or_else(|| serde_json::Value::String(detail.to_owned()));
+    runtime.apply_agent_event(AgentEvent::ToolExecutionStarted {
+        turn: 0,
+        id: id.clone(),
+        name: name.to_owned(),
+        arguments: arguments_value,
+    });
+    if matches!(
+        status,
+        neo_tui::ToolStatusKind::Succeeded | neo_tui::ToolStatusKind::Failed
+    ) {
+        runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
+            turn: 0,
+            id,
+            name: name.to_owned(),
+            result: ToolResult {
+                content: tool_run.display_detail(),
+                is_error: matches!(status, neo_tui::ToolStatusKind::Failed),
+                details: None,
+                terminate: false,
+            },
+        });
+    }
+}
+
+fn render_runtime_overlay_snapshot(app: &NeoTuiApp, width: usize) -> Vec<String> {
+    let mut lines = match app.focused_overlay().map(|overlay| &overlay.kind) {
+        Some(neo_tui::OverlayKind::SessionPicker(picker)) => {
+            render_picker_snapshot("Sessions", picker, width)
+        }
+        Some(neo_tui::OverlayKind::ModelPicker(picker)) => {
+            render_picker_snapshot("Models", picker, width)
+        }
+        Some(neo_tui::OverlayKind::CommandPalette(_)) => vec!["Commands".to_owned()],
+        Some(neo_tui::OverlayKind::PromptCompletion(_)) => vec!["Completions".to_owned()],
+        Some(neo_tui::OverlayKind::Message(message)) => vec![message.clone()],
+        Some(neo_tui::OverlayKind::Approval(_) | neo_tui::OverlayKind::QuestionDialog(_))
+        | None => Vec::new(),
+    };
+    lines.extend(
+        neo_tui::runtime_chrome_ansi_lines(app, width)
+            .0
+            .into_iter()
+            .map(|line| neo_tui::ansi::strip_ansi(&line).trim_end().to_owned()),
+    );
+    lines
+}
+
+fn render_picker_snapshot(title: &str, picker: &neo_tui::PickerState, width: usize) -> Vec<String> {
+    let mut lines = vec![title.to_owned()];
+    lines.extend(picker.render_lines(width));
+    lines
 }
 
 #[cfg(test)]
 mod tests {
+    use neo_tui::transcript::TranscriptEntry;
+
     use std::{
         collections::BTreeMap,
         fs,
@@ -2699,6 +3002,152 @@ mod tests {
 
     fn test_workspace_root() -> PathBuf {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    }
+
+    #[test]
+    fn kimi_runtime_bridge_exposes_live_rows_without_replacing_default_draw_path() {
+        let mut runtime = neo_tui::NeoTuiRuntime::new(80, 12);
+        runtime.push_transcript(TranscriptEntry::tool_call_running("Bash", "cargo test"));
+
+        let lines =
+            render_kimi_runtime_lines(&mut runtime, 80, 12).expect("non-zero terminal size");
+
+        assert!(lines.iter().any(|line| line.contains("Using Bash")));
+        assert_eq!(render_kimi_runtime_lines(&mut runtime, 0, 12), None);
+    }
+
+    #[test]
+    fn kimi_runtime_draw_uses_one_terminal_renderer_for_commit_and_live_rows() {
+        let mut app = NeoTuiApp::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+        );
+        app.prompt_mut().text = "next".to_owned();
+        app.prompt_mut().cursor = 4;
+        let mut runtime = neo_tui::NeoTuiRuntime::new(80, 12);
+        runtime.push_banner("Welcome to neo");
+        runtime.push_transcript(TranscriptEntry::tool_call_running("Bash", "cargo test"));
+        let mut renderer = neo_tui::TerminalRenderer::new(80, 12);
+        let mut output = Vec::new();
+
+        draw_kimi_runtime_with_writer(&mut renderer, &mut output, &app, &mut runtime, 80, 12)
+            .expect("runtime draw writes to buffer");
+
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("Welcome to neo"));
+        assert!(output.contains("Using Bash"));
+        assert!(output.contains("\r\nWelcome to neo\x1b[?2026h\r\n\x1b[2K"));
+        assert!(!output.contains("Welcome to neo\x1b[?2026h\x1b[2K"));
+        assert!(
+            renderer
+                .committed_rows()
+                .contains(&neo_tui::Line::raw("Welcome to neo"))
+        );
+        assert!(
+            renderer
+                .live_rows()
+                .iter()
+                .any(|line| line.to_ansi().contains("Using Bash"))
+        );
+    }
+
+    #[test]
+    fn kimi_runtime_draw_replays_finished_tool_to_scrollback_before_prompt_chrome() {
+        let mut app = NeoTuiApp::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+        );
+        app.prompt_mut().text = "next".to_owned();
+        app.prompt_mut().cursor = 4;
+        let transcript = LoadedSessionTranscript::new(
+            "alpha",
+            Vec::new(),
+            [
+                AgentMessage::user_text("inspect"),
+                AgentMessage::assistant(
+                    [Content::text("reading")],
+                    [neo_agent_core::AgentToolCall {
+                        id: "tool-1".to_owned(),
+                        name: "Read".to_owned(),
+                        arguments: serde_json::json!({ "path": "README.md" }),
+                    }],
+                    StopReason::ToolUse,
+                ),
+                AgentMessage::tool_result(
+                    "tool-1",
+                    "Read",
+                    [Content::text("README contents")],
+                    false,
+                ),
+            ],
+        );
+        let mut runtime = neo_tui::NeoTuiRuntime::new(80, 12);
+        runtime.push_banner("Welcome to neo");
+        replay_session_into_kimi_runtime(&mut runtime, &transcript);
+        let mut renderer = neo_tui::TerminalRenderer::new(80, 12);
+        let mut output = Vec::new();
+
+        draw_kimi_runtime_with_writer(&mut renderer, &mut output, &app, &mut runtime, 80, 12)
+            .expect("runtime draw writes replay into buffer");
+
+        let output = String::from_utf8(output).expect("utf8");
+        let welcome = output.find("Welcome to neo").expect("welcome committed");
+        let prompt = output.find("> next").expect("prompt chrome live row");
+        let tool = output
+            .find("Used Read (README.md)")
+            .expect("tool committed");
+        assert!(welcome < tool);
+        assert!(tool < prompt);
+        assert!(!output.contains("Using Read"));
+        assert!(!output.contains("\x1b[2J"));
+        assert!(renderer.committed_rows().iter().any(|line| {
+            neo_tui::ansi::strip_ansi(&line.to_ansi()).contains("Used Read (README.md)")
+        }));
+        assert!(
+            renderer
+                .live_rows()
+                .iter()
+                .any(|line| { neo_tui::ansi::strip_ansi(&line.to_ansi()).contains("> next") })
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_snapshot_uses_runtime_tool_card_rendering() {
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move {
+                Ok(vec![
+                    AgentEvent::ToolExecutionStarted {
+                        turn: 1,
+                        id: "tool-1".to_owned(),
+                        name: "Read".to_owned(),
+                        arguments: serde_json::json!({ "path": "README.md" }),
+                    },
+                    AgentEvent::ToolExecutionFinished {
+                        turn: 1,
+                        id: "tool-1".to_owned(),
+                        name: "Read".to_owned(),
+                        result: ToolResult::ok("line one\nline two"),
+                    },
+                ])
+            },
+        );
+
+        controller.type_text("inspect");
+        let snapshot = controller.submit_prompt().await.expect("prompt succeeds");
+
+        assert!(
+            snapshot.contains("✓ Used Read (README.md)"),
+            "runtime snapshot should include finalized tool card, got:\n{snapshot}"
+        );
+        assert!(snapshot.contains("> "));
     }
 
     #[tokio::test]
@@ -2797,9 +3246,9 @@ mod tests {
         );
 
         controller
-            .run_terminal_loop(
-                |app| {
-                    rendered.push(render_terminal_fallback(app));
+            .run_terminal_loop_with_runtime(
+                |app, runtime| {
+                    rendered.push(render_runtime_snapshot(app, runtime, 80, 24));
                     Ok(())
                 },
                 FakeEvents {
@@ -2906,7 +3355,8 @@ mod tests {
         controller
             .run_terminal_loop(
                 |app| {
-                    rendered.push(render_terminal_fallback(app));
+                    let mut runtime = runtime_from_app_snapshot(app, 80, 24);
+                    rendered.push(render_runtime_snapshot(app, &mut runtime, 80, 24));
                     Ok(())
                 },
                 FakeEvents {
@@ -2956,7 +3406,8 @@ mod tests {
         controller
             .run_terminal_loop(
                 |app| {
-                    rendered.push(render_terminal_fallback(app));
+                    let mut runtime = runtime_from_app_snapshot(app, 80, 24);
+                    rendered.push(render_runtime_snapshot(app, &mut runtime, 80, 24));
                     Ok(())
                 },
                 FakeEvents {
@@ -3509,7 +3960,10 @@ mod tests {
             }
 
             fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
-                Ok(self.events.pop_front().unwrap_or(Some(InputEvent::Interrupt)))
+                Ok(self
+                    .events
+                    .pop_front()
+                    .unwrap_or(Some(InputEvent::Interrupt)))
             }
         }
 
@@ -4432,6 +4886,7 @@ command = "python3"
             empty_session_loader,
         );
 
+        controller.ensure_kimi_runtime();
         controller
             .handle_input_event(InputEvent::Action(KeybindingAction::ModelPickerOpen))
             .await
@@ -4815,7 +5270,10 @@ command = "python3"
             }
 
             fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
-                Ok(self.events.pop_front().unwrap_or(Some(InputEvent::Interrupt)))
+                Ok(self
+                    .events
+                    .pop_front()
+                    .unwrap_or(Some(InputEvent::Interrupt)))
             }
         }
 
@@ -4907,7 +5365,10 @@ command = "python3"
             }
 
             fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
-                Ok(self.events.pop_front().unwrap_or(Some(InputEvent::Interrupt)))
+                Ok(self
+                    .events
+                    .pop_front()
+                    .unwrap_or(Some(InputEvent::Interrupt)))
             }
         }
 
@@ -4974,7 +5435,10 @@ command = "python3"
             }
 
             fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
-                Ok(self.events.pop_front().unwrap_or(Some(InputEvent::Interrupt)))
+                Ok(self
+                    .events
+                    .pop_front()
+                    .unwrap_or(Some(InputEvent::Interrupt)))
             }
         }
 
@@ -5053,6 +5517,51 @@ command = "python3"
         assert!(token.is_cancelled());
         assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
         assert_eq!(controller.app().active_assistant_id(), None);
+    }
+
+    #[test]
+    fn rebuild_kimi_runtime_from_session_replays_tool_calls_and_results() {
+        let mut runtime = NeoTuiRuntime::new(80, 12);
+        let transcript = LoadedSessionTranscript::new(
+            "alpha",
+            ["branch summary: inspected project".to_owned()],
+            [
+                AgentMessage::user_text("inspect"),
+                AgentMessage::assistant(
+                    [Content::text("reading")],
+                    [neo_agent_core::AgentToolCall {
+                        id: "tool-1".to_owned(),
+                        name: "Read".to_owned(),
+                        arguments: serde_json::json!({ "path": "README.md" }),
+                    }],
+                    StopReason::ToolUse,
+                ),
+                AgentMessage::tool_result(
+                    "tool-1",
+                    "Read",
+                    [Content::text("README contents")],
+                    false,
+                ),
+            ],
+        );
+
+        replay_session_into_kimi_runtime(&mut runtime, &transcript);
+        let output = runtime.render_output().expect("render output");
+        let rendered = output
+            .committed
+            .iter()
+            .chain(output.live.iter())
+            .map(neo_tui::core::Line::to_ansi)
+            .map(|line| neo_tui::ansi::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("branch summary: inspected project"));
+        assert!(rendered.contains("inspect"));
+        assert!(rendered.contains("reading"));
+        assert!(rendered.contains("Used Read (README.md)"));
+        assert!(rendered.contains("README contents"));
+        assert!(!rendered.contains("Using Read"));
     }
 
     #[tokio::test]

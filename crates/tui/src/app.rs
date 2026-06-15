@@ -5,12 +5,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use neo_agent_core::{AgentEvent, AgentMessage, CompactionPhase, Content, ImageRef};
 use crate::ansi::{Color, Rect};
+use neo_agent_core::{
+    AgentEvent, AgentMessage, CompactionPhase, Content, ImageRef, PermissionDecision,
+};
 
 use crate::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities, TodoDisplayItem,
-    TodoDisplayStatus, app_layout,
+    TodoDisplayStatus, TranscriptWidget, app_layout,
     widgets::{QuestionDialogAction, QuestionResult, QuestionStateMachine},
 };
 
@@ -319,10 +321,6 @@ pub struct NeoTuiApp {
     transcript_view: TranscriptView,
     transcript_selection: Option<TranscriptSelection>,
     expanded_transcript_items: BTreeSet<usize>,
-    /// Number of transcript items already pushed to terminal scrollback via
-    /// `insert_before`. Items `[0, committed_count)` are in scrollback.
-    /// Items `[committed_count, len)` are live (rendered in the viewport).
-    committed_count: usize,
     prompt: PromptState,
     copy_buffer: Option<String>,
     mode: AppMode,
@@ -339,6 +337,7 @@ pub struct NeoTuiApp {
     image_render_policy: ImageRenderPolicy,
     image_capabilities: TerminalImageCapabilities,
     theme: TuiTheme,
+    permission_decision: PermissionDecision,
     /// Current agent mode indicator (for footer display)
     plan_mode_active: bool,
     /// Current todo list for the TodoPanel.
@@ -364,7 +363,6 @@ impl NeoTuiApp {
             transcript_view: TranscriptView::new(),
             transcript_selection: None,
             expanded_transcript_items: BTreeSet::new(),
-            committed_count: 0,
             prompt: PromptState::default(),
             copy_buffer: None,
             mode: AppMode::Editing,
@@ -381,6 +379,7 @@ impl NeoTuiApp {
             image_render_policy: ImageRenderPolicy::default(),
             image_capabilities: TerminalImageCapabilities::default(),
             theme: TuiTheme::default(),
+            permission_decision: PermissionDecision::Ask,
             plan_mode_active: false,
             todo_items: Vec::new(),
         }
@@ -431,10 +430,22 @@ impl NeoTuiApp {
         matches!(self.mode, AppMode::Streaming).then(|| "working · esc interrupt".to_owned())
     }
 
-    /// TODO: placeholder until `NeoTuiApp` stores actual permission state.
+    #[must_use]
+    pub fn permission_decision(&self) -> PermissionDecision {
+        self.permission_decision
+    }
+
+    pub fn set_permission_decision(&mut self, decision: PermissionDecision) {
+        self.permission_decision = decision;
+    }
+
     #[must_use]
     pub fn permission_badge(&self) -> (&'static str, Color) {
-        ("ask", self.theme().footer_permission_ask)
+        match self.permission_decision {
+            PermissionDecision::Allow => ("allow", self.theme().footer_permission_allow),
+            PermissionDecision::Ask => ("ask", self.theme().footer_permission_ask),
+            PermissionDecision::Deny => ("deny", self.theme().footer_permission_deny),
+        }
     }
 
     #[must_use]
@@ -646,63 +657,16 @@ impl NeoTuiApp {
 
     pub fn sync_transcript_view_for_area(&mut self, area: Rect) {
         let body = app_layout(self, area.into()).body;
-        // Use the unified render_transcript_rows() for row counting —
-        // same function that produces actual display output.
-        let content_rows = crate::app_renderer::render_transcript_rows(self, usize::from(body.width)).len();
+        let content_rows = TranscriptWidget::new(&self.transcript)
+            .with_selection(self.transcript_selection.as_ref())
+            .with_expanded_items(&self.expanded_transcript_items)
+            .with_theme(self.theme)
+            .row_count(body.width);
         self.transcript_view
             .sync(content_rows, usize::from(body.height));
     }
 
-    // ── Inline viewport: committed item management ──
-
-    /// Returns `true` if the transcript item at `index` is finalized (ready to
-    /// be pushed to scrollback).
-    #[must_use]
-    fn is_item_finalized(&self, index: usize) -> bool {
-        let Some(item) = self.transcript.items().get(index) else {
-            return false;
-        };
-        match item {
-            TranscriptItem::User { .. }
-            | TranscriptItem::Notice { .. }
-            | TranscriptItem::Banner { .. }
-            | TranscriptItem::Compaction { .. }
-            | TranscriptItem::Image { .. } => true,
-            TranscriptItem::Assistant { .. } => {
-                // Finalized if not the currently-streaming message
-                self.active_assistant_id.is_none() || index < self.transcript.items().len() - 1
-            }
-            TranscriptItem::Tool { status, .. } => {
-                !matches!(status, ToolStatusKind::Pending | ToolStatusKind::Running)
-            }
-        }
-    }
-
-    /// Returns the indices of newly-finalized items that should be pushed to
-    /// scrollback. Advances `committed_count`.
-    pub fn drain_newly_committed(&mut self) -> Vec<usize> {
-        let mut indices = Vec::new();
-        while self.committed_count < self.transcript.items().len()
-            && self.is_item_finalized(self.committed_count)
-        {
-            indices.push(self.committed_count);
-            self.committed_count += 1;
-        }
-        indices
-    }
-
-    /// Returns the slice of transcript items that are "live" (not yet committed
-    /// to scrollback). These are what the viewport widget should render.
-    #[must_use]
-    pub fn live_transcript_items(&self) -> &[TranscriptItem] {
-        let start = self.committed_count.min(self.transcript.items().len());
-        &self.transcript.items()[start..]
-    }
-
-    /// Reset committed state (used when loading a new session transcript).
-    pub fn reset_committed(&mut self) {
-        self.committed_count = 0;
-    }
+    // ── Transcript selection ──
 
     pub fn select_visible_transcript_item(&mut self) {
         let range = self.transcript_view.visible_range(&self.transcript, 1);
@@ -758,7 +722,6 @@ impl NeoTuiApp {
         self.transcript_view = TranscriptView::new();
         self.transcript_selection = None;
         self.expanded_transcript_items.clear();
-        self.committed_count = 0;
         self.prompt = PromptState::default();
         self.active_assistant_id = None;
         self.active_user_prompt = None;

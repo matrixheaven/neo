@@ -990,13 +990,16 @@ fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: 
                     let k = t.to_api_kind();
                     (k, vec![k])
                 }
-                None => (ApiKind::OpenAiCompatible, vec![
-                    ApiKind::OpenAiResponses,
-                    ApiKind::OpenAiChatCompletions,
-                    ApiKind::AnthropicMessages,
-                    ApiKind::GoogleGenerativeAi,
+                None => (
                     ApiKind::OpenAiCompatible,
-                ]),
+                    vec![
+                        ApiKind::OpenAiResponses,
+                        ApiKind::OpenAiChatCompletions,
+                        ApiKind::AnthropicMessages,
+                        ApiKind::GoogleGenerativeAi,
+                        ApiKind::OpenAiCompatible,
+                    ],
+                ),
             };
             ProviderSpec {
                 id: provider_id.clone(),

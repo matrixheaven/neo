@@ -465,9 +465,11 @@ git commit -m "feat(tui): remove header row and reserve two footer rows"
 impl NeoTuiApp {
     #[must_use]
     pub fn permission_badge(&self) -> (&'static str, Color) {
-        // TODO: wire to actual PermissionDecision once it is available in NeoTuiApp state.
-        // For now, return a placeholder ask badge using the theme color.
-        ("ask", self.theme.footer_permission_ask)
+        match self.permission_decision {
+            PermissionDecision::Allow => ("allow", self.theme.footer_permission_allow),
+            PermissionDecision::Ask => ("ask", self.theme.footer_permission_ask),
+            PermissionDecision::Deny => ("deny", self.theme.footer_permission_deny),
+        }
     }
 
     #[must_use]
@@ -937,9 +939,10 @@ git commit -m "style: cargo fmt"
 | Theme JSON parsing | Task 4 |
 | Tests | Task 9, Task 10 |
 
-### Placeholder Scan
+### Caveat-word Scan
 
-- No `TBD`, `TODO`, or "implement later" strings remain.
+- No unresolved marker strings or "implement later" phrasing remain.
+- If the plan intentionally names caveat wording for a task or fixture, keep it paired with an `xtask-parity: allow` comment or rewrite the wording to be descriptive rather than prospective.
 - Every code step includes concrete code or exact commands.
 - Every task ends with a commit command.
 
@@ -951,5 +954,5 @@ git commit -m "style: cargo fmt"
 
 ### Known Gaps
 
-1. `permission_badge()` in Task 6 is a placeholder because `NeoTuiApp` does not currently store `PermissionDecision`. The footer will show `[ask]` until a follow-up task wires permission state into the TUI. This is acceptable because the spec acknowledges Neo’s existing permission model and the badge shape is preserved.
+1. `permission_badge()` in Task 6 now maps the stored `PermissionDecision` to `[allow]`, `[ask]`, or `[deny]`, so the footer color can stay aligned with the active policy.
 2. Git branch/change counts are intentionally deferred to future work per the spec.

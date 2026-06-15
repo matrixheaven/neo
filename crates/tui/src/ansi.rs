@@ -271,10 +271,7 @@ pub fn strip_ansi(s: &str) -> String {
 /// Visible width of a string (ANSI escapes stripped, unicode-width aware).
 #[must_use]
 pub fn visible_width(s: &str) -> usize {
-    strip_ansi(s)
-        .chars()
-        .map(|c| c.width().unwrap_or(0))
-        .sum()
+    strip_ansi(s).chars().map(|c| c.width().unwrap_or(0)).sum()
 }
 
 /// Wrap plain text (no ANSI) to a maximum visible width.

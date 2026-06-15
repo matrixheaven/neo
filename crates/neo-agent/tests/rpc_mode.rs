@@ -4,7 +4,7 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     process::{Command, Stdio},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
 };
 
 use serde_json::{Value, json};
