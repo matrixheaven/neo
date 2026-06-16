@@ -458,7 +458,14 @@ impl InteractiveController {
         let (cols, rows) = size().unwrap_or((80, 24));
         let mut runtime = NeoTuiRuntime::new(usize::from(cols), usize::from(rows));
         runtime.set_theme(self.app.theme());
-        runtime.push_banner(format!("Welcome to {}", self.app.title()));
+        runtime.push_welcome_banner(
+            self.app.title(),
+            self.app.session_label(),
+            self.app.model_label(),
+            &self.app.cwd_label(),
+            env!("CARGO_PKG_VERSION"),
+            None,
+        );
         self.kimi_runtime = Some(runtime);
     }
 
@@ -1458,7 +1465,14 @@ impl InteractiveController {
         let (cols, rows) = size().unwrap_or((80, 24));
         let mut runtime = NeoTuiRuntime::new(usize::from(cols), usize::from(rows));
         runtime.set_theme(self.app.theme());
-        runtime.push_banner(format!("Welcome to {}", self.app.title()));
+        runtime.push_welcome_banner(
+            self.app.title(),
+            self.app.session_label(),
+            self.app.model_label(),
+            &self.app.cwd_label(),
+            env!("CARGO_PKG_VERSION"),
+            None,
+        );
         replay_session_into_kimi_runtime(&mut runtime, loaded);
         self.kimi_runtime = Some(runtime);
     }
@@ -2378,9 +2392,12 @@ impl NeoTerminal {
         let body_len = lines.len();
         let (chrome_lines, cursor) = neo_tui::runtime_chrome_ansi_lines(app, width);
         lines.extend(chrome_lines);
+        // Apply the uniform CHROME_GUTTER to body + chrome together so
+        // nothing renders flush against the screen edge.
+        neo_tui::runtime::apply_gutter(&mut lines);
         let cursor = cursor.map(|cursor| neo_tui::CursorPos {
             row: body_len + cursor.row,
-            col: cursor.col,
+            col: cursor.col + neo_tui::runtime::CHROME_GUTTER,
         });
         // Single-buffer differential render (pi-tui model): hand the whole
         // frame to InlineRenderer::render, which diffs against the previous

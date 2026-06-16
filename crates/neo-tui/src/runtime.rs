@@ -14,6 +14,26 @@ use crate::{NeoTuiApp, PromptState, ToolStatusKind, wrap_width};
 
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 5;
 
+/// Uniform 1-column left/right gutter applied to ALL chrome (body, banner,
+/// prompt box, footer). Matches kimi-code's `CHROME_GUTTER = 1`. Applied once
+/// by [`apply_gutter`] after body + chrome are merged, so nothing renders
+/// flush against the screen edge.
+pub const CHROME_GUTTER: usize = 1;
+
+/// Prepend `CHROME_GUTTER` spaces to every non-empty line. Empty separator
+/// lines stay empty so vertical spacing isn't shifted.
+pub fn apply_gutter(lines: &mut [String]) {
+    if CHROME_GUTTER == 0 {
+        return;
+    }
+    let lead = " ".repeat(CHROME_GUTTER);
+    for line in lines.iter_mut() {
+        if !line.is_empty() {
+            line.insert_str(0, &lead);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct NeoTuiRuntime {
     width: usize,
@@ -90,6 +110,30 @@ impl NeoTuiRuntime {
 
     pub fn push_banner(&mut self, title: impl Into<String>) {
         self.push_transcript(TranscriptEntry::banner(title));
+    }
+
+    /// Push a rich welcome banner (rounded box + logo + metadata) built from
+    /// the app's title/session/model/workspace info.
+    pub fn push_welcome_banner(
+        &mut self,
+        title: &str,
+        session: &str,
+        model: &str,
+        directory: &str,
+        version: &str,
+        mcp: Option<String>,
+    ) {
+        use crate::transcript::messages::BannerData;
+        let data = BannerData {
+            title: format!("Welcome to {title}!"),
+            subtitle: "Send /help for help information.".to_owned(),
+            directory: directory.to_owned(),
+            session: session.to_owned(),
+            model: model.to_owned(),
+            version: version.to_owned(),
+            mcp,
+        };
+        self.push_transcript(TranscriptEntry::welcome_banner(data));
     }
 
     pub fn replay_user_message(&mut self, content: impl Into<String>) {
@@ -280,17 +324,17 @@ impl NeoTuiRuntime {
     /// tool cards + finalized tool cards). The chrome (prompt box + footer) is
     /// appended by the caller.
     fn compose_body_lines(&mut self, width: usize) -> Vec<String> {
-        // Reserve a 1-column left margin so content does not touch the left
-        // edge of the screen (kimi-code leaves a 1-space gutter). We render at
-        // `body_width = width - 1` and prepend a space to every non-empty
-        // frame line at the end.
-        let body_width = width.saturating_sub(1).max(1);
+        // The body renders at `content_width = width - CHROME_GUTTER` so that
+        // when the caller prepends the gutter it never overflows. The gutter
+        // itself is applied uniformly to body + chrome in
+        // [`apply_gutter`], NOT here.
+        let content_width = width.saturating_sub(CHROME_GUTTER).max(1);
         // 1. Drain newly finalized transcript rows into history (they will not
         //    change again). They stay in history so future frames still show
         //    them until the renderer scrolls them off-screen.
         for line in self
             .transcript
-            .drain_finalized_rows(body_width, &self.theme)
+            .drain_finalized_rows(content_width, &self.theme)
         {
             self.history.push(line.to_ansi());
         }
@@ -298,7 +342,7 @@ impl NeoTuiRuntime {
         // 2. Drain newly finalized tool cards into history, interleaved after
         //    any finalized transcript rows above. This only drains when there
         //    is no live transcript tail, matching the previous semantics.
-        let live_rows = self.transcript.render_live_rows(body_width, &self.theme);
+        let live_rows = self.transcript.render_live_rows(content_width, &self.theme);
         if live_rows.is_empty() {
             for line in self.drain_finalized_tool_rows() {
                 self.history.push(line.to_ansi());
@@ -323,20 +367,12 @@ impl NeoTuiRuntime {
         // history already ends with one (e.g. a trailing tool-card gap).
         if !frame.is_empty()
             && !live.is_empty()
-            && frame.last().map_or(true, |line| !line.is_empty())
+            && frame.last().is_some_and(|line| !line.is_empty())
         {
             frame.push(String::new());
         }
         for line in live {
             frame.push(line.to_ansi());
-        }
-        // Apply the 1-column left margin: prepend a space to every non-empty
-        // line. Empty separator lines stay empty so the margin doesn't shift
-        // vertical spacing.
-        for line in frame.iter_mut() {
-            if !line.is_empty() {
-                line.insert(0, ' ');
-            }
         }
 
         frame
@@ -528,44 +564,56 @@ pub fn runtime_chrome_ansi_lines(
     app: &NeoTuiApp,
     width: usize,
 ) -> (Vec<String>, Option<crate::CursorPos>) {
+    // Chrome renders at `width - CHROME_GUTTER` so the gutter (applied by the
+    // caller via [`apply_gutter`]) doesn't cause overflow.
+    let content_width = width.saturating_sub(CHROME_GUTTER).max(1);
     let mut lines = Vec::new();
-    let (prompt_lines, prompt_cursor) =
-        render_prompt_lines(app.prompt(), width, app.theme().prompt);
+    let (prompt_lines, prompt_cursor) = render_prompt_lines(app, content_width);
     lines.extend(prompt_lines);
-    lines.extend(render_footer_lines(app, width));
+    lines.extend(render_footer_lines(app, content_width));
     (lines, prompt_cursor)
 }
 
-fn render_prompt_lines(
-    prompt: &PromptState,
-    width: usize,
-    color: crate::ansi::Color,
-) -> (Vec<String>, Option<crate::CursorPos>) {
-    let inner_width = width.saturating_sub(2).max(1);
-    let display = prompt_display(prompt);
-    let content_lines: Vec<String> = wrap_width(&display, inner_width)
-        .into_iter()
-        .take(6)
-        .collect();
-    let border_style = Style::default().fg(color);
-    let text_style = Style::default().fg(color);
+/// Render the rounded prompt input box. The first content line carries the
+/// `> ` prompt symbol; continuation lines use a 4-space hanging indent so
+/// wrapped/explicit-newline text aligns under the body (matching kimi-code's
+/// `paddingX: 4` editor). Border color is muted by default and switches to
+/// the magenta accent when the input starts with `/` or plan mode is active.
+fn render_prompt_lines(app: &NeoTuiApp, width: usize) -> (Vec<String>, Option<crate::CursorPos>) {
+    let theme = app.theme();
+    let prompt = app.prompt();
+    let highlighted = app.is_plan_mode() || prompt.text.trim_start().starts_with('/');
+    let border_color = if highlighted {
+        theme.accent
+    } else {
+        theme.muted
+    };
+    let border_style = Style::default().fg(border_color);
+    let text_style = Style::default().fg(theme.header);
 
-    let mut lines = Vec::with_capacity(content_lines.len() + 2);
+    let inner_width = width.saturating_sub(2).max(1);
+    let body_width = inner_width.saturating_sub(4).max(1);
+
+    let logical_lines = build_prompt_logical_lines(prompt, body_width);
+
+    let mut lines = Vec::with_capacity(logical_lines.len() + 2);
     lines.push(paint(
-        &format!("┌{}┐", "─".repeat(inner_width)),
+        &format!("\u{256d}{}\u{256e}", "\u{2500}".repeat(inner_width)),
         border_style,
     ));
-    for line in content_lines {
-        let pad = inner_width.saturating_sub(visible_width(&line));
+    for (idx, line) in logical_lines.iter().enumerate() {
+        let prefix = if idx == 0 { "  > " } else { "    " };
+        let content = format!("{prefix}{line}");
+        let pad = inner_width.saturating_sub(visible_width(&content));
         lines.push(format!(
             "{}{}{}",
-            paint("│", border_style),
-            paint(&format!("{line}{}", " ".repeat(pad)), text_style),
-            paint("│", border_style)
+            paint("\u{2502}", border_style),
+            paint(&format!("{content}{}", " ".repeat(pad)), text_style),
+            paint("\u{2502}", border_style)
         ));
     }
     lines.push(paint(
-        &format!("└{}┘", "─".repeat(inner_width)),
+        &format!("\u{2570}{}\u{256f}", "\u{2500}".repeat(inner_width)),
         border_style,
     ));
     let cursor = find_cursor(&lines);
@@ -576,12 +624,28 @@ fn render_prompt_lines(
     (lines, cursor)
 }
 
-fn prompt_display(prompt: &PromptState) -> String {
+/// Build the per-line content (already wrapped) for the prompt, inserting the
+/// cursor marker on the active line. Each returned string is the body text
+/// (without the `  > `/`    ` prefix, which is added by the caller).
+fn build_prompt_logical_lines(prompt: &PromptState, body_width: usize) -> Vec<String> {
     let chars: Vec<char> = prompt.text.chars().collect();
     let cursor = prompt.cursor.min(chars.len());
     let before: String = chars[..cursor].iter().collect();
     let after: String = chars[cursor..].iter().collect();
-    format!("> {before}{CURSOR_MARKER}{after}")
+    let marked = format!("{before}{CURSOR_MARKER}{after}");
+    let mut out = Vec::new();
+    for logical in marked.split('\n') {
+        let wrapped = wrap_width(logical, body_width);
+        if wrapped.is_empty() {
+            out.push(String::new());
+        } else {
+            out.extend(wrapped);
+        }
+    }
+    if out.len() > 6 {
+        out.truncate(6);
+    }
+    out
 }
 
 fn find_cursor(lines: &[String]) -> Option<crate::CursorPos> {

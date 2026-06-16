@@ -31,10 +31,11 @@ fn runtime_renders_finalized_rows_then_live_rows_in_one_frame() {
 
     let frame = plain_frame(&mut runtime, 80, 12);
     // Finalized rows (banner, user) precede the live region (tool card,
-    // streaming assistant).
+    // streaming assistant). The banner renders as a rounded box containing
+    // the title text.
     let welcome = frame
         .iter()
-        .position(|l| l.trim() == "Welcome to neo")
+        .position(|l| l.contains("Welcome to neo"))
         .expect("banner");
     // User message is now bullet-led (kimi-style), no "You" label.
     let hello = frame

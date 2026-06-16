@@ -1,11 +1,23 @@
-use crate::ansi::{Color, Style, visible_width};
+use crate::ansi::{Color, Style, paint, visible_width};
 use crate::app::TuiTheme;
 use crate::core::{Finalization, Line};
 use crate::wrap_width;
 
+/// Rich welcome-banner content rendered as a rounded box (matching kimi-code).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BannerData {
+    pub title: String,
+    pub subtitle: String,
+    pub directory: String,
+    pub session: String,
+    pub model: String,
+    pub version: String,
+    pub mcp: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptEntry {
-    Banner(String),
+    Banner(BannerData),
     User(String),
     Assistant {
         thinking: String,
@@ -40,7 +52,15 @@ pub enum NoticeSeverity {
 impl TranscriptEntry {
     #[must_use]
     pub fn banner(title: impl Into<String>) -> Self {
-        Self::Banner(title.into())
+        Self::Banner(BannerData {
+            title: title.into(),
+            ..BannerData::default()
+        })
+    }
+
+    #[must_use]
+    pub fn welcome_banner(data: BannerData) -> Self {
+        Self::Banner(data)
     }
 
     #[must_use]
@@ -119,7 +139,7 @@ impl TranscriptEntry {
         // would corrupt the coordinate model and garble streaming output.
         let inner_width = width.max(1);
         match self {
-            Self::Banner(title) => styled_wrap(title, inner_width, banner_style(theme)),
+            Self::Banner(data) => render_welcome_banner(data, inner_width, theme),
             // User: no "You" label — a sparkle bullet (roleUser amber) on the
             // first line, continuation lines indented to align after the
             // bullet (kimi-code style).
@@ -276,6 +296,132 @@ fn styled_wrap(text: &str, width: usize, style: Style) -> Vec<Line> {
 
 fn banner_style(theme: &TuiTheme) -> Style {
     Style::default().fg(theme.header).bold()
+}
+/// Render the welcome banner as a rounded box with an ASCII-art logo and
+/// aligned metadata, matching kimi-code's `welcome.ts`.
+///
+/// Layout:
+/// ```text
+/// ╭──────╮
+/// │      │
+/// │  ▐█▛█▛█▌  Welcome to Neo!
+/// │  ▐█████▌  Send /help for help.
+/// │      │
+/// │  Directory: /path
+/// │  Session:   abc
+/// │  Model:     GLM
+/// │  ...
+/// │      │
+/// ╰──────╯
+/// ```
+fn render_welcome_banner(data: &BannerData, width: usize, theme: &TuiTheme) -> Vec<Line> {
+    use std::fmt::Write as _;
+    let logo = [
+        "\u{2590}\u{2588}\u{259b}\u{2588}\u{259b}\u{2588}\u{2510}",
+        "\u{2590}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2510}",
+    ];
+    let logo_width = 7usize;
+    let gap = "  ";
+    // Inner content width inside the box: │ + 2-space pad + content + pad + │
+    let border_overhead = 4usize; // 2 borders + 2 inner pad spaces
+    let inner_content = width.saturating_sub(border_overhead).max(1);
+
+    // Build the content lines (plain text with ANSI via paint, to be padded).
+    let logo_color = Style::default().fg(theme.accent);
+    let title_style = Style::default().fg(theme.accent).bold();
+    let subtitle_style = Style::default().fg(theme.muted);
+    let label_style = Style::default().fg(theme.muted).bold();
+    let value_style = Style::default().fg(theme.header);
+
+    let mut content: Vec<String> = Vec::new();
+    // blank line at top of box
+    content.push(String::new());
+    // logo + title / subtitle
+    let mut line0 = String::new();
+    let _ = write!(line0, "{}{}", paint(logo[0], logo_color), gap);
+    let mut rest0 = String::new();
+    if !data.title.is_empty() {
+        rest0.push_str(&paint(&data.title, title_style));
+    }
+    content.push(format!("{line0}{rest0}"));
+    let mut line1 = String::new();
+    let _ = write!(line1, "{}{}", paint(logo[1], logo_color), gap);
+    let mut rest1 = String::new();
+    if !data.subtitle.is_empty() {
+        rest1.push_str(&paint(&data.subtitle, subtitle_style));
+    }
+    content.push(format!("{line1}{rest1}"));
+    // blank line between logo and metadata
+    content.push(String::new());
+
+    // Metadata rows: label padded to a fixed width so colons align.
+    let label_w = 11usize;
+    let mut meta: Vec<(&str, &str)> = Vec::new();
+    if !data.directory.is_empty() {
+        meta.push(("Directory:", data.directory.as_str()));
+    }
+    if !data.session.is_empty() {
+        meta.push(("Session:", data.session.as_str()));
+    }
+    if !data.model.is_empty() {
+        meta.push(("Model:", data.model.as_str()));
+    }
+    if !data.version.is_empty() {
+        meta.push(("Version:", data.version.as_str()));
+    }
+    if let Some(m) = &data.mcp {
+        meta.push(("MCP:", m.as_str()));
+    }
+    for (label, value) in &meta {
+        let mut label_padded = label.to_string();
+        while visible_width(&label_padded) < label_w {
+            label_padded.push(' ');
+        }
+        let mut row = String::new();
+        let _ = write!(
+            row,
+            "{} {}",
+            paint(&label_padded, label_style),
+            paint(value, value_style)
+        );
+        content.push(row);
+    }
+    // blank line at bottom of box
+    content.push(String::new());
+
+    // Draw the rounded box.
+    let border_style = Style::default().fg(theme.accent);
+    let pad_str = " ".repeat(inner_content);
+    let mut rows = Vec::new();
+    // top border
+    rows.push(Line::raw(format!(
+        "{}{}{}",
+        paint("\u{256d}", border_style),
+        paint(&"\u{2500}".repeat(inner_content), border_style),
+        paint("\u{256e}", border_style),
+    )));
+    for cline in &content {
+        let vw = visible_width(cline);
+        let pad = inner_content.saturating_sub(vw);
+        let body = format!(" {}{} ", cline, " ".repeat(pad));
+        rows.push(Line::raw(format!(
+            "{}{}{}",
+            paint("\u{2502}", border_style),
+            body,
+            paint("\u{2502}", border_style),
+        )));
+    }
+    // bottom border
+    rows.push(Line::raw(format!(
+        "{}{}{}",
+        paint("\u{2570}", border_style),
+        paint(&"\u{2500}".repeat(inner_content), border_style),
+        paint("\u{256f}", border_style),
+    )));
+    // trailing blank line separates the banner from the next block
+    rows.push(Line::raw(""));
+    let _ = pad_str;
+    rows
 }
 
 fn notice_style(theme: &TuiTheme) -> Style {
