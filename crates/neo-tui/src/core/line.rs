@@ -67,6 +67,21 @@ impl Line {
         Self { spans }
     }
 
+    /// Borrow the underlying spans.
+    #[must_use]
+    pub fn spans(&self) -> &[Span] {
+        &self.spans
+    }
+
+    /// Prepend an unstyled prefix to this line, preserving existing styling.
+    #[must_use]
+    pub fn prepend_prefix(mut self, prefix: &str) -> Self {
+        if !prefix.is_empty() {
+            self.spans.insert(0, Span::raw(prefix));
+        }
+        self
+    }
+
     #[must_use]
     pub fn to_ansi(&self) -> String {
         self.spans.iter().map(Span::to_ansi).collect()
