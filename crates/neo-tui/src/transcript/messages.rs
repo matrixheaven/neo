@@ -149,21 +149,28 @@ impl TranscriptEntry {
                     rows.extend(render_thinking(thinking, inner_width, *finalized, theme));
                 }
                 if !content.is_empty() {
-                    // Assistant body is rendered as markdown (headings, bold,
-                    // inline code, code blocks with syntax highlighting, lists,
-                    // tables, blockquotes). On finalization we prefix a single
-                    // magenta `● ` bullet line as a turn separator; streaming
-                    // content renders without a bullet.
+                    // Assistant body is rendered as markdown. On finalization
+                    // the first line carries a magenta `● ` bullet and every
+                    // continuation line is indented to align under the body
+                    // (not under the bullet glyph) — matching kimi-code.
                     if *finalized {
-                        rows.push(Line::styled("●", Style::default().fg(theme.accent).bold()));
-                    }
-                    let md_width = if *finalized {
-                        // finalized body sits flush under the bullet, no indent
-                        inner_width
+                        rows.extend(crate::markdown::render_markdown(
+                            content,
+                            inner_width,
+                            theme,
+                            "● ",
+                            "  ",
+                        ));
                     } else {
-                        inner_width
-                    };
-                    rows.extend(crate::markdown::render_markdown(content, md_width, theme));
+                        // Streaming: no bullet, plain indent.
+                        rows.extend(crate::markdown::render_markdown(
+                            content,
+                            inner_width,
+                            theme,
+                            "",
+                            "",
+                        ));
+                    }
                 }
                 rows
             }

@@ -280,17 +280,25 @@ impl NeoTuiRuntime {
     /// tool cards + finalized tool cards). The chrome (prompt box + footer) is
     /// appended by the caller.
     fn compose_body_lines(&mut self, width: usize) -> Vec<String> {
+        // Reserve a 1-column left margin so content does not touch the left
+        // edge of the screen (kimi-code leaves a 1-space gutter). We render at
+        // `body_width = width - 1` and prepend a space to every non-empty
+        // frame line at the end.
+        let body_width = width.saturating_sub(1).max(1);
         // 1. Drain newly finalized transcript rows into history (they will not
         //    change again). They stay in history so future frames still show
         //    them until the renderer scrolls them off-screen.
-        for line in self.transcript.drain_finalized_rows(width, &self.theme) {
+        for line in self
+            .transcript
+            .drain_finalized_rows(body_width, &self.theme)
+        {
             self.history.push(line.to_ansi());
         }
 
         // 2. Drain newly finalized tool cards into history, interleaved after
         //    any finalized transcript rows above. This only drains when there
         //    is no live transcript tail, matching the previous semantics.
-        let live_rows = self.transcript.render_live_rows(width, &self.theme);
+        let live_rows = self.transcript.render_live_rows(body_width, &self.theme);
         if live_rows.is_empty() {
             for line in self.drain_finalized_tool_rows() {
                 self.history.push(line.to_ansi());
@@ -321,6 +329,14 @@ impl NeoTuiRuntime {
         }
         for line in live {
             frame.push(line.to_ansi());
+        }
+        // Apply the 1-column left margin: prepend a space to every non-empty
+        // line. Empty separator lines stay empty so the margin doesn't shift
+        // vertical spacing.
+        for line in frame.iter_mut() {
+            if !line.is_empty() {
+                line.insert(0, ' ');
+            }
         }
 
         frame

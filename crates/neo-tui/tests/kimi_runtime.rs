@@ -34,7 +34,7 @@ fn runtime_renders_finalized_rows_then_live_rows_in_one_frame() {
     // streaming assistant).
     let welcome = frame
         .iter()
-        .position(|l| l == "Welcome to neo")
+        .position(|l| l.trim() == "Welcome to neo")
         .expect("banner");
     // User message is now bullet-led (kimi-style), no "You" label.
     let hello = frame
@@ -288,7 +288,7 @@ fn runtime_finalizes_streaming_assistant_once_without_live_duplicate() {
     });
     let live = plain_frame(&mut runtime, 80, 12);
     assert_eq!(
-        live.iter().filter(|l| **l == "hello").count(),
+        live.iter().filter(|l| l.trim() == "hello").count(),
         1,
         "live assistant text appears once: {live:?}"
     );

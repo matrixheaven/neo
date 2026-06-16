@@ -7,21 +7,33 @@
 use std::sync::OnceLock;
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use unicode_width::UnicodeWidthChar;
 
 use crate::ansi::{Color, Style, visible_width};
 use crate::app::TuiTheme;
 use crate::core::{Line, Span};
 
 /// Render markdown `text` into styled lines, wrapped to `width`.
+///
+/// `first_prefix` is prepended to the very first emitted line;
+/// `cont_prefix` is prepended to every continuation line. Both are visible
+/// width (e.g. `"● "` and `"  "` so wrapped body lines align under the
+/// bullet, not under the bullet glyph).
 #[must_use]
-pub fn render_markdown(text: &str, width: usize, theme: &TuiTheme) -> Vec<Line> {
+pub fn render_markdown(
+    text: &str,
+    width: usize,
+    theme: &TuiTheme,
+    first_prefix: &str,
+    cont_prefix: &str,
+) -> Vec<Line> {
     let width = width.max(1);
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
     let parser = Parser::new_ext(text, opts);
-    let mut renderer = MdRenderer::new(width, theme);
+    let mut renderer = MdRenderer::new(width, theme, first_prefix, cont_prefix);
     renderer.run(parser);
     renderer.finish()
 }
@@ -87,10 +99,20 @@ struct MdRenderer<'a> {
     current_row: Vec<String>,
     in_table_head: bool,
     in_table: bool,
+    /// Prefix prepended to the very first emitted line (e.g. "● ").
+    first_prefix: String,
+    /// Prefix prepended to every continuation line (e.g. "  ").
+    cont_prefix: String,
+    /// Whether no line has been emitted yet (so the next emit uses first_prefix).
+    first_line_pending: bool,
 }
 
 impl<'a> MdRenderer<'a> {
-    fn new(width: usize, theme: &'a TuiTheme) -> Self {
+    fn new(width: usize, theme: &'a TuiTheme, first_prefix: &str, cont_prefix: &str) -> Self {
+        // Reserve space for the continuation prefix so wrapped lines never
+        // overflow once we indent them in `finish()`.
+        let reserved = visible_width(cont_prefix).max(visible_width(first_prefix));
+        let width = width.saturating_sub(reserved).max(1);
         Self {
             width,
             theme,
@@ -108,6 +130,9 @@ impl<'a> MdRenderer<'a> {
             current_row: Vec::new(),
             in_table_head: false,
             in_table: false,
+            first_prefix: first_prefix.to_owned(),
+            cont_prefix: cont_prefix.to_owned(),
+            first_line_pending: true,
         }
     }
 
@@ -418,6 +443,21 @@ impl<'a> MdRenderer<'a> {
         if self.out.last().is_some_and(|l| l.text().is_empty()) {
             self.out.pop();
         }
+        // Apply the outer prefix: the very first emitted line gets
+        // `first_prefix` (e.g. "● "), every subsequent line gets
+        // `cont_prefix` (e.g. "  ") so wrapped body aligns under the bullet.
+        let first = self.first_prefix.clone();
+        let cont = self.cont_prefix.clone();
+        let len = self.out.len();
+        for i in 0..len {
+            let prefix = if i == 0 {
+                first.as_str()
+            } else {
+                cont.as_str()
+            };
+            let line = self.out[i].clone();
+            self.out[i] = line.prepend_prefix(prefix);
+        }
         self.out
     }
 }
@@ -606,13 +646,40 @@ fn make_table_row(
     for i in 0..ncols {
         let content = cells.get(i).map(String::as_str).unwrap_or("");
         let w = widths[i];
-        let vw = visible_width(content);
+        // Truncate the cell to the column width (visible-width aware), adding
+        // an ellipsis when it overflows. This keeps CJK + long content from
+        // blowing out the table grid.
+        let displayed = truncate_visible(content, w);
+        let vw = visible_width(&displayed);
         let pad = w.saturating_sub(vw);
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(content.to_owned(), cell_style));
+        spans.push(Span::styled(displayed, cell_style));
         spans.push(Span::raw(" ".repeat(pad)));
         spans.push(Span::raw(" "));
         spans.push(Span::styled("│", border_style));
     }
     Line::from_spans(spans)
+}
+
+/// Truncate `s` to at most `width` visible columns. If it overflows, the last
+/// column is replaced with `…`. Width is computed with Unicode East-Asian
+/// width so CJK characters (width 2) are counted correctly.
+fn truncate_visible(s: &str, width: usize) -> String {
+    if visible_width(s) <= width {
+        return s.to_owned();
+    }
+    // Reserve one column for the ellipsis so the result fits in `width`.
+    let target = width.saturating_sub(1);
+    let mut out = String::new();
+    let mut w = 0usize;
+    for c in s.chars() {
+        let cw = c.width().unwrap_or(0);
+        if w + cw > target {
+            break;
+        }
+        out.push(c);
+        w += cw;
+    }
+    out.push('…');
+    out
 }

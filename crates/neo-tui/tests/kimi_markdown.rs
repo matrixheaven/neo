@@ -4,7 +4,7 @@ use neo_tui::app::TuiTheme;
 use neo_tui::markdown::render_markdown;
 
 fn plain(text: &str, width: usize) -> Vec<String> {
-    render_markdown(text, width, &TuiTheme::default())
+    render_markdown(text, width, &TuiTheme::default(), "", "")
         .into_iter()
         .map(|line| {
             neo_tui::ansi::strip_ansi(&line.to_ansi())
@@ -143,4 +143,76 @@ fn mixed_content_renders_in_order() {
 fn empty_input_produces_no_lines() {
     let lines = plain("", 80);
     assert!(lines.is_empty(), "empty input -> no lines");
+}
+
+#[test]
+fn finalized_bullet_prefix_keeps_first_line_inline_and_indents_continuation() {
+    // With first_prefix "● " and cont_prefix "  ", the first line starts with
+    // "● " then the heading text, and continuation lines start with "  ".
+    let lines = render_markdown(
+        "Hello world this is a long line that should wrap\nsecond paragraph",
+        30,
+        &TuiTheme::default(),
+        "● ",
+        "  ",
+    );
+    let plain: Vec<String> = lines
+        .iter()
+        .map(|l| neo_tui::ansi::strip_ansi(&l.to_ansi()))
+        .collect();
+    // First line: bullet + text inline (NOT bullet on its own line).
+    assert!(
+        plain[0].starts_with("● ") && plain[0].chars().count() > 2,
+        "first line has bullet + text inline: {:?}",
+        plain[0]
+    );
+    // Continuation lines start with the indent prefix, not the bullet.
+    for line in &plain[1..] {
+        assert!(
+            line.starts_with("  "),
+            "continuation line indented with two spaces: {:?}",
+            line
+        );
+    }
+}
+
+#[test]
+fn table_truncates_long_cell_content_to_column_width() {
+    // A narrow terminal with a long body cell must truncate, not overflow.
+    let md = "| h\n|---|\n| this is a very long body cell that exceeds the column |";
+    let lines = plain(md, 24);
+    let joined = lines.join("\n");
+    // The table should still render with box borders (not the raw fallback).
+    assert!(joined.contains('┌'), "box border present: {joined}");
+    // No line should exceed the width (24) — truncation keeps it in bounds.
+    for line in &lines {
+        let w = neo_tui::ansi::visible_width(line);
+        assert!(w <= 24, "line within width ({w} > 24): {line:?}");
+    }
+    // The long content is truncated with an ellipsis.
+    assert!(joined.contains('…'), "truncated with ellipsis: {joined}");
+}
+
+#[test]
+fn table_handles_cjk_full_width_cells() {
+    // CJK characters are width-2; the column widths must account for that so
+    // the grid stays aligned.
+    let md = "| 名称 | 说明 |\n|---|---|\n| 甲 | 第一项 |\n| 乙 | 第二项 |";
+    let lines = plain(md, 40);
+    let joined = lines.join("\n");
+    assert!(joined.contains('┌'), "box border: {joined}");
+    assert!(joined.contains("名称"), "CJK header: {joined}");
+    assert!(joined.contains("第一项"), "CJK body: {joined}");
+    // Borders must align: every non-border line should have the same width.
+    let body_widths: Vec<usize> = lines
+        .iter()
+        .filter(|l| l.contains('│'))
+        .map(|l| neo_tui::ansi::visible_width(l))
+        .collect();
+    if !body_widths.is_empty() {
+        let w0 = body_widths[0];
+        for (i, w) in body_widths.iter().enumerate() {
+            assert!(*w == w0, "row {i} width {w} != {w0}: {}", lines[i]);
+        }
+    }
 }
