@@ -294,9 +294,6 @@ fn styled_wrap(text: &str, width: usize, style: Style) -> Vec<Line> {
         .collect()
 }
 
-fn banner_style(theme: &TuiTheme) -> Style {
-    Style::default().fg(theme.header).bold()
-}
 /// Render the welcome banner as a rounded box with an ASCII-art logo and
 /// aligned metadata, matching kimi-code's `welcome.ts`.
 ///
@@ -320,7 +317,6 @@ fn render_welcome_banner(data: &BannerData, width: usize, theme: &TuiTheme) -> V
         "\u{2590}\u{2588}\u{259b}\u{2588}\u{259b}\u{2588}\u{2510}",
         "\u{2590}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2510}",
     ];
-    let logo_width = 7usize;
     let gap = "  ";
     // Inner content width inside the box: │ + 2-space pad + content + pad + │
     let border_overhead = 4usize; // 2 borders + 2 inner pad spaces
