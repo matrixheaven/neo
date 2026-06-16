@@ -1440,7 +1440,7 @@ fn app_shell_streams_live_bash_output_and_clears_on_finish() {
     // Finished: header shows "Used bash", body shows result (no live output).
     let lines = render_app(80, 10, &app);
     assert!(
-        lines.iter().any(|line| line.contains("✓ Used bash")),
+        lines.iter().any(|line| line.contains("● Used bash")),
         "expected used bash header"
     );
     assert!(
@@ -1580,7 +1580,7 @@ fn tool_call_lifecycle_renders_single_header() {
         .collect();
     let used_headers: Vec<_> = lines
         .iter()
-        .filter(|l| l.contains("✓ Used list"))
+        .filter(|l| l.contains("● Used list"))
         .cloned()
         .collect();
     assert!(
@@ -1790,7 +1790,7 @@ fn tool_call_with_assistant_message_does_not_duplicate() {
         .collect();
     let used_headers: Vec<_> = lines
         .iter()
-        .filter(|l| l.contains("✓ Used list"))
+        .filter(|l| l.contains("● Used list"))
         .cloned()
         .collect();
     assert!(
@@ -1828,7 +1828,7 @@ fn single_read_renders_standalone() {
 
     let lines = render_app(100, 10, &app);
     assert!(
-        lines.iter().any(|line| line.contains("✓ Used read")),
+        lines.iter().any(|line| line.contains("● Used read")),
         "expected standalone read header"
     );
     assert!(

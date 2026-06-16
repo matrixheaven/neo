@@ -1,5 +1,7 @@
 use crate::ToolStatusKind;
-use crate::core::{Line, Text};
+use crate::ansi::{Color, Style};
+use crate::app::TuiTheme;
+use crate::core::{Line, Span, Text};
 
 use super::tool_call::ToolCallState;
 
@@ -9,8 +11,7 @@ const COMMAND_PREVIEW_LINES: usize = 10;
 #[must_use]
 pub fn tool_header(state: &ToolCallState) -> String {
     let symbol = match state.status {
-        ToolStatusKind::Pending | ToolStatusKind::Running => "●",
-        ToolStatusKind::Succeeded => "✓",
+        ToolStatusKind::Pending | ToolStatusKind::Running | ToolStatusKind::Succeeded => "●",
         ToolStatusKind::Failed => "✗",
         ToolStatusKind::Cancelled => "⊘",
     };
@@ -26,6 +27,71 @@ pub fn tool_header(state: &ToolCallState) -> String {
         format!("{symbol} {verb} {}{chip}", state.name)
     } else {
         format!("{symbol} {verb} {} ({key}){chip}", state.name)
+    }
+}
+
+/// Build the tool header as styled spans: `{symbol} {verb} {name} ({key}){chip}`.
+///
+/// Color mapping (mirrors kimi-code's tool header):
+/// - symbol + verb → status color (accent while running, success/failed on
+///   completion)
+/// - tool name → bold accent
+/// - `(key arg)` → muted
+/// - chip (`· N lines`) → muted
+#[must_use]
+pub fn tool_header_spans(state: &ToolCallState, theme: &TuiTheme) -> Vec<Span> {
+    let symbol = tool_symbol(state.status);
+    let verb = tool_verb(state.status);
+    let status_color = tool_status_color(state.status, theme);
+    let name_color = theme.accent;
+    let meta_color = theme.muted;
+
+    let mut spans = vec![
+        Span::styled(format!("{symbol} "), Style::default().fg(status_color)),
+        Span::styled(format!("{verb} "), Style::default().fg(status_color)),
+        Span::styled(state.name.clone(), Style::default().fg(name_color).bold()),
+    ];
+    let key = key_argument(state.arguments.as_deref());
+    if !key.is_empty() {
+        spans.push(Span::styled(
+            format!(" ({key})"),
+            Style::default().fg(meta_color),
+        ));
+    }
+    let chip = result_chip(state);
+    if !chip.is_empty() {
+        spans.push(Span::styled(chip, Style::default().fg(meta_color)));
+    }
+    spans
+}
+
+fn tool_symbol(status: ToolStatusKind) -> &'static str {
+    match status {
+        // Running and succeeded both use ●; they are distinguished by color
+        // (accent while running, success green when done) — matching the
+        // kimi-code bullet convention and the read-group card.
+        ToolStatusKind::Pending | ToolStatusKind::Running | ToolStatusKind::Succeeded => "●",
+        ToolStatusKind::Failed => "✗",
+        ToolStatusKind::Cancelled => "⊘",
+    }
+}
+
+fn tool_verb(status: ToolStatusKind) -> &'static str {
+    match status {
+        ToolStatusKind::Pending | ToolStatusKind::Running => "Using",
+        ToolStatusKind::Succeeded => "Used",
+        ToolStatusKind::Failed => "Failed",
+        ToolStatusKind::Cancelled => "Cancelled",
+    }
+}
+
+fn tool_status_color(status: ToolStatusKind, theme: &TuiTheme) -> Color {
+    match status {
+        ToolStatusKind::Pending => theme.pending,
+        ToolStatusKind::Running => theme.accent,
+        ToolStatusKind::Succeeded => theme.success,
+        ToolStatusKind::Failed => theme.danger,
+        ToolStatusKind::Cancelled => theme.cancelled,
     }
 }
 
@@ -105,6 +171,116 @@ pub fn render_tool_body(state: &ToolCallState, expanded: bool, width: usize) -> 
     rows
 }
 
+/// Theme-aware variant of [`render_tool_body`]. Emits styled lines:
+/// - Write/Edit preview headers and generic result bodies → `theme.muted`
+/// - Edit diff lines → `theme.diff_added` / `theme.diff_removed` (kept
+///   colored instead of ANSI-stripped)
+/// - Collapsed overflow hints → `theme.muted`
+#[must_use]
+pub fn render_tool_body_themed(
+    state: &ToolCallState,
+    expanded: bool,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    let muted = Style::default().fg(theme.muted);
+    let body_style = Style::default().fg(theme.header);
+
+    if state.name.eq_ignore_ascii_case("Write") {
+        if let Some((path, content)) = parse_write_arguments(state.arguments.as_deref()) {
+            let lines: Vec<&str> = content.lines().collect();
+            let total = lines.len();
+            let limit = if expanded {
+                total
+            } else {
+                COMMAND_PREVIEW_LINES.min(total)
+            };
+            let mut rows = vec![Line::styled(format!("  {path} · {total} lines"), muted)];
+            for (index, line) in lines.iter().take(limit).enumerate() {
+                rows.push(Line::styled(
+                    format!("  {:>4} {line}", index + 1),
+                    body_style,
+                ));
+            }
+            if limit < total {
+                rows.push(Line::styled(
+                    format!(
+                        "  ... ({} more lines, {total} total, ctrl+o to expand)",
+                        total - limit
+                    ),
+                    muted,
+                ));
+            }
+            return rows;
+        }
+    }
+
+    if state.name.eq_ignore_ascii_case("Edit") {
+        if let Some(arguments) = state.arguments.as_deref().and_then(parse_edit_arguments) {
+            let max = if expanded {
+                None
+            } else {
+                Some(COMMAND_PREVIEW_LINES)
+            };
+            return crate::transcript::diff_preview::render_diff_lines_clustered(
+                &arguments.old,
+                &arguments.new,
+                &arguments.path,
+                3,
+                max,
+            )
+            .into_iter()
+            .map(|line| diff_body_line(&line.to_ansi(), theme))
+            .collect();
+        }
+    }
+
+    let Some(result) = state.result.as_deref().filter(|value| !value.is_empty()) else {
+        return Vec::new();
+    };
+
+    let limit = if expanded {
+        usize::MAX
+    } else {
+        RESULT_PREVIEW_LINES
+    };
+    let result_line_count = result.lines().count();
+    let mut rows = Vec::new();
+    let mut rendered = 0usize;
+    for line in result.lines() {
+        for wrapped in Text::new(line).render_lines(width.saturating_sub(2).max(1)) {
+            if rendered >= limit {
+                let remaining = result_line_count.saturating_sub(rendered);
+                rows.push(Line::styled(
+                    format!("  ... ({remaining} more lines, ctrl+o to expand)"),
+                    muted,
+                ));
+                return rows;
+            }
+            rows.push(Line::styled(
+                format!("  {}", crate::ansi::strip_ansi(&wrapped.to_ansi())),
+                body_style,
+            ));
+            rendered += 1;
+        }
+    }
+    rows
+}
+
+/// Render one diff body line with add/remove coloring. Indented 2 spaces,
+/// the leading `+`/`-`/` ` drives the color.
+fn diff_body_line(raw: &str, theme: &TuiTheme) -> Line {
+    let plain = crate::ansi::strip_ansi(raw);
+    let trimmed = plain.trim_start();
+    let color = match trimmed.chars().next() {
+        Some('+') => theme.diff_added,
+        Some('-') => theme.diff_removed,
+        Some('@') => theme.diff_hunk,
+        _ => theme.diff_context,
+    };
+    Line::styled(format!("  {plain}"), Style::default().fg(color))
+}
+
 struct EditArguments {
     path: String,
     old: String,
@@ -142,7 +318,8 @@ fn parse_edit_arguments(arguments: &str) -> Option<EditArguments> {
     Some(EditArguments { path, old, new })
 }
 
-fn key_argument(arguments: Option<&str>) -> String {
+#[must_use]
+pub fn key_argument(arguments: Option<&str>) -> String {
     let Some(arguments) = arguments.map(str::trim).filter(|value| !value.is_empty()) else {
         return String::new();
     };

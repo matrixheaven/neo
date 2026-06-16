@@ -1,0 +1,23 @@
+{
+  "name": "magenta-dark",
+  "colors": {
+    "accent": "#C678DD",
+    "success": "#4EC87E",
+    "danger": "#E85454",
+    "warning": "#E8A838",
+    "muted": "#8B949A",
+    "header": "#C6D0F5",
+    "prompt": "#C6D0F5",
+    "user": "#E5C890",
+    "assistant": "#C6D0F5",
+    "thinking": "#8B949A",
+    "notice": "#8B949A",
+    "diff_added": "#4EC87E",
+    "diff_removed": "#E85454",
+    "diff_hunk": "#E8A838",
+    "diff_context": "#8B949A",
+    "footer_hint": "#8B949A",
+    "footer_permission_ask": "#C678DD",
+    "footer_working": "#C678DD"
+  }
+}

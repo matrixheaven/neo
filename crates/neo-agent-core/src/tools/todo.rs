@@ -34,9 +34,9 @@ impl TodoStatus {
     #[must_use]
     pub const fn glyph(self) -> &'static str {
         match self {
-            Self::Pending => "\u{25CB}", // ○
+            Self::Pending => "\u{25CB}",    // ○
             Self::InProgress => "\u{25CF}", // ●
-            Self::Done => "\u{2713}", // ✓
+            Self::Done => "\u{2713}",       // ✓
         }
     }
 
@@ -130,7 +130,9 @@ impl TodoTool {
     /// Read the current todos from shared state (for testing / external queries).
     #[must_use]
     pub fn current_todos(&self) -> Vec<TodoEventData> {
-        self.state.lock().map_or_else(|_| Vec::new(), |guard| guard.clone())
+        self.state
+            .lock()
+            .map_or_else(|_| Vec::new(), |guard| guard.clone())
     }
 }
 
@@ -151,7 +153,11 @@ impl Tool for TodoTool {
         schema::<TodoInput>()
     }
 
-    fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> super::ToolFuture<'a> {
+    fn execute<'a>(
+        &'a self,
+        ctx: &'a ToolContext,
+        input: serde_json::Value,
+    ) -> super::ToolFuture<'a> {
         Box::pin(async move {
             let input: TodoInput = parse_input(self.name(), input)?;
             let formatted = format_todos(&input.todos);
@@ -322,13 +328,9 @@ mod tests {
         // Capture emitted updates via a shared buffer.
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = Arc::clone(&captured);
-        let callback: super::super::ToolUpdateCallback =
-            Arc::new(move |partial: &str| {
-                captured_clone
-                    .lock()
-                    .unwrap()
-                    .push(partial.to_owned());
-            });
+        let callback: super::super::ToolUpdateCallback = Arc::new(move |partial: &str| {
+            captured_clone.lock().unwrap().push(partial.to_owned());
+        });
         let ctx = ToolContext::new(std::env::current_dir().unwrap())
             .unwrap()
             .with_permission_policy(PermissionPolicy::allow_all())
@@ -368,9 +370,7 @@ mod tests {
         assert!(props.contains_key("todos"));
         // The top-level schema should declare `todos` as required.
         let required = schema.get("required").and_then(|v| v.as_array());
-        assert!(required.is_some_and(|arr| {
-            arr.iter().any(|v| v.as_str() == Some("todos"))
-        }));
+        assert!(required.is_some_and(|arr| { arr.iter().any(|v| v.as_str() == Some("todos")) }));
     }
 
     #[tokio::test]
@@ -417,12 +417,10 @@ mod tests {
 
     #[test]
     fn current_todos_reflects_state() {
-        let shared: Arc<Mutex<Vec<TodoEventData>>> = Arc::new(Mutex::new(vec![
-            TodoEventData {
-                title: "X".into(),
-                status: "done".into(),
-            },
-        ]));
+        let shared: Arc<Mutex<Vec<TodoEventData>>> = Arc::new(Mutex::new(vec![TodoEventData {
+            title: "X".into(),
+            status: "done".into(),
+        }]));
         let tool = TodoTool::with_state(shared);
         let todos = tool.current_todos();
         assert_eq!(todos.len(), 1);

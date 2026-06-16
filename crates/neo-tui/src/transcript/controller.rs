@@ -1,3 +1,4 @@
+use crate::app::TuiTheme;
 use crate::core::{Finalization, Line};
 
 use super::messages::TranscriptEntry;
@@ -66,7 +67,7 @@ impl TranscriptController {
         &self.live
     }
 
-    pub fn drain_finalized_rows(&mut self, width: usize) -> Vec<Line> {
+    pub fn drain_finalized_rows(&mut self, width: usize, theme: &TuiTheme) -> Vec<Line> {
         let finalized_count = self
             .live
             .iter()
@@ -75,15 +76,15 @@ impl TranscriptController {
         let drained: Vec<TranscriptEntry> = self.live.drain(..finalized_count).collect();
         drained
             .into_iter()
-            .flat_map(|entry| entry.render(width))
+            .flat_map(|entry| entry.render(width, theme))
             .collect()
     }
 
     #[must_use]
-    pub fn render_live_rows(&self, width: usize) -> Vec<Line> {
+    pub fn render_live_rows(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
         self.live
             .iter()
-            .flat_map(|entry| entry.render(width))
+            .flat_map(|entry| entry.render(width, theme))
             .collect()
     }
 }

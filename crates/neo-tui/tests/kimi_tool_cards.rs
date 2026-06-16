@@ -46,7 +46,7 @@ fn tool_call_updates_in_place_to_finished_state() {
     let rows = plain(card.render(80));
     assert!(
         rows.iter()
-            .any(|line| line.contains("✓ Used Read (README.md)"))
+            .any(|line| line.contains("● Used Read (README.md)"))
     );
     assert!(rows.iter().any(|line| line.contains("2 lines")));
     assert_eq!(card.finalization(), Finalization::Finalized);

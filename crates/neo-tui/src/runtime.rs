@@ -3,9 +3,13 @@ use std::collections::BTreeMap;
 use neo_agent_core::AgentEvent;
 
 use crate::ansi::{Style, paint, truncate_to_width, visible_width};
+use crate::app::TuiTheme;
 use crate::core::{Expandable, Finalization, Line, RenderKind, RenderScheduler};
 use crate::renderer::CURSOR_MARKER;
-use crate::transcript::{ToolCallComponent, ToolCallState, TranscriptController, TranscriptEntry};
+use crate::transcript::{
+    ToolCallComponent, ToolCallState, ToolGroup, TranscriptController, TranscriptEntry,
+    render_tool_group,
+};
 use crate::{NeoTuiApp, PromptState, ToolStatusKind, wrap_width};
 
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 5;
@@ -32,6 +36,11 @@ pub struct NeoTuiRuntime {
     /// tests can inspect rendered output via [`frame_ansi_lines`] without
     /// re-running the scheduler.
     last_frame: Vec<String>,
+    /// Theme used to color the live transcript body. Mirrors [`NeoTuiApp`]'s
+    /// theme; kept here (rather than borrowed) so the runtime can render
+    /// without holding a reference to the app. The interactive mode keeps it
+    /// in sync via [`Self::set_theme`].
+    theme: TuiTheme,
 }
 
 impl NeoTuiRuntime {
@@ -49,7 +58,21 @@ impl NeoTuiRuntime {
             streaming_tool_args: BTreeMap::new(),
             history: Vec::new(),
             last_frame: Vec::new(),
+            theme: TuiTheme::default(),
         }
+    }
+
+    /// Update the theme used to color the live transcript body. Called by the
+    /// interactive mode whenever the app's theme changes (e.g. from a
+    /// `~/.neo/themes/*.json` file).
+    pub fn set_theme(&mut self, theme: TuiTheme) {
+        self.theme = theme;
+        self.request_render(RenderKind::Incremental);
+    }
+
+    #[must_use]
+    pub const fn theme(&self) -> TuiTheme {
+        self.theme
     }
 
     pub fn push_transcript(&mut self, entry: TranscriptEntry) {
@@ -260,14 +283,14 @@ impl NeoTuiRuntime {
         // 1. Drain newly finalized transcript rows into history (they will not
         //    change again). They stay in history so future frames still show
         //    them until the renderer scrolls them off-screen.
-        for line in self.transcript.drain_finalized_rows(width) {
+        for line in self.transcript.drain_finalized_rows(width, &self.theme) {
             self.history.push(line.to_ansi());
         }
 
         // 2. Drain newly finalized tool cards into history, interleaved after
         //    any finalized transcript rows above. This only drains when there
         //    is no live transcript tail, matching the previous semantics.
-        let live_rows = self.transcript.render_live_rows(width);
+        let live_rows = self.transcript.render_live_rows(width, &self.theme);
         if live_rows.is_empty() {
             for line in self.drain_finalized_tool_rows() {
                 self.history.push(line.to_ansi());
@@ -285,6 +308,16 @@ impl NeoTuiRuntime {
         }
         if live.is_empty() {
             live.extend(self.render_tool_rows());
+        }
+        // Insert a blank separator between the finalized history and the live
+        // region so a tool card block never touches the live assistant text
+        // that follows it (and vice versa). Avoid a double blank when the
+        // history already ends with one (e.g. a trailing tool-card gap).
+        if !frame.is_empty()
+            && !live.is_empty()
+            && frame.last().map_or(true, |line| !line.is_empty())
+        {
+            frame.push(String::new());
         }
         for line in live {
             frame.push(line.to_ansi());
@@ -347,8 +380,6 @@ impl NeoTuiRuntime {
     }
 
     fn drain_finalized_tool_rows(&mut self) -> Vec<Line> {
-        use crate::core::Component as _;
-
         let finalized_ids: Vec<String> = self
             .tool_order
             .iter()
@@ -366,27 +397,114 @@ impl NeoTuiRuntime {
         self.tool_order
             .retain(|id| !finalized_ids.iter().any(|finalized| finalized == id));
 
-        let mut rows = Vec::new();
-        for id in finalized_ids {
-            self.streaming_tool_args.remove(&id);
-            if let Some(mut tool) = self.tools.remove(&id) {
-                rows.extend(tool.render(self.width));
+        // Collect the finalized tool components in order so we can group
+        // consecutive reads (and other groupable tools) into tree cards.
+        let mut ordered: Vec<ToolCallComponent> = Vec::new();
+        for id in &finalized_ids {
+            self.streaming_tool_args.remove(id);
+            if let Some(tool) = self.tools.remove(id) {
+                ordered.push(tool);
             }
         }
-        rows
+        render_ordered_tools(&mut ordered, self.width, &self.theme)
     }
 
     fn render_tool_rows(&mut self) -> Vec<Line> {
-        use crate::core::Component as _;
-
-        let mut rows = Vec::new();
-        for id in &self.tool_order {
-            if let Some(tool) = self.tools.get_mut(id) {
-                rows.extend(tool.render(self.width));
+        // Render the live tool cards in order. We borrow mutably in order so
+        // the theme-aware render can flush any cached state; grouping scans
+        // consecutive same-name groupable tools and renders tree cards.
+        let ordered_ids: Vec<String> = self.tool_order.clone();
+        let mut ordered: Vec<ToolCallComponent> = Vec::new();
+        for id in &ordered_ids {
+            if let Some(tool) = self.tools.remove(id) {
+                ordered.push(tool);
             }
+        }
+        // Put them back so future frames still see them as live.
+        let rows = render_ordered_tools(&mut ordered, self.width, &self.theme);
+        for tool in ordered {
+            self.tools.insert(tool.id().to_owned(), tool);
         }
         rows
     }
+}
+
+/// Render an ordered slice of tool components, collapsing consecutive runs of
+/// the same groupable tool (read/grep/glob/find) into a single tree card.
+///
+/// A run of length 1 still renders as a normal solo card. Any non-groupable
+/// tool (bash/edit/write/...) breaks an in-progress run. Live output buffers
+/// are preserved because we render from the components directly (not cloned
+/// states).
+fn render_ordered_tools(
+    ordered: &mut [ToolCallComponent],
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    use crate::core::Expandable as _;
+
+    let mut rows = Vec::new();
+    let mut i = 0;
+    while i < ordered.len() {
+        // Each card (solo or group) is preceded by a blank line — separating
+        // it both from any transcript text above the tool block and from the
+        // previous card — so adjacent cards never touch (kimi-code
+        // MESSAGE_INDENT gap between every visual block).
+        rows.push(Line::raw(""));
+        let current_name = ordered[i].name().to_owned();
+        let groupable = is_groupable(&current_name);
+        if !groupable {
+            ordered[i].set_expanded(false);
+            rows.extend(ordered[i].render_with_theme(width, theme));
+            i += 1;
+            continue;
+        }
+        // Greedy run of consecutive same-name groupable tools.
+        let mut j = i + 1;
+        while j < ordered.len()
+            && ordered[j].name().eq_ignore_ascii_case(&current_name)
+            && is_groupable(ordered[j].name())
+        {
+            j += 1;
+        }
+        if j - i >= 2 {
+            // Group of >= 2: render as a tree card. Only group tools that are
+            // NOT still streaming live output (a running read shows solo).
+            let any_live_output = ordered[i..j].iter().any(|t| !t.progress().is_empty());
+            if any_live_output {
+                for tool in &mut ordered[i..j] {
+                    tool.set_expanded(false);
+                    rows.extend(tool.render_with_theme(width, theme));
+                }
+            } else {
+                let states: Vec<&ToolCallState> =
+                    ordered[i..j].iter().map(ToolCallComponent::state).collect();
+                let group = ToolGroup {
+                    tool: current_name.clone(),
+                    states,
+                };
+                rows.extend(render_tool_group(&group, theme));
+            }
+        } else {
+            ordered[i].set_expanded(false);
+            rows.extend(ordered[i].render_with_theme(width, theme));
+        }
+        i = j;
+    }
+    // Trail the tool block with a blank line so the next block (e.g. live
+    // assistant text) is also separated from the last card.
+    if !rows.is_empty() {
+        rows.push(Line::raw(""));
+    }
+    rows
+}
+
+/// Whether a tool name is eligible for consecutive-call grouping.
+fn is_groupable(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().as_str(),
+        "read" | "grep" | "glob" | "find" | "list"
+    )
 }
 
 #[must_use]

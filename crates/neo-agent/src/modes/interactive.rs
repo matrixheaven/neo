@@ -457,6 +457,7 @@ impl InteractiveController {
         }
         let (cols, rows) = size().unwrap_or((80, 24));
         let mut runtime = NeoTuiRuntime::new(usize::from(cols), usize::from(rows));
+        runtime.set_theme(self.app.theme());
         runtime.push_banner(format!("Welcome to {}", self.app.title()));
         self.kimi_runtime = Some(runtime);
     }
@@ -1456,6 +1457,7 @@ impl InteractiveController {
     fn rebuild_kimi_runtime_from_session(&mut self, loaded: &LoadedSessionTranscript) {
         let (cols, rows) = size().unwrap_or((80, 24));
         let mut runtime = NeoTuiRuntime::new(usize::from(cols), usize::from(rows));
+        runtime.set_theme(self.app.theme());
         runtime.push_banner(format!("Welcome to {}", self.app.title()));
         replay_session_into_kimi_runtime(&mut runtime, loaded);
         self.kimi_runtime = Some(runtime);
@@ -2362,6 +2364,9 @@ impl NeoTerminal {
             return Ok(());
         }
         let width = usize::from(cols);
+        // Keep the runtime's theme in sync with the app so config-loaded
+        // themes color the live transcript body, not just the chrome.
+        runtime.set_theme(app.theme());
         runtime.resize(width, usize::from(rows));
         runtime.request_render(neo_tui::core::RenderKind::Incremental);
         let Some(mut lines) = runtime.render_frame(width, usize::from(rows)) else {
@@ -2849,6 +2854,7 @@ fn render_runtime_snapshot(
 
 fn runtime_from_app_snapshot(app: &NeoTuiApp, width: usize, height: usize) -> NeoTuiRuntime {
     let mut runtime = NeoTuiRuntime::new(width, height);
+    runtime.set_theme(app.theme());
     for item in app.transcript().items() {
         match item {
             neo_tui::TranscriptItem::User { content } => runtime.replay_user_message(content),
@@ -3020,7 +3026,7 @@ mod tests {
         let prompt = joined.find("> next").expect("prompt chrome at tail");
         assert!(welcome < tool, "banner should precede the tool card");
         assert!(tool < prompt, "tool card should precede the prompt chrome");
-        // The running tool card is live (● Using), not finalized (✓ Used).
+        // The running tool card is live (● Using), not finalized (● Used).
         assert!(!joined.contains("Used Bash"));
     }
 
@@ -3063,7 +3069,13 @@ mod tests {
         let lines = compose_runtime_frame(&mut app, &mut runtime, 80, 12)
             .expect("runtime frame composes replay");
 
-        let joined = lines.join("\n");
+        // Tool header spans are individually ANSI-colored, so strip codes
+        // before substring searching for the committed tool card.
+        let plain: Vec<String> = lines
+            .iter()
+            .map(|line| neo_tui::ansi::strip_ansi(line))
+            .collect();
+        let joined = plain.join("\n");
         let welcome = joined.find("Welcome to neo").expect("welcome in body");
         let prompt = joined.find("> next").expect("prompt chrome live row");
         let tool = joined
@@ -3103,7 +3115,7 @@ mod tests {
         let snapshot = controller.submit_prompt().await.expect("prompt succeeds");
 
         assert!(
-            snapshot.contains("✓ Used Read (README.md)"),
+            snapshot.contains("● Used Read (README.md)"),
             "runtime snapshot should include finalized tool card, got:\n{snapshot}"
         );
         assert!(snapshot.contains("> "));
@@ -3156,9 +3168,8 @@ mod tests {
         assert!(snapshot.contains("Welcome to neo"));
         assert!(snapshot.contains("Session: test-session"));
         assert!(snapshot.contains("Model: openai/gpt-4.1"));
-        assert!(snapshot.contains("You"));
+        // The user prompt and assistant reply appear in the rendered frame.
         assert!(snapshot.contains("hello neo"));
-        assert!(snapshot.contains("Assistant"));
         assert!(snapshot.contains("Hello, Neo"));
         assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
     }

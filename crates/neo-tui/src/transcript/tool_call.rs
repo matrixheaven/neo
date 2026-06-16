@@ -1,7 +1,9 @@
 use crate::ToolStatusKind;
+use crate::ansi::Style;
+use crate::app::TuiTheme;
 use crate::core::{Component, Expandable, Finalization, Line};
 
-use super::tool_renderers::{render_tool_body, tool_header};
+use super::tool_renderers::{render_tool_body_themed, tool_header_spans};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallState {
@@ -106,9 +108,27 @@ impl ToolCallComponent {
         &self.state.id
     }
 
+    /// The tool name (e.g. "Read", "Bash").
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.state.name
+    }
+
     #[must_use]
     pub fn arguments(&self) -> Option<&str> {
         self.state.arguments.as_deref()
+    }
+
+    /// Borrow the underlying tool state (for grouping/rendering snapshots).
+    #[must_use]
+    pub const fn state(&self) -> &ToolCallState {
+        &self.state
+    }
+
+    /// Consume into the underlying state (used when draining finalized cards).
+    #[must_use]
+    pub fn into_state(self) -> ToolCallState {
+        self.state
     }
 
     #[must_use]
@@ -140,27 +160,7 @@ impl Expandable for ToolCallComponent {
 
 impl Component for ToolCallComponent {
     fn render(&mut self, width: usize) -> Vec<Line> {
-        let mut rows = vec![Line::raw(tool_header(&self.state))];
-        rows.extend(render_tool_body(&self.state, self.expanded, width));
-        if self.state.status == ToolStatusKind::Running {
-            rows.extend(
-                self.progress_lines
-                    .iter()
-                    .map(|line| Line::raw(format!("  {line}"))),
-            );
-            if self.dropped_live_output_lines > 0 {
-                rows.push(Line::raw(format!(
-                    "  ... ({} earlier lines)",
-                    self.dropped_live_output_lines
-                )));
-            }
-            rows.extend(
-                self.live_output
-                    .iter()
-                    .map(|line| Line::raw(format!("  {line}"))),
-            );
-        }
-        rows
+        self.render_with_theme(width, &TuiTheme::default())
     }
 
     fn finalization(&self) -> Finalization {
@@ -170,5 +170,41 @@ impl Component for ToolCallComponent {
             }
             ToolStatusKind::Pending | ToolStatusKind::Running => Finalization::Live,
         }
+    }
+}
+
+impl ToolCallComponent {
+    /// Theme-aware render. Builds the header as styled spans (status symbol
+    /// + tool name + key arg + chip) and the body as muted preview lines.
+    #[must_use]
+    pub fn render_with_theme(&mut self, width: usize, theme: &TuiTheme) -> Vec<Line> {
+        let header_spans = tool_header_spans(&self.state, theme);
+        let mut rows = vec![Line::from_spans(header_spans)];
+        rows.extend(render_tool_body_themed(
+            &self.state,
+            self.expanded,
+            width,
+            theme,
+        ));
+        if self.state.status == ToolStatusKind::Running {
+            let live_style = Style::default().fg(theme.muted);
+            rows.extend(
+                self.progress_lines
+                    .iter()
+                    .map(|line| Line::styled(format!("  {line}"), live_style)),
+            );
+            if self.dropped_live_output_lines > 0 {
+                rows.push(Line::styled(
+                    format!("  ... ({} earlier lines)", self.dropped_live_output_lines),
+                    Style::default().fg(theme.muted),
+                ));
+            }
+            rows.extend(
+                self.live_output
+                    .iter()
+                    .map(|line| Line::styled(format!("  {line}"), live_style)),
+            );
+        }
+        rows
     }
 }
