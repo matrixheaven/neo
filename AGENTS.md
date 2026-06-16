@@ -8,6 +8,10 @@ Read @ [CX.md](../../.kimi-code/CX.md)  @[RTK.md](../../.kimi-code/RTK.md) ，Us
 
 Swarm mode : Parallel at least 3 subagent swarm to finish a job
 
+不接受任何反驳，这个项目将会同时有 N 个 AI Agent 并行开发，禁止一切犯贱行为：动 git 的任何回溯操作来方便你自己的工作，你必须立刻停下
+
+不接受任何反驳，禁止去做不属于你的工作，别的 AI 整出来的报错，不关你任何事，100%专注于管好你自己的工作！
+
 ## Project overview
 
 Neo is a Rust-native, local AI coding agent monorepo inspired by `pi`. It is
@@ -255,7 +259,7 @@ The interactive TUI mode (`neo-agent` with no subcommand) provides:
   blocks, tool call cards, and images with syntax highlighting.
 - **Inline image protocols**: Kitty Graphics, iTerm2 inline images, and Sixel
   encoding for terminal image display.
-- **Session picker**: `ctrl+r` or `/tree` opens a local session picker.
+- **Session picker**: `ctrl+r` or `/resume` opens a local session picker.
 - **Model picker**: `/model` opens a model selection dialog.
 - **Session fork**: `ctrl+n` in the session picker forks the selected session.
 - **Transcript selection copy**: `ctrl+shift+c` copies selected transcript text.
@@ -358,7 +362,7 @@ CLI provider/model management: `neo provider add/remove/list`,
 `neo models add/remove/list/set`.
 
 TUI slash commands: `/model` (model picker), `/provider` (provider list),
-`/resume` (session picker), `/tree` (session picker).
+`/resume` (session picker).
 
 CLI session management: `neo sessions list/show/rename/fork/summarize/compact/export-html/export-json`.
 
@@ -421,6 +425,54 @@ marketplace fixtures.
 - Example config and tool schemas are in `examples/config/` and
   `examples/tools/`.
 
+## Git policy — STRICT (READ THIS BEFORE ANY git COMMAND)
+
+**Git 修改操作（mutations）一律禁止，除非用户在当前会话中明确逐次授权。**
+
+### 绝对禁止（无论是否"看起来安全"）
+
+以下命令会**不可逆地丢失未提交的工作**，**永远不得执行**，包括在
+subagent / background task / hook 中也不行：
+
+- `git reset`（任何形式：`--hard`、`--soft`、`--mixed`、`HEAD`、`HEAD~N`、`HEAD^`）
+- `git checkout -- <file>` / `git checkout HEAD -- <file>` / `git restore <file>`
+  （还原工作区文件）
+- `git checkout <commit> -- <path>`（把文件回退到历史版本）
+- `git stash` / `git stash drop` / `git stash clear`
+- `git rebase` / `git rebase -i` / `git rebase --abort`
+- `git clean -fd` / `git clean -fdx`（删除未跟踪文件/目录）
+- `git rm`（删除已跟踪文件）
+- `git gc --prune=now` / `git reflog expire`（清理引用日志）
+- `git filter-branch` / `git filter-repo`
+
+### 需要逐次确认（不能假设之前的授权延续）
+
+- `git commit` / `git commit --amend`
+- `git push` / `git push --force`
+- `git merge` / `git cherry-pick`
+- `git branch -d` / `git branch -D`
+- `git tag` / `git tag -d`
+- `git add`（仅当用户明确要求暂存时）
+- `git checkout <branch>` / `git switch <branch>`（切换分支）
+- `git worktree add` / `git worktree remove`
+
+### 允许（只读，不需要确认）
+
+`git status`、`git diff`、`git log`、`git show`、`git branch`（不带 -d）、
+`git stash list`、`git reflog`、`git blame`、`git ls-files` 等只读命令可自由使用。
+
+### 给 subagent 的规则
+
+**subagent（Agent / AgentSwarm / background bash）不得执行任何 git mutation。**
+如果 subagent 认为需要 commit/reset/checkout，它必须返回结果让主 agent
+向用户请求授权，而不是自己执行。subagent 的 prompt 里也应包含此约束。
+
+### 违反后果
+
+执行 `git reset`、`git checkout --`、`git stash`、`git clean` 等命令会
+**静默丢弃用户未提交的代码**，且可能无法通过 `git fsck` 恢复。
+这是最容易发生的灾难性操作，必须零容忍。
+
 ## Current workspace health (as of last exploration)
 
 The workspace compiles and all tests in `neo-agent-core` and `neo-agent` pass
@@ -466,3 +518,43 @@ icm topics                                # list all topics
 ```
 
 <!-- icm:end -->
+
+## Git mutation policy — STRICT
+
+**NEVER run any git command that discards, reverts, or rewrites uncommitted
+working-tree changes unless the user gives an explicit, message-level
+instruction to do so.** This applies to all agents and subagents.
+
+### Banned commands (never run without explicit user approval)
+
+| Command | Why banned |
+|---------|------------|
+| `git reset --hard` | Discards all uncommitted work |
+| `git restore <path>` / `git checkout -- <path>` | Reverts tracked files to HEAD |
+| `git checkout .` / `git checkout -- .` | Reverts entire worktree |
+| `git stash` / `git stash drop` / `git stash clear` | Hides or destroys uncommitted changes |
+| `git clean -fd` / `git clean -fdx` | Deletes untracked files and dirs |
+| `git rebase` / `git rebase -i` | Rewrites commit history |
+| `git commit --amend` / `git commit --amend --no-edit` | Rewrites the last commit |
+| `git push --force` / `git push -f` | Overwrites remote history |
+
+### Allowed git commands
+
+`git status`, `git diff`, `git log`, `git branch`, `git show`, `git add`,
+`git stash list` (read-only), `git fsck`, `git reflog` — all fine.
+
+`git commit`, `git push` (non-force), `git merge`, `git checkout -b <new>` are
+allowed **only when the user explicitly asks for them** (this restates the
+global rule in the system prompt).
+
+### If you need to undo your own edit
+
+Use `Edit` / `Write` to revert the specific lines you changed. Never use a
+git command to blow away the file — you will destroy the user's parallel work
+in the same file.
+
+### Subagent dispatch
+
+When delegating to subagents, include this rule in the prompt. A subagent
+that runs `git restore` or `git stash` can silently destroy hours of the
+user's uncommitted work.<!-- git-mutation-ban -->

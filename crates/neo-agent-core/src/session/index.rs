@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncBufReadExt;
 
-use super::SessionError;
+use super::{SessionError, SessionMetadataFile, SessionSummary};
 
 const INDEX_FILENAME: &str = "session_index.jsonl";
 
@@ -99,6 +99,66 @@ impl SessionIndex {
             }
         }
         Ok(entries)
+    }
+
+    /// Read every indexed session and enrich it with its per-workspace metadata.
+    ///
+    /// Returns summaries sorted by `updated_at` descending. Entries whose
+    /// metadata file is missing or corrupted are skipped silently.
+    pub fn list_all_with_metadata(
+        &self,
+        sessions_root: &Path,
+    ) -> Result<Vec<SessionSummary>, SessionIndexError> {
+        let entries = self.list_all()?;
+        let mut summaries = Vec::new();
+
+        for entry in entries {
+            let bucket_dir = if entry.session_dir.is_absolute() {
+                entry.session_dir.clone()
+            } else {
+                sessions_root.join(&entry.session_dir)
+            };
+            let metadata_path = bucket_dir.join("sessions.metadata.json");
+
+            let content = match std::fs::read_to_string(&metadata_path) {
+                Ok(content) => content,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(SessionIndexError::Io(error)),
+            };
+
+            let metadata = match serde_json::from_str::<SessionMetadataFile>(&content) {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+
+            let Some(stored) = metadata.sessions.get(&entry.session_id) else {
+                continue;
+            };
+
+            let record = crate::session::SessionRecord {
+                id: entry.session_id.clone(),
+                name: stored.name.clone(),
+                summary: stored.summary.clone(),
+                parent_id: stored.parent_id.clone(),
+                summary_record: stored.summary_record.clone(),
+                title: stored.title.clone(),
+                title_model: stored.title_model.clone(),
+                title_updated_at: stored.title_updated_at.clone(),
+                workspace: stored.workspace.clone(),
+                last_user_prompt: stored.last_user_prompt.clone(),
+                updated_at: stored.updated_at.clone(),
+                children: Vec::new(),
+            };
+            summaries.push(SessionSummary::from_record(record, &entry.workdir));
+        }
+
+        summaries.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        Ok(summaries)
     }
 }
 

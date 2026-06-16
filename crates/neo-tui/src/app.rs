@@ -3,6 +3,7 @@ use std::{
     fmt::Write as _,
     ops::Range,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use crate::ansi::{Color, Rect};
@@ -11,8 +12,8 @@ use neo_agent_core::{
 };
 
 use crate::{
-    ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities, TodoDisplayItem,
-    TodoDisplayStatus, TranscriptWidget, app_layout,
+    ImageRenderPolicy, ImageSource, InlineImage, InputEvent, InputResult, KeybindingAction,
+    TerminalImageCapabilities, TodoDisplayItem, TodoDisplayStatus, TranscriptWidget, app_layout,
     widgets::{QuestionDialogAction, QuestionResult, QuestionStateMachine},
 };
 
@@ -790,6 +791,11 @@ impl NeoTuiApp {
             .and_then(|id| self.overlays.iter().find(|overlay| overlay.id == id))
     }
 
+    pub fn focused_overlay_mut(&mut self) -> Option<&mut Overlay> {
+        self.focused_overlay
+            .and_then(|id| self.overlays.iter_mut().find(|overlay| overlay.id == id))
+    }
+
     pub fn submit_prompt(&mut self) -> Option<String> {
         let submitted = self.prompt.text.trim_end().to_owned();
         if submitted.trim().is_empty() {
@@ -1019,12 +1025,21 @@ impl NeoTuiApp {
                 arguments,
                 ..
             } => {
+                let is_plan_review = subject.starts_with("Exit plan mode");
                 let body = if arguments.is_null() {
                     subject
                 } else {
                     format!("{subject}\n{arguments}")
                 };
-                self.request_approval(id, format!("{operation:?} approval"), body);
+                if is_plan_review {
+                    // Use plan-review modal with Approve/Reject/Revise
+                    self.push_overlay(Overlay::new(
+                        "approval",
+                        OverlayKind::Approval(ApprovalRequestModal::new_plan_review(id, body)),
+                    ));
+                } else {
+                    self.request_approval(id, format!("{operation:?} approval"), body);
+                }
             }
             AgentEvent::ShellCommandStarted { .. } | AgentEvent::ShellCommandFinished { .. } => {
                 self.apply_shell_event(event);
@@ -1072,8 +1087,11 @@ impl NeoTuiApp {
             AgentEvent::PlanModeEntered { .. } => {
                 self.plan_mode_active = true;
             }
-            AgentEvent::PlanModeExited { .. } => {
+            AgentEvent::PlanModeExited { .. } | AgentEvent::PlanModeCancelled { .. } => {
                 self.plan_mode_active = false;
+            }
+            AgentEvent::PlanUpdated { enabled, .. } => {
+                self.plan_mode_active = enabled;
             }
             AgentEvent::TodoUpdated { todos, .. } => {
                 let display: Vec<TodoDisplayItem> = todos
@@ -1639,29 +1657,46 @@ impl NeoTuiApp {
 
     pub fn open_session_picker(
         &mut self,
-        items: impl IntoIterator<Item = PickerItem>,
+        current_session_id: &str,
+        scope: SessionPickerScope,
+        items: impl IntoIterator<Item = SessionPickerItem>,
     ) -> OverlayId {
         self.push_overlay(Overlay::new(
             "sessions",
-            OverlayKind::SessionPicker(SessionPickerState::new_with_visible(items, 4)),
+            OverlayKind::SessionPicker(SessionPickerState::new(
+                items,
+                current_session_id,
+                scope,
+                4,
+            )),
         ))
     }
 
     #[must_use]
-    pub fn selected_session(&self) -> Option<PickerItem> {
+    pub fn selected_session(&self) -> Option<SessionPickerItem> {
         let OverlayKind::SessionPicker(picker) = &self.focused_overlay()?.kind else {
             return None;
         };
         picker.confirm()
     }
 
-    pub fn confirm_session_picker(&mut self) -> Option<PickerItem> {
+    pub fn confirm_session_picker(&mut self) -> Option<SessionPickerItem> {
         let id = self.focused_overlay;
         let selected = self.selected_session()?;
         if let Some(id) = id {
             let _ = self.close_overlay(id);
         }
         Some(selected)
+    }
+
+    /// Render the focused overlay as ANSI lines, if any.
+    #[must_use]
+    pub fn render_focused_overlay(&self, width: usize) -> Option<Vec<String>> {
+        let overlay = self.focused_overlay()?;
+        match &overlay.kind {
+            OverlayKind::SessionPicker(picker) => Some(picker.render_lines(width, &self.theme)),
+            _ => None,
+        }
     }
 
     pub fn open_model_picker(&mut self, items: impl IntoIterator<Item = PickerItem>) -> OverlayId {
@@ -1723,6 +1758,192 @@ impl NeoTuiApp {
         Some(selected)
     }
 
+    // -- Rich Kimi-style dialog overlays ---------------------------------------
+
+    pub fn open_model_selector(&mut self, opts: crate::dialogs::ModelSelectorOptions) -> OverlayId {
+        let state = crate::dialogs::ModelSelectorState::new(opts);
+        self.push_overlay(Overlay::new("models", OverlayKind::ModelSelector(state)))
+    }
+
+    pub fn open_tabbed_model_selector(
+        &mut self,
+        opts: crate::dialogs::TabbedModelSelectorOptions,
+    ) -> OverlayId {
+        let state = crate::dialogs::TabbedModelSelectorState::new(opts);
+        self.push_overlay(Overlay::new(
+            "models",
+            OverlayKind::TabbedModelSelector(state),
+        ))
+    }
+
+    pub fn open_provider_manager(
+        &mut self,
+        opts: crate::dialogs::ProviderManagerOptions,
+    ) -> OverlayId {
+        let state = crate::dialogs::ProviderManagerState::new(opts);
+        self.push_overlay(Overlay::new(
+            "providers",
+            OverlayKind::ProviderManager(state),
+        ))
+    }
+
+    pub fn open_choice_picker(&mut self, opts: crate::dialogs::ChoicePickerOptions) -> OverlayId {
+        let state = crate::dialogs::ChoicePickerState::new(opts);
+        self.push_overlay(Overlay::new("choice", OverlayKind::ChoicePicker(state)))
+    }
+
+    pub fn open_api_key_input(&mut self, opts: crate::dialogs::ApiKeyInputOptions) -> OverlayId {
+        let state = crate::dialogs::ApiKeyInputState::new(opts, self.theme);
+        self.push_overlay(Overlay::new("api-key", OverlayKind::ApiKeyInput(state)))
+    }
+
+    pub fn open_custom_registry_import(
+        &mut self,
+        opts: crate::dialogs::CustomRegistryImportOptions,
+    ) -> OverlayId {
+        let state = crate::dialogs::CustomRegistryImportState::new(opts, self.theme);
+        self.push_overlay(Overlay::new(
+            "registry",
+            OverlayKind::CustomRegistryImport(state),
+        ))
+    }
+
+    /// Render the focused overlay (if any) into ANSI lines at the given width.
+    #[must_use]
+    pub fn focused_overlay_lines(&self, width: usize) -> Vec<String> {
+        let Some(overlay) = self.focused_overlay() else {
+            return Vec::new();
+        };
+        match &overlay.kind {
+            OverlayKind::SessionPicker(picker) => picker.render_lines(width, &self.theme),
+            OverlayKind::ModelPicker(picker) => picker.render_lines(width),
+            OverlayKind::CommandPalette(palette) => palette.render_lines(width),
+            OverlayKind::PromptCompletion(completions) => completions.render_lines(width),
+            OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_) => {
+                // These are rendered via dedicated panel rendering, not overlay lines.
+                Vec::new()
+            }
+            OverlayKind::Message(text) => vec![text.clone()],
+            OverlayKind::ModelSelector(state) => state.render_lines(width),
+            OverlayKind::TabbedModelSelector(state) => state.render_lines(width),
+            OverlayKind::ProviderManager(state) => state.render_lines(width),
+            OverlayKind::ChoicePicker(state) => state.render_lines(width),
+            OverlayKind::ApiKeyInput(state) => state.render_lines(width),
+            OverlayKind::CustomRegistryImport(state) => state.render_lines(width),
+        }
+    }
+
+    /// Height in terminal lines the focused overlay wants to occupy.
+    #[must_use]
+    pub fn focused_overlay_height(&self) -> u16 {
+        let Some(overlay) = self.focused_overlay() else {
+            return 0;
+        };
+        match &overlay.kind {
+            OverlayKind::SessionPicker(_) => 16,
+            OverlayKind::ModelPicker(_) => 16,
+            OverlayKind::CommandPalette(_) => 12,
+            OverlayKind::PromptCompletion(_) => 8,
+            OverlayKind::Approval(_) => 8,
+            OverlayKind::QuestionDialog(_) => 16,
+            OverlayKind::Message(_) => 3,
+            OverlayKind::ModelSelector(_)
+            | OverlayKind::TabbedModelSelector(_)
+            | OverlayKind::ProviderManager(_)
+            | OverlayKind::ChoicePicker(_) => 16,
+            OverlayKind::ApiKeyInput(_) | OverlayKind::CustomRegistryImport(_) => 10,
+        }
+    }
+
+    /// Check if the focused overlay is one of the rich dialog types that
+    /// handles its own keyboard input via `handle_input`.
+    #[must_use]
+    pub fn focused_overlay_is_rich_dialog(&self) -> bool {
+        let Some(overlay) = self.focused_overlay() else {
+            return false;
+        };
+        matches!(
+            overlay.kind,
+            OverlayKind::ModelSelector(_)
+                | OverlayKind::TabbedModelSelector(_)
+                | OverlayKind::ProviderManager(_)
+                | OverlayKind::ChoicePicker(_)
+                | OverlayKind::ApiKeyInput(_)
+                | OverlayKind::CustomRegistryImport(_)
+        )
+    }
+
+    /// Forward an input event to the focused rich dialog overlay.
+    pub fn handle_focused_dialog_input(&mut self, input: InputEvent) -> InputResult {
+        let Some(id) = self.focused_overlay else {
+            return InputResult::Ignored;
+        };
+        if let Some(overlay) = self.overlays.iter_mut().find(|o| o.id == id) {
+            match &mut overlay.kind {
+                OverlayKind::ModelSelector(state) => return state.handle_input(input),
+                OverlayKind::TabbedModelSelector(state) => return state.handle_input(input),
+                OverlayKind::ProviderManager(state) => return state.handle_input(input),
+                OverlayKind::ChoicePicker(state) => return state.handle_input(input),
+                OverlayKind::ApiKeyInput(state) => return state.handle_input(input),
+                OverlayKind::CustomRegistryImport(state) => return state.handle_input(input),
+                _ => {}
+            }
+        }
+        InputResult::Ignored
+    }
+
+    // Convenience result accessors for rich dialogs
+
+    #[must_use]
+    pub fn model_selector_result(&self) -> Option<&crate::dialogs::ModelSelectorResult> {
+        let OverlayKind::ModelSelector(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        state.result()
+    }
+
+    #[must_use]
+    pub fn tabbed_model_selector_result(&self) -> Option<&crate::dialogs::ModelSelectorResult> {
+        let OverlayKind::TabbedModelSelector(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        state.result()
+    }
+
+    #[must_use]
+    pub fn provider_manager_action(&self) -> Option<crate::dialogs::ProviderManagerAction> {
+        let OverlayKind::ProviderManager(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        state.action()
+    }
+
+    #[must_use]
+    pub fn choice_picker_result(&self) -> Option<&crate::dialogs::ChoiceResult> {
+        let OverlayKind::ChoicePicker(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        state.result()
+    }
+
+    #[must_use]
+    pub fn api_key_input_result(&self) -> Option<&crate::dialogs::ApiKeyInputResult> {
+        let OverlayKind::ApiKeyInput(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        state.result()
+    }
+
+    #[must_use]
+    pub fn custom_registry_import_result(
+        &self,
+    ) -> Option<&crate::dialogs::CustomRegistryImportResult> {
+        let OverlayKind::CustomRegistryImport(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        state.result()
+    }
+
     #[must_use]
     pub fn approval_choice(&self) -> Option<ApprovalChoice> {
         let OverlayKind::Approval(modal) = &self.focused_overlay()?.kind else {
@@ -1740,6 +1961,7 @@ impl NeoTuiApp {
         let result = ApprovalResult {
             request_id: modal.request_id.clone(),
             choice: modal.modal.selected_choice()?,
+            feedback: None,
         };
         if let Some(id) = id {
             let _ = self.close_overlay(id);
@@ -2143,37 +2365,94 @@ impl Overlay {
     pub fn move_selection_down(&mut self) {
         match &mut self.kind {
             OverlayKind::CommandPalette(state) => state.move_down(),
-            OverlayKind::SessionPicker(state) | OverlayKind::ModelPicker(state) => {
+            OverlayKind::SessionPicker(state) => state.move_down(),
+            OverlayKind::ModelPicker(state) => {
                 state.move_down();
             }
             OverlayKind::PromptCompletion(state) => state.move_down(),
             OverlayKind::Approval(request) => request.move_down(),
             OverlayKind::QuestionDialog(state) => state.move_cursor_down(),
             OverlayKind::Message(_) => {}
+            OverlayKind::ModelSelector(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+            }
+            OverlayKind::TabbedModelSelector(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+            }
+            OverlayKind::ProviderManager(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+            }
+            OverlayKind::ChoicePicker(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+            }
+            OverlayKind::ApiKeyInput(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+            }
+            OverlayKind::CustomRegistryImport(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+            }
         }
     }
 
     pub fn move_selection_up(&mut self) {
         match &mut self.kind {
             OverlayKind::CommandPalette(state) => state.move_up(),
-            OverlayKind::SessionPicker(state) | OverlayKind::ModelPicker(state) => {
+            OverlayKind::SessionPicker(state) => state.move_up(),
+            OverlayKind::ModelPicker(state) => {
                 state.move_up();
             }
             OverlayKind::PromptCompletion(state) => state.move_up(),
             OverlayKind::Approval(request) => request.move_up(),
             OverlayKind::QuestionDialog(state) => state.move_cursor_up(),
             OverlayKind::Message(_) => {}
+            OverlayKind::ModelSelector(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectUp));
+            }
+            OverlayKind::TabbedModelSelector(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectUp));
+            }
+            OverlayKind::ProviderManager(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectUp));
+            }
+            OverlayKind::ChoicePicker(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectUp));
+            }
+            OverlayKind::ApiKeyInput(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectUp));
+            }
+            OverlayKind::CustomRegistryImport(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectUp));
+            }
         }
     }
 
     pub fn move_selection_page_down(&mut self) {
         match &mut self.kind {
             OverlayKind::CommandPalette(state) => state.page_down(),
-            OverlayKind::SessionPicker(state) | OverlayKind::ModelPicker(state) => {
+            OverlayKind::SessionPicker(state) => state.page_down(),
+            OverlayKind::ModelPicker(state) => {
                 state.page_down();
             }
             OverlayKind::PromptCompletion(state) => state.page_down(),
             OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_) | OverlayKind::Message(_) => {
+            }
+            OverlayKind::ModelSelector(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
+            }
+            OverlayKind::TabbedModelSelector(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
+            }
+            OverlayKind::ProviderManager(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
+            }
+            OverlayKind::ChoicePicker(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
+            }
+            OverlayKind::ApiKeyInput(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
+            }
+            OverlayKind::CustomRegistryImport(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
             }
         }
     }
@@ -2181,11 +2460,30 @@ impl Overlay {
     pub fn move_selection_page_up(&mut self) {
         match &mut self.kind {
             OverlayKind::CommandPalette(state) => state.page_up(),
-            OverlayKind::SessionPicker(state) | OverlayKind::ModelPicker(state) => {
+            OverlayKind::SessionPicker(state) => state.page_up(),
+            OverlayKind::ModelPicker(state) => {
                 state.page_up();
             }
             OverlayKind::PromptCompletion(state) => state.page_up(),
             OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_) | OverlayKind::Message(_) => {
+            }
+            OverlayKind::ModelSelector(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageUp));
+            }
+            OverlayKind::TabbedModelSelector(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageUp));
+            }
+            OverlayKind::ProviderManager(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageUp));
+            }
+            OverlayKind::ChoicePicker(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageUp));
+            }
+            OverlayKind::ApiKeyInput(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageUp));
+            }
+            OverlayKind::CustomRegistryImport(state) => {
+                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageUp));
             }
         }
     }
@@ -2200,10 +2498,479 @@ pub enum OverlayKind {
     Approval(ApprovalRequestModal),
     QuestionDialog(QuestionStateMachine),
     Message(String),
+    // Kimi-style rich dialogs
+    ModelSelector(crate::dialogs::ModelSelectorState),
+    TabbedModelSelector(crate::dialogs::TabbedModelSelectorState),
+    ProviderManager(crate::dialogs::ProviderManagerState),
+    ChoicePicker(crate::dialogs::ChoicePickerState),
+    ApiKeyInput(crate::dialogs::ApiKeyInputState),
+    CustomRegistryImport(crate::dialogs::CustomRegistryImportState),
 }
 
-pub type SessionPickerState = PickerState;
 pub type ModelPickerState = PickerState;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionPickerScope {
+    Workspace,
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPickerItem {
+    pub id: String,
+    pub title: String,
+    pub last_prompt: Option<String>,
+    pub work_dir: PathBuf,
+    pub updated_at: SystemTime,
+    pub is_current: bool,
+}
+
+impl SessionPickerItem {
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        last_prompt: Option<String>,
+        work_dir: impl Into<PathBuf>,
+        updated_at: SystemTime,
+        is_current: bool,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            last_prompt,
+            work_dir: work_dir.into(),
+            updated_at,
+            is_current,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPickerState {
+    items: Vec<SessionPickerItem>,
+    current_session_id: String,
+    scope: SessionPickerScope,
+    filter: String,
+    /// Selected index into the filtered list.
+    selected: usize,
+    max_visible: usize,
+}
+
+impl SessionPickerState {
+    #[must_use]
+    pub fn new(
+        items: impl IntoIterator<Item = SessionPickerItem>,
+        current_session_id: impl Into<String>,
+        scope: SessionPickerScope,
+        max_visible: usize,
+    ) -> Self {
+        Self {
+            items: items.into_iter().collect(),
+            current_session_id: current_session_id.into(),
+            scope,
+            filter: String::new(),
+            selected: 0,
+            max_visible: max_visible.max(1),
+        }
+    }
+
+    fn filtered_items(&self) -> Vec<&SessionPickerItem> {
+        if self.filter.is_empty() {
+            self.items.iter().collect()
+        } else {
+            let q = self.filter.to_lowercase();
+            self.items
+                .iter()
+                .filter(|item| {
+                    item.title.to_lowercase().contains(&q)
+                        || item.id.to_lowercase().contains(&q)
+                        || item
+                            .last_prompt
+                            .as_deref()
+                            .is_some_and(|p| p.to_lowercase().contains(&q))
+                })
+                .collect()
+        }
+    }
+
+    pub fn set_filter(&mut self, filter: &str) {
+        self.filter = filter.to_owned();
+        self.selected = 0;
+    }
+
+    /// Clear the filter. Returns `true` if there was a filter to clear
+    /// (for the Esc two-stage behaviour).
+    pub fn clear_filter(&mut self) -> bool {
+        let had = !self.filter.is_empty();
+        self.filter.clear();
+        self.selected = 0;
+        had
+    }
+
+    pub fn move_up(&mut self) {
+        let len = self.filtered_items().len();
+        if len > 0 {
+            self.selected = (self.selected + len - 1) % len;
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        let len = self.filtered_items().len();
+        if len > 0 {
+            self.selected = (self.selected + 1) % len;
+        }
+    }
+
+    pub fn page_up(&mut self) {
+        let len = self.filtered_items().len();
+        if len > 0 {
+            self.selected = self.selected.saturating_sub(self.max_visible);
+        }
+    }
+
+    pub fn page_down(&mut self) {
+        let len = self.filtered_items().len();
+        if len > 0 {
+            self.selected = (self.selected + self.max_visible).min(len - 1);
+        }
+    }
+
+    pub fn set_scope(&mut self, scope: SessionPickerScope) {
+        self.scope = scope;
+        self.selected = 0;
+        self.filter.clear();
+    }
+
+    #[must_use]
+    pub const fn scope(&self) -> SessionPickerScope {
+        self.scope
+    }
+
+    #[must_use]
+    pub fn selected_item(&self) -> Option<SessionPickerItem> {
+        self.filtered_items()
+            .get(self.selected)
+            .map(|item| (*item).clone())
+    }
+
+    #[must_use]
+    pub fn confirm(&self) -> Option<SessionPickerItem> {
+        self.selected_item()
+    }
+
+    /// Render the picker as ANSI-styled lines matching the Kimi card layout.
+    #[must_use]
+    pub fn render_lines(&self, width: usize, theme: &TuiTheme) -> Vec<String> {
+        let accent = theme.accent;
+        let muted = theme.muted;
+        let success = theme.success;
+        let text_color = theme.header;
+        let border = format!(
+            "{}",
+            crate::ansi::paint(&"─".repeat(width), crate::ansi::Style::default().fg(accent))
+        );
+
+        let mut lines = vec![border.clone()];
+
+        let title = match self.scope {
+            SessionPickerScope::Workspace => "Sessions",
+            SessionPickerScope::All => "All sessions",
+        };
+        let title_suffix = if self.filter.is_empty() {
+            format!(
+                "  {}",
+                crate::ansi::paint("(type to search)", crate::ansi::Style::default().fg(muted))
+            )
+        } else {
+            String::new()
+        };
+        lines.push(format!(
+            "{}{}",
+            crate::ansi::paint(title, crate::ansi::Style::default().fg(accent).bold()),
+            title_suffix
+        ));
+
+        // Hint line
+        let scope_hint = match self.scope {
+            SessionPickerScope::Workspace => "Ctrl+A all",
+            SessionPickerScope::All => "Ctrl+A current cwd",
+        };
+        let hint_parts: Vec<&str> = if self.filter.is_empty() {
+            vec![
+                "\u{2191}\u{2193} navigate",
+                scope_hint,
+                "Enter select",
+                "Esc cancel",
+            ]
+        } else {
+            vec![
+                "Backspace clear",
+                "\u{2191}\u{2193} navigate",
+                scope_hint,
+                "Enter select",
+                "Esc cancel",
+            ]
+        };
+        lines.push(crate::ansi::paint(
+            &hint_parts.join(" \u{00b7} "),
+            crate::ansi::Style::default().fg(muted),
+        ));
+
+        lines.push(String::new());
+
+        if !self.filter.is_empty() {
+            lines.push(format!(
+                "{}{}",
+                crate::ansi::paint("Search: ", crate::ansi::Style::default().fg(accent)),
+                crate::ansi::paint(&self.filter, crate::ansi::Style::default().fg(text_color))
+            ));
+        }
+
+        let filtered = self.filtered_items();
+        if filtered.is_empty() {
+            let msg = if self.items.is_empty() {
+                "No sessions found."
+            } else {
+                "No matches"
+            };
+            lines.push(crate::ansi::paint(
+                msg,
+                crate::ansi::Style::default().fg(muted),
+            ));
+            lines.push(border);
+            return lines;
+        }
+
+        let visible_start = (self.selected / self.max_visible) * self.max_visible;
+        let visible_end = (visible_start + self.max_visible).min(filtered.len());
+        for vi in visible_start..visible_end {
+            let item = &filtered[vi];
+            let is_selected = vi == self.selected;
+            for card_line in
+                self.render_card(item, is_selected, width, accent, muted, success, text_color)
+            {
+                lines.push(card_line);
+            }
+            if vi < visible_end - 1 {
+                lines.push(String::new());
+            }
+        }
+
+        // Footer
+        if filtered.len() > self.max_visible || !self.filter.is_empty() {
+            lines.push(String::new());
+            let total_suffix = if !self.filter.is_empty() {
+                format!("{} matches", filtered.len())
+            } else {
+                format!("{} sessions", filtered.len())
+            };
+            let footer = format!(
+                "Showing {}-{} of {}",
+                visible_start + 1,
+                visible_end,
+                total_suffix
+            );
+            lines.push(crate::ansi::paint(
+                &footer,
+                crate::ansi::Style::default().fg(muted),
+            ));
+        }
+
+        lines.push(border);
+        lines
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_card(
+        &self,
+        item: &SessionPickerItem,
+        is_selected: bool,
+        width: usize,
+        accent: Color,
+        muted: Color,
+        success: Color,
+        text_color: Color,
+    ) -> Vec<String> {
+        let pointer = if is_selected { "\u{276f} " } else { "  " };
+        let pointer_style = if is_selected {
+            crate::ansi::Style::default().fg(accent)
+        } else {
+            crate::ansi::Style::default().fg(muted)
+        };
+
+        // Relative time
+        let time_str = format_relative_time(item.updated_at);
+
+        // Current badge
+        let badge = if item.is_current {
+            " \u{2190} current"
+        } else {
+            ""
+        };
+
+        // Title with inline trailing
+        let title_text = if item.title.is_empty() {
+            &item.id
+        } else {
+            &item.title
+        };
+        let title_style = if is_selected {
+            crate::ansi::Style::default().fg(accent).bold()
+        } else {
+            crate::ansi::Style::default().fg(text_color)
+        };
+
+        let mut header = crate::ansi::paint(pointer, pointer_style);
+        header.push_str(&crate::ansi::paint(&single_line(title_text), title_style));
+        if !time_str.is_empty() {
+            header.push_str("  ");
+            header.push_str(&crate::ansi::paint(
+                &time_str,
+                crate::ansi::Style::default().fg(muted),
+            ));
+        }
+        if !badge.is_empty() {
+            header.push_str("  ");
+            header.push_str(&crate::ansi::paint(
+                badge,
+                crate::ansi::Style::default().fg(success),
+            ));
+        }
+
+        // Truncate header to width
+        let mut card = vec![truncate_ansi_to_width(&header, width)];
+
+        // Meta line: session id + work_dir
+        let id_str = &item.id;
+        let dir_str = home_alias(&item.work_dir);
+        let indent = "  ";
+        let meta_gap = "   ";
+        let meta_line = format!(
+            "{}{}{}{}",
+            indent,
+            crate::ansi::paint(id_str, crate::ansi::Style::default().fg(muted)),
+            crate::ansi::paint(meta_gap, crate::ansi::Style::default().fg(muted)),
+            crate::ansi::paint(&dir_str, crate::ansi::Style::default().fg(muted))
+        );
+        let meta_visible = crate::ansi::strip_ansi(&meta_line).chars().count();
+        if meta_visible <= width {
+            card.push(meta_line);
+        } else {
+            // Wrap: id on one line, dir on next
+            card.push(format!(
+                "{}{}",
+                indent,
+                crate::ansi::paint(id_str, crate::ansi::Style::default().fg(muted))
+            ));
+            let dir_budget = width.saturating_sub(indent.len());
+            let truncated_dir = truncate_left(&dir_str, dir_budget);
+            card.push(format!(
+                "{}{}",
+                indent,
+                crate::ansi::paint(&truncated_dir, crate::ansi::Style::default().fg(muted))
+            ));
+        }
+
+        // Last prompt preview
+        if let Some(prompt) = &item.last_prompt {
+            let trimmed = single_line(prompt);
+            if !trimmed.is_empty() {
+                let marker = "\u{203a} ";
+                let budget = width.saturating_sub(indent.len() + marker.len());
+                let truncated = truncate_to_chars(&trimmed, budget);
+                card.push(format!(
+                    "{}{}{}",
+                    indent,
+                    crate::ansi::paint(marker, crate::ansi::Style::default().fg(muted)),
+                    crate::ansi::paint(&truncated, crate::ansi::Style::default().fg(muted))
+                ));
+            }
+        }
+
+        card
+    }
+}
+
+fn format_relative_time(time: SystemTime) -> String {
+    let now = SystemTime::now();
+    let diff = now.duration_since(time).unwrap_or_default();
+    let secs = diff.as_secs();
+    if secs < 60 {
+        "just now".to_owned()
+    } else {
+        let mins = secs / 60;
+        if mins < 60 {
+            format!("{mins}m ago")
+        } else {
+            let hours = mins / 60;
+            if hours < 24 {
+                format!("{hours}h ago")
+            } else {
+                let days = hours / 24;
+                format!("{days}d ago")
+            }
+        }
+    }
+}
+
+fn single_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+fn home_alias(path: &Path) -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        let home = PathBuf::from(&home);
+        if let Ok(rel) = path.strip_prefix(&home) {
+            return format!("~/{}", rel.display());
+        }
+    }
+    path.display().to_string()
+}
+
+fn truncate_left(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_width {
+        return s.to_owned();
+    }
+    if max_width == 1 {
+        return "\u{2026}".to_owned();
+    }
+    let keep = max_width - 1;
+    let start = chars.len() - keep;
+    format!("\u{2026}{}", chars[start..].iter().collect::<String>())
+}
+
+fn truncate_to_chars(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        return s.to_owned();
+    }
+    if max_chars <= 1 {
+        return "\u{2026}".to_owned();
+    }
+    format!(
+        "{}\u{2026}",
+        chars[..max_chars - 1].iter().collect::<String>()
+    )
+}
+
+fn truncate_ansi_to_width(s: &str, width: usize) -> String {
+    let visible = crate::ansi::strip_ansi(s);
+    if visible.chars().count() <= width {
+        return s.to_owned();
+    }
+    // Simple truncation: just cut at width characters of visible text
+    let truncated: String = visible.chars().take(width).collect();
+    truncated
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptCompletionState {
@@ -2478,6 +3245,26 @@ impl ApprovalRequestModal {
         }
     }
 
+    /// Create a plan-review approval modal with Approve / Reject / Revise options.
+    #[must_use]
+    pub fn new_plan_review(
+        request_id: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            modal: ApprovalModal::new(
+                "Plan Review".to_string(),
+                body,
+                [
+                    ApprovalOption::new(ApprovalChoice::Approve, "Approve"),
+                    ApprovalOption::new(ApprovalChoice::Deny, "Reject"),
+                    ApprovalOption::new(ApprovalChoice::Revise, "Revise"),
+                ],
+            ),
+        }
+    }
+
     pub fn move_up(&mut self) {
         if self.modal.options.is_empty() {
             self.modal.selected = 0;
@@ -2501,6 +3288,8 @@ impl ApprovalRequestModal {
 pub struct ApprovalResult {
     pub request_id: String,
     pub choice: ApprovalChoice,
+    /// Feedback text when the user picks Revise (ExitPlanMode plan review).
+    pub feedback: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4084,6 +4873,9 @@ pub enum ApprovalChoice {
     Approve,
     Deny,
     AlwaysApprove,
+    /// Revise — like Deny but the user provides feedback that gets sent to the model.
+    /// Used for ExitPlanMode plan review.
+    Revise,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

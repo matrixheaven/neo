@@ -1,8 +1,8 @@
 use neo_tui::{
     AppMode, CommandPaletteState, CommandSpec, ContextWindow, ImageProtocolPreference,
     ImageRenderPolicy, ModelPickerState, NeoTuiApp, Overlay, OverlayKind, PickerItem, Rect,
-    SessionPickerState, StreamUpdate, TerminalImageCapabilities, TranscriptLine,
-    TranscriptRenderer, runtime_chrome_ansi_lines,
+    SessionPickerItem, SessionPickerScope, SessionPickerState, StreamUpdate,
+    TerminalImageCapabilities, TranscriptLine, TranscriptRenderer, runtime_chrome_ansi_lines,
 };
 use std::path::PathBuf;
 
@@ -1070,12 +1070,31 @@ fn command_palette_session_and_model_pickers_filter_and_select_values() {
     assert_eq!(palette.selected_command().expect("command").id, "model");
     assert_eq!(palette.confirm().expect("confirmed").id, "model");
 
-    let mut sessions = SessionPickerState::new([
-        PickerItem::new("s1", "Session one", Some("today")),
-        PickerItem::new("s2", "Long task", Some("yesterday")),
-    ]);
+    let mut sessions = SessionPickerState::new(
+        [
+            SessionPickerItem::new(
+                "s1",
+                "Session one",
+                Some("today".to_owned()),
+                "/tmp",
+                std::time::SystemTime::UNIX_EPOCH,
+                false,
+            ),
+            SessionPickerItem::new(
+                "s2",
+                "Long task",
+                Some("yesterday".to_owned()),
+                "/tmp",
+                std::time::SystemTime::UNIX_EPOCH,
+                false,
+            ),
+        ],
+        "",
+        SessionPickerScope::Workspace,
+        4,
+    );
     sessions.set_filter("long");
-    assert_eq!(sessions.confirm().expect("session").value, "s2");
+    assert_eq!(sessions.confirm().expect("session").id, "s2");
 
     let mut models = ModelPickerState::new([
         PickerItem::new("openai/gpt-4.1", "GPT-4.1", Some("balanced")),
@@ -1099,15 +1118,33 @@ fn command_palette_session_and_model_pickers_filter_and_select_values() {
     assert_eq!(selected.id, "models");
     assert!(app.focused_overlay().is_none());
 
-    app.open_session_picker([
-        PickerItem::new("alpha", "Alpha", Some("first session")),
-        PickerItem::new("beta", "Beta", Some("second session")),
-    ]);
+    app.open_session_picker(
+        "current",
+        SessionPickerScope::Workspace,
+        [
+            SessionPickerItem::new(
+                "alpha",
+                "Alpha",
+                Some("first session".to_owned()),
+                "/tmp",
+                std::time::SystemTime::UNIX_EPOCH,
+                false,
+            ),
+            SessionPickerItem::new(
+                "beta",
+                "Beta",
+                Some("second session".to_owned()),
+                "/tmp",
+                std::time::SystemTime::UNIX_EPOCH,
+                false,
+            ),
+        ],
+    );
     app.move_overlay_selection_down();
     let selected = app
         .confirm_session_picker()
         .expect("selected session returned");
-    assert_eq!(selected.value, "beta");
+    assert_eq!(selected.id, "beta");
     assert!(app.focused_overlay().is_none());
 
     app.open_model_picker([
@@ -1172,15 +1209,23 @@ fn command_palette_session_and_model_pickers_page_selection() {
     palette.page_up();
     assert_eq!(palette.selected_command().expect("command").id, "command-0");
 
-    let mut sessions = SessionPickerState::new((0..10).map(|index| {
-        PickerItem::new(
-            format!("session-{index}"),
-            format!("Session {index}"),
-            None::<String>,
-        )
-    }));
+    let mut sessions = SessionPickerState::new(
+        (0..10).map(|index| {
+            SessionPickerItem::new(
+                format!("session-{index}"),
+                format!("Session {index}"),
+                None,
+                "/tmp",
+                std::time::SystemTime::UNIX_EPOCH,
+                false,
+            )
+        }),
+        "",
+        SessionPickerScope::Workspace,
+        8,
+    );
     sessions.page_down();
-    assert_eq!(sessions.confirm().expect("session").value, "session-8");
+    assert_eq!(sessions.confirm().expect("session").id, "session-8");
 
     let mut models = ModelPickerState::new((0..10).map(|index| {
         PickerItem::new(

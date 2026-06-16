@@ -152,7 +152,6 @@ In interactive mode:
 - `/model` — Open the model picker
 - `/provider` — Open the provider list
 - `/resume` — Open session picker
-- `/tree` — Open session picker
 
 ## Themes
 

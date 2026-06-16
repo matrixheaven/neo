@@ -1416,6 +1416,7 @@ pub async fn run_prompt_in_session(
     let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
     record_session_activity(config, session_id, &prompt);
     let runtime = runtime_for_config(config, None, None).await?;
+    runtime.restore_plan_mode(&context);
     finish_prompt_turn(
         user_message,
         context,
@@ -1490,6 +1491,7 @@ pub async fn run_prompt_in_session_streaming(
     let (user_message, events) = append_user_event_jsonl(prompt.clone(), &mut writer).await?;
     record_session_activity(config, session_id, &prompt);
     let runtime = runtime_for_config(config, Some(approval_tx), question_tx).await?;
+    runtime.restore_plan_mode(&context);
     let streaming = StreamingTurnIo {
         event_tx,
         session_id: session_id.to_owned(),

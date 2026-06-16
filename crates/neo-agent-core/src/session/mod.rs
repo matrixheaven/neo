@@ -263,6 +263,36 @@ pub struct SessionRecord {
     pub children: Vec<String>,
 }
 
+/// Lightweight summary of a session for picker UIs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub id: String,
+    pub title: Option<String>,
+    pub last_prompt: Option<String>,
+    pub work_dir: PathBuf,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+impl SessionSummary {
+    #[must_use]
+    pub fn from_record(record: SessionRecord, work_dir: impl AsRef<Path>) -> Self {
+        Self {
+            id: record.id,
+            title: record
+                .name
+                .clone()
+                .or_else(|| record.title.clone())
+                .or_else(|| record.last_user_prompt.clone()),
+            last_prompt: record.last_user_prompt,
+            work_dir: work_dir.as_ref().to_path_buf(),
+            updated_at: record.updated_at.unwrap_or_default(),
+            metadata: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSummaryRecord {
     pub text: String,
@@ -286,13 +316,13 @@ pub struct SessionMetadataStore {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct SessionMetadataFile {
+pub(crate) struct SessionMetadataFile {
     #[serde(default)]
     sessions: BTreeMap<String, StoredSessionMetadata>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct StoredSessionMetadata {
+pub(crate) struct StoredSessionMetadata {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -338,6 +368,18 @@ impl SessionMetadataStore {
                 .then_with(|| right.id.cmp(&left.id))
         });
         Ok(records)
+    }
+
+    pub fn list_summaries(
+        &self,
+        work_dir: impl AsRef<Path>,
+    ) -> Result<Vec<SessionSummary>, SessionError> {
+        let work_dir = work_dir.as_ref().to_path_buf();
+        let records = self.list_recent()?;
+        Ok(records
+            .into_iter()
+            .map(|record| SessionSummary::from_record(record, &work_dir))
+            .collect())
     }
 
     pub fn rename(&self, session_id: &str, name: String) -> Result<SessionRecord, SessionError> {

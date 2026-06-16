@@ -19,6 +19,7 @@ pub struct AppLayout {
     pub status: Rect,
     pub approval: Rect,
     pub session_picker: Rect,
+    pub overlay: Rect,
     pub prompt: Rect,
     pub footer: Rect,
 }
@@ -45,6 +46,13 @@ pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
             approval_panel_height(&request.modal, area.width)
         })
         .min(area.height.saturating_sub(3));
+    // Rich dialog overlays (model selector, provider manager, choice picker, etc.)
+    let overlay_height = if app.focused_overlay().is_some() {
+        app.focused_overlay_height()
+    } else {
+        0
+    }
+    .min(area.height.saturating_sub(3));
     let todo_height = if app.has_todos() {
         TodoPanel::new(app.todo_items())
             .with_theme(app.theme())
@@ -56,7 +64,8 @@ pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
         .saturating_add(prompt_height)
         .saturating_add(footer_bar_height)
         .saturating_add(session_picker_height)
-        .saturating_add(approval_height);
+        .saturating_add(approval_height)
+        .saturating_add(overlay_height);
     let body_y = area.y;
     let body_height = area.height.saturating_sub(bottom_height);
     let body = Rect {
@@ -89,9 +98,15 @@ pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
         width: area.width,
         height: session_picker_height,
     };
-    let prompt = Rect {
+    let overlay = Rect {
         x: area.x,
         y: session_picker.y.saturating_add(session_picker.height),
+        width: area.width,
+        height: overlay_height,
+    };
+    let prompt = Rect {
+        x: area.x,
+        y: overlay.y.saturating_add(overlay.height),
         width: area.width,
         height: prompt_height,
     };
@@ -108,6 +123,7 @@ pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
         status,
         approval,
         session_picker,
+        overlay,
         prompt,
         footer,
     }

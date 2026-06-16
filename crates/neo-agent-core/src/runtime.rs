@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     AgentEvent, AgentMessage, AgentToolCall, CompactionPhase, CompactionReason, CompactionSummary,
-    Content, PermissionDecision, PermissionOperation, PermissionPolicy, PlanModeState,
+    Content, InjectionManager, PermissionDecision, PermissionOperation, PermissionPolicy, PlanMode,
     ProcessSupervisor, QueueKind, StopReason, TodoEventData, ToolContext, ToolError, ToolRegistry,
     ToolResult, ToolUpdateCallback, check_plan_mode_guard,
 };
@@ -106,7 +106,12 @@ pub struct AgentConfig {
     /// `enter_plan_mode` / `exit_plan_mode`.
     #[serde(skip)]
     #[schemars(skip)]
-    pub plan_mode: Arc<RwLock<PlanModeState>>,
+    pub plan_mode: Arc<RwLock<PlanMode>>,
+    /// Side-channel for ExitPlanMode Revise feedback, keyed by tool_call.id.
+    /// Populated by the approval handler when the user picks Revise.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub plan_review_feedback: Arc<Mutex<std::collections::HashMap<String, String>>>,
     /// Home directory used for plan file creation (e.g. `~/.neo`).
     /// Falls back to `workspace_root` if unset.
     pub home_dir: Option<PathBuf>,
@@ -141,7 +146,8 @@ impl AgentConfig {
             async_after_tool_call: None,
             approval_handler: None,
             async_approval_handler: None,
-            plan_mode: Arc::new(RwLock::new(PlanModeState::default())),
+            plan_mode: Arc::new(RwLock::new(PlanMode::default())),
+            plan_review_feedback: Arc::new(Mutex::new(std::collections::HashMap::new())),
             home_dir: None,
             todos: Arc::new(Mutex::new(Vec::new())),
         }
@@ -272,7 +278,7 @@ impl AgentConfig {
     /// Replace the shared plan-mode state. Useful when constructing from a
     /// pre-existing state (e.g. after replay).
     #[must_use]
-    pub fn with_plan_mode(mut self, plan_mode: Arc<RwLock<PlanModeState>>) -> Self {
+    pub fn with_plan_mode(mut self, plan_mode: Arc<RwLock<PlanMode>>) -> Self {
         self.plan_mode = plan_mode;
         self
     }
@@ -314,6 +320,9 @@ pub struct AgentContext {
     /// Whether plan mode was active at the end of the last replayed/exected turn.
     #[serde(default)]
     plan_mode_active: bool,
+    /// The plan id from the last `PlanModeEntered` event, if any.
+    #[serde(default)]
+    plan_mode_id: Option<String>,
     /// Latest todo list state, restored on resume replay.
     #[serde(default)]
     todos: Vec<TodoEventData>,
@@ -375,6 +384,12 @@ impl AgentContext {
         self.plan_mode_active
     }
 
+    /// The plan id from the last replayed `PlanModeEntered` event, if any.
+    #[must_use]
+    pub fn plan_mode_id(&self) -> Option<&str> {
+        self.plan_mode_id.as_deref()
+    }
+
     /// Latest todo list from replayed state.
     #[must_use]
     pub fn todos(&self) -> &[TodoEventData] {
@@ -423,11 +438,15 @@ impl AgentContext {
                 AgentEvent::CompactionApplied { summary } => {
                     context.apply_compaction(summary.clone());
                 }
-                AgentEvent::PlanModeEntered { .. } => {
+                AgentEvent::PlanModeEntered { id, .. } => {
                     context.plan_mode_active = true;
+                    context.plan_mode_id = Some(id.clone());
                 }
-                AgentEvent::PlanModeExited { .. } => {
+                AgentEvent::PlanModeExited { .. } | AgentEvent::PlanModeCancelled { .. } => {
                     context.plan_mode_active = false;
+                }
+                AgentEvent::PlanUpdated { enabled, .. } => {
+                    context.plan_mode_active = *enabled;
                 }
                 AgentEvent::TodoUpdated { todos, .. } => {
                     context.todos.clone_from(todos);
@@ -540,6 +559,22 @@ impl AgentRuntime {
         &self.config
     }
 
+    /// Restore plan-mode state from a replayed context.
+    pub fn restore_plan_mode(&self, context: &AgentContext) {
+        if !context.is_plan_mode_active() {
+            return;
+        }
+        let Some(id) = context.plan_mode_id() else {
+            return;
+        };
+        let Some(plans_dir) = plan_mode_plans_dir(&self.config) else {
+            return;
+        };
+        if let Ok(mut pm) = self.config.plan_mode.write() {
+            pm.restore_enter(&plans_dir, id.to_owned());
+        }
+    }
+
     pub fn run_turn<'a>(
         &'a self,
         context: &'a mut AgentContext,
@@ -633,7 +668,17 @@ struct SpawnedRun<'a> {
     context: &'a mut AgentContext,
 }
 
-fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {
+/// Compute the workspace-scoped plans directory.
+fn plan_mode_plans_dir(config: &AgentConfig) -> Option<PathBuf> {
+    let home = config.home_dir.as_deref()?;
+    if let Some(workdir) = config.workspace_root.as_deref() {
+        Some(crate::session::workspace_sessions_dir(&home.join("sessions"), workdir).join("plans"))
+    } else {
+        Some(home.join("plans"))
+    }
+}
+
+async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {
     let mut messages = Vec::new();
     if let Some(system_prompt) = &config.system_prompt {
         messages.push(AgentMessage::system_text(system_prompt).to_chat_message());
@@ -650,6 +695,10 @@ fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {
             without_reasoning_content(message.to_chat_message())
         }
     }));
+    let mut injector = InjectionManager::new(Arc::clone(&config.plan_mode));
+    for injected in injector.inject(context).await {
+        messages.push(injected.to_chat_message());
+    }
     ChatRequest {
         model: config.model.clone(),
         messages,
@@ -793,11 +842,15 @@ impl EventEmitter {
             AgentEvent::CompactionApplied { summary } => {
                 context.apply_compaction(summary.clone());
             }
-            AgentEvent::PlanModeEntered { .. } => {
+            AgentEvent::PlanModeEntered { id, .. } => {
                 context.plan_mode_active = true;
+                context.plan_mode_id = Some(id.clone());
             }
-            AgentEvent::PlanModeExited { .. } => {
+            AgentEvent::PlanModeExited { .. } | AgentEvent::PlanModeCancelled { .. } => {
                 context.plan_mode_active = false;
+            }
+            AgentEvent::PlanUpdated { enabled, .. } => {
+                context.plan_mode_active = *enabled;
             }
             AgentEvent::TodoUpdated { todos, .. } => {
                 context.todos.clone_from(todos);
@@ -862,7 +915,7 @@ async fn run_agent_turn(
         }
 
         let turn = emitter.context.turns.saturating_add(1);
-        let request = chat_request(&config, &emitter.context);
+        let request = chat_request(&config, &emitter.context).await;
         validate_model_capabilities(&request)?;
         let assistant = run_model_turn(
             Arc::clone(&model),
@@ -894,7 +947,7 @@ async fn run_agent_turn(
         let Some(registry) = &tools else {
             break;
         };
-        let tool_results = execute_tool_calls(
+        let mut tool_results = execute_tool_calls(
             &config,
             registry,
             turn,
@@ -921,33 +974,64 @@ async fn run_agent_turn(
             );
             emitter.emit(AgentEvent::MessageAppended { message });
         }
+        // Inject plan data into exit_plan_mode tool results for TUI PlanBox rendering.
+        {
+            let pm = config.plan_mode.read().unwrap();
+            if pm.is_active() {
+                if let Some(plan_data) = pm.data().ok().flatten() {
+                    for (tool_call, result) in &mut tool_results {
+                        if tool_call.name == "exit_plan_mode" && result.details.is_none() {
+                            result.details = Some(serde_json::json!({
+                                "plan_content": plan_data.content,
+                                "plan_path": plan_data.path.display().to_string(),
+                            }));
+                        }
+                    }
+                }
+            }
+        }
         // Intercept plan-mode tools and todo tool to emit structured events.
         for (tool_call, result) in &tool_results {
             if result.terminate {
                 match tool_call.name.as_str() {
                     "enter_plan_mode" => {
                         let mut pm = config.plan_mode.write().unwrap();
-                        let homedir = config
-                            .home_dir
-                            .as_deref()
-                            .or(config.workspace_root.as_deref());
-                        if let Some(home) = homedir {
-                            if pm.enter(home).is_ok() {
-                                drop(pm);
-                                emitter.emit(AgentEvent::PlanModeEntered { turn });
+                        let id = if let Some(plans_dir) = plan_mode_plans_dir(&config) {
+                            match pm.enter(&plans_dir, true) {
+                                Ok(data) => data.id,
+                                Err(_) => {
+                                    pm.enter_in_memory();
+                                    pm.plan_id().unwrap_or("").to_owned()
+                                }
                             }
                         } else {
-                            // No home_dir — activate without a plan file.
-                            pm.is_active = true;
-                            drop(pm);
-                            emitter.emit(AgentEvent::PlanModeEntered { turn });
-                        }
+                            pm.enter_in_memory();
+                            pm.plan_id().unwrap_or("").to_owned()
+                        };
+                        drop(pm);
+                        emitter.emit(AgentEvent::PlanModeEntered {
+                            turn,
+                            id: id.clone(),
+                        });
+                        emitter.emit(AgentEvent::PlanUpdated {
+                            turn,
+                            enabled: true,
+                        });
                     }
                     "exit_plan_mode" => {
+                        // Exit plan mode and emit events. In non-auto permission
+                        // mode, the TUI layer can intercept with an approval
+                        // dialog before this code runs; if we reach here the
+                        // exit has been approved (or auto-approved).
                         let mut pm = config.plan_mode.write().unwrap();
+                        let id = pm.plan_id().unwrap_or("").to_owned();
                         pm.exit();
                         drop(pm);
-                        emitter.emit(AgentEvent::PlanModeExited { turn });
+                        emitter.emit(AgentEvent::PlanModeExited { turn, id });
+                        emitter.emit(AgentEvent::PlanUpdated {
+                            turn,
+                            enabled: false,
+                        });
                     }
                     _ => {}
                 }
@@ -1720,7 +1804,7 @@ async fn prepare_tool_context(
     // --- Plan-mode guard: check BEFORE normal permission policy ---
     {
         let plan_mode = config.plan_mode.read().unwrap();
-        if plan_mode.is_active {
+        if plan_mode.is_active() {
             let decision = check_plan_mode_guard(&plan_mode, &tool_call.name, &tool_call.arguments);
             if decision == PermissionDecision::Deny {
                 return ToolPreparation::Skip(ToolResult::error(format!(
@@ -1728,6 +1812,59 @@ async fn prepare_tool_context(
                     tool_call.name
                 )));
             }
+        }
+    }
+
+    // --- ExitPlanMode approval: ask the user to review the plan ---
+    if tool_call.name == "exit_plan_mode" {
+        // Read plan info under a short-lived guard, then drop it before any .await
+        let (plan_content, plan_path) = {
+            let pm = config.plan_mode.read().unwrap();
+            if !pm.is_active() {
+                (String::new(), String::new())
+            } else {
+                let content = pm
+                    .data()
+                    .ok()
+                    .flatten()
+                    .map(|d| d.content)
+                    .unwrap_or_default();
+                let path = pm
+                    .plan_file_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                (content, path)
+            }
+        };
+        // Guard is now dropped — safe to .await
+        if !plan_content.trim().is_empty() {
+            let subject = format!("Exit plan mode\nPlan file: {plan_path}");
+            if let Some(result) = approval_decision(
+                config,
+                turn,
+                tool_call,
+                PermissionOperation::Tool,
+                subject,
+                emitter,
+            )
+            .await
+            {
+                // Denied — check for revise feedback
+                let feedback = config
+                    .plan_review_feedback
+                    .lock()
+                    .ok()
+                    .and_then(|mut m| m.remove(&tool_call.id));
+                let message = if let Some(feedback) = feedback {
+                    format!(
+                        "User requested revisions. Plan mode remains active.\n\nFeedback: {feedback}"
+                    )
+                } else {
+                    result.content
+                };
+                return ToolPreparation::Skip(ToolResult::ok(message));
+            }
+            // Approved (None) — let the tool run; terminate handler exits plan mode
         }
     }
 

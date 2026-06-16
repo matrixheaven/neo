@@ -94,7 +94,7 @@ cargo run -p neo-agent -- sessions export-json <session-id>
 cargo run -p neo-agent -- resume <session-id>
 ```
 
-Live TUI mode opens the local session picker with `ctrl+r` or `/tree`, and can
+Live TUI mode opens the local session picker with `ctrl+r` or `/resume`, and can
 fork the selected local session with `ctrl+n`.
 
 ## Local Extensions And Skills

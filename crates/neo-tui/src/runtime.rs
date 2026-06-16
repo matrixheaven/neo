@@ -568,10 +568,54 @@ pub fn runtime_chrome_ansi_lines(
     // caller via [`apply_gutter`]) doesn't cause overflow.
     let content_width = width.saturating_sub(CHROME_GUTTER).max(1);
     let mut lines = Vec::new();
+    // Render the slash-command completion picker above the prompt box when
+    // active, mirroring kimi-code's inline SelectList positioned above the
+    // editor.
+    if let Some(completion_lines) = render_prompt_completion_lines(app, content_width) {
+        lines.extend(completion_lines);
+    }
     let (prompt_lines, prompt_cursor) = render_prompt_lines(app, content_width);
     lines.extend(prompt_lines);
     lines.extend(render_footer_lines(app, content_width));
     (lines, prompt_cursor)
+}
+
+/// Render only the footer lines (status bar + hint line), without the prompt
+/// box. Used when a session picker overlay replaces the prompt/editor area.
+#[must_use]
+pub fn footer_only_ansi_lines(app: &NeoTuiApp, width: usize) -> Vec<String> {
+    let content_width = width.saturating_sub(CHROME_GUTTER).max(1);
+    render_footer_lines(app, content_width)
+}
+
+/// Render the prompt-completion (slash command) picker as ANSI lines if a
+/// `PromptCompletion` overlay is currently focused. Returns `None` when no
+/// completion overlay is open.
+fn render_prompt_completion_lines(app: &NeoTuiApp, width: usize) -> Option<Vec<String>> {
+    let overlay = app.focused_overlay()?;
+    let crate::app::OverlayKind::PromptCompletion(state) = &overlay.kind else {
+        return None;
+    };
+    let raw_lines = state.render_lines(width);
+    if raw_lines.is_empty() {
+        return None;
+    }
+    let theme = app.theme();
+    let border_style = Style::default().fg(theme.accent);
+    // Draw a thin separator line above the completion items to visually
+    // distinguish them from the prompt box below.
+    let inner_width = width.saturating_sub(2).max(1);
+    let mut lines = Vec::with_capacity(raw_lines.len() + 2);
+    lines.push(paint(
+        &format!("\u{256d}{}\u{256e}", "\u{2500}".repeat(inner_width)),
+        border_style,
+    ));
+    lines.extend(raw_lines);
+    lines.push(paint(
+        &format!("\u{2570}{}\u{256f}", "\u{2500}".repeat(inner_width)),
+        border_style,
+    ));
+    Some(lines)
 }
 
 /// Render the rounded prompt input box. The first content line carries the

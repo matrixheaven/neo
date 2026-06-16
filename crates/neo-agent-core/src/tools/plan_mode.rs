@@ -64,6 +64,26 @@ impl Tool for ExitPlanModeTool {
                 "plan_summary": {
                     "type": "string",
                     "description": "A brief summary of the plan for the user to review"
+                },
+                "options": {
+                    "type": "array",
+                    "description": "Optional 1-3 custom approval options (e.g. different approaches). Labels must be unique (case-insensitive). Reserved labels (Approve, Reject, Revise, 'Reject and Exit') are not allowed.",
+                    "maxItems": 3,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {
+                                "type": "string",
+                                "maxLength": 80,
+                                "description": "Short label for this option"
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "Optional description explaining this option"
+                            }
+                        },
+                        "required": ["label"]
+                    }
                 }
             },
             "required": ["plan_summary"]

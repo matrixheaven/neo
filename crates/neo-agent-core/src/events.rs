@@ -195,10 +195,22 @@ pub enum AgentEvent {
     /// Plan mode was entered — read-only exploration plus plan file writes.
     PlanModeEntered {
         turn: u32,
+        id: String,
     },
     /// Plan mode was exited — normal tool access restored.
     PlanModeExited {
         turn: u32,
+        id: String,
+    },
+    /// Plan mode was cancelled.
+    PlanModeCancelled {
+        turn: u32,
+        id: String,
+    },
+    /// Plan-mode active state changed (for TUI replay / status updates).
+    PlanUpdated {
+        turn: u32,
+        enabled: bool,
     },
     /// Structured todo list was updated (for persistence + TUI panel).
     TodoUpdated {
@@ -321,19 +333,50 @@ mod tests {
 
     #[test]
     fn plan_mode_entered_serializes() {
-        let event = AgentEvent::PlanModeEntered { turn: 3 };
+        let event = AgentEvent::PlanModeEntered {
+            turn: 3,
+            id: "p1".into(),
+        };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains("\"PlanModeEntered\""));
-        assert!(json.contains("\"turn\":3"));
+        assert!(json.contains("\"id\":\"p1\""));
         let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(event, back);
     }
 
     #[test]
     fn plan_mode_exited_serializes() {
-        let event = AgentEvent::PlanModeExited { turn: 5 };
+        let event = AgentEvent::PlanModeExited {
+            turn: 5,
+            id: "p1".into(),
+        };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains("\"PlanModeExited\""));
+        let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(event, back);
+    }
+
+    #[test]
+    fn plan_mode_cancelled_serializes() {
+        let event = AgentEvent::PlanModeCancelled {
+            turn: 4,
+            id: "p1".into(),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"PlanModeCancelled\""));
+        let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(event, back);
+    }
+
+    #[test]
+    fn plan_updated_serializes() {
+        let event = AgentEvent::PlanUpdated {
+            turn: 2,
+            enabled: true,
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"PlanUpdated\""));
+        assert!(json.contains("\"enabled\":true"));
         let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(event, back);
     }

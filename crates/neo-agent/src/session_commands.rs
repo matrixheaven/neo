@@ -5,8 +5,8 @@ use std::{
 
 use anyhow::Context;
 use neo_agent_core::session::{
-    JsonlSessionReader, SessionCompactionOptions, SessionMetadataStore, compact_jsonl_session,
-    validate_session_id,
+    JsonlSessionReader, SessionCompactionOptions, SessionIndex, SessionMetadataStore,
+    SessionSummary, compact_jsonl_session, validate_session_id,
 };
 use neo_agent_core::{AgentMessage, Content};
 use neo_sdk::{ExportConversation, ExportMessage, HtmlExportOptions, export_html as render_html};
@@ -44,6 +44,37 @@ pub fn list(config: &AppConfig) -> anyhow::Result<String> {
             .collect::<Vec<_>>()
             .join("\n");
         Ok(format!("{lines}\n"))
+    }
+}
+
+/// Scope for the session picker data layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionPickerScope {
+    Workspace,
+    All,
+}
+
+/// Return session summaries for the current workspace or every known workspace.
+pub(crate) fn session_summaries(
+    config: &AppConfig,
+    scope: SessionPickerScope,
+) -> anyhow::Result<Vec<SessionSummary>> {
+    match scope {
+        SessionPickerScope::Workspace => metadata_store(config)
+            .list_summaries(&config.project_dir)
+            .map_err(|error| anyhow::anyhow!("failed to list workspace sessions: {error}")),
+        SessionPickerScope::All => {
+            let neo_home = config.sessions_dir.parent().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "sessions dir {} has no parent directory",
+                    config.sessions_dir.display()
+                )
+            })?;
+            let index = SessionIndex::new(neo_home);
+            index
+                .list_all_with_metadata(&config.sessions_dir)
+                .map_err(|error| anyhow::anyhow!("failed to list all sessions: {error}"))
+        }
     }
 }
 
