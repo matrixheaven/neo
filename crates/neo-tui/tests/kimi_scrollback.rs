@@ -11,7 +11,11 @@ fn finalized_banner_and_user_messages_commit_into_scrollback() {
 
     let committed = controller.drain_finalized_rows(80, &theme);
 
-    assert!(committed.iter().any(|row| row.text() == "Welcome to neo"));
+    assert!(
+        committed
+            .iter()
+            .any(|row| row.text().contains("Welcome to neo"))
+    );
     assert!(
         committed
             .iter()
@@ -53,8 +57,14 @@ fn finalized_prefix_stops_before_live_entry() {
 
     let committed = controller.drain_finalized_rows(80, &theme);
 
-    assert_eq!(committed.len(), 1);
-    assert_eq!(committed[0].text(), "Welcome to neo");
+    // Banner renders as a multi-line rounded box; verify it's committed and
+    // contains the title, rather than asserting an exact line count.
+    assert!(!committed.is_empty());
+    assert!(
+        committed
+            .iter()
+            .any(|row| row.text().contains("Welcome to neo"))
+    );
     assert_eq!(controller.live_entries().len(), 2);
     let live = controller
         .render_live_rows(80, &theme)

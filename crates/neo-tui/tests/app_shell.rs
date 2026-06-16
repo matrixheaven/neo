@@ -226,7 +226,7 @@ fn app_shell_renders_chrome_prompt_and_footer_lines_on_short_terminal() {
     assert!(footer_row.contains("ctx 12k/200k"));
     assert!(hint_row.contains("enter send"));
     assert!(hint_row.contains("/ commands"));
-    assert!(chrome.iter().any(|line| line.starts_with("┌")));
+    assert!(chrome.iter().any(|line| line.starts_with("\u{256d}")));
 }
 
 #[test]

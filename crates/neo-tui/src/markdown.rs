@@ -103,8 +103,6 @@ struct MdRenderer<'a> {
     first_prefix: String,
     /// Prefix prepended to every continuation line (e.g. "  ").
     cont_prefix: String,
-    /// Whether no line has been emitted yet (so the next emit uses first_prefix).
-    first_line_pending: bool,
 }
 
 impl<'a> MdRenderer<'a> {
@@ -132,7 +130,6 @@ impl<'a> MdRenderer<'a> {
             in_table: false,
             first_prefix: first_prefix.to_owned(),
             cont_prefix: cont_prefix.to_owned(),
-            first_line_pending: true,
         }
     }
 
