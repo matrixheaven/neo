@@ -36,9 +36,17 @@ struct ThemeFile {
 struct ThemeColors {
     header: Option<String>,
     prompt: Option<String>,
+    /// Brand accent (magenta by default) — tool names, running bullets.
+    accent: Option<String>,
+    success: Option<String>,
+    danger: Option<String>,
+    warning: Option<String>,
+    /// Secondary text / chip color.
+    muted: Option<String>,
     user: Option<String>,
     assistant: Option<String>,
     notice: Option<String>,
+    thinking: Option<String>,
     diff_added: Option<String>,
     diff_removed: Option<String>,
     diff_hunk: Option<String>,
@@ -255,6 +263,21 @@ fn load_project_theme_files(project_dir: &Path) -> anyhow::Result<Vec<ResolvedTh
 fn apply_colors(theme: &mut TuiTheme, colors: &ThemeColors, path: &Path) -> anyhow::Result<()> {
     apply_color(&mut theme.header, "header", colors.header.as_deref(), path)?;
     apply_color(&mut theme.prompt, "prompt", colors.prompt.as_deref(), path)?;
+    apply_color(&mut theme.accent, "accent", colors.accent.as_deref(), path)?;
+    apply_color(
+        &mut theme.success,
+        "success",
+        colors.success.as_deref(),
+        path,
+    )?;
+    apply_color(&mut theme.danger, "danger", colors.danger.as_deref(), path)?;
+    apply_color(
+        &mut theme.warning,
+        "warning",
+        colors.warning.as_deref(),
+        path,
+    )?;
+    apply_color(&mut theme.muted, "muted", colors.muted.as_deref(), path)?;
     apply_color(&mut theme.user, "user", colors.user.as_deref(), path)?;
     apply_color(
         &mut theme.assistant,
@@ -263,6 +286,12 @@ fn apply_colors(theme: &mut TuiTheme, colors: &ThemeColors, path: &Path) -> anyh
         path,
     )?;
     apply_color(&mut theme.notice, "notice", colors.notice.as_deref(), path)?;
+    apply_color(
+        &mut theme.thinking,
+        "thinking",
+        colors.thinking.as_deref(),
+        path,
+    )?;
     apply_color(
         &mut theme.diff_added,
         "diff_added",

@@ -5,6 +5,7 @@ pub mod core;
 pub mod diff;
 pub mod image;
 pub mod input;
+pub mod markdown;
 pub mod renderer;
 pub mod runtime;
 pub mod streaming;

@@ -1,7 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
-use crate::permissions::PermissionDecision;
 use crate::mode::plan::PlanModeState;
+use crate::permissions::PermissionDecision;
 
 /// Check whether a tool call should be allowed under plan mode.
 ///
@@ -233,18 +233,12 @@ mod tests {
 
     #[test]
     fn normalize_handles_dot_dot() {
-        assert_eq!(
-            normalize(Path::new("/a/b/../c")),
-            PathBuf::from("/a/c")
-        );
+        assert_eq!(normalize(Path::new("/a/b/../c")), PathBuf::from("/a/c"));
     }
 
     #[test]
     fn normalize_handles_dot() {
-        assert_eq!(
-            normalize(Path::new("/a/./b")),
-            PathBuf::from("/a/b")
-        );
+        assert_eq!(normalize(Path::new("/a/./b")), PathBuf::from("/a/b"));
     }
 
     #[test]
@@ -257,9 +251,6 @@ mod tests {
 
     #[test]
     fn paths_differ() {
-        assert!(!paths_match(
-            Path::new("/a/b/c.md"),
-            Path::new("/a/b/d.md")
-        ));
+        assert!(!paths_match(Path::new("/a/b/c.md"), Path::new("/a/b/d.md")));
     }
 }

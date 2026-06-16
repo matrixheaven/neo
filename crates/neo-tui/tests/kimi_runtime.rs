@@ -36,9 +36,10 @@ fn runtime_renders_finalized_rows_then_live_rows_in_one_frame() {
         .iter()
         .position(|l| l == "Welcome to neo")
         .expect("banner");
+    // User message is now bullet-led (kimi-style), no "You" label.
     let hello = frame
         .iter()
-        .position(|l| l == "hello")
+        .position(|l| l.contains("✨") && l.contains("hello"))
         .expect("user message");
     let tool = frame
         .iter()
@@ -72,8 +73,14 @@ fn runtime_maps_user_and_assistant_events_to_transcript_entries() {
     runtime.request_render(RenderKind::Incremental);
     let frame = plain_frame(&mut runtime, 80, 12);
 
-    assert!(frame.iter().any(|l| l == "hello"));
-    assert!(frame.iter().any(|l| l == "world"));
+    // User message is bullet-led (✨), assistant final is bullet-led (●).
+    assert!(
+        frame
+            .iter()
+            .any(|l| l.contains("✨") && l.contains("hello"))
+    );
+    assert!(frame.iter().any(|l| l.contains("●")));
+    assert!(frame.iter().any(|l| l.contains("world")));
 }
 
 #[test]
@@ -95,8 +102,13 @@ fn runtime_keeps_streaming_assistant_live_until_finalized() {
     });
 
     let first = plain_frame(&mut runtime, 80, 12);
-    assert!(first.iter().any(|l| l == "hello"));
-    assert!(first.iter().any(|l| l == "Hello"));
+    // User message is bullet-led; live assistant text has no bullet yet.
+    assert!(
+        first
+            .iter()
+            .any(|l| l.contains("✨") && l.contains("hello"))
+    );
+    assert!(first.iter().any(|l| l.contains("Hello")));
 
     runtime.apply_agent_event(neo_agent_core::AgentEvent::MessageFinished {
         turn: 1,
@@ -104,9 +116,10 @@ fn runtime_keeps_streaming_assistant_live_until_finalized() {
         stop_reason: neo_agent_core::StopReason::EndTurn,
     });
     let second = plain_frame(&mut runtime, 80, 12);
-    // "Hello" is still in the frame (now finalized, not live), exactly once.
+    // "Hello" appears exactly once across the frame (finalized now carries a
+    // ● bullet prefix, live text is gone).
     assert_eq!(
-        second.iter().filter(|l| **l == "Hello").count(),
+        second.iter().filter(|l| l.contains("Hello")).count(),
         1,
         "finalized assistant text appears exactly once: {second:?}"
     );
@@ -274,7 +287,11 @@ fn runtime_finalizes_streaming_assistant_once_without_live_duplicate() {
         text: "hello".to_owned(),
     });
     let live = plain_frame(&mut runtime, 80, 12);
-    assert_eq!(live.iter().filter(|l| **l == "hello").count(), 1);
+    assert_eq!(
+        live.iter().filter(|l| **l == "hello").count(),
+        1,
+        "live assistant text appears once: {live:?}"
+    );
 
     runtime.apply_agent_event(neo_agent_core::AgentEvent::MessageFinished {
         turn: 1,
@@ -282,8 +299,9 @@ fn runtime_finalizes_streaming_assistant_once_without_live_duplicate() {
         stop_reason: neo_agent_core::StopReason::EndTurn,
     });
     let finalized = plain_frame(&mut runtime, 80, 12);
+    // Finalized text gains a ● bullet prefix; still exactly one occurrence.
     assert_eq!(
-        finalized.iter().filter(|l| **l == "hello").count(),
+        finalized.iter().filter(|l| l.contains("hello")).count(),
         1,
         "finalized assistant text appears exactly once: {finalized:?}"
     );
@@ -297,6 +315,11 @@ fn replayed_messages_render_through_same_runtime_path() {
     runtime.request_render(RenderKind::Incremental);
 
     let frame = plain_frame(&mut runtime, 80, 12);
-    assert!(frame.iter().any(|l| l == "previous prompt"));
-    assert!(frame.iter().any(|l| l == "previous answer"));
+    assert!(
+        frame
+            .iter()
+            .any(|l| l.contains("✨") && l.contains("previous prompt"))
+    );
+    assert!(frame.iter().any(|l| l.contains("●")));
+    assert!(frame.iter().any(|l| l.contains("previous answer")));
 }

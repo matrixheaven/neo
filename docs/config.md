@@ -156,7 +156,10 @@ In interactive mode:
 
 ## Themes
 
-Project themes live under `.neo/themes/*.json` and define color overrides:
+The default theme is **magenta-dark**: a magenta (`#C678DD`) brand accent with
+teal/green status colors, soft-white body text, and an amber user-role hue.
+Project themes live under `.neo/themes/*.json` and override individual color
+tokens:
 
 ```bash
 neo themes list
@@ -165,7 +168,20 @@ neo --theme .neo/themes/night-owl.json
 ```
 
 Theme JSON files use a `colors` object with named color values (hex, ANSI
-names, or `Reset`).
+names, or `Reset`). The key tokens are:
+
+- `accent` — brand color for tool names, running bullets, footer badges.
+- `header` / `prompt` — body and prompt text (soft white by default).
+- `user` — user message hue (amber). Only the user role has its own color;
+  assistant text reuses `header`.
+- `success` / `danger` / `warning` — completion, failure, and warning states.
+- `muted` — secondary text, chips, overflow hints.
+- `thinking` / `notice` — reasoning and system notice text.
+- `diff_added` / `diff_removed` / `diff_hunk` / `diff_context` — edit diff colors.
+- `footer_*` — footer badge and context-counter colors.
+
+A reference `magenta-dark` theme is checked in at
+`examples/config/magenta-dark.json`.
 
 ## Keybindings
 

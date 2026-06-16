@@ -30,6 +30,12 @@ impl Span {
         paint(&self.text, self.style)
     }
 
+    /// The visible (ANSI-stripped) text of this span.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
     #[must_use]
     pub fn visible_width(&self) -> usize {
         visible_width(&self.text)
@@ -50,6 +56,13 @@ impl Line {
     }
 
     #[must_use]
+    pub fn styled(text: impl Into<String>, style: Style) -> Self {
+        Self {
+            spans: vec![Span::styled(text, style)],
+        }
+    }
+
+    #[must_use]
     pub fn from_spans(spans: Vec<Span>) -> Self {
         Self { spans }
     }
@@ -57,6 +70,15 @@ impl Line {
     #[must_use]
     pub fn to_ansi(&self) -> String {
         self.spans.iter().map(Span::to_ansi).collect()
+    }
+
+    /// The visible (ANSI-stripped) text of all spans concatenated.
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.spans
+            .iter()
+            .map(|span| strip_ansi(span.text()))
+            .collect()
     }
 
     #[must_use]

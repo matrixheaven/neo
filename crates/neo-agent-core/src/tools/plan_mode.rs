@@ -76,10 +76,7 @@ impl Tool for ExitPlanModeTool {
                 .get("plan_summary")
                 .and_then(Value::as_str)
                 .unwrap_or("No summary provided");
-            Ok(ToolResult::ok(format!(
-                "Exiting plan mode. Plan summary: {summary}"
-            ))
-            .terminate())
+            Ok(ToolResult::ok(format!("Exiting plan mode. Plan summary: {summary}")).terminate())
         })
     }
 }
@@ -136,9 +133,11 @@ mod tests {
         let schema = ExitPlanModeTool.input_schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["plan_summary"]["type"].is_string());
-        assert!(schema["required"].as_array().is_some_and(|arr| {
-            arr.iter().any(|v| v == "plan_summary")
-        }));
+        assert!(
+            schema["required"]
+                .as_array()
+                .is_some_and(|arr| { arr.iter().any(|v| v == "plan_summary") })
+        );
     }
 
     #[test]

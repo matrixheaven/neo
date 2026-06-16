@@ -121,10 +121,13 @@ impl Tool for AskUserTool {
         super::schema::<AskUserInput>()
     }
 
-    fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> super::ToolFuture<'a> {
+    fn execute<'a>(
+        &'a self,
+        ctx: &'a ToolContext,
+        input: serde_json::Value,
+    ) -> super::ToolFuture<'a> {
         Box::pin(async move {
-            let input: AskUserInput =
-                super::parse_input(self.name(), input)?;
+            let input: AskUserInput = super::parse_input(self.name(), input)?;
 
             // Convert model-facing input to event data.
             let questions: Vec<QuestionEventData> = input
@@ -156,11 +159,9 @@ impl Tool for AskUserTool {
                     questions,
                     response_tx,
                 })
-                .map_err(|_| {
-                    super::ToolError::InvalidInput {
-                        tool: "ask_user".to_owned(),
-                        message: "question channel closed".to_owned(),
-                    }
+                .map_err(|_| super::ToolError::InvalidInput {
+                    tool: "ask_user".to_owned(),
+                    message: "question channel closed".to_owned(),
                 })?;
 
             // Wait for the response or cancellation.

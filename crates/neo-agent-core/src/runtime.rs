@@ -952,7 +952,8 @@ async fn run_agent_turn(
                     _ => {}
                 }
             }
-            if tool_call.name == "todo" && !result.is_error
+            if tool_call.name == "todo"
+                && !result.is_error
                 && let Some(details) = &result.details
                 && let Some(todos_val) = details.get("todos")
                 && let Ok(todos) = serde_json::from_value::<Vec<TodoEventData>>(todos_val.clone())
@@ -1720,8 +1721,7 @@ async fn prepare_tool_context(
     {
         let plan_mode = config.plan_mode.read().unwrap();
         if plan_mode.is_active {
-            let decision =
-                check_plan_mode_guard(&plan_mode, &tool_call.name, &tool_call.arguments);
+            let decision = check_plan_mode_guard(&plan_mode, &tool_call.name, &tool_call.arguments);
             if decision == PermissionDecision::Deny {
                 return ToolPreparation::Skip(ToolResult::error(format!(
                     "blocked by plan mode: {} is read-only while planning",
