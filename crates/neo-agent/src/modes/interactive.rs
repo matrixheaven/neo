@@ -2951,6 +2951,7 @@ impl NeoTerminal {
             return Ok(());
         }
         let width = usize::from(cols);
+        let content_width = width.saturating_sub(neo_tui::runtime::CHROME_GUTTER).max(1);
 
         // Keep the runtime's theme in sync with the app so config-loaded
         // themes color the live transcript body, not just the chrome.
@@ -2964,24 +2965,30 @@ impl NeoTerminal {
         // kimi-code "editor-container swap" model: when a session picker is
         // focused, replace the chrome (prompt box) with the picker panel.
         // The transcript body stays visible above. The footer stays below.
-        let (chrome_lines, cursor) = if app.focused_overlay().is_some_and(|o| {
-            matches!(o.kind, neo_tui::OverlayKind::SessionPicker(_))
-        }) {
-            // Overlay replaces chrome. Render picker lines + footer.
-            let overlay = app.render_focused_overlay(width).unwrap_or_default();
+        let chrome = if app
+            .focused_overlay()
+            .is_some_and(|o| matches!(o.kind, neo_tui::OverlayKind::SessionPicker(_)))
+        {
+            let overlay = app
+                .render_focused_overlay(content_width)
+                .unwrap_or_default();
             let footer = neo_tui::runtime::footer_only_ansi_lines(app, width);
-            (overlay.into_iter().chain(footer).collect::<Vec<_>>(), None)
+            neo_tui::runtime::ChromeRender {
+                lines: overlay.into_iter().chain(footer).collect(),
+                cursor: None,
+                prompt_start_row: 0,
+            }
         } else {
             neo_tui::runtime_chrome_ansi_lines(app, width)
         };
 
         let body_len = lines.len();
-        lines.extend(chrome_lines);
+        lines.extend(chrome.lines);
         // Apply the uniform CHROME_GUTTER to body + chrome together so
         // nothing renders flush against the screen edge.
         neo_tui::runtime::apply_gutter(&mut lines);
-        let cursor = cursor.map(|cursor| neo_tui::CursorPos {
-            row: body_len + cursor.row,
+        let cursor = chrome.cursor.map(|cursor| neo_tui::CursorPos {
+            row: body_len + chrome.prompt_start_row + cursor.row,
             col: cursor.col + neo_tui::runtime::CHROME_GUTTER,
         });
         // Single-buffer differential render (pi-tui model): hand the whole
@@ -3020,8 +3027,8 @@ fn compose_runtime_frame(
     runtime.resize(width, usize::from(rows));
     runtime.request_render(neo_tui::core::RenderKind::Incremental);
     let mut lines = runtime.render_frame(width, usize::from(rows))?;
-    let (chrome_lines, _cursor) = neo_tui::runtime_chrome_ansi_lines(app, width);
-    lines.extend(chrome_lines);
+    let chrome = neo_tui::runtime_chrome_ansi_lines(app, width);
+    lines.extend(chrome.lines);
     Some(lines)
 }
 
@@ -3552,13 +3559,14 @@ fn replay_transcript_tool_item(
 }
 
 fn render_runtime_overlay_snapshot(app: &NeoTuiApp, width: usize) -> Vec<String> {
+    let content_width = width.saturating_sub(neo_tui::runtime::CHROME_GUTTER).max(1);
     let mut lines = match app.focused_overlay().map(|overlay| &overlay.kind) {
         Some(neo_tui::OverlayKind::SessionPicker(picker)) => {
             let theme = app.theme();
-            picker.render_lines(width, &theme)
+            picker.render_lines(content_width, &theme)
         }
         Some(neo_tui::OverlayKind::ModelPicker(picker)) => {
-            render_picker_snapshot("Models", picker, width)
+            render_picker_snapshot("Models", picker, content_width)
         }
         Some(neo_tui::OverlayKind::CommandPalette(_)) => vec!["Commands".to_owned()],
         Some(neo_tui::OverlayKind::PromptCompletion(_)) => vec![],
@@ -3567,12 +3575,12 @@ fn render_runtime_overlay_snapshot(app: &NeoTuiApp, width: usize) -> Vec<String>
             Vec::new()
         }
         // Rich dialogs — use their own render_lines.
-        Some(_) => app.focused_overlay_lines(width),
+        Some(_) => app.focused_overlay_lines(content_width),
         None => Vec::new(),
     };
     lines.extend(
         neo_tui::runtime_chrome_ansi_lines(app, width)
-            .0
+            .lines
             .into_iter()
             .map(|line| neo_tui::ansi::strip_ansi(&line).trim_end().to_owned()),
     );
@@ -6977,6 +6985,25 @@ command = "python3"
             )
         }));
     }
+
+    #[test]
+    fn composed_frame_lines_do_not_exceed_content_width() {
+        let app = NeoTuiApp::new("neo", "s", "openai/gpt-4.1", "/tmp");
+        let mut runtime = NeoTuiRuntime::new(80, 12);
+        runtime.push_welcome_banner("neo", "s", "m", "~Workspace/neo", "0.1.0", None);
+        let lines = compose_runtime_frame(&app, &mut runtime, 80, 12).expect("frame composes");
+        let expected = 80usize
+            .saturating_sub(neo_tui::runtime::CHROME_GUTTER)
+            .max(1);
+        for (i, line) in lines.iter().enumerate() {
+            let w = neo_tui::ansi::visible_width(line);
+            assert!(
+                w <= expected,
+                "line {i} exceeds expected content width {expected}: {w}: {line:?}"
+            );
+        }
+    }
+
     fn test_config(project_dir: &Path, sessions_dir: PathBuf) -> AppConfig {
         AppConfig {
             default_model: "gpt-4.1".to_owned(),

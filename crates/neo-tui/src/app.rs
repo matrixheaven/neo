@@ -3247,10 +3247,7 @@ impl ApprovalRequestModal {
 
     /// Create a plan-review approval modal with Approve / Reject / Revise options.
     #[must_use]
-    pub fn new_plan_review(
-        request_id: impl Into<String>,
-        body: impl Into<String>,
-    ) -> Self {
+    pub fn new_plan_review(request_id: impl Into<String>, body: impl Into<String>) -> Self {
         Self {
             request_id: request_id.into(),
             modal: ApprovalModal::new(

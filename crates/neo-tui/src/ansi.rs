@@ -232,37 +232,71 @@ pub fn paint(text: &str, style: Style) -> String {
     }
 }
 
+/// If `s` starts with an ANSI escape sequence at byte `start`, return that sequence.
+/// Mirrors the set of sequences handled by `strip_ansi`.
+pub(crate) fn next_sequence(s: &str, start: usize) -> Option<&str> {
+    let tail = s.get(start..)?;
+    let mut chars = tail.chars().peekable();
+    if chars.next()? != '\x1b' {
+        return None;
+    }
+    match chars.peek() {
+        Some('[') => {
+            chars.next();
+            let mut consumed = 2;
+            for c in chars.by_ref() {
+                consumed += c.len_utf8();
+                if ('\x40'..='\x7e').contains(&c) {
+                    return Some(&tail[..consumed]);
+                }
+            }
+            Some(tail)
+        }
+        Some(']' | '_' | 'P' | '^' | 'X') => {
+            chars.next();
+            let mut consumed = 2;
+            loop {
+                match chars.next() {
+                    None => return Some(tail),
+                    Some(c) => {
+                        consumed += c.len_utf8();
+                        if c == '\x07'
+                            || c == '\x18'
+                            || c == '\x1a'
+                            || (c == '\x1b' && chars.peek() == Some(&'\\'))
+                        {
+                            if c == '\x1b' {
+                                let _ = chars.next();
+                                consumed += 1;
+                            }
+                            return Some(&tail[..consumed]);
+                        }
+                    }
+                }
+            }
+        }
+        _ => match chars.next() {
+            None => Some(tail),
+            Some(c) => {
+                let consumed = 1 + c.len_utf8();
+                Some(&tail[..consumed])
+            }
+        },
+    }
+}
+
 /// Strip ANSI escape sequences from a string and return the visible text.
 #[must_use]
 pub fn strip_ansi(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '\x1b' {
+    let mut index = 0;
+    while index < s.len() {
+        if let Some(seq) = next_sequence(s, index) {
+            index += seq.len();
+        } else {
+            let ch = s[index..].chars().next().unwrap();
             result.push(ch);
-            continue;
-        }
-        // Skip escape sequence: ESC [ ... letter  OR  ESC ] ... BEL
-        match chars.peek() {
-            Some('[') => {
-                chars.next();
-                while let Some(c) = chars.next() {
-                    if c.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                chars.next();
-                while let Some(c) = chars.next() {
-                    if c == '\x07' {
-                        break;
-                    }
-                }
-            }
-            _ => {
-                chars.next();
-            }
+            index += ch.len_utf8();
         }
     }
     result
@@ -454,5 +488,67 @@ mod tests {
     #[test]
     fn truncate_adds_ellipsis() {
         assert_eq!(truncate_to_width("hello world", 8), "hello w…");
+    }
+
+    #[test]
+    fn strip_ansi_removes_cursor_marker() {
+        assert_eq!(strip_ansi(crate::CURSOR_MARKER), "");
+    }
+
+    #[test]
+    fn strip_ansi_removes_dcs_pm_sos_apc_with_st() {
+        assert_eq!(strip_ansi("\x1bPpayload\x1b\\"), "");
+        assert_eq!(strip_ansi("\x1b^payload\x1b\\"), "");
+        assert_eq!(strip_ansi("\x1bXpayload\x1b\\"), "");
+        assert_eq!(strip_ansi("\x1b_payload\x1b\\"), "");
+    }
+
+    #[test]
+    fn strip_ansi_string_sequences_cancel_on_can_sub() {
+        assert_eq!(strip_ansi("\x1b]osc\x18visible"), "visible");
+        assert_eq!(strip_ansi("\x1b_apc\x1avisible"), "visible");
+    }
+
+    #[test]
+    fn visible_width_ignores_cursor_marker() {
+        let line = format!("> {}hello", crate::CURSOR_MARKER);
+        assert_eq!(visible_width(&line), "> hello".chars().count());
+    }
+
+    #[test]
+    fn visible_width_ignores_dcs_with_st() {
+        assert_eq!(visible_width("\x1bP\x1b\\hello"), 5);
+    }
+
+    #[test]
+    fn strip_ansi_empty_string() {
+        assert_eq!(strip_ansi(""), "");
+    }
+
+    #[test]
+    fn strip_ansi_no_ansi_preserved() {
+        assert_eq!(strip_ansi("hello 世界"), "hello 世界");
+    }
+
+    #[test]
+    fn strip_ansi_trailing_esc_removed() {
+        assert_eq!(strip_ansi("text\x1b"), "text");
+    }
+
+    #[test]
+    fn strip_ansi_unknown_two_char_sequence_removed() {
+        assert_eq!(strip_ansi("a\x1bDb"), "ab");
+    }
+
+    #[test]
+    fn strip_ansi_multibyte_after_esc_does_not_panic() {
+        // ESC followed by a multi-byte codepoint is not a valid ANSI sequence,
+        // but the parser must not panic on a non-char-boundary slice.
+        assert_eq!(strip_ansi("a\x1b中b"), "ab");
+    }
+
+    #[test]
+    fn strip_ansi_osc_terminated_by_bel() {
+        assert_eq!(strip_ansi("\x1b]0;title\x07visible"), "visible");
     }
 }

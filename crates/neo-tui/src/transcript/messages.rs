@@ -1,6 +1,7 @@
 use crate::ansi::{Color, Style, paint, visible_width};
 use crate::app::TuiTheme;
 use crate::core::{Finalization, Line};
+use crate::widgets::box_draw;
 use crate::wrap_width;
 
 /// Rich welcome-banner content rendered as a rounded box (matching kimi-code).
@@ -314,13 +315,10 @@ fn styled_wrap(text: &str, width: usize, style: Style) -> Vec<Line> {
 fn render_welcome_banner(data: &BannerData, width: usize, theme: &TuiTheme) -> Vec<Line> {
     use std::fmt::Write as _;
     let logo = [
-        "\u{2590}\u{2588}\u{259b}\u{2588}\u{259b}\u{2588}\u{2510}",
-        "\u{2590}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2510}",
+        "\u{2590}\u{2588}\u{259b}\u{2588}\u{259b}\u{2588}\u{258c}",
+        "\u{2590}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{258c}",
     ];
     let gap = "  ";
-    // Inner content width inside the box: │ + 2-space pad + content + pad + │
-    let border_overhead = 4usize; // 2 borders + 2 inner pad spaces
-    let inner_content = width.saturating_sub(border_overhead).max(1);
 
     // Build the content lines (plain text with ANSI via paint, to be padded).
     let logo_color = Style::default().fg(theme.accent);
@@ -385,38 +383,18 @@ fn render_welcome_banner(data: &BannerData, width: usize, theme: &TuiTheme) -> V
     // blank line at bottom of box
     content.push(String::new());
 
-    // Draw the rounded box.
     let border_style = Style::default().fg(theme.accent);
-    let pad_str = " ".repeat(inner_content);
     let mut rows = Vec::new();
-    // top border
-    rows.push(Line::raw(format!(
-        "{}{}{}",
-        paint("\u{256d}", border_style),
-        paint(&"\u{2500}".repeat(inner_content), border_style),
-        paint("\u{256e}", border_style),
-    )));
+    rows.push(Line::raw(box_draw::top_border(width, border_style)));
     for cline in &content {
-        let vw = visible_width(cline);
-        let pad = inner_content.saturating_sub(vw);
-        let body = format!(" {}{} ", cline, " ".repeat(pad));
-        rows.push(Line::raw(format!(
-            "{}{}{}",
-            paint("\u{2502}", border_style),
-            body,
-            paint("\u{2502}", border_style),
+        rows.push(Line::raw(box_draw::content_line(
+            &format!(" {cline} "),
+            width,
+            border_style,
         )));
     }
-    // bottom border
-    rows.push(Line::raw(format!(
-        "{}{}{}",
-        paint("\u{2570}", border_style),
-        paint(&"\u{2500}".repeat(inner_content), border_style),
-        paint("\u{256f}", border_style),
-    )));
-    // trailing blank line separates the banner from the next block
+    rows.push(Line::raw(box_draw::bottom_border(width, border_style)));
     rows.push(Line::raw(""));
-    let _ = pad_str;
     rows
 }
 
@@ -437,4 +415,37 @@ fn tool_finished_style(theme: &TuiTheme) -> Style {
     // Finished tool rows use the success accent; failures are surfaced via the
     // tool card status symbol rather than recoloring the whole row here.
     Style::default().fg(theme.success)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::TuiTheme;
+
+    #[test]
+    fn welcome_banner_has_correct_width_and_logo() {
+        let data = BannerData {
+            title: "Welcome to Neo!".to_owned(),
+            subtitle: "Send /help for help information.".to_owned(),
+            directory: "/tmp/neo".to_owned(),
+            session: "test".to_owned(),
+            model: "deepseek/deepseek-v4-pro".to_owned(),
+            version: "0.1.0".to_owned(),
+            mcp: None,
+        };
+        let lines = render_welcome_banner(&data, 60, &TuiTheme::default());
+        for line in &lines {
+            let width = crate::ansi::visible_width(&line.to_ansi());
+            assert!(
+                width == 60 || width == 0,
+                "line width mismatch: {:?}",
+                line.text()
+            );
+        }
+        // The right edge of both logo rows should use the left half-block
+        // glyph, not the square corner glyph '┐'.
+        for logo_line in [&lines[2], &lines[3]] {
+            assert!(!logo_line.text().contains('┐'));
+        }
+    }
 }
