@@ -33,7 +33,11 @@ pub struct ChoicePickerOptions {
     pub items: Vec<ChoiceItem>,
     pub initial_id: Option<String>,
     pub theme: TuiTheme,
+    /// Maximum number of items visible at once. `0` means use the default.
+    pub page_size: usize,
 }
+
+const DEFAULT_PAGE_SIZE: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChoiceResult {
@@ -45,6 +49,8 @@ pub enum ChoiceResult {
 pub struct ChoicePickerState {
     items: Vec<ChoiceItem>,
     selected: usize,
+    scroll_offset: usize,
+    page_size: usize,
     theme: TuiTheme,
     title: String,
     result: Option<ChoiceResult>,
@@ -59,13 +65,42 @@ impl ChoicePickerState {
             .and_then(|id| opts.items.iter().position(|i| &i.id == id))
             .unwrap_or(0)
             .min(opts.items.len().saturating_sub(1));
-        Self {
+        let page_size = if opts.page_size == 0 {
+            DEFAULT_PAGE_SIZE
+        } else {
+            opts.page_size
+        };
+        let mut state = Self {
             items: opts.items,
             selected,
+            scroll_offset: 0,
+            page_size,
             theme: opts.theme,
             title: opts.title,
             result: None,
+        };
+        state.ensure_selected_visible();
+        state
+    }
+
+    fn ensure_selected_visible(&mut self) {
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        } else if self.selected >= self.scroll_offset + self.page_size {
+            self.scroll_offset = self.selected.saturating_sub(self.page_size - 1);
         }
+    }
+
+    fn total_pages(&self) -> usize {
+        self.items.len().div_ceil(self.page_size)
+    }
+
+    fn current_page(&self) -> usize {
+        self.selected / self.page_size + 1
+    }
+
+    fn page_start_for(index: usize, page_size: usize) -> usize {
+        (index / page_size) * page_size
     }
 
     #[must_use]
@@ -83,8 +118,10 @@ impl ChoicePickerState {
             "─".repeat(remaining),
         ));
 
-        // Items
-        for (i, item) in self.items.iter().enumerate() {
+        // Items (paginated)
+        let end = (self.scroll_offset + self.page_size).min(self.items.len());
+        for i in self.scroll_offset..end {
+            let item = &self.items[i];
             let is_selected = i == self.selected;
             let marker = if is_selected { "▸" } else { " " };
             let label = &item.label;
@@ -109,8 +146,16 @@ impl ChoicePickerState {
         }
 
         // Hint
+        let mut hint = "↑↓ navigate · Enter select · Esc cancel".to_owned();
+        if self.items.len() > self.page_size {
+            hint.push_str(&format!(
+                " · page {}/{} · ←/→ · PgUp/PgDn",
+                self.current_page(),
+                self.total_pages()
+            ));
+        }
         lines.push(format!(
-            "\x1b[38;2;{}m ↑↓ navigate · Enter select · Esc cancel\x1b[0m",
+            "\x1b[38;2;{}m {hint}\x1b[0m",
             rgb(&self.theme.muted)
         ));
 
@@ -135,11 +180,27 @@ impl ChoicePickerState {
                 } else {
                     self.selected = self.selected.saturating_sub(1);
                 }
+                self.ensure_selected_visible();
                 InputResult::Handled
             }
             InputEvent::Action(crate::KeybindingAction::SelectDown) | InputEvent::ScrollDown(1) => {
                 if !self.items.is_empty() {
                     self.selected = (self.selected + 1) % self.items.len();
+                }
+                self.ensure_selected_visible();
+                InputResult::Handled
+            }
+            InputEvent::Action(crate::KeybindingAction::SelectPageUp) | InputEvent::MoveLeft => {
+                if !self.items.is_empty() {
+                    self.selected = self.selected.saturating_sub(self.page_size);
+                    self.scroll_offset = Self::page_start_for(self.selected, self.page_size);
+                }
+                InputResult::Handled
+            }
+            InputEvent::Action(crate::KeybindingAction::SelectPageDown) | InputEvent::MoveRight => {
+                if !self.items.is_empty() {
+                    self.selected = (self.selected + self.page_size).min(self.items.len() - 1);
+                    self.scroll_offset = Self::page_start_for(self.selected, self.page_size);
                 }
                 InputResult::Handled
             }
@@ -248,6 +309,7 @@ mod tests {
                 ChoiceItem::new("b", "Option B"),
             ],
             initial_id: None,
+            page_size: 0,
             theme: theme(),
         });
         let lines = state.render_lines(40);
@@ -263,6 +325,7 @@ mod tests {
             title: "T".into(),
             items: vec![ChoiceItem::new("a", "A"), ChoiceItem::new("b", "B")],
             initial_id: Some("b".into()),
+            page_size: 0,
             theme: theme(),
         });
         assert_eq!(state.selected, 1);
@@ -274,6 +337,7 @@ mod tests {
             title: "T".into(),
             items: vec![ChoiceItem::new("a", "A"), ChoiceItem::new("b", "B")],
             initial_id: None,
+            page_size: 0,
             theme: theme(),
         });
         assert_eq!(state.selected, 0);
@@ -289,6 +353,7 @@ mod tests {
             title: "T".into(),
             items: vec![ChoiceItem::new("a", "A"), ChoiceItem::new("b", "B")],
             initial_id: None,
+            page_size: 0,
             theme: theme(),
         });
         state.handle_input(InputEvent::Submit);
@@ -304,9 +369,56 @@ mod tests {
             title: "T".into(),
             items: vec![ChoiceItem::new("a", "A")],
             initial_id: None,
+            page_size: 0,
             theme: theme(),
         });
         state.handle_input(InputEvent::Cancel);
         assert!(matches!(state.take_result(), Some(ChoiceResult::Cancelled)));
+    }
+
+    #[test]
+    fn pagination_pages_and_indicator_match_selection() {
+        let items: Vec<_> = (0..25)
+            .map(|i| ChoiceItem::new(i.to_string(), format!("Item {i}")))
+            .collect();
+        let mut state = ChoicePickerState::new(ChoicePickerOptions {
+            title: "T".into(),
+            items,
+            initial_id: None,
+            page_size: 10,
+            theme: theme(),
+        });
+        assert_eq!(state.current_page(), 1);
+        assert_eq!(state.total_pages(), 3);
+
+        state.handle_input(InputEvent::Action(crate::KeybindingAction::SelectPageDown));
+        assert_eq!(state.selected, 10);
+        assert_eq!(state.scroll_offset, 10);
+        assert_eq!(state.current_page(), 2);
+
+        state.handle_input(InputEvent::Action(crate::KeybindingAction::SelectPageDown));
+        assert_eq!(state.selected, 20);
+        assert_eq!(state.scroll_offset, 20);
+        assert_eq!(state.current_page(), 3);
+
+        state.handle_input(InputEvent::Action(crate::KeybindingAction::SelectPageUp));
+        assert_eq!(state.selected, 10);
+        assert_eq!(state.scroll_offset, 10);
+        assert_eq!(state.current_page(), 2);
+
+        state.handle_input(InputEvent::MoveRight);
+        assert_eq!(state.selected, 20);
+        assert_eq!(state.current_page(), 3);
+
+        state.handle_input(InputEvent::MoveLeft);
+        assert_eq!(state.selected, 10);
+        assert_eq!(state.current_page(), 2);
+
+        // Page indicator follows selected item even when scroll offset is unaligned.
+        for _ in 0..12 {
+            state.handle_input(InputEvent::Action(crate::KeybindingAction::SelectDown));
+        }
+        assert_eq!(state.selected, 22);
+        assert_eq!(state.current_page(), 3);
     }
 }
