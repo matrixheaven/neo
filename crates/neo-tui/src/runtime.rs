@@ -10,6 +10,7 @@ use crate::transcript::{
     ToolCallComponent, ToolCallState, ToolGroup, TranscriptController, TranscriptEntry,
     render_tool_group,
 };
+use crate::widgets::box_draw;
 use crate::{NeoTuiApp, PromptState, ToolStatusKind, wrap_width};
 
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 5;
@@ -559,25 +560,30 @@ fn is_groupable(name: &str) -> bool {
     )
 }
 
+/// Chrome lines, optional cursor position, and the row where the prompt box
+/// starts within those lines.
+pub struct ChromeRender {
+    pub lines: Vec<String>,
+    pub cursor: Option<crate::CursorPos>,
+    pub prompt_start_row: usize,
+}
+
 #[must_use]
-pub fn runtime_chrome_ansi_lines(
-    app: &NeoTuiApp,
-    width: usize,
-) -> (Vec<String>, Option<crate::CursorPos>) {
-    // Chrome renders at `width - CHROME_GUTTER` so the gutter (applied by the
-    // caller via [`apply_gutter`]) doesn't cause overflow.
+pub fn runtime_chrome_ansi_lines(app: &NeoTuiApp, width: usize) -> ChromeRender {
     let content_width = width.saturating_sub(CHROME_GUTTER).max(1);
     let mut lines = Vec::new();
-    // Render the slash-command completion picker above the prompt box when
-    // active, mirroring kimi-code's inline SelectList positioned above the
-    // editor.
-    if let Some(completion_lines) = render_prompt_completion_lines(app, content_width) {
-        lines.extend(completion_lines);
-    }
+    let prompt_start_row = lines.len();
     let (prompt_lines, prompt_cursor) = render_prompt_lines(app, content_width);
     lines.extend(prompt_lines);
+    if let Some(dropdown) = render_prompt_completion_dropdown(app, content_width) {
+        lines.extend(dropdown);
+    }
     lines.extend(render_footer_lines(app, content_width));
-    (lines, prompt_cursor)
+    ChromeRender {
+        lines,
+        cursor: prompt_cursor,
+        prompt_start_row,
+    }
 }
 
 /// Render only the footer lines (status bar + hint line), without the prompt
@@ -588,33 +594,24 @@ pub fn footer_only_ansi_lines(app: &NeoTuiApp, width: usize) -> Vec<String> {
     render_footer_lines(app, content_width)
 }
 
-/// Render the prompt-completion (slash command) picker as ANSI lines if a
-/// `PromptCompletion` overlay is currently focused. Returns `None` when no
-/// completion overlay is open.
-fn render_prompt_completion_lines(app: &NeoTuiApp, width: usize) -> Option<Vec<String>> {
+/// Render the `/` command dropdown below the prompt box, if active.
+fn render_prompt_completion_dropdown(app: &NeoTuiApp, width: usize) -> Option<Vec<String>> {
     let overlay = app.focused_overlay()?;
     let crate::app::OverlayKind::PromptCompletion(state) = &overlay.kind else {
         return None;
     };
-    let raw_lines = state.render_lines(width);
+    let inner_width = width.saturating_sub(2).max(1);
+    let raw_lines = state.render_lines(inner_width);
     if raw_lines.is_empty() {
         return None;
     }
     let theme = app.theme();
     let border_style = Style::default().fg(theme.accent);
-    // Draw a thin separator line above the completion items to visually
-    // distinguish them from the prompt box below.
-    let inner_width = width.saturating_sub(2).max(1);
-    let mut lines = Vec::with_capacity(raw_lines.len() + 2);
-    lines.push(paint(
-        &format!("\u{256d}{}\u{256e}", "\u{2500}".repeat(inner_width)),
-        border_style,
-    ));
-    lines.extend(raw_lines);
-    lines.push(paint(
-        &format!("\u{2570}{}\u{256f}", "\u{2500}".repeat(inner_width)),
-        border_style,
-    ));
+    let mut lines = Vec::with_capacity(raw_lines.len() + 1);
+    for raw in raw_lines {
+        lines.push(box_draw::side_bordered_line(&raw, width, border_style));
+    }
+    lines.push(box_draw::bottom_border(width, border_style));
     Some(lines)
 }
 
@@ -622,7 +619,7 @@ fn render_prompt_completion_lines(app: &NeoTuiApp, width: usize) -> Option<Vec<S
 /// `> ` prompt symbol; continuation lines use a 4-space hanging indent so
 /// wrapped/explicit-newline text aligns under the body (matching kimi-code's
 /// `paddingX: 4` editor). Border color is muted by default and switches to
-/// the magenta accent when the input starts with `/` or plan mode is active.
+/// the accent color when the input starts with `/` or plan mode is active.
 fn render_prompt_lines(app: &NeoTuiApp, width: usize) -> (Vec<String>, Option<crate::CursorPos>) {
     let theme = app.theme();
     let prompt = app.prompt();
@@ -641,25 +638,14 @@ fn render_prompt_lines(app: &NeoTuiApp, width: usize) -> (Vec<String>, Option<cr
     let logical_lines = build_prompt_logical_lines(prompt, body_width);
 
     let mut lines = Vec::with_capacity(logical_lines.len() + 2);
-    lines.push(paint(
-        &format!("\u{256d}{}\u{256e}", "\u{2500}".repeat(inner_width)),
-        border_style,
-    ));
+    lines.push(box_draw::top_border(width, border_style));
     for (idx, line) in logical_lines.iter().enumerate() {
         let prefix = if idx == 0 { "  > " } else { "    " };
-        let content = format!("{prefix}{line}");
-        let pad = inner_width.saturating_sub(visible_width(&content));
-        lines.push(format!(
-            "{}{}{}",
-            paint("\u{2502}", border_style),
-            paint(&format!("{content}{}", " ".repeat(pad)), text_style),
-            paint("\u{2502}", border_style)
-        ));
+        let content = paint(&format!("{prefix}{line}"), text_style);
+        lines.push(box_draw::content_line(&content, width, border_style));
     }
-    lines.push(paint(
-        &format!("\u{2570}{}\u{256f}", "\u{2500}".repeat(inner_width)),
-        border_style,
-    ));
+    lines.push(box_draw::bottom_border(width, border_style));
+
     let cursor = find_cursor(&lines);
     let lines = lines
         .into_iter()
@@ -748,4 +734,76 @@ fn render_footer_lines(app: &NeoTuiApp, width: usize) -> Vec<String> {
         "enter send · shift+enter/ctrl+j newline · / commands"
     };
     vec![row, paint(hints, Style::default().fg(theme.footer_hint))]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{NeoTuiApp, PickerItem, PromptCompletionPrefix, TuiTheme};
+
+    #[test]
+    fn prompt_box_lines_are_exact_width() {
+        let mut app = NeoTuiApp::new("neo", "s", "m", "/tmp");
+        app.set_theme(TuiTheme::default());
+        app.prompt_mut()
+            .apply_edit(crate::PromptEdit::Insert("hello world"));
+        let render = runtime_chrome_ansi_lines(&app, 40);
+        // Lines render at content_width so the caller can apply CHROME_GUTTER.
+        let expected_width = 40_usize.saturating_sub(CHROME_GUTTER).max(1);
+        for line in &render.lines {
+            assert!(
+                crate::ansi::visible_width(line) <= expected_width,
+                "line: {line:?}"
+            );
+        }
+        // The prompt box borders and content rows must be exactly content_width.
+        let prompt_box_lines: Vec<&String> = render
+            .lines
+            .iter()
+            .filter(|l| {
+                let s = crate::ansi::strip_ansi(l);
+                s.starts_with('│') || s.starts_with('╭') || s.starts_with('╰')
+            })
+            .collect();
+        assert!(!prompt_box_lines.is_empty(), "prompt box lines missing");
+        for line in prompt_box_lines {
+            assert_eq!(
+                crate::ansi::visible_width(line),
+                expected_width,
+                "line: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_dropdown_is_below_prompt() {
+        let mut app = NeoTuiApp::new("neo", "s", "m", "/tmp");
+        app.prompt_mut().apply_edit(crate::PromptEdit::Insert("/"));
+        app.open_prompt_completion_picker(
+            PromptCompletionPrefix {
+                start: 0,
+                end: 1,
+                text: "/".to_owned(),
+            },
+            vec![
+                PickerItem::new("/model", "model", Some("switch model")),
+                PickerItem::new("/plan", "plan", Some("toggle plan")),
+            ],
+        );
+        let render = runtime_chrome_ansi_lines(&app, 60);
+        // First line is the prompt top border.
+        assert!(render.lines[0].contains('╭'));
+        let dropdown_start = render
+            .lines
+            .iter()
+            .position(|l| l.contains("model"))
+            .expect("dropdown missing");
+        assert!(dropdown_start > 1);
+        // The line immediately before the dropdown must be the prompt bottom border.
+        assert!(render.lines[dropdown_start - 1].contains('╰'));
+        // Dropdown items are side-bordered.
+        let stripped = crate::ansi::strip_ansi(&render.lines[dropdown_start]);
+        assert!(stripped.starts_with('│'));
+        assert!(stripped.ends_with('│'));
+    }
 }

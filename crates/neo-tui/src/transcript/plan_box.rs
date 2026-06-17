@@ -142,16 +142,16 @@ mod tests {
         let comp = PlanBoxComponent::new("# Plan\n- Step 1", Some("/tmp/abc.md".to_string()));
         let lines = comp.render(40, &TuiTheme::default());
         assert!(lines.len() >= 3); // top border + content lines + bottom border
-        let top = format!("{}", lines[0].render());
+        let top = lines[0].to_ansi();
         assert!(top.contains("plan: abc.md"));
     }
 
     #[test]
     fn render_with_status() {
-        let comp = PlanBoxComponent::new("plan", Some("/tmp/x.md".to_string()))
-            .with_status("Rejected");
+        let comp =
+            PlanBoxComponent::new("plan", Some("/tmp/x.md".to_string())).with_status("Rejected");
         let lines = comp.render(40, &TuiTheme::default());
-        let top = format!("{}", lines[0].render());
+        let top = lines[0].to_ansi();
         assert!(top.contains("Rejected"));
     }
 

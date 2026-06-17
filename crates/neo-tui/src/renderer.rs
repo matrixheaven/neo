@@ -15,7 +15,7 @@
 //! `height-1` = bottom. Content rows are converted to screen rows via
 //! `content_row - viewport_top`.
 
-use std::io::{Stdout, Write, stdout};
+use std::io::{Write, stdout};
 
 use crossterm::{
     event::{
@@ -160,10 +160,22 @@ impl InlineRenderer {
         new_lines: Vec<String>,
         cursor: Option<CursorPos>,
     ) -> std::io::Result<()> {
+        let mut output = stdout();
         let (width, height_u16) = size()?;
         if width == 0 || height_u16 == 0 {
             return Ok(());
         }
+        self.render_to_with_size(&mut output, width, height_u16, new_lines, cursor)
+    }
+
+    fn render_to_with_size(
+        &mut self,
+        output: &mut dyn Write,
+        width: u16,
+        height_u16: u16,
+        new_lines: Vec<String>,
+        cursor: Option<CursorPos>,
+    ) -> std::io::Result<()> {
         let height = height_u16 as usize;
 
         let width_changed = self.previous_width != 0 && self.previous_width != width;
@@ -198,12 +210,10 @@ impl InlineRenderer {
         let cursor_pos = cursor;
         let new_lines_ref = &new_lines;
 
-        let mut output = stdout();
-
         // First render - just output everything without clearing (assumes clean screen)
         if self.previous_lines.is_empty() && !width_changed && !height_changed {
             self.full_render(
-                &mut output,
+                output,
                 false,
                 new_lines_ref,
                 height,
@@ -218,7 +228,7 @@ impl InlineRenderer {
         // First render flag (e.g. after suspend_resume) → full redraw without clear.
         if self.first_render {
             self.full_render(
-                &mut output,
+                output,
                 false,
                 new_lines_ref,
                 height,
@@ -233,7 +243,7 @@ impl InlineRenderer {
         // Width changes always need a full re-render because wrapping changes.
         if width_changed {
             self.full_render(
-                &mut output,
+                output,
                 true,
                 new_lines_ref,
                 height,
@@ -247,7 +257,24 @@ impl InlineRenderer {
         // Height changes need a full re-render to keep the viewport aligned.
         if height_changed {
             self.full_render(
-                &mut output,
+                output,
+                true,
+                new_lines_ref,
+                height,
+                height_u16,
+                width,
+                cursor_pos,
+            )?;
+            return Ok(());
+        }
+
+        // Content shrank below the historical high-water mark: force a full clear
+        // so obsolete rows (e.g. a closed overlay) do not linger on screen.
+        // full_render(clear=true) resets max_lines_rendered to new_lines.len(),
+        // so this branch will not fire again until content grows and shrinks again.
+        if new_lines.len() < self.max_lines_rendered {
+            self.full_render(
+                output,
                 true,
                 new_lines_ref,
                 height,
@@ -285,7 +312,7 @@ impl InlineRenderer {
 
         // No changes - but still need to update hardware cursor position if it moved
         if first_changed == -1 {
-            self.position_hardware_cursor(&mut output, cursor_pos, new_lines.len())?;
+            self.position_hardware_cursor(output, cursor_pos, new_lines.len())?;
             self.previous_viewport_top = prev_viewport_top;
             self.previous_height = height_u16;
             self.previous_lines = new_lines;
@@ -304,7 +331,7 @@ impl InlineRenderer {
                 let target_row = new_lines.len().saturating_sub(1);
                 if target_row < prev_viewport_top {
                     self.full_render(
-                        &mut output,
+                        output,
                         true,
                         new_lines_ref,
                         height,
@@ -330,7 +357,7 @@ impl InlineRenderer {
                 let extra_lines = self.previous_lines.len() - new_lines.len();
                 if extra_lines > height {
                     self.full_render(
-                        &mut output,
+                        output,
                         true,
                         new_lines_ref,
                         height,
@@ -358,7 +385,7 @@ impl InlineRenderer {
                 self.cursor_row = target_row;
                 self.hardware_cursor_row = target_row;
             }
-            self.position_hardware_cursor(&mut output, cursor_pos, new_lines.len())?;
+            self.position_hardware_cursor(output, cursor_pos, new_lines.len())?;
             self.previous_lines = new_lines;
             self.previous_width = width;
             self.previous_height = height_u16;
@@ -370,7 +397,7 @@ impl InlineRenderer {
         // If the first changed line is above the previous viewport, full redraw.
         if first_changed_u < prev_viewport_top {
             self.full_render(
-                &mut output,
+                output,
                 true,
                 new_lines_ref,
                 height,
@@ -468,7 +495,7 @@ impl InlineRenderer {
             prev_viewport_top.max(final_cursor_row.saturating_sub(height - 1));
 
         // Position hardware cursor for IME
-        self.position_hardware_cursor(&mut output, cursor_pos, new_lines.len())?;
+        self.position_hardware_cursor(output, cursor_pos, new_lines.len())?;
 
         self.previous_lines = new_lines;
         self.previous_width = width;
@@ -480,7 +507,7 @@ impl InlineRenderer {
     /// 1:1 port of pi-tui's `fullRender()`.
     fn full_render(
         &mut self,
-        output: &mut Stdout,
+        output: &mut dyn Write,
         clear: bool,
         new_lines: &[String],
         height: usize,
@@ -523,7 +550,7 @@ impl InlineRenderer {
     /// 1:1 port of pi-tui's `positionHardwareCursor`.
     fn position_hardware_cursor(
         &mut self,
-        output: &mut Stdout,
+        output: &mut dyn Write,
         cursor_pos: Option<CursorPos>,
         total_lines: usize,
     ) -> std::io::Result<()> {
@@ -576,5 +603,93 @@ mod tests {
         let pos = CursorPos { row: 1, col: 2 };
         let pos2 = pos;
         assert_eq!(pos, pos2);
+    }
+
+    #[test]
+    fn shrink_triggers_full_clear() {
+        let mut renderer = InlineRenderer {
+            previous_lines: vec!["line0".to_owned(), "line1".to_owned(), "line2".to_owned()],
+            viewport_top: 0,
+            previous_viewport_top: 0,
+            hardware_cursor_row: 2,
+            previous_width: 80,
+            previous_height: 24,
+            first_render: false,
+            max_lines_rendered: 3,
+            cursor_row: 2,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        renderer
+            .render_to_with_size(
+                &mut buf,
+                80,
+                24,
+                vec!["line0".to_owned(), "line1".to_owned()],
+                None,
+            )
+            .unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        assert!(
+            output.contains("\x1b[2J"),
+            "shrink should force full clear: {output:?}"
+        );
+        assert!(
+            output.contains("line0"),
+            "first line should be rendered: {output:?}"
+        );
+        assert!(
+            output.contains("line1"),
+            "second line should be rendered: {output:?}"
+        );
+        assert_eq!(
+            renderer.max_lines_rendered, 2,
+            "high-water mark should reset to new line count"
+        );
+
+        // A second frame of the same size must not force another clear.
+        buf.clear();
+        renderer
+            .render_to_with_size(
+                &mut buf,
+                80,
+                24,
+                vec!["line0".to_owned(), "line1".to_owned()],
+                None,
+            )
+            .unwrap();
+        let output2 = String::from_utf8_lossy(&buf);
+        assert!(
+            !output2.contains("\x1b[2J"),
+            "same small content should not clear again: {output2:?}"
+        );
+        assert_eq!(
+            renderer.max_lines_rendered, 2,
+            "high-water mark should stay at current line count"
+        );
+    }
+
+    #[test]
+    fn shrink_to_empty_clears_screen() {
+        let mut renderer = InlineRenderer {
+            previous_lines: vec!["line0".to_owned(), "line1".to_owned()],
+            viewport_top: 0,
+            previous_viewport_top: 0,
+            hardware_cursor_row: 1,
+            previous_width: 80,
+            previous_height: 24,
+            first_render: false,
+            max_lines_rendered: 2,
+            cursor_row: 1,
+        };
+        let mut buf = Vec::new();
+        renderer
+            .render_to_with_size(&mut buf, 80, 24, Vec::new(), None)
+            .unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        assert!(
+            output.contains("\x1b[2J"),
+            "shrink to empty should clear: {output:?}"
+        );
+        assert_eq!(renderer.max_lines_rendered, 0);
     }
 }

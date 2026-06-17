@@ -39,7 +39,7 @@ fn render_runtime_shell(width: u16, height: u16, app: &NeoTuiApp) -> (Vec<String
         .map(|line| neo_tui::ansi::strip_ansi(&line))
         .collect();
     let chrome = runtime_chrome_ansi_lines(app, usize::from(width))
-        .0
+        .lines
         .into_iter()
         .map(|line| neo_tui::ansi::strip_ansi(&line))
         .collect();
