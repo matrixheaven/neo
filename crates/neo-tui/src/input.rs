@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    time::{Duration, Instant},
 };
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -73,7 +74,9 @@ impl InputEvent {
             (KeyCode::Right, _) => Some(Self::MoveRight),
             (KeyCode::Home, _) => Some(Self::MoveHome),
             (KeyCode::End, _) => Some(Self::MoveEnd),
-            (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
+            (KeyCode::Enter, modifiers)
+                if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+            {
                 Some(Self::NewLine)
             }
             (KeyCode::Enter, _) => Some(Self::Submit),
@@ -93,10 +96,17 @@ impl InputEvent {
 
         // Explicit intercept for newline keys — works regardless of keybinding
         // configuration and survives crossterm parsing quirks.
-        match (event.code, event.modifiers) {
-            (KeyCode::Enter, KeyModifiers::SHIFT) => return Some(Self::NewLine),
-            (KeyCode::Char('j'), KeyModifiers::CONTROL) => return Some(Self::NewLine),
-            _ => {}
+        if event.code == KeyCode::Enter
+            && event
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+        {
+            return Some(Self::NewLine);
+        }
+        if matches!(event.code, KeyCode::Char('j' | 'J'))
+            && event.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            return Some(Self::NewLine);
         }
 
         if matches!(event.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
@@ -118,6 +128,9 @@ pub struct InputParser {
     keybindings: Option<KeybindingsManager>,
     paste_buffer: Option<String>,
     pending_escape: String,
+    /// Some terminals send ESC followed by CR for Shift+Enter. We buffer a lone
+    /// ESC briefly so that a subsequent Enter can be converted into a newline.
+    pending_esc: Option<(Instant, KeyEvent)>,
 }
 
 impl InputParser {
@@ -127,6 +140,7 @@ impl InputParser {
             keybindings: None,
             paste_buffer: None,
             pending_escape: String::new(),
+            pending_esc: None,
         }
     }
 
@@ -136,6 +150,7 @@ impl InputParser {
             keybindings: Some(keybindings),
             paste_buffer: None,
             pending_escape: String::new(),
+            pending_esc: None,
         }
     }
 
@@ -154,7 +169,44 @@ impl InputParser {
         }
     }
 
+    /// Flush any buffered input that has exceeded its recognition window.
+    ///
+    /// Call this after an input poll timeout so a lone ESC is still reported as
+    /// `Cancel` even when no subsequent key arrives.
+    #[must_use]
+    pub fn flush_timeout(&mut self) -> Vec<InputEvent> {
+        if let Some((esc_time, _)) = self.pending_esc {
+            if esc_time.elapsed() > ESC_ENTER_NEWLINE_WINDOW {
+                self.pending_esc = None;
+                return vec![InputEvent::Cancel];
+            }
+        }
+        Vec::new()
+    }
+
     fn feed_key_event(&mut self, event: KeyEvent) -> Vec<InputEvent> {
+        // Handle a buffered ESC that may be the first half of an ESC-CR Shift+Enter.
+        if let Some((esc_time, _)) = self.pending_esc.take() {
+            if event.code == KeyCode::Enter
+                && event.modifiers == KeyModifiers::NONE
+                && esc_time.elapsed() <= ESC_ENTER_NEWLINE_WINDOW
+            {
+                return vec![InputEvent::NewLine];
+            }
+
+            let mut output = vec![InputEvent::Cancel];
+            output.extend(self.feed_key_event(event));
+            return output;
+        }
+
+        if event.code == KeyCode::Esc
+            && event.modifiers == KeyModifiers::NONE
+            && event.kind == KeyEventKind::Press
+        {
+            self.pending_esc = Some((Instant::now(), event));
+            return Vec::new();
+        }
+
         if let Some(output) = self.feed_pending_escape(event) {
             return output;
         }
@@ -253,6 +305,13 @@ fn raw_sequence_character(event: KeyEvent) -> Option<char> {
 
 const BRACKETED_PASTE_START: &str = "\x1b[200~";
 const BRACKETED_PASTE_END: &str = "\x1b[201~";
+
+/// Max time between an ESC and the following Enter for the pair to be treated
+/// as a single Shift+Enter newline. This covers terminals (e.g. Ghostty with
+/// certain configs) that send `ESC CR` for Shift+Enter instead of a CSI-u
+/// sequence. The window is intentionally short so a deliberate Esc followed by
+/// Enter is not misinterpreted.
+const ESC_ENTER_NEWLINE_WINDOW: Duration = Duration::from_millis(30);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KeyId(String);
@@ -686,7 +745,7 @@ fn input_keybinding_definitions() -> Vec<KeybindingDefinition> {
     vec![
         definition(
             Action::InputNewLine,
-            &["shift+enter", "ctrl+j"],
+            &["shift+enter", "alt+enter", "ctrl+j"],
             "Insert newline",
         ),
         definition(Action::InputSubmit, &["enter"], "Submit input"),
@@ -922,4 +981,108 @@ fn is_valid_base_key(base: &str) -> bool {
             | ">"
             | "?"
     ) || base.chars().count() == 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new_with_kind(code, modifiers, KeyEventKind::Press)
+    }
+
+    #[test]
+    fn esc_then_enter_becomes_newline() {
+        let mut parser = InputParser::new();
+        assert!(
+            parser
+                .feed_key_event(key(KeyCode::Esc, KeyModifiers::NONE))
+                .is_empty()
+        );
+        assert_eq!(
+            parser.feed_key_event(key(KeyCode::Enter, KeyModifiers::NONE)),
+            vec![InputEvent::NewLine]
+        );
+    }
+
+    #[test]
+    fn esc_alone_is_buffered_and_flushed_after_timeout() {
+        let mut parser = InputParser::new();
+        assert!(
+            parser
+                .feed_key_event(key(KeyCode::Esc, KeyModifiers::NONE))
+                .is_empty()
+        );
+        std::thread::sleep(ESC_ENTER_NEWLINE_WINDOW + Duration::from_millis(20));
+        assert_eq!(parser.flush_timeout(), vec![InputEvent::Cancel]);
+    }
+
+    #[test]
+    fn esc_then_letter_does_not_swallow_letter() {
+        let mut parser = InputParser::new();
+        assert!(
+            parser
+                .feed_key_event(key(KeyCode::Esc, KeyModifiers::NONE))
+                .is_empty()
+        );
+        assert_eq!(
+            parser.feed_key_event(key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            vec![InputEvent::Cancel, InputEvent::Insert('a')]
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_still_works() {
+        let mut parser = InputParser::new();
+        for c in "\x1b[200~".chars() {
+            assert!(
+                parser
+                    .feed_key_event(key(KeyCode::Char(c), KeyModifiers::NONE))
+                    .is_empty()
+            );
+        }
+        assert!(
+            parser
+                .feed_key_event(key(KeyCode::Char('h'), KeyModifiers::NONE))
+                .is_empty()
+        );
+        assert!(
+            parser
+                .feed_key_event(key(KeyCode::Char('i'), KeyModifiers::NONE))
+                .is_empty()
+        );
+        for c in "\x1b[201".chars() {
+            assert!(
+                parser
+                    .feed_key_event(key(KeyCode::Char(c), KeyModifiers::NONE))
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            parser.feed_key_event(key(KeyCode::Char('~'), KeyModifiers::NONE)),
+            vec![InputEvent::Paste("hi".into())]
+        );
+        assert_eq!(
+            parser.feed_key_event(key(KeyCode::Char('x'), KeyModifiers::NONE)),
+            vec![InputEvent::Insert('x')]
+        );
+    }
+
+    #[test]
+    fn shift_enter_csi_u_still_produces_newline() {
+        let mut parser = InputParser::new();
+        assert_eq!(
+            parser.feed_key_event(key(KeyCode::Enter, KeyModifiers::SHIFT)),
+            vec![InputEvent::NewLine]
+        );
+    }
+
+    #[test]
+    fn alt_enter_produces_newline() {
+        let mut parser = InputParser::new();
+        assert_eq!(
+            parser.feed_key_event(key(KeyCode::Enter, KeyModifiers::ALT)),
+            vec![InputEvent::NewLine]
+        );
+    }
 }

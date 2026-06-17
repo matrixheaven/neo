@@ -47,10 +47,11 @@ type SessionLoader = Arc<dyn Fn(String) -> BoxedSessionFuture + Send + Sync>;
 type SessionForker = Arc<dyn Fn(String) -> BoxedForkFuture + Send + Sync>;
 type ClipboardWriter = Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupAction {
     None,
     OpenSessionPicker,
+    LoadSession(String),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -60,12 +61,19 @@ pub struct InteractiveOptions {
 
 pub fn execute_with_startup(
     config: &AppConfig,
-    startup: StartupAction,
+    startup: &StartupAction,
     options: InteractiveOptions,
 ) -> String {
     let mut controller = controller_for_config(config);
     controller.apply_startup_options(config, options);
     controller.apply_startup_action(startup);
+    if let StartupAction::LoadSession(session_id) = startup {
+        controller
+            .app
+            .apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: format!("Session resume requires a terminal (session {session_id})"),
+            });
+    }
     controller.ensure_kimi_runtime();
     controller.render_snapshot()
 }
@@ -76,13 +84,23 @@ pub async fn execute_tty_with_startup(
     options: InteractiveOptions,
 ) -> Result<Option<String>> {
     if !stdout().is_terminal() {
-        return Ok(Some(execute_with_startup(config, startup, options)));
+        return Ok(Some(execute_with_startup(config, &startup, options)));
     }
 
     let terminal = RefCell::new(NeoTerminal::enter()?);
     let mut controller = controller_for_config(config);
     controller.apply_startup_options(config, options);
-    controller.apply_startup_action(startup);
+    if let StartupAction::LoadSession(session_id) = &startup {
+        if let Err(error) = controller.load_session_at_startup(session_id).await {
+            controller
+                .app
+                .apply_stream_update(neo_tui::StreamUpdate::Notice {
+                    text: format!("Failed to resume session: {error}"),
+                });
+        }
+    } else {
+        controller.apply_startup_action(&startup);
+    }
     let events = CrosstermEvents::new(controller.keybindings.clone());
     controller
         .run_terminal_loop_with_suspend(
@@ -490,11 +508,24 @@ impl InteractiveController {
         }
     }
 
-    pub fn apply_startup_action(&mut self, startup: StartupAction) {
+    pub fn apply_startup_action(&mut self, startup: &StartupAction) {
         match startup {
-            StartupAction::None => {}
             StartupAction::OpenSessionPicker => self.open_session_picker(),
+            StartupAction::None | StartupAction::LoadSession(_) => {
+                // `LoadSession` is loaded asynchronously before the terminal loop.
+            }
         }
+    }
+
+    async fn load_session_at_startup(&mut self, session_id: &str) -> Result<()> {
+        let loaded = (self.load_session)(session_id.to_owned())
+            .await
+            .with_context(|| format!("failed to load session {session_id}"))?;
+        self.rebuild_kimi_runtime_from_session(&loaded);
+        self.app
+            .load_session_transcript(loaded.label, loaded.notices, loaded.messages);
+        self.active_session_id = Some(session_id.to_owned());
+        Ok(())
     }
 
     pub fn apply_startup_options(&mut self, config: &AppConfig, options: InteractiveOptions) {
@@ -3003,6 +3034,12 @@ impl TerminalEvents for CrosstermEvents {
                 return Ok(Some(input));
             }
         }
+
+        self.pending.extend(self.parser.flush_timeout());
+        if let Some(input) = self.pending.pop_front() {
+            return Ok(Some(input));
+        }
+
         Ok(None)
     }
 }

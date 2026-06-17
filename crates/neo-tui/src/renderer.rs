@@ -54,6 +54,10 @@ pub struct InlineRenderer {
     max_lines_rendered: usize,
     /// Logical end-of-content row (mirrors pi-tui's `cursorRow`).
     cursor_row: usize,
+    /// Whether to clear the screen when content shrinks below the historical
+    /// high-water mark. Defaults to `false` to avoid wiping terminal scrollback
+    /// when the input box or other inline content loses lines.
+    clear_on_shrink: bool,
 }
 
 impl InlineRenderer {
@@ -65,10 +69,13 @@ impl InlineRenderer {
             stdout(),
             EnableBracketedPaste,
             PushKeyboardEnhancementFlags(
+                // Match Codex: only disambiguate, report event types, and report
+                // alternate keys. REPORT_ALL_KEYS_AS_ESCAPE_CODES is omitted
+                // because it can cause terminals to send Enter as `CSI 13 u`
+                // and may drop the shift modifier on Shift+Enter.
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                     | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
             )
         )?;
         Ok(Self {
@@ -81,6 +88,7 @@ impl InlineRenderer {
             first_render: true,
             max_lines_rendered: 0,
             cursor_row: 0,
+            clear_on_shrink: false,
         })
     }
 
@@ -119,8 +127,7 @@ impl InlineRenderer {
             PushKeyboardEnhancementFlags(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                     | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
             )
         )?;
         // Force full redraw after resume
@@ -272,11 +279,11 @@ impl InlineRenderer {
             return Ok(());
         }
 
-        // Content shrank below the historical high-water mark: force a full clear
-        // so obsolete rows (e.g. a closed overlay) do not linger on screen.
-        // full_render(clear=true) resets max_lines_rendered to new_lines.len(),
-        // so this branch will not fire again until content grows and shrinks again.
-        if new_lines.len() < self.max_lines_rendered {
+        // Content shrank below the historical high-water mark. We only force a
+        // full clear when explicitly opted in (e.g. a closed overlay) because the
+        // default behaviour of clearing the visible screen -- and the scrollback
+        // buffer on many terminals -- destroys the user's shell history.
+        if self.clear_on_shrink && new_lines.len() < self.max_lines_rendered {
             self.full_render(
                 output,
                 true,
@@ -522,7 +529,10 @@ impl InlineRenderer {
         let mut buffer = String::with_capacity(8192);
         buffer.push_str("\x1b[?2026h");
         if clear {
-            buffer.push_str("\x1b[2J\x1b[H\x1b[3J"); // Clear screen, home, clear scrollback
+            // Clear screen and move cursor home. We intentionally do NOT send
+            // \x1b[3J (clear scrollback) because that wipes the user's terminal
+            // history, which is unacceptable for an inline renderer.
+            buffer.push_str("\x1b[2J\x1b[H");
         }
         for (i, line) in new_lines.iter().enumerate() {
             if i > 0 {
@@ -610,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn shrink_triggers_full_clear() {
+    fn shrink_triggers_full_clear_when_enabled() {
         let mut renderer = InlineRenderer {
             previous_lines: vec!["line0".to_owned(), "line1".to_owned(), "line2".to_owned()],
             viewport_top: 0,
@@ -621,6 +631,7 @@ mod tests {
             first_render: false,
             max_lines_rendered: 3,
             cursor_row: 2,
+            clear_on_shrink: true,
         };
         let mut buf: Vec<u8> = Vec::new();
         renderer
@@ -636,6 +647,10 @@ mod tests {
         assert!(
             output.contains("\x1b[2J"),
             "shrink should force full clear: {output:?}"
+        );
+        assert!(
+            !output.contains("\x1b[3J"),
+            "full clear must not wipe scrollback: {output:?}"
         );
         assert!(
             output.contains("line0"),
@@ -673,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn shrink_to_empty_clears_screen() {
+    fn shrink_to_empty_clears_screen_when_enabled() {
         let mut renderer = InlineRenderer {
             previous_lines: vec!["line0".to_owned(), "line1".to_owned()],
             viewport_top: 0,
@@ -684,6 +699,7 @@ mod tests {
             first_render: false,
             max_lines_rendered: 2,
             cursor_row: 1,
+            clear_on_shrink: true,
         };
         let mut buf = Vec::new();
         renderer
@@ -694,6 +710,51 @@ mod tests {
             output.contains("\x1b[2J"),
             "shrink to empty should clear: {output:?}"
         );
+        assert!(
+            !output.contains("\x1b[3J"),
+            "full clear must not wipe scrollback: {output:?}"
+        );
         assert_eq!(renderer.max_lines_rendered, 0);
+    }
+
+    #[test]
+    fn shrink_does_not_clear_by_default() {
+        let mut renderer = InlineRenderer {
+            previous_lines: vec!["line0".to_owned(), "line1".to_owned(), "line2".to_owned()],
+            viewport_top: 0,
+            previous_viewport_top: 0,
+            hardware_cursor_row: 2,
+            previous_width: 80,
+            previous_height: 24,
+            first_render: false,
+            max_lines_rendered: 3,
+            cursor_row: 2,
+            clear_on_shrink: false,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        renderer
+            .render_to_with_size(
+                &mut buf,
+                80,
+                24,
+                vec!["line0".to_owned(), "line1".to_owned()],
+                None,
+            )
+            .unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        assert!(
+            !output.contains("\x1b[2J"),
+            "default shrink should not clear screen: {output:?}"
+        );
+        assert!(
+            !output.contains("\x1b[3J"),
+            "default shrink should not wipe scrollback: {output:?}"
+        );
+        // Differential rendering for a deleted trailing line only emits cursor
+        // moves/clears; unchanged lines are assumed to already be on screen.
+        assert!(
+            output.contains("\x1b[2K"),
+            "default shrink should clear the obsolete line: {output:?}"
+        );
     }
 }
