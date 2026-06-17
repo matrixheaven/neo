@@ -73,7 +73,9 @@ impl InputEvent {
             (KeyCode::Right, _) => Some(Self::MoveRight),
             (KeyCode::Home, _) => Some(Self::MoveHome),
             (KeyCode::End, _) => Some(Self::MoveEnd),
-            (KeyCode::Enter, KeyModifiers::SHIFT) => Some(Self::NewLine),
+            (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
+                Some(Self::NewLine)
+            }
             (KeyCode::Enter, _) => Some(Self::Submit),
             (KeyCode::Esc, _) => Some(Self::Cancel),
             _ => None,
