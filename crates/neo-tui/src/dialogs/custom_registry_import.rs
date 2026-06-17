@@ -150,6 +150,18 @@ impl CustomRegistryImportState {
                 self.switch_field(true);
                 InputResult::Handled
             }
+            InputEvent::Paste(text) => {
+                for ch in text.chars() {
+                    if ch.is_ascii_graphic() || ch == ' ' || ch == '/' || ch == ':' {
+                        match self.active_field {
+                            FIELD_URL => self.url.push(ch),
+                            FIELD_TOKEN => self.token.push(ch),
+                            _ => {}
+                        }
+                    }
+                }
+                InputResult::Handled
+            }
             InputEvent::Insert(ch)
                 if ch.is_ascii_graphic() || ch == ' ' || ch == '/' || ch == ':' =>
             {
@@ -237,6 +249,20 @@ mod tests {
         let lines = state.render_lines(50);
         let combined: String = lines.join("\n");
         assert!(combined.contains("ht"));
+    }
+
+    #[test]
+    fn paste_appends_allowed_characters() {
+        let mut state = CustomRegistryImportState::new(
+            CustomRegistryImportOptions {
+                title: "Import".into(),
+            },
+            theme(),
+        );
+        state.handle_input(InputEvent::Paste("https://example.com/api.json".to_owned()));
+        let lines = state.render_lines(50);
+        let combined: String = lines.join("\n");
+        assert!(combined.contains("https://example.com/api.json"));
     }
 
     #[test]

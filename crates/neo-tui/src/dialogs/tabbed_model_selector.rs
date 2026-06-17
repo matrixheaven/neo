@@ -112,9 +112,13 @@ impl TabbedModelSelectorState {
 
         // Top border with title
         lines.push(format!(
-            "\x1b[38;2;{}m╭ Models {}\n╰─── Tab: {} ───╯\x1b[0m",
+            "\x1b[38;2;{}m╭ Models {}\x1b[0m",
             rgb(&self.theme.overlay_border),
             "─".repeat(width.saturating_sub(10)),
+        ));
+        lines.push(format!(
+            "\x1b[38;2;{}m╰─── Tab: {} ───╯\x1b[0m",
+            rgb(&self.theme.overlay_border),
             self.tabs[self.active_tab],
         ));
 
