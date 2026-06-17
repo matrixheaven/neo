@@ -350,6 +350,12 @@ pub struct NeoTuiApp {
     plan_mode_active: bool,
     /// Current todo list for the TodoPanel.
     todo_items: Vec<TodoDisplayItem>,
+    /// Optional custom label shown in the footer as a working indicator.
+    custom_working_label: Option<String>,
+    /// Whether the current model has thinking enabled (shown in the footer).
+    thinking_enabled: bool,
+    /// Optional persistent exit-confirmation message shown in the footer.
+    exit_confirmation_label: Option<String>,
 }
 
 impl NeoTuiApp {
@@ -390,6 +396,9 @@ impl NeoTuiApp {
             permission_decision: PermissionDecision::Ask,
             plan_mode_active: false,
             todo_items: Vec::new(),
+            custom_working_label: None,
+            thinking_enabled: false,
+            exit_confirmation_label: None,
         }
     }
 
@@ -429,6 +438,9 @@ impl NeoTuiApp {
 
     #[must_use]
     pub fn working_label(&self) -> Option<String> {
+        if let Some(label) = &self.custom_working_label {
+            return Some(label.clone());
+        }
         if !self.active_tools.is_empty() {
             return Some("working · esc interrupt".to_owned());
         }
@@ -436,6 +448,31 @@ impl NeoTuiApp {
             return Some("thinking · esc interrupt".to_owned());
         }
         matches!(self.mode, AppMode::Streaming).then(|| "working · esc interrupt".to_owned())
+    }
+
+    /// Set a custom footer working label. Pass `None` to clear it.
+    pub fn set_custom_working_label(&mut self, label: Option<String>) {
+        self.custom_working_label = label;
+    }
+
+    #[must_use]
+    pub fn thinking_enabled(&self) -> bool {
+        self.thinking_enabled
+    }
+
+    /// Toggle the thinking-enabled indicator shown in the footer.
+    pub fn set_thinking_enabled(&mut self, enabled: bool) {
+        self.thinking_enabled = enabled;
+    }
+
+    #[must_use]
+    pub fn exit_confirmation_label(&self) -> Option<&str> {
+        self.exit_confirmation_label.as_deref()
+    }
+
+    /// Set a persistent exit-confirmation label in the footer. Pass `None` to clear.
+    pub fn set_exit_confirmation_label(&mut self, label: Option<String>) {
+        self.exit_confirmation_label = label;
     }
 
     #[must_use]
@@ -1695,6 +1732,12 @@ impl NeoTuiApp {
         let overlay = self.focused_overlay()?;
         match &overlay.kind {
             OverlayKind::SessionPicker(picker) => Some(picker.render_lines(width, &self.theme)),
+            OverlayKind::ModelSelector(state) => Some(state.render_lines(width)),
+            OverlayKind::TabbedModelSelector(state) => Some(state.render_lines(width)),
+            OverlayKind::ProviderManager(state) => Some(state.render_lines(width)),
+            OverlayKind::ChoicePicker(state) => Some(state.render_lines(width)),
+            OverlayKind::ApiKeyInput(state) => Some(state.render_lines(width)),
+            OverlayKind::CustomRegistryImport(state) => Some(state.render_lines(width)),
             _ => None,
         }
     }
@@ -1878,6 +1921,7 @@ impl NeoTuiApp {
         let Some(id) = self.focused_overlay else {
             return InputResult::Ignored;
         };
+        let input = Self::translate_key_event_for_dialog(input);
         if let Some(overlay) = self.overlays.iter_mut().find(|o| o.id == id) {
             match &mut overlay.kind {
                 OverlayKind::ModelSelector(state) => return state.handle_input(input),
@@ -1892,7 +1936,29 @@ impl NeoTuiApp {
         InputResult::Ignored
     }
 
-    // Convenience result accessors for rich dialogs
+    /// Convenience result accessors for rich dialogs
+
+    fn translate_key_event_for_dialog(input: InputEvent) -> InputEvent {
+        match &input {
+            InputEvent::Key(key) => match key.as_str() {
+                "enter" => InputEvent::Submit,
+                "escape" => InputEvent::Cancel,
+                "up" => InputEvent::Action(crate::KeybindingAction::SelectUp),
+                "down" => InputEvent::Action(crate::KeybindingAction::SelectDown),
+                "pageup" => InputEvent::Action(crate::KeybindingAction::SelectPageUp),
+                "pagedown" => InputEvent::Action(crate::KeybindingAction::SelectPageDown),
+                "tab" => InputEvent::Insert('\t'),
+                "backspace" => InputEvent::Backspace,
+                "delete" => InputEvent::Delete,
+                "left" => InputEvent::MoveLeft,
+                "right" => InputEvent::MoveRight,
+                "home" => InputEvent::MoveHome,
+                "end" => InputEvent::MoveEnd,
+                _ => input,
+            },
+            _ => input,
+        }
+    }
 
     #[must_use]
     pub fn model_selector_result(&self) -> Option<&crate::dialogs::ModelSelectorResult> {

@@ -143,7 +143,7 @@ fn app_shell_renders_context_window_and_working_status() {
     let lines = render_app(100, 12, &app);
 
     assert!(lines.iter().any(|line| line.contains("ctx 12k/200k")));
-    assert!(lines.iter().any(|line| line.contains("● working")));
+    assert!(lines.iter().any(|line| line.contains("working")));
 }
 
 #[test]

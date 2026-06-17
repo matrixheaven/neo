@@ -698,6 +698,15 @@ fn render_footer_lines(app: &NeoTuiApp, width: usize) -> Vec<String> {
     if !app.model_label().is_empty() {
         left_parts.push(paint(app.model_label(), Style::default().fg(theme.muted)));
     }
+    if app.thinking_enabled() {
+        left_parts.push(paint(
+            "thinking",
+            Style::default().fg(theme.footer_working).italic(),
+        ));
+    }
+    if let Some(exit) = app.exit_confirmation_label() {
+        left_parts.push(paint(exit, Style::default().fg(theme.warning).bold()));
+    }
     if app.is_plan_mode() {
         left_parts.push(paint(
             "[PLAN MODE]",
@@ -705,8 +714,10 @@ fn render_footer_lines(app: &NeoTuiApp, width: usize) -> Vec<String> {
         ));
     }
     if let Some(working) = app.working_label() {
+        const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let spinner = SPINNER[app.activity_frame() % SPINNER.len()];
         left_parts.push(paint(
-            &format!("● {working}"),
+            &format!("{spinner} {working}"),
             Style::default().fg(theme.footer_working),
         ));
     }
