@@ -28,8 +28,8 @@ use neo_agent_core::{
 };
 use neo_tui::{
     ApprovalChoice, ApprovalResult, CommandSpec, ContextWindow, ImageProtocolPreference,
-    ImageRenderPolicy, InlineRenderer, InputEvent, InputParser, KeyId, KeybindingAction,
-    KeybindingsManager, NeoTuiApp, NeoTuiRuntime, PickerItem, PromptEdit,
+    ImageRenderPolicy, InlineRenderer, InputEvent, InputParser, InputResult, KeyId,
+    KeybindingAction, KeybindingsManager, NeoTuiApp, NeoTuiRuntime, PickerItem, PromptEdit,
     TerminalImageCapabilities,
 };
 
@@ -94,6 +94,24 @@ pub async fn execute_tty_with_startup(
     Ok(None)
 }
 
+struct PendingCustomRegistry {
+    source: neo_tui::dialogs::CustomRegistrySource,
+    catalog: BTreeMap<String, neo_ai::catalog::CatalogEntry>,
+}
+
+enum CatalogFetchSource {
+    Known,
+    Custom(neo_tui::dialogs::CustomRegistrySource),
+}
+
+struct PendingCatalogFetch {
+    source: CatalogFetchSource,
+    #[allow(clippy::type_complexity)]
+    handle: tokio::task::JoinHandle<
+        Result<BTreeMap<String, neo_ai::catalog::CatalogEntry>, neo_ai::error::AiError>,
+    >,
+}
+
 pub(crate) struct InteractiveController {
     app: NeoTuiApp,
     kimi_runtime: Option<neo_tui::NeoTuiRuntime>,
@@ -102,12 +120,12 @@ pub(crate) struct InteractiveController {
     session_items: Vec<SessionSummary>,
     session_list_error: Option<String>,
     model_items: Vec<PickerItem>,
-    model_list_error: Option<String>,
     load_session: SessionLoader,
     fork_session: SessionForker,
     active_session_id: Option<String>,
     local_config: Option<AppConfig>,
     active_model: Option<SelectedModel>,
+    current_thinking: bool,
     active_turn: Option<RunningTurn>,
     pending_approvals: BTreeMap<String, oneshot::Sender<PermissionDecision>>,
     resolved_approvals: BTreeMap<String, PermissionDecision>,
@@ -119,6 +137,9 @@ pub(crate) struct InteractiveController {
     workspace_root: PathBuf,
     pending_exit_confirmation: Option<ExitConfirmation>,
     suspend_requested: bool,
+    pending_custom_registry: Option<PendingCustomRegistry>,
+    pending_catalog_provider_id: Option<String>,
+    pending_catalog_fetch: Option<PendingCatalogFetch>,
 }
 
 pub(crate) struct TurnChannels {
@@ -178,7 +199,6 @@ pub(crate) struct PickerCatalogs {
     session_items: Vec<SessionSummary>,
     session_error: Option<String>,
     model_items: Vec<PickerItem>,
-    model_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +206,7 @@ pub(crate) struct TurnRequest {
     pub prompt: Vec<String>,
     pub session_id: Option<String>,
     pub model: Option<SelectedModel>,
+    pub reasoning_effort: Option<neo_ai::ReasoningEffort>,
 }
 
 impl TurnRequest {
@@ -194,11 +215,13 @@ impl TurnRequest {
         prompt: Vec<String>,
         session_id: Option<String>,
         model: Option<SelectedModel>,
+        reasoning_effort: Option<neo_ai::ReasoningEffort>,
     ) -> Self {
         Self {
             prompt,
             session_id,
             model,
+            reasoning_effort,
         }
     }
 }
@@ -383,12 +406,12 @@ impl InteractiveController {
             session_items: catalogs.session_items,
             session_list_error: catalogs.session_error,
             model_items: catalogs.model_items,
-            model_list_error: catalogs.model_error,
             load_session,
             fork_session,
             active_session_id: None,
             local_config: None,
             active_model: None,
+            current_thinking: false,
             active_turn: None,
             pending_approvals: BTreeMap::new(),
             resolved_approvals: BTreeMap::new(),
@@ -399,6 +422,9 @@ impl InteractiveController {
             workspace_root,
             pending_exit_confirmation: None,
             suspend_requested: false,
+            pending_custom_registry: None,
+            pending_catalog_provider_id: None,
+            pending_catalog_fetch: None,
         }
     }
 
@@ -455,7 +481,6 @@ impl InteractiveController {
                 self.session_items = catalogs.session_items;
                 self.session_list_error = catalogs.session_error;
                 self.model_items = catalogs.model_items;
-                self.model_list_error = catalogs.model_error;
                 self.app.set_theme(config.theme.theme);
                 self.local_config = Some(config);
             }
@@ -595,31 +620,24 @@ impl InteractiveController {
                 None => tokio::task::yield_now().await,
             }
             self.drain_active_turn().await?;
+            self.poll_pending_catalog_fetch().await;
             let runtime = self
                 .kimi_runtime
                 .as_mut()
                 .expect("NeoTuiRuntime remains initialized while rendering");
+            self.app.advance_activity_frame();
             render(&mut self.app, runtime)?;
         }
         Ok(())
     }
 
     async fn handle_input_event(&mut self, event: InputEvent) -> Result<bool> {
-        // If a rich dialog overlay is focused, intercept raw input events so
-        // typing, backspace, left/right (thinking toggle) and Tab go to the
-        // dialog instead of the prompt editor.
+        // If a rich dialog overlay is focused, forward ALL input events to it
+        // first. Rich dialogs consume keys, actions, submit, cancel, etc.
         if self.app.focused_overlay_is_rich_dialog() {
-            match &event {
-                InputEvent::Insert(_)
-                | InputEvent::Backspace
-                | InputEvent::MoveLeft
-                | InputEvent::MoveRight
-                | InputEvent::Cancel => {
-                    self.app.handle_focused_dialog_input(event);
-                    return Ok(false);
-                }
-                _ => {}
-            }
+            let result = self.app.handle_focused_dialog_input(event);
+            self.process_rich_dialog_result(result).await?;
+            return Ok(false);
         }
         match event {
             InputEvent::Insert(character) => {
@@ -757,7 +775,7 @@ impl InteractiveController {
                 self.open_session_picker();
             }
             KeybindingAction::SessionPickerToggleScope => {
-                self.toggle_session_picker_scope().await?;
+                self.toggle_session_picker_scope()?;
             }
             KeybindingAction::SessionFork => {
                 if self.app.selected_session().is_some() {
@@ -788,50 +806,11 @@ impl InteractiveController {
                 self.clear_pending_exit_confirmation();
                 self.submit_current_prompt().await?;
             }
-            KeybindingAction::SelectUp => {
-                if self.app.focused_overlay_is_rich_dialog() {
-                    self.app.handle_focused_dialog_input(InputEvent::Action(
-                        KeybindingAction::SelectUp,
-                    ));
-                } else {
-                    self.app.move_overlay_selection_up();
-                }
-            }
-            KeybindingAction::SelectDown => {
-                if self.app.focused_overlay_is_rich_dialog() {
-                    self.app.handle_focused_dialog_input(InputEvent::Action(
-                        KeybindingAction::SelectDown,
-                    ));
-                } else {
-                    self.app.move_overlay_selection_down();
-                }
-            }
-            KeybindingAction::SelectPageUp => {
-                if self.app.focused_overlay_is_rich_dialog() {
-                    self.app.handle_focused_dialog_input(InputEvent::Action(
-                        KeybindingAction::SelectPageUp,
-                    ));
-                } else {
-                    self.app.move_overlay_selection_page_up();
-                }
-            }
-            KeybindingAction::SelectPageDown => {
-                if self.app.focused_overlay_is_rich_dialog() {
-                    self.app.handle_focused_dialog_input(InputEvent::Action(
-                        KeybindingAction::SelectPageDown,
-                    ));
-                } else {
-                    self.app.move_overlay_selection_page_down();
-                }
-            }
+            KeybindingAction::SelectUp => self.app.move_overlay_selection_up(),
+            KeybindingAction::SelectDown => self.app.move_overlay_selection_down(),
+            KeybindingAction::SelectPageUp => self.app.move_overlay_selection_page_up(),
+            KeybindingAction::SelectPageDown => self.app.move_overlay_selection_page_down(),
             KeybindingAction::SelectConfirm => {
-                // First, forward the confirm to any focused rich dialog so it
-                // can set its result.
-                if self.app.focused_overlay_is_rich_dialog() {
-                    self.app.handle_focused_dialog_input(InputEvent::Action(
-                        KeybindingAction::SelectConfirm,
-                    ));
-                }
                 if self.app.selected_command().is_some() {
                     self.run_selected_command().await?;
                 } else if self.app.approval_choice().is_some() {
@@ -844,20 +823,8 @@ impl InteractiveController {
                     }
                 } else if self.app.selected_session().is_some() {
                     self.load_selected_session().await?;
-                } else if self.app.tabbed_model_selector_result().is_some() {
-                    self.apply_tabbed_model_selection()?;
-                } else if self.app.model_selector_result().is_some() {
-                    self.apply_model_selector_result()?;
                 } else if self.app.selected_model().is_some() {
                     self.apply_selected_model()?;
-                } else if self.app.provider_manager_action().is_some() {
-                    self.handle_provider_manager_action()?;
-                } else if self.app.choice_picker_result().is_some() {
-                    self.handle_choice_picker_result();
-                } else if self.app.api_key_input_result().is_some() {
-                    self.handle_api_key_input_result();
-                } else if self.app.custom_registry_import_result().is_some() {
-                    self.handle_custom_registry_import_result();
                 } else if self.app.selected_prompt_completion().is_some() {
                     let _ = self.app.confirm_prompt_completion();
                 } else if self.app.focused_overlay_id().is_none() {
@@ -865,25 +832,6 @@ impl InteractiveController {
                 }
             }
             KeybindingAction::SelectCancel => {
-                // Forward cancel to rich dialog first so it can clear query or set cancelled result
-                if self.app.focused_overlay_is_rich_dialog() {
-                    self.app.handle_focused_dialog_input(InputEvent::Action(
-                        KeybindingAction::SelectCancel,
-                    ));
-                    // If the dialog set a Cancelled result, close it
-                    if self.app.tabbed_model_selector_result().is_some()
-                        || self.app.model_selector_result().is_some()
-                        || self.app.choice_picker_result().is_some()
-                        || self.app.api_key_input_result().is_some()
-                        || self.app.custom_registry_import_result().is_some()
-                        || self.app.provider_manager_action().is_some()
-                    {
-                        self.app.close_focused_overlay();
-                        return Ok(false);
-                    }
-                    // Otherwise the dialog consumed the Esc (e.g. cleared query)
-                    return Ok(false);
-                }
                 if self.cancel_focused_overlay() {
                     return Ok(false);
                 }
@@ -950,6 +898,10 @@ impl InteractiveController {
 
     fn complete_prompt_or_insert_tab(&mut self) {
         self.clear_pending_exit_confirmation();
+        if self.app.selected_prompt_completion().is_some() {
+            let _ = self.app.confirm_prompt_completion();
+            return;
+        }
         let Some(prefix) = self.app.prompt().completion_prefix() else {
             self.app.prompt_mut().apply_edit(PromptEdit::Insert("\t"));
             return;
@@ -1133,9 +1085,6 @@ impl InteractiveController {
         }
         if !self.app.prompt().text.is_empty() {
             self.app.prompt_mut().apply_edit(PromptEdit::Clear);
-            self.show_notice("Press Ctrl-C again to exit");
-            self.pending_exit_confirmation = Some(ExitConfirmation::new(ExitGesture::CtrlC));
-            return false;
         }
         self.handle_exit_confirmation(ExitGesture::CtrlC)
     }
@@ -1156,6 +1105,7 @@ impl InteractiveController {
             .is_some_and(|confirmation| confirmation.matches(gesture))
         {
             self.pending_exit_confirmation = None;
+            self.app.set_exit_confirmation_label(None);
             return true;
         }
         let message = match gesture {
@@ -1163,6 +1113,8 @@ impl InteractiveController {
             ExitGesture::CtrlD => "Press Ctrl-D again to exit",
         };
         self.show_notice(message);
+        self.app
+            .set_exit_confirmation_label(Some(message.to_owned()));
         self.pending_exit_confirmation = Some(ExitConfirmation::new(gesture));
         false
     }
@@ -1175,6 +1127,7 @@ impl InteractiveController {
 
     fn clear_pending_exit_confirmation(&mut self) {
         self.pending_exit_confirmation = None;
+        self.app.set_exit_confirmation_label(None);
     }
 
     fn open_command_palette(&mut self) {
@@ -1252,53 +1205,50 @@ impl InteractiveController {
         Ok(())
     }
 
-    async fn submit_current_prompt(&mut self) -> Result<()> {
-        if self.active_turn.is_some() {
-            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                text: "A turn is already running".to_owned(),
-            });
-            return Ok(());
-        }
-        let Some(prompt) = self.app.submit_prompt() else {
-            return Ok(());
-        };
-        if prompt.trim() == "/resume" {
-            self.open_session_picker();
-            return Ok(());
+    /// Handle slash commands. Returns `true` if the prompt was consumed and should
+    /// not be submitted as a chat turn.
+    fn handle_slash_command(&mut self, prompt: &str) -> bool {
+        match prompt.trim() {
+            "/resume" => {
+                self.app.prompt_mut().clear_after_submit();
+                self.open_session_picker();
+                return true;
+            }
+            "/provider" => {
+                self.app.prompt_mut().clear_after_submit();
+                self.open_provider_picker();
+                return true;
+            }
+            _ => {}
         }
         // /model [alias] — opens model picker, optionally pre-selected
         if prompt.trim() == "/model" || prompt.trim().starts_with("/model ") {
+            self.app.prompt_mut().clear_after_submit();
             let alias = prompt.trim().strip_prefix("/model").unwrap_or("").trim();
             if alias.is_empty() {
                 self.open_model_picker();
+            } else if self.model_items.iter().any(|item| item.value == alias) {
+                self.open_model_picker_with_alias(alias);
             } else {
-                // Check if alias exists
-                if self.model_items.iter().any(|item| item.value == alias) {
-                    self.open_model_picker_with_alias(alias);
-                } else {
-                    self.app.apply_stream_update(neo_tui::StreamUpdate::Error {
-                        text: format!("Unknown model alias: {alias}"),
-                    });
-                }
+                self.app.apply_stream_update(neo_tui::StreamUpdate::Error {
+                    text: format!("Unknown model alias: {alias}"),
+                });
             }
-            return Ok(());
-        }
-        if prompt.trim() == "/provider" {
-            self.open_provider_picker();
-            return Ok(());
+            return true;
         }
         if let Some(rest) = prompt.trim().strip_prefix("/plan") {
+            self.app.prompt_mut().clear_after_submit();
             let arg = rest.trim();
             match arg {
                 "" | "on" => {
-                    if !self.app.is_plan_mode() {
+                    if self.app.is_plan_mode() {
+                        self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                            text: "Plan mode is already active".to_string(),
+                        });
+                    } else {
                         self.app.set_plan_mode(true);
                         self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
                             text: " Entered plan mode — read-only until you exit".to_string(),
-                        });
-                    } else {
-                        self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                            text: "Plan mode is already active".to_string(),
                         });
                     }
                 }
@@ -1315,22 +1265,19 @@ impl InteractiveController {
                     }
                 }
                 "clear" => {
-                    // Attempt to clear the plan file via the runtime's shared plan_mode.
-                    // Since the TUI layer doesn't hold a direct reference, we rely on
-                    // the app's plan mode tracking + workspace paths.
                     let plans_dir = self.workspace_root.join(".neo").join("plans");
-                    if let Some(entry) = std::fs::read_dir(&plans_dir).ok()
-                        && let Some(first) = entry.filter_map(|e| e.ok()).next()
-                        && let Ok(_) = std::fs::write(first.path(), "")
-                    {
-                        self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                            text: "Plan file cleared".to_string(),
-                        });
-                    } else {
-                        self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                            text: "No plan file to clear".to_string(),
-                        });
-                    }
+                    let cleared = std::fs::read_dir(&plans_dir)
+                        .ok()
+                        .and_then(|mut entries| entries.next().and_then(std::result::Result::ok))
+                        .and_then(|entry| std::fs::write(entry.path(), "").ok())
+                        .is_some();
+                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                        text: if cleared {
+                            "Plan file cleared".to_string()
+                        } else {
+                            "No plan file to clear".to_string()
+                        },
+                    });
                 }
                 _ => {
                     self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
@@ -1340,8 +1287,35 @@ impl InteractiveController {
                     });
                 }
             }
+            return true;
+        }
+        false
+    }
+
+    async fn submit_current_prompt(&mut self) -> Result<()> {
+        if self.active_turn.is_some() {
+            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: "A turn is already running".to_owned(),
+            });
             return Ok(());
         }
+        let prompt = self.app.prompt().text.trim_end().to_owned();
+        if prompt.trim().is_empty() {
+            return Ok(());
+        }
+
+        // Dismiss any open prompt-completion overlay before handling slash commands
+        // or submitting, so it doesn't linger under a newly-opened picker.
+        self.close_inline_prompt_completion();
+
+        // Slash commands: handle without submitting a turn or entering streaming mode.
+        if self.handle_slash_command(&prompt) {
+            return Ok(());
+        }
+
+        let Some(prompt) = self.app.submit_prompt() else {
+            return Ok(());
+        };
         let PromptSubmission {
             prompt,
             model_override,
@@ -1367,9 +1341,16 @@ impl InteractiveController {
             questions: question_tx,
         };
         let future = (self.run_turn)(
-            TurnRequest::new(vec![prompt], self.active_session_id.clone(), {
-                model_override.or_else(|| self.active_model.clone())
-            }),
+            TurnRequest::new(
+                vec![prompt],
+                self.active_session_id.clone(),
+                model_override.or_else(|| self.active_model.clone()),
+                if self.current_thinking {
+                    Some(neo_ai::ReasoningEffort::High)
+                } else {
+                    None
+                },
+            ),
             channels,
         );
         let task = tokio::spawn(async move {
@@ -1541,7 +1522,7 @@ impl InteractiveController {
         }
     }
 
-    /// Register a pending AskUser question. Stores the oneshot response channel
+    /// Register a pending `AskUser` question. Stores the oneshot response channel
     /// and synthesizes a `QuestionRequested` event for the TUI so it can display
     /// the question dialog.
     fn register_pending_question(&mut self, pending: PendingQuestion) {
@@ -1618,36 +1599,24 @@ impl InteractiveController {
     }
 
     fn open_model_picker(&mut self) {
-        if let Some(error) = &self.model_list_error {
-            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                text: format!("Error loading models: {error}"),
-            });
-            return;
-        }
-        if self.model_items.is_empty() {
+        let entries = self.model_entries_for_picker();
+        if entries.is_empty() {
             self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
                 text: "No configured models".to_owned(),
             });
             return;
         }
-        // Build ModelEntry list from PickerItems
-        let entries: Vec<neo_tui::dialogs::ModelEntry> = self
-            .model_items
-            .iter()
-            .map(model_entry_from_picker_item)
-            .collect();
         let current_alias = self
             .active_model
             .as_ref()
             .map(|m| format!("{}/{}", m.provider, m.model))
             .unwrap_or_default();
-        let current_thinking = false;
         self.app
             .open_tabbed_model_selector(neo_tui::dialogs::TabbedModelSelectorOptions {
                 models: entries,
                 current_alias,
                 selected_alias: None,
-                current_thinking,
+                current_thinking: self.current_thinking,
                 initial_tab_id: None,
                 theme: self.app.theme(),
             });
@@ -1655,17 +1624,18 @@ impl InteractiveController {
 
     /// Open the model picker with a specific alias pre-selected.
     fn open_model_picker_with_alias(&mut self, alias: &str) {
-        let entries: Vec<neo_tui::dialogs::ModelEntry> = self
-            .model_items
-            .iter()
-            .map(model_entry_from_picker_item)
-            .collect();
+        let entries = self.model_entries_for_picker();
+        if entries.is_empty() {
+            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                text: "No configured models".to_owned(),
+            });
+            return;
+        }
         let current_alias = self
             .active_model
             .as_ref()
             .map(|m| format!("{}/{}", m.provider, m.model))
             .unwrap_or_default();
-        // Determine which provider tab to open on
         let initial_tab_id = entries
             .iter()
             .find(|e| e.alias == alias)
@@ -1675,10 +1645,22 @@ impl InteractiveController {
                 models: entries,
                 current_alias,
                 selected_alias: Some(alias.to_owned()),
-                current_thinking: false,
+                current_thinking: self.current_thinking,
                 initial_tab_id,
                 theme: self.app.theme(),
             });
+    }
+
+    /// Resolve the ordered list of `ModelEntry` to show in the picker.
+    /// Only providers/models explicitly configured via `[models.*]` or
+    /// `model_catalogs` are included; the seeded default catalog is not shown
+    /// so the picker does not list providers the user has not set up.
+    fn model_entries_for_picker(&self) -> Vec<neo_tui::dialogs::ModelEntry> {
+        self.local_config.as_ref().map_or_else(Vec::new, |config| {
+            let mut entries = model_entries_from_config(config);
+            entries.extend(model_entries_from_model_catalogs(config));
+            entries
+        })
     }
 
     fn open_provider_picker(&mut self) {
@@ -1698,13 +1680,9 @@ impl InteractiveController {
         let active_provider_id = self.active_model.as_ref().map(|m| m.provider.clone());
         let sources: Vec<neo_tui::dialogs::ProviderSource> = config
             .providers
-            .iter()
-            .map(|(id, cfg)| {
-                let type_str = cfg
-                    .provider_type
-                    .map(neo_ai::ApiType::as_config_str)
-                    .unwrap_or("auto");
-                let label = format!("{id} ({type_str})");
+            .keys()
+            .map(|id| {
+                let label = id.clone();
                 neo_tui::dialogs::ProviderSource {
                     provider_ids: vec![id.clone()],
                     label,
@@ -1750,7 +1728,7 @@ impl InteractiveController {
         Ok(())
     }
 
-    async fn toggle_session_picker_scope(&mut self) -> Result<()> {
+    fn toggle_session_picker_scope(&mut self) -> Result<()> {
         let current_scope = {
             let Some(overlay) = self.app.focused_overlay() else {
                 return Ok(());
@@ -1866,50 +1844,84 @@ impl InteractiveController {
         Ok(())
     }
 
-    /// Apply the selection from the rich TabbedModelSelector dialog.
+    /// Dispatch a rich dialog result after an input event was forwarded.
+    async fn process_rich_dialog_result(&mut self, result: InputResult) -> Result<()> {
+        if !matches!(
+            result,
+            InputResult::Submitted | InputResult::Cancelled | InputResult::Handled
+        ) {
+            return Ok(());
+        }
+        // For ModelSelector / TabbedModelSelector, the Submit path stores the
+        // result in the state. We poll the accessor to apply it.
+        if self.app.tabbed_model_selector_result().is_some() {
+            self.apply_tabbed_model_selection()?;
+        } else if self.app.model_selector_result().is_some() {
+            self.apply_model_selector_result()?;
+        } else if self.app.provider_manager_action().is_some() {
+            self.handle_provider_manager_action()?;
+        } else if self.app.choice_picker_result().is_some() {
+            self.handle_choice_picker_result().await;
+        } else if self.app.api_key_input_result().is_some() {
+            self.handle_api_key_input_result().await;
+        } else if self.app.custom_registry_import_result().is_some() {
+            self.handle_custom_registry_import_result().await;
+        }
+        Ok(())
+    }
+
+    /// Apply a model selection, updating the active model, context window,
+    /// thinking state, and footer indicator.
+    fn apply_model_selection(&mut self, selection: &neo_tui::dialogs::ModelSelection) {
+        let (provider, model) = selection
+            .alias
+            .split_once('/')
+            .unwrap_or((&selection.alias, ""));
+        self.app.set_model_label(selection.alias.clone());
+        let max_ctx = self
+            .model_items
+            .iter()
+            .find(|item| item.value == selection.alias)
+            .and_then(context_window_from_picker_item);
+        self.app.set_context_window(max_ctx.map(ContextWindow::new));
+        self.active_model = Some(SelectedModel {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            max_context_tokens: max_ctx,
+        });
+        self.current_thinking = selection.thinking;
+        self.app.set_thinking_enabled(selection.thinking);
+        if let Some(config) = self.local_config.as_mut() {
+            config.runtime.reasoning_effort = if selection.thinking {
+                Some(neo_ai::ReasoningEffort::High)
+            } else {
+                None
+            };
+        }
+        let notice = if selection.thinking {
+            format!("Switched to {} (thinking: on)", selection.alias)
+        } else {
+            format!("Switched to {}", selection.alias)
+        };
+        self.app
+            .apply_stream_update(neo_tui::StreamUpdate::Notice { text: notice });
+    }
+
+    /// Apply the selection from the rich `TabbedModelSelector` dialog.
     fn apply_tabbed_model_selection(&mut self) -> Result<()> {
         let result = self.app.tabbed_model_selector_result().cloned();
         let result = match result {
             Some(r) => r,
             None => return Ok(()),
         };
-        // Close the overlay
         self.app.close_focused_overlay();
-        match result {
-            neo_tui::dialogs::ModelSelectorResult::Selected(selection) => {
-                let (provider, model) = selection
-                    .alias
-                    .split_once('/')
-                    .unwrap_or((&selection.alias, ""));
-                self.app.set_model_label(selection.alias.clone());
-                // Try to find context window from model_items
-                let max_ctx = self
-                    .model_items
-                    .iter()
-                    .find(|item| item.value == selection.alias)
-                    .and_then(context_window_from_picker_item);
-                self.app.set_context_window(max_ctx.map(ContextWindow::new));
-                self.active_model = Some(SelectedModel {
-                    provider: provider.to_owned(),
-                    model: model.to_owned(),
-                    max_context_tokens: max_ctx,
-                });
-                if selection.thinking {
-                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                        text: format!("Switched to {} (thinking: on)", selection.alias),
-                    });
-                } else {
-                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                        text: format!("Switched to {}", selection.alias),
-                    });
-                }
-            }
-            neo_tui::dialogs::ModelSelectorResult::Cancelled => {}
+        if let neo_tui::dialogs::ModelSelectorResult::Selected(selection) = result {
+            self.apply_model_selection(&selection);
         }
         Ok(())
     }
 
-    /// Apply the selection from the flat ModelSelector dialog.
+    /// Apply the selection from the flat `ModelSelector` dialog.
     fn apply_model_selector_result(&mut self) -> Result<()> {
         let result = self.app.model_selector_result().cloned();
         let result = match result {
@@ -1917,31 +1929,13 @@ impl InteractiveController {
             None => return Ok(()),
         };
         self.app.close_focused_overlay();
-        match result {
-            neo_tui::dialogs::ModelSelectorResult::Selected(selection) => {
-                let (provider, model) = selection
-                    .alias
-                    .split_once('/')
-                    .unwrap_or((&selection.alias, ""));
-                self.app.set_model_label(selection.alias.clone());
-                let max_ctx = self
-                    .model_items
-                    .iter()
-                    .find(|item| item.value == selection.alias)
-                    .and_then(context_window_from_picker_item);
-                self.app.set_context_window(max_ctx.map(ContextWindow::new));
-                self.active_model = Some(SelectedModel {
-                    provider: provider.to_owned(),
-                    model: model.to_owned(),
-                    max_context_tokens: max_ctx,
-                });
-            }
-            neo_tui::dialogs::ModelSelectorResult::Cancelled => {}
+        if let neo_tui::dialogs::ModelSelectorResult::Selected(selection) = result {
+            self.apply_model_selection(&selection);
         }
         Ok(())
     }
 
-    /// Handle a ProviderManager action (Add / DeleteSource / Close).
+    /// Handle a `ProviderManager` action (Add / `DeleteSource` / Close).
     fn handle_provider_manager_action(&mut self) -> Result<()> {
         let action = self.app.provider_manager_action();
         let action = match action {
@@ -1972,6 +1966,7 @@ impl InteractiveController {
                         ],
                         initial_id: None,
                         theme: self.app.theme(),
+                        page_size: 0,
                     });
             }
             neo_tui::dialogs::ProviderManagerAction::DeleteSource(ids) => {
@@ -1994,21 +1989,23 @@ impl InteractiveController {
         Ok(())
     }
 
-    /// Handle a ChoicePicker result.
-    fn handle_choice_picker_result(&mut self) {
-        let result = self.app.choice_picker_result().cloned();
-        let result = match result {
-            Some(r) => r,
-            None => return,
+    /// Handle a `ChoicePicker` result.
+    async fn handle_choice_picker_result(&mut self) {
+        let Some(result) = self.app.choice_picker_result().cloned() else {
+            return;
         };
         self.app.close_focused_overlay();
         match result {
             neo_tui::dialogs::ChoiceResult::Selected(item) => match item.id.as_str() {
                 "known" => {
-                    // Open catalog provider picker
-                    // For now, just notify — the full flow requires async catalog fetch
-                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                        text: "Fetching models.dev catalog...".to_owned(),
+                    self.app.set_custom_working_label(Some(
+                        "Fetching models.dev catalog...".to_owned(),
+                    ));
+                    let handle =
+                        tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
+                    self.pending_catalog_fetch = Some(PendingCatalogFetch {
+                        source: CatalogFetchSource::Known,
+                        handle,
                     });
                 }
                 "custom" => {
@@ -2021,11 +2018,55 @@ impl InteractiveController {
                 id if id.starts_with("catalog:") => {
                     // Catalog provider selected — ask for API key
                     let provider_id = id.strip_prefix("catalog:").unwrap_or(id);
+                    self.pending_catalog_provider_id = Some(provider_id.to_owned());
                     self.app
                         .open_api_key_input(neo_tui::dialogs::ApiKeyInputOptions {
                             title: "API Key".to_owned(),
                             provider_name: provider_id.to_owned(),
                         });
+                }
+                id if id.starts_with("custom-catalog:") => {
+                    let provider_id = id.strip_prefix("custom-catalog:").unwrap_or(id);
+                    if let Some(pending) = self.pending_custom_registry.take() {
+                        if let Some(entry) = pending.catalog.get(provider_id) {
+                            match self.config_path() {
+                                Some(config_path) => {
+                                    match crate::config_ops::add_provider_from_catalog_entry(
+                                        &config_path,
+                                        provider_id,
+                                        entry,
+                                        Some(&pending.source.token),
+                                        None,
+                                    ) {
+                                        Ok(message) => {
+                                            self.app.apply_stream_update(
+                                                neo_tui::StreamUpdate::Notice { text: message },
+                                            );
+                                            self.refresh_config();
+                                        }
+                                        Err(error) => {
+                                            self.app.apply_stream_update(
+                                                neo_tui::StreamUpdate::Error {
+                                                    text: format!(
+                                                        "Failed to import provider: {error}"
+                                                    ),
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                                None => {
+                                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                                        text: "No config available".to_owned(),
+                                    });
+                                }
+                            }
+                        } else {
+                            self.app.apply_stream_update(neo_tui::StreamUpdate::Error {
+                                text: format!("Provider '{provider_id}' not found in registry"),
+                            });
+                        }
+                    }
                 }
                 _ => {}
             },
@@ -2034,40 +2075,147 @@ impl InteractiveController {
     }
 
     /// Handle an API key input result.
-    fn handle_api_key_input_result(&mut self) {
-        let result = self.app.api_key_input_result().cloned();
-        let result = match result {
-            Some(r) => r,
-            None => return,
+    async fn handle_api_key_input_result(&mut self) {
+        let Some(result) = self.app.api_key_input_result().cloned() else {
+            return;
         };
         self.app.close_focused_overlay();
         match result {
-            neo_tui::dialogs::ApiKeyInputResult::Submitted(_key) => {
-                self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                    text: "API key saved. Provider added.".to_owned(),
-                });
-                self.refresh_config();
+            neo_tui::dialogs::ApiKeyInputResult::Submitted(key) => {
+                if let Some(provider_id) = self.pending_catalog_provider_id.take() {
+                    match self.config_path() {
+                        Some(config_path) => {
+                            match crate::config_ops::catalog_add_provider(
+                                &config_path,
+                                &provider_id,
+                                Some(&key),
+                                None,
+                            )
+                            .await
+                            {
+                                Ok(message) => {
+                                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                                        text: message,
+                                    });
+                                    self.refresh_config();
+                                }
+                                Err(error) => {
+                                    self.app.apply_stream_update(neo_tui::StreamUpdate::Error {
+                                        text: format!("Failed to add provider: {error}"),
+                                    });
+                                }
+                            }
+                        }
+                        None => {
+                            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                                text: "No config available".to_owned(),
+                            });
+                        }
+                    }
+                } else {
+                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                        text: "API key saved.".to_owned(),
+                    });
+                }
             }
-            neo_tui::dialogs::ApiKeyInputResult::Cancelled => {}
+            neo_tui::dialogs::ApiKeyInputResult::Cancelled => {
+                self.pending_catalog_provider_id = None;
+            }
         }
     }
 
     /// Handle a custom registry import result.
-    fn handle_custom_registry_import_result(&mut self) {
-        let result = self.app.custom_registry_import_result().cloned();
-        let result = match result {
-            Some(r) => r,
-            None => return,
+    async fn handle_custom_registry_import_result(&mut self) {
+        let Some(result) = self.app.custom_registry_import_result().cloned() else {
+            return;
         };
         self.app.close_focused_overlay();
         match result {
-            neo_tui::dialogs::CustomRegistryImportResult::Submitted(_source) => {
-                self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                    text: "Custom registry imported.".to_owned(),
+            neo_tui::dialogs::CustomRegistryImportResult::Submitted(source) => {
+                self.app
+                    .set_custom_working_label(Some("Fetching custom registry...".to_owned()));
+                let url = source.url.clone();
+                let handle =
+                    tokio::spawn(async move { neo_ai::catalog::fetch_catalog_from(&url).await });
+                self.pending_catalog_fetch = Some(PendingCatalogFetch {
+                    source: CatalogFetchSource::Custom(source),
+                    handle,
                 });
-                self.refresh_config();
             }
             neo_tui::dialogs::CustomRegistryImportResult::Cancelled => {}
+        }
+    }
+
+    /// Poll a pending catalog fetch. If it has finished, clear the working
+    /// indicator and open the provider picker; if not, leave it in place.
+    async fn poll_pending_catalog_fetch(&mut self) {
+        let Some(pending) = self.pending_catalog_fetch.take() else {
+            return;
+        };
+        if !pending.handle.is_finished() {
+            self.pending_catalog_fetch = Some(pending);
+            return;
+        }
+        self.app.set_custom_working_label(None);
+        match pending.handle.await {
+            Ok(Ok(catalog)) => {
+                let items: Vec<_> = catalog
+                    .iter()
+                    .map(|(id, entry)| {
+                        let label = entry.name.clone().unwrap_or_else(|| id.clone());
+                        let description = entry.api.clone().unwrap_or_default();
+                        neo_tui::dialogs::ChoiceItem::new(format!("catalog:{id}"), label)
+                            .with_description(description)
+                    })
+                    .collect();
+                if items.is_empty() {
+                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
+                        text: "No providers found in catalog.".to_owned(),
+                    });
+                    return;
+                }
+                match pending.source {
+                    CatalogFetchSource::Known => {
+                        self.app
+                            .open_choice_picker(neo_tui::dialogs::ChoicePickerOptions {
+                                title: "Select a provider".to_owned(),
+                                items,
+                                initial_id: None,
+                                theme: self.app.theme(),
+                                page_size: 0,
+                            });
+                    }
+                    CatalogFetchSource::Custom(source) => {
+                        self.pending_custom_registry =
+                            Some(PendingCustomRegistry { source, catalog });
+                        let custom_items: Vec<_> = items
+                            .into_iter()
+                            .map(|mut item| {
+                                item.id = item.id.replacen("catalog:", "custom-catalog:", 1);
+                                item
+                            })
+                            .collect();
+                        self.app
+                            .open_choice_picker(neo_tui::dialogs::ChoicePickerOptions {
+                                title: "Select a provider".to_owned(),
+                                items: custom_items,
+                                initial_id: None,
+                                theme: self.app.theme(),
+                                page_size: 0,
+                            });
+                    }
+                }
+            }
+            Ok(Err(error)) => {
+                self.app.apply_stream_update(neo_tui::StreamUpdate::Error {
+                    text: format!("Failed to fetch catalog: {error}"),
+                });
+            }
+            Err(join_error) => {
+                self.app.apply_stream_update(neo_tui::StreamUpdate::Error {
+                    text: format!("Failed to fetch catalog: {join_error}"),
+                });
+            }
         }
     }
 
@@ -2962,13 +3110,22 @@ impl NeoTerminal {
             return Ok(());
         };
 
-        // kimi-code "editor-container swap" model: when a session picker is
-        // focused, replace the chrome (prompt box) with the picker panel.
-        // The transcript body stays visible above. The footer stays below.
-        let chrome = if app
-            .focused_overlay()
-            .is_some_and(|o| matches!(o.kind, neo_tui::OverlayKind::SessionPicker(_)))
-        {
+        // "editor-container swap" model: when a fullscreen overlay (session
+        // picker or any rich dialog) is focused, replace the chrome (prompt
+        // box) with the overlay panel. The transcript body stays visible above.
+        // The footer stays below.
+        let chrome = if app.focused_overlay().is_some_and(|o| {
+            matches!(
+                o.kind,
+                neo_tui::OverlayKind::SessionPicker(_)
+                    | neo_tui::OverlayKind::ModelSelector(_)
+                    | neo_tui::OverlayKind::TabbedModelSelector(_)
+                    | neo_tui::OverlayKind::ProviderManager(_)
+                    | neo_tui::OverlayKind::ChoicePicker(_)
+                    | neo_tui::OverlayKind::ApiKeyInput(_)
+                    | neo_tui::OverlayKind::CustomRegistryImport(_)
+            )
+        }) {
             let overlay = app
                 .render_focused_overlay(content_width)
                 .unwrap_or_default();
@@ -3064,6 +3221,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                 effective_config.default_provider = model.provider;
                 effective_config.default_model = model.model;
             }
+            effective_config.runtime.reasoning_effort = request.reasoning_effort;
             if let Some(session_id) = request.session_id {
                 let turn = crate::modes::run::run_prompt_in_session_streaming(
                     &session_id,
@@ -3131,6 +3289,10 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     controller
         .app
         .set_context_window(default_context_window.map(ContextWindow::new));
+    controller.current_thinking = config.runtime.reasoning_effort.is_some();
+    controller
+        .app
+        .set_thinking_enabled(controller.current_thinking);
     controller.local_config = Some(config);
     controller
 }
@@ -3189,7 +3351,6 @@ fn picker_catalogs_for_config(config: &AppConfig) -> PickerCatalogs {
         session_items: sessions.items,
         session_error: sessions.error,
         model_items: models.items,
-        model_error: models.error,
     }
 }
 
@@ -3231,27 +3392,82 @@ fn model_to_picker_item(model: &neo_ai::ModelSpec) -> PickerItem {
     PickerItem::new(value.clone(), value, Some(description))
 }
 
-/// Convert a model PickerItem into a ModelEntry for the rich dialog.
-fn model_entry_from_picker_item(item: &PickerItem) -> neo_tui::dialogs::ModelEntry {
-    let (provider_id, model_id) = item.value.split_once('/').unwrap_or((&item.value, ""));
-    let max_context_tokens = context_window_from_picker_item(item);
+/// Build ModelEntry list directly from `[models.*]` in config.
+fn model_entries_from_config(config: &AppConfig) -> Vec<neo_tui::dialogs::ModelEntry> {
+    if !config.models.is_empty() {
+        return config
+            .models
+            .iter()
+            .map(|(alias, model)| {
+                let provider_id = model.provider.clone();
+                let alias_full = if alias.contains('/') {
+                    alias.clone()
+                } else {
+                    format!("{}/{}", provider_id, model.model)
+                };
+                let mut capabilities = model.capabilities.clone();
+                if capabilities.iter().any(|c| c == "reasoning")
+                    && !capabilities.iter().any(|c| c == "thinking")
+                {
+                    capabilities.push("thinking".to_owned());
+                }
+                neo_tui::dialogs::ModelEntry {
+                    alias: alias_full,
+                    provider_id,
+                    display_name: model.display_name.clone().unwrap_or_else(|| alias.clone()),
+                    model_id: model.model.clone(),
+                    capabilities,
+                    max_context_tokens: model.max_context_tokens,
+                }
+            })
+            .collect();
+    }
+    Vec::new()
+}
 
-    // Infer capabilities from the description
+/// Build ModelEntry list from configured `model_catalogs` JSON files only.
+/// Does not include the seeded default catalog.
+fn model_entries_from_model_catalogs(config: &AppConfig) -> Vec<neo_tui::dialogs::ModelEntry> {
+    let mut registry = neo_ai::ModelRegistry::new();
+    for path in &config.model_catalogs {
+        if let Err(error) = registry.load_catalog_path(path) {
+            tracing::warn!("failed to load model catalog {}: {error}", path.display());
+        }
+    }
+    let models = registry.list();
+    let models = crate::config::scoped_models(models.iter(), &config.model_scope);
+    models.iter().map(model_spec_to_model_entry).collect()
+}
+
+fn model_spec_to_model_entry(model: &neo_ai::ModelSpec) -> neo_tui::dialogs::ModelEntry {
+    let alias = format!("{}/{}", model.provider.0, model.model);
+    let provider_id = model.provider.0.clone();
     let mut capabilities = Vec::new();
-    if let Some(desc) = &item.description {
-        let desc_lower = desc.to_lowercase();
-        if desc_lower.contains("thinking") || desc_lower.contains("reasoning") {
+    if model.capabilities.streaming {
+        capabilities.push("streaming".to_owned());
+    }
+    if model.capabilities.tools {
+        capabilities.push("tools".to_owned());
+    }
+    if model.capabilities.images {
+        capabilities.push("images".to_owned());
+    }
+    if model.capabilities.reasoning {
+        capabilities.push("reasoning".to_owned());
+        if !capabilities.iter().any(|c| c == "thinking") {
             capabilities.push("thinking".to_owned());
         }
     }
-
+    if model.capabilities.embeddings {
+        capabilities.push("embeddings".to_owned());
+    }
     neo_tui::dialogs::ModelEntry {
-        alias: item.value.clone(),
-        provider_id: provider_id.to_owned(),
-        display_name: item.label.clone(),
-        model_id: model_id.to_owned(),
+        alias: alias.clone(),
+        provider_id,
+        display_name: model.model.clone(),
+        model_id: model.model.clone(),
         capabilities,
-        max_context_tokens,
+        max_context_tokens: model.capabilities.max_context_tokens,
     }
 }
 
@@ -3607,7 +3823,9 @@ mod tests {
     use neo_tui::{KeybindingAction, OverlayKind};
 
     use super::*;
-    use crate::config::{Defaults, McpConfig, RuntimeConfig, ToolFilterConfig, TuiConfig};
+    use crate::config::{
+        Defaults, McpConfig, ModelConfig, RuntimeConfig, ToolFilterConfig, TuiConfig,
+    };
 
     fn test_workspace_root() -> PathBuf {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -4077,7 +4295,6 @@ mod tests {
                 )],
                 session_error: None,
                 model_items: Vec::new(),
-                model_error: None,
             },
             |session_id| async move {
                 Ok(LoadedSessionTranscript::new(
@@ -4174,7 +4391,6 @@ mod tests {
                 )],
                 session_error: None,
                 model_items: Vec::new(),
-                model_error: None,
             },
             |session_id| async move {
                 Ok(LoadedSessionTranscript::new(
@@ -4316,7 +4532,6 @@ mod tests {
                 )],
                 session_error: None,
                 model_items: Vec::new(),
-                model_error: None,
             },
             |session_id| async move {
                 Ok(LoadedSessionTranscript::new(
@@ -4788,6 +5003,70 @@ mod tests {
         assert!(controller.app().focused_overlay().is_none());
     }
 
+    #[tokio::test]
+    async fn tab_confirms_selected_prompt_completion() {
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+
+        controller.type_text("/");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+            .await
+            .expect("tab opens completion picker");
+
+        assert!(controller.app().focused_overlay().is_some());
+        assert!(controller.app().selected_prompt_completion().is_some());
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+            .await
+            .expect("tab confirms selected completion");
+
+        assert!(controller.app().focused_overlay().is_none());
+        assert!(!controller.app().prompt().text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn slash_model_does_not_enter_streaming_mode() {
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.type_text("/model");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("submit handled");
+        assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
+        assert!(controller.app().prompt().text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn slash_provider_does_not_enter_streaming_mode() {
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.type_text("/provider");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("submit handled");
+        assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
+        assert!(controller.app().prompt().text.is_empty());
+    }
+
     #[test]
     fn prompt_completions_merges_real_prompt_package_extension_and_session_commands() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -5024,7 +5303,6 @@ command = "python3"
                 )],
                 session_error: None,
                 model_items: Vec::new(),
-                model_error: None,
             },
             |session_id| async move {
                 Ok(LoadedSessionTranscript::new(
@@ -5081,7 +5359,6 @@ command = "python3"
                     ),
                     PickerItem::new("openai/gpt-4.1", "openai/gpt-4.1", Some("Responses")),
                 ],
-                model_error: None,
             },
             |session_id| async move {
                 Ok(LoadedSessionTranscript::new(
@@ -5146,7 +5423,6 @@ command = "python3"
                     ),
                     PickerItem::new("openai/gpt-4.1", "openai/gpt-4.1", Some("Responses")),
                 ],
-                model_error: None,
             },
             |session_id| async move {
                 Ok(LoadedSessionTranscript::new(
@@ -5207,7 +5483,6 @@ command = "python3"
                     "anthropic/claude-sonnet",
                     Some("Messages"),
                 )],
-                model_error: None,
             },
             |session_id| async move {
                 Ok(LoadedSessionTranscript::new(
@@ -5263,7 +5538,6 @@ command = "python3"
                     "anthropic/claude-sonnet",
                     Some("Messages"),
                 )],
-                model_error: None,
             },
             |session_id| async move {
                 Ok(LoadedSessionTranscript::new(
@@ -5483,12 +5757,24 @@ command = "python3"
                     "openai/gpt-4.1",
                     Some("test model"),
                 )],
-                model_error: None,
             },
             empty_session_loader,
         );
 
         controller.ensure_kimi_runtime();
+        controller.local_config = Some(test_config_with_models(
+            &test_workspace_root(),
+            test_workspace_root().join(".neo/sessions"),
+            BTreeMap::from([(
+                "openai/gpt-4.1".to_owned(),
+                ModelConfig {
+                    provider: "openai".to_owned(),
+                    model: "gpt-4.1".to_owned(),
+                    display_name: Some("test model".to_owned()),
+                    ..ModelConfig::default()
+                },
+            )]),
+        ));
         controller
             .handle_input_event(InputEvent::Action(KeybindingAction::ModelPickerOpen))
             .await
@@ -5624,7 +5910,6 @@ command = "python3"
                     "anthropic/claude-sonnet",
                     Some("messages"),
                 )],
-                model_error: None,
             },
             |session_id| async move {
                 Ok(LoadedSessionTranscript::new(
@@ -5635,6 +5920,19 @@ command = "python3"
             },
         );
 
+        controller.local_config = Some(test_config_with_models(
+            &test_workspace_root(),
+            test_workspace_root().join(".neo/sessions"),
+            BTreeMap::from([(
+                "anthropic/claude-sonnet".to_owned(),
+                ModelConfig {
+                    provider: "anthropic".to_owned(),
+                    model: "claude-sonnet".to_owned(),
+                    display_name: Some("messages".to_owned()),
+                    ..ModelConfig::default()
+                },
+            )]),
+        ));
         controller
             .handle_input_event(InputEvent::Key(KeyId::new("ctrl+p").expect("valid key")))
             .await
@@ -6209,7 +6507,6 @@ command = "python3"
                 )],
                 session_error: None,
                 model_items: Vec::new(),
-                model_error: None,
             },
             |session_id| async move {
                 assert_eq!(session_id, "alpha");
@@ -6481,7 +6778,6 @@ command = "python3"
                 )],
                 session_error: None,
                 model_items: Vec::new(),
-                model_error: None,
             },
             |_session_id| async move {
                 panic!("fork action should not use the plain session loader");
@@ -6551,7 +6847,7 @@ command = "python3"
         let mut controller = InteractiveController::new_with_sessions(
             "neo",
             "new",
-            "openai/gpt-4.1",
+            "anthropic/claude-sonnet-4-5",
             test_workspace_root(),
             move |request| {
                 let captured_requests = std::sync::Arc::clone(&captured_requests);
@@ -6587,7 +6883,6 @@ command = "python3"
                         Some("Messages · ctx 200000"),
                     ),
                 ],
-                model_error: None,
             },
             |session_id| async move {
                 Ok(LoadedSessionTranscript::new(
@@ -6598,14 +6893,35 @@ command = "python3"
             },
         );
 
+        controller.local_config = Some(test_config_with_models(
+            &test_workspace_root(),
+            test_workspace_root().join(".neo/sessions"),
+            BTreeMap::from([
+                (
+                    "openai/gpt-4.1".to_owned(),
+                    ModelConfig {
+                        provider: "openai".to_owned(),
+                        model: "gpt-4.1".to_owned(),
+                        display_name: Some("Responses".to_owned()),
+                        ..ModelConfig::default()
+                    },
+                ),
+                (
+                    "anthropic/claude-sonnet-4-5".to_owned(),
+                    ModelConfig {
+                        provider: "anthropic".to_owned(),
+                        model: "claude-sonnet-4-5".to_owned(),
+                        display_name: Some("Messages · ctx 200000".to_owned()),
+                        max_context_tokens: Some(200_000),
+                        ..ModelConfig::default()
+                    },
+                ),
+            ]),
+        ));
         controller
             .handle_input_event(InputEvent::Action(KeybindingAction::ModelPickerOpen))
             .await
             .expect("model picker opens");
-        controller
-            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
-            .await
-            .expect("model selection moves");
         controller
             .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
             .await
@@ -6954,7 +7270,6 @@ command = "python3"
                 }],
                 session_error: None,
                 model_items: Vec::new(),
-                model_error: None,
             },
             |_session_id| async move {
                 panic!("load_session should not be called for a cross-cwd session");
@@ -7043,5 +7358,15 @@ command = "python3"
             project_dir: project_dir.to_path_buf(),
             config_path: project_dir.join(".neo/config.toml"),
         }
+    }
+
+    fn test_config_with_models(
+        project_dir: &Path,
+        sessions_dir: PathBuf,
+        models: BTreeMap<String, ModelConfig>,
+    ) -> AppConfig {
+        let mut config = test_config(project_dir, sessions_dir);
+        config.models = models;
+        config
     }
 }
