@@ -3,6 +3,7 @@
 //! All functions read → modify → write `config.toml` atomically.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::Context;
@@ -97,6 +98,17 @@ pub async fn catalog_add_provider(
         anyhow::anyhow!("provider '{provider_id}' not found in models.dev catalog")
     })?;
 
+    add_provider_from_catalog_entry(config_path, provider_id, entry, api_key, default_model)
+}
+
+/// Write a provider from an already-fetched catalog entry into config.toml.
+pub fn add_provider_from_catalog_entry(
+    config_path: &Path,
+    provider_id: &str,
+    entry: &neo_ai::catalog::CatalogEntry,
+    api_key: Option<&str>,
+    default_model: Option<&str>,
+) -> anyhow::Result<String> {
     let provider_config =
         neo_ai::catalog::catalog_to_provider_config(entry, api_key).ok_or_else(|| {
             anyhow::anyhow!(
@@ -140,10 +152,10 @@ pub async fn catalog_add_provider(
             capabilities: caps,
             display_name: model_info.name.clone(),
         };
-        if let Some(dm) = default_model {
-            if model_info.id == dm {
-                selected_alias = Some(alias.clone());
-            }
+        if let Some(dm) = default_model
+            && model_info.id == dm
+        {
+            selected_alias = Some(alias.clone());
         }
         models.insert(alias, mc);
     }
@@ -202,12 +214,13 @@ pub fn list_providers(config_path: &Path) -> anyhow::Result<String> {
         } else {
             ""
         };
-        out.push_str(&format!(
-            "{id:<20} type={ptype:<18} base_url={base:<45} models={model_count:<3} cred={cred}{current}\n"
-        ));
+        let _ = writeln!(
+            out,
+            "{id:<20} type={ptype:<18} base_url={base:<45} models={model_count:<3} cred={cred}{current}"
+        );
     }
     if !default_model.is_empty() {
-        out.push_str(&format!("\nDefault model: {default_model}\n"));
+        let _ = writeln!(out, "\nDefault model: {default_model}");
     }
     Ok(out)
 }
