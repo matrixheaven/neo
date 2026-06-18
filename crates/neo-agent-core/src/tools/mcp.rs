@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -190,6 +190,10 @@ pub struct McpStdioConfig {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,6 +201,8 @@ pub struct McpHttpConfig {
     pub url: String,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_timeout_ms: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -420,15 +426,20 @@ impl McpToolAdapter for McpHttpToolAdapter {
         name: &str,
         arguments: serde_json::Value,
     ) -> Result<McpToolResponse, McpError> {
-        let result = self
-            .request(
-                "tools/call",
-                Some(json_obj([
-                    ("name", serde_json::Value::String(name.to_owned())),
-                    ("arguments", arguments),
-                ])),
-            )
-            .await?;
+        let fut = self.request(
+            "tools/call",
+            Some(json_obj([
+                ("name", serde_json::Value::String(name.to_owned())),
+                ("arguments", arguments),
+            ])),
+        );
+        let result = if let Some(ms) = self.config.tool_timeout_ms {
+            tokio::time::timeout(std::time::Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| McpError::protocol(format!("tool call {name} timed out")))?
+        } else {
+            fut.await
+        }?;
         let is_error = result
             .get("isError")
             .and_then(serde_json::Value::as_bool)
@@ -649,15 +660,20 @@ impl McpToolAdapter for McpStdioToolAdapter {
         name: &str,
         arguments: serde_json::Value,
     ) -> Result<McpToolResponse, McpError> {
-        let result = self
-            .request(
-                "tools/call",
-                Some(json_obj([
-                    ("name", serde_json::Value::String(name.to_owned())),
-                    ("arguments", arguments),
-                ])),
-            )
-            .await?;
+        let fut = self.request(
+            "tools/call",
+            Some(json_obj([
+                ("name", serde_json::Value::String(name.to_owned())),
+                ("arguments", arguments),
+            ])),
+        );
+        let result = if let Some(ms) = self.config.tool_timeout_ms {
+            tokio::time::timeout(std::time::Duration::from_millis(ms), fut)
+                .await
+                .map_err(|_| McpError::protocol(format!("tool call {name} timed out")))?
+        } else {
+            fut.await
+        }?;
         let is_error = result
             .get("isError")
             .and_then(serde_json::Value::as_bool)
@@ -748,6 +764,9 @@ impl StdioJsonRpcSession {
         let mut command = Command::new(&config.command);
         command.args(&config.args);
         command.envs(&config.env);
+        if let Some(cwd) = &config.cwd {
+            command.current_dir(cwd);
+        }
         command.stdin(std::process::Stdio::piped());
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::null());
@@ -938,6 +957,27 @@ impl McpToolProvider {
                 input_schema: tool.input_schema.clone(),
             })
             .collect()
+    }
+
+    #[must_use]
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools.iter().map(|tool| tool.name.clone()).collect()
+    }
+
+    #[must_use]
+    pub fn with_tool_filter(mut self, enabled: &[String], disabled: &[String]) -> Self {
+        let enabled_set: std::collections::HashSet<_> = enabled.iter().cloned().collect();
+        let disabled_set: std::collections::HashSet<_> = disabled.iter().cloned().collect();
+        self.tools.retain(|tool| {
+            if !enabled.is_empty() && !enabled_set.contains(&tool.name) {
+                return false;
+            }
+            if !disabled.is_empty() && disabled_set.contains(&tool.name) {
+                return false;
+            }
+            true
+        });
+        self
     }
 
     pub fn register_into(self, registry: &mut ToolRegistry) {

@@ -25,6 +25,7 @@ neo-sdk = { path = "../neo-sdk" }
 reqwest.workspace = true
 rustix.workspace = true
 serde.workspace = true
+shell-words = "1.1"
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

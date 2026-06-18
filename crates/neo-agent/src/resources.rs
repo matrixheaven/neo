@@ -16,38 +16,19 @@ const CONTEXT_FILE_CANDIDATES: &[&str] = &["AGENTS.md", "AGENTS.MD", "CLAUDE.md"
 
 pub(crate) fn load_system_prompt(
     project_dir: &Path,
-    explicit_system_prompt: Option<&str>,
-    explicit_append_system_prompts: &[String],
-    explicit_skill_paths: &[PathBuf],
-    no_skills: bool,
-    no_context_files: bool,
     project_trusted: bool,
 ) -> anyhow::Result<Option<String>> {
-    let system_prompt = match explicit_system_prompt {
-        Some(prompt) => Some(resolve_prompt_input(prompt, "system prompt")?),
-        None => read_first_existing(&system_prompt_candidates(project_dir), "system prompt")?,
-    };
-    let mut append_prompts = if explicit_append_system_prompts.is_empty() {
-        read_first_existing(
-            &append_system_prompt_candidates(project_dir),
-            "append system prompt",
-        )?
-        .into_iter()
-        .collect()
-    } else {
-        explicit_append_system_prompts
-            .iter()
-            .map(|prompt| resolve_prompt_input(prompt, "append system prompt"))
-            .collect::<anyhow::Result<Vec<_>>>()?
-    };
-    append_prompts.extend(load_skill_prompts(
-        project_dir,
-        explicit_skill_paths,
-        no_skills,
-    )?);
-    if !no_context_files
-        && let Some(project_context) =
-            format_project_context(&load_context_files(project_dir, project_trusted)?)
+    let system_prompt =
+        read_first_existing(&system_prompt_candidates(project_dir), "system prompt")?;
+    let mut append_prompts: Vec<String> = read_first_existing(
+        &append_system_prompt_candidates(project_dir),
+        "append system prompt",
+    )?
+    .into_iter()
+    .collect();
+    append_prompts.extend(load_skill_prompts(project_dir)?);
+    if let Some(project_context) =
+        format_project_context(&load_context_files(project_dir, project_trusted)?)
     {
         append_prompts.push(project_context);
     }
@@ -131,16 +112,8 @@ fn format_project_context(context_files: &[ContextFile]) -> Option<String> {
     Some(prompt)
 }
 
-fn load_skill_prompts(
-    project_dir: &Path,
-    explicit_paths: &[PathBuf],
-    no_skills: bool,
-) -> anyhow::Result<Vec<String>> {
-    let mut paths = Vec::new();
-    if !no_skills {
-        paths.extend(discover_skill_paths(project_dir)?);
-    }
-    paths.extend(explicit_paths.iter().cloned());
+fn load_skill_prompts(project_dir: &Path) -> anyhow::Result<Vec<String>> {
+    let paths = discover_skill_paths(project_dir)?;
     paths
         .iter()
         .map(|path| {
@@ -234,15 +207,6 @@ fn collect_skill_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> anyhow::Result<(
         }
     }
     Ok(())
-}
-
-fn resolve_prompt_input(input: &str, description: &str) -> anyhow::Result<String> {
-    let path = Path::new(input);
-    if path.exists() {
-        return fs::read_to_string(path)
-            .with_context(|| format!("failed to read {description} {}", path.display()));
-    }
-    Ok(input.to_owned())
 }
 
 fn normalize_prompt(prompt: &str) -> String {

@@ -17,7 +17,7 @@ pub struct ToolCallState {
     pub exit_code: Option<i32>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallComponent {
     state: ToolCallState,
     expanded: bool,
@@ -126,7 +126,7 @@ impl ToolCallComponent {
         &self.state
     }
 
-    /// Consume into the underlying state (used when draining finalized cards).
+    /// Consume into the underlying state.
     #[must_use]
     pub fn into_state(self) -> ToolCallState {
         self.state
@@ -176,7 +176,7 @@ impl Component for ToolCallComponent {
 
 impl ToolCallComponent {
     /// Theme-aware render. Builds the header as styled spans (status symbol
-    /// + tool name + key arg + chip) and the body as muted preview lines.
+    /// + tool name + key arg + chip) and the body as weak preview lines.
     #[must_use]
     pub fn render_with_theme(&mut self, width: usize, theme: &TuiTheme) -> Vec<Line> {
         let header_spans = tool_header_spans(&self.state, theme);
@@ -211,7 +211,7 @@ impl ToolCallComponent {
             theme,
         ));
         if self.state.status == ToolStatusKind::Running {
-            let live_style = Style::default().fg(theme.muted);
+            let live_style = Style::default().fg(theme.text_muted);
             rows.extend(
                 self.progress_lines
                     .iter()
@@ -220,7 +220,7 @@ impl ToolCallComponent {
             if self.dropped_live_output_lines > 0 {
                 rows.push(Line::styled(
                     format!("  ... ({} earlier lines)", self.dropped_live_output_lines),
-                    Style::default().fg(theme.muted),
+                    Style::default().fg(theme.text_muted),
                 ));
             }
             rows.extend(

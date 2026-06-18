@@ -3,12 +3,14 @@
 //! All functions read → modify → write `config.toml` atomically.
 
 use std::collections::BTreeMap;
+use std::env;
 use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::Context;
+use serde_json::json;
 
-use crate::config::{ModelConfig, ProviderConfig, read_file_config, write_file_config};
+use crate::config::{AppConfig, ModelConfig, ProviderConfig, read_file_config, write_file_config};
 
 /// Add or replace a provider in config.toml.
 pub fn add_provider(
@@ -180,47 +182,89 @@ pub fn add_provider_from_catalog_entry(
     ))
 }
 
-/// List providers in config.toml as a formatted string.
-pub fn list_providers(config_path: &Path) -> anyhow::Result<String> {
-    let file_config = read_file_config(config_path)?;
-    let providers = file_config.providers.unwrap_or_default();
-    let models = file_config.models.unwrap_or_default();
-    let default_model = file_config.default_model.unwrap_or_default();
+/// List configured providers as a formatted string or JSON.
+///
+/// Uses the merged `AppConfig` so providers from both user-global and project
+/// `config.toml` are visible.
+pub fn list_providers(config: &AppConfig, json: bool) -> anyhow::Result<String> {
+    let providers = &config.providers;
+    let models = &config.models;
 
     if providers.is_empty() {
+        if json {
+            return Ok(serde_json::to_string_pretty(&json!({
+                "providers": [],
+                "default_model": config.default_model,
+            }))? + "\n");
+        }
         return Ok(
             "no providers configured. Use `neo provider catalog list` to discover providers.\n"
                 .to_owned(),
         );
     }
 
+    if json {
+        let entries: Vec<_> = providers
+            .iter()
+            .map(|(id, cfg)| {
+                let ptype = cfg
+                    .provider_type
+                    .as_ref()
+                    .map_or("unknown", |t| t.as_config_str());
+                let base = cfg.effective_base_url().unwrap_or("(none)");
+                let model_count = models.values().filter(|m| m.provider == *id).count();
+                let is_default = config.default_model.starts_with(&format!("{id}/"));
+                json!({
+                    "id": id,
+                    "type": ptype,
+                    "base_url": base,
+                    "credential": provider_credential_label(cfg),
+                    "model_count": model_count,
+                    "default": is_default,
+                })
+            })
+            .collect();
+        return Ok(serde_json::to_string_pretty(&json!({
+            "providers": entries,
+            "default_model": config.default_model,
+        }))? + "\n");
+    }
+
     let mut out = String::new();
-    for (id, cfg) in &providers {
+    for (id, cfg) in providers {
         let ptype = cfg
             .provider_type
             .as_ref()
             .map_or("unknown", |t| t.as_config_str());
         let base = cfg.effective_base_url().unwrap_or("(none)");
         let model_count = models.values().filter(|m| m.provider == *id).count();
-        let cred = if cfg.api_key.is_some() {
-            "api_key"
-        } else if cfg.api_key_env.is_some() {
-            cfg.api_key_env.as_deref().unwrap_or("")
-        } else {
-            "(none)"
-        };
-        let current = if default_model.starts_with(&format!("{id}/")) {
+        let current = if config.default_model.starts_with(&format!("{id}/")) {
             " ← current"
         } else {
             ""
         };
         let _ = writeln!(
             out,
-            "{id:<20} type={ptype:<18} base_url={base:<45} models={model_count:<3} cred={cred}{current}"
+            "{id:<20} type={ptype:<18} base_url={base:<45} models={model_count:<3} cred={cred}{current}",
+            cred = provider_credential_label(cfg)
         );
     }
-    if !default_model.is_empty() {
-        let _ = writeln!(out, "\nDefault model: {default_model}");
+    if !config.default_model.is_empty() {
+        let _ = writeln!(out, "\nDefault model: {}", config.default_model);
     }
     Ok(out)
+}
+
+fn provider_credential_label(cfg: &ProviderConfig) -> &'static str {
+    if cfg.api_key.is_some() {
+        "api_key"
+    } else if let Some(env_name) = &cfg.api_key_env {
+        if env::var(env_name).is_ok_and(|value| !value.is_empty()) {
+            "configured"
+        } else {
+            "missing"
+        }
+    } else {
+        "(none)"
+    }
 }

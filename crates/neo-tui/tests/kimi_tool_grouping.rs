@@ -4,10 +4,10 @@
 //! so they cover what the user actually sees.
 
 use neo_agent_core::AgentEvent;
-use neo_tui::NeoTuiRuntime;
+use neo_tui::TranscriptPane;
 use neo_tui::ansi::strip_ansi;
 
-fn plain_frame(runtime: &mut NeoTuiRuntime, width: usize, height: usize) -> Vec<String> {
+fn plain_frame(runtime: &mut TranscriptPane, width: usize, height: usize) -> Vec<String> {
     runtime
         .render_frame(width, height)
         .expect("render frame")
@@ -18,7 +18,7 @@ fn plain_frame(runtime: &mut NeoTuiRuntime, width: usize, height: usize) -> Vec<
 
 #[test]
 fn consecutive_reads_collapse_into_one_tree_card() {
-    let mut runtime = NeoTuiRuntime::new(80, 20);
+    let mut runtime = TranscriptPane::new(80, 20);
     for (id, path) in ["a.rs", "b.rs", "c.rs"].into_iter().enumerate() {
         runtime.apply_agent_event(AgentEvent::ToolCallStarted {
             turn: 1,
@@ -65,7 +65,7 @@ fn consecutive_reads_collapse_into_one_tree_card() {
 
 #[test]
 fn single_read_still_renders_as_solo_card() {
-    let mut runtime = NeoTuiRuntime::new(80, 12);
+    let mut runtime = TranscriptPane::new(80, 12);
     runtime.apply_agent_event(AgentEvent::ToolCallStarted {
         turn: 1,
         id: "read-0".to_owned(),
@@ -97,7 +97,7 @@ fn single_read_still_renders_as_solo_card() {
 
 #[test]
 fn non_groupable_tool_between_reads_breaks_the_group() {
-    let mut runtime = NeoTuiRuntime::new(80, 20);
+    let mut runtime = TranscriptPane::new(80, 20);
     for (id, name, is_path, fragment) in [
         ("read-0", "Read", true, "a.rs"),
         ("bash-0", "Bash", false, "ls"),
@@ -138,7 +138,7 @@ fn non_groupable_tool_between_reads_breaks_the_group() {
 fn group_header_uses_capitalized_verb_without_duplicating_tool_name() {
     // Regression: the header must read `● Read 3 files` (capitalized verb,
     // count) and NOT `● read Read 3 files` (duplicated, lowercase).
-    let mut runtime = NeoTuiRuntime::new(80, 20);
+    let mut runtime = TranscriptPane::new(80, 20);
     for (id, path) in ["a.rs", "b.rs", "c.rs"].into_iter().enumerate() {
         runtime.apply_agent_event(AgentEvent::ToolCallStarted {
             turn: 1,
@@ -176,12 +176,12 @@ fn group_header_uses_capitalized_verb_without_duplicating_tool_name() {
 #[test]
 fn list_group_uses_list_verb_not_read() {
     // `list` calls must show `● List 2 files`, not `● list Read 2 files`.
-    let mut runtime = NeoTuiRuntime::new(80, 20);
+    let mut runtime = TranscriptPane::new(80, 20);
     for (id, path) in ["crates", "docs"].into_iter().enumerate() {
         runtime.apply_agent_event(AgentEvent::ToolCallStarted {
             turn: 1,
             id: format!("list-{id}"),
-            name: "list".to_owned(),
+            name: "List".to_owned(),
         });
         runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
             turn: 1,
@@ -191,7 +191,7 @@ fn list_group_uses_list_verb_not_read() {
         runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
             turn: 1,
             id: format!("list-{id}"),
-            name: "list".to_owned(),
+            name: "List".to_owned(),
             result: neo_agent_core::ToolResult::ok("entry one\nentry two"),
         });
     }
@@ -203,20 +203,60 @@ fn list_group_uses_list_verb_not_read() {
         "list group must not say Read: {joined}"
     );
     assert!(
-        !joined.contains("list List"),
+        !joined.contains("List List"),
         "no duplicated name: {joined}"
     );
 }
 
 #[test]
-fn finalized_tool_block_is_separated_from_live_assistant_text() {
-    // A tool card (drained into history) must not touch the live assistant
-    // text that follows it — there should be a blank line between them.
-    let mut runtime = NeoTuiRuntime::new(80, 20);
+fn grouped_tool_run_is_flushed_once_before_following_text() {
+    let mut runtime = TranscriptPane::new(80, 20);
+    for (id, path) in ["crates", "docs"].into_iter().enumerate() {
+        runtime.apply_agent_event(AgentEvent::ToolCallStarted {
+            turn: 1,
+            id: format!("list-{id}"),
+            name: "List".to_owned(),
+        });
+        runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
+            turn: 1,
+            id: format!("list-{id}"),
+            json_fragment: format!(r#"{{"path":"{path}"}}"#),
+        });
+        runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: format!("list-{id}"),
+            name: "List".to_owned(),
+            result: neo_agent_core::ToolResult::ok("entry one\nentry two"),
+        });
+    }
+    runtime.apply_agent_event(AgentEvent::TextDelta {
+        turn: 1,
+        text: "done".to_owned(),
+    });
+
+    let joined = plain_frame(&mut runtime, 80, 20).join("\n");
+
+    assert_eq!(
+        joined.matches("● List 2 files").count(),
+        1,
+        "grouped tool run should render once: {joined}"
+    );
+    assert_eq!(
+        joined.matches("● done").count(),
+        1,
+        "assistant text should render once: {joined}"
+    );
+}
+
+#[test]
+fn finished_tool_block_is_separated_from_streaming_assistant_text() {
+    // A finished tool card must not touch the streaming assistant text that
+    // follows it — there should be a blank line between them.
+    let mut runtime = TranscriptPane::new(80, 20);
     runtime.apply_agent_event(AgentEvent::ToolCallStarted {
         turn: 1,
         id: "list-0".to_owned(),
-        name: "list".to_owned(),
+        name: "List".to_owned(),
     });
     runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
         turn: 1,
@@ -226,7 +266,7 @@ fn finalized_tool_block_is_separated_from_live_assistant_text() {
     runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "list-0".to_owned(),
-        name: "list".to_owned(),
+        name: "List".to_owned(),
         result: neo_agent_core::ToolResult::ok("entry one\nentry two"),
     });
     // Now a live assistant message streams in after the tool finished.
@@ -243,7 +283,7 @@ fn finalized_tool_block_is_separated_from_live_assistant_text() {
     let joined = frame.join("\n");
     // Both the tool card and the assistant text are present.
     assert!(
-        joined.contains("Used list") || joined.contains("List 1 files"),
+        joined.contains("Used List") || joined.contains("List 1 files"),
         "tool card present: {joined}"
     );
     assert!(
@@ -253,7 +293,7 @@ fn finalized_tool_block_is_separated_from_live_assistant_text() {
     // Find the tool card and assistant text row indices (whichever order).
     let tool_idx = frame
         .iter()
-        .position(|l| l.contains("Used list") || l.contains("List 1 files"))
+        .position(|l| l.contains("Used List") || l.contains("List 1 files"))
         .expect("tool card in frame");
     let text_idx = frame
         .iter()
@@ -277,12 +317,12 @@ fn multiple_consecutive_tool_cards_are_each_separated_by_blank_lines() {
     // Regression for the "cards touch each other" bug: two finished list
     // calls that do NOT group (different names, or broken by a non-groupable
     // tool) must each be separated by a blank line.
-    let mut runtime = NeoTuiRuntime::new(80, 20);
+    let mut runtime = TranscriptPane::new(80, 20);
     // list, then bash (non-groupable, breaks any list run), then list.
     for (id, name, fragment) in [
-        ("list-0", "list", r#"{"path":"crates"}"#),
+        ("list-0", "List", r#"{"path":"crates"}"#),
         ("bash-0", "bash", r#"{"command":"echo hi"}"#),
-        ("list-1", "list", r#"{"path":"docs"}"#),
+        ("list-1", "List", r#"{"path":"docs"}"#),
     ] {
         runtime.apply_agent_event(AgentEvent::ToolCallStarted {
             turn: 1,
@@ -304,9 +344,9 @@ fn multiple_consecutive_tool_cards_are_each_separated_by_blank_lines() {
 
     let frame = plain_frame(&mut runtime, 80, 20);
     // Each card header is present.
-    let list0 = frame.iter().position(|l| l.contains("Used list (crates)"));
+    let list0 = frame.iter().position(|l| l.contains("Used List (crates)"));
     let bash0 = frame.iter().position(|l| l.contains("Used bash"));
-    let list1 = frame.iter().position(|l| l.contains("Used list (docs)"));
+    let list1 = frame.iter().position(|l| l.contains("Used List (docs)"));
     let (list0, bash0, list1) = (
         list0.expect("list0"),
         bash0.expect("bash0"),

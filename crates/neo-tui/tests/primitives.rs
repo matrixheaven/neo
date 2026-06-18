@@ -1,8 +1,7 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use neo_tui::{
-    ChatTranscript, InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager,
-    ListMarker, NeoTuiApp, PromptEdit, PromptState, SelectItem, SelectListState, ToolStatusKind,
-    TranscriptItem, TranscriptLine, TranscriptRenderer, TranscriptSelection, TranscriptView,
+    InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager, NeoTuiApp, PromptEdit,
+    PromptState, SelectItem, SelectListState, TranscriptEntry, TranscriptStore, TranscriptViewport,
     truncate_width, visible_width, wrap_width,
 };
 
@@ -495,47 +494,49 @@ fn keybinding_manager_matches_defaults_overrides_and_conflicts() {
 }
 
 #[test]
-fn chat_transcript_keeps_order_and_allows_streaming_update() {
-    let mut transcript = ChatTranscript::default();
+fn transcript_store_keeps_order_and_allows_streaming_update() {
+    let mut transcript = TranscriptStore::default();
 
-    transcript.push(TranscriptItem::user("hello"));
-    transcript.push(TranscriptItem::assistant("hel"));
-    transcript.update_last_assistant("hello");
-    transcript.push(TranscriptItem::tool(
-        "shell.run",
-        "cargo test",
-        ToolStatusKind::Running,
+    transcript.push(TranscriptEntry::user_message("hello"));
+    transcript.push(TranscriptEntry::assistant_message("hello"));
+    transcript.push_tool_run("tool-1", "shell.run", Some("cargo test".to_owned()));
+
+    assert_eq!(transcript.entries().len(), 3);
+    assert_eq!(
+        transcript.entries()[0],
+        TranscriptEntry::user_message("hello")
+    );
+    assert_eq!(
+        transcript.entries()[1],
+        TranscriptEntry::assistant_message("hello")
+    );
+    assert!(matches!(
+        transcript.entries()[2],
+        TranscriptEntry::ToolRun { .. }
     ));
-
-    assert_eq!(transcript.items().len(), 3);
-    assert_eq!(transcript.items()[0], TranscriptItem::user("hello"));
-    assert_eq!(transcript.items()[1], TranscriptItem::assistant("hello"));
 }
 
 #[test]
-fn transcript_view_tracks_bottom_and_manual_scroll() {
-    let transcript = ChatTranscript::from_items(
-        (0..8).map(|index| TranscriptItem::notice(format!("line {index}"))),
-    );
-    let mut view = TranscriptView::new();
+fn transcript_viewport_tracks_bottom_and_manual_scroll() {
+    let mut view = TranscriptViewport::new();
 
-    view.sync(transcript.len(), 3);
-    let bottom = view.visible_range(&transcript, 3);
+    view.sync(8, 3);
+    let bottom = view.visible_row_range(8, 3);
     assert_eq!(bottom, 5..8);
 
     view.scroll_up(2);
-    assert_eq!(view.visible_range(&transcript, 3), 3..6);
+    assert_eq!(view.visible_row_range(8, 3), 3..6);
 
     view.scroll_down(1);
-    assert_eq!(view.visible_range(&transcript, 3), 4..7);
+    assert_eq!(view.visible_row_range(8, 3), 4..7);
 
     view.follow_bottom();
-    assert_eq!(view.visible_range(&transcript, 3), 5..8);
+    assert_eq!(view.visible_row_range(8, 3), 5..8);
 }
 
 #[test]
-fn transcript_view_syncs_visual_row_scrollback_and_follow_tail() {
-    let mut view = TranscriptView::new();
+fn transcript_viewport_syncs_visual_row_scrollback_and_follow_tail() {
+    let mut view = TranscriptViewport::new();
 
     view.sync(40, 10);
     assert_eq!(view.visible_row_range(40, 10), 30..40);
@@ -808,6 +809,33 @@ fn truncate_width_is_display_width_safe_and_can_pad() {
 }
 
 #[test]
+fn line_truncate_to_width_preserves_styles_when_not_truncated() {
+    use neo_tui::ansi::{Color, Style};
+    use neo_tui::core::{Line, Span};
+
+    let style = Style::default().fg(Color::Rgb(198, 120, 221)).bold();
+    let line = Line::from_spans(vec![Span::styled("hello ", style), Span::raw("world")]);
+    let truncated = line.truncate_to_width(20);
+    assert_eq!(truncated.visible_width(), 11);
+    assert!(truncated.to_ansi().contains("\x1b[38;2;198;120;221m"));
+    assert!(truncated.to_ansi().contains("\x1b[1m"));
+}
+
+#[test]
+fn line_truncate_to_width_preserves_styles_when_truncated() {
+    use neo_tui::ansi::{Color, Style};
+    use neo_tui::core::{Line, Span};
+
+    let style = Style::default().fg(Color::Rgb(198, 120, 221));
+    let line = Line::from_spans(vec![Span::styled("hello world", style)]);
+    let truncated = line.truncate_to_width(8);
+    assert_eq!(truncated.visible_width(), 8);
+    let ansi = truncated.to_ansi();
+    assert!(ansi.contains("\x1b[38;2;198;120;221m"));
+    assert!(ansi.contains('…'));
+}
+
+#[test]
 fn wrap_width_breaks_long_words_and_keeps_blank_lines() {
     let lines = wrap_width("alpha\n\nsuperwide", 4);
 
@@ -917,179 +945,57 @@ fn prompt_copy_uses_internal_buffer_without_mutating_editor_state() {
 
 #[test]
 fn transcript_selection_copies_item_range_with_roles() {
-    let transcript = ChatTranscript::from_items([
-        TranscriptItem::user("first prompt"),
-        TranscriptItem::assistant("first answer"),
-        TranscriptItem::tool("shell.run", "exit 0", ToolStatusKind::Succeeded),
-        TranscriptItem::notice("done"),
-    ]);
-    let mut selection = TranscriptSelection::new(2);
+    let mut transcript = TranscriptStore::new();
+    transcript.push(TranscriptEntry::user_message("first prompt"));
+    transcript.push(TranscriptEntry::assistant_message("first answer"));
+    transcript.push_tool_run("tool-1", "shell.run", Some("exit 0".to_owned()));
+    if let Some(tool) = transcript.tool_mut("tool-1") {
+        tool.set_result(Some("exit 0".to_owned()), None, false, Some(0));
+    }
+    transcript.push(TranscriptEntry::status("done"));
 
-    selection.extend_up(&transcript, 1);
-    selection.extend_down(&transcript, 1);
+    transcript.select_visible_entry();
+    transcript.extend_selection_up(2);
 
-    assert_eq!(selection.range(&transcript), Some(1..4));
     assert_eq!(
-        transcript.copy_selection(&selection).as_deref(),
-        Some("Assistant\nfirst answer\n\nTool\n+ shell.run (exit 0)\n\nNotice\ndone")
+        transcript.copy_selection().as_deref(),
+        Some("Assistant\nfirst answer\n\nTool\n+ shell.run (exit 0)\n\nStatus\ndone")
     );
 }
 
 #[test]
-fn app_transcript_copy_uses_internal_buffer_and_clears_on_new_prompt() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.transcript_mut()
-        .push(TranscriptItem::user("copy selected prompt"));
-    app.transcript_mut()
-        .push(TranscriptItem::assistant("copy selected answer"));
-
-    app.select_visible_transcript_item();
-    app.extend_transcript_selection_up(1);
+fn transcript_pane_copy_uses_store_selection() {
+    let mut runtime = neo_tui::TranscriptPane::new(80, 24);
+    runtime.push_user_message("copy selected prompt");
+    runtime.push_assistant_message("copy selected answer");
+    runtime.select_visible_transcript_entry();
+    runtime.extend_transcript_selection_up(1);
 
     assert_eq!(
-        app.copy_selected_transcript_text().as_deref(),
+        runtime.copy_selected_transcript_text().as_deref(),
         Some("You\ncopy selected prompt\n\nAssistant\ncopy selected answer")
     );
-    assert_eq!(
-        app.copy_buffer(),
-        Some("You\ncopy selected prompt\n\nAssistant\ncopy selected answer")
-    );
-
-    app.prompt_mut().apply_edit(PromptEdit::Insert("next turn"));
-    let _ = app.submit_prompt();
-    assert!(app.transcript_selection().is_none());
 }
 
 #[test]
-fn app_toggles_selected_transcript_tool_detail() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.transcript_mut().push(TranscriptItem::tool(
-        "read",
-        "expanded file content",
-        ToolStatusKind::Succeeded,
-    ));
+fn transcript_pane_toggles_tool_detail_expansion() {
+    let mut runtime = neo_tui::TranscriptPane::new(80, 24);
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "read".to_owned(),
+        arguments: serde_json::json!({ "path": "README.md" }),
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "read".to_owned(),
+        result: neo_agent_core::ToolResult::ok("expanded file content"),
+    });
 
-    app.select_visible_transcript_item();
-
-    assert!(app.toggle_selected_transcript_detail());
-    assert!(app.expanded_transcript_items().contains(&0));
-
-    assert!(app.toggle_selected_transcript_detail());
-    assert!(!app.expanded_transcript_items().contains(&0));
-}
-
-#[test]
-fn transcript_renderer_renders_markdown_tables_tasks_and_inline_marks_without_raw_markers() {
-    let renderer = TranscriptRenderer::new(64);
-    let lines = renderer.render_markdownish(
-        "## Ship list\n\
-         - [x] parse **bold** and *italic* with `code`\n\
-         - [ ] keep item\n\n\
-         | Area | Status |\n\
-         | --- | --- |\n\
-         | TUI | Ready |\n\n\
-         > quote with **weight**",
-    );
-
-    assert!(matches!(
-        &lines[0],
-        TranscriptLine::Heading { level: 2, text } if text == "Ship list"
-    ));
-    assert!(
-        lines.iter().any(|line| {
-            matches!(
-                line,
-                TranscriptLine::ListItem {
-                    indent: 0,
-                    marker: ListMarker::TaskDone,
-                    text,
-                }
-                    if text == "parse bold and italic with `code`"
-            )
-        }),
-        "{lines:#?}"
-    );
-    assert!(
-        lines.iter().any(|line| {
-            matches!(
-                line,
-                TranscriptLine::ListItem {
-                    indent: 0,
-                    marker: ListMarker::TaskOpen,
-                    text,
-                }
-                    if text == "keep item"
-            )
-        }),
-        "{lines:#?}"
-    );
-    assert!(
-        lines.iter().any(|line| {
-            matches!(
-                line,
-                TranscriptLine::Text { text }
-                    if text == "Area | Status"
-            )
-        }),
-        "{lines:#?}"
-    );
-    assert!(
-        lines.iter().any(|line| {
-            matches!(
-                line,
-                TranscriptLine::Text { text }
-                    if text == "TUI  | Ready"
-            )
-        }),
-        "{lines:#?}"
-    );
-    assert!(
-        lines.iter().all(|line| !line.display_text().contains("**")
-            && !line.display_text().contains("[x]")
-            && !line.display_text().contains("[ ]")
-            && !line.display_text().contains("| --- |")),
-        "{lines:#?}"
-    );
-    assert!(
-        lines.iter().any(|line| {
-            matches!(
-                line,
-                TranscriptLine::Quote { text }
-                    if text == "quote with weight"
-            )
-        }),
-        "{lines:#?}"
-    );
-}
-
-#[test]
-fn transcript_renderer_classifies_fenced_diff_blocks_as_diff_lines() {
-    let renderer = TranscriptRenderer::new(24);
-    let lines = renderer.render_markdownish(
-        "```diff\n\
-         --- old.txt\n\
-         +++ new.txt\n\
-         @@\n\
-         -before\n\
-         +after\n\
-         ```",
-    );
-
-    assert!(matches!(
-        &lines[0],
-        TranscriptLine::DiffFileHeader { marker: '-', path } if path == "old.txt"
-    ));
-    assert!(matches!(
-        &lines[1],
-        TranscriptLine::DiffFileHeader { marker: '+', path } if path == "new.txt"
-    ));
-    assert!(matches!(&lines[2], TranscriptLine::DiffHunk { text } if text == "@@"));
-    assert!(matches!(
-        &lines[3],
-        TranscriptLine::DiffRemoved { text } if text == "before"
-    ));
-    assert!(matches!(
-        &lines[4],
-        TranscriptLine::DiffAdded { text } if text == "after"
-    ));
+    assert!(!runtime.tool_output_expanded());
+    assert!(runtime.toggle_tool_output_expanded());
+    assert!(runtime.tool_output_expanded());
+    assert!(runtime.toggle_tool_output_expanded());
+    assert!(!runtime.tool_output_expanded());
 }

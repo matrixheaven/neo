@@ -126,8 +126,8 @@ impl ProviderManagerState {
 
         let inner_width = width.saturating_sub(2).max(1);
         let border_style = Style::default().fg(self.theme.overlay_border);
-        let title_style = Style::default().fg(self.theme.header).bold();
-        let hint_style = Style::default().fg(self.theme.muted);
+        let title_style = Style::default().fg(self.theme.text_primary).bold();
+        let hint_style = Style::default().fg(self.theme.text_muted);
 
         // Top border.
         lines.push(paint(
@@ -355,16 +355,16 @@ fn initial_selection(rows: &[Row], active_provider_id: &Option<String>) -> usize
 fn render_row(row: &Row, is_selected: bool, width: usize, theme: TuiTheme) -> Vec<String> {
     let pointer = if is_selected { "❯" } else { " " };
     let pointer_style = if is_selected {
-        Style::default().fg(theme.accent)
+        Style::default().fg(theme.brand)
     } else {
-        Style::default().fg(theme.muted)
+        Style::default().fg(theme.text_muted)
     };
 
     let label_style = if is_selected {
-        Style::default().fg(theme.accent).bold()
+        Style::default().fg(theme.brand).bold()
     } else {
         match row {
-            Row::Add => Style::default().fg(theme.accent),
+            Row::Add => Style::default().fg(theme.brand),
             Row::Source { .. } => Style::default().fg(theme.prompt),
         }
     };
@@ -375,7 +375,7 @@ fn render_row(row: &Row, is_selected: bool, width: usize, theme: TuiTheme) -> Ve
         } => " ← current",
         _ => "",
     };
-    let marker_style = Style::default().fg(theme.success);
+    let marker_style = Style::default().fg(theme.status_ok);
 
     let label = row.label();
     let marker_width = visible_width(marker);

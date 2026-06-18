@@ -1,12 +1,36 @@
 use neo_tui::ToolStatusKind;
 use neo_tui::core::{Component, Expandable, Finalization, Line};
 use neo_tui::transcript::diff_preview::render_diff_lines_clustered;
+use neo_tui::transcript::tool_renderers::tool_header_spans;
 use neo_tui::transcript::{ToolCallComponent, ToolCallState};
 
 fn plain(rows: Vec<Line>) -> Vec<String> {
     rows.into_iter()
         .map(|row| neo_tui::ansi::strip_ansi(&row.to_ansi()))
         .collect()
+}
+
+#[test]
+fn running_tool_header_uses_finished_status_color() {
+    let theme = neo_tui::TuiTheme::default();
+    let running = ToolCallState {
+        id: "tool-1".to_owned(),
+        name: "Read".to_owned(),
+        arguments: None,
+        result: None,
+        details: None,
+        status: ToolStatusKind::Running,
+        exit_code: None,
+    };
+    let used = ToolCallState {
+        status: ToolStatusKind::Succeeded,
+        ..running.clone()
+    };
+
+    assert_eq!(
+        tool_header_spans(&running, &theme)[0].to_ansi(),
+        tool_header_spans(&used, &theme)[0].to_ansi()
+    );
 }
 
 #[test]
@@ -177,12 +201,159 @@ fn edit_tool_card_renders_finalized_clustered_diff_from_args() {
 }
 
 #[test]
-fn runtime_expansion_state_is_instance_local() {
-    let mut expanded_runtime = neo_tui::NeoTuiRuntime::new(80, 12);
-    let collapsed_runtime = neo_tui::NeoTuiRuntime::new(80, 12);
+fn transcript_pane_expansion_state_is_instance_local() {
+    let mut expanded_pane = neo_tui::TranscriptPane::new(80, 12);
+    let collapsed_pane = neo_tui::TranscriptPane::new(80, 12);
 
-    expanded_runtime.set_tool_output_expanded(true);
+    expanded_pane.set_tool_output_expanded(true);
 
-    assert!(expanded_runtime.tool_output_expanded());
-    assert!(!collapsed_runtime.tool_output_expanded());
+    assert!(expanded_pane.tool_output_expanded());
+    assert!(!collapsed_pane.tool_output_expanded());
+}
+
+#[test]
+fn tool_card_lines_do_not_exceed_terminal_width_after_gutter() {
+    // Regression for the post-turn duplicate/right-shift bug: tool-card rows
+    // were rendered at the full terminal width, then the TUI applied a 1-col
+    // gutter, pushing them one column past the edge. The terminal wrapped the
+    // extra column and the differential renderer lost track of cursor rows.
+    use neo_agent_core::AgentEvent;
+    use neo_tui::ansi::{strip_ansi, visible_width};
+    use neo_tui::transcript::{apply_gutter, frame_content_width};
+
+    const WIDTH: usize = 40;
+    let mut runtime = neo_tui::TranscriptPane::new(WIDTH, 20);
+
+    runtime.apply_agent_event(AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "read-0".to_owned(),
+        name: "Read".to_owned(),
+    });
+    runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
+        turn: 1,
+        id: "read-0".to_owned(),
+        json_fragment: r#"{"path":"src/lib.rs"}"#.to_owned(),
+    });
+    // Result line is intentionally wider than the terminal so the wrapped body
+    // would have hit the right edge before the fix.
+    runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "read-0".to_owned(),
+        name: "Read".to_owned(),
+        result: neo_agent_core::ToolResult::ok("x".repeat(200)),
+    });
+
+    let frame = runtime
+        .render_frame(WIDTH, 20)
+        .expect("frame renders")
+        .iter()
+        .map(|line| strip_ansi(line).to_owned())
+        .collect::<Vec<_>>();
+
+    // Sanity-check the invariant that makes the gutter safe: the body was
+    // composed at content_width, not full terminal width.
+    let content_width = frame_content_width(WIDTH);
+    assert!(
+        frame
+            .iter()
+            .filter(|line| line.contains("Used Read"))
+            .all(|line| visible_width(line) <= content_width),
+        "header should fit in content width {content_width}"
+    );
+
+    let mut frame_with_gutter = frame.clone();
+    apply_gutter(&mut frame_with_gutter);
+
+    let mut tool_card_header_count = 0;
+    for line in &frame_with_gutter {
+        if line.is_empty() {
+            continue;
+        }
+        let w = visible_width(line);
+        assert!(
+            w < WIDTH,
+            "line reaches terminal autowrap column ({w} >= {WIDTH}): {line:?}"
+        );
+        if line.contains("Used Read") {
+            tool_card_header_count += 1;
+        }
+    }
+    assert_eq!(tool_card_header_count, 1, "tool card header rendered once");
+    assert!(
+        frame_with_gutter
+            .iter()
+            .any(|line| line.contains("ctrl+o to expand")),
+        "overflow hint present: {frame_with_gutter:?}"
+    );
+}
+
+#[test]
+fn grouped_read_lines_do_not_exceed_terminal_width_after_gutter() {
+    use neo_agent_core::AgentEvent;
+    use neo_tui::ansi::{strip_ansi, visible_width};
+    use neo_tui::transcript::{apply_gutter, frame_content_width};
+
+    const WIDTH: usize = 30;
+    let mut runtime = neo_tui::TranscriptPane::new(WIDTH, 20);
+
+    for (idx, path) in ["very/long/path/to/alpha.rs", "very/long/path/to/beta.rs"]
+        .into_iter()
+        .enumerate()
+    {
+        let id = format!("read-{idx}");
+        runtime.apply_agent_event(AgentEvent::ToolCallStarted {
+            turn: 1,
+            id: id.clone(),
+            name: "Read".to_owned(),
+        });
+        runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
+            turn: 1,
+            id: id.clone(),
+            json_fragment: format!(r#"{{"path":"{path}"}}"#),
+        });
+        runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id,
+            name: "Read".to_owned(),
+            result: neo_agent_core::ToolResult::ok("ok"),
+        });
+    }
+
+    let frame = runtime
+        .render_frame(WIDTH, 20)
+        .expect("frame renders")
+        .iter()
+        .map(|line| strip_ansi(line).to_owned())
+        .collect::<Vec<_>>();
+
+    // Grouped rows should be truncated to content_width, not full width.
+    let content_width = frame_content_width(WIDTH);
+    assert!(
+        frame
+            .iter()
+            .filter(|line| line.contains("Read 2 files") || line.contains("very/long"))
+            .all(|line| visible_width(line) <= content_width),
+        "grouped rows must fit in content width {content_width}"
+    );
+
+    let mut frame_with_gutter = frame.clone();
+    apply_gutter(&mut frame_with_gutter);
+
+    assert!(
+        frame_with_gutter
+            .iter()
+            .any(|line| line.contains("Read 2 files")),
+        "group header present: {frame_with_gutter:?}"
+    );
+
+    for line in &frame_with_gutter {
+        if line.is_empty() {
+            continue;
+        }
+        let w = visible_width(line);
+        assert!(
+            w < WIDTH,
+            "grouped tool line reaches terminal autowrap column ({w} >= {WIDTH}): {line:?}"
+        );
+    }
 }

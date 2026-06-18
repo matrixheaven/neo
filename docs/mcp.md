@@ -82,8 +82,7 @@ The model should only see normal `ToolSpec` values. It should not know whether a
 - Disabled MCP servers are not started.
 - Tool names are namespaced by server id and use provider-safe characters.
 - MCP tool calls pass through the same permission policy as built-in tools.
-- MCP resources are fetched only through explicit `neo mcp resources` commands;
-  they are not silently injected into model context.
+- MCP resources are not silently injected into model context.
 - Resource update notifications are host/runtime state; they are not exposed as
   model tools or silently appended to the transcript.
 - Server stderr and protocol logs are developer diagnostics, not model context.
@@ -94,21 +93,25 @@ The model should only see normal `ToolSpec` values. It should not know whether a
 `neo-agent-core` has the MCP tool adapter abstraction, stdio JSON-RPC process
 adapter, HTTP/SSE JSON-RPC adapter, discovery-to-`ToolSpec` bridge, namespaced
 `ToolRegistry` registration, persistent initialized stdio session reuse, and
-async call delegation. It also supports explicit MCP `resources/list` and
-`resources/read` through the same stdio or HTTP/SSE JSON-RPC adapters. The
-stdio adapter also supports `resources/subscribe`,
-`resources/unsubscribe`, and queued `notifications/resources/updated` delivery;
-the HTTP/SSE adapter does the same when a remote `resources/subscribe` response
-is backed by either a live SSE response stream or a JSON acknowledgement plus a
-separate SSE event stream on the same endpoint.
+async call delegation.
 `neo-agent print` and `neo-agent run` load enabled `transport = "stdio"`,
 `transport = "http"`, and `transport = "sse"` servers from project config and
-advertise their tools to the configured model. `neo mcp resources <server>
-list/read` fetches resource catalogs and content without adding them to model
-context automatically. `neo mcp resources <server> watch <uri>` subscribes to a
-stdio resource or a remote HTTP/SSE resource backed by a live SSE subscribe
-response, waits for real `notifications/resources/updated` messages, prints
-updated URIs, and unsubscribes before exiting.
+advertise their tools to the configured model.
+
+The `neo mcp` CLI surface is intentionally small:
+
+- `neo mcp list` — list configured servers and their advertised tools.
+- `neo mcp add <name> -t studio|remote-http|remote-sse ...` — add a server,
+  test the connection, and persist the entry to project config.
+- `neo mcp del <name>` — remove a server from project config.
+- `neo mcp enable <name>` / `neo mcp disable <name>` — toggle enablement.
+
+Studio servers take a shell command string (`-C`), optional working directory
+(`--cwd`), and environment variables. Remote servers take a URL (`--url`) and
+optional headers. Both kinds support an enabled-tool allowlist
+(`--enabled-tools`), a disabled-tool blocklist (`--disabled-tools`), connection
+startup timeout (`--startup-timeout-ms`), and per-tool call timeout
+(`--tool-timeout-ms`).
 
 Current limitation: Neo supports configured local stdio and explicit HTTP/SSE
 MCP endpoints. Hosted MCP registries, OAuth onboarding, hosted server lifecycle

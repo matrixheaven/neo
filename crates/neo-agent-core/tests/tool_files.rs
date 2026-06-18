@@ -25,9 +25,9 @@ async fn file_tools_read_search_write_and_edit_inside_workspace() {
     assert_eq!(read.content, "alpha\nbeta\nalphabet\n");
 
     let listed = registry
-        .run("list", &context, json!({ "path": "." }))
+        .run("List", &context, json!({ "path": "." }))
         .await
-        .expect("list");
+        .expect("List");
     assert!(listed.content.contains("src/"));
 
     let found = registry

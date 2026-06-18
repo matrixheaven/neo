@@ -81,9 +81,9 @@ impl CustomRegistryImportState {
             " "
         };
         let url_color = if self.active_field == FIELD_URL {
-            self.theme.accent
+            self.theme.brand
         } else {
-            self.theme.muted
+            self.theme.text_muted
         };
         lines.push(format!(
             "\x1b[38;2;{}m{url_marker} Registry URL:\x1b[0m",
@@ -107,9 +107,9 @@ impl CustomRegistryImportState {
             " "
         };
         let token_color = if self.active_field == FIELD_TOKEN {
-            self.theme.accent
+            self.theme.brand
         } else {
-            self.theme.muted
+            self.theme.text_muted
         };
         lines.push(format!(
             "\x1b[38;2;{}m{token_marker} Bearer Token:\x1b[0m",
@@ -128,7 +128,7 @@ impl CustomRegistryImportState {
         // Hint
         lines.push(format!(
             "\x1b[38;2;{}m Tab switch · Enter submit · Esc cancel\x1b[0m",
-            rgb(&self.theme.muted)
+            rgb(&self.theme.text_muted)
         ));
 
         // Bottom border

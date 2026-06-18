@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use neo_agent_core::session::workspace_sessions_dir as compute_workspace_sessions_dir;
 use neo_agent_core::{PermissionPolicy, QueueMode, ToolExecutionMode};
 use neo_ai::{ModelRegistry, ModelSpec, ReasoningEffort};
@@ -12,7 +12,7 @@ use neo_tui::{ImageProtocolPreference, KeyId, KeybindingAction, KeybindingsManag
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    cli::{Cli, ThinkingLevel, ToolFilterArgs},
+    cli::Cli,
     themes::{self, ResolvedTheme},
     trust,
 };
@@ -23,113 +23,19 @@ const DEFAULT_MODEL: &str = "gpt-4.1";
 const DEFAULT_PROVIDER: &str = "openai";
 const DEFAULT_MODE: &str = "interactive";
 
-#[derive(Debug, Default)]
-struct EnvOverrides {
-    model: Option<String>,
-    provider: Option<String>,
-    api_base: Option<String>,
-    api_key_env: Option<String>,
-    sessions_dir: Option<PathBuf>,
-    mode: Option<String>,
-    offline: bool,
-}
-
-#[derive(Debug, Clone)]
-#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Default)]
 pub struct ConfigOverrides {
-    pub model: Option<String>,
-    pub provider: Option<String>,
-    pub api_base: Option<String>,
-    pub api_key: Option<String>,
     pub config_path: Option<PathBuf>,
-    pub sessions_dir: Option<PathBuf>,
-    pub mode: Option<String>,
-    pub model_scope: Vec<String>,
-    pub approve: bool,
-    pub no_approve: bool,
-    pub prompt_templates: Vec<String>,
-    pub skill_paths: Vec<PathBuf>,
-    pub extension_paths: Vec<PathBuf>,
-    pub theme_paths: Vec<PathBuf>,
-    pub no_extensions: bool,
-    pub no_themes: bool,
-    pub no_prompt_templates: bool,
-    pub no_skills: bool,
-    pub no_context_files: bool,
-    pub offline: bool,
-    pub system_prompt: Option<String>,
-    pub append_system_prompt: Vec<String>,
-    pub thinking: Option<ThinkingLevel>,
-    pub tool_filters: ToolFilterConfig,
+    pub yolo: bool,
 }
 
 impl ConfigOverrides {
     pub fn from_cli(cli: &Cli) -> Self {
         Self {
-            model: cli.model.clone(),
-            provider: cli.provider.clone(),
-            api_base: cli.api_base.clone(),
-            api_key: cli.api_key.clone(),
             config_path: cli.config.clone(),
-            sessions_dir: cli.session_dir.clone(),
-            mode: cli.mode.clone(),
-            model_scope: clean_model_scope(&cli.models),
-            approve: cli.approve,
-            no_approve: cli.no_approve,
-            prompt_templates: cli.prompt_template.clone(),
-            skill_paths: cli.skill.clone(),
-            extension_paths: cli.extension.clone(),
-            theme_paths: cli.theme.clone(),
-            no_extensions: cli.no_extensions,
-            no_themes: cli.no_themes,
-            no_prompt_templates: cli.no_prompt_templates,
-            no_skills: cli.no_skills,
-            no_context_files: cli.no_context_files,
-            offline: cli.offline,
-            system_prompt: cli.system_prompt.clone(),
-            append_system_prompt: cli.append_system_prompt.clone(),
-            thinking: cli.thinking,
-            tool_filters: ToolFilterConfig::from_cli(&cli.tool_filters),
+            yolo: cli.yolo,
         }
     }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ToolFilterConfig {
-    pub no_tools: bool,
-    pub no_builtin_tools: bool,
-    pub allow: Vec<String>,
-    pub exclude: Vec<String>,
-}
-
-impl ToolFilterConfig {
-    fn from_cli(filters: &ToolFilterArgs) -> Self {
-        Self {
-            no_tools: filters.no_tools,
-            no_builtin_tools: filters.no_builtin_tools,
-            allow: clean_tool_names(&filters.tools),
-            exclude: clean_tool_names(&filters.exclude_tools),
-        }
-    }
-}
-
-fn clean_tool_names(values: &[String]) -> Vec<String> {
-    values
-        .iter()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-fn clean_model_scope(values: &[String]) -> Vec<String> {
-    values
-        .iter()
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .collect()
 }
 
 pub(crate) fn scoped_models<'a>(
@@ -227,13 +133,10 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct AppConfig {
     pub default_model: String,
     pub default_provider: String,
     pub api_base: Option<String>,
-    #[serde(skip)]
-    pub api_key: Option<String>,
     pub api_key_env: Option<String>,
     pub providers: BTreeMap<String, ProviderConfig>,
     /// Models defined inline in config.toml `[models.<alias>]`.
@@ -241,8 +144,6 @@ pub struct AppConfig {
     pub model_catalogs: Vec<PathBuf>,
     #[serde(skip)]
     pub model_scope: Vec<String>,
-    #[serde(skip)]
-    pub model_selection: ModelSelection,
     pub sessions_dir: PathBuf,
     pub permissions: PermissionPolicy,
     pub defaults: Defaults,
@@ -251,32 +152,8 @@ pub struct AppConfig {
     #[serde(skip)]
     pub theme: ResolvedTheme,
     pub mcp: McpConfig,
-    pub approve: bool,
-    pub no_approve: bool,
     #[serde(skip)]
     pub prompt_templates: Vec<String>,
-    #[serde(skip)]
-    pub skill_paths: Vec<PathBuf>,
-    #[serde(skip)]
-    pub extension_paths: Vec<PathBuf>,
-    #[serde(skip)]
-    pub no_extensions: bool,
-    #[serde(skip)]
-    pub configured_prompt_templates: Vec<String>,
-    #[serde(skip)]
-    pub no_prompt_templates: bool,
-    #[serde(skip)]
-    pub no_skills: bool,
-    #[serde(skip)]
-    pub no_context_files: bool,
-    #[serde(skip)]
-    pub offline: bool,
-    #[serde(skip)]
-    pub system_prompt: Option<String>,
-    #[serde(skip)]
-    pub append_system_prompt: Vec<String>,
-    #[serde(skip)]
-    pub tool_filters: ToolFilterConfig,
     #[serde(skip)]
     pub project_trusted: bool,
     pub project_dir: PathBuf,
@@ -288,23 +165,6 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Defaults {
     pub mode: String,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ModelSelection {
-    #[default]
-    Default,
-    Explicit,
-}
-
-impl ModelSelection {
-    const fn from_explicit(explicit: bool) -> Self {
-        if explicit {
-            Self::Explicit
-        } else {
-            Self::Default
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -384,16 +244,6 @@ impl ProviderConfig {
     pub fn effective_base_url(&self) -> Option<&str> {
         self.base_url.as_deref().or(self.api_base.as_deref())
     }
-
-    /// Produce a redacted copy for `config show`.
-    #[must_use]
-    pub fn redacted(&self) -> Self {
-        let mut copy = self.clone();
-        if copy.api_key.is_some() {
-            copy.api_key = Some("[REDACTED]".to_owned());
-        }
-        copy
-    }
 }
 
 /// A model definition in `config.toml` `[models.<alias>]`.
@@ -426,14 +276,6 @@ pub struct McpConfig {
     pub servers: Vec<McpServerConfig>,
 }
 
-impl McpConfig {
-    fn redacted(&self) -> Self {
-        Self {
-            servers: self.servers.iter().map(McpServerConfig::redacted).collect(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     pub id: String,
@@ -450,23 +292,16 @@ pub struct McpServerConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
-}
-
-impl McpServerConfig {
-    fn redacted(&self) -> Self {
-        let mut server = self.clone();
-        server.env = server
-            .env
-            .keys()
-            .map(|key| (key.clone(), "[REDACTED]".to_owned()))
-            .collect();
-        server.headers = server
-            .headers
-            .keys()
-            .map(|key| (key.clone(), "[REDACTED]".to_owned()))
-            .collect();
-        server
-    }
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enabled_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_timeout_ms: Option<u64>,
 }
 
 const fn default_enabled() -> bool {
@@ -546,47 +381,6 @@ pub(crate) struct FileTuiConfig {
     keybindings: Option<BTreeMap<String, Vec<String>>>,
 }
 
-impl FileTuiConfig {
-    fn from_tui(tui: &TuiConfig) -> Self {
-        Self {
-            image_protocol: (tui.image_protocol != ImageProtocolPreference::Auto)
-                .then_some(tui.image_protocol),
-            fetch_remote_images: tui.fetch_remote_images.then_some(tui.fetch_remote_images),
-            keybindings: (!tui.keybindings.is_empty()).then(|| tui.keybindings.clone()),
-        }
-    }
-}
-
-impl FileRuntimeConfig {
-    fn from_runtime(runtime: &RuntimeConfig) -> Self {
-        Self {
-            temperature: runtime.temperature,
-            max_tokens: runtime.max_tokens,
-            reasoning_effort: runtime.reasoning_effort,
-            replay_reasoning: Some(runtime.replay_reasoning),
-            steering_queue_mode: Some(runtime.steering_queue_mode),
-            follow_up_queue_mode: Some(runtime.follow_up_queue_mode),
-            tool_execution_mode: Some(runtime.tool_execution_mode),
-            compaction: runtime
-                .compaction
-                .as_ref()
-                .map(FileRuntimeCompactionConfig::from_runtime),
-        }
-    }
-}
-
-impl FileRuntimeCompactionConfig {
-    fn from_runtime(compaction: &RuntimeCompactionConfig) -> Self {
-        Self {
-            enabled: Some(compaction.enabled),
-            max_estimated_tokens: (compaction.max_estimated_tokens
-                != default_runtime_compaction_max_estimated_tokens())
-            .then_some(compaction.max_estimated_tokens),
-            keep_recent_messages: Some(compaction.keep_recent_messages),
-        }
-    }
-}
-
 impl AppConfig {
     #[allow(clippy::too_many_lines)]
     pub fn load(overrides: ConfigOverrides) -> anyhow::Result<Self> {
@@ -602,31 +396,19 @@ impl AppConfig {
             .unwrap_or_default();
         let project_config = read_file_config(&config_path)?;
         let file_config = merge_file_configs(global_config, project_config);
-        let env_overrides = env_overrides();
-        let thinking_override = overrides.thinking;
-        let project_trusted =
-            project_trusted_from_overrides(&project_dir, overrides.approve, overrides.no_approve)?;
+        let project_trusted = project_trusted_from_yolo(&project_dir, overrides.yolo)?;
 
-        let explicit_model = overrides.model.is_some();
-        let mut default_model = overrides
-            .model
-            .or(env_overrides.model)
-            .or(file_config.default_model)
+        let mut default_model = file_config
+            .default_model
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
-        let mut default_provider = overrides
-            .provider
-            .or(env_overrides.provider)
-            .or(file_config.default_provider)
+        let mut default_provider = file_config
+            .default_provider
             .unwrap_or_else(|| DEFAULT_PROVIDER.to_owned());
         let providers = file_config.providers.unwrap_or_default();
         let models = file_config.models.unwrap_or_default();
-        let api_base = overrides
-            .api_base
-            .or(env_overrides.api_base)
-            .or(file_config.api_base);
-        let api_key_env = env_overrides
+        let api_base = file_config.api_base;
+        let api_key_env = file_config
             .api_key_env
-            .or(file_config.api_key_env)
             .or_else(|| provider_api_key_env(&providers, &default_provider));
         let model_catalogs: Vec<PathBuf> = file_config
             .model_catalogs
@@ -634,57 +416,44 @@ impl AppConfig {
             .into_iter()
             .map(|path| resolve_project_path(&project_dir, path))
             .collect();
-        let cli_model_scope = overrides.model_scope;
-        let explicit_model_scope = !cli_model_scope.is_empty();
-        let model_scope = if explicit_model_scope {
-            apply_scoped_default_model(
-                &mut default_provider,
-                &mut default_model,
-                &model_catalogs,
-                &cli_model_scope,
-                explicit_model,
-            )?;
-            cli_model_scope
-        } else {
-            file_config.model_scope.unwrap_or_default()
-        };
-        let configured_prompt_templates = file_config.prompt_templates.unwrap_or_default();
-        let sessions_dir = overrides
+        let model_scope = file_config.model_scope.unwrap_or_default();
+        apply_scoped_default_model(
+            &mut default_provider,
+            &mut default_model,
+            &model_catalogs,
+            &model_scope,
+        )?;
+        let prompt_templates = file_config.prompt_templates.unwrap_or_default();
+        let sessions_dir = file_config
             .sessions_dir
             .map(expand_user_path)
-            .or(env_overrides.sessions_dir)
-            .or_else(|| file_config.sessions_dir.map(expand_user_path))
             .unwrap_or_else(|| {
-                neo_home()
-                    .map(|home| home.join("sessions"))
-                    .unwrap_or_else(|| project_dir.join(CONFIG_DIR).join("sessions"))
+                neo_home().map_or_else(
+                    || project_dir.join(CONFIG_DIR).join("sessions"),
+                    |home| home.join("sessions"),
+                )
             });
         let permissions = file_config.permissions.unwrap_or_default();
         let runtime = runtime_from_file(file_config.runtime);
-        let runtime = apply_runtime_overrides(runtime, thinking_override);
         validate_runtime_config(&runtime)?;
         let tui = tui_from_file(file_config.tui);
         validate_tui_config(&tui)?;
-        let theme =
-            themes::resolve_theme(&project_dir, &overrides.theme_paths, overrides.no_themes)?;
+        let theme = themes::resolve_theme(&project_dir)?;
         let mcp = file_config.mcp.unwrap_or_default();
-        let mode = overrides
-            .mode
-            .or(env_overrides.mode)
-            .or(file_config.defaults.and_then(|defaults| defaults.mode))
+        let mode = file_config
+            .defaults
+            .and_then(|defaults| defaults.mode)
             .unwrap_or_else(|| DEFAULT_MODE.to_owned());
 
         Ok(Self {
             default_model,
             default_provider,
             api_base,
-            api_key: overrides.api_key,
             api_key_env,
             providers,
             models,
             model_catalogs,
             model_scope,
-            model_selection: ModelSelection::from_explicit(explicit_model),
             sessions_dir,
             permissions,
             defaults: Defaults { mode },
@@ -692,20 +461,7 @@ impl AppConfig {
             tui,
             theme,
             mcp,
-            approve: overrides.approve,
-            no_approve: overrides.no_approve,
-            prompt_templates: overrides.prompt_templates,
-            skill_paths: overrides.skill_paths,
-            extension_paths: overrides.extension_paths,
-            no_extensions: overrides.no_extensions,
-            configured_prompt_templates,
-            no_prompt_templates: overrides.no_prompt_templates,
-            no_skills: overrides.no_skills,
-            no_context_files: overrides.no_context_files,
-            offline: overrides.offline || env_overrides.offline,
-            system_prompt: overrides.system_prompt,
-            append_system_prompt: overrides.append_system_prompt,
-            tool_filters: overrides.tool_filters,
+            prompt_templates,
             project_trusted,
             project_dir,
             config_path,
@@ -713,34 +469,8 @@ impl AppConfig {
     }
 }
 
-fn env_overrides() -> EnvOverrides {
-    EnvOverrides {
-        model: env::var("NEO_MODEL").ok(),
-        provider: env::var("NEO_PROVIDER").ok(),
-        api_base: env::var("NEO_API_BASE").ok(),
-        api_key_env: env::var("NEO_API_KEY_ENV").ok(),
-        sessions_dir: env::var("NEO_SESSIONS_DIR")
-            .ok()
-            .map(PathBuf::from)
-            .map(expand_user_path),
-        mode: env::var("NEO_MODE").ok(),
-        offline: env::var("NEO_OFFLINE").is_ok_and(|value| truthy_env_flag(&value)),
-    }
-}
-
-fn truthy_env_flag(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes"
-    )
-}
-
-fn project_trusted_from_overrides(
-    project_dir: &Path,
-    approve: bool,
-    no_approve: bool,
-) -> anyhow::Result<bool> {
-    trust::resolve_project_trust(project_dir, approve, no_approve)
+fn project_trusted_from_yolo(project_dir: &Path, yolo: bool) -> anyhow::Result<bool> {
+    trust::resolve_project_trust(project_dir, yolo)
 }
 
 fn scoped_default_model(catalogs: &[PathBuf], model_scope: &[String]) -> anyhow::Result<ModelSpec> {
@@ -754,7 +484,7 @@ fn scoped_default_model(catalogs: &[PathBuf], model_scope: &[String]) -> anyhow:
     let scoped = scoped_models(models.iter(), model_scope);
     scoped.first().cloned().with_context(|| {
         format!(
-            "no models match --models {}; run `neo --list-models` for supported catalog entries",
+            "no models match model_scope {}; run `neo models list` for supported entries",
             model_scope.join(",")
         )
     })
@@ -765,13 +495,12 @@ fn apply_scoped_default_model(
     default_model: &mut String,
     model_catalogs: &[PathBuf],
     model_scope: &[String],
-    explicit_model: bool,
 ) -> anyhow::Result<()> {
-    if model_scope.is_empty() || explicit_model {
+    if model_scope.is_empty() {
         return Ok(());
     }
     let scoped_default = scoped_default_model(model_catalogs, model_scope)
-        .with_context(|| format!("failed to resolve --models {}", model_scope.join(",")))?;
+        .with_context(|| format!("failed to resolve model_scope {}", model_scope.join(",")))?;
     *default_provider = scoped_default.provider.0;
     *default_model = scoped_default.model;
     Ok(())
@@ -784,42 +513,6 @@ fn provider_api_key_env(
     providers
         .get(provider_id)
         .and_then(|provider| provider.api_key_env.clone())
-}
-
-pub fn show(config: &AppConfig) -> anyhow::Result<String> {
-    let providers = (!config.providers.is_empty()).then(|| {
-        config
-            .providers
-            .iter()
-            .map(|(id, cfg)| (id.clone(), cfg.redacted()))
-            .collect()
-    });
-    let snapshot = FileConfig {
-        default_model: Some(config.default_model.clone()),
-        default_provider: Some(config.default_provider.clone()),
-        api_base: config.api_base.clone(),
-        api_key_env: config.api_key_env.clone(),
-        providers,
-        models: (!config.models.is_empty()).then(|| config.models.clone()),
-        model_scope: (!config.model_scope.is_empty()).then(|| config.model_scope.clone()),
-        model_catalogs: (!config.model_catalogs.is_empty()).then(|| config.model_catalogs.clone()),
-        prompt_templates: (!config.configured_prompt_templates.is_empty())
-            .then(|| config.configured_prompt_templates.clone()),
-        sessions_dir: Some(config.sessions_dir.clone()),
-        permissions: Some(config.permissions.clone()),
-        defaults: Some(FileDefaults {
-            mode: Some(config.defaults.mode.clone()),
-        }),
-        runtime: Some(FileRuntimeConfig::from_runtime(&config.runtime)),
-        tui: Some(FileTuiConfig::from_tui(&config.tui)),
-        mcp: Some(config.mcp.redacted()),
-    };
-
-    Ok(format!(
-        "# path = {}\n{}\n",
-        config.config_path.display(),
-        toml::to_string_pretty(&snapshot)?
-    ))
 }
 
 pub fn upsert_mcp_server(server: &McpServerConfig) -> anyhow::Result<String> {
@@ -870,175 +563,6 @@ pub fn set_mcp_server_enabled(server_id: &str, enabled: bool) -> anyhow::Result<
     write_file_config(&config_path, &config)?;
     let action = if enabled { "enabled" } else { "disabled" };
     Ok(format!("{action} MCP server {server_id}\n"))
-}
-
-pub fn set(key: &str, value: &str) -> anyhow::Result<String> {
-    let config_path = find_config_path()?;
-    let mut config = read_file_config(&config_path)?;
-
-    match key {
-        "default_model" | "model" => config.default_model = Some(value.to_owned()),
-        "default_provider" | "provider" => config.default_provider = Some(value.to_owned()),
-        "api_base" => config.api_base = Some(value.to_owned()),
-        "api_key_env" => config.api_key_env = Some(value.to_owned()),
-        "model_scope" => config.model_scope = Some(parse_string_list(value)?),
-        key if key.starts_with("providers.") && key.ends_with(".api_base") => {
-            let provider_id = parse_provider_key(key, ".api_base")?;
-            let provider = config
-                .providers
-                .get_or_insert_with(BTreeMap::new)
-                .entry(provider_id.to_owned())
-                .or_default();
-            provider.api_base = Some(value.to_owned());
-        }
-        key if key.starts_with("providers.") && key.ends_with(".base_url") => {
-            let provider_id = parse_provider_key(key, ".base_url")?;
-            let provider = config
-                .providers
-                .get_or_insert_with(BTreeMap::new)
-                .entry(provider_id.to_owned())
-                .or_default();
-            provider.base_url = Some(value.to_owned());
-        }
-        key if key.starts_with("providers.") && key.ends_with(".api_key_env") => {
-            let provider_id = parse_provider_key(key, ".api_key_env")?;
-            let provider = config
-                .providers
-                .get_or_insert_with(BTreeMap::new)
-                .entry(provider_id.to_owned())
-                .or_default();
-            provider.api_key_env = Some(value.to_owned());
-        }
-        key if key.starts_with("providers.") && key.ends_with(".api_key") => {
-            let provider_id = parse_provider_key(key, ".api_key")?;
-            let provider = config
-                .providers
-                .get_or_insert_with(BTreeMap::new)
-                .entry(provider_id.to_owned())
-                .or_default();
-            provider.api_key = Some(value.to_owned());
-        }
-        key if key.starts_with("providers.") && key.ends_with(".type") => {
-            let provider_id = parse_provider_key(key, ".type")?;
-            let api_type = neo_ai::ApiType::from_config_str(value)
-                .ok_or_else(|| anyhow::anyhow!("unsupported provider type: {value}"))?;
-            let provider = config
-                .providers
-                .get_or_insert_with(BTreeMap::new)
-                .entry(provider_id.to_owned())
-                .or_default();
-            provider.provider_type = Some(api_type);
-        }
-        "sessions_dir" => config.sessions_dir = Some(PathBuf::from(value)),
-        "prompt_templates" => {
-            config.prompt_templates = Some(parse_string_list(value)?);
-        }
-        "permissions.file_read" | "file_read" => {
-            let permissions = config
-                .permissions
-                .get_or_insert_with(PermissionPolicy::default);
-            permissions.file_read = toml::from_str(&format!("\"{value}\""))?;
-        }
-        "permissions.file_write" | "file_write" => {
-            let permissions = config
-                .permissions
-                .get_or_insert_with(PermissionPolicy::default);
-            permissions.file_write = toml::from_str(&format!("\"{value}\""))?;
-        }
-        "permissions.shell" | "shell" => {
-            let permissions = config
-                .permissions
-                .get_or_insert_with(PermissionPolicy::default);
-            permissions.shell = toml::from_str(&format!("\"{value}\""))?;
-        }
-        "permissions.tool" | "tool" => {
-            let permissions = config
-                .permissions
-                .get_or_insert_with(PermissionPolicy::default);
-            permissions.tool = toml::from_str(&format!("\"{value}\""))?;
-        }
-        "defaults.mode" | "mode" => {
-            let defaults = config.defaults.get_or_insert_with(FileDefaults::default);
-            defaults.mode = Some(value.to_owned());
-        }
-        key if set_runtime_config(&mut config, key, value)? => {}
-        key if set_tui_config(&mut config, key, value)? => {}
-        unknown => bail!("unsupported config key: {unknown}"),
-    }
-
-    if let Some(runtime) = &config.runtime {
-        validate_runtime_config(&runtime_from_file(Some(runtime.clone())))?;
-    }
-    if let Some(tui) = &config.tui {
-        validate_tui_config(&tui_from_file(Some(tui.clone())))?;
-    }
-    write_file_config(&config_path, &config)?;
-    Ok(format!("set {key}\n"))
-}
-
-fn set_runtime_config(config: &mut FileConfig, key: &str, value: &str) -> anyhow::Result<bool> {
-    match key {
-        "runtime.temperature" | "temperature" => {
-            runtime_config_mut(config).temperature = Some(value.parse()?);
-        }
-        "runtime.max_tokens" | "max_tokens" => {
-            runtime_config_mut(config).max_tokens = Some(value.parse()?);
-        }
-        "runtime.reasoning_effort" | "reasoning_effort" => {
-            runtime_config_mut(config).reasoning_effort = Some(parse_reasoning_effort(value)?);
-        }
-        "runtime.steering_queue_mode" | "steering_queue_mode" => {
-            runtime_config_mut(config).steering_queue_mode = Some(parse_queue_mode(value)?);
-        }
-        "runtime.follow_up_queue_mode" | "follow_up_queue_mode" => {
-            runtime_config_mut(config).follow_up_queue_mode = Some(parse_queue_mode(value)?);
-        }
-        "runtime.tool_execution_mode" | "tool_execution_mode" => {
-            runtime_config_mut(config).tool_execution_mode =
-                Some(parse_tool_execution_mode(value)?);
-        }
-        "runtime.compaction.enabled" | "compaction.enabled" => {
-            compaction_config_mut(config).enabled = Some(value.parse()?);
-        }
-        "runtime.compaction.max_estimated_tokens" | "compaction.max_estimated_tokens" => {
-            compaction_config_mut(config).max_estimated_tokens = Some(value.parse()?);
-        }
-        "runtime.compaction.keep_recent_messages" | "compaction.keep_recent_messages" => {
-            compaction_config_mut(config).keep_recent_messages = Some(value.parse()?);
-        }
-        _ => return Ok(false),
-    }
-    Ok(true)
-}
-
-fn set_tui_config(config: &mut FileConfig, key: &str, value: &str) -> anyhow::Result<bool> {
-    match key {
-        "tui.image_protocol" | "image_protocol" => {
-            tui_config_mut(config).image_protocol = Some(parse_image_protocol(value)?);
-            return Ok(true);
-        }
-        "tui.fetch_remote_images" | "fetch_remote_images" => {
-            tui_config_mut(config).fetch_remote_images = Some(value.parse()?);
-            return Ok(true);
-        }
-        _ => {}
-    }
-
-    let Some(action_id) = key.strip_prefix("tui.keybindings.") else {
-        return Ok(false);
-    };
-    tui_config_mut(config)
-        .keybindings
-        .get_or_insert_with(BTreeMap::new)
-        .insert(action_id.to_owned(), parse_string_list(value)?);
-    Ok(true)
-}
-
-fn parse_provider_key<'a>(key: &'a str, suffix: &str) -> anyhow::Result<&'a str> {
-    key.strip_prefix("providers.")
-        .and_then(|key| key.strip_suffix(suffix))
-        .filter(|provider_id| !provider_id.is_empty())
-        .with_context(|| format!("invalid provider config key: {key}"))
 }
 
 fn merge_file_configs(base: FileConfig, layer: FileConfig) -> FileConfig {
@@ -1288,30 +812,6 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
     }
 }
 
-fn apply_runtime_overrides(
-    mut runtime: RuntimeConfig,
-    thinking_override: Option<ThinkingLevel>,
-) -> RuntimeConfig {
-    if let Some(thinking) = thinking_override {
-        runtime.reasoning_effort = reasoning_effort_from_thinking(thinking);
-        if matches!(thinking, ThinkingLevel::Off) {
-            runtime.replay_reasoning = false;
-        }
-    }
-    runtime
-}
-
-const fn reasoning_effort_from_thinking(thinking: ThinkingLevel) -> Option<ReasoningEffort> {
-    match thinking {
-        ThinkingLevel::Off => None,
-        ThinkingLevel::Minimal => Some(ReasoningEffort::Minimal),
-        ThinkingLevel::Low => Some(ReasoningEffort::Low),
-        ThinkingLevel::Medium => Some(ReasoningEffort::Medium),
-        ThinkingLevel::High => Some(ReasoningEffort::High),
-        ThinkingLevel::XHigh => Some(ReasoningEffort::XHigh),
-    }
-}
-
 fn tui_from_file(tui: Option<FileTuiConfig>) -> TuiConfig {
     let Some(tui) = tui else {
         return TuiConfig::default();
@@ -1321,75 +821,6 @@ fn tui_from_file(tui: Option<FileTuiConfig>) -> TuiConfig {
         fetch_remote_images: tui.fetch_remote_images.unwrap_or(false),
         keybindings: tui.keybindings.unwrap_or_default(),
     }
-}
-
-fn runtime_config_mut(config: &mut FileConfig) -> &mut FileRuntimeConfig {
-    config
-        .runtime
-        .get_or_insert_with(FileRuntimeConfig::default)
-}
-
-fn compaction_config_mut(config: &mut FileConfig) -> &mut FileRuntimeCompactionConfig {
-    runtime_config_mut(config)
-        .compaction
-        .get_or_insert_with(FileRuntimeCompactionConfig::default)
-}
-
-fn tui_config_mut(config: &mut FileConfig) -> &mut FileTuiConfig {
-    config.tui.get_or_insert_with(FileTuiConfig::default)
-}
-
-fn parse_queue_mode(value: &str) -> anyhow::Result<QueueMode> {
-    match value {
-        "All" => Ok(QueueMode::All),
-        "OneAtATime" => Ok(QueueMode::OneAtATime),
-        other => bail!("unsupported queue mode: {other}"),
-    }
-}
-
-fn parse_tool_execution_mode(value: &str) -> anyhow::Result<ToolExecutionMode> {
-    match value {
-        "Sequential" => Ok(ToolExecutionMode::Sequential),
-        "Parallel" => Ok(ToolExecutionMode::Parallel),
-        other => bail!("unsupported tool execution mode: {other}"),
-    }
-}
-
-fn parse_reasoning_effort(value: &str) -> anyhow::Result<ReasoningEffort> {
-    match value {
-        "minimal" | "Minimal" => Ok(ReasoningEffort::Minimal),
-        "low" | "Low" => Ok(ReasoningEffort::Low),
-        "medium" | "Medium" => Ok(ReasoningEffort::Medium),
-        "high" | "High" => Ok(ReasoningEffort::High),
-        "xhigh" | "XHigh" => Ok(ReasoningEffort::XHigh),
-        other => bail!("unsupported reasoning effort: {other}"),
-    }
-}
-
-fn parse_image_protocol(value: &str) -> anyhow::Result<ImageProtocolPreference> {
-    #[derive(Deserialize)]
-    struct ImageProtocolValue {
-        value: ImageProtocolPreference,
-    }
-
-    toml::from_str::<ImageProtocolValue>(&format!("value = \"{value}\""))
-        .map(|parsed| parsed.value)
-        .with_context(|| format!("unsupported TUI image protocol: {value}"))
-}
-
-fn parse_string_list(value: &str) -> anyhow::Result<Vec<String>> {
-    let trimmed = value.trim();
-    if trimmed.starts_with('[') {
-        #[derive(Deserialize)]
-        struct StringListValue {
-            value: Vec<String>,
-        }
-
-        return toml::from_str::<StringListValue>(&format!("value = {trimmed}"))
-            .map(|parsed| parsed.value)
-            .with_context(|| format!("failed to parse string list: {value}"));
-    }
-    Ok(vec![value.to_owned()])
 }
 
 fn validate_runtime_config(config: &RuntimeConfig) -> anyhow::Result<()> {

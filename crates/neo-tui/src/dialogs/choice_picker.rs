@@ -156,7 +156,7 @@ impl ChoicePickerState {
         }
         lines.push(format!(
             "\x1b[38;2;{}m {hint}\x1b[0m",
-            rgb(&self.theme.muted)
+            rgb(&self.theme.text_muted)
         ));
 
         // Bottom border

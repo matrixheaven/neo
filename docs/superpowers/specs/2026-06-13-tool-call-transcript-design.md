@@ -23,7 +23,7 @@ Replace the duplicated "Use XXXX running" lines with a single stateful tool-call
 ## Scope
 
 - **In scope:** Neo's interactive TUI (`neo` with no subcommand or `neo interactive`).
-- **Out of scope:** Non-interactive `neo run` / `neo print` output, JSONL session files, MCP resource commands.
+- **Out of scope:** Non-interactive `neo run` output, JSONL session files, MCP resource commands.
 
 ## Design Decisions
 

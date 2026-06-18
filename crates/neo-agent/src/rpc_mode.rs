@@ -13,9 +13,8 @@ use serde_json::{Value, json};
 
 use crate::{
     config::{self, AppConfig, workspace_sessions_dir},
-    modes::run,
+    modes::{run, sessions},
     prompt_templates::{self, PromptTemplateLocation},
-    session_commands,
 };
 
 pub async fn execute(config: &AppConfig) -> anyhow::Result<String> {
@@ -96,7 +95,7 @@ fn handle_get_commands(
     let commands = match prompt_templates::discover_prompt_template_commands(
         &config.project_dir,
         config::global_prompts_dir().as_deref(),
-        &config.configured_prompt_templates,
+        &config.prompt_templates,
     ) {
         Ok(commands) => commands,
         Err(err) => {
@@ -179,7 +178,7 @@ async fn handle_sessions_get(
         );
     };
 
-    let session_id = match session_commands::resolve_session_id(session_ref, config) {
+    let session_id = match sessions::resolve_session_id(session_ref, config) {
         Ok(session_id) => session_id,
         Err(err) => {
             return push_rpc_message(
@@ -285,7 +284,7 @@ async fn handle_sessions_export_html(
         );
     };
 
-    let session_id = match session_commands::resolve_session_id(session_ref, config) {
+    let session_id = match sessions::resolve_session_id(session_ref, config) {
         Ok(session_id) => session_id,
         Err(err) => {
             return push_rpc_message(
@@ -312,7 +311,7 @@ async fn handle_sessions_export_html(
         );
     }
 
-    let html = match session_commands::export_html(&session_id, config).await {
+    let html = match sessions::export_html(&session_id, config).await {
         Ok(html) => html,
         Err(err) => {
             return push_rpc_message(
@@ -353,7 +352,7 @@ async fn handle_sessions_export_json(
         );
     };
 
-    if let Err(err) = session_commands::resolve_session_id(session_ref, config) {
+    if let Err(err) = sessions::resolve_session_id(session_ref, config) {
         return push_rpc_message(
             output,
             &RpcMessage::Response(RpcResponse::failure(
@@ -363,7 +362,7 @@ async fn handle_sessions_export_json(
         );
     }
 
-    let artifact = match session_commands::export_json_artifact(session_ref, config).await {
+    let artifact = match sessions::export_json_artifact(session_ref, config).await {
         Ok(artifact) => artifact,
         Err(err) => {
             return push_rpc_message(
@@ -417,7 +416,7 @@ fn handle_set_session_name(
         );
     };
 
-    let session_id = match session_commands::resolve_session_id(session_ref, config) {
+    let session_id = match sessions::resolve_session_id(session_ref, config) {
         Ok(session_id) => session_id,
         Err(err) => {
             return push_rpc_message(
@@ -444,7 +443,7 @@ fn handle_set_session_name(
         );
     }
 
-    match session_commands::rename(&session_id, name, config) {
+    match sessions::rename(&session_id, name, config) {
         Ok(_) => push_rpc_message(
             output,
             &RpcMessage::Response(RpcResponse::success(
@@ -484,7 +483,7 @@ async fn handle_get_messages(
         );
     };
 
-    let session_id = match session_commands::resolve_session_id(session_ref, config) {
+    let session_id = match sessions::resolve_session_id(session_ref, config) {
         Ok(session_id) => session_id,
         Err(err) => {
             return push_rpc_message(
@@ -579,7 +578,7 @@ async fn handle_prompt(
 }
 
 fn session_store(config: &AppConfig) -> SessionMetadataStore {
-    SessionMetadataStore::new(&workspace_sessions_dir(config))
+    SessionMetadataStore::new(workspace_sessions_dir(config))
 }
 
 fn rpc_session_record(record: SessionRecord) -> RpcSessionRecord {

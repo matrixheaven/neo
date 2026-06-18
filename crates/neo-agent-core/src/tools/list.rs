@@ -18,7 +18,7 @@ pub struct ListTool;
 
 impl Tool for ListTool {
     fn name(&self) -> &'static str {
-        "list"
+        "List"
     }
 
     fn description(&self) -> &'static str {

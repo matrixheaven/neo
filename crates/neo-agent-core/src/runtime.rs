@@ -683,6 +683,9 @@ async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatReque
     if let Some(system_prompt) = &config.system_prompt {
         messages.push(AgentMessage::system_text(system_prompt).to_chat_message());
     }
+    if let Some(workspace_context) = workspace_context_message(config) {
+        messages.push(workspace_context.to_chat_message());
+    }
     let context_messages = if let Some(transform) = &config.context_transform {
         transform(context.messages())
     } else {
@@ -711,6 +714,14 @@ async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatReque
             ..RequestOptions::default()
         },
     }
+}
+
+fn workspace_context_message(config: &AgentConfig) -> Option<AgentMessage> {
+    let workspace_root = config.workspace_root.as_ref()?;
+    Some(AgentMessage::system_text(format!(
+        "<environment_context>\n<cwd>{}</cwd>\n</environment_context>\n\nShell tools already run in this workspace. Do not prefix shell commands with `cd <cwd> &&`; use the bash `workdir` field for a workspace subdirectory.",
+        workspace_root.display()
+    )))
 }
 
 fn without_reasoning_content(message: ChatMessage) -> ChatMessage {
@@ -1994,7 +2005,7 @@ fn permission_operation_for_tool(
     tool_call: &AgentToolCall,
 ) -> Option<(PermissionOperation, String)> {
     match tool_call.name.as_str() {
-        "read" | "list" | "grep" | "find" => Some((
+        "read" | "List" | "grep" | "find" => Some((
             PermissionOperation::FileRead,
             path_subject(&tool_call.arguments).unwrap_or_else(|| tool_call.name.clone()),
         )),

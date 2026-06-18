@@ -1,4 +1,4 @@
-# Example MCP server configuration. `neo mcp list`, `neo print`, and `neo run`
+# Example MCP server configuration. `neo mcp list` and `neo run`
 # read these shapes for MCP tool discovery and calls.
 
 [[mcp.servers]]

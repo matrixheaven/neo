@@ -7,13 +7,11 @@ mod modes;
 mod prompt_templates;
 mod resources;
 mod rpc_mode;
-mod session_commands;
-mod session_migrate;
-mod skill_commands;
 mod themes;
 mod trust;
 
 use std::{
+    fmt::Write as _,
     io::{self, IsTerminal as _, Read as _},
     path::{Component, Path, PathBuf},
 };
@@ -21,12 +19,12 @@ use std::{
 use clap::Parser;
 
 use anyhow::Context as _;
+use serde_json::json;
 
 use crate::{
     cli::{
-        CatalogCommand, Cli, Command, ConfigCommand, ExtensionCommand, ImageCommand,
-        LIST_MODELS_NO_SEARCH, McpCommand, ModelCommand, PromptPackageCommand, ProviderCommand,
-        SessionCommand, SkillCommand, ThemePackageCommand, TrustCommand,
+        CatalogCommand, Cli, Command, ExtensionCommand, McpCommand, ModelCommand, ProviderCommand,
+        SessionCommand,
     },
     config::{AppConfig, ConfigOverrides},
 };
@@ -36,29 +34,10 @@ async fn main() -> anyhow::Result<()> {
     color_eyre::install().ok();
     tracing_subscriber::fmt().with_target(false).try_init().ok();
 
-    let cli = Cli::parse_from(normalize_pi_style_args(std::env::args_os()));
+    let cli = Cli::parse_from(std::env::args_os());
     let output = dispatch(cli).await?;
     print!("{output}");
     Ok(())
-}
-
-fn normalize_pi_style_args(
-    args: impl IntoIterator<Item = std::ffi::OsString>,
-) -> Vec<std::ffi::OsString> {
-    args.into_iter()
-        .map(|arg| match arg.to_str() {
-            Some("--print" | "-p") => "print".into(),
-            Some("-na") => "--no-approve".into(),
-            Some("-nt") => "--no-tools".into(),
-            Some("-nbt") => "--no-builtin-tools".into(),
-            Some("-np") => "--no-prompt-templates".into(),
-            Some("-nc") => "--no-context-files".into(),
-            Some("-ns") => "--no-skills".into(),
-            Some("-ne") => "--no-extensions".into(),
-            Some("-xt") => "--exclude-tools".into(),
-            _ => arg,
-        })
-        .collect()
 }
 
 async fn dispatch(cli: Cli) -> anyhow::Result<String> {
@@ -66,20 +45,10 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
 
     // Migrate legacy sessions from {project_dir}/.neo/sessions/ to the new
     // workspace-scoped layout. Idempotent — no-op if already migrated.
-    if let Err(error) = session_migrate::migrate_legacy_sessions(&config) {
+    if let Err(error) = modes::session_migrate::migrate_legacy_sessions(&config) {
         tracing::warn!("session migration failed (continuing): {error:#}");
     }
 
-    if !cli.export.is_empty() {
-        return dispatch_export(&cli.export).await;
-    }
-    if let Some(search) = &cli.list_models {
-        let search = search.trim();
-        let search =
-            (!search.is_empty() && search != LIST_MODELS_NO_SEARCH && !search.starts_with('@'))
-                .then_some(search);
-        return modes::run::list_models_filtered(&config, search);
-    }
     if cli.resume_picker && cli.command.is_some() {
         anyhow::bail!(
             "--resume/-r starts the interactive session picker and cannot be combined with a subcommand"
@@ -102,33 +71,16 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
 
 #[derive(Clone)]
 struct RunSessionOptions {
-    session_id: Option<String>,
-    session: Option<String>,
     continue_latest: bool,
-    fork: Option<String>,
-    name: Option<String>,
     no_session: bool,
 }
 
 impl RunSessionOptions {
     fn from_cli(cli: &Cli) -> Self {
         Self {
-            session_id: cli.session_id.clone(),
-            session: cli.session.clone(),
             continue_latest: cli.continue_latest,
-            fork: cli.fork.clone(),
-            name: cli.name.clone(),
             no_session: cli.no_session,
         }
-    }
-
-    fn target(&self) -> Option<modes::run::SessionTarget<'_>> {
-        session_target_for_cli(
-            self.session_id.as_deref(),
-            self.session.as_deref(),
-            self.continue_latest,
-            self.fork.as_deref(),
-        )
     }
 }
 
@@ -141,71 +93,62 @@ async fn dispatch_command(
     interactive_options: modes::interactive::InteractiveOptions,
 ) -> anyhow::Result<String> {
     match command {
-        Some(Command::Print { prompt }) => {
-            let prompt = prepare_prompt(prompt, config)?;
-            modes::print::execute(
-                &prompt,
-                config,
-                session_options.target(),
-                session_options.name.as_deref(),
-                session_options.no_session,
-            )
-            .await
-        }
         Some(Command::Run { output, prompt }) => {
             let prompt = prepare_prompt(prompt, config)?;
             modes::run::execute(
                 &prompt,
                 config,
                 output.unwrap_or_else(|| run_output_for_mode(config)),
-                session_options.target(),
-                session_options.name.as_deref(),
+                session_options.continue_latest,
                 session_options.no_session,
             )
             .await
         }
-        Some(Command::Resume { session_id }) => modes::run::resume(&session_id, config).await,
+        Some(Command::Resume { session_id }) => {
+            if io::stdout().is_terminal() {
+                let startup = match session_id {
+                    Some(id) => modes::interactive::StartupAction::LoadSession(id),
+                    None => modes::interactive::StartupAction::OpenSessionPicker,
+                };
+                Ok(modes::interactive::execute_tty_with_startup(
+                    config,
+                    startup,
+                    interactive_options,
+                )
+                .await?
+                .unwrap_or_default())
+            } else if let Some(id) = session_id {
+                let transcript = modes::sessions::transcript(&id, config).await?;
+                Ok(format!("session {id}\n{transcript}"))
+            } else {
+                anyhow::bail!(
+                    "`neo resume` requires a terminal; use `neo resume <session-id>` in scripts"
+                )
+            }
+        }
         Some(Command::Sessions { command }) => match command {
-            SessionCommand::List => session_commands::list(config),
-            SessionCommand::Show { session_id } => session_commands::show(&session_id, config),
+            SessionCommand::List => modes::sessions::list(config),
+            SessionCommand::Show { session_id } => modes::sessions::show(&session_id, config),
             SessionCommand::Rename { session_id, name } => {
-                session_commands::rename(&session_id, &name, config)
+                modes::sessions::rename(&session_id, &name, config)
             }
             SessionCommand::Fork { session_id, name } => {
-                session_commands::fork(&session_id, name.as_deref(), config)
-            }
-            SessionCommand::Summarize { session_id } => {
-                session_commands::summarize(&session_id, config).await
+                modes::sessions::fork(&session_id, name.as_deref(), config)
             }
             SessionCommand::Compact {
                 session_id,
                 keep_recent,
-            } => session_commands::compact(&session_id, keep_recent, config).await,
+            } => modes::sessions::compact(&session_id, keep_recent, config).await,
             SessionCommand::ExportHtml { session_id } => {
-                session_commands::export_html(&session_id, config).await
+                modes::sessions::export_html(&session_id, config).await
             }
             SessionCommand::ExportJson { session_id } => {
-                session_commands::export_json(&session_id, config).await
+                modes::sessions::export_json(&session_id, config).await
             }
         },
-        Some(Command::Skills { command }) => match command {
-            SkillCommand::Show { path } => skill_commands::show(&path),
-        },
         Some(Command::Extensions { command }) => dispatch_extensions(config, command).await,
-        Some(Command::Prompts { command }) => dispatch_prompts(config, command),
-        Some(Command::Themes { command }) => dispatch_themes(config, command),
-        Some(Command::Trust { command }) => match command {
-            TrustCommand::Status => trust::status(&config.project_dir),
-            TrustCommand::Approve => trust::approve(&config.project_dir),
-            TrustCommand::Deny => trust::deny(&config.project_dir),
-            TrustCommand::Clear => trust::clear(&config.project_dir),
-        },
-        Some(Command::Config { command }) => match command {
-            ConfigCommand::Show => config::show(config),
-            ConfigCommand::Set { key, value } => config::set(&key, &value),
-        },
         Some(Command::Models { command }) => match command {
-            ModelCommand::List { json } => modes::run::list_models_with_options(config, json),
+            ModelCommand::List { json } => modes::run::list_configured_models(config, json),
             ModelCommand::Add {
                 alias,
                 provider,
@@ -235,7 +178,7 @@ async fn dispatch_command(
             }
         },
         Some(Command::Provider { command }) => match command {
-            ProviderCommand::List { json: _ } => config_ops::list_providers(&config.config_path),
+            ProviderCommand::List { json } => config_ops::list_providers(config, json),
             ProviderCommand::Add {
                 provider_id,
                 r#type,
@@ -269,8 +212,8 @@ async fn dispatch_command(
                 CatalogCommand::List {
                     provider_id,
                     filter,
-                    json: _,
-                } => list_catalog_providers(provider_id.as_deref(), filter.as_deref()).await,
+                    json,
+                } => list_catalog_providers(provider_id.as_deref(), filter.as_deref(), json).await,
                 CatalogCommand::Add {
                     provider_id,
                     api_key,
@@ -286,59 +229,46 @@ async fn dispatch_command(
                 }
             },
         },
-        Some(Command::Images { command }) => match command {
-            ImageCommand::Generate {
-                prompt,
-                model,
-                output,
-                size,
-            } => modes::run::generate_image(config, &prompt, &model, &output, &size).await,
-        },
         Some(Command::Mcp { command }) => match command {
-            McpCommand::List => Ok(modes::run::list_mcp_servers(config)),
-            McpCommand::Servers { command } => match command {
-                cli::McpServersCommand::Add {
-                    server_id,
-                    transport,
+            McpCommand::List => Ok(modes::run::list_mcp(config).await),
+            McpCommand::Add {
+                mcp_name,
+                r#type,
+                command,
+                url,
+                env,
+                headers,
+                cwd,
+                enabled_tools,
+                disabled_tools,
+                startup_timeout_ms,
+                tool_timeout_ms,
+                enable,
+                disable,
+            } => {
+                let enabled = enable && !disable;
+                Ok(modes::run::add_mcp_server(
+                    mcp_name,
+                    r#type,
                     command,
                     url,
-                    args,
                     env,
                     headers,
-                } => modes::run::add_mcp_server(
-                    server_id, transport, command, url, args, env, headers,
-                ),
-                cli::McpServersCommand::Remove { server_id } => {
-                    config::remove_mcp_server(&server_id)
-                }
-                cli::McpServersCommand::Enable { server_id } => {
-                    config::set_mcp_server_enabled(&server_id, true)
-                }
-                cli::McpServersCommand::Disable { server_id } => {
-                    config::set_mcp_server_enabled(&server_id, false)
-                }
-                cli::McpServersCommand::Health { server_id } => {
-                    modes::run::mcp_server_health(config, &server_id).await
-                }
-                cli::McpServersCommand::Start { server_id } => {
-                    modes::run::start_mcp_server(config, &server_id)
-                }
-                cli::McpServersCommand::Stop { server_id } => {
-                    modes::run::stop_mcp_server(config, &server_id)
-                }
-            },
-            McpCommand::Tools { server_id } => modes::run::list_mcp_tools(config, &server_id).await,
-            McpCommand::Resources { server_id, command } => match command {
-                cli::McpResourceCommand::List => {
-                    modes::run::list_mcp_resources(config, &server_id).await
-                }
-                cli::McpResourceCommand::Read { uri } => {
-                    modes::run::read_mcp_resource(config, &server_id, &uri).await
-                }
-                cli::McpResourceCommand::Watch { uri, count } => {
-                    modes::run::watch_mcp_resource(config, &server_id, &uri, count).await
-                }
-            },
+                    cwd,
+                    enabled_tools,
+                    disabled_tools,
+                    startup_timeout_ms,
+                    tool_timeout_ms,
+                    enabled,
+                    config,
+                )
+                .await?)
+            }
+            McpCommand::Del { mcp_name } => Ok(config::remove_mcp_server(&mcp_name)?),
+            McpCommand::Disable { mcp_name } => {
+                Ok(config::set_mcp_server_enabled(&mcp_name, false)?)
+            }
+            McpCommand::Enable { mcp_name } => Ok(config::set_mcp_server_enabled(&mcp_name, true)?),
         },
         Some(Command::Rpc) => rpc_mode::execute(config).await,
         None => {
@@ -359,41 +289,6 @@ async fn dispatch_command(
     }
 }
 
-async fn dispatch_export(paths: &[PathBuf]) -> anyhow::Result<String> {
-    anyhow::ensure!(
-        paths.len() <= 2,
-        "--export accepts a session JSONL path and optional output path"
-    );
-    let input_path = paths
-        .first()
-        .expect("non-empty export paths checked by caller");
-    let output_path = paths.get(1).cloned().unwrap_or_else(|| {
-        let stem = input_path
-            .file_stem()
-            .and_then(std::ffi::OsStr::to_str)
-            .filter(|stem| !stem.is_empty())
-            .unwrap_or("session");
-        PathBuf::from(format!("neo-session-{stem}.html"))
-    });
-    session_commands::export_html_file(input_path, &output_path)
-        .await
-        .with_context(|| format!("failed to export session {}", input_path.display()))?;
-    Ok(format!("Exported to: {}\n", output_path.display()))
-}
-
-fn session_target_for_cli<'a>(
-    session_id: Option<&'a str>,
-    session: Option<&'a str>,
-    continue_latest: bool,
-    fork: Option<&'a str>,
-) -> Option<modes::run::SessionTarget<'a>> {
-    session_id
-        .map(modes::run::SessionTarget::ExactId)
-        .or_else(|| session.map(modes::run::SessionTarget::Existing))
-        .or(continue_latest.then_some(modes::run::SessionTarget::Latest))
-        .or_else(|| fork.map(modes::run::SessionTarget::Fork))
-}
-
 fn run_output_for_mode(config: &AppConfig) -> cli::RunOutput {
     if config.defaults.mode.eq_ignore_ascii_case("json") {
         cli::RunOutput::Json
@@ -403,18 +298,12 @@ fn run_output_for_mode(config: &AppConfig) -> cli::RunOutput {
 }
 
 fn prepare_prompt(prompt: Vec<String>, config: &AppConfig) -> anyhow::Result<Vec<String>> {
-    let mut prompt_template_selectors = config.configured_prompt_templates.clone();
-    for selector in &config.prompt_templates {
-        if !prompt_template_selectors.contains(selector) {
-            prompt_template_selectors.push(selector.clone());
-        }
-    }
     let prompt = prompt_templates::expand_prompt_template_args(
         prompt,
         &config.project_dir,
         config::global_prompts_dir().as_deref(),
-        &prompt_template_selectors,
-        config.no_prompt_templates,
+        &config.prompt_templates,
+        false,
     )?;
     let prompt = expand_prompt_files(prompt, &config.project_dir)?;
     prompt_with_piped_stdin(prompt)
@@ -530,7 +419,6 @@ async fn dispatch_extensions(
                 &paths.state_path,
                 &paths.registry_path,
                 &extension_id,
-                config.offline,
             )
         }
         ExtensionCommand::Uninstall { extension_id, root } => {
@@ -573,31 +461,6 @@ async fn dispatch_extensions(
     }
 }
 
-fn dispatch_prompts(config: &AppConfig, command: PromptPackageCommand) -> anyhow::Result<String> {
-    match command {
-        PromptPackageCommand::List => prompt_templates::list_project_prompt_templates(
-            &config.project_dir,
-            config::global_prompts_dir().as_deref(),
-        ),
-        PromptPackageCommand::Preview { name } => {
-            prompt_templates::preview_project_prompt_template(
-                &config.project_dir,
-                config::global_prompts_dir().as_deref(),
-                &name,
-            )
-        }
-    }
-}
-
-fn dispatch_themes(config: &AppConfig, command: ThemePackageCommand) -> anyhow::Result<String> {
-    match command {
-        ThemePackageCommand::List => themes::list_project_themes(&config.project_dir),
-        ThemePackageCommand::Preview { name } => {
-            themes::preview_project_theme(&config.project_dir, &name)
-        }
-    }
-}
-
 struct ExtensionPaths {
     root: PathBuf,
     state_path: PathBuf,
@@ -622,9 +485,11 @@ fn resolve_default_extension_root(config: &AppConfig, root: PathBuf) -> PathBuf 
 }
 
 /// Fetch and display providers from the models.dev catalog.
+#[allow(clippy::too_many_lines)]
 async fn list_catalog_providers(
     provider_id: Option<&str>,
     filter: Option<&str>,
+    json: bool,
 ) -> anyhow::Result<String> {
     let catalog = neo_ai::catalog::fetch_catalog()
         .await
@@ -640,6 +505,26 @@ async fn list_catalog_providers(
         let wire_str = wire.as_ref().map_or("unsupported", |t| t.as_config_str());
 
         let models = neo_ai::catalog::catalog_provider_models(entry);
+        if json {
+            let models_json: Vec<_> = models
+                .iter()
+                .map(|m| {
+                    json!({
+                        "id": m.id,
+                        "name": m.name,
+                        "max_context_tokens": m.max_context_tokens,
+                        "capabilities": m.capabilities,
+                    })
+                })
+                .collect();
+            return Ok(serde_json::to_string_pretty(&json!({
+                "id": pid,
+                "name": name,
+                "wire": wire_str,
+                "models": models_json,
+            }))? + "\n");
+        }
+
         let mut out = format!("{name} ({pid})  wire={wire_str}  models={}\n", models.len());
         for m in &models {
             let ctx = m
@@ -647,10 +532,11 @@ async fn list_catalog_providers(
                 .map_or("?".to_owned(), |n| n.to_string());
             let caps = m.capabilities.join(",");
             let display = m.name.as_deref().unwrap_or(&m.id);
-            out.push_str(&format!(
-                "  {id:<40} {display:<30} ctx={ctx:<10} [{caps}]\n",
+            let _ = writeln!(
+                out,
+                "  {id:<40} {display:<30} ctx={ctx:<10} [{caps}]",
                 id = m.id
-            ));
+            );
         }
         return Ok(out);
     }
@@ -658,6 +544,33 @@ async fn list_catalog_providers(
     // List all providers
     let mut entries: Vec<_> = catalog.values().collect();
     entries.sort_by_key(|e| e.id.clone());
+
+    if json {
+        let providers_json: Vec<_> = entries
+            .iter()
+            .filter_map(|entry| {
+                if let Some(f) = filter {
+                    let f_lower = f.to_ascii_lowercase();
+                    let id_match = entry.id.to_ascii_lowercase().contains(&f_lower);
+                    let name_match = entry
+                        .name
+                        .as_deref()
+                        .is_some_and(|n| n.to_ascii_lowercase().contains(&f_lower));
+                    if !id_match && !name_match {
+                        return None;
+                    }
+                }
+                let wire = neo_ai::catalog::infer_api_type(entry)?;
+                Some(json!({
+                    "id": entry.id,
+                    "name": entry.name,
+                    "wire": wire.as_config_str(),
+                    "model_count": entry.models.len(),
+                }))
+            })
+            .collect();
+        return Ok(serde_json::to_string_pretty(&json!({ "providers": providers_json }))? + "\n");
+    }
 
     let mut out = String::new();
     for entry in entries {
@@ -681,10 +594,11 @@ async fn list_catalog_providers(
         let wire_str = wire.as_ref().map_or("?", |t| t.as_config_str());
         let name = entry.name.as_deref().unwrap_or(&entry.id);
         let model_count = entry.models.len();
-        out.push_str(&format!(
-            "{id:<25} wire={wire_str:<18} models={model_count:<4} {name}\n",
+        let _ = writeln!(
+            out,
+            "{id:<25} wire={wire_str:<18} models={model_count:<4} {name}",
             id = entry.id
-        ));
+        );
     }
     Ok(out)
 }

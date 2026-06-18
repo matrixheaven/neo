@@ -57,7 +57,7 @@ impl ApiKeyInputState {
         // Provider name hint
         lines.push(format!(
             "\x1b[38;2;{}m Provider: {}\x1b[0m",
-            rgb(&self.theme.muted),
+            rgb(&self.theme.text_muted),
             self.provider_name
         ));
         lines.push(String::new());
@@ -66,13 +66,13 @@ impl ApiKeyInputState {
         let masked = self.masked_display();
         lines.push(format!(
             "\x1b[38;2;{}m API Key: \x1b[0m{masked}▏",
-            rgb(&self.theme.header)
+            rgb(&self.theme.text_primary)
         ));
 
         // Hint
         lines.push(format!(
             "\x1b[38;2;{}m Enter submit · Esc cancel\x1b[0m",
-            rgb(&self.theme.muted)
+            rgb(&self.theme.text_muted)
         ));
 
         // Bottom border

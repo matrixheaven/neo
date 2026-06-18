@@ -107,24 +107,42 @@ impl Line {
             return Self { spans: Vec::new() };
         }
 
-        let mut collected = String::new();
+        // Nothing to truncate: preserve original spans and styling.
+        let total = self.visible_width();
+        if total <= width {
+            return self.clone();
+        }
+
+        // Reserve one display column for the ellipsis.
+        let target = width.saturating_sub(1);
         let mut used = 0usize;
+        let mut out = Vec::new();
         for span in &self.spans {
-            let plain = strip_ansi(&span.to_ansi());
-            for ch in plain.chars() {
-                let cw = ch.width().unwrap_or(0);
-                if used + cw > width.saturating_sub(1) {
-                    collected.push('…');
-                    return Self {
-                        spans: vec![Span::raw(collected)],
-                    };
+            let span_width = span.visible_width();
+            if used + span_width <= target {
+                out.push(span.clone());
+                used += span_width;
+            } else {
+                let remaining = target.saturating_sub(used);
+                if remaining > 0 {
+                    let mut prefix = String::new();
+                    let mut prefix_width = 0usize;
+                    for ch in span.text().chars() {
+                        let cw = ch.width().unwrap_or(0);
+                        if prefix_width + cw > remaining {
+                            break;
+                        }
+                        prefix.push(ch);
+                        prefix_width += cw;
+                    }
+                    if !prefix.is_empty() {
+                        out.push(Span::styled(prefix, span.style));
+                    }
                 }
-                collected.push(ch);
-                used += cw;
+                break;
             }
         }
-        Self {
-            spans: vec![Span::raw(collected)],
-        }
+        out.push(Span::raw("…".to_owned()));
+        Self { spans: out }
     }
 }

@@ -131,6 +131,46 @@ async fn bash_background_handles_are_removed_after_finished_poll() {
 }
 
 #[tokio::test]
+async fn bash_background_finished_poll_does_not_wait_for_inherited_output_handles() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let started = registry
+        .run(
+            "bash",
+            &context,
+            json!({ "mode": "start", "command": "sleep 2 & printf done" }),
+        )
+        .await
+        .expect("background start should succeed");
+    let handle = started.details.as_ref().expect("start details")["handle"]
+        .as_str()
+        .expect("handle")
+        .to_owned();
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let polled = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        registry.run(
+            "bash",
+            &context,
+            json!({ "mode": "poll", "handle": handle }),
+        ),
+    )
+    .await
+    .expect("finished poll should not wait for inherited pipe handles")
+    .expect("background poll should succeed");
+
+    let details = polled.details.expect("poll details");
+    assert_eq!(details["status"], "exited");
+    assert_eq!(details["exit_code"], 0);
+    assert_eq!(details["stdout"], "done");
+}
+
+#[tokio::test]
 async fn bash_without_mode_remains_foreground_compatible() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
@@ -144,6 +184,110 @@ async fn bash_without_mode_remains_foreground_compatible() {
         .expect("foreground bash should still run");
 
     assert_eq!(result.details.expect("details")["stdout"], "foreground");
+}
+
+#[tokio::test]
+async fn bash_workdir_runs_command_from_workspace_subdirectory() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let subdir = workspace.path().join("sub");
+    std::fs::create_dir(&subdir).expect("subdir");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let result = registry
+        .run(
+            "bash",
+            &context,
+            json!({ "command": "pwd", "workdir": "sub" }),
+        )
+        .await
+        .expect("foreground bash should run");
+
+    assert_eq!(
+        result.details.expect("details")["stdout"],
+        format!(
+            "{}\n",
+            subdir.canonicalize().expect("canonical subdir").display()
+        )
+    );
+}
+
+#[tokio::test]
+async fn bash_workdir_rejects_paths_outside_workspace() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let error = registry
+        .run(
+            "bash",
+            &context,
+            json!({ "command": "pwd", "workdir": ".." }),
+        )
+        .await
+        .expect_err("workdir should stay inside workspace");
+
+    assert!(matches!(error, ToolError::PathOutsideWorkspace { .. }));
+}
+
+#[tokio::test]
+async fn bash_foreground_returns_after_shell_exits_with_inherited_background_output() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        registry.run(
+            "bash",
+            &context,
+            json!({ "command": "sleep 5 & printf done", "timeout_ms": 10000 }),
+        ),
+    )
+    .await
+    .expect("foreground bash should not wait for orphaned pipe handles")
+    .expect("foreground bash should run");
+
+    assert_eq!(result.details.expect("details")["stdout"], "done");
+}
+
+#[tokio::test]
+async fn bash_foreground_reports_missing_cd_promptly() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        registry.run(
+            "bash",
+            &context,
+            json!({
+                "command": "cd /definitely/not/a/neo/workspace && printf nope",
+                "timeout_ms": 10000
+            }),
+        ),
+    )
+    .await
+    .expect("missing cd should return promptly")
+    .expect("foreground bash should return command output");
+    let details = result.details.expect("details");
+
+    assert_eq!(details["exit_code"], 1);
+    assert!(
+        details["stderr"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("No such file")
+    );
 }
 
 #[tokio::test]

@@ -1,10 +1,10 @@
 use crate::{
     config::{self, AppConfig, workspace_sessions_dir},
+    modes::sessions::{SessionPickerScope as SessionDataScope, session_summaries},
     prompt_templates::{
         PromptTemplateLocation, discover_prompt_template_commands, expand_prompt_template_args,
         load_project_prompt_templates,
     },
-    session_commands::{SessionPickerScope as SessionDataScope, session_summaries},
 };
 use std::{
     cell::RefCell,
@@ -22,15 +22,14 @@ use std::{
 use anyhow::{Context, Result};
 use crossterm::{event, terminal::size};
 use neo_agent_core::{
-    AgentEvent, AgentMessage, Content, PendingQuestion, PermissionDecision, QuestionResponse,
-    ToolResult,
+    AgentEvent, AgentMessage, PendingQuestion, PermissionDecision, QuestionResponse,
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
 };
 use neo_tui::{
     ApprovalChoice, ApprovalResult, CommandSpec, ContextWindow, ImageProtocolPreference,
-    ImageRenderPolicy, InlineRenderer, InputEvent, InputParser, InputResult, KeyId,
-    KeybindingAction, KeybindingsManager, NeoTuiApp, NeoTuiRuntime, PickerItem, PromptEdit,
-    TerminalImageCapabilities,
+    ImageRenderPolicy, InputEvent, InputParser, InputResult, KeyId, KeybindingAction,
+    KeybindingsManager, NeoTuiApp, PickerItem, PromptEdit, TerminalImageCapabilities,
+    TranscriptPane, TuiRenderer,
 };
 
 use tokio::{
@@ -68,13 +67,10 @@ pub fn execute_with_startup(
     controller.apply_startup_options(config, options);
     controller.apply_startup_action(startup);
     if let StartupAction::LoadSession(session_id) = startup {
-        controller
-            .app
-            .apply_stream_update(neo_tui::StreamUpdate::Notice {
-                text: format!("Session resume requires a terminal (session {session_id})"),
-            });
+        controller.push_status(format!(
+            "Session resume requires a terminal (session {session_id})"
+        ));
     }
-    controller.ensure_kimi_runtime();
     controller.render_snapshot()
 }
 
@@ -92,11 +88,7 @@ pub async fn execute_tty_with_startup(
     controller.apply_startup_options(config, options);
     if let StartupAction::LoadSession(session_id) = &startup {
         if let Err(error) = controller.load_session_at_startup(session_id).await {
-            controller
-                .app
-                .apply_stream_update(neo_tui::StreamUpdate::Notice {
-                    text: format!("Failed to resume session: {error}"),
-                });
+            controller.push_status(format!("Failed to resume session: {error}"));
         }
     } else {
         controller.apply_startup_action(&startup);
@@ -104,7 +96,7 @@ pub async fn execute_tty_with_startup(
     let events = CrosstermEvents::new(controller.keybindings.clone());
     controller
         .run_terminal_loop_with_suspend(
-            |app, runtime| terminal.borrow_mut().draw_runtime(app, runtime),
+            |tui| terminal.borrow_mut().draw_tui(tui),
             || terminal.borrow_mut().suspend(),
             events,
         )
@@ -131,8 +123,7 @@ struct PendingCatalogFetch {
 }
 
 pub(crate) struct InteractiveController {
-    app: NeoTuiApp,
-    kimi_runtime: Option<neo_tui::NeoTuiRuntime>,
+    tui: neo_tui::NeoTui,
     keybindings: KeybindingsManager,
     run_turn: TurnDriver,
     session_items: Vec<SessionSummary>,
@@ -417,8 +408,12 @@ impl InteractiveController {
     ) -> Self {
         let workspace_root = workspace_root.into();
         Self {
-            app: NeoTuiApp::new(title, session_label, model_label, workspace_root.clone()),
-            kimi_runtime: None,
+            tui: neo_tui::NeoTui::with_welcome_banner(
+                NeoTuiApp::new(title, session_label, model_label, workspace_root.clone()),
+                80,
+                24,
+                env!("CARGO_PKG_VERSION"),
+            ),
             keybindings: KeybindingsManager::default(),
             run_turn,
             session_items: catalogs.session_items,
@@ -448,7 +443,10 @@ impl InteractiveController {
 
     #[allow(dead_code)]
     pub fn type_text(&mut self, text: &str) {
-        self.app.prompt_mut().apply_edit(PromptEdit::Insert(text));
+        self.tui
+            .app_mut()
+            .prompt_mut()
+            .apply_edit(PromptEdit::Insert(text));
     }
 
     #[cfg(test)]
@@ -461,6 +459,10 @@ impl InteractiveController {
         self.local_config.as_ref().map(|c| c.config_path.clone())
     }
 
+    fn transcript_mut(&mut self) -> &mut TranscriptPane {
+        self.tui.transcript_mut()
+    }
+
     /// Reloads configuration from disk and refreshes all derived state.
     fn refresh_config(&mut self) {
         let Some(path) = self.config_path() else {
@@ -468,30 +470,8 @@ impl InteractiveController {
         };
         // Build minimal overrides pointing at the same config path.
         let overrides = crate::config::ConfigOverrides {
-            model: None,
-            provider: None,
-            api_base: None,
-            api_key: None,
             config_path: Some(path),
-            sessions_dir: None,
-            mode: None,
-            model_scope: Vec::new(),
-            approve: false,
-            no_approve: false,
-            prompt_templates: Vec::new(),
-            skill_paths: Vec::new(),
-            extension_paths: Vec::new(),
-            theme_paths: Vec::new(),
-            no_extensions: false,
-            no_themes: false,
-            no_prompt_templates: false,
-            no_skills: false,
-            no_context_files: false,
-            offline: false,
-            system_prompt: None,
-            append_system_prompt: Vec::new(),
-            thinking: None,
-            tool_filters: crate::config::ToolFilterConfig::default(),
+            yolo: false,
         };
         match crate::config::AppConfig::load(overrides) {
             Ok(config) => {
@@ -499,7 +479,7 @@ impl InteractiveController {
                 self.session_items = catalogs.session_items;
                 self.session_list_error = catalogs.session_error;
                 self.model_items = catalogs.model_items;
-                self.app.set_theme(config.theme.theme);
+                self.tui.app_mut().set_theme(config.theme.theme);
                 self.local_config = Some(config);
             }
             Err(error) => {
@@ -521,67 +501,41 @@ impl InteractiveController {
         let loaded = (self.load_session)(session_id.to_owned())
             .await
             .with_context(|| format!("failed to load session {session_id}"))?;
-        self.rebuild_kimi_runtime_from_session(&loaded);
-        self.app
-            .load_session_transcript(loaded.label, loaded.notices, loaded.messages);
+        self.tui.app_mut().set_session_label(loaded.label.clone());
+        self.rebuild_transcript_from_session(&loaded);
         self.active_session_id = Some(session_id.to_owned());
         Ok(())
     }
 
     pub fn apply_startup_options(&mut self, config: &AppConfig, options: InteractiveOptions) {
-        self.app.set_theme(config.theme.theme);
-        self.app.set_permission_decision(config.permissions.shell);
-        self.app.set_image_render_policy(ImageRenderPolicy::new(
-            config.tui.image_protocol,
-            config.tui.fetch_remote_images,
-        ));
-        self.app
+        self.tui.app_mut().set_theme(config.theme.theme);
+        self.tui
+            .app_mut()
+            .set_permission_decision(config.permissions.shell);
+        self.tui
+            .app_mut()
+            .set_image_render_policy(ImageRenderPolicy::new(
+                config.tui.image_protocol,
+                config.tui.fetch_remote_images,
+            ));
+        self.tui
+            .app_mut()
             .set_image_capabilities(terminal_image_capabilities_for_policy(
                 config.tui.image_protocol,
                 |name| env::var(name),
             ));
-        let title = self.app.title().to_owned();
-        let session_label = self.app.session_label().to_owned();
-        let model_label = self.app.model_label().to_owned();
-        self.app
-            .transcript_mut()
-            .push(neo_tui::TranscriptItem::banner(
-                format!("Welcome to {title}"),
-                session_label,
-                model_label,
-                self.workspace_root.clone(),
-            ));
         if !options.verbose_startup {
             return;
         }
-        self.app
-            .transcript_mut()
-            .push(neo_tui::TranscriptItem::notice(
-                startup_notices(config).join("\n"),
-            ));
+        self.push_status(startup_notices(config).join("\n"));
     }
 
-    fn ensure_kimi_runtime(&mut self) {
-        if self.kimi_runtime.is_some() {
-            return;
-        }
-        let (cols, rows) = size().unwrap_or((80, 24));
-        let mut runtime = NeoTuiRuntime::new(usize::from(cols), usize::from(rows));
-        runtime.set_theme(self.app.theme());
-        runtime.push_welcome_banner(
-            self.app.title(),
-            self.app.session_label(),
-            self.app.model_label(),
-            &self.app.cwd_label(),
-            env!("CARGO_PKG_VERSION"),
-            None,
-        );
-        self.kimi_runtime = Some(runtime);
+    fn push_status(&mut self, message: impl Into<String>) {
+        self.transcript_mut().push_status(message);
     }
 
     #[allow(dead_code)]
     pub async fn submit_prompt(&mut self) -> Result<String> {
-        self.ensure_kimi_runtime();
         self.submit_current_prompt().await?;
         self.wait_for_active_turn().await?;
         Ok(self.render_snapshot())
@@ -593,32 +547,34 @@ impl InteractiveController {
         mut render: impl FnMut(&mut NeoTuiApp) -> Result<()>,
         events: impl TerminalEvents,
     ) -> Result<()> {
-        self.run_terminal_loop_with_suspend(|app, _runtime| render(app), || Ok(()), events)
+        self.run_terminal_loop_with_suspend(|tui| render(tui.app_mut()), || Ok(()), events)
             .await
     }
 
     #[cfg(test)]
-    pub async fn run_terminal_loop_with_runtime(
+    pub async fn run_terminal_loop_with_transcript(
         &mut self,
-        render: impl FnMut(&mut NeoTuiApp, &mut neo_tui::NeoTuiRuntime) -> Result<()>,
+        mut render: impl FnMut(&mut NeoTuiApp, &mut neo_tui::TranscriptPane) -> Result<()>,
         events: impl TerminalEvents,
     ) -> Result<()> {
-        self.run_terminal_loop_with_suspend(render, || Ok(()), events)
-            .await
+        self.run_terminal_loop_with_suspend(
+            |tui| {
+                let (app, transcript) = tui.split_mut();
+                render(app, transcript)
+            },
+            || Ok(()),
+            events,
+        )
+        .await
     }
 
     async fn run_terminal_loop_with_suspend(
         &mut self,
-        mut render: impl FnMut(&mut NeoTuiApp, &mut neo_tui::NeoTuiRuntime) -> Result<()>,
+        mut render: impl FnMut(&mut neo_tui::NeoTui) -> Result<()>,
         mut suspend: impl FnMut() -> Result<()>,
         mut events: impl TerminalEvents,
     ) -> Result<()> {
-        self.ensure_kimi_runtime();
-        let runtime = self
-            .kimi_runtime
-            .as_mut()
-            .expect("NeoTuiRuntime is initialized before rendering");
-        render(&mut self.app, runtime)?;
+        render(&mut self.tui)?;
         loop {
             match events.poll_input_event(Duration::from_millis(50))? {
                 Some(event) => {
@@ -631,33 +587,21 @@ impl InteractiveController {
                             self.wait_for_active_turn().await?;
                         }
                         if had_active_turn {
-                            let runtime = self
-                                .kimi_runtime
-                                .as_mut()
-                                .expect("NeoTuiRuntime remains initialized while rendering");
-                            render(&mut self.app, runtime)?;
+                            render(&mut self.tui)?;
                         }
                         break;
                     }
                     if self.take_suspend_requested() {
                         suspend()?;
-                        let runtime = self
-                            .kimi_runtime
-                            .as_mut()
-                            .expect("NeoTuiRuntime remains initialized after suspend");
-                        render(&mut self.app, runtime)?;
+                        render(&mut self.tui)?;
                     }
                 }
                 None => tokio::task::yield_now().await,
             }
             self.drain_active_turn().await?;
             self.poll_pending_catalog_fetch().await;
-            let runtime = self
-                .kimi_runtime
-                .as_mut()
-                .expect("NeoTuiRuntime remains initialized while rendering");
-            self.app.advance_activity_frame();
-            render(&mut self.app, runtime)?;
+            self.tui.app_mut().advance_activity_frame();
+            render(&mut self.tui)?;
         }
         Ok(())
     }
@@ -665,59 +609,84 @@ impl InteractiveController {
     async fn handle_input_event(&mut self, event: InputEvent) -> Result<bool> {
         // If a rich dialog overlay is focused, forward ALL input events to it
         // first. Rich dialogs consume keys, actions, submit, cancel, etc.
-        if self.app.focused_overlay_is_rich_dialog() {
-            let result = self.app.handle_focused_dialog_input(event);
+        if self.tui.app_mut().focused_overlay_is_rich_dialog() {
+            let result = self.tui.app_mut().handle_focused_dialog_input(event);
             self.process_rich_dialog_result(result).await?;
             return Ok(false);
         }
         match event {
             InputEvent::Insert(character) => {
                 self.clear_pending_exit_confirmation();
-                self.app
+                self.tui
+                    .app_mut()
                     .prompt_mut()
                     .apply_edit(PromptEdit::Insert(&character.to_string()));
                 self.sync_inline_prompt_completion();
             }
             InputEvent::Paste(text) => {
                 self.clear_pending_exit_confirmation();
-                self.app.prompt_mut().apply_edit(PromptEdit::Insert(&text));
+                self.tui
+                    .app_mut()
+                    .prompt_mut()
+                    .apply_edit(PromptEdit::Insert(&text));
                 self.sync_inline_prompt_completion();
             }
             InputEvent::Key(key) => return self.handle_keybinding_key(&key).await,
             InputEvent::Action(action) => return self.handle_keybinding_action(action).await,
             InputEvent::Backspace => {
                 self.clear_pending_exit_confirmation();
-                self.app.prompt_mut().apply_edit(PromptEdit::Backspace);
+                self.tui
+                    .app_mut()
+                    .prompt_mut()
+                    .apply_edit(PromptEdit::Backspace);
                 self.sync_inline_prompt_completion();
             }
             InputEvent::Delete => {
                 self.clear_pending_exit_confirmation();
-                self.app.prompt_mut().apply_edit(PromptEdit::Delete);
+                self.tui
+                    .app_mut()
+                    .prompt_mut()
+                    .apply_edit(PromptEdit::Delete);
                 self.sync_inline_prompt_completion();
             }
             InputEvent::MoveLeft => {
                 self.clear_pending_exit_confirmation();
-                self.app.prompt_mut().apply_edit(PromptEdit::MoveLeft);
+                self.tui
+                    .app_mut()
+                    .prompt_mut()
+                    .apply_edit(PromptEdit::MoveLeft);
                 self.sync_inline_prompt_completion();
             }
             InputEvent::MoveRight => {
                 self.clear_pending_exit_confirmation();
-                self.app.prompt_mut().apply_edit(PromptEdit::MoveRight);
+                self.tui
+                    .app_mut()
+                    .prompt_mut()
+                    .apply_edit(PromptEdit::MoveRight);
                 self.sync_inline_prompt_completion();
             }
             InputEvent::MoveHome => {
                 self.clear_pending_exit_confirmation();
-                self.app.prompt_mut().apply_edit(PromptEdit::MoveHome);
+                self.tui
+                    .app_mut()
+                    .prompt_mut()
+                    .apply_edit(PromptEdit::MoveHome);
                 self.sync_inline_prompt_completion();
             }
             InputEvent::MoveEnd => {
                 self.clear_pending_exit_confirmation();
-                self.app.prompt_mut().apply_edit(PromptEdit::MoveEnd);
+                self.tui
+                    .app_mut()
+                    .prompt_mut()
+                    .apply_edit(PromptEdit::MoveEnd);
                 self.sync_inline_prompt_completion();
             }
             InputEvent::NewLine => {
                 self.clear_pending_exit_confirmation();
-                self.app.prompt_mut().apply_edit(PromptEdit::Insert("\n"));
+                self.tui
+                    .app_mut()
+                    .prompt_mut()
+                    .apply_edit(PromptEdit::Insert("\n"));
                 self.sync_inline_prompt_completion();
             }
             InputEvent::Submit => {
@@ -726,11 +695,11 @@ impl InteractiveController {
             }
             InputEvent::ScrollUp(rows) => {
                 self.clear_pending_exit_confirmation();
-                self.app.scroll_transcript_up(rows);
+                self.transcript_mut().scroll_transcript_up(rows);
             }
             InputEvent::ScrollDown(rows) => {
                 self.clear_pending_exit_confirmation();
-                self.app.scroll_transcript_down(rows);
+                self.transcript_mut().scroll_transcript_down(rows);
             }
             InputEvent::Resize { .. } => {}
             InputEvent::Cancel => {
@@ -757,11 +726,11 @@ impl InteractiveController {
 
     async fn handle_keybinding_key(&mut self, key: &KeyId) -> Result<bool> {
         let actions = self.keybindings.matching_actions(key);
-        let priority = if self.app.focused_overlay().is_some_and(|overlay| {
+        let priority = if self.tui.app_mut().focused_overlay().is_some_and(|overlay| {
             matches!(overlay.kind, neo_tui::OverlayKind::PromptCompletion(_))
         }) {
             PROMPT_COMPLETION_ACTION_PRIORITY
-        } else if self.app.focused_overlay_id().is_some() {
+        } else if self.tui.app_mut().focused_overlay_id().is_some() {
             OVERLAY_ACTION_PRIORITY
         } else {
             EDITING_ACTION_PRIORITY
@@ -769,7 +738,7 @@ impl InteractiveController {
 
         for action in priority {
             if *action == KeybindingAction::TranscriptCopySelection
-                && self.app.transcript_selection().is_none()
+                && !self.tui.transcript().has_transcript_selection()
             {
                 continue;
             }
@@ -792,7 +761,10 @@ impl InteractiveController {
         match action {
             KeybindingAction::InputNewLine => {
                 self.clear_pending_exit_confirmation();
-                self.app.prompt_mut().apply_edit(PromptEdit::Insert("\n"));
+                self.tui
+                    .app_mut()
+                    .prompt_mut()
+                    .apply_edit(PromptEdit::Insert("\n"));
             }
             KeybindingAction::InputTab => self.complete_prompt_or_insert_tab(),
             KeybindingAction::InputCopy => self.copy_prompt_to_clipboard(),
@@ -809,56 +781,52 @@ impl InteractiveController {
                 self.toggle_session_picker_scope()?;
             }
             KeybindingAction::SessionFork => {
-                if self.app.selected_session().is_some() {
+                if self.tui.app_mut().selected_session().is_some() {
                     self.fork_selected_session().await?;
                 }
             }
             KeybindingAction::ModelPickerOpen => {
-                let toggled_runtime_tool = self
-                    .kimi_runtime
-                    .as_mut()
-                    .is_some_and(NeoTuiRuntime::toggle_tool_output_expanded);
-                if !toggled_runtime_tool && !self.app.toggle_selected_transcript_detail() {
+                if !self.transcript_mut().toggle_tool_output_expanded() {
                     self.open_model_picker();
                 }
             }
             KeybindingAction::TogglePlanMode => {
-                let currently_active = self.app.is_plan_mode();
-                self.app.set_plan_mode(!currently_active);
-                self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                    text: if !currently_active {
-                        " Entered plan mode — read-only until you exit".to_string()
-                    } else {
-                        "Exited plan mode".to_string()
-                    },
+                let currently_active = self.tui.app_mut().is_plan_mode();
+                self.tui.app_mut().set_plan_mode(!currently_active);
+                self.push_status(if !currently_active {
+                    " Entered plan mode — read-only until you exit"
+                } else {
+                    "Exited plan mode"
                 });
             }
             KeybindingAction::InputSubmit => {
                 self.clear_pending_exit_confirmation();
                 self.submit_current_prompt().await?;
             }
-            KeybindingAction::SelectUp => self.app.move_overlay_selection_up(),
-            KeybindingAction::SelectDown => self.app.move_overlay_selection_down(),
-            KeybindingAction::SelectPageUp => self.app.move_overlay_selection_page_up(),
-            KeybindingAction::SelectPageDown => self.app.move_overlay_selection_page_down(),
+            KeybindingAction::SelectUp => self.tui.app_mut().move_overlay_selection_up(),
+            KeybindingAction::SelectDown => self.tui.app_mut().move_overlay_selection_down(),
+            KeybindingAction::SelectPageUp => self.tui.app_mut().move_overlay_selection_page_up(),
+            KeybindingAction::SelectPageDown => {
+                self.tui.app_mut().move_overlay_selection_page_down()
+            }
             KeybindingAction::SelectConfirm => {
-                if self.app.selected_command().is_some() {
+                if self.tui.app_mut().selected_command().is_some() {
                     self.run_selected_command().await?;
-                } else if self.app.approval_choice().is_some() {
-                    if let Some(result) = self.app.confirm_approval() {
+                } else if self.tui.app_mut().approval_choice().is_some() {
+                    if let Some(result) = self.tui.app_mut().confirm_approval() {
                         self.resolve_approval(&result);
                     }
-                } else if self.app.question_dialog_state().is_some() {
-                    if let Some(result) = self.app.confirm_question() {
+                } else if self.tui.app_mut().question_dialog_state().is_some() {
+                    if let Some(result) = self.tui.app_mut().confirm_question() {
                         self.resolve_question(&result.id, result.answers);
                     }
-                } else if self.app.selected_session().is_some() {
+                } else if self.tui.app_mut().selected_session().is_some() {
                     self.load_selected_session().await?;
-                } else if self.app.selected_model().is_some() {
+                } else if self.tui.app_mut().selected_model().is_some() {
                     self.apply_selected_model()?;
-                } else if self.app.selected_prompt_completion().is_some() {
-                    let _ = self.app.confirm_prompt_completion();
-                } else if self.app.focused_overlay_id().is_none() {
+                } else if self.tui.app_mut().selected_prompt_completion().is_some() {
+                    let _ = self.tui.app_mut().confirm_prompt_completion();
+                } else if self.tui.app_mut().focused_overlay_id().is_none() {
                     self.submit_current_prompt().await?;
                 }
             }
@@ -875,8 +843,8 @@ impl InteractiveController {
             KeybindingAction::EditorCursorUp | KeybindingAction::EditorCursorDown => {
                 unreachable!("prompt history actions are handled before overlay actions")
             }
-            KeybindingAction::EditorPageUp => self.app.scroll_transcript_up(8),
-            KeybindingAction::EditorPageDown => self.app.scroll_transcript_down(8),
+            KeybindingAction::EditorPageUp => self.transcript_mut().scroll_transcript_up(8),
+            KeybindingAction::EditorPageDown => self.transcript_mut().scroll_transcript_down(8),
             KeybindingAction::EditorCursorLeft
             | KeybindingAction::EditorCursorRight
             | KeybindingAction::EditorCursorWordLeft
@@ -908,13 +876,13 @@ impl InteractiveController {
     fn cancel_focused_overlay(&mut self) -> bool {
         // Check if the focused overlay is a question dialog and handle its
         // cancellation (drops response_tx → AskUserTool gets "cancelled").
-        if self.app.question_dialog_is_focused() {
-            if let Some(id) = self.app.cancel_question() {
+        if self.tui.app_mut().question_dialog_is_focused() {
+            if let Some(id) = self.tui.app_mut().cancel_question() {
                 self.pending_questions.remove(&id);
             }
             return true;
         }
-        let Some(overlay) = self.app.close_focused_overlay() else {
+        let Some(overlay) = self.tui.app_mut().close_focused_overlay() else {
             return false;
         };
         if let neo_tui::OverlayKind::Approval(modal) = overlay.kind {
@@ -929,27 +897,31 @@ impl InteractiveController {
 
     fn complete_prompt_or_insert_tab(&mut self) {
         self.clear_pending_exit_confirmation();
-        if self.app.selected_prompt_completion().is_some() {
-            let _ = self.app.confirm_prompt_completion();
+        if self.tui.app_mut().selected_prompt_completion().is_some() {
+            let _ = self.tui.app_mut().confirm_prompt_completion();
             return;
         }
-        let Some(prefix) = self.app.prompt().completion_prefix() else {
-            self.app.prompt_mut().apply_edit(PromptEdit::Insert("\t"));
+        let Some(prefix) = self.tui.app_mut().prompt().completion_prefix() else {
+            self.tui
+                .app_mut()
+                .prompt_mut()
+                .apply_edit(PromptEdit::Insert("\t"));
             return;
         };
         let completions =
             match prompt_completions(&self.completion_root, &prefix.text, &self.model_items) {
                 Ok(completions) => completions,
                 Err(error) => {
-                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                        text: format!("Completion error: {error}"),
-                    });
+                    self.push_status(format!("Completion error: {error}"));
                     return;
                 }
             };
 
         if completions.is_empty() {
-            self.app.prompt_mut().apply_edit(PromptEdit::Insert("\t"));
+            self.tui
+                .app_mut()
+                .prompt_mut()
+                .apply_edit(PromptEdit::Insert("\t"));
             return;
         }
 
@@ -957,7 +929,8 @@ impl InteractiveController {
             && common_prefix.chars().count() > prefix.text.chars().count()
         {
             let _ = self
-                .app
+                .tui
+                .app_mut()
                 .prompt_mut()
                 .replace_completion_prefix(&prefix, &common_prefix);
             return;
@@ -965,17 +938,20 @@ impl InteractiveController {
 
         if completions.len() == 1 {
             let _ = self
-                .app
+                .tui
+                .app_mut()
                 .prompt_mut()
                 .replace_completion_prefix(&prefix, &completions[0].value);
             return;
         }
 
-        self.app.open_prompt_completion_picker(prefix, completions);
+        self.tui
+            .app_mut()
+            .open_prompt_completion_picker(prefix, completions);
     }
 
     fn sync_inline_prompt_completion(&mut self) {
-        let Some(prefix) = self.app.prompt().completion_prefix() else {
+        let Some(prefix) = self.tui.app_mut().prompt().completion_prefix() else {
             self.close_inline_prompt_completion();
             return;
         };
@@ -990,9 +966,7 @@ impl InteractiveController {
                 Ok(completions) => completions,
                 Err(error) => {
                     self.close_inline_prompt_completion();
-                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                        text: format!("Completion error: {error}"),
-                    });
+                    self.push_status(format!("Completion error: {error}"));
                     return;
                 }
             };
@@ -1002,23 +976,26 @@ impl InteractiveController {
             return;
         }
 
-        let focused_is_prompt_completion = self.app.focused_overlay().is_some_and(|overlay| {
-            matches!(overlay.kind, neo_tui::OverlayKind::PromptCompletion(_))
-        });
+        let focused_is_prompt_completion =
+            self.tui.app_mut().focused_overlay().is_some_and(|overlay| {
+                matches!(overlay.kind, neo_tui::OverlayKind::PromptCompletion(_))
+            });
         if focused_is_prompt_completion {
-            let _ = self.app.close_focused_overlay();
-        } else if self.app.focused_overlay_id().is_some() {
+            let _ = self.tui.app_mut().close_focused_overlay();
+        } else if self.tui.app_mut().focused_overlay_id().is_some() {
             return;
         }
 
-        self.app.open_prompt_completion_picker(prefix, completions);
+        self.tui
+            .app_mut()
+            .open_prompt_completion_picker(prefix, completions);
     }
 
     fn close_inline_prompt_completion(&mut self) {
-        if self.app.focused_overlay().is_some_and(|overlay| {
+        if self.tui.app_mut().focused_overlay().is_some_and(|overlay| {
             matches!(overlay.kind, neo_tui::OverlayKind::PromptCompletion(_))
         }) {
-            let _ = self.app.close_focused_overlay();
+            let _ = self.tui.app_mut().close_focused_overlay();
         }
     }
 
@@ -1026,13 +1003,13 @@ impl InteractiveController {
         match action {
             KeybindingAction::EditorCursorUp => {
                 self.clear_pending_exit_confirmation();
-                self.app.prompt_mut().recall_previous_history();
+                self.tui.app_mut().prompt_mut().recall_previous_history();
                 self.sync_inline_prompt_completion();
                 return true;
             }
             KeybindingAction::EditorCursorDown => {
                 self.clear_pending_exit_confirmation();
-                self.app.prompt_mut().recall_next_history();
+                self.tui.app_mut().prompt_mut().recall_next_history();
                 self.sync_inline_prompt_completion();
                 return true;
             }
@@ -1057,26 +1034,30 @@ impl InteractiveController {
             _ => return false,
         };
         self.clear_pending_exit_confirmation();
-        self.app.prompt_mut().apply_edit(edit);
+        self.tui.app_mut().prompt_mut().apply_edit(edit);
         self.sync_inline_prompt_completion();
         true
     }
 
     fn handle_transcript_keybinding_action(&mut self, action: KeybindingAction) -> bool {
         match action {
-            KeybindingAction::TranscriptSelectionStart => self.app.select_visible_transcript_item(),
-            KeybindingAction::TranscriptSelectionClear => self.app.clear_transcript_selection(),
+            KeybindingAction::TranscriptSelectionStart => {
+                self.transcript_mut().select_visible_transcript_entry();
+            }
+            KeybindingAction::TranscriptSelectionClear => {
+                self.transcript_mut().clear_transcript_selection();
+            }
             KeybindingAction::TranscriptSelectionExtendUp => {
-                self.app.extend_transcript_selection_up(1);
+                self.transcript_mut().extend_transcript_selection_up(1);
             }
             KeybindingAction::TranscriptSelectionExtendDown => {
-                self.app.extend_transcript_selection_down(1);
+                self.transcript_mut().extend_transcript_selection_down(1);
             }
             KeybindingAction::TranscriptSelectionExtendPageUp => {
-                self.app.extend_transcript_selection_up(8);
+                self.transcript_mut().extend_transcript_selection_up(8);
             }
             KeybindingAction::TranscriptSelectionExtendPageDown => {
-                self.app.extend_transcript_selection_down(8);
+                self.transcript_mut().extend_transcript_selection_down(8);
             }
             KeybindingAction::TranscriptCopySelection => {
                 self.copy_transcript_selection_to_clipboard();
@@ -1087,14 +1068,14 @@ impl InteractiveController {
     }
 
     fn copy_prompt_to_clipboard(&mut self) {
-        let Some(copied) = self.app.copy_prompt_text() else {
+        let Some(copied) = self.tui.app_mut().copy_prompt_text() else {
             return;
         };
         self.write_clipboard_text(&copied);
     }
 
     fn copy_transcript_selection_to_clipboard(&mut self) {
-        let Some(copied) = self.app.copy_selected_transcript_text() else {
+        let Some(copied) = self.transcript_mut().copy_selected_transcript_text() else {
             return;
         };
         self.write_clipboard_text(&copied);
@@ -1102,30 +1083,34 @@ impl InteractiveController {
 
     fn write_clipboard_text(&mut self, copied: &str) {
         if let Err(error) = (self.clipboard_writer)(copied) {
-            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                text: format!("Clipboard copy failed: {error}"),
-            });
+            self.push_status(format!("Clipboard copy failed: {error}"));
         }
     }
 
     fn handle_app_clear(&mut self) -> bool {
-        if self.app.transcript_selection().is_some() {
+        if self.tui.transcript().has_transcript_selection() {
             self.copy_transcript_selection_to_clipboard();
             self.clear_pending_exit_confirmation();
             return false;
         }
-        if !self.app.prompt().text.is_empty() {
-            self.app.prompt_mut().apply_edit(PromptEdit::Clear);
+        if !self.tui.app_mut().prompt().text.is_empty() {
+            self.tui
+                .app_mut()
+                .prompt_mut()
+                .apply_edit(PromptEdit::Clear);
         }
         self.handle_exit_confirmation(ExitGesture::CtrlC)
     }
 
     fn handle_app_exit(&mut self) -> bool {
-        if self.app.prompt().text.is_empty() {
+        if self.tui.app_mut().prompt().text.is_empty() {
             return self.handle_exit_confirmation(ExitGesture::CtrlD);
         }
         self.clear_pending_exit_confirmation();
-        self.app.prompt_mut().apply_edit(PromptEdit::Delete);
+        self.tui
+            .app_mut()
+            .prompt_mut()
+            .apply_edit(PromptEdit::Delete);
         false
     }
 
@@ -1136,7 +1121,7 @@ impl InteractiveController {
             .is_some_and(|confirmation| confirmation.matches(gesture))
         {
             self.pending_exit_confirmation = None;
-            self.app.set_exit_confirmation_label(None);
+            self.tui.app_mut().set_exit_confirmation_label(None);
             return true;
         }
         let message = match gesture {
@@ -1144,39 +1129,37 @@ impl InteractiveController {
             ExitGesture::CtrlD => "Press Ctrl-D again to exit",
         };
         self.show_notice(message);
-        self.app
+        self.tui
+            .app_mut()
             .set_exit_confirmation_label(Some(message.to_owned()));
         self.pending_exit_confirmation = Some(ExitConfirmation::new(gesture));
         false
     }
 
     fn show_notice(&mut self, message: impl Into<String>) {
-        self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-            text: message.into(),
-        });
+        self.push_status(message);
     }
 
     fn clear_pending_exit_confirmation(&mut self) {
         self.pending_exit_confirmation = None;
-        self.app.set_exit_confirmation_label(None);
+        self.tui.app_mut().set_exit_confirmation_label(None);
     }
 
     fn open_command_palette(&mut self) {
         let (commands, error) = command_specs(&self.completion_root);
         if let Some(error) = error {
-            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                text: format!("Error loading prompt templates: {error}"),
-            });
+            self.push_status(format!("Error loading prompt templates: {error}"));
         }
-        self.app.open_command_palette(commands);
+        self.tui.app_mut().open_command_palette(commands);
     }
 
     async fn run_selected_command(&mut self) -> Result<()> {
-        let Some(command) = self.app.confirm_command_palette() else {
+        let Some(command) = self.tui.app_mut().confirm_command_palette() else {
             return Ok(());
         };
         if let Some(name) = command.id.strip_prefix("prompt-template.") {
-            self.app
+            self.tui
+                .app_mut()
                 .prompt_mut()
                 .apply_edit(PromptEdit::Insert(&format!("/{name} ")));
             return Ok(());
@@ -1187,8 +1170,8 @@ impl InteractiveController {
             "models" => self.open_model_picker(),
             "providers" => self.open_provider_picker(),
             "copy-prompt" => self.copy_prompt_to_clipboard(),
-            "select-transcript" => self.app.select_visible_transcript_item(),
-            "clear-transcript-selection" => self.app.clear_transcript_selection(),
+            "select-transcript" => self.transcript_mut().select_visible_transcript_entry(),
+            "clear-transcript-selection" => self.transcript_mut().clear_transcript_selection(),
             "copy-transcript-selection" => self.copy_transcript_selection_to_clipboard(),
             "session.exportHtml" => self.export_active_session_to_html().await?,
             "fork" => self.fork_current_session().await?,
@@ -1196,43 +1179,38 @@ impl InteractiveController {
                 // Toggle is handled in submit_current_prompt where we have
                 // access to the raw prompt text for /plan on|off|clear parsing.
                 // This path is for bare command invocation via picker.
-                let currently_active = self.app.is_plan_mode();
-                self.app.set_plan_mode(!currently_active);
-                self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                    text: if !currently_active {
-                        " Entered plan mode — read-only until you exit".to_string()
-                    } else {
-                        "Exited plan mode".to_string()
-                    },
+                let currently_active = self.tui.app_mut().is_plan_mode();
+                self.tui.app_mut().set_plan_mode(!currently_active);
+                self.push_status(if !currently_active {
+                    " Entered plan mode — read-only until you exit"
+                } else {
+                    "Exited plan mode"
                 });
             }
             "submit" => self.submit_current_prompt().await?,
-            unknown => self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                text: format!("Unknown command: {unknown}"),
-            }),
+            unknown => self.push_status(format!("Unknown command: {unknown}")),
         }
         Ok(())
     }
 
     async fn export_active_session_to_html(&mut self) -> Result<()> {
         let Some(session_id) = self.active_session_id.clone() else {
-            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                text: "No active session to export".to_owned(),
-            });
+            self.push_status("No active session to export");
             return Ok(());
         };
         let config = self
             .local_config
             .clone()
             .context("session HTML export is unavailable")?;
-        let html = crate::session_commands::export_html(&session_id, &config).await?;
+        let html = crate::modes::sessions::export_html(&session_id, &config).await?;
         let output_path =
-            crate::session_commands::session_path(&session_id, &config)?.with_extension("html");
+            crate::modes::sessions::session_path(&session_id, &config)?.with_extension("html");
         fs::write(&output_path, html)
             .with_context(|| format!("failed to write {}", output_path.display()))?;
-        self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-            text: format!("Exported session {session_id} to {}", output_path.display()),
-        });
+        self.push_status(format!(
+            "Exported session {session_id} to {}",
+            output_path.display()
+        ));
         Ok(())
     }
 
@@ -1241,12 +1219,12 @@ impl InteractiveController {
     fn handle_slash_command(&mut self, prompt: &str) -> bool {
         match prompt.trim() {
             "/resume" => {
-                self.app.prompt_mut().clear_after_submit();
+                self.tui.app_mut().prompt_mut().clear_after_submit();
                 self.open_session_picker();
                 return true;
             }
             "/provider" => {
-                self.app.prompt_mut().clear_after_submit();
+                self.tui.app_mut().prompt_mut().clear_after_submit();
                 self.open_provider_picker();
                 return true;
             }
@@ -1254,45 +1232,35 @@ impl InteractiveController {
         }
         // /model [alias] — opens model picker, optionally pre-selected
         if prompt.trim() == "/model" || prompt.trim().starts_with("/model ") {
-            self.app.prompt_mut().clear_after_submit();
+            self.tui.app_mut().prompt_mut().clear_after_submit();
             let alias = prompt.trim().strip_prefix("/model").unwrap_or("").trim();
             if alias.is_empty() {
                 self.open_model_picker();
             } else if self.model_items.iter().any(|item| item.value == alias) {
                 self.open_model_picker_with_alias(alias);
             } else {
-                self.app.apply_stream_update(neo_tui::StreamUpdate::Error {
-                    text: format!("Unknown model alias: {alias}"),
-                });
+                self.push_status(format!("Error: Unknown model alias: {alias}"));
             }
             return true;
         }
         if let Some(rest) = prompt.trim().strip_prefix("/plan") {
-            self.app.prompt_mut().clear_after_submit();
+            self.tui.app_mut().prompt_mut().clear_after_submit();
             let arg = rest.trim();
             match arg {
                 "" | "on" => {
-                    if self.app.is_plan_mode() {
-                        self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                            text: "Plan mode is already active".to_string(),
-                        });
+                    if self.tui.app_mut().is_plan_mode() {
+                        self.push_status("Plan mode is already active");
                     } else {
-                        self.app.set_plan_mode(true);
-                        self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                            text: " Entered plan mode — read-only until you exit".to_string(),
-                        });
+                        self.tui.app_mut().set_plan_mode(true);
+                        self.push_status(" Entered plan mode — read-only until you exit");
                     }
                 }
                 "off" => {
-                    if self.app.is_plan_mode() {
-                        self.app.set_plan_mode(false);
-                        self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                            text: "Exited plan mode".to_string(),
-                        });
+                    if self.tui.app_mut().is_plan_mode() {
+                        self.tui.app_mut().set_plan_mode(false);
+                        self.push_status("Exited plan mode");
                     } else {
-                        self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                            text: "Plan mode is not active".to_string(),
-                        });
+                        self.push_status("Plan mode is not active");
                     }
                 }
                 "clear" => {
@@ -1302,20 +1270,16 @@ impl InteractiveController {
                         .and_then(|mut entries| entries.next().and_then(std::result::Result::ok))
                         .and_then(|entry| std::fs::write(entry.path(), "").ok())
                         .is_some();
-                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                        text: if cleared {
-                            "Plan file cleared".to_string()
-                        } else {
-                            "No plan file to clear".to_string()
-                        },
+                    self.push_status(if cleared {
+                        "Plan file cleared"
+                    } else {
+                        "No plan file to clear"
                     });
                 }
                 _ => {
-                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                        text: format!(
-                            "Unknown /plan argument: '{arg}'. Usage: /plan [on|off|clear]"
-                        ),
-                    });
+                    self.push_status(format!(
+                        "Unknown /plan argument: '{arg}'. Usage: /plan [on|off|clear]"
+                    ));
                 }
             }
             return true;
@@ -1325,12 +1289,10 @@ impl InteractiveController {
 
     async fn submit_current_prompt(&mut self) -> Result<()> {
         if self.active_turn.is_some() {
-            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                text: "A turn is already running".to_owned(),
-            });
+            self.push_status("A turn is already running");
             return Ok(());
         }
-        let prompt = self.app.prompt().text.trim_end().to_owned();
+        let prompt = self.tui.app_mut().prompt().text.trim_end().to_owned();
         if prompt.trim().is_empty() {
             return Ok(());
         }
@@ -1344,7 +1306,7 @@ impl InteractiveController {
             return Ok(());
         }
 
-        let Some(prompt) = self.app.submit_prompt() else {
+        let Some(prompt) = self.tui.app_mut().submit_prompt() else {
             return Ok(());
         };
         let PromptSubmission {
@@ -1356,9 +1318,7 @@ impl InteractiveController {
             self.local_config.as_ref(),
             &self.completion_root,
         )?;
-        if let Some(runtime) = &mut self.kimi_runtime {
-            runtime.push_user_message(prompt.clone());
-        }
+        self.tui.transcript_mut().push_user_message(prompt.clone());
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (approval_tx, approval_rx) = mpsc::unbounded_channel();
         let (session_id_tx, session_id_rx) = mpsc::unbounded_channel();
@@ -1445,9 +1405,7 @@ impl InteractiveController {
             match event {
                 Ok(event) => self.apply_turn_event(event),
                 Err(error) => {
-                    self.app.apply_stream_update(neo_tui::StreamUpdate::Error {
-                        text: error.to_string(),
-                    });
+                    self.push_status(format!("Error: {error}"));
                 }
             }
         }
@@ -1470,18 +1428,25 @@ impl InteractiveController {
                 match event {
                     Ok(event) => self.apply_turn_event(event),
                     Err(error) => {
-                        self.app.apply_stream_update(neo_tui::StreamUpdate::Error {
-                            text: error.to_string(),
-                        });
+                        self.push_status(format!("Error: {error}"));
                     }
                 }
             }
             // Turn-driver errors are already forwarded through the event channel
             // and rendered into the transcript. Keep the interactive shell alive.
-            if let Ok(outcome) = turn_result
-                && let Some(session_id) = outcome.session_id
-            {
-                self.set_active_session_id(session_id);
+            match turn_result {
+                Ok(outcome) => {
+                    if let Some(session_id) = outcome.session_id {
+                        self.set_active_session_id(session_id);
+                    }
+                }
+                Err(error) => {
+                    self.tui
+                        .app_mut()
+                        .apply_stream_update(neo_tui::StreamUpdate::Error {
+                            text: error.to_string(),
+                        });
+                }
             }
         } else {
             self.active_turn = Some(turn);
@@ -1491,18 +1456,15 @@ impl InteractiveController {
 
     fn set_active_session_id(&mut self, session_id: String) {
         self.active_session_id = Some(session_id.clone());
-        self.app.set_session_label(session_id);
-        self.ensure_kimi_runtime();
+        self.tui.app_mut().set_session_label(session_id);
     }
 
     fn apply_turn_event(&mut self, event: AgentEvent) {
         if self.always_approve && matches!(event, AgentEvent::ApprovalRequested { .. }) {
             return;
         }
-        if let Some(runtime) = &mut self.kimi_runtime {
-            runtime.apply_agent_event(event.clone());
-        }
-        self.app.apply_agent_event(event);
+        self.tui.transcript_mut().apply_agent_event(event.clone());
+        self.tui.app_mut().apply_agent_event(event);
     }
 
     fn register_pending_approval(&mut self, approval: crate::modes::run::PromptApprovalRequest) {
@@ -1528,21 +1490,19 @@ impl InteractiveController {
             }
             ApprovalChoice::Deny => PermissionDecision::Deny,
             // Revise is treated as Deny, but the feedback is stored so the
-            // runtime can include it in the tool result sent back to the model.
+            // transcript can include it in the tool result sent back to the model.
             ApprovalChoice::Revise => PermissionDecision::Deny,
         };
-        // Store revise feedback for the runtime to pick up when building the
+        // Store revise feedback for the transcript to pick up when building the
         // exit_plan_mode tool result.
         if result.choice == ApprovalChoice::Revise {
             if let Some(feedback) = &result.feedback {
                 // Feedback is communicated via the approval subject side-channel:
                 // we can't reach the runtime's plan_review_feedback map from here,
                 // so we encode it in the resolved_approvals as a special marker.
-                // The runtime will check plan_review_feedback; for now, the feedback
+                // The transcript will check plan_review_feedback; for now, the feedback
                 // is passed through the TUI notice system.
-                self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                    text: format!("Revision feedback: {feedback}"),
-                });
+                self.push_status(format!("Revision feedback: {feedback}"));
             }
         }
         if let Some(tx) = self.pending_approvals.remove(&result.request_id) {
@@ -1562,11 +1522,13 @@ impl InteractiveController {
         // Synthesize a QuestionRequested event for the TUI to display the dialog.
         // The TUI's apply_agent_event will push a question overlay (implemented by
         // the TUI subagent).
-        self.app.apply_agent_event(AgentEvent::QuestionRequested {
-            turn: 0,
-            id: id.clone(),
-            questions,
-        });
+        self.tui
+            .app_mut()
+            .apply_agent_event(AgentEvent::QuestionRequested {
+                turn: 0,
+                id: id.clone(),
+                questions,
+            });
         self.pending_questions.insert(id, pending.response_tx);
     }
 
@@ -1594,15 +1556,11 @@ impl InteractiveController {
 
     fn open_session_picker_with_scope(&mut self, scope: SessionDataScope) {
         if let Some(error) = &self.session_list_error {
-            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                text: format!("Error loading sessions: {error}"),
-            });
+            self.push_status(format!("Error loading sessions: {error}"));
             return;
         }
         if self.session_items.is_empty() {
-            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                text: "No local sessions".to_owned(),
-            });
+            self.push_status("No local sessions");
             return;
         }
         let current_session_id = self.active_session_id.clone().unwrap_or_default();
@@ -1625,16 +1583,15 @@ impl InteractiveController {
                 )
             })
             .collect();
-        self.app
+        self.tui
+            .app_mut()
             .open_session_picker(&current_session_id, picker_scope, items);
     }
 
     fn open_model_picker(&mut self) {
         let entries = self.model_entries_for_picker();
         if entries.is_empty() {
-            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                text: "No configured models".to_owned(),
-            });
+            self.push_status("No configured models");
             return;
         }
         let current_alias = self
@@ -1642,24 +1599,24 @@ impl InteractiveController {
             .as_ref()
             .map(|m| format!("{}/{}", m.provider, m.model))
             .unwrap_or_default();
-        self.app
-            .open_tabbed_model_selector(neo_tui::dialogs::TabbedModelSelectorOptions {
+        let theme = self.tui.app().theme();
+        self.tui.app_mut().open_tabbed_model_selector(
+            neo_tui::dialogs::TabbedModelSelectorOptions {
                 models: entries,
                 current_alias,
                 selected_alias: None,
                 current_thinking: self.current_thinking,
                 initial_tab_id: None,
-                theme: self.app.theme(),
-            });
+                theme,
+            },
+        );
     }
 
     /// Open the model picker with a specific alias pre-selected.
     fn open_model_picker_with_alias(&mut self, alias: &str) {
         let entries = self.model_entries_for_picker();
         if entries.is_empty() {
-            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                text: "No configured models".to_owned(),
-            });
+            self.push_status("No configured models");
             return;
         }
         let current_alias = self
@@ -1671,15 +1628,17 @@ impl InteractiveController {
             .iter()
             .find(|e| e.alias == alias)
             .map(|e| e.provider_id.clone());
-        self.app
-            .open_tabbed_model_selector(neo_tui::dialogs::TabbedModelSelectorOptions {
+        let theme = self.tui.app().theme();
+        self.tui.app_mut().open_tabbed_model_selector(
+            neo_tui::dialogs::TabbedModelSelectorOptions {
                 models: entries,
                 current_alias,
                 selected_alias: Some(alias.to_owned()),
                 current_thinking: self.current_thinking,
                 initial_tab_id,
-                theme: self.app.theme(),
-            });
+                theme,
+            },
+        );
     }
 
     /// Resolve the ordered list of `ModelEntry` to show in the picker.
@@ -1696,15 +1655,11 @@ impl InteractiveController {
 
     fn open_provider_picker(&mut self) {
         let Some(config) = &self.local_config else {
-            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                text: "No config available".to_owned(),
-            });
+            self.push_status("No config available");
             return;
         };
         if config.providers.is_empty() {
-            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                text: "No configured providers".to_owned(),
-            });
+            self.push_status("No configured providers");
             return;
         }
         // Build provider sources from config
@@ -1721,16 +1676,18 @@ impl InteractiveController {
                 }
             })
             .collect();
-        self.app
+        let theme = self.tui.app().theme();
+        self.tui
+            .app_mut()
             .open_provider_manager(neo_tui::dialogs::ProviderManagerOptions {
                 sources,
                 active_provider_id,
-                theme: self.app.theme(),
+                theme,
             });
     }
 
     async fn load_selected_session(&mut self) -> Result<()> {
-        let Some(session) = self.app.confirm_session_picker() else {
+        let Some(session) = self.tui.app_mut().confirm_session_picker() else {
             return Ok(());
         };
 
@@ -1738,9 +1695,8 @@ impl InteractiveController {
             let loaded = (self.load_session)(session.id.clone())
                 .await
                 .with_context(|| format!("failed to load session {}", session.id))?;
-            self.rebuild_kimi_runtime_from_session(&loaded);
-            self.app
-                .load_session_transcript(loaded.label, loaded.notices, loaded.messages);
+            self.tui.app_mut().set_session_label(loaded.label.clone());
+            self.rebuild_transcript_from_session(&loaded);
             self.active_session_id = Some(session.id);
             return Ok(());
         }
@@ -1750,9 +1706,7 @@ impl InteractiveController {
             session.work_dir.display(),
             session.id
         );
-        self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-            text: command.clone(),
-        });
+        self.push_status(command.clone());
         if let Err(error) = (self.clipboard_writer)(&command) {
             tracing::warn!("failed to copy resume command to clipboard: {error}");
         }
@@ -1761,7 +1715,7 @@ impl InteractiveController {
 
     fn toggle_session_picker_scope(&mut self) -> Result<()> {
         let current_scope = {
-            let Some(overlay) = self.app.focused_overlay() else {
+            let Some(overlay) = self.tui.app_mut().focused_overlay() else {
                 return Ok(());
             };
             let neo_tui::OverlayKind::SessionPicker(picker) = &overlay.kind else {
@@ -1779,83 +1733,74 @@ impl InteractiveController {
         match session_summaries(config, new_scope) {
             Ok(summaries) => {
                 self.session_items = summaries;
-                self.app.close_focused_overlay();
+                self.tui.app_mut().close_focused_overlay();
                 self.open_session_picker_with_scope(new_scope);
             }
             Err(error) => {
-                self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                    text: format!("Error loading sessions: {error}"),
-                });
+                self.push_status(format!("Error loading sessions: {error}"));
             }
         }
         Ok(())
     }
 
     async fn fork_selected_session(&mut self) -> Result<()> {
-        let Some(parent) = self.app.confirm_session_picker() else {
+        let Some(parent) = self.tui.app_mut().confirm_session_picker() else {
             return Ok(());
         };
         let forked = (self.fork_session)(parent.id.clone())
             .await
             .with_context(|| format!("failed to fork session {}", parent.id))?;
-        self.rebuild_kimi_runtime_from_session(&forked.transcript);
-        self.app.load_session_transcript(
-            forked.transcript.label,
-            forked.transcript.notices,
-            forked.transcript.messages,
-        );
+        self.tui
+            .app_mut()
+            .set_session_label(forked.transcript.label.clone());
+        self.rebuild_transcript_from_session(&forked.transcript);
         self.active_session_id = Some(forked.session_id);
         Ok(())
     }
 
     async fn fork_current_session(&mut self) -> Result<()> {
         let Some(parent_id) = self.active_session_id.clone() else {
-            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                text: "No active session to fork".to_owned(),
-            });
+            self.push_status("No active session to fork");
             return Ok(());
         };
         let forked = (self.fork_session)(parent_id.clone())
             .await
             .with_context(|| format!("failed to fork session {parent_id}"))?;
         let child_id = forked.session_id.clone();
-        self.rebuild_kimi_runtime_from_session(&forked.transcript);
-        self.app.load_session_transcript(
-            forked.transcript.label,
-            forked.transcript.notices,
-            forked.transcript.messages,
-        );
+        self.tui
+            .app_mut()
+            .set_session_label(forked.transcript.label.clone());
+        self.rebuild_transcript_from_session(&forked.transcript);
         self.active_session_id = Some(forked.session_id);
-        self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-            text: format!("Forked session {parent_id} to {child_id}"),
-        });
+        self.push_status(format!("Forked session {parent_id} to {child_id}"));
         Ok(())
     }
 
-    fn rebuild_kimi_runtime_from_session(&mut self, loaded: &LoadedSessionTranscript) {
+    fn rebuild_transcript_from_session(&mut self, loaded: &LoadedSessionTranscript) {
         let (cols, rows) = size().unwrap_or((80, 24));
-        let mut runtime = NeoTuiRuntime::new(usize::from(cols), usize::from(rows));
-        runtime.set_theme(self.app.theme());
-        runtime.push_welcome_banner(
-            self.app.title(),
-            self.app.session_label(),
-            self.app.model_label(),
-            &self.app.cwd_label(),
+        let mut transcript = TranscriptPane::new(usize::from(cols), usize::from(rows));
+        transcript.set_theme(self.tui.app().theme());
+        transcript.push_welcome_banner(
+            self.tui.app().title(),
+            self.tui.app().session_label(),
+            self.tui.app().model_label(),
+            &self.tui.app().cwd_label(),
             env!("CARGO_PKG_VERSION"),
             None,
         );
-        replay_session_into_kimi_runtime(&mut runtime, loaded);
-        self.kimi_runtime = Some(runtime);
+        replay_session_into_transcript(&mut transcript, loaded);
+        self.tui.replace_transcript(transcript);
     }
 
     fn apply_selected_model(&mut self) -> Result<()> {
-        let Some(item) = self.app.confirm_model_picker() else {
+        let Some(item) = self.tui.app_mut().confirm_model_picker() else {
             return Ok(());
         };
         match SelectedModel::from_picker_item(&item) {
             Ok(selected) => {
-                self.app.set_model_label(item.label);
-                self.app
+                self.tui.app_mut().set_model_label(item.label);
+                self.tui
+                    .app_mut()
                     .set_context_window(selected.max_context_tokens.map(ContextWindow::new));
                 self.active_model = Some(selected);
             }
@@ -1867,9 +1812,7 @@ impl InteractiveController {
                     .filter(|d| !d.is_empty())
                     .map(|d| format!(" — {d}"))
                     .unwrap_or_default();
-                self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                    text: format!("Provider: {}{detail}", item.label),
-                });
+                self.push_status(format!("Provider: {}{detail}", item.label));
             }
         }
         Ok(())
@@ -1885,17 +1828,17 @@ impl InteractiveController {
         }
         // For ModelSelector / TabbedModelSelector, the Submit path stores the
         // result in the state. We poll the accessor to apply it.
-        if self.app.tabbed_model_selector_result().is_some() {
+        if self.tui.app_mut().tabbed_model_selector_result().is_some() {
             self.apply_tabbed_model_selection()?;
-        } else if self.app.model_selector_result().is_some() {
+        } else if self.tui.app_mut().model_selector_result().is_some() {
             self.apply_model_selector_result()?;
-        } else if self.app.provider_manager_action().is_some() {
+        } else if self.tui.app_mut().provider_manager_action().is_some() {
             self.handle_provider_manager_action()?;
-        } else if self.app.choice_picker_result().is_some() {
+        } else if self.tui.app_mut().choice_picker_result().is_some() {
             self.handle_choice_picker_result().await;
-        } else if self.app.api_key_input_result().is_some() {
+        } else if self.tui.app_mut().api_key_input_result().is_some() {
             self.handle_api_key_input_result().await;
-        } else if self.app.custom_registry_import_result().is_some() {
+        } else if self.tui.app_mut().custom_registry_import_result().is_some() {
             self.handle_custom_registry_import_result().await;
         }
         Ok(())
@@ -1908,20 +1851,22 @@ impl InteractiveController {
             .alias
             .split_once('/')
             .unwrap_or((&selection.alias, ""));
-        self.app.set_model_label(selection.alias.clone());
+        self.tui.app_mut().set_model_label(selection.alias.clone());
         let max_ctx = self
             .model_items
             .iter()
             .find(|item| item.value == selection.alias)
             .and_then(context_window_from_picker_item);
-        self.app.set_context_window(max_ctx.map(ContextWindow::new));
+        self.tui
+            .app_mut()
+            .set_context_window(max_ctx.map(ContextWindow::new));
         self.active_model = Some(SelectedModel {
             provider: provider.to_owned(),
             model: model.to_owned(),
             max_context_tokens: max_ctx,
         });
         self.current_thinking = selection.thinking;
-        self.app.set_thinking_enabled(selection.thinking);
+        self.tui.app_mut().set_thinking_enabled(selection.thinking);
         if let Some(config) = self.local_config.as_mut() {
             config.runtime.reasoning_effort = if selection.thinking {
                 Some(neo_ai::ReasoningEffort::High)
@@ -1934,18 +1879,17 @@ impl InteractiveController {
         } else {
             format!("Switched to {}", selection.alias)
         };
-        self.app
-            .apply_stream_update(neo_tui::StreamUpdate::Notice { text: notice });
+        self.push_status(notice);
     }
 
     /// Apply the selection from the rich `TabbedModelSelector` dialog.
     fn apply_tabbed_model_selection(&mut self) -> Result<()> {
-        let result = self.app.tabbed_model_selector_result().cloned();
+        let result = self.tui.app_mut().tabbed_model_selector_result().cloned();
         let result = match result {
             Some(r) => r,
             None => return Ok(()),
         };
-        self.app.close_focused_overlay();
+        self.tui.app_mut().close_focused_overlay();
         if let neo_tui::dialogs::ModelSelectorResult::Selected(selection) = result {
             self.apply_model_selection(&selection);
         }
@@ -1954,12 +1898,12 @@ impl InteractiveController {
 
     /// Apply the selection from the flat `ModelSelector` dialog.
     fn apply_model_selector_result(&mut self) -> Result<()> {
-        let result = self.app.model_selector_result().cloned();
+        let result = self.tui.app_mut().model_selector_result().cloned();
         let result = match result {
             Some(r) => r,
             None => return Ok(()),
         };
-        self.app.close_focused_overlay();
+        self.tui.app_mut().close_focused_overlay();
         if let neo_tui::dialogs::ModelSelectorResult::Selected(selection) = result {
             self.apply_model_selection(&selection);
         }
@@ -1968,19 +1912,21 @@ impl InteractiveController {
 
     /// Handle a `ProviderManager` action (Add / `DeleteSource` / Close).
     fn handle_provider_manager_action(&mut self) -> Result<()> {
-        let action = self.app.provider_manager_action();
+        let action = self.tui.app_mut().provider_manager_action();
         let action = match action {
             Some(a) => a,
             None => return Ok(()),
         };
         match action {
             neo_tui::dialogs::ProviderManagerAction::Close => {
-                self.app.close_focused_overlay();
+                self.tui.app_mut().close_focused_overlay();
             }
             neo_tui::dialogs::ProviderManagerAction::Add => {
-                self.app.close_focused_overlay();
+                self.tui.app_mut().close_focused_overlay();
                 // Open choice picker for add method
-                self.app
+                let theme = self.tui.app().theme();
+                self.tui
+                    .app_mut()
                     .open_choice_picker(neo_tui::dialogs::ChoicePickerOptions {
                         title: "Add Provider".to_owned(),
                         items: vec![
@@ -1996,23 +1942,19 @@ impl InteractiveController {
                             .with_description("Import from a custom registry URL"),
                         ],
                         initial_id: None,
-                        theme: self.app.theme(),
+                        theme,
                         page_size: 0,
                     });
             }
             neo_tui::dialogs::ProviderManagerAction::DeleteSource(ids) => {
-                self.app.close_focused_overlay();
+                self.tui.app_mut().close_focused_overlay();
                 if let Some(config_path) = self.config_path() {
                     for id in &ids {
                         if let Err(e) = crate::config_ops::remove_provider(&config_path, id) {
-                            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                                text: format!("Failed to remove provider {id}: {e}"),
-                            });
+                            self.push_status(format!("Failed to remove provider {id}: {e}"));
                         }
                     }
-                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                        text: format!("Removed {} provider(s)", ids.len()),
-                    });
+                    self.push_status(format!("Removed {} provider(s)", ids.len()));
                     self.refresh_config();
                 }
             }
@@ -2022,14 +1964,14 @@ impl InteractiveController {
 
     /// Handle a `ChoicePicker` result.
     async fn handle_choice_picker_result(&mut self) {
-        let Some(result) = self.app.choice_picker_result().cloned() else {
+        let Some(result) = self.tui.app_mut().choice_picker_result().cloned() else {
             return;
         };
-        self.app.close_focused_overlay();
+        self.tui.app_mut().close_focused_overlay();
         match result {
             neo_tui::dialogs::ChoiceResult::Selected(item) => match item.id.as_str() {
                 "known" => {
-                    self.app.set_custom_working_label(Some(
+                    self.tui.app_mut().set_custom_working_label(Some(
                         "Fetching models.dev catalog...".to_owned(),
                     ));
                     let handle =
@@ -2040,7 +1982,7 @@ impl InteractiveController {
                     });
                 }
                 "custom" => {
-                    self.app.open_custom_registry_import(
+                    self.tui.app_mut().open_custom_registry_import(
                         neo_tui::dialogs::CustomRegistryImportOptions {
                             title: "Import Custom Registry".to_owned(),
                         },
@@ -2050,7 +1992,8 @@ impl InteractiveController {
                     // Catalog provider selected — ask for API key
                     let provider_id = id.strip_prefix("catalog:").unwrap_or(id);
                     self.pending_catalog_provider_id = Some(provider_id.to_owned());
-                    self.app
+                    self.tui
+                        .app_mut()
                         .open_api_key_input(neo_tui::dialogs::ApiKeyInputOptions {
                             title: "API Key".to_owned(),
                             provider_name: provider_id.to_owned(),
@@ -2070,32 +2013,24 @@ impl InteractiveController {
                                         None,
                                     ) {
                                         Ok(message) => {
-                                            self.app.apply_stream_update(
-                                                neo_tui::StreamUpdate::Notice { text: message },
-                                            );
+                                            self.push_status(message);
                                             self.refresh_config();
                                         }
                                         Err(error) => {
-                                            self.app.apply_stream_update(
-                                                neo_tui::StreamUpdate::Error {
-                                                    text: format!(
-                                                        "Failed to import provider: {error}"
-                                                    ),
-                                                },
-                                            );
+                                            self.push_status(format!(
+                                                "Error: Failed to import provider: {error}"
+                                            ));
                                         }
                                     }
                                 }
                                 None => {
-                                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                                        text: "No config available".to_owned(),
-                                    });
+                                    self.push_status("No config available");
                                 }
                             }
                         } else {
-                            self.app.apply_stream_update(neo_tui::StreamUpdate::Error {
-                                text: format!("Provider '{provider_id}' not found in registry"),
-                            });
+                            self.push_status(format!(
+                                "Error: Provider '{provider_id}' not found in registry"
+                            ));
                         }
                     }
                 }
@@ -2107,10 +2042,10 @@ impl InteractiveController {
 
     /// Handle an API key input result.
     async fn handle_api_key_input_result(&mut self) {
-        let Some(result) = self.app.api_key_input_result().cloned() else {
+        let Some(result) = self.tui.app_mut().api_key_input_result().cloned() else {
             return;
         };
-        self.app.close_focused_overlay();
+        self.tui.app_mut().close_focused_overlay();
         match result {
             neo_tui::dialogs::ApiKeyInputResult::Submitted(key) => {
                 if let Some(provider_id) = self.pending_catalog_provider_id.take() {
@@ -2125,28 +2060,22 @@ impl InteractiveController {
                             .await
                             {
                                 Ok(message) => {
-                                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                                        text: message,
-                                    });
+                                    self.push_status(message);
                                     self.refresh_config();
                                 }
                                 Err(error) => {
-                                    self.app.apply_stream_update(neo_tui::StreamUpdate::Error {
-                                        text: format!("Failed to add provider: {error}"),
-                                    });
+                                    self.push_status(format!(
+                                        "Error: Failed to add provider: {error}"
+                                    ));
                                 }
                             }
                         }
                         None => {
-                            self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                                text: "No config available".to_owned(),
-                            });
+                            self.push_status("No config available");
                         }
                     }
                 } else {
-                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                        text: "API key saved.".to_owned(),
-                    });
+                    self.push_status("API key saved.");
                 }
             }
             neo_tui::dialogs::ApiKeyInputResult::Cancelled => {
@@ -2157,13 +2086,14 @@ impl InteractiveController {
 
     /// Handle a custom registry import result.
     async fn handle_custom_registry_import_result(&mut self) {
-        let Some(result) = self.app.custom_registry_import_result().cloned() else {
+        let Some(result) = self.tui.app_mut().custom_registry_import_result().cloned() else {
             return;
         };
-        self.app.close_focused_overlay();
+        self.tui.app_mut().close_focused_overlay();
         match result {
             neo_tui::dialogs::CustomRegistryImportResult::Submitted(source) => {
-                self.app
+                self.tui
+                    .app_mut()
                     .set_custom_working_label(Some("Fetching custom registry...".to_owned()));
                 let url = source.url.clone();
                 let handle =
@@ -2187,7 +2117,7 @@ impl InteractiveController {
             self.pending_catalog_fetch = Some(pending);
             return;
         }
-        self.app.set_custom_working_label(None);
+        self.tui.app_mut().set_custom_working_label(None);
         match pending.handle.await {
             Ok(Ok(catalog)) => {
                 let items: Vec<_> = catalog
@@ -2200,21 +2130,21 @@ impl InteractiveController {
                     })
                     .collect();
                 if items.is_empty() {
-                    self.app.apply_stream_update(neo_tui::StreamUpdate::Notice {
-                        text: "No providers found in catalog.".to_owned(),
-                    });
+                    self.push_status("No providers found in catalog.");
                     return;
                 }
                 match pending.source {
                     CatalogFetchSource::Known => {
-                        self.app
-                            .open_choice_picker(neo_tui::dialogs::ChoicePickerOptions {
+                        let theme = self.tui.app().theme();
+                        self.tui.app_mut().open_choice_picker(
+                            neo_tui::dialogs::ChoicePickerOptions {
                                 title: "Select a provider".to_owned(),
                                 items,
                                 initial_id: None,
-                                theme: self.app.theme(),
+                                theme,
                                 page_size: 0,
-                            });
+                            },
+                        );
                     }
                     CatalogFetchSource::Custom(source) => {
                         self.pending_custom_registry =
@@ -2226,26 +2156,24 @@ impl InteractiveController {
                                 item
                             })
                             .collect();
-                        self.app
-                            .open_choice_picker(neo_tui::dialogs::ChoicePickerOptions {
+                        let theme = self.tui.app().theme();
+                        self.tui.app_mut().open_choice_picker(
+                            neo_tui::dialogs::ChoicePickerOptions {
                                 title: "Select a provider".to_owned(),
                                 items: custom_items,
                                 initial_id: None,
-                                theme: self.app.theme(),
+                                theme,
                                 page_size: 0,
-                            });
+                            },
+                        );
                     }
                 }
             }
             Ok(Err(error)) => {
-                self.app.apply_stream_update(neo_tui::StreamUpdate::Error {
-                    text: format!("Failed to fetch catalog: {error}"),
-                });
+                self.push_status(format!("Error: Failed to fetch catalog: {error}"));
             }
             Err(join_error) => {
-                self.app.apply_stream_update(neo_tui::StreamUpdate::Error {
-                    text: format!("Failed to fetch catalog: {join_error}"),
-                });
+                self.push_status(format!("Error: Failed to fetch catalog: {join_error}"));
             }
         }
     }
@@ -2253,7 +2181,13 @@ impl InteractiveController {
     #[allow(dead_code)]
     #[must_use]
     pub const fn app(&self) -> &NeoTuiApp {
-        &self.app
+        self.tui.app()
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    fn transcript(&self) -> Option<&TranscriptPane> {
+        Some(self.tui.transcript())
     }
 
     #[must_use]
@@ -2265,12 +2199,12 @@ impl InteractiveController {
 
     #[must_use]
     pub fn render_snapshot(&self) -> String {
-        let mut runtime = self.runtime_snapshot_source();
-        render_runtime_snapshot(&self.app, &mut runtime, 80, 24)
+        let mut transcript = self.transcript_snapshot_source();
+        render_transcript_snapshot(self.tui.app(), &mut transcript, 80, 24)
     }
 
-    fn runtime_snapshot_source(&self) -> NeoTuiRuntime {
-        runtime_from_app_snapshot(&self.app, 80, 24)
+    fn transcript_snapshot_source(&self) -> TranscriptPane {
+        self.tui.transcript().clone()
     }
 }
 
@@ -2760,27 +2694,20 @@ fn expand_interactive_prompt(
     let Some(args) = slash_prompt_args(prompt) else {
         return Ok(prompt.to_owned());
     };
-    let (project_dir, selectors, disabled) = if let Some(config) = config {
-        let mut selectors = config.configured_prompt_templates.clone();
-        for selector in &config.prompt_templates {
-            if !selectors.contains(selector) {
-                selectors.push(selector.clone());
-            }
-        }
+    let (project_dir, selectors) = if let Some(config) = config {
         (
             config.project_dir.as_path(),
-            selectors,
-            config.no_prompt_templates,
+            config.prompt_templates.clone(),
         )
     } else {
-        (fallback_project_dir, Vec::new(), false)
+        (fallback_project_dir, Vec::new())
     };
     let expanded = expand_prompt_template_args(
         args,
         project_dir,
         config::global_prompts_dir().as_deref(),
         &selectors,
-        disabled,
+        false,
     )?;
     Ok(expanded.join(" "))
 }
@@ -3117,90 +3044,37 @@ const PROMPT_COMPLETION_ACTION_PRIORITY: &[KeybindingAction] = &[
 ];
 
 struct NeoTerminal {
-    renderer: InlineRenderer,
+    tui: TuiRenderer,
 }
 
 impl NeoTerminal {
     fn enter() -> Result<Self> {
-        let renderer = InlineRenderer::enter()?;
-        Ok(Self { renderer })
+        let tui = TuiRenderer::enter()?;
+        Ok(Self { tui })
     }
 
-    fn draw_runtime(
-        &mut self,
-        app: &NeoTuiApp,
-        runtime: &mut neo_tui::NeoTuiRuntime,
-    ) -> Result<()> {
+    fn draw_tui(&mut self, tui: &mut neo_tui::NeoTui) -> Result<()> {
         let (cols, rows) = size()?;
         if cols == 0 || rows == 0 {
             return Ok(());
         }
-        let width = usize::from(cols);
-        let content_width = width.saturating_sub(neo_tui::runtime::CHROME_GUTTER).max(1);
-
-        // Keep the runtime's theme in sync with the app so config-loaded
-        // themes color the live transcript body, not just the chrome.
-        runtime.set_theme(app.theme());
-        runtime.resize(width, usize::from(rows));
-        runtime.request_render(neo_tui::core::RenderKind::Incremental);
-        let Some(mut lines) = runtime.render_frame(width, usize::from(rows)) else {
-            return Ok(());
-        };
-
-        // "editor-container swap" model: when a fullscreen overlay (session
-        // picker or any rich dialog) is focused, replace the chrome (prompt
-        // box) with the overlay panel. The transcript body stays visible above.
-        // The footer stays below.
-        let chrome = if app.focused_overlay().is_some_and(|o| {
-            matches!(
-                o.kind,
-                neo_tui::OverlayKind::SessionPicker(_)
-                    | neo_tui::OverlayKind::ModelSelector(_)
-                    | neo_tui::OverlayKind::TabbedModelSelector(_)
-                    | neo_tui::OverlayKind::ProviderManager(_)
-                    | neo_tui::OverlayKind::ChoicePicker(_)
-                    | neo_tui::OverlayKind::ApiKeyInput(_)
-                    | neo_tui::OverlayKind::CustomRegistryImport(_)
-            )
-        }) {
-            let overlay = app
-                .render_focused_overlay(content_width)
-                .unwrap_or_default();
-            let footer = neo_tui::runtime::footer_only_ansi_lines(app, width);
-            neo_tui::runtime::ChromeRender {
-                lines: overlay.into_iter().chain(footer).collect(),
-                cursor: None,
-                prompt_start_row: 0,
-            }
-        } else {
-            neo_tui::runtime_chrome_ansi_lines(app, width)
-        };
-
-        let body_len = lines.len();
-        lines.extend(chrome.lines);
-        // Apply the uniform CHROME_GUTTER to body + chrome together so
-        // nothing renders flush against the screen edge.
-        neo_tui::runtime::apply_gutter(&mut lines);
-        let cursor = chrome.cursor.map(|cursor| neo_tui::CursorPos {
-            row: body_len + chrome.prompt_start_row + cursor.row,
-            col: cursor.col + neo_tui::runtime::CHROME_GUTTER,
-        });
+        let (lines, cursor) = tui.render_frame(usize::from(cols), usize::from(rows));
         // Single-buffer differential render (pi-tui model): hand the whole
-        // frame to InlineRenderer::render, which diffs against the previous
+        // frame to TuiRenderer::render, which diffs against the previous
         // frame and rewrites only changed lines in place.
-        self.renderer.render(lines, cursor)?;
+        self.tui.render(lines, cursor)?;
         Ok(())
     }
 
     #[allow(dead_code)]
     fn leave(&mut self) {
-        self.renderer.leave();
+        self.tui.leave();
     }
 
     fn reenter(&mut self) -> Result<()> {
         // Force a full redraw on the next render so the resumed session paints
         // cleanly after the terminal state was disturbed by SIGTSTP.
-        self.renderer.suspend_resume()?;
+        self.tui.suspend_resume()?;
         Ok(())
     }
 }
@@ -3208,33 +3082,31 @@ impl NeoTerminal {
 /// Compose the full frame (body + chrome) as ANSI strings, without writing to
 /// the terminal. Used by tests that need to inspect what would be drawn.
 #[cfg(test)]
-fn compose_runtime_frame(
+fn compose_tui_frame(
     app: &NeoTuiApp,
-    runtime: &mut neo_tui::NeoTuiRuntime,
+    transcript: &mut neo_tui::TranscriptPane,
     cols: u16,
     rows: u16,
 ) -> Option<Vec<String>> {
     if cols == 0 || rows == 0 {
         return None;
     }
-    let width = usize::from(cols);
-    runtime.resize(width, usize::from(rows));
-    runtime.request_render(neo_tui::core::RenderKind::Incremental);
-    let mut lines = runtime.render_frame(width, usize::from(rows))?;
-    let chrome = neo_tui::runtime_chrome_ansi_lines(app, width);
-    lines.extend(chrome.lines);
+    transcript.mark_dirty();
+    let mut tui = neo_tui::NeoTui::new(app.clone(), transcript.clone());
+    let (lines, _) = tui.render_frame(usize::from(cols), usize::from(rows));
+    *transcript = tui.transcript().clone();
     Some(lines)
 }
 
 impl Drop for NeoTerminal {
     fn drop(&mut self) {
-        self.renderer.leave();
+        self.tui.leave();
     }
 }
 
 impl NeoTerminal {
     fn suspend(&mut self) -> Result<()> {
-        self.renderer.suspend_prepare();
+        self.tui.suspend_prepare();
         #[cfg(unix)]
         {
             rustix::process::kill_current_process_group(rustix::process::Signal::TSTP)?;
@@ -3324,11 +3196,13 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         .find(|item| item.value == default_model_value)
         .and_then(context_window_from_picker_item);
     controller
-        .app
+        .tui
+        .app_mut()
         .set_context_window(default_context_window.map(ContextWindow::new));
     controller.current_thinking = config.runtime.reasoning_effort.is_some();
     controller
-        .app
+        .tui
+        .app_mut()
         .set_thinking_enabled(controller.current_thinking);
     controller.local_config = Some(config);
     controller
@@ -3545,13 +3419,7 @@ fn startup_notices(config: &AppConfig) -> Vec<String> {
         ),
         format!("model scope: {model_scope}"),
         format!("theme: {}", config.theme.name),
-        format!(
-            "resources: context_files={} skills={} extensions={} offline={}",
-            enabled_label(!config.no_context_files),
-            enabled_label(!config.no_skills),
-            enabled_label(!config.no_extensions),
-            enabled_label(config.offline),
-        ),
+        "resources: auto-discovered".to_owned(),
         format!("trust: project={}", enabled_label(config.project_trusted)),
     ];
     if !config.tui.keybindings.is_empty() {
@@ -3607,7 +3475,7 @@ async fn load_session_transcript(
     session_id: String,
     config: &AppConfig,
 ) -> Result<LoadedSessionTranscript> {
-    let path = crate::session_commands::session_path(&session_id, config)?;
+    let path = crate::modes::sessions::session_path(&session_id, config)?;
     let context = JsonlSessionReader::replay_context(&path)
         .await
         .with_context(|| format!("failed to replay session {}", path.display()))?;
@@ -3634,65 +3502,15 @@ async fn load_session_transcript(
     ))
 }
 
-fn message_content_text(content: &[Content]) -> String {
-    content
-        .iter()
-        .filter_map(Content::as_text)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn replay_session_into_kimi_runtime(runtime: &mut NeoTuiRuntime, loaded: &LoadedSessionTranscript) {
+fn replay_session_into_transcript(
+    transcript: &mut TranscriptPane,
+    loaded: &LoadedSessionTranscript,
+) {
     for notice in &loaded.notices {
-        runtime.push_transcript(neo_tui::transcript::TranscriptEntry::notice(notice.clone()));
+        transcript.push_transcript(neo_tui::transcript::TranscriptEntry::status(notice.clone()));
     }
     for message in &loaded.messages {
-        match message {
-            AgentMessage::User { content } => {
-                let text = message_content_text(content);
-                if !text.is_empty() {
-                    runtime.replay_user_message(text);
-                }
-            }
-            AgentMessage::Assistant {
-                content,
-                tool_calls,
-                ..
-            } => {
-                let text = message_content_text(content);
-                if !text.is_empty() {
-                    runtime.replay_assistant_message(text);
-                }
-                for tool_call in tool_calls {
-                    runtime.apply_agent_event(AgentEvent::ToolExecutionStarted {
-                        turn: 0,
-                        id: tool_call.id.clone(),
-                        name: tool_call.name.clone(),
-                        arguments: tool_call.arguments.clone(),
-                    });
-                }
-            }
-            AgentMessage::ToolResult {
-                tool_call_id,
-                tool_name,
-                content,
-                is_error,
-            } => {
-                let text = message_content_text(content);
-                runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
-                    turn: 0,
-                    id: tool_call_id.clone(),
-                    name: tool_name.clone(),
-                    result: ToolResult {
-                        content: text,
-                        is_error: *is_error,
-                        details: None,
-                        terminate: false,
-                    },
-                });
-            }
-            AgentMessage::System { .. } => {}
-        }
+        transcript.replay_message(message);
     }
 }
 
@@ -3709,110 +3527,28 @@ async fn fork_session_transcript(
     Ok(ForkedSessionTranscript::new(child_id, loaded))
 }
 
-fn render_runtime_snapshot(
+fn render_transcript_snapshot(
     app: &NeoTuiApp,
-    runtime: &mut NeoTuiRuntime,
+    transcript: &mut TranscriptPane,
     width: usize,
     height: usize,
 ) -> String {
-    runtime.resize(width, height);
-    runtime.request_render(neo_tui::core::RenderKind::Incremental);
-    let _ = runtime.render_frame(width, height);
+    transcript.resize(width, height);
+    transcript.mark_dirty();
+    let _ = transcript.render_frame(width, height);
 
-    let mut lines = runtime
+    let mut lines = transcript
         .frame_ansi_lines()
         .into_iter()
         .map(|line| neo_tui::ansi::strip_ansi(&line).trim_end().to_owned())
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
-    lines.extend(render_runtime_overlay_snapshot(app, width));
+    lines.extend(render_overlay_snapshot(app, width));
     format!("{}\n", lines.join("\n").trim_end())
 }
 
-fn runtime_from_app_snapshot(app: &NeoTuiApp, width: usize, height: usize) -> NeoTuiRuntime {
-    let mut runtime = NeoTuiRuntime::new(width, height);
-    runtime.set_theme(app.theme());
-    for item in app.transcript().items() {
-        match item {
-            neo_tui::TranscriptItem::User { content } => runtime.replay_user_message(content),
-            neo_tui::TranscriptItem::Assistant { content, .. } => {
-                runtime.replay_assistant_message(content);
-            }
-            neo_tui::TranscriptItem::Notice { content } => runtime.append_notice(content),
-            neo_tui::TranscriptItem::Tool {
-                name,
-                detail,
-                status,
-                tool_run,
-            } => replay_transcript_tool_item(&mut runtime, name, detail, *status, tool_run),
-            neo_tui::TranscriptItem::Image { metadata, .. } => runtime.append_notice(metadata),
-            neo_tui::TranscriptItem::Compaction {
-                compacted_message_count,
-                tokens_before,
-                ..
-            } => runtime.append_notice(format!(
-                "Compaction: {compacted_message_count} messages · {tokens_before} tokens"
-            )),
-            neo_tui::TranscriptItem::Banner {
-                title,
-                session_label,
-                model_label,
-                ..
-            } => {
-                runtime.push_banner(title);
-                runtime.append_notice(format!("Session: {session_label}"));
-                runtime.append_notice(format!("Model: {model_label}"));
-            }
-        }
-    }
-    runtime
-}
-
-fn replay_transcript_tool_item(
-    runtime: &mut NeoTuiRuntime,
-    name: &str,
-    detail: &str,
-    status: neo_tui::ToolStatusKind,
-    tool_run: &neo_tui::ToolRunTranscript,
-) {
-    let id = format!(
-        "snapshot-tool-{}",
-        runtime.transcript().live_entries().len()
-    );
-    let arguments_value = tool_run
-        .arguments
-        .as_deref()
-        .map(|s| {
-            serde_json::from_str::<serde_json::Value>(s)
-                .unwrap_or(serde_json::Value::String(s.to_owned()))
-        })
-        .unwrap_or_else(|| serde_json::Value::String(detail.to_owned()));
-    runtime.apply_agent_event(AgentEvent::ToolExecutionStarted {
-        turn: 0,
-        id: id.clone(),
-        name: name.to_owned(),
-        arguments: arguments_value,
-    });
-    if matches!(
-        status,
-        neo_tui::ToolStatusKind::Succeeded | neo_tui::ToolStatusKind::Failed
-    ) {
-        runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
-            turn: 0,
-            id,
-            name: name.to_owned(),
-            result: ToolResult {
-                content: tool_run.display_detail(),
-                is_error: matches!(status, neo_tui::ToolStatusKind::Failed),
-                details: None,
-                terminate: false,
-            },
-        });
-    }
-}
-
-fn render_runtime_overlay_snapshot(app: &NeoTuiApp, width: usize) -> Vec<String> {
-    let content_width = width.saturating_sub(neo_tui::runtime::CHROME_GUTTER).max(1);
+fn render_overlay_snapshot(app: &NeoTuiApp, width: usize) -> Vec<String> {
+    let content_width = neo_tui::transcript::frame_content_width(width);
     let mut lines = match app.focused_overlay().map(|overlay| &overlay.kind) {
         Some(neo_tui::OverlayKind::SessionPicker(picker)) => {
             let theme = app.theme();
@@ -3832,7 +3568,7 @@ fn render_runtime_overlay_snapshot(app: &NeoTuiApp, width: usize) -> Vec<String>
         None => Vec::new(),
     };
     lines.extend(
-        neo_tui::runtime_chrome_ansi_lines(app, width)
+        neo_tui::transcript::render_chrome_lines(app, width)
             .lines
             .into_iter()
             .map(|line| neo_tui::ansi::strip_ansi(&line).trim_end().to_owned()),
@@ -3848,21 +3584,18 @@ fn render_picker_snapshot(title: &str, picker: &neo_tui::PickerState, width: usi
 
 #[cfg(test)]
 mod tests {
-    use neo_tui::transcript::TranscriptEntry;
-
     use std::{
         collections::BTreeMap,
         fs,
         path::{Path, PathBuf},
     };
 
+    use neo_agent_core::ToolResult;
     use neo_agent_core::{AgentEvent, AgentMessage, Content, PermissionPolicy, StopReason};
-    use neo_tui::{KeybindingAction, OverlayKind};
+    use neo_tui::{KeybindingAction, OverlayKind, TranscriptEntry};
 
     use super::*;
-    use crate::config::{
-        Defaults, McpConfig, ModelConfig, RuntimeConfig, ToolFilterConfig, TuiConfig,
-    };
+    use crate::config::{Defaults, McpConfig, ModelConfig, RuntimeConfig, TuiConfig};
 
     fn test_workspace_root() -> PathBuf {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -3884,26 +3617,58 @@ mod tests {
         }
     }
 
+    fn transcript_entries(controller: &InteractiveController) -> &[TranscriptEntry] {
+        controller
+            .transcript()
+            .expect("transcript should be initialized")
+            .transcript()
+            .entries()
+    }
+
+    fn transcript_has_status(controller: &InteractiveController, expected: &str) -> bool {
+        transcript_entries(controller).iter().any(|entry| {
+            matches!(entry, TranscriptEntry::Status { text, .. } if text.contains(expected))
+        })
+    }
+
+    fn transcript_scrollback(controller: &InteractiveController) -> usize {
+        controller
+            .transcript()
+            .expect("transcript should be initialized")
+            .transcript()
+            .viewport()
+            .scrollback()
+    }
+
     #[test]
-    fn kimi_runtime_bridge_exposes_live_rows_without_replacing_default_draw_path() {
+    fn transcript_pane_exposes_live_rows_for_neo_tui_draw() {
         let mut app = NeoTuiApp::new(
             "neo",
             "test-session",
             "openai/gpt-4.1",
             test_workspace_root(),
         );
-        let mut runtime = neo_tui::NeoTuiRuntime::new(80, 12);
-        runtime.push_transcript(TranscriptEntry::tool_call_running("Bash", "cargo test"));
+        let mut transcript = neo_tui::TranscriptPane::new(80, 12);
+        transcript.apply_agent_event(AgentEvent::ToolExecutionStarted {
+            turn: 0,
+            id: "tool-1".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: serde_json::json!({ "command": "cargo test" }),
+        });
 
         let lines =
-            compose_runtime_frame(&mut app, &mut runtime, 80, 12).expect("non-zero terminal size");
+            compose_tui_frame(&mut app, &mut transcript, 80, 12).expect("non-zero terminal size");
 
-        assert!(lines.iter().any(|line| line.contains("Using Bash")));
-        assert_eq!(compose_runtime_frame(&mut app, &mut runtime, 0, 12), None);
+        let plain: Vec<String> = lines
+            .iter()
+            .map(|line| neo_tui::ansi::strip_ansi(line))
+            .collect();
+        assert!(plain.iter().any(|line| line.contains("Using Bash")));
+        assert_eq!(compose_tui_frame(&mut app, &mut transcript, 0, 12), None);
     }
 
     #[test]
-    fn kimi_runtime_draw_composes_body_then_chrome_in_one_frame() {
+    fn neo_tui_draw_composes_body_then_chrome_in_one_frame() {
         let mut app = NeoTuiApp::new(
             "neo",
             "test-session",
@@ -3912,14 +3677,23 @@ mod tests {
         );
         app.prompt_mut().text = "next".to_owned();
         app.prompt_mut().cursor = 4;
-        let mut runtime = neo_tui::NeoTuiRuntime::new(80, 12);
-        runtime.push_banner("Welcome to neo");
-        runtime.push_transcript(TranscriptEntry::tool_call_running("Bash", "cargo test"));
+        let mut transcript = neo_tui::TranscriptPane::new(80, 12);
+        transcript.push_banner("Welcome to neo");
+        transcript.apply_agent_event(AgentEvent::ToolExecutionStarted {
+            turn: 0,
+            id: "tool-1".to_owned(),
+            name: "Bash".to_owned(),
+            arguments: serde_json::json!({ "command": "cargo test" }),
+        });
 
-        let lines = compose_runtime_frame(&mut app, &mut runtime, 80, 12)
-            .expect("runtime frame composes body + chrome");
+        let lines = compose_tui_frame(&mut app, &mut transcript, 80, 12)
+            .expect("transcript frame composes body + chrome");
 
-        let joined = lines.join("\n");
+        let joined = lines
+            .iter()
+            .map(|line| neo_tui::ansi::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
         // Banner (finalized) appears in the body before the running tool card,
         // which appears before the prompt chrome.
         let welcome = joined.find("Welcome to neo").expect("welcome in body");
@@ -3932,7 +3706,7 @@ mod tests {
     }
 
     #[test]
-    fn kimi_runtime_draw_replays_finished_tool_to_scrollback_before_prompt_chrome() {
+    fn neo_tui_draw_replays_finished_tool_before_prompt_chrome() {
         let mut app = NeoTuiApp::new(
             "neo",
             "test-session",
@@ -3941,7 +3715,7 @@ mod tests {
         );
         app.prompt_mut().text = "next".to_owned();
         app.prompt_mut().cursor = 4;
-        let transcript = LoadedSessionTranscript::new(
+        let loaded = LoadedSessionTranscript::new(
             "alpha",
             Vec::new(),
             [
@@ -3963,12 +3737,12 @@ mod tests {
                 ),
             ],
         );
-        let mut runtime = neo_tui::NeoTuiRuntime::new(80, 12);
-        runtime.push_banner("Welcome to neo");
-        replay_session_into_kimi_runtime(&mut runtime, &transcript);
+        let mut transcript = neo_tui::TranscriptPane::new(80, 12);
+        transcript.push_banner("Welcome to neo");
+        replay_session_into_transcript(&mut transcript, &loaded);
 
-        let lines = compose_runtime_frame(&mut app, &mut runtime, 80, 12)
-            .expect("runtime frame composes replay");
+        let lines = compose_tui_frame(&mut app, &mut transcript, 80, 12)
+            .expect("transcript frame composes replay");
 
         // Tool header spans are individually ANSI-colored, so strip codes
         // before substring searching for the committed tool card.
@@ -3988,7 +3762,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn controller_snapshot_uses_runtime_tool_card_rendering() {
+    async fn controller_snapshot_uses_transcript_tool_card_rendering() {
         let mut controller = InteractiveController::new(
             "neo",
             "test-session",
@@ -4017,7 +3791,7 @@ mod tests {
 
         assert!(
             snapshot.contains("● Used Read (README.md)"),
-            "runtime snapshot should include finalized tool card, got:\n{snapshot}"
+            "transcript snapshot should include finalized tool card, got:\n{snapshot}"
         );
         assert!(snapshot.contains("> "));
     }
@@ -4054,21 +3828,12 @@ mod tests {
             },
         );
 
-        controller
-            .app
-            .transcript_mut()
-            .push(neo_tui::TranscriptItem::banner(
-                "Welcome to neo",
-                "test-session",
-                "openai/gpt-4.1",
-                test_workspace_root(),
-            ));
         controller.type_text("hello neo");
         let snapshot = controller.submit_prompt().await.expect("turn succeeds");
 
         assert!(snapshot.contains("Welcome to neo"));
-        assert!(snapshot.contains("Session: test-session"));
-        assert!(snapshot.contains("Model: openai/gpt-4.1"));
+        assert!(snapshot.contains("test-session"));
+        assert!(snapshot.contains("openai/gpt-4.1"));
         // The user prompt and assistant reply appear in the rendered frame.
         assert!(snapshot.contains("hello neo"));
         assert!(snapshot.contains("Hello, Neo"));
@@ -4117,9 +3882,9 @@ mod tests {
         );
 
         controller
-            .run_terminal_loop_with_runtime(
-                |app, runtime| {
-                    rendered.push(render_runtime_snapshot(app, runtime, 80, 24));
+            .run_terminal_loop_with_transcript(
+                |app, transcript| {
+                    rendered.push(render_transcript_snapshot(app, transcript, 80, 24));
                     Ok(())
                 },
                 FakeEvents {
@@ -4224,10 +3989,9 @@ mod tests {
         );
 
         controller
-            .run_terminal_loop(
-                |app| {
-                    let mut runtime = runtime_from_app_snapshot(app, 80, 24);
-                    rendered.push(render_runtime_snapshot(app, &mut runtime, 80, 24));
+            .run_terminal_loop_with_transcript(
+                |app, transcript| {
+                    rendered.push(render_transcript_snapshot(app, transcript, 80, 24));
                     Ok(())
                 },
                 FakeEvents {
@@ -4275,10 +4039,9 @@ mod tests {
         );
 
         controller
-            .run_terminal_loop(
-                |app| {
-                    let mut runtime = runtime_from_app_snapshot(app, 80, 24);
-                    rendered.push(render_runtime_snapshot(app, &mut runtime, 80, 24));
+            .run_terminal_loop_with_transcript(
+                |app, transcript| {
+                    rendered.push(render_transcript_snapshot(app, transcript, 80, 24));
                     Ok(())
                 },
                 FakeEvents {
@@ -4480,15 +4243,11 @@ mod tests {
             Ok(())
         }));
         controller
-            .app
             .transcript_mut()
-            .push(neo_tui::TranscriptItem::user("selected user prompt"));
+            .push_user_message("selected user prompt");
         controller
-            .app
             .transcript_mut()
-            .push(neo_tui::TranscriptItem::assistant(
-                "selected assistant reply",
-            ));
+            .push_assistant_message("selected assistant reply");
         controller.type_text("prompt text stays out of clipboard");
 
         controller
@@ -4512,10 +4271,7 @@ mod tests {
             copied.lock().expect("clipboard writes").as_slice(),
             ["You\nselected user prompt\n\nAssistant\nselected assistant reply"]
         );
-        assert_eq!(
-            controller.app().copy_buffer(),
-            Some("You\nselected user prompt\n\nAssistant\nselected assistant reply")
-        );
+        assert_eq!(controller.app().copy_buffer(), None);
         assert_eq!(
             controller.app().prompt().text,
             "prompt text stays out of clipboard"
@@ -4542,12 +4298,14 @@ mod tests {
             .expect("clipboard failure is non-fatal");
 
         assert_eq!(controller.app().copy_buffer(), Some("copy fallback"));
-        assert!(matches!(
-            controller.app().transcript().items().last(),
-            Some(neo_tui::TranscriptItem::Notice { content })
-                if content.contains("Clipboard copy failed")
-                    && content.contains("clipboard unavailable")
-        ));
+        assert!(transcript_entries(&controller).iter().any(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::Status { text, .. }
+                    if text.contains("Clipboard copy failed")
+                        && text.contains("clipboard unavailable")
+            )
+        }));
     }
 
     #[tokio::test]
@@ -4618,10 +4376,9 @@ mod tests {
 
         assert!(!should_exit);
         assert_eq!(controller.app().prompt().text, "");
-        assert!(matches!(
-            controller.app().transcript().items().last(),
-            Some(neo_tui::TranscriptItem::Notice { content })
-                if content == "Press Ctrl-C again to exit"
+        assert!(transcript_has_status(
+            &controller,
+            "Press Ctrl-C again to exit"
         ));
     }
 
@@ -4684,10 +4441,9 @@ mod tests {
         assert_eq!(controller.app().prompt().text, "");
         assert!(!first_exit);
         assert!(second_exit);
-        assert!(matches!(
-            controller.app().transcript().items().last(),
-            Some(neo_tui::TranscriptItem::Notice { content })
-                if content == "Press Ctrl-D again to exit"
+        assert!(transcript_has_status(
+            &controller,
+            "Press Ctrl-D again to exit"
         ));
     }
 
@@ -5196,22 +4952,10 @@ command = "echo"
                 verbose_startup: true,
             },
         );
-        let notices = controller
-            .app()
-            .transcript()
-            .items()
-            .iter()
-            .filter_map(|item| match item {
-                neo_tui::TranscriptItem::Notice { content } => Some(content.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert!(
-            notices
-                .iter()
-                .any(|notice| notice.contains("keybindings: 1 override"))
-        );
+        assert!(transcript_has_status(
+            &controller,
+            "keybindings: 1 override"
+        ));
     }
 
     #[test]
@@ -5640,29 +5384,28 @@ command = "python3"
         );
         for index in 0..10 {
             controller
-                .app
                 .transcript_mut()
-                .push(neo_tui::TranscriptItem::notice(format!("line {index}")));
+                .push_status(format!("line {index}"));
         }
-        controller.app.transcript_view_mut().sync(10, 2);
+        controller.transcript_mut().sync_transcript_view(10, 2);
 
         controller
             .handle_input_event(InputEvent::Action(KeybindingAction::EditorPageUp))
             .await
             .expect("page up scrolls transcript");
-        assert_eq!(controller.app().transcript_view().scrollback(), 8);
+        assert_eq!(transcript_scrollback(&controller), 8);
 
         controller
             .handle_input_event(InputEvent::Action(KeybindingAction::EditorCursorDown))
             .await
             .expect("cursor down scrolls transcript toward bottom");
-        assert_eq!(controller.app().transcript_view().scrollback(), 8);
+        assert_eq!(transcript_scrollback(&controller), 8);
 
         controller
             .handle_input_event(InputEvent::Action(KeybindingAction::EditorPageDown))
             .await
             .expect("page down returns transcript to bottom");
-        assert_eq!(controller.app().transcript_view().scrollback(), 0);
+        assert_eq!(transcript_scrollback(&controller), 0);
     }
 
     #[tokio::test]
@@ -5729,25 +5472,25 @@ command = "python3"
             test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
-        controller.app.transcript_view_mut().sync(30, 6);
+        controller.transcript_mut().sync_transcript_view(30, 6);
 
         controller
             .handle_input_event(InputEvent::ScrollUp(3))
             .await
             .expect("wheel up scrolls transcript toward older rows");
-        assert_eq!(controller.app().transcript_view().scrollback(), 3);
+        assert_eq!(transcript_scrollback(&controller), 3);
 
         controller
             .handle_input_event(InputEvent::ScrollDown(2))
             .await
             .expect("wheel down scrolls transcript toward newest rows");
-        assert_eq!(controller.app().transcript_view().scrollback(), 1);
+        assert_eq!(transcript_scrollback(&controller), 1);
 
         controller
             .handle_input_event(InputEvent::ScrollDown(3))
             .await
             .expect("wheel down follows tail at bottom");
-        assert_eq!(controller.app().transcript_view().scrollback(), 0);
+        assert_eq!(transcript_scrollback(&controller), 0);
     }
 
     #[tokio::test]
@@ -5760,14 +5503,24 @@ command = "python3"
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
         controller
-            .app
             .transcript_mut()
-            .push(neo_tui::TranscriptItem::tool(
-                "read",
-                "expanded file content",
-                neo_tui::ToolStatusKind::Succeeded,
-            ));
-        controller.app.select_visible_transcript_item();
+            .apply_agent_event(AgentEvent::ToolExecutionStarted {
+                turn: 1,
+                id: "tool-1".to_owned(),
+                name: "read".to_owned(),
+                arguments: serde_json::json!({ "path": "README.md" }),
+            });
+        controller
+            .transcript_mut()
+            .apply_agent_event(AgentEvent::ToolExecutionFinished {
+                turn: 1,
+                id: "tool-1".to_owned(),
+                name: "read".to_owned(),
+                result: ToolResult::ok("expanded file content"),
+            });
+        controller
+            .transcript_mut()
+            .select_visible_transcript_entry();
 
         controller
             .handle_input_event(InputEvent::Action(KeybindingAction::ModelPickerOpen))
@@ -5775,7 +5528,12 @@ command = "python3"
             .expect("ctrl-o toggles selected tool detail");
 
         assert!(controller.app().focused_overlay().is_none());
-        assert!(controller.app().expanded_transcript_items().contains(&0));
+        assert!(
+            controller
+                .transcript()
+                .expect("transcript should be initialized")
+                .tool_output_expanded()
+        );
     }
 
     #[tokio::test]
@@ -5798,7 +5556,6 @@ command = "python3"
             empty_session_loader,
         );
 
-        controller.ensure_kimi_runtime();
         controller.local_config = Some(test_config_with_models(
             &test_workspace_root(),
             test_workspace_root().join(".neo/sessions"),
@@ -5845,7 +5602,8 @@ command = "python3"
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
         controller
-            .app
+            .tui
+            .app_mut()
             .request_approval("approval-1", "Run command?", "cargo test");
 
         controller
@@ -5872,7 +5630,7 @@ command = "python3"
             .expect("approval confirms");
         assert!(controller.app().focused_overlay().is_none());
 
-        controller.app.push_overlay(neo_tui::Overlay::new(
+        controller.tui.app_mut().push_overlay(neo_tui::Overlay::new(
             "palette",
             OverlayKind::CommandPalette(neo_tui::CommandPaletteState::new((0..10).map(|index| {
                 neo_tui::CommandSpec::new(
@@ -5907,9 +5665,9 @@ command = "python3"
             panic!("expected command palette overlay");
         };
         assert_eq!(palette.selected_command().expect("command").id, "command-0");
-        let _ = controller.app.close_focused_overlay();
+        let _ = controller.tui.app_mut().close_focused_overlay();
 
-        controller.app.push_overlay(neo_tui::Overlay::new(
+        controller.tui.app_mut().push_overlay(neo_tui::Overlay::new(
             "custom",
             OverlayKind::Message("Body".to_owned()),
         ));
@@ -6145,12 +5903,12 @@ command = "python3"
         assert!(html.contains("<strong>bold</strong>"));
         assert!(html.contains("&lt;script&gt;"));
         assert!(!html.contains("<script>"));
-        assert!(controller.app().transcript().items().iter().any(|item| {
+        assert!(transcript_entries(&controller).iter().any(|entry| {
             matches!(
-                item,
-                neo_tui::TranscriptItem::Notice { content }
-                    if content.contains("Exported session alpha to")
-                        && content.contains(&export_path.display().to_string())
+                entry,
+                TranscriptEntry::Status { text, .. }
+                    if text.contains("Exported session alpha to")
+                        && text.contains(&export_path.display().to_string())
             )
         }));
     }
@@ -6186,13 +5944,10 @@ command = "python3"
             .await
             .expect("export command handles missing session locally");
 
-        assert!(controller.app().transcript().items().iter().any(|item| {
-            matches!(
-                item,
-                neo_tui::TranscriptItem::Notice { content }
-                    if content.contains("No active session to export")
-            )
-        }));
+        assert!(transcript_has_status(
+            &controller,
+            "No active session to export"
+        ));
     }
 
     #[tokio::test]
@@ -6456,13 +6211,13 @@ command = "python3"
             .expect("turn token captured");
         assert!(token.is_cancelled());
         assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
-        assert_eq!(controller.app().active_assistant_id(), None);
+        assert!(controller.active_turn.is_none());
     }
 
     #[test]
-    fn rebuild_kimi_runtime_from_session_replays_tool_calls_and_results() {
-        let mut runtime = NeoTuiRuntime::new(80, 12);
-        let transcript = LoadedSessionTranscript::new(
+    fn rebuild_transcript_from_session_replays_tool_calls_and_results() {
+        let mut transcript = TranscriptPane::new(80, 12);
+        let loaded = LoadedSessionTranscript::new(
             "alpha",
             ["branch summary: inspected project".to_owned()],
             [
@@ -6485,8 +6240,8 @@ command = "python3"
             ],
         );
 
-        replay_session_into_kimi_runtime(&mut runtime, &transcript);
-        let rendered = runtime
+        replay_session_into_transcript(&mut transcript, &loaded);
+        let rendered = transcript
             .render_frame(80, 12)
             .expect("render frame")
             .into_iter()
@@ -6581,19 +6336,16 @@ command = "python3"
 
         assert_eq!(controller.app().session_label(), "alpha");
         assert!(controller.app().focused_overlay().is_none());
-        assert!(matches!(
-            &controller.app().transcript().items()[0],
-            neo_tui::TranscriptItem::Notice { content }
-                if content == "branch summary: Local branch summary"
+        assert!(transcript_has_status(
+            &controller,
+            "branch summary: Local branch summary"
         ));
-        assert!(matches!(
-            &controller.app().transcript().items()[1],
-            neo_tui::TranscriptItem::User { content } if content == "hello"
-        ));
-        assert!(matches!(
-            &controller.app().transcript().items()[2],
-            neo_tui::TranscriptItem::Assistant { content, .. } if content == "hi back"
-        ));
+        assert!(transcript_entries(&controller).iter().any(|entry| {
+            matches!(entry, TranscriptEntry::UserMessage(content) if content == "hello")
+        }));
+        assert!(transcript_entries(&controller).iter().any(|entry| {
+            matches!(entry, TranscriptEntry::AssistantMessage { content } if content == "hi back")
+        }));
 
         controller.type_text("continue");
         controller
@@ -6609,8 +6361,8 @@ command = "python3"
         assert_eq!(requests[0].prompt, vec!["continue".to_owned()]);
         assert_eq!(requests[0].session_id.as_deref(), Some("alpha"));
         assert_eq!(requests[0].model, None);
-        assert!(controller.app().transcript().items().iter().any(|item| {
-            matches!(item, neo_tui::TranscriptItem::Assistant { content, .. } if content == "continued")
+        assert!(transcript_entries(&controller).iter().any(|entry| {
+            matches!(entry, TranscriptEntry::AssistantMessage { content } if content == "continued")
         }));
     }
 
@@ -6852,14 +6604,10 @@ command = "python3"
 
         assert_eq!(controller.app().session_label(), "alpha-fork-1");
         assert!(controller.app().focused_overlay().is_none());
-        assert!(matches!(
-            &controller.app().transcript().items()[0],
-            neo_tui::TranscriptItem::Notice { content } if content == "forked from alpha"
-        ));
-        assert!(matches!(
-            &controller.app().transcript().items()[1],
-            neo_tui::TranscriptItem::User { content } if content == "hello"
-        ));
+        assert!(transcript_has_status(&controller, "forked from alpha"));
+        assert!(transcript_entries(&controller).iter().any(|entry| {
+            matches!(entry, TranscriptEntry::UserMessage(content) if content == "hello")
+        }));
 
         controller.type_text("continue fork");
         controller
@@ -7330,28 +7078,21 @@ command = "python3"
             other_dir.path().display()
         );
         assert!(controller.app().focused_overlay().is_none());
-        assert!(controller.app().transcript().items().iter().any(|item| {
-            matches!(
-                item,
-                neo_tui::TranscriptItem::Notice { content } if content == &expected
-            )
-        }));
+        assert!(transcript_has_status(&controller, &expected));
     }
 
     #[test]
     fn composed_frame_lines_do_not_exceed_content_width() {
         let app = NeoTuiApp::new("neo", "s", "openai/gpt-4.1", "/tmp");
-        let mut runtime = NeoTuiRuntime::new(80, 12);
-        runtime.push_welcome_banner("neo", "s", "m", "~Workspace/neo", "0.1.0", None);
-        let lines = compose_runtime_frame(&app, &mut runtime, 80, 12).expect("frame composes");
-        let expected = 80usize
-            .saturating_sub(neo_tui::runtime::CHROME_GUTTER)
-            .max(1);
+        let mut transcript = TranscriptPane::new(80, 12);
+        transcript.push_welcome_banner("neo", "s", "m", "~Workspace/neo", "0.1.0", None);
+        let lines = compose_tui_frame(&app, &mut transcript, 80, 12).expect("frame composes");
+        let expected = 80usize;
         for (i, line) in lines.iter().enumerate() {
             let w = neo_tui::ansi::visible_width(line);
             assert!(
-                w <= expected,
-                "line {i} exceeds expected content width {expected}: {w}: {line:?}"
+                w < expected,
+                "line {i} reaches terminal autowrap column {expected}: {w}: {line:?}"
             );
         }
     }
@@ -7361,13 +7102,11 @@ command = "python3"
             default_model: "gpt-4.1".to_owned(),
             default_provider: "openai".to_owned(),
             api_base: None,
-            api_key: None,
             api_key_env: None,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
             model_catalogs: Vec::new(),
             model_scope: Vec::new(),
-            model_selection: config::ModelSelection::Default,
             sessions_dir,
             permissions: PermissionPolicy::default(),
             defaults: Defaults {
@@ -7377,20 +7116,7 @@ command = "python3"
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
-            approve: false,
-            no_approve: false,
             prompt_templates: Vec::new(),
-            skill_paths: Vec::new(),
-            extension_paths: Vec::new(),
-            no_extensions: false,
-            configured_prompt_templates: Vec::new(),
-            no_prompt_templates: false,
-            no_skills: false,
-            no_context_files: false,
-            offline: false,
-            system_prompt: None,
-            append_system_prompt: Vec::new(),
-            tool_filters: ToolFilterConfig::default(),
             project_trusted: true,
             project_dir: project_dir.to_path_buf(),
             config_path: project_dir.join(".neo/config.toml"),

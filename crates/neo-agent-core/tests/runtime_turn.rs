@@ -100,6 +100,56 @@ async fn runtime_streams_one_turn_text_and_updates_context() {
 }
 
 #[tokio::test]
+async fn runtime_injects_workspace_context_into_model_request() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_root = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::MessageStart {
+            id: "msg_1".to_owned(),
+        },
+        AiStreamEvent::TextDelta {
+            text: "ok".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model())
+            .with_workspace_root(workspace.path())
+            .expect("workspace root"),
+        harness.client(),
+    );
+    let mut context = AgentContext::new();
+
+    runtime
+        .run_turn(&mut context, AgentMessage::user_text("where am I?"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    let request = harness.requests().pop().expect("model request");
+    assert!(matches!(
+        request.messages.first(),
+        Some(neo_ai::ChatMessage::System { content })
+            if content.iter().any(|part| matches!(
+                part,
+                neo_ai::ContentPart::Text { text }
+                    if text.contains("<environment_context>")
+                        && text.contains("<cwd>")
+                        && text.contains(&workspace_root.display().to_string())
+                        && text.contains("Do not prefix shell commands with `cd")
+            ))
+    ));
+}
+
+#[tokio::test]
 async fn runtime_emits_provider_token_usage() {
     let harness = FakeHarness::from_events([
         AiStreamEvent::MessageStart {
@@ -995,7 +1045,7 @@ async fn runtime_compaction_keeps_valid_tool_result_boundaries() {
             },
             AgentToolCall {
                 id: "tool_2".to_owned(),
-                name: "list".to_owned(),
+                name: "List".to_owned(),
                 arguments: json!({ "path": "src" }),
             },
         ],
@@ -1009,7 +1059,7 @@ async fn runtime_compaction_keeps_valid_tool_result_boundaries() {
     ));
     context.append_message(AgentMessage::tool_result(
         "tool_2",
-        "list",
+        "List",
         [Content::text("file list")],
         false,
     ));

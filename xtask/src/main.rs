@@ -315,9 +315,9 @@ fn release_smoke_local_extension_steps() -> Vec<CommandStep> {
 
 fn release_smoke_mcp_steps() -> Vec<CommandStep> {
     vec![
-        neo_agent_step(&["mcp", "servers", "health", "release-smoke"]),
-        neo_agent_step(&["mcp", "servers", "start", "release-smoke"]),
-        neo_agent_step(&["mcp", "servers", "stop", "release-smoke"]),
+        neo_agent_step(&["mcp", "list"]),
+        neo_agent_step(&["mcp", "disable", "release-smoke"]),
+        neo_agent_step(&["mcp", "enable", "release-smoke"]),
     ]
 }
 
@@ -522,10 +522,12 @@ fn release_smoke_cli_surface_errors(root: &Path) -> Result<Vec<String>> {
         ),
         (
             normalized.contains("mcpcommand")
-                && normalized.contains("health")
-                && normalized.contains("start")
-                && normalized.contains("stop"),
-            "missing neo-agent MCP lifecycle smoke flow; expected crates/neo-agent/src/cli.rs to expose `mcp servers health/start/stop <server-id>` before release-smoke can exercise local MCP lifecycle",
+                && normalized.contains("list")
+                && normalized.contains("add")
+                && normalized.contains("del")
+                && normalized.contains("enable")
+                && normalized.contains("disable"),
+            "missing neo-agent MCP lifecycle smoke flow; expected crates/neo-agent/src/cli.rs to expose `mcp list|add|del|enable|disable` before release-smoke can exercise local MCP lifecycle",
         ),
     ] {
         if !ok {
@@ -3403,7 +3405,7 @@ mod tests {
                 "pub enum ModelCommand { List }\n",
                 "pub enum SessionCommand { List, Tree, Show, ExportJson }\n",
                 "pub enum ExtensionCommand { Install, List, Status, Disable, Enable, Call }\n",
-                "pub enum McpCommand { Health, Start, Stop }\n",
+                "pub enum McpCommand { List, Add, Del, Enable, Disable }\n",
             ),
         )
         .expect("cli source");
@@ -3433,9 +3435,9 @@ mod tests {
             "cargo run -p neo-agent -- extensions disable echo",
             "cargo run -p neo-agent -- extensions enable echo",
             "cargo run -p neo-agent -- extensions call echo tools.echo {\"value\":42}",
-            "cargo run -p neo-agent -- mcp servers health release-smoke",
-            "cargo run -p neo-agent -- mcp servers start release-smoke",
-            "cargo run -p neo-agent -- mcp servers stop release-smoke",
+            "cargo run -p neo-agent -- mcp list",
+            "cargo run -p neo-agent -- mcp disable release-smoke",
+            "cargo run -p neo-agent -- mcp enable release-smoke",
             "cargo run -p xtask -- catalog check",
         ] {
             assert!(steps.iter().any(|step| step == expected), "{expected}");

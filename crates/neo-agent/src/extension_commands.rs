@@ -55,18 +55,7 @@ pub fn update(
     state_path: &Path,
     registry_path: &Path,
     extension_id: &str,
-    offline: bool,
 ) -> anyhow::Result<String> {
-    if offline {
-        let status = lifecycle_store(state_path).status(root, extension_id)?;
-        let source = installer(root, state_path, registry_path)
-            .source_for(extension_id)?
-            .unwrap_or_else(|| "-".to_owned());
-        return Ok(format!(
-            "offline: skipped extension update {}\t{}\t{}\n",
-            status.id, status.version, source
-        ));
-    }
     let updated = installer(root, state_path, registry_path).update(extension_id)?;
     Ok(format!(
         "{} updated {}\t{}\n",

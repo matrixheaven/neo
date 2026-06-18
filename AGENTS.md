@@ -322,8 +322,7 @@ methods.
   advertised to the model as `extension__<id>__<tool>`.
 - Configured MCP servers expose tools as `mcp__<server>__<tool>` and execute via
   `McpStdioToolAdapter` or `McpHttpToolAdapter`.
-- MCP resources are fetched only through explicit `neo mcp resources` commands;
-  they are not silently injected into model context.
+- MCP resources are not silently injected into model context.
 
 ## Configuration model
 
@@ -368,8 +367,9 @@ CLI session management: `neo sessions list/show/rename/fork/summarize/compact/ex
 
 CLI extension management: `neo extensions install/update/uninstall/list/status/enable/disable/call`.
 
-CLI MCP management: `neo mcp list`, `neo mcp servers add/remove/enable/disable/health/start/stop`,
-`neo mcp tools <server>`, `neo mcp resources <server> list/read/watch`.
+CLI MCP management: `neo mcp list`,
+`neo mcp add <name> -t studio|remote-http|remote-sse ...`,
+`neo mcp del <name>`, `neo mcp enable/disable <name>`.
 
 CLI image generation: `neo images generate --model <provider/model> --output <path>`.
 

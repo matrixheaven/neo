@@ -1,8 +1,10 @@
 use crate::ansi::{Color, Style, paint, visible_width};
 use crate::app::TuiTheme;
-use crate::core::{Finalization, Line};
+use crate::core::Line;
+use crate::image::InlineImage;
+use crate::transcript::ToolCallComponent;
 use crate::widgets::box_draw;
-use crate::wrap_width;
+use crate::{ImageRenderPolicy, ImageSource, TerminalImageCapabilities, wrap_width};
 
 /// Rich welcome-banner content rendered as a rounded box (matching kimi-code).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -19,32 +21,50 @@ pub struct BannerData {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptEntry {
     Banner(BannerData),
-    User(String),
-    Assistant {
-        thinking: String,
+    UserMessage(String),
+    AssistantMessage {
         content: String,
-        finalized: bool,
     },
-    ToolCallRunning {
-        name: String,
-        detail: String,
+    ThinkingBlock {
+        content: String,
+        phase: ThinkingPhase,
     },
-    ToolCallFinished {
-        name: String,
-        detail: String,
+    ToolRun {
+        component: ToolCallComponent,
     },
-    Notice {
+    Image {
+        id: String,
+        mime_type: String,
+        size_bytes: Option<usize>,
+        alt: Option<String>,
+        source: ImageSource,
+        metadata: String,
+        payload: Option<Vec<u8>>,
+    },
+    Compaction {
+        phase: Option<neo_agent_core::CompactionPhase>,
+        percent: u8,
+        compacted_message_count: usize,
+        tokens_before: usize,
+    },
+    Status {
         text: String,
-        /// When set, the notice renders as a bold title (in the severity
-        /// color) for system/error notices. Plain notices stay a single dim
+        /// When set, the status renders as a bold title (in the severity
+        /// color) for system/error statuses. Plain statuses stay a single dim
         /// line with no prefix.
-        severity: Option<NoticeSeverity>,
+        severity: Option<StatusSeverity>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingPhase {
+    Streaming,
+    Complete,
 }
 
 /// Severity for an emphasized system notice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoticeSeverity {
+pub enum StatusSeverity {
     Info,
     Warning,
     Error,
@@ -65,69 +85,82 @@ impl TranscriptEntry {
     }
 
     #[must_use]
-    pub fn user(content: impl Into<String>) -> Self {
-        Self::User(content.into())
+    pub fn user_message(content: impl Into<String>) -> Self {
+        Self::UserMessage(content.into())
     }
 
     #[must_use]
-    pub fn assistant_live(content: impl Into<String>) -> Self {
-        Self::Assistant {
-            thinking: String::new(),
+    pub fn assistant_message(content: impl Into<String>) -> Self {
+        Self::AssistantMessage {
             content: content.into(),
-            finalized: false,
         }
     }
 
     #[must_use]
-    pub fn assistant_final(content: impl Into<String>) -> Self {
-        Self::Assistant {
-            thinking: String::new(),
+    pub fn thinking_streaming(content: impl Into<String>) -> Self {
+        Self::ThinkingBlock {
             content: content.into(),
-            finalized: true,
+            phase: ThinkingPhase::Streaming,
         }
     }
 
     #[must_use]
-    pub fn tool_call_running(name: impl Into<String>, detail: impl Into<String>) -> Self {
-        Self::ToolCallRunning {
-            name: name.into(),
-            detail: detail.into(),
+    pub fn thinking_complete(content: impl Into<String>) -> Self {
+        Self::ThinkingBlock {
+            content: content.into(),
+            phase: ThinkingPhase::Complete,
         }
     }
 
     #[must_use]
-    pub fn tool_call_finished(name: impl Into<String>, detail: impl Into<String>) -> Self {
-        Self::ToolCallFinished {
-            name: name.into(),
-            detail: detail.into(),
+    pub fn tool_run(component: ToolCallComponent) -> Self {
+        Self::ToolRun { component }
+    }
+
+    #[must_use]
+    pub fn image(
+        id: impl Into<String>,
+        mime_type: impl Into<String>,
+        size_bytes: Option<usize>,
+        alt: Option<impl Into<String>>,
+        source: ImageSource,
+        metadata: impl Into<String>,
+        payload: Option<Vec<u8>>,
+    ) -> Self {
+        Self::Image {
+            id: id.into(),
+            mime_type: mime_type.into(),
+            size_bytes,
+            alt: alt.map(Into::into),
+            source,
+            metadata: metadata.into(),
+            payload,
         }
     }
 
     #[must_use]
-    pub fn notice(content: impl Into<String>) -> Self {
-        Self::Notice {
+    pub const fn compaction(compacted_message_count: usize, tokens_before: usize) -> Self {
+        Self::Compaction {
+            phase: Some(neo_agent_core::CompactionPhase::Applying),
+            percent: 100,
+            compacted_message_count,
+            tokens_before,
+        }
+    }
+
+    #[must_use]
+    pub fn status(content: impl Into<String>) -> Self {
+        Self::Status {
             text: content.into(),
             severity: None,
         }
     }
 
     #[must_use]
-    pub fn notice_severity(content: impl Into<String>, severity: NoticeSeverity) -> Self {
-        Self::Notice {
+    pub fn status_severity(content: impl Into<String>, severity: StatusSeverity) -> Self {
+        Self::Status {
             text: content.into(),
             severity: Some(severity),
-        }
-    }
-
-    #[must_use]
-    pub fn finalization(&self) -> Finalization {
-        match self {
-            Self::Banner(_)
-            | Self::User(_)
-            | Self::Notice { .. }
-            | Self::ToolCallFinished { .. } => Finalization::Finalized,
-            Self::Assistant { finalized, .. } if *finalized => Finalization::Finalized,
-            Self::Assistant { .. } | Self::ToolCallRunning { .. } => Finalization::Live,
         }
     }
 
@@ -144,69 +177,139 @@ impl TranscriptEntry {
             // User: no "You" label — a sparkle bullet (roleUser amber) on the
             // first line, continuation lines indented to align after the
             // bullet (kimi-code style).
-            Self::User(content) => {
-                let style = Style::default().fg(theme.user);
+            Self::UserMessage(content) => {
+                let style = Style::default().fg(theme.user_message);
                 bulleted_wrap(content, inner_width, "✨ ", style)
             }
-            // Notice: plain dim single-line for routine notices; a bold
-            // severity-colored title for system/error notices.
-            Self::Notice { text, severity } => match severity {
-                None => styled_wrap(text, inner_width, notice_style(theme)),
+            // Status: plain dim single-line for routine statuses; a bold
+            // severity-colored title for system/error statuses.
+            Self::Status { text, severity } => match severity {
+                None => styled_wrap(text, inner_width, status_style(theme)),
                 Some(sev) => {
                     let style = Style::default().fg(severity_color(*sev, theme)).bold();
                     styled_wrap(text, inner_width, style)
                 }
             },
-            Self::Assistant {
-                thinking,
-                content,
-                finalized,
-            } => {
-                let mut rows = Vec::new();
-                if *finalized && content.is_empty() && thinking.is_empty() {
-                    return rows;
+            Self::AssistantMessage { content } => {
+                if content.is_empty() {
+                    return Vec::new();
                 }
-                if !thinking.is_empty() {
-                    rows.extend(render_thinking(thinking, inner_width, *finalized, theme));
-                }
-                if !content.is_empty() {
-                    // Assistant body is rendered as markdown. On finalization
-                    // the first line carries a magenta `● ` bullet and every
-                    // continuation line is indented to align under the body
-                    // (not under the bullet glyph) — matching kimi-code.
-                    if *finalized {
-                        rows.extend(crate::markdown::render_markdown(
-                            content,
-                            inner_width,
-                            theme,
-                            "● ",
-                            "  ",
-                        ));
-                    } else {
-                        // Streaming: no bullet, plain indent.
-                        rows.extend(crate::markdown::render_markdown(
-                            content,
-                            inner_width,
-                            theme,
-                            "",
-                            "",
-                        ));
-                    }
-                }
-                rows
+                crate::markdown::render_markdown(content, inner_width, theme, "● ", "  ")
             }
-            Self::ToolCallRunning { name, detail } => styled_wrap(
-                &format!("● Using {name} ({detail})"),
+            Self::ThinkingBlock { content, phase } => {
+                if content.is_empty() {
+                    Vec::new()
+                } else {
+                    render_thinking(content, inner_width, *phase, theme)
+                }
+            }
+            Self::ToolRun { component } => {
+                let mut component = component.clone();
+                component.render_with_theme(inner_width, theme)
+            }
+            Self::Image { metadata, .. } => styled_wrap(metadata, inner_width, status_style(theme)),
+            Self::Compaction {
+                compacted_message_count,
+                tokens_before,
+                ..
+            } => styled_wrap(
+                &format!(
+                    "Compacted {compacted_message_count} messages · {} tokens before",
+                    format_token_count_usize(*tokens_before)
+                ),
                 inner_width,
-                tool_running_style(theme),
-            ),
-            Self::ToolCallFinished { name, detail } => styled_wrap(
-                &format!("● Used {name} ({detail})"),
-                inner_width,
-                tool_finished_style(theme),
+                status_style(theme),
             ),
         }
     }
+
+    #[must_use]
+    pub fn copy_parts(&self) -> (&'static str, String) {
+        match self {
+            Self::Banner(data) => (
+                "Banner",
+                format!(
+                    "{}\nSession: {}\nModel: {}\nWorkspace: {}",
+                    data.title, data.session, data.model, data.directory
+                ),
+            ),
+            Self::UserMessage(content) => ("You", content.clone()),
+            Self::AssistantMessage { content } => ("Assistant", content.clone()),
+            Self::ThinkingBlock { content, .. } => ("Thinking", content.clone()),
+            Self::ToolRun { component } => {
+                let state = component.state();
+                let detail = state
+                    .result
+                    .as_ref()
+                    .filter(|result| !result.is_empty())
+                    .or_else(|| {
+                        state
+                            .arguments
+                            .as_ref()
+                            .filter(|arguments| !arguments.is_empty())
+                    })
+                    .cloned()
+                    .unwrap_or_default();
+                (
+                    "Tool",
+                    format!("{} {} ({detail})", state.status.marker(), state.name),
+                )
+            }
+            Self::Image { metadata, .. } => ("Image", metadata.clone()),
+            Self::Compaction {
+                compacted_message_count,
+                tokens_before,
+                ..
+            } => (
+                "Compact",
+                format!(
+                    "Compacted {compacted_message_count} messages · {} tokens before",
+                    format_token_count_usize(*tokens_before)
+                ),
+            ),
+            Self::Status { text, .. } => ("Status", text.clone()),
+        }
+    }
+
+    #[must_use]
+    pub fn inline_image_render(
+        &self,
+        image_render_policy: ImageRenderPolicy,
+        image_capabilities: TerminalImageCapabilities,
+    ) -> Option<InlineImageRender> {
+        let Self::Image {
+            id,
+            mime_type,
+            alt,
+            source,
+            payload,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let payload = payload.as_ref()?;
+        let inline = InlineImage::bytes(
+            id.clone(),
+            mime_type.clone(),
+            payload.clone(),
+            alt.clone(),
+            *source,
+        );
+        image_render_policy
+            .render_inline_image(&inline, image_capabilities)
+            .escape_sequence
+            .map(|escape_sequence| InlineImageRender {
+                id: id.clone(),
+                escape_sequence,
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineImageRender {
+    pub id: String,
+    pub escape_sequence: String,
 }
 
 /// Wrap `text` and apply a bullet prefix to the first row, indenting the rest
@@ -229,37 +332,52 @@ fn bulleted_wrap(text: &str, width: usize, prefix: &str, style: Style) -> Vec<Li
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn severity_color(severity: NoticeSeverity, theme: &TuiTheme) -> Color {
+fn severity_color(severity: StatusSeverity, theme: &TuiTheme) -> Color {
     match severity {
-        NoticeSeverity::Info => theme.accent,
-        NoticeSeverity::Warning => theme.warning,
-        NoticeSeverity::Error => theme.danger,
+        StatusSeverity::Info => theme.brand,
+        StatusSeverity::Warning => theme.status_warn,
+        StatusSeverity::Error => theme.status_error,
     }
 }
 
-/// Number of thinking lines shown in the floating window (live) or as a
-/// finalized preview. Matches kimi-code's `THINKING_PREVIEW_LINES = 2`.
+fn format_token_count_usize(tokens: usize) -> String {
+    if tokens >= 1_000_000 {
+        format!("{}m", tokens / 1_000_000)
+    } else if tokens >= 1_000 {
+        format!("{}k", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// Number of thinking lines shown in the floating window (streaming) or as a
+/// compact preview. Matches kimi-code's `THINKING_PREVIEW_LINES = 2`.
 const THINKING_PREVIEW_LINES: usize = 2;
 
 /// Render the thinking block as a fixed-height floating window.
 ///
-/// - **Live** (`finalized == false`): a braille-spinner header line
+/// - **Streaming**: a braille-spinner header line
 ///   `⠋ thinking...` followed by the *last* `THINKING_PREVIEW_LINES` wrapped
 ///   rows. As new content streams in the window shows the tail, giving the
 ///   impression of text scrolling up within a fixed 2-line height.
-/// - **Finalized**: the *first* `THINKING_PREVIEW_LINES` rows prefixed with a
+/// - **Complete**: the *first* `THINKING_PREVIEW_LINES` rows prefixed with a
 ///   `●` bullet, followed by a `… N more lines (ctrl+o to expand)` hint when
-///   the full text was longer. This keeps finalized thinking compact instead
+///   the full text was longer. This keeps completed thinking compact instead
 ///   of unbounded.
-fn render_thinking(thinking: &str, width: usize, finalized: bool, theme: &TuiTheme) -> Vec<Line> {
+fn render_thinking(
+    thinking: &str,
+    width: usize,
+    phase: ThinkingPhase,
+    theme: &TuiTheme,
+) -> Vec<Line> {
     let style = thinking_style(theme);
     let body_width = width.max(1).saturating_sub(2).max(1);
     let wrapped = wrap_width(thinking, body_width);
     let total = wrapped.len();
     let mut rows = Vec::new();
 
-    if !finalized {
-        // Live: spinner + tail window.
+    if phase == ThinkingPhase::Streaming {
+        // Streaming: spinner + tail window.
         rows.push(Line::styled("⠋ thinking...", style));
         let start = total.saturating_sub(THINKING_PREVIEW_LINES);
         for line in &wrapped[start..] {
@@ -268,7 +386,7 @@ fn render_thinking(thinking: &str, width: usize, finalized: bool, theme: &TuiThe
         return rows;
     }
 
-    // Finalized: head window + collapse hint.
+    // Complete: head window + collapse hint.
     let limit = THINKING_PREVIEW_LINES.min(total);
     for (i, line) in wrapped.iter().take(limit).enumerate() {
         if i == 0 {
@@ -281,7 +399,7 @@ fn render_thinking(thinking: &str, width: usize, finalized: bool, theme: &TuiThe
         let remaining = total - limit;
         rows.push(Line::styled(
             format!("  … {remaining} more lines (ctrl+o to expand)"),
-            Style::default().fg(theme.muted),
+            Style::default().fg(theme.text_muted),
         ));
     }
     rows
@@ -321,11 +439,11 @@ fn render_welcome_banner(data: &BannerData, width: usize, theme: &TuiTheme) -> V
     let gap = "  ";
 
     // Build the content lines (plain text with ANSI via paint, to be padded).
-    let logo_color = Style::default().fg(theme.accent);
-    let title_style = Style::default().fg(theme.accent).bold();
-    let subtitle_style = Style::default().fg(theme.muted);
-    let label_style = Style::default().fg(theme.muted).bold();
-    let value_style = Style::default().fg(theme.header);
+    let logo_color = Style::default().fg(theme.brand);
+    let title_style = Style::default().fg(theme.brand).bold();
+    let subtitle_style = Style::default().fg(theme.text_muted);
+    let label_style = Style::default().fg(theme.text_muted).bold();
+    let value_style = Style::default().fg(theme.text_primary);
 
     let mut content: Vec<String> = Vec::new();
     // blank line at top of box
@@ -383,7 +501,7 @@ fn render_welcome_banner(data: &BannerData, width: usize, theme: &TuiTheme) -> V
     // blank line at bottom of box
     content.push(String::new());
 
-    let border_style = Style::default().fg(theme.accent);
+    let border_style = Style::default().fg(theme.brand);
     let mut rows = Vec::new();
     rows.push(Line::raw(box_draw::top_border(width, border_style)));
     for cline in &content {
@@ -398,23 +516,12 @@ fn render_welcome_banner(data: &BannerData, width: usize, theme: &TuiTheme) -> V
     rows
 }
 
-fn notice_style(theme: &TuiTheme) -> Style {
-    Style::default().fg(theme.notice)
+fn status_style(theme: &TuiTheme) -> Style {
+    Style::default().fg(theme.text_muted)
 }
 
 fn thinking_style(theme: &TuiTheme) -> Style {
-    Style::default().fg(theme.thinking).italic()
-}
-
-fn tool_running_style(theme: &TuiTheme) -> Style {
-    Style::default().fg(theme.accent)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn tool_finished_style(theme: &TuiTheme) -> Style {
-    // Finished tool rows use the success accent; failures are surfaced via the
-    // tool card status symbol rather than recoloring the whole row here.
-    Style::default().fg(theme.success)
+    Style::default().fg(theme.text_muted).italic()
 }
 
 #[cfg(test)]

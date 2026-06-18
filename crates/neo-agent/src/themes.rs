@@ -33,30 +33,23 @@ struct ThemeFile {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ThemeColors {
-    header: Option<String>,
+    text_primary: Option<String>,
     prompt: Option<String>,
-    /// Brand accent (magenta by default) — tool names, running bullets.
-    accent: Option<String>,
-    success: Option<String>,
-    danger: Option<String>,
-    warning: Option<String>,
-    /// Secondary text / chip color.
-    muted: Option<String>,
-    user: Option<String>,
-    assistant: Option<String>,
-    notice: Option<String>,
-    thinking: Option<String>,
+    brand: Option<String>,
+    status_ok: Option<String>,
+    status_error: Option<String>,
+    status_warn: Option<String>,
+    text_muted: Option<String>,
+    user_message: Option<String>,
     diff_added: Option<String>,
     diff_removed: Option<String>,
     diff_hunk: Option<String>,
     diff_context: Option<String>,
     selection_bg: Option<String>,
-    pending: Option<String>,
-    running: Option<String>,
-    succeeded: Option<String>,
-    failed: Option<String>,
-    cancelled: Option<String>,
+    status_pending: Option<String>,
+    status_cancelled: Option<String>,
     approval_border: Option<String>,
     selected_fg: Option<String>,
     selected_bg: Option<String>,
@@ -71,16 +64,10 @@ struct ThemeColors {
     footer_hint: Option<String>,
 }
 
-pub fn resolve_theme(
-    project_dir: &Path,
-    explicit_paths: &[PathBuf],
-    no_themes: bool,
-) -> anyhow::Result<ResolvedTheme> {
-    let mut paths = explicit_paths.to_vec();
-    if !no_themes {
-        paths.extend(discover_project_themes(project_dir)?);
-        paths.extend(discover_global_themes()?);
-    }
+pub fn resolve_theme(project_dir: &Path) -> anyhow::Result<ResolvedTheme> {
+    let mut paths = Vec::new();
+    paths.extend(discover_project_themes(project_dir)?);
+    paths.extend(discover_global_themes()?);
 
     let Some(path) = paths.first() else {
         return Ok(ResolvedTheme::default());
@@ -198,98 +185,44 @@ fn load_theme_file(path: &Path) -> anyhow::Result<ResolvedTheme> {
     })
 }
 
-pub fn list_project_themes(project_dir: &Path) -> anyhow::Result<String> {
-    let themes = load_project_theme_files(project_dir)?;
-    if themes.is_empty() {
-        return Ok("no themes\n".to_owned());
-    }
-
-    let mut output = String::new();
-    for theme in themes {
-        use std::fmt::Write as _;
-        let _ = writeln!(
-            output,
-            "{}\t{}",
-            theme.name,
-            theme
-                .source
-                .as_ref()
-                .map_or_else(|| "-".to_owned(), |path| path.display().to_string())
-        );
-    }
-    Ok(output)
-}
-
-pub fn preview_project_theme(project_dir: &Path, name: &str) -> anyhow::Result<String> {
-    let theme = load_project_theme_files(project_dir)?
-        .into_iter()
-        .find(|theme| {
-            theme.name == name
-                || theme.source.as_ref().is_some_and(|path| {
-                    path.file_stem()
-                        .and_then(std::ffi::OsStr::to_str)
-                        .is_some_and(|stem| stem == name)
-                })
-        })
-        .ok_or_else(|| anyhow::anyhow!("theme {name:?} not found"))?;
-    let source = theme
-        .source
-        .as_ref()
-        .with_context(|| format!("theme {name:?} has no source"))?;
-    let content = fs::read_to_string(source)
-        .with_context(|| format!("failed to read theme {}", source.display()))?;
-    Ok(format!(
-        "{}\t{}\n{}\n",
-        theme.name,
-        source.display(),
-        content
-    ))
-}
-
-fn load_project_theme_files(project_dir: &Path) -> anyhow::Result<Vec<ResolvedTheme>> {
-    let mut themes = Vec::new();
-    for path in discover_project_themes(project_dir)? {
-        themes.push(load_theme_file(&path)?);
-    }
-    themes.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
-            .then_with(|| left.source.cmp(&right.source))
-    });
-    Ok(themes)
-}
-
 #[allow(clippy::too_many_lines)]
 fn apply_colors(theme: &mut TuiTheme, colors: &ThemeColors, path: &Path) -> anyhow::Result<()> {
-    apply_color(&mut theme.header, "header", colors.header.as_deref(), path)?;
+    apply_color(
+        &mut theme.text_primary,
+        "text_primary",
+        colors.text_primary.as_deref(),
+        path,
+    )?;
     apply_color(&mut theme.prompt, "prompt", colors.prompt.as_deref(), path)?;
-    apply_color(&mut theme.accent, "accent", colors.accent.as_deref(), path)?;
+    apply_color(&mut theme.brand, "brand", colors.brand.as_deref(), path)?;
     apply_color(
-        &mut theme.success,
-        "success",
-        colors.success.as_deref(),
+        &mut theme.status_ok,
+        "status_ok",
+        colors.status_ok.as_deref(),
         path,
     )?;
-    apply_color(&mut theme.danger, "danger", colors.danger.as_deref(), path)?;
     apply_color(
-        &mut theme.warning,
-        "warning",
-        colors.warning.as_deref(),
+        &mut theme.status_error,
+        "status_error",
+        colors.status_error.as_deref(),
         path,
     )?;
-    apply_color(&mut theme.muted, "muted", colors.muted.as_deref(), path)?;
-    apply_color(&mut theme.user, "user", colors.user.as_deref(), path)?;
     apply_color(
-        &mut theme.assistant,
-        "assistant",
-        colors.assistant.as_deref(),
+        &mut theme.status_warn,
+        "status_warn",
+        colors.status_warn.as_deref(),
         path,
     )?;
-    apply_color(&mut theme.notice, "notice", colors.notice.as_deref(), path)?;
     apply_color(
-        &mut theme.thinking,
-        "thinking",
-        colors.thinking.as_deref(),
+        &mut theme.text_muted,
+        "text_muted",
+        colors.text_muted.as_deref(),
+        path,
+    )?;
+    apply_color(
+        &mut theme.user_message,
+        "user_message",
+        colors.user_message.as_deref(),
         path,
     )?;
     apply_color(
@@ -323,28 +256,15 @@ fn apply_colors(theme: &mut TuiTheme, colors: &ThemeColors, path: &Path) -> anyh
         path,
     )?;
     apply_color(
-        &mut theme.pending,
-        "pending",
-        colors.pending.as_deref(),
+        &mut theme.status_pending,
+        "status_pending",
+        colors.status_pending.as_deref(),
         path,
     )?;
     apply_color(
-        &mut theme.running,
-        "running",
-        colors.running.as_deref(),
-        path,
-    )?;
-    apply_color(
-        &mut theme.succeeded,
-        "succeeded",
-        colors.succeeded.as_deref(),
-        path,
-    )?;
-    apply_color(&mut theme.failed, "failed", colors.failed.as_deref(), path)?;
-    apply_color(
-        &mut theme.cancelled,
-        "cancelled",
-        colors.cancelled.as_deref(),
+        &mut theme.status_cancelled,
+        "status_cancelled",
+        colors.status_cancelled.as_deref(),
         path,
     )?;
     apply_color(
@@ -474,5 +394,70 @@ fn named_color(value: &str) -> anyhow::Result<Color> {
         "lightcyan" | "light_cyan" | "light-cyan" => Ok(Color::LightCyan),
         "white" => Ok(Color::White),
         _ => bail!("unknown color {value:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn theme_json_uses_role_color_keys() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("role-theme.json");
+        fs::write(
+            &path,
+            r##"
+{
+  "name": "Role Theme",
+  "colors": {
+    "text_primary": "#010203",
+    "text_muted": "#040506",
+    "brand": "#070809",
+    "status_ok": "#0a0b0c",
+    "status_warn": "#0d0e0f",
+    "status_error": "#101112",
+    "status_pending": "#131415",
+    "status_cancelled": "darkgray",
+    "user_message": "#161718"
+  }
+}
+"##,
+        )
+        .expect("write theme");
+
+        let resolved = load_theme_file(&path).expect("load theme");
+
+        assert_eq!(resolved.theme.text_primary, Color::Rgb(1, 2, 3));
+        assert_eq!(resolved.theme.text_muted, Color::Rgb(4, 5, 6));
+        assert_eq!(resolved.theme.brand, Color::Rgb(7, 8, 9));
+        assert_eq!(resolved.theme.status_ok, Color::Rgb(10, 11, 12));
+        assert_eq!(resolved.theme.status_warn, Color::Rgb(13, 14, 15));
+        assert_eq!(resolved.theme.status_error, Color::Rgb(16, 17, 18));
+        assert_eq!(resolved.theme.status_pending, Color::Rgb(19, 20, 21));
+        assert_eq!(resolved.theme.status_cancelled, Color::DarkGray);
+        assert_eq!(resolved.theme.user_message, Color::Rgb(22, 23, 24));
+    }
+
+    #[test]
+    fn theme_json_rejects_old_color_keys() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("old-theme.json");
+        fs::write(
+            &path,
+            r##"
+{
+  "name": "Old Theme",
+  "colors": {
+    "accent": "#070809"
+  }
+}
+"##,
+        )
+        .expect("write theme");
+
+        let error = load_theme_file(&path).expect_err("old key should fail");
+        assert!(error.to_string().contains("failed to parse theme"));
     }
 }

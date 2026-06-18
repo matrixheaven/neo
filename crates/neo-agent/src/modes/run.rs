@@ -2,17 +2,11 @@ use std::{
     collections::BTreeMap,
     env,
     fmt::Write as _,
-    fs,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
 };
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt as _;
-
 use anyhow::Context;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures::StreamExt;
 use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionMetadataStore};
 use neo_agent_core::{
@@ -22,13 +16,9 @@ use neo_agent_core::{
     ToolRegistry,
 };
 use neo_ai::{
-    ApiKind, ApiType, ChatMessage, ContentPart, CredentialResolver, ImageData,
-    ImageGenerationClient, ImageGenerationRequest, ModelClient, ModelRegistry, ModelSpec,
-    ProviderRegistry, ProviderSpec, RequestOptions, ResolvedCredential,
-    providers::openai_images::OpenAiImagesClient,
+    ApiKind, ApiType, ChatMessage, ContentPart, CredentialResolver, ModelClient, ModelRegistry,
+    ModelSpec, ProviderRegistry, ProviderSpec, RequestOptions, ResolvedCredential,
 };
-use reqwest::header;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -36,46 +26,38 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     cli::RunOutput,
     config::{self, AppConfig, McpServerConfig, workspace_sessions_dir},
-    extension_tools, resources, session_commands,
+    extension_tools,
+    modes::sessions,
+    resources,
 };
-
-const REMOTE_IMAGE_MAX_BYTES: u64 = 20 * 1024 * 1024;
-const REMOTE_IMAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub async fn execute(
     prompt: &[String],
     config: &AppConfig,
     output: RunOutput,
-    session_target: Option<SessionTarget<'_>>,
-    session_name: Option<&str>,
+    continue_latest: bool,
     no_session: bool,
 ) -> anyhow::Result<String> {
     let turn = if no_session {
         run_prompt_ephemeral(prompt, config).await?
-    } else if let Some(session_target) = session_target {
-        run_prompt_with_session_target(session_target, prompt, config).await?
+    } else if continue_latest {
+        let session_id = latest_session_id(config)?;
+        run_prompt_in_session(&session_id, prompt, config).await?
     } else {
         run_prompt(prompt, config).await?
     };
-    if !no_session {
-        apply_session_name(config, &turn.session_id, session_name)?;
+    match output {
+        RunOutput::Json => stable_json_output(&turn, config),
+        RunOutput::Text => Ok(format!("{}\n", turn.assistant_text)),
+        RunOutput::Events => {
+            let mut output = String::new();
+            for event in turn.events {
+                output.push_str(&serde_json::to_string(&event)?);
+                output.push('\n');
+            }
+            Ok(output)
+        }
     }
-    if matches!(output, RunOutput::Json) {
-        return stable_json_output(&turn, config);
-    }
-
-    let mut output = String::new();
-    for event in turn.events {
-        output.push_str(&serde_json::to_string(&event)?);
-        output.push('\n');
-    }
-    Ok(output)
-}
-
-pub async fn resume(session_ref: &str, config: &AppConfig) -> anyhow::Result<String> {
-    let session_id = session_commands::resolve_session_id(session_ref, config)?;
-    let transcript = session_commands::transcript(&session_id, config).await?;
-    Ok(format!("session {session_id}\n{transcript}"))
 }
 
 fn stable_json_output(turn: &PromptTurn, config: &AppConfig) -> anyhow::Result<String> {
@@ -577,330 +559,100 @@ fn current_unix_timestamp() -> String {
     format!("{}.{:09}Z", duration.as_secs(), duration.subsec_nanos())
 }
 
-pub fn list_models_filtered(config: &AppConfig, search: Option<&str>) -> anyhow::Result<String> {
-    list_models_with_search_and_options(config, search, false)
-}
-
-pub fn list_models_with_options(config: &AppConfig, json_output: bool) -> anyhow::Result<String> {
-    list_models_with_search_and_options(config, None, json_output)
-}
-
-fn list_models_with_search_and_options(
-    config: &AppConfig,
-    search: Option<&str>,
-    json_output: bool,
-) -> anyhow::Result<String> {
-    let providers = provider_registry_for_config(config);
-    let models = model_registry_for_config(config)?;
-    let search = search.map(str::trim).filter(|search| !search.is_empty());
-    let listed_models = models
-        .list()
-        .into_iter()
-        .filter(|model| model_matches_search(&models, model, search))
-        .collect::<Vec<_>>();
-    if let Some(search) = search
-        && listed_models.is_empty()
-    {
-        return Ok(format!("no models matching \"{search}\"\n"));
+/// List only the models explicitly configured in `config.toml`.
+///
+/// Unlike `list_models_with_options`, built-in seeded models are excluded so
+/// the output reflects exactly what the user has configured.
+pub fn list_configured_models(config: &AppConfig, json_output: bool) -> anyhow::Result<String> {
+    #[derive(Debug)]
+    struct Entry<'a> {
+        alias: &'a str,
+        provider: &'a str,
+        model: &'a str,
+        provider_type: &'a str,
+        capabilities: &'a [String],
+        max_context_tokens: Option<u32>,
+        display_name: Option<&'a str>,
+        is_default: bool,
     }
+
+    if config.models.is_empty() {
+        if json_output {
+            return Ok(serde_json::to_string_pretty(&json!({
+                "models": [],
+                "default_model": config.default_model,
+            }))? + "\n");
+        }
+        return Ok("no models configured\n".to_owned());
+    }
+
+    let mut entries = Vec::with_capacity(config.models.len());
+    for (alias, model_cfg) in &config.models {
+        let provider_cfg = config.providers.get(&model_cfg.provider);
+        let provider_type = provider_cfg
+            .and_then(|cfg| cfg.provider_type)
+            .map_or("unknown", |t| t.as_config_str());
+        entries.push(Entry {
+            alias,
+            provider: &model_cfg.provider,
+            model: &model_cfg.model,
+            provider_type,
+            capabilities: &model_cfg.capabilities,
+            max_context_tokens: model_cfg.max_context_tokens,
+            display_name: model_cfg.display_name.as_deref(),
+            is_default: *alias == config.default_model
+                || format!("{}/{}", model_cfg.provider, model_cfg.model) == config.default_model
+                || (model_cfg.provider == config.default_provider
+                    && model_cfg.model == config.default_model),
+        });
+    }
+
     if json_output {
-        return list_models_json(config, &providers, &models, &listed_models);
+        let models_json: Vec<_> = entries
+            .iter()
+            .map(|e| {
+                json!({
+                    "alias": e.alias,
+                    "provider": e.provider,
+                    "model": e.model,
+                    "type": e.provider_type,
+                    "capabilities": e.capabilities,
+                    "max_context_tokens": e.max_context_tokens,
+                    "display_name": e.display_name,
+                    "default": e.is_default,
+                })
+            })
+            .collect();
+        return Ok(serde_json::to_string_pretty(&json!({
+            "models": models_json,
+            "default_model": config.default_model,
+        }))? + "\n");
     }
 
     let mut out = "models:\n".to_owned();
-    if search.is_none() {
-        let _ = writeln!(
-            out,
-            "- {}/{} (configured default)",
-            config.default_provider, config.default_model
-        );
-    }
-    for model in listed_models {
-        let marker =
-            if model.provider.0 == config.default_provider && model.model == config.default_model {
-                " default"
-            } else {
-                ""
-            };
-        let display = model_display_suffix(&models, &model)
-            .map(|display| format!(" - {display}"))
+    for e in &entries {
+        let default_marker = if e.is_default { " default" } else { "" };
+        let display = e
+            .display_name
+            .map(|d| format!(" - {d}"))
             .unwrap_or_default();
+        let caps = e.capabilities.join(",");
+        let ctx = e
+            .max_context_tokens
+            .map_or("?".to_owned(), |n| n.to_string());
+        let alias_label = if e.alias.contains('/') {
+            e.alias.to_owned()
+        } else {
+            format!("{} -> {}/{}", e.alias, e.provider, e.model)
+        };
         let _ = writeln!(
             out,
-            "- {}/{} ({:?}{marker}){display}",
-            model.provider.0, model.model, model.api
+            "- {alias_label} ({ptype}{default_marker}) ctx={ctx} [{caps}]{display}",
+            alias_label = alias_label,
+            ptype = e.provider_type,
         );
-    }
-    out.push_str("providers:\n");
-    for provider in providers.list() {
-        let status = provider_credential_status_for_config(config, &provider.id)
-            .map_or("unknown", credential_status_label);
-        let _ = writeln!(out, "- {} ({:?}, {status})", provider.id, provider.api);
     }
     Ok(out)
-}
-
-pub async fn generate_image(
-    config: &AppConfig,
-    prompt: &str,
-    model: &str,
-    output: &Path,
-    size: &str,
-) -> anyhow::Result<String> {
-    let (provider_id, model_id) = parse_provider_model(model)?;
-    let registry = model_registry_for_config(config)?;
-    let model = registry
-        .list()
-        .into_iter()
-        .find(|candidate| candidate.provider.0 == provider_id && candidate.model == model_id)
-        .with_context(|| format!("unknown image model {model}; run `neo models list --json`"))?;
-    anyhow::ensure!(
-        registry.supports_image_generation(&model.provider.0, &model.model),
-        "model {}/{} does not advertise image generation support",
-        model.provider.0,
-        model.model
-    );
-    anyhow::ensure!(
-        matches!(
-            model.api,
-            ApiKind::OpenAiResponses | ApiKind::OpenAiCompatible | ApiKind::OpenAiChatCompletions
-        ),
-        "image generation currently requires an OpenAI-style image endpoint"
-    );
-
-    let provider = provider_with_invocation_overrides(config, &model.provider.0)
-        .with_context(|| format!("provider {} is not registered", model.provider.0))?;
-    let credential = resolve_provider_credential(config, &provider)
-        .with_context(|| format!("missing credentials for provider {}", provider.id))?;
-    let base_url = provider
-        .base_url
-        .as_deref()
-        .with_context(|| format!("provider {} does not define a base URL", provider.id))?;
-    let client = OpenAiImagesClient::new(base_url, credential.secret());
-    let response = client
-        .generate_image(ImageGenerationRequest {
-            model,
-            prompt: prompt.to_owned(),
-            size: size.to_owned(),
-        })
-        .await
-        .map_err(anyhow::Error::from)?;
-    let image = response
-        .images
-        .into_iter()
-        .next()
-        .context("provider returned no images")?;
-    let bytes = match image.data {
-        ImageData::Base64(value) => BASE64_STANDARD
-            .decode(value)
-            .context("provider returned invalid base64 image data")?,
-        ImageData::Url(url) => {
-            if !config.tui.fetch_remote_images {
-                anyhow::bail!(
-                    "provider returned an image URL ({url}); enable tui.fetch_remote_images = true to allow Neo to fetch remote image outputs"
-                );
-            }
-            fetch_remote_image(&url).await?
-        }
-    };
-    let output = workspace_safe_output_path(&config.project_dir, output)?;
-    if let Some(parent) = output.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    std::fs::write(&output, bytes)
-        .with_context(|| format!("failed to write image to {}", output.display()))?;
-    Ok(format!("wrote image to {}\n", output.display()))
-}
-
-async fn fetch_remote_image(url: &str) -> anyhow::Result<Vec<u8>> {
-    let parsed = reqwest::Url::parse(url).context("provider returned an invalid image URL")?;
-    anyhow::ensure!(
-        matches!(parsed.scheme(), "http" | "https"),
-        "remote image URL must use http or https"
-    );
-    let client = reqwest::Client::builder()
-        .timeout(REMOTE_IMAGE_FETCH_TIMEOUT)
-        .build()
-        .context("failed to initialize remote image fetch client")?;
-    let response = client
-        .get(parsed)
-        .send()
-        .await
-        .context("failed to fetch remote image URL")?;
-    let status = response.status();
-    anyhow::ensure!(
-        status.is_success(),
-        "remote image fetch failed with HTTP status {}",
-        status.as_u16()
-    );
-    if let Some(length) = response.content_length() {
-        anyhow::ensure!(
-            length <= REMOTE_IMAGE_MAX_BYTES,
-            "remote image response is larger than {REMOTE_IMAGE_MAX_BYTES} bytes"
-        );
-    }
-    let content_type = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("application/octet-stream")
-        .to_owned();
-    let media_type = content_type
-        .split_once(';')
-        .map_or(content_type.as_str(), |(media_type, _)| media_type)
-        .trim()
-        .to_ascii_lowercase();
-    anyhow::ensure!(
-        media_type.starts_with("image/"),
-        "remote image response content-type {content_type} is not allowed"
-    );
-    let bytes = response
-        .bytes()
-        .await
-        .context("failed to read remote image response")?;
-    anyhow::ensure!(
-        u64::try_from(bytes.len()).unwrap_or(u64::MAX) <= REMOTE_IMAGE_MAX_BYTES,
-        "remote image response is larger than {REMOTE_IMAGE_MAX_BYTES} bytes"
-    );
-    Ok(bytes.to_vec())
-}
-
-fn workspace_safe_output_path(project_dir: &Path, output: &Path) -> anyhow::Result<PathBuf> {
-    let project_dir = project_dir.canonicalize().with_context(|| {
-        format!(
-            "failed to canonicalize project dir {}",
-            project_dir.display()
-        )
-    })?;
-    let output = if output.is_absolute() {
-        output.to_path_buf()
-    } else {
-        project_dir.join(output)
-    };
-    let parent = output.parent().unwrap_or(&project_dir);
-    let canonical_parent = nearest_existing_ancestor(parent)?
-        .canonicalize()
-        .with_context(|| format!("failed to resolve output directory {}", parent.display()))?;
-    anyhow::ensure!(
-        canonical_parent.starts_with(&project_dir),
-        "image output path must stay inside workspace {}",
-        project_dir.display()
-    );
-    Ok(output)
-}
-
-fn nearest_existing_ancestor(path: &Path) -> anyhow::Result<&Path> {
-    path.ancestors()
-        .find(|ancestor| ancestor.exists())
-        .context("failed to find an existing output directory ancestor")
-}
-
-fn parse_provider_model(model: &str) -> anyhow::Result<(&str, &str)> {
-    let (provider, model) = model
-        .split_once('/')
-        .with_context(|| format!("model must be qualified as provider/model, got {model:?}"))?;
-    let provider = provider.trim();
-    let model = model.trim();
-    anyhow::ensure!(
-        !provider.is_empty() && !model.is_empty(),
-        "model must be qualified as provider/model"
-    );
-    Ok((provider, model))
-}
-
-fn list_models_json(
-    config: &AppConfig,
-    providers: &ProviderRegistry,
-    registry: &ModelRegistry,
-    models: &[ModelSpec],
-) -> anyhow::Result<String> {
-    let models = models
-        .iter()
-        .map(|model| {
-            json!({
-                "provider": model.provider.0,
-                "model": model.model,
-                "api": format!("{:?}", model.api),
-                "default": model.provider.0 == config.default_provider && model.model == config.default_model,
-                "context_window": model.capabilities.max_context_tokens,
-                "capabilities": {
-                    "streaming": model.capabilities.streaming,
-                    "tools": model.capabilities.tools,
-                    "images": model.capabilities.images,
-                    "reasoning": model.capabilities.reasoning,
-                    "embeddings": model.capabilities.embeddings,
-                    "image_generation": registry.supports_image_generation(&model.provider.0, &model.model),
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    let providers = providers
-        .list()
-        .into_iter()
-        .map(|provider| {
-            let status = provider_credential_status_for_config(config, &provider.id)
-                .map_or("unknown", credential_status_label);
-            json!({
-                "id": provider.id,
-                "api": format!("{:?}", provider.api),
-                "status": status,
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(format!(
-        "{}\n",
-        serde_json::to_string(&json!({
-            "models": models,
-            "providers": providers,
-        }))?
-    ))
-}
-
-const fn credential_status_label(configured: bool) -> &'static str {
-    if configured {
-        "configured"
-    } else {
-        "missing credentials"
-    }
-}
-
-fn model_matches_search(registry: &ModelRegistry, model: &ModelSpec, search: Option<&str>) -> bool {
-    let Some(search) = search else {
-        return true;
-    };
-    let display = model_display_suffix(registry, model).unwrap_or_default();
-    let haystack = format!("{} {} {}", model.provider.0, model.model, display);
-    fuzzy_match(&haystack, search)
-}
-
-fn model_display_suffix(registry: &ModelRegistry, model: &ModelSpec) -> Option<String> {
-    let metadata = registry.display_metadata(&model.provider.0, &model.model)?;
-    match (
-        metadata.provider_name.as_deref(),
-        metadata.model_name.as_deref(),
-    ) {
-        (Some(provider), Some(model)) => Some(format!("{provider} / {model}")),
-        (Some(provider), None) => Some(provider.to_owned()),
-        (None, Some(model)) => Some(model.to_owned()),
-        (None, None) => None,
-    }
-}
-
-fn fuzzy_match(haystack: &str, needle: &str) -> bool {
-    let haystack = haystack.to_lowercase();
-    let needle = needle.to_lowercase();
-    if haystack.contains(&needle) {
-        return true;
-    }
-    let mut chars = haystack.chars();
-    needle
-        .chars()
-        .all(|needle_char| chars.any(|candidate| candidate == needle_char))
 }
 
 fn provider_registry_for_config(config: &AppConfig) -> ProviderRegistry {
@@ -930,32 +682,15 @@ fn provider_with_invocation_overrides(
     Some(provider)
 }
 
-fn provider_credential_status_for_config(config: &AppConfig, provider_id: &str) -> Option<bool> {
-    let provider = provider_with_invocation_overrides(config, provider_id)?;
-    let env = env::vars().collect::<BTreeMap<_, _>>();
-    let ambient_authenticated = provider.ambient_auth_env_vars.iter().any(|group| {
-        group
-            .iter()
-            .all(|key| env.get(key).is_some_and(|value| !value.is_empty()))
-    });
-    let key_authenticated = resolve_provider_credential_from_env(config, &provider, &env).is_some();
-    Some(ambient_authenticated || key_authenticated)
-}
-
-fn resolve_provider_credential(
-    config: &AppConfig,
-    provider: &ProviderSpec,
-) -> Option<ResolvedCredential> {
-    resolve_provider_credential_from_env(config, provider, &env::vars().collect())
+fn resolve_provider_credential(provider: &ProviderSpec) -> Option<ResolvedCredential> {
+    resolve_provider_credential_from_env(provider, &env::vars().collect())
 }
 
 fn resolve_provider_credential_from_env(
-    config: &AppConfig,
     provider: &ProviderSpec,
     env: &BTreeMap<String, String>,
 ) -> Option<ResolvedCredential> {
     CredentialResolver::new(&provider.id)
-        .with_cli_api_key(config.api_key.clone())
         .with_env(provider.api_key_env_vars.iter().map(String::as_str), env)
         .with_auth_file_credentials(BTreeMap::new())
         .resolve()
@@ -967,7 +702,7 @@ fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: 
         let provider = if let Some(mut p) = existing {
             // Override existing built-in provider fields
             if let Some(t) = &provider_config.provider_type {
-                p.provider_type = Some(t.clone());
+                p.provider_type = Some(*t);
             }
             if let Some(base_url) = provider_config.effective_base_url() {
                 p.base_url = Some(base_url.to_owned());
@@ -1017,263 +752,190 @@ fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: 
     }
 }
 
-pub fn list_mcp_servers(config: &AppConfig) -> String {
+fn parse_mcp_kind(type_arg: &str) -> anyhow::Result<&'static str> {
+    match type_arg {
+        "studio" => Ok("stdio"),
+        "remote-http" => Ok("http"),
+        "remote-sse" => Ok("sse"),
+        _ => anyhow::bail!(
+            "unknown MCP type '{type_arg}'; expected studio, remote-http, or remote-sse"
+        ),
+    }
+}
+
+fn display_mcp_kind(transport: &str) -> &str {
+    match transport {
+        "stdio" => "studio",
+        "http" => "remote-http",
+        "sse" => "remote-sse",
+        _ => transport,
+    }
+}
+
+fn parse_command_string(cmd: &str) -> anyhow::Result<(String, Vec<String>)> {
+    let parts =
+        shell_words::split(cmd).with_context(|| format!("invalid command string: {cmd}"))?;
+    let (command, args) = parts.split_first().context("command string is empty")?;
+    Ok((command.clone(), args.to_vec()))
+}
+
+pub async fn list_mcp(config: &AppConfig) -> String {
     if config.mcp.servers.is_empty() {
         return "no MCP servers configured\n".to_owned();
     }
 
     let mut out = String::new();
-    for server in &config.mcp.servers {
-        let state = if server.enabled {
-            "enabled"
-        } else {
-            "disabled"
-        };
-        let args = if server.args.is_empty() {
-            String::new()
-        } else {
-            format!(" {}", server.args.join(" "))
-        };
-        let endpoint = if matches!(server.transport.as_str(), "http" | "sse") {
-            server.url.as_deref().unwrap_or("")
-        } else {
-            server.command.as_deref().unwrap_or("")
-        };
-        let _ = writeln!(
-            out,
-            "{}\t{}\t{}\t{}{}",
-            server.id, state, server.transport, endpoint, args
-        );
+    for (idx, server) in config.mcp.servers.iter().enumerate() {
+        let kind = display_mcp_kind(&server.transport);
+        let _ = writeln!(out, "[{}]<{}>({})", idx + 1, server.id, kind);
+
+        if !server.enabled {
+            let _ = writeln!(out, "{{}}");
+            continue;
+        }
+
+        match list_mcp_tools_for_server(server).await {
+            Ok(tools) => {
+                let map: serde_json::Map<String, serde_json::Value> = tools
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, name)| ((i + 1).to_string(), serde_json::Value::String(name)))
+                    .collect();
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_owned())
+                );
+            }
+            Err(_) => {
+                let _ = writeln!(out, "{{}}");
+            }
+        }
     }
     out
 }
 
-pub async fn list_mcp_tools(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
-    let server = enabled_mcp_server(config, server_id)?;
+async fn list_mcp_tools_for_server(server: &McpServerConfig) -> anyhow::Result<Vec<String>> {
     let adapter = mcp_adapter_for_server(server)?;
     let provider = McpToolProvider::discover_dyn(&server.id, adapter)
         .await
-        .with_context(|| format!("failed to discover MCP tools from {server_id}"))?;
-    let specs = provider.specs();
-    if specs.is_empty() {
-        return Ok("no MCP tools\n".to_owned());
-    }
-
-    let mut out = String::new();
-    for spec in specs {
-        let input_schema = serde_json::to_string(&spec.input_schema)?;
-        let _ = writeln!(out, "{}\t{}\t{}", spec.name, spec.description, input_schema);
-    }
-    Ok(out)
+        .with_context(|| format!("failed to discover MCP tools from {}", server.id))?;
+    let mut tools = provider.tool_names();
+    apply_tool_filter(&mut tools, &server.enabled_tools, &server.disabled_tools);
+    Ok(tools)
 }
 
-pub fn add_mcp_server(
-    server_id: String,
-    transport: String,
+#[allow(clippy::too_many_arguments)]
+pub async fn add_mcp_server(
+    mcp_name: String,
+    r#type: String,
     command: Option<String>,
     url: Option<String>,
-    args: Vec<String>,
     env: Vec<String>,
     headers: Vec<String>,
+    cwd: Option<PathBuf>,
+    enabled_tools: Vec<String>,
+    disabled_tools: Vec<String>,
+    startup_timeout_ms: Option<u64>,
+    tool_timeout_ms: Option<u64>,
+    enabled: bool,
+    _config: &AppConfig,
 ) -> anyhow::Result<String> {
-    config::upsert_mcp_server(&McpServerConfig {
-        id: server_id,
-        enabled: true,
-        transport,
+    let transport = parse_mcp_kind(&r#type)?;
+
+    let (command, args) = if transport == "stdio" {
+        let Some(cmd) = command else {
+            anyhow::bail!("studio MCP requires --command");
+        };
+        let (cmd, args) = parse_command_string(&cmd)?;
+        (Some(cmd), args)
+    } else {
+        if command.is_some() {
+            anyhow::bail!("remote MCP uses --url, not --command");
+        }
+        (None, Vec::new())
+    };
+
+    let url = if transport == "http" || transport == "sse" {
+        let Some(url) = url else {
+            anyhow::bail!("remote MCP requires --url");
+        };
+        Some(url)
+    } else {
+        if url.is_some() {
+            anyhow::bail!("studio MCP uses --command, not --url");
+        }
+        None
+    };
+
+    if transport != "http" && transport != "sse" && !headers.is_empty() {
+        anyhow::bail!("--header is only valid for remote-http / remote-sse");
+    }
+    if transport != "stdio" && cwd.is_some() {
+        anyhow::bail!("--cwd is only valid for studio");
+    }
+
+    let server = McpServerConfig {
+        id: mcp_name.clone(),
+        enabled,
+        transport: transport.to_owned(),
         command,
         url,
         args,
         env: key_value_pairs(env, "--env")?,
         headers: key_value_pairs(headers, "--header")?,
-    })
-}
-
-pub async fn mcp_server_health(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
-    let server = enabled_mcp_server(config, server_id)?;
-    let adapter = mcp_adapter_for_server(server)?;
-    let tools = adapter
-        .list_tools()
-        .await
-        .with_context(|| format!("failed to probe MCP server {server_id}"))?;
-    Ok(format!(
-        "{server_id}\thealthy\t{} {}\n",
-        tools.len(),
-        if tools.len() == 1 { "tool" } else { "tools" }
-    ))
-}
-
-pub fn start_mcp_server(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
-    let server = enabled_mcp_server(config, server_id)?;
-    anyhow::ensure!(
-        server.transport == "stdio",
-        "MCP server {server_id} uses {} transport; only stdio servers can be started locally",
-        server.transport
-    );
-    let command = server
-        .command
-        .as_deref()
-        .with_context(|| format!("missing MCP command for {server_id}"))?;
-    let mut process = std::process::Command::new("sh");
-    process
-        .arg("-c")
-        .arg("tail -f /dev/null | \"$0\" \"$@\"")
-        .arg(command)
-        .args(&server.args)
-        .envs(&server.env)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(unix)]
-    {
-        process.process_group(0);
-    }
-    let child = process
-        .spawn()
-        .with_context(|| format!("failed to start MCP server {server_id}"))?;
-    let child_pid = child.id();
-    let reported_pid = wait_for_mcp_server_pid(server, Duration::from_secs(2));
-    let mut state = read_mcp_process_state(config)?;
-    state.servers.retain(|record| record.id != server_id);
-    state.servers.push(McpProcessRecord {
-        id: server_id.to_owned(),
-        child_pid,
-        #[cfg(unix)]
-        process_group_id: Some(child_pid),
-        #[cfg(not(unix))]
-        process_group_id: None,
-        server_pid: reported_pid,
-    });
-    write_mcp_process_state(config, &state)?;
-    Ok(format!("started MCP server {server_id}\tpid={child_pid}\n"))
-}
-
-pub fn stop_mcp_server(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
-    let mut state = read_mcp_process_state(config)?;
-    let Some(index) = state
-        .servers
-        .iter()
-        .position(|record| record.id == server_id)
-    else {
-        anyhow::bail!("MCP server {server_id} is not running");
+        cwd,
+        enabled_tools,
+        disabled_tools,
+        startup_timeout_ms,
+        tool_timeout_ms,
     };
-    let record = state.servers.remove(index);
-    terminate_mcp_process(&record);
-    write_mcp_process_state(config, &state)?;
-    Ok(format!("stopped MCP server {server_id}\n"))
+
+    let saved = config::upsert_mcp_server(&server)?;
+
+    if !enabled {
+        return Ok(format!("{saved}{mcp_name} added (disabled)\n"));
+    }
+
+    let probe_result = probe_mcp_server(&server, startup_timeout_ms).await;
+    let probe_msg = match probe_result {
+        Ok(()) => format!("{mcp_name} successfully connected!\n"),
+        Err(_) => format!("{mcp_name} connect failed\n"),
+    };
+    Ok(format!("{saved}{probe_msg}"))
 }
 
-pub async fn list_mcp_resources(config: &AppConfig, server_id: &str) -> anyhow::Result<String> {
-    let server = enabled_mcp_server(config, server_id)?;
+async fn probe_mcp_server(server: &McpServerConfig, timeout_ms: Option<u64>) -> anyhow::Result<()> {
     let adapter = mcp_adapter_for_server(server)?;
-    let resources = adapter
-        .list_resources()
-        .await
-        .with_context(|| format!("failed to list MCP resources from {server_id}"))?;
-    if resources.is_empty() {
-        return Ok("no MCP resources\n".to_owned());
-    }
-    let mut out = String::new();
-    for resource in resources {
-        let _ = writeln!(
-            out,
-            "{}\t{}\t{}\t{}",
-            resource.uri,
-            resource.name,
-            resource.mime_type.unwrap_or_default(),
-            resource.description.unwrap_or_default()
-        );
-    }
-    Ok(out)
+    let fut = adapter.list_tools();
+    let tools = if let Some(ms) = timeout_ms {
+        tokio::time::timeout(std::time::Duration::from_millis(ms), fut)
+            .await
+            .with_context(|| format!("timeout connecting to MCP server {}", server.id))??
+    } else {
+        fut.await
+            .with_context(|| format!("failed to list tools from {}", server.id))?
+    };
+    let mut names: Vec<String> = tools.into_iter().map(|t| t.name).collect();
+    apply_tool_filter(&mut names, &server.enabled_tools, &server.disabled_tools);
+    Ok(())
 }
 
-pub async fn read_mcp_resource(
-    config: &AppConfig,
-    server_id: &str,
-    uri: &str,
-) -> anyhow::Result<String> {
-    let server = enabled_mcp_server(config, server_id)?;
-    let adapter = mcp_adapter_for_server(server)?;
-    let resource = adapter
-        .read_resource(uri)
-        .await
-        .with_context(|| format!("failed to read MCP resource {uri} from {server_id}"))?;
-    if resource.contents.is_empty() {
-        return Ok("no MCP resource content\n".to_owned());
+fn apply_tool_filter(tools: &mut Vec<String>, enabled_tools: &[String], disabled_tools: &[String]) {
+    if !enabled_tools.is_empty() {
+        let allow: std::collections::HashSet<_> = enabled_tools.iter().cloned().collect();
+        tools.retain(|name| allow.contains(name));
     }
-    let mut out = String::new();
-    for content in resource.contents {
-        let _ = writeln!(
-            out,
-            "{}\t{}",
-            content.uri,
-            content.mime_type.unwrap_or_default()
-        );
-        if let Some(text) = content.text {
-            out.push_str(&text);
-            if !out.ends_with('\n') {
-                out.push('\n');
-            }
-        } else if let Some(blob) = content.blob {
-            out.push_str(&blob);
-            if !out.ends_with('\n') {
-                out.push('\n');
-            }
-        }
+    if !disabled_tools.is_empty() {
+        let deny: std::collections::HashSet<_> = disabled_tools.iter().cloned().collect();
+        tools.retain(|name| !deny.contains(name));
     }
-    Ok(out)
-}
-
-pub async fn watch_mcp_resource(
-    config: &AppConfig,
-    server_id: &str,
-    uri: &str,
-    count: usize,
-) -> anyhow::Result<String> {
-    anyhow::ensure!(count > 0, "MCP resource watch count must be greater than 0");
-    let server = enabled_mcp_server(config, server_id)?;
-    let adapter = mcp_adapter_for_server(server)?;
-    adapter
-        .subscribe_resource(uri)
-        .await
-        .with_context(|| format!("failed to subscribe to MCP resource {uri} from {server_id}"))?;
-
-    let mut out = String::new();
-    let mut watch_result = Ok(());
-    for _ in 0..count {
-        match adapter.next_resource_update().await {
-            Ok(update) => {
-                let _ = writeln!(out, "{}", update.uri);
-            }
-            Err(err) => {
-                watch_result = Err(err);
-                break;
-            }
-        }
-    }
-
-    let unsubscribe_result = adapter.unsubscribe_resource(uri).await;
-    if let Err(err) = watch_result {
-        return Err(anyhow::Error::from(err).context(format!(
-            "failed while watching MCP resource {uri} from {server_id}"
-        )));
-    }
-    unsubscribe_result
-        .with_context(|| format!("failed to unsubscribe from MCP resource {uri} on {server_id}"))?;
-    Ok(out)
 }
 
 pub struct PromptTurn {
     pub session_id: String,
     pub events: Vec<AgentEvent>,
     pub assistant_text: String,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum SessionTarget<'a> {
-    ExactId(&'a str),
-    Existing(&'a str),
-    Latest,
-    Fork(&'a str),
 }
 
 pub struct PromptApprovalRequest {
@@ -1324,88 +986,13 @@ pub async fn run_prompt_ephemeral(
     .await
 }
 
-pub async fn run_prompt_with_session_target(
-    session_target: SessionTarget<'_>,
-    prompt: &[String],
-    config: &AppConfig,
-) -> anyhow::Result<PromptTurn> {
-    match session_target {
-        SessionTarget::ExactId(session_id) => {
-            run_prompt_with_exact_session_id(session_id, prompt, config).await
-        }
-        SessionTarget::Existing(session_ref) => {
-            let session_id = session_commands::resolve_session_id(session_ref, config)?;
-            run_prompt_in_session(&session_id, prompt, config).await
-        }
-        SessionTarget::Latest => {
-            let session_id = latest_session_id(config)?;
-            run_prompt_in_session(&session_id, prompt, config).await
-        }
-        SessionTarget::Fork(session_ref) => {
-            let parent_id = session_commands::resolve_session_id(session_ref, config)?;
-            let bucket_dir = workspace_sessions_dir(config);
-            let child = SessionMetadataStore::new(&bucket_dir)
-                .fork(&parent_id, None)
-                .with_context(|| format!("failed to fork session {session_ref}"))?;
-            run_prompt_in_session(&child.id, prompt, config).await
-        }
-    }
-}
-
-pub fn apply_session_name(
-    config: &AppConfig,
-    session_id: &str,
-    session_name: Option<&str>,
-) -> anyhow::Result<()> {
-    let Some(session_name) = session_name else {
-        return Ok(());
-    };
-    let bucket_dir = workspace_sessions_dir(config);
-    SessionMetadataStore::new(&bucket_dir)
-        .rename(session_id, session_name.to_owned())
-        .with_context(|| format!("failed to name session {session_id}"))?;
-    Ok(())
-}
-
-async fn run_prompt_with_exact_session_id(
-    session_id: &str,
-    prompt: &[String],
-    config: &AppConfig,
-) -> anyhow::Result<PromptTurn> {
-    let session_path = exact_session_path(session_id, config).await?;
-    if tokio::fs::metadata(&session_path).await.is_ok() {
-        return run_prompt_in_session(session_id, prompt, config).await;
-    }
-
-    let prompt = prompt.join(" ");
-    let mut writer = JsonlSessionWriter::create(&session_path)
-        .await
-        .with_context(|| format!("failed to create session {}", session_path.display()))?;
-    let mut writer = SessionEventWriter::jsonl(&mut writer);
-    let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
-    record_session_activity(config, session_id, &prompt);
-    let runtime = runtime_for_config(config, None, None).await?;
-    let turn = finish_prompt_turn(
-        user_message,
-        AgentContext::new(),
-        &mut writer,
-        runtime,
-        events,
-        session_id.to_owned(),
-    )
-    .await?;
-    record_initial_session_title(config, &turn, &prompt).await;
-    Ok(turn)
-}
-
-#[allow(dead_code)]
 pub async fn run_prompt_in_session(
     session_id: &str,
     prompt: &[String],
     config: &AppConfig,
 ) -> anyhow::Result<PromptTurn> {
     let prompt = prompt.join(" ");
-    let session_path = session_commands::session_path(session_id, config)?;
+    let session_path = sessions::session_path(session_id, config)?;
     let context = JsonlSessionReader::replay_context(&session_path)
         .await
         .with_context(|| format!("failed to replay session {}", session_path.display()))?;
@@ -1478,7 +1065,7 @@ pub async fn run_prompt_in_session_streaming(
     question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
 ) -> anyhow::Result<PromptTurn> {
     let prompt = prompt.join(" ");
-    let session_path = session_commands::session_path(session_id, config)?;
+    let session_path = sessions::session_path(session_id, config)?;
     let context = JsonlSessionReader::replay_context(&session_path)
         .await
         .with_context(|| format!("failed to replay session {}", session_path.display()))?;
@@ -1716,15 +1303,9 @@ fn agent_config_for_app(
     agent_config.max_tokens = config.runtime.max_tokens;
     agent_config.reasoning_effort = config.runtime.reasoning_effort;
     agent_config.replay_reasoning = config.runtime.replay_reasoning;
-    if let Some(system_prompt) = resources::load_system_prompt(
-        &config.project_dir,
-        config.system_prompt.as_deref(),
-        &config.append_system_prompt,
-        &config.skill_paths,
-        config.no_skills,
-        config.no_context_files,
-        config.project_trusted,
-    )? {
+    if let Some(system_prompt) =
+        resources::load_system_prompt(&config.project_dir, config.project_trusted)?
+    {
         agent_config = agent_config.with_system_prompt(system_prompt);
     }
     if let Some(compaction) = &config.runtime.compaction {
@@ -1738,11 +1319,7 @@ fn agent_config_for_app(
             keep_recent_messages: compaction.keep_recent_messages,
         });
     }
-    if config.approve {
-        agent_config = agent_config.with_approval_handler(|_| PermissionDecision::Allow);
-    } else if config.no_approve {
-        agent_config = agent_config.with_approval_handler(|_| PermissionDecision::Deny);
-    } else if let Some(approval_tx) = approval_tx {
+    if let Some(approval_tx) = approval_tx {
         agent_config = agent_config.with_async_approval_handler(move |request| {
             let approval_tx = approval_tx.clone();
             async move {
@@ -1781,44 +1358,17 @@ fn effective_compaction_max_estimated_tokens(
 }
 
 async fn tool_registry_for_config(config: &AppConfig) -> anyhow::Result<ToolRegistry> {
-    let filters = &config.tool_filters;
-    let mut registry = if filters.no_tools && filters.allow.is_empty()
-        || (filters.no_builtin_tools && filters.allow.is_empty())
-    {
-        ToolRegistry::new()
-    } else {
-        ToolRegistry::with_builtin_tools()
-    };
-    if !(filters.no_tools && filters.allow.is_empty()) {
-        extension_tools::register_enabled_extension_tools(
-            &mut registry,
-            &extension_tools::default_extension_root(&config.project_dir),
-            &extension_tools::default_extension_state_path(&config.project_dir),
-            &config.extension_paths,
-            config.no_extensions,
-        )
-        .await?;
-        for server in config.mcp.servers.iter().filter(|server| server.enabled) {
-            register_mcp_server(&mut registry, server).await?;
-        }
+    let mut registry = ToolRegistry::with_builtin_tools();
+    extension_tools::register_enabled_extension_tools(
+        &mut registry,
+        &extension_tools::default_extension_root(&config.project_dir),
+        &extension_tools::default_extension_state_path(&config.project_dir),
+    )
+    .await?;
+    for server in config.mcp.servers.iter().filter(|server| server.enabled) {
+        register_mcp_server(&mut registry, server).await?;
     }
-    apply_tool_filters(&mut registry, config);
     Ok(registry)
-}
-
-fn apply_tool_filters(registry: &mut ToolRegistry, config: &AppConfig) {
-    let filters = &config.tool_filters;
-    if filters.no_tools && filters.allow.is_empty() {
-        return;
-    }
-    if !filters.allow.is_empty() {
-        let allowed = filters.allow.iter().cloned().collect();
-        registry.retain_named(&allowed);
-    }
-    if !filters.exclude.is_empty() {
-        let excluded = filters.exclude.iter().cloned().collect();
-        registry.remove_named(&excluded);
-    }
 }
 
 async fn register_mcp_server(
@@ -1828,23 +1378,10 @@ async fn register_mcp_server(
     let adapter = mcp_adapter_for_server(server)?;
     let provider = McpToolProvider::discover_dyn(&server.id, adapter)
         .await
-        .with_context(|| format!("failed to discover MCP tools from {}", server.id))?;
+        .with_context(|| format!("failed to discover MCP tools from {}", server.id))?
+        .with_tool_filter(&server.enabled_tools, &server.disabled_tools);
     provider.register_into(registry);
     Ok(())
-}
-
-fn enabled_mcp_server<'a>(
-    config: &'a AppConfig,
-    server_id: &str,
-) -> anyhow::Result<&'a McpServerConfig> {
-    let server = config
-        .mcp
-        .servers
-        .iter()
-        .find(|server| server.id == server_id)
-        .with_context(|| format!("MCP server {server_id} is not configured"))?;
-    anyhow::ensure!(server.enabled, "MCP server {server_id} is disabled");
-    Ok(server)
 }
 
 fn mcp_adapter_for_server(server: &McpServerConfig) -> anyhow::Result<Arc<dyn McpToolAdapter>> {
@@ -1857,13 +1394,9 @@ fn mcp_adapter_for_server(server: &McpServerConfig) -> anyhow::Result<Arc<dyn Mc
             Ok(Arc::new(McpStdioToolAdapter::new(McpStdioConfig {
                 command,
                 args: server.args.clone(),
-                env: server
-                    .env
-                    .iter()
-                    .fold(BTreeMap::new(), |mut env, (key, value)| {
-                        env.insert(key.clone(), value.clone());
-                        env
-                    }),
+                env: server.env.clone(),
+                cwd: server.cwd.clone(),
+                tool_timeout_ms: server.tool_timeout_ms,
             })))
         }
         "http" | "sse" => {
@@ -1873,33 +1406,12 @@ fn mcp_adapter_for_server(server: &McpServerConfig) -> anyhow::Result<Arc<dyn Mc
                 .with_context(|| format!("missing MCP url for {}", server.id))?;
             Ok(Arc::new(McpHttpToolAdapter::new(McpHttpConfig {
                 url,
-                headers: server.headers.iter().fold(
-                    BTreeMap::new(),
-                    |mut headers, (key, value)| {
-                        headers.insert(key.clone(), value.clone());
-                        headers
-                    },
-                ),
+                headers: server.headers.clone(),
+                tool_timeout_ms: server.tool_timeout_ms,
             })))
         }
         other => anyhow::bail!("unsupported MCP transport for {}: {other}", server.id),
     }
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct McpProcessState {
-    #[serde(default)]
-    servers: Vec<McpProcessRecord>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct McpProcessRecord {
-    id: String,
-    child_pid: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    server_pid: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    process_group_id: Option<u32>,
 }
 
 fn key_value_pairs(values: Vec<String>, flag: &str) -> anyhow::Result<BTreeMap<String, String>> {
@@ -1913,79 +1425,6 @@ fn key_value_pairs(values: Vec<String>, flag: &str) -> anyhow::Result<BTreeMap<S
         pairs.insert(key.to_owned(), value.trim().to_owned());
     }
     Ok(pairs)
-}
-
-fn mcp_state_path(config: &AppConfig) -> PathBuf {
-    config.project_dir.join(".neo/mcp-state.toml")
-}
-
-fn read_mcp_process_state(config: &AppConfig) -> anyhow::Result<McpProcessState> {
-    let path = mcp_state_path(config);
-    let content = fs::read_to_string(&path).unwrap_or_default();
-    if content.trim().is_empty() {
-        return Ok(McpProcessState::default());
-    }
-    toml::from_str(&content)
-        .with_context(|| format!("failed to parse MCP process state {}", path.display()))
-}
-
-fn write_mcp_process_state(config: &AppConfig, state: &McpProcessState) -> anyhow::Result<()> {
-    let path = mcp_state_path(config);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(
-        &path,
-        toml::to_string_pretty(state)
-            .with_context(|| format!("failed to serialize MCP process state {}", path.display()))?,
-    )?;
-    Ok(())
-}
-
-fn wait_for_mcp_server_pid(server: &McpServerConfig, timeout: Duration) -> Option<String> {
-    let pid_file = server.env.get("MCP_PID_FILE").map(PathBuf::from)?;
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if let Ok(pid) = fs::read_to_string(&pid_file) {
-            let pid = pid.trim();
-            if !pid.is_empty() {
-                return Some(pid.to_owned());
-            }
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    None
-}
-
-fn terminate_mcp_process(record: &McpProcessRecord) {
-    #[cfg(unix)]
-    let target = record
-        .process_group_id
-        .map_or_else(|| record.child_pid.to_string(), |pgid| format!("-{pgid}"));
-    #[cfg(not(unix))]
-    let target = record.child_pid.to_string();
-
-    let _ = std::process::Command::new("kill")
-        .args(["-TERM", &target])
-        .status();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline {
-        if !process_exists(&target) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let _ = std::process::Command::new("kill")
-        .args(["-KILL", &target])
-        .status();
-}
-
-fn process_exists(target: &str) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", target])
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 async fn create_session_path(config: &AppConfig) -> anyhow::Result<std::path::PathBuf> {
@@ -2019,24 +1458,6 @@ async fn create_session_path(config: &AppConfig) -> anyhow::Result<std::path::Pa
     }
 }
 
-async fn exact_session_path(
-    session_id: &str,
-    config: &AppConfig,
-) -> anyhow::Result<std::path::PathBuf> {
-    neo_agent_core::session::validate_session_id(session_id)
-        .with_context(|| format!("invalid session id {session_id:?}"))?;
-    let bucket_dir = workspace_sessions_dir(config);
-    tokio::fs::create_dir_all(&bucket_dir)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to create sessions directory {}",
-                bucket_dir.display()
-            )
-        })?;
-    Ok(bucket_dir.join(format!("{session_id}.jsonl")))
-}
-
 fn session_id_from_path(path: &Path) -> anyhow::Result<String> {
     path.file_stem()
         .and_then(std::ffi::OsStr::to_str)
@@ -2044,7 +1465,7 @@ fn session_id_from_path(path: &Path) -> anyhow::Result<String> {
         .with_context(|| format!("invalid session path {}", path.display()))
 }
 
-fn latest_session_id(config: &AppConfig) -> anyhow::Result<String> {
+pub(crate) fn latest_session_id(config: &AppConfig) -> anyhow::Result<String> {
     let bucket_dir = workspace_sessions_dir(config);
     let mut latest: Option<(std::time::SystemTime, String)> = None;
     let entries = std::fs::read_dir(&bucket_dir)
@@ -2082,14 +1503,10 @@ fn latest_session_id(config: &AppConfig) -> anyhow::Result<String> {
 fn resolve_model(config: &AppConfig) -> anyhow::Result<ModelSpec> {
     let registry = model_registry_for_config(config)?;
     let models = registry.list();
-    let candidates = if matches!(config.model_selection, config::ModelSelection::Explicit) {
-        models
-    } else {
-        config::scoped_models(models.iter(), &config.model_scope)
-    };
+    let candidates = config::scoped_models(models.iter(), &config.model_scope);
     if !config.model_scope.is_empty() && candidates.is_empty() {
         anyhow::bail!(
-            "no models match --models {}; run `neo --list-models` for supported catalog entries",
+            "no models match model_scope {}; run `neo models list` for supported catalog entries",
             config.model_scope.join(",")
         );
     }
@@ -2289,7 +1706,7 @@ fn resolve_model_client(
     let mut registry = ProviderRegistry::production();
     apply_configured_provider_overrides(&mut registry, config);
     if let Some(mut provider) = provider_with_invocation_overrides(config, &model.provider.0) {
-        let credential = resolve_provider_credential(config, &provider);
+        let credential = resolve_provider_credential(&provider);
         let mut env = env::vars().collect::<BTreeMap<_, _>>();
         if let Some(credential) = credential {
             provider.api_key_env_vars = vec![RESOLVED_API_KEY_ENV.to_owned()];
@@ -2344,8 +1761,7 @@ mod tests {
         PromptApprovalRequest, StableJsonState, agent_config_for_app, run_prompt_with_runtime,
     };
     use crate::config::{
-        AppConfig, Defaults, McpConfig, ModelSelection, RuntimeCompactionConfig, RuntimeConfig,
-        ToolFilterConfig, TuiConfig,
+        AppConfig, Defaults, McpConfig, RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
     };
 
     #[test]
@@ -2355,17 +1771,15 @@ mod tests {
             default_model: "test-model".to_owned(),
             default_provider: "openai".to_owned(),
             api_base: None,
-            api_key: None,
             api_key_env: None,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
             model_catalogs: Vec::new(),
             model_scope: Vec::new(),
-            model_selection: ModelSelection::Default,
             sessions_dir: temp.path().join(".neo/sessions"),
             permissions: PermissionPolicy::default(),
             defaults: Defaults {
-                mode: "print".to_owned(),
+                mode: "events".to_owned(),
             },
             runtime: RuntimeConfig {
                 temperature: Some(0.35),
@@ -2384,20 +1798,7 @@ mod tests {
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
-            approve: false,
-            no_approve: false,
             prompt_templates: Vec::new(),
-            skill_paths: Vec::new(),
-            extension_paths: Vec::new(),
-            no_extensions: false,
-            configured_prompt_templates: Vec::new(),
-            no_prompt_templates: false,
-            no_skills: false,
-            no_context_files: false,
-            offline: false,
-            system_prompt: None,
-            append_system_prompt: Vec::new(),
-            tool_filters: ToolFilterConfig::default(),
             project_trusted: true,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
@@ -2491,13 +1892,11 @@ mod tests {
             default_model: "large-context-model".to_owned(),
             default_provider: "anthropic".to_owned(),
             api_base: None,
-            api_key: None,
             api_key_env: None,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
             model_catalogs: Vec::new(),
             model_scope: Vec::new(),
-            model_selection: ModelSelection::Default,
             sessions_dir: temp.path().join(".neo/sessions"),
             permissions: PermissionPolicy::default(),
             defaults: Defaults {
@@ -2520,20 +1919,7 @@ mod tests {
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
-            approve: false,
-            no_approve: false,
             prompt_templates: Vec::new(),
-            skill_paths: Vec::new(),
-            extension_paths: Vec::new(),
-            no_extensions: false,
-            configured_prompt_templates: Vec::new(),
-            no_prompt_templates: false,
-            no_skills: false,
-            no_context_files: false,
-            offline: false,
-            system_prompt: None,
-            append_system_prompt: Vec::new(),
-            tool_filters: ToolFilterConfig::default(),
             project_trusted: true,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
@@ -2564,13 +1950,11 @@ mod tests {
             default_model: "large-context-model".to_owned(),
             default_provider: "anthropic".to_owned(),
             api_base: None,
-            api_key: None,
             api_key_env: None,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
             model_catalogs: Vec::new(),
             model_scope: Vec::new(),
-            model_selection: ModelSelection::Default,
             sessions_dir: temp.path().join(".neo/sessions"),
             permissions: PermissionPolicy::default(),
             defaults: Defaults {
@@ -2593,20 +1977,7 @@ mod tests {
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
-            approve: false,
-            no_approve: false,
             prompt_templates: Vec::new(),
-            skill_paths: Vec::new(),
-            extension_paths: Vec::new(),
-            no_extensions: false,
-            configured_prompt_templates: Vec::new(),
-            no_prompt_templates: false,
-            no_skills: false,
-            no_context_files: false,
-            offline: false,
-            system_prompt: None,
-            append_system_prompt: Vec::new(),
-            tool_filters: ToolFilterConfig::default(),
             project_trusted: true,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
@@ -2637,13 +2008,11 @@ mod tests {
             default_model: "test-model".to_owned(),
             default_provider: "openai".to_owned(),
             api_base: None,
-            api_key: None,
             api_key_env: None,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
             model_catalogs: Vec::new(),
             model_scope: Vec::new(),
-            model_selection: ModelSelection::Default,
             sessions_dir: temp.path().join(".neo/sessions"),
             permissions: PermissionPolicy::default(),
             defaults: Defaults {
@@ -2653,20 +2022,7 @@ mod tests {
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
-            approve: false,
-            no_approve: false,
             prompt_templates: Vec::new(),
-            skill_paths: Vec::new(),
-            extension_paths: Vec::new(),
-            no_extensions: false,
-            configured_prompt_templates: Vec::new(),
-            no_prompt_templates: false,
-            no_skills: false,
-            no_context_files: false,
-            offline: false,
-            system_prompt: None,
-            append_system_prompt: Vec::new(),
-            tool_filters: ToolFilterConfig::default(),
             project_trusted: true,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),

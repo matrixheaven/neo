@@ -136,7 +136,7 @@ impl TabbedModelSelectorState {
             } else {
                 tab_str.push_str(&format!(
                     "\x1b[38;2;{}m {tab} \x1b[0m",
-                    rgb(&self.theme.muted)
+                    rgb(&self.theme.text_muted)
                 ));
             }
         }

@@ -30,8 +30,8 @@ xtask maintenance commands
 - `neo-tui` owns terminal rendering via a component-tree architecture:
   - `core/`: `Component` trait, `Line`/`Span` styled primitives, `Container`,
     `RenderScheduler`, `TerminalRenderer` with differential rendering.
-  - `transcript/`: `TranscriptController`, tool call lifecycle tracking,
-    per-tool-type renderers, LCS-based inline diff preview.
+  - `transcript/`: `TranscriptStore`, ordered transcript entries, tool call
+    lifecycle rendering, per-tool-type renderers, LCS-based inline diff preview.
   - `runtime.rs`: `NeoTuiRuntime` bridging `AgentEvent` to terminal output.
   - `streaming.rs`: `StreamingController` for tool call state during streaming.
   - `widgets/`: `QuestionStateMachine` (multi-question dialog), `TodoPanel`.

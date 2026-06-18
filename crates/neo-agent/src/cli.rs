@@ -1,320 +1,127 @@
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
-
-pub const LIST_MODELS_NO_SEARCH: &str = "__neo_list_models_no_search__";
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
-#[allow(clippy::struct_excessive_bools)]
-#[command(name = "neo", version, about = "Rust-native coding agent")]
+#[command(name = "neo", version, about = "Rust-native 本地 AI 编程代理")]
 pub struct Cli {
-    #[arg(long, global = true, env = "NEO_MODEL")]
-    pub model: Option<String>,
-
-    #[arg(long, global = true, env = "NEO_PROVIDER")]
-    pub provider: Option<String>,
-
-    #[arg(long, global = true, env = "NEO_API_BASE")]
-    pub api_base: Option<String>,
-
-    #[arg(long = "api-key", global = true, value_name = "KEY")]
-    pub api_key: Option<String>,
-
-    #[arg(long, global = true, env = "NEO_CONFIG")]
-    pub config: Option<std::path::PathBuf>,
-
-    #[arg(long = "session-dir", global = true, value_name = "DIR")]
-    pub session_dir: Option<std::path::PathBuf>,
-
-    #[arg(long = "session-id", global = true, value_name = "ID")]
-    pub session_id: Option<String>,
-
-    #[arg(
-        long,
-        global = true,
-        value_name = "ID_OR_PATH",
-        conflicts_with = "session_id"
-    )]
-    pub session: Option<String>,
-
-    #[arg(
-        short = 'c',
-        long = "continue",
-        global = true,
-        conflicts_with_all = ["session_id", "session", "resume_picker"]
-    )]
-    pub continue_latest: bool,
-
     #[arg(
         short = 'r',
         long = "resume",
-        global = true,
-        conflicts_with_all = [
-            "session_id",
-            "session",
-            "continue_latest",
-            "fork",
-            "name",
-            "no_session",
-            "export",
-            "list_models"
-        ]
+        conflicts_with_all = ["continue_latest", "no_session"]
     )]
     pub resume_picker: bool,
 
     #[arg(
-        long,
-        global = true,
-        value_name = "ID_OR_PATH",
-        conflicts_with_all = ["session_id", "session", "continue_latest", "resume_picker"]
+        short = 'c',
+        long = "continue",
+        conflicts_with_all = ["resume_picker", "no_session"]
     )]
-    pub fork: Option<String>,
+    pub continue_latest: bool,
 
-    #[arg(short = 'n', long, global = true, value_name = "NAME")]
-    pub name: Option<String>,
-
-    #[arg(long = "no-session", global = true, conflicts_with_all = [
-        "session_id",
-        "session",
-        "continue_latest",
-        "resume_picker",
-        "fork",
-        "name"
-    ])]
+    #[arg(
+        long = "no-session",
+        conflicts_with_all = ["continue_latest", "resume_picker"]
+    )]
     pub no_session: bool,
 
-    #[arg(long, global = true, value_name = "SESSION_JSONL", num_args = 1..=2)]
-    pub export: Vec<std::path::PathBuf>,
+    #[arg(long = "yolo")]
+    pub yolo: bool,
 
-    #[arg(long, global = true, env = "NEO_MODE")]
-    pub mode: Option<String>,
+    #[arg(long, env = "NEO_CONFIG")]
+    pub config: Option<std::path::PathBuf>,
 
-    #[arg(
-        long = "models",
-        global = true,
-        value_name = "PATTERNS",
-        value_delimiter = ','
-    )]
-    pub models: Vec<String>,
-
-    #[arg(short = 'a', long, global = true, conflicts_with = "no_approve")]
-    pub approve: bool,
-
-    #[arg(long = "no-approve", alias = "no_approve", global = true)]
-    pub no_approve: bool,
-
-    #[arg(long, global = true, value_name = "NAME_OR_PATH")]
-    pub prompt_template: Vec<String>,
-
-    #[arg(long = "skill", global = true, value_name = "PATH")]
-    pub skill: Vec<std::path::PathBuf>,
-
-    #[arg(short = 'e', long = "extension", global = true, value_name = "PATH")]
-    pub extension: Vec<std::path::PathBuf>,
-
-    #[arg(long = "theme", global = true, value_name = "PATH")]
-    pub theme: Vec<std::path::PathBuf>,
-
-    #[arg(long = "no-extensions", alias = "no_extensions", global = true)]
-    pub no_extensions: bool,
-
-    #[arg(long = "no-themes", alias = "no_themes", global = true)]
-    pub no_themes: bool,
-
-    #[arg(long, global = true)]
-    pub no_prompt_templates: bool,
-
-    #[arg(long = "no-skills", alias = "no_skills", global = true)]
-    pub no_skills: bool,
-
-    #[arg(long = "no-context-files", alias = "no_context_files", global = true)]
-    pub no_context_files: bool,
-
-    #[arg(long, global = true)]
-    pub offline: bool,
-
-    #[arg(long, global = true)]
+    #[arg(long)]
     pub verbose: bool,
-
-    #[arg(long, global = true, value_name = "TEXT_OR_PATH")]
-    pub system_prompt: Option<String>,
-
-    #[arg(long, global = true, value_name = "TEXT_OR_PATH")]
-    pub append_system_prompt: Vec<String>,
-
-    #[arg(long, global = true, value_name = "LEVEL")]
-    pub thinking: Option<ThinkingLevel>,
-
-    #[arg(
-        long = "list-models",
-        global = true,
-        num_args = 0..=1,
-        value_name = "SEARCH",
-        default_missing_value = LIST_MODELS_NO_SEARCH,
-        action = ArgAction::Set
-    )]
-    pub list_models: Option<String>,
-
-    #[command(flatten)]
-    pub tool_filters: ToolFilterArgs,
 
     #[command(subcommand)]
     pub command: Option<Command>,
 }
 
-#[derive(Debug, Clone, Default, Args)]
-pub struct ToolFilterArgs {
-    #[arg(long = "no-tools", alias = "no_tools", global = true)]
-    pub no_tools: bool,
-
-    #[arg(long = "no-builtin-tools", alias = "no_builtin_tools", global = true)]
-    pub no_builtin_tools: bool,
-
-    #[arg(
-        short = 't',
-        long,
-        global = true,
-        value_name = "NAMES",
-        value_delimiter = ','
-    )]
-    pub tools: Vec<String>,
-
-    #[arg(
-        long = "exclude-tools",
-        alias = "exclude_tools",
-        global = true,
-        value_name = "NAMES",
-        value_delimiter = ','
-    )]
-    pub exclude_tools: Vec<String>,
-}
-
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    Print {
-        prompt: Vec<String>,
-    },
+    /// 在标准输入/文件上运行一次代理任务
     Run {
         #[arg(long, value_enum)]
         output: Option<RunOutput>,
         prompt: Vec<String>,
     },
-    Resume {
-        session_id: String,
-    },
+    /// 恢复指定会话并进入交互模式
+    Resume { session_id: Option<String> },
+    /// 会话管理
     Sessions {
         #[command(subcommand)]
         command: SessionCommand,
     },
-    Skills {
-        #[command(subcommand)]
-        command: SkillCommand,
-    },
+    /// 本地扩展管理
     Extensions {
         #[command(subcommand)]
         command: ExtensionCommand,
     },
-    Prompts {
-        #[command(subcommand)]
-        command: PromptPackageCommand,
-    },
-    Themes {
-        #[command(subcommand)]
-        command: ThemePackageCommand,
-    },
-    Trust {
-        #[command(subcommand)]
-        command: TrustCommand,
-    },
-    Config {
-        #[command(subcommand)]
-        command: ConfigCommand,
-    },
+    /// 模型提供商管理
     Provider {
         #[command(subcommand)]
         command: ProviderCommand,
     },
+    /// 模型管理
     Models {
         #[command(subcommand)]
         command: ModelCommand,
     },
-    Images {
-        #[command(subcommand)]
-        command: ImageCommand,
-    },
+    /// MCP 服务器管理
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
     },
+    /// JSONL RPC 服务端模式
     Rpc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum RunOutput {
+    /// 原始事件流
     Events,
+    /// JSON 输出
     Json,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum ThinkingLevel {
-    Off,
-    Minimal,
-    Low,
-    Medium,
-    High,
-    #[value(name = "xhigh")]
-    XHigh,
+    /// 纯文本输出
+    Text,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum SessionCommand {
+    /// 列出当前工作区会话
     List,
-    Show {
-        session_id: String,
-    },
-    Rename {
-        session_id: String,
-        name: String,
-    },
+    /// 查看会话详情
+    Show { session_id: String },
+    /// 重命名会话
+    Rename { session_id: String, name: String },
+    /// 分叉会话
     Fork {
         session_id: String,
+        /// 新会话名称
         #[arg(long)]
         name: Option<String>,
     },
-    Summarize {
-        session_id: String,
-    },
+    /// 压缩会话历史
     Compact {
         session_id: String,
+        /// 保留最近多少条消息
         #[arg(long, default_value_t = 20)]
         keep_recent: usize,
     },
-    ExportHtml {
-        session_id: String,
-    },
-    ExportJson {
-        session_id: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ConfigCommand {
-    Show,
-    Set { key: String, value: String },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum TrustCommand {
-    Status,
-    Approve,
-    Deny,
-    Clear,
+    /// 导出会话为 HTML
+    ExportHtml { session_id: String },
+    /// 导出会话为 JSON
+    ExportJson { session_id: String },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ModelCommand {
+    /// 列出可用模型
     List {
+        /// 以 JSON 格式输出
         #[arg(long)]
         json: bool,
     },
+    /// 添加模型别名
     Add {
         alias: String,
         #[arg(long)]
@@ -328,20 +135,21 @@ pub enum ModelCommand {
         #[arg(long)]
         display_name: Option<String>,
     },
-    Remove {
-        alias: String,
-    },
-    Set {
-        alias: String,
-    },
+    /// 删除模型别名
+    Remove { alias: String },
+    /// 设置默认模型
+    Set { alias: String },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ProviderCommand {
+    /// 列出已配置或可用的提供商
     List {
+        /// 以 JSON 格式输出
         #[arg(long)]
         json: bool,
     },
+    /// 添加自定义提供商
     Add {
         provider_id: String,
         #[arg(long, value_name = "TYPE")]
@@ -353,9 +161,9 @@ pub enum ProviderCommand {
         #[arg(long, value_name = "ENV_VAR")]
         api_key_env: Option<String>,
     },
-    Remove {
-        provider_id: String,
-    },
+    /// 删除自定义提供商
+    Remove { provider_id: String },
+    /// models.dev 目录管理
     Catalog {
         #[command(subcommand)]
         command: CatalogCommand,
@@ -364,166 +172,158 @@ pub enum ProviderCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum CatalogCommand {
-    /// List providers available on models.dev.
+    /// 列出 models.dev 上的提供商
     List {
-        /// Show models for a specific provider.
+        /// 只看指定提供商的模型
         provider_id: Option<String>,
-        /// Filter providers by substring.
+        /// 按关键字过滤
         #[arg(long)]
         filter: Option<String>,
+        /// 以 JSON 格式输出
         #[arg(long)]
         json: bool,
     },
-    /// Import a provider and its models from models.dev.
+    /// 从 models.dev 导入提供商及其模型
     Add {
         provider_id: String,
         #[arg(long, value_name = "KEY")]
         api_key: Option<String>,
-        /// Set a specific model as default after import.
+        /// 导入后设为默认的模型 ID
         #[arg(long, value_name = "MODEL_ID")]
         default_model: Option<String>,
     },
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ImageCommand {
-    Generate {
-        prompt: String,
-        #[arg(long, value_name = "PROVIDER/MODEL")]
-        model: String,
-        #[arg(long, value_name = "PATH")]
-        output: std::path::PathBuf,
-        #[arg(long, default_value = "1024x1024")]
-        size: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum McpCommand {
+    /// 列出所有已配置的 MCP 及其工具名
     List,
-    Servers {
-        #[command(subcommand)]
-        command: McpServersCommand,
-    },
-    Tools {
-        server_id: String,
-    },
-    Resources {
-        server_id: String,
-        #[command(subcommand)]
-        command: McpResourceCommand,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum McpServersCommand {
+    /// 添加并测试一个 MCP
     Add {
-        server_id: String,
-        #[arg(long)]
-        transport: String,
-        #[arg(long)]
+        /// MCP 名称
+        mcp_name: String,
+        /// MCP 类型：studio、remote-http、remote-sse
+        #[arg(short = 't', long = "type", value_name = "TYPE")]
+        r#type: String,
+        /// studio 类型的完整 shell 命令（全局 -c 已被占用，因此用 -C）
+        #[arg(short = 'C', long = "command", value_name = "CMD")]
         command: Option<String>,
-        #[arg(long)]
+        /// remote-http / remote-sse 的服务地址
+        #[arg(short = 'u', long = "url", value_name = "URL")]
         url: Option<String>,
-        #[arg(long = "arg")]
-        args: Vec<String>,
-        #[arg(long = "env", value_name = "KEY=VALUE")]
+        /// 环境变量，格式 KEY=VALUE，可多次指定
+        #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
         env: Vec<String>,
-        #[arg(long = "header", value_name = "KEY=VALUE")]
+        /// remote 类型的 HTTP 请求头，格式 KEY=VALUE（-h 已被 help 占用，因此用 -H）
+        #[arg(short = 'H', long = "header", value_name = "KEY=VALUE")]
         headers: Vec<String>,
+        /// studio 类型子进程的工作目录
+        #[arg(long = "cwd", value_name = "DIR")]
+        cwd: Option<std::path::PathBuf>,
+        /// 工具白名单，逗号分隔
+        #[arg(
+            long = "enabled-tools",
+            value_name = "TOOL1,TOOL2",
+            value_delimiter = ','
+        )]
+        enabled_tools: Vec<String>,
+        /// 工具黑名单，逗号分隔
+        #[arg(
+            long = "disabled-tools",
+            value_name = "TOOL1,TOOL2",
+            value_delimiter = ','
+        )]
+        disabled_tools: Vec<String>,
+        /// 连接测试超时（毫秒）
+        #[arg(long = "startup-timeout-ms", value_name = "MS")]
+        startup_timeout_ms: Option<u64>,
+        /// 单次工具调用超时（毫秒）
+        #[arg(long = "tool-timeout-ms", value_name = "MS")]
+        tool_timeout_ms: Option<u64>,
+        /// 添加后默认启用；显式传 --enable 保持启用（默认行为）
+        #[arg(long = "enable", default_value_t = true)]
+        enable: bool,
+        /// 添加后默认启用；加此 flag 则禁用
+        #[arg(long = "disable", default_value_t = false)]
+        disable: bool,
     },
-    Remove {
-        server_id: String,
+    /// 删除一个 MCP
+    Del {
+        /// MCP 名称
+        mcp_name: String,
     },
-    Enable {
-        server_id: String,
-    },
+    /// 禁用一个 MCP
     Disable {
-        server_id: String,
+        /// MCP 名称
+        mcp_name: String,
     },
-    Health {
-        server_id: String,
+    /// 启用一个 MCP
+    Enable {
+        /// MCP 名称
+        mcp_name: String,
     },
-    Start {
-        server_id: String,
-    },
-    Stop {
-        server_id: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum McpResourceCommand {
-    List,
-    Read {
-        uri: String,
-    },
-    Watch {
-        uri: String,
-        #[arg(long, default_value_t = 1)]
-        count: usize,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum SkillCommand {
-    Show { path: std::path::PathBuf },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ExtensionCommand {
+    /// 列出本地扩展
     List {
+        /// 扩展根目录
         #[arg(default_value = ".neo/extensions")]
         root: std::path::PathBuf,
     },
+    /// 安装扩展
     Install {
         source: String,
+        /// 扩展根目录
         #[arg(long, default_value = ".neo/extensions")]
         root: std::path::PathBuf,
     },
+    /// 更新扩展
     Update {
         extension_id: String,
+        /// 扩展根目录
         #[arg(long, default_value = ".neo/extensions")]
         root: std::path::PathBuf,
     },
+    /// 卸载扩展
     Uninstall {
         extension_id: String,
+        /// 扩展根目录
         #[arg(long, default_value = ".neo/extensions")]
         root: std::path::PathBuf,
     },
+    /// 查看扩展状态
     Status {
         extension_id: String,
+        /// 扩展根目录
         #[arg(long, default_value = ".neo/extensions")]
         root: std::path::PathBuf,
     },
+    /// 启用扩展
     Enable {
         extension_id: String,
+        /// 扩展根目录
         #[arg(long, default_value = ".neo/extensions")]
         root: std::path::PathBuf,
     },
+    /// 禁用扩展
     Disable {
         extension_id: String,
+        /// 扩展根目录
         #[arg(long, default_value = ".neo/extensions")]
         root: std::path::PathBuf,
     },
+    /// 调用扩展方法
     Call {
         extension_id: String,
         method: String,
+        /// JSON 参数字符串
         #[arg(default_value = "{}")]
         params: String,
+        /// 扩展根目录
         #[arg(long, default_value = ".neo/extensions")]
         root: std::path::PathBuf,
     },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum PromptPackageCommand {
-    List,
-    Preview { name: String },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ThemePackageCommand {
-    List,
-    Preview { name: String },
 }

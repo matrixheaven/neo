@@ -119,17 +119,29 @@ enabled tools through each extension's JSONL RPC `tools.list`.
 
 ## MCP
 
-Configure MCP servers in `.neo/config.toml`, then inspect or use them locally:
+Configure MCP servers in `.neo/config.toml`, or manage them from the CLI:
 
 ```bash
+# list configured MCP servers and their advertised tools
 cargo run -p neo-agent -- mcp list
-cargo run -p neo-agent -- mcp servers health release-smoke
-cargo run -p neo-agent -- mcp tools release-smoke
-cargo run -p neo-agent -- mcp resources release-smoke list
+
+# add a local stdio MCP server
+cargo run -p neo-agent -- mcp add filesystem -t studio \
+  -C "npx -y @modelcontextprotocol/server-filesystem ." --cwd .
+
+# add a remote HTTP or SSE MCP server
+cargo run -p neo-agent -- mcp add remote-docs -t remote-http \
+  --url https://mcp.example.test/rpc \
+  --header authorization="Bearer $TOKEN"
+
+# enable, disable, or delete an entry
+cargo run -p neo-agent -- mcp disable remote-docs
+cargo run -p neo-agent -- mcp enable remote-docs
+cargo run -p neo-agent -- mcp del remote-docs
 ```
 
-Enabled stdio, HTTP, and SSE MCP entries are discovered for provider-backed
-turns and exposed as `mcp__<server>__<tool>` functions.
+Enabled `studio` (stdio), `remote-http`, and `remote-sse` entries are discovered
+for provider-backed turns and exposed as `mcp__<server>__<tool>` functions.
 
 ## Image Generation
 

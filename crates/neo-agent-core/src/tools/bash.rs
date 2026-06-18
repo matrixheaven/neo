@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt},
+    io::AsyncReadExt,
     process::{Child, Command},
     sync::Mutex,
     task::JoinHandle,
@@ -23,8 +23,8 @@ use rustix::{
 };
 
 use super::{
-    ProcessKind, Tool, ToolContext, ToolError, ToolFuture, ToolResult, cap_output, parse_input,
-    schema,
+    ProcessKind, Tool, ToolContext, ToolError, ToolFuture, ToolResult, ToolUpdateCallback,
+    cap_output, parse_input, schema,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -32,6 +32,7 @@ use super::{
 struct BashInput {
     mode: Option<BashMode>,
     command: Option<String>,
+    workdir: Option<String>,
     handle: Option<String>,
     timeout_ms: Option<u64>,
     max_output_bytes: Option<usize>,
@@ -69,12 +70,14 @@ impl Tool for BashTool {
             match input.mode.unwrap_or(BashMode::Foreground) {
                 BashMode::Foreground => {
                     let command = required_field(self.name(), input.command, "command")?;
+                    let workdir = input.workdir.as_deref();
                     let timeout_ms = input.timeout_ms.unwrap_or_else(|| {
                         u64::try_from(ctx.bash_timeout.as_millis()).unwrap_or(u64::MAX)
                     });
                     let output = run_command(
                         ctx,
                         &command,
+                        workdir,
                         Duration::from_millis(timeout_ms),
                         max_output_bytes,
                     )
@@ -83,14 +86,22 @@ impl Tool for BashTool {
                 }
                 BashMode::Start => {
                     let command = required_field(self.name(), input.command, "command")?;
-                    start_background_command(ctx, &command, max_output_bytes).await
+                    start_background_command(
+                        ctx,
+                        &command,
+                        input.workdir.as_deref(),
+                        max_output_bytes,
+                    )
+                    .await
                 }
                 BashMode::Poll => {
+                    reject_field(self.name(), input.workdir.is_some(), "workdir")?;
                     let handle = required_field(self.name(), input.handle, "handle")?;
                     poll_background_command(ctx, self.name(), &handle, max_output_bytes).await
                 }
                 BashMode::Stop => {
                     reject_field(self.name(), input.command.is_some(), "command")?;
+                    reject_field(self.name(), input.workdir.is_some(), "workdir")?;
                     let handle = required_field(self.name(), input.handle, "handle")?;
                     stop_background_command(ctx, self.name(), &handle, max_output_bytes).await
                 }
@@ -121,6 +132,8 @@ struct CommandOutput {
     stdout: String,
     stderr: String,
 }
+
+const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 
 fn required_field<T>(tool: &str, value: Option<T>, field: &'static str) -> Result<T, ToolError> {
     value.ok_or_else(|| ToolError::InvalidInput {
@@ -162,81 +175,25 @@ fn command_result(output: &CommandOutput, max_output_bytes: usize) -> ToolResult
 async fn run_command(
     ctx: &ToolContext,
     command: &str,
+    workdir: Option<&str>,
     timeout_duration: Duration,
     stream_max_bytes: usize,
 ) -> Result<CommandOutput, ToolError> {
-    let mut process = spawn_bash_process(ctx, command)?;
-    let stdout = process.child.stdout.take().expect("stdout was piped");
-    let stderr = process.child.stderr.take().expect("stderr was piped");
-
-    // Clone the optional update callback so the spawned reader tasks can
-    // stream lines without borrowing ctx. Each task gets its own clone of the
-    // Arc callback. Streamed content is capped to `stream_max_bytes` so it
-    // doesn't leak data that would be truncated in the final result.
-    let stdout_callback = ctx.tool_update.clone();
-    let stderr_callback = ctx.tool_update.clone();
-
-    let stdout_task = tokio::spawn(async move {
-        let reader = tokio::io::BufReader::new(stdout);
-        let mut buffer = Vec::new();
-        let mut reader = reader;
-        let mut streamed: usize = 0;
-
-        // Read line-by-line, both accumulating for the final result and
-        // streaming through the update callback.
-        loop {
-            let mut line = Vec::new();
-            match reader.read_until(b'\n', &mut line).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    buffer.extend_from_slice(&line);
-                    if streamed < stream_max_bytes {
-                        let remaining = stream_max_bytes - streamed;
-                        let chunk = if line.len() <= remaining {
-                            &line[..]
-                        } else {
-                            &line[..remaining]
-                        };
-                        let line_str = String::from_utf8_lossy(chunk);
-                        streamed += chunk.len();
-                        if let Some(callback) = &stdout_callback {
-                            callback(&line_str);
-                        }
-                    }
-                }
-            }
-        }
-        Ok::<_, std::io::Error>(String::from_utf8_lossy(&buffer).into_owned())
-    });
-    let stderr_task = tokio::spawn(async move {
-        let reader = tokio::io::BufReader::new(stderr);
-        let mut buffer = Vec::new();
-        let mut reader = reader;
-        let mut streamed: usize = 0;
-        loop {
-            let mut line = Vec::new();
-            match reader.read_until(b'\n', &mut line).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    buffer.extend_from_slice(&line);
-                    if streamed < stream_max_bytes {
-                        let remaining = stream_max_bytes - streamed;
-                        let chunk = if line.len() <= remaining {
-                            &line[..]
-                        } else {
-                            &line[..remaining]
-                        };
-                        let line_str = String::from_utf8_lossy(chunk);
-                        streamed += chunk.len();
-                        if let Some(callback) = &stderr_callback {
-                            callback(&line_str);
-                        }
-                    }
-                }
-            }
-        }
-        Ok::<_, std::io::Error>(String::from_utf8_lossy(&buffer).into_owned())
-    });
+    let mut process = spawn_bash_process(ctx, command, workdir)?;
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stdout_task = spawn_streaming_output_reader(
+        process.child.stdout.take().expect("stdout was piped"),
+        stdout.clone(),
+        ctx.tool_update.clone(),
+        stream_max_bytes,
+    );
+    let stderr_task = spawn_streaming_output_reader(
+        process.child.stderr.take().expect("stderr was piped"),
+        stderr.clone(),
+        ctx.tool_update.clone(),
+        stream_max_bytes,
+    );
 
     let status = tokio::select! {
         status = process.child.wait() => status?,
@@ -252,21 +209,25 @@ async fn run_command(
         }
     };
 
-    let stdout = stdout_task.await.map_err(std::io::Error::other)??;
-    let stderr = stderr_task.await.map_err(std::io::Error::other)??;
-    Ok(CommandOutput {
-        exit_code: status.code(),
-        stdout,
-        stderr,
-    })
+    drain_reader(stdout_task).await;
+    drain_reader(stderr_task).await;
+    Ok(output_from_buffers(status.code(), stdout, stderr).await)
 }
 
-fn spawn_bash_process(ctx: &ToolContext, command_text: &str) -> Result<ManagedChild, ToolError> {
+fn spawn_bash_process(
+    ctx: &ToolContext,
+    command_text: &str,
+    workdir: Option<&str>,
+) -> Result<ManagedChild, ToolError> {
+    let cwd = match workdir {
+        Some(path) => ctx.resolve_workspace_path(std::path::Path::new(path))?,
+        None => ctx.cwd.clone(),
+    };
     let mut process_command = Command::new("bash");
     process_command
         .arg("-lc")
         .arg(command_text)
-        .current_dir(&ctx.cwd)
+        .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -279,6 +240,14 @@ fn spawn_bash_process(ctx: &ToolContext, command_text: &str) -> Result<ManagedCh
         process_group: child_process_group(&child),
         child,
     })
+}
+
+async fn drain_reader(task: JoinHandle<()>) {
+    let mut task = task;
+    tokio::select! {
+        () = tokio::time::sleep(PIPE_DRAIN_TIMEOUT) => task.abort(),
+        _ = &mut task => {}
+    }
 }
 
 #[cfg(unix)]
@@ -311,9 +280,10 @@ fn kill_process_group_if_available(process: &ManagedChild) {
 async fn start_background_command(
     ctx: &ToolContext,
     command: &str,
+    workdir: Option<&str>,
     max_output_bytes: usize,
 ) -> Result<ToolResult, ToolError> {
-    let mut process = spawn_bash_process(ctx, command)?;
+    let mut process = spawn_bash_process(ctx, command, workdir)?;
 
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -372,6 +342,38 @@ where
     })
 }
 
+fn spawn_streaming_output_reader<R>(
+    mut reader: R,
+    buffer: Arc<Mutex<Vec<u8>>>,
+    callback: Option<ToolUpdateCallback>,
+    stream_max_bytes: usize,
+) -> JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut local = [0_u8; 8192];
+        let mut streamed = 0;
+        loop {
+            match reader.read(&mut local).await {
+                Ok(0) | Err(_) => break,
+                Ok(bytes_read) => {
+                    let chunk = &local[..bytes_read];
+                    buffer.lock().await.extend_from_slice(chunk);
+                    if streamed < stream_max_bytes {
+                        let remaining = stream_max_bytes - streamed;
+                        let streamed_chunk = &chunk[..chunk.len().min(remaining)];
+                        streamed += streamed_chunk.len();
+                        if let Some(callback) = &callback {
+                            callback(&String::from_utf8_lossy(streamed_chunk));
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
 async fn poll_background_command(
     ctx: &ToolContext,
     tool: &str,
@@ -391,8 +393,8 @@ async fn poll_background_command(
         let command = commands.remove(handle).expect("command existed");
         drop(commands);
         ctx.process_supervisor.unregister(handle).await;
-        let _ = command.stdout_task.await;
-        let _ = command.stderr_task.await;
+        drain_reader(command.stdout_task).await;
+        drain_reader(command.stderr_task).await;
         let output = output_from_buffers(status.code(), command.stdout, command.stderr).await;
         return Ok(background_command_result(
             handle,
@@ -433,8 +435,8 @@ async fn stop_background_command(
     ctx.process_supervisor.unregister(handle).await;
 
     let exit_code = kill_child(&mut command.process).await;
-    let _ = command.stdout_task.await;
-    let _ = command.stderr_task.await;
+    drain_reader(command.stdout_task).await;
+    drain_reader(command.stderr_task).await;
     let output = output_from_buffers(exit_code, command.stdout, command.stderr).await;
     Ok(background_command_result(
         handle,
@@ -498,8 +500,8 @@ async fn cleanup_background_command(handle: &str) {
         return;
     };
     let _ = kill_child(&mut command.process).await;
-    let _ = command.stdout_task.await;
-    let _ = command.stderr_task.await;
+    drain_reader(command.stdout_task).await;
+    drain_reader(command.stderr_task).await;
 }
 
 fn cap_output_details(content: &str, max_bytes: usize) -> String {

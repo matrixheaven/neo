@@ -1,13 +1,18 @@
-pub mod controller;
 pub mod diff_preview;
-pub mod messages;
+pub mod entry;
+pub mod pane;
 pub mod plan_box;
+pub mod store;
 pub mod tool_call;
 pub mod tool_group;
 pub mod tool_renderers;
 
-pub use controller::TranscriptController;
-pub use messages::{NoticeSeverity, TranscriptEntry};
+pub use entry::{BannerData, InlineImageRender, StatusSeverity, ThinkingPhase, TranscriptEntry};
+pub use pane::{
+    CHROME_GUTTER, ChromeRender, TranscriptPane, apply_gutter, frame_content_width,
+    render_chrome_lines, render_footer_only_lines,
+};
 pub use plan_box::PlanBoxComponent;
+pub use store::{TranscriptSelection, TranscriptStore, TranscriptViewport};
 pub use tool_call::{ToolCallComponent, ToolCallState};
 pub use tool_group::{ToolGroup, render_tool_group};

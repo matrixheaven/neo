@@ -141,45 +141,6 @@ pub(crate) fn load_project_prompt_templates(
     load_prompt_templates_from_tree(&prompts_dir)
 }
 
-pub(crate) fn list_project_prompt_templates(
-    project_dir: &Path,
-    global_prompts_dir: Option<&Path>,
-) -> anyhow::Result<String> {
-    let commands = discover_prompt_template_commands(project_dir, global_prompts_dir, &[])?;
-    if commands.is_empty() {
-        return Ok("no prompts\n".to_owned());
-    }
-
-    let mut output = String::new();
-    for command in commands {
-        use std::fmt::Write as _;
-        let _ = writeln!(
-            output,
-            "{}\t{}\t{}",
-            command.template.name,
-            command.template.description,
-            command.template.path.display()
-        );
-    }
-    Ok(output)
-}
-
-pub(crate) fn preview_project_prompt_template(
-    project_dir: &Path,
-    global_prompts_dir: Option<&Path>,
-    name: &str,
-) -> anyhow::Result<String> {
-    let template = find_prompt_template_by_name(name, project_dir, global_prompts_dir)?
-        .ok_or_else(|| anyhow::anyhow!("prompt {name:?} not found"))?;
-    Ok(format!(
-        "{}\t{}\t{}\n{}\n",
-        template.name,
-        template.description,
-        template.path.display(),
-        template.content
-    ))
-}
-
 fn load_user_prompt_templates(prompts_dir: &Path) -> anyhow::Result<Vec<PromptTemplate>> {
     load_prompt_templates_from_tree(prompts_dir)
 }

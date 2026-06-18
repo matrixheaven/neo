@@ -106,6 +106,35 @@ fn code_block_has_backtick_borders_and_indent() {
 }
 
 #[test]
+fn fenced_bash_block_does_not_leak_thinking_or_prompt_chrome() {
+    let thinking = "I now have a comprehensive understanding of this project.";
+    let md = format!(
+        "快速上手\n\n```bash\n# 查看可用模型\ncargo run -p neo-agent -- models list\n```\n\n安全与约束"
+    );
+    let lines = plain(&md, 80);
+    let joined = lines.join("\n");
+
+    assert_eq!(
+        joined.matches("```bash").count(),
+        1,
+        "one opening fence: {joined}"
+    );
+    assert_eq!(
+        lines.iter().filter(|line| line.trim() == "```").count(),
+        1,
+        "one closing fence: {joined}"
+    );
+    assert!(
+        !joined.contains(thinking),
+        "code block should not contain stale thinking text: {joined}"
+    );
+    assert!(
+        !joined.contains("│  >"),
+        "body markdown should not contain prompt chrome: {joined}"
+    );
+}
+
+#[test]
 fn diff_code_block_colors_add_remove() {
     let md = "```diff\n+added line\n-removed line\n```";
     let lines = plain(md, 80);

@@ -148,22 +148,6 @@ pub async fn transcript(session_ref: &str, config: &AppConfig) -> anyhow::Result
     }
 }
 
-pub async fn summarize(session_ref: &str, config: &AppConfig) -> anyhow::Result<String> {
-    let session_id = resolve_session_id(session_ref, config)?;
-    let messages = JsonlSessionReader::replay_messages(session_path(&session_id, config)?)
-        .await
-        .with_context(|| format!("failed to replay session {session_ref}"))?;
-    let summary = summarize_messages(&messages);
-    let session = metadata_store(config)
-        .summarize(&session_id, summary.clone())
-        .with_context(|| format!("failed to store summary for session {session_ref}"))?;
-    Ok(format!(
-        "summarized {}: {}\n",
-        session.id,
-        session.summary.unwrap_or(summary)
-    ))
-}
-
 pub async fn compact(
     session_ref: &str,
     keep_recent: usize,
@@ -232,23 +216,6 @@ pub(crate) async fn export_json_artifact(
         },
         messages,
     })
-}
-
-pub async fn export_html_file(input_path: &Path, output_path: &Path) -> anyhow::Result<()> {
-    let messages = JsonlSessionReader::replay_messages(input_path)
-        .await
-        .with_context(|| format!("failed to replay session {}", input_path.display()))?;
-    let title = input_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map_or_else(
-            || "neo session".to_owned(),
-            |stem| format!("neo session {stem}"),
-        );
-    let html = render_messages_html(title, &messages)?;
-    std::fs::write(output_path, html)
-        .with_context(|| format!("failed to write export {}", output_path.display()))?;
-    Ok(())
 }
 
 fn render_messages_html(title: String, messages: &[AgentMessage]) -> anyhow::Result<String> {
@@ -330,22 +297,22 @@ fn session_id_from_jsonl_path(
 
     // Accept paths inside the workspace-scoped bucket directory (primary).
     let bucket_dir = workspace_sessions_dir(config);
-    if let Ok(bucket_canonical) = bucket_dir.canonicalize() {
-        if check_path.starts_with(&bucket_canonical) || path.starts_with(&bucket_dir) {
-            validate_session_id(session_id)
-                .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
-            return Ok(Some(session_id.to_owned()));
-        }
+    if let Ok(bucket_canonical) = bucket_dir.canonicalize()
+        && (check_path.starts_with(&bucket_canonical) || path.starts_with(&bucket_dir))
+    {
+        validate_session_id(session_id)
+            .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
+        return Ok(Some(session_id.to_owned()));
     }
 
     // Also accept paths directly under the sessions root (legacy/compat).
     let sessions_root = &config.sessions_dir;
-    if let Ok(root_canonical) = sessions_root.canonicalize() {
-        if check_path.starts_with(&root_canonical) {
-            validate_session_id(session_id)
-                .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
-            return Ok(Some(session_id.to_owned()));
-        }
+    if let Ok(root_canonical) = sessions_root.canonicalize()
+        && check_path.starts_with(&root_canonical)
+    {
+        validate_session_id(session_id)
+            .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
+        return Ok(Some(session_id.to_owned()));
     }
 
     // Also accept paths that look like they were under a project's sessions
@@ -397,34 +364,6 @@ fn format_message(message: &AgentMessage) -> String {
     format!("{role}: {}", message_text(message))
 }
 
-fn summarize_messages(messages: &[AgentMessage]) -> String {
-    if messages.is_empty() {
-        return "Local branch summary: empty session".to_owned();
-    }
-
-    let lines = messages
-        .iter()
-        .take(6)
-        .map(|message| {
-            format!(
-                "{}: {}",
-                message_role(message),
-                one_line_message_text(message)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" | ");
-    let suffix = if messages.len() > 6 {
-        format!(" | ... {} more messages", messages.len() - 6)
-    } else {
-        String::new()
-    };
-    format!(
-        "Local branch summary ({} messages): {lines}{suffix}",
-        messages.len()
-    )
-}
-
 fn message_role(message: &AgentMessage) -> &'static str {
     match message {
         AgentMessage::System { .. } => "system",
@@ -442,13 +381,6 @@ fn message_text(message: &AgentMessage) -> String {
         | AgentMessage::ToolResult { content, .. } => content,
     };
     text_content(content)
-}
-
-fn one_line_message_text(message: &AgentMessage) -> String {
-    message_text(message)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn text_content(content: &[Content]) -> String {

@@ -1,0 +1,1235 @@
+use std::collections::BTreeMap;
+
+use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef};
+
+use crate::ansi::{Style, paint, truncate_to_width, visible_width};
+use crate::app::TuiTheme;
+use crate::core::{Expandable, Line};
+use crate::pi_tui::CURSOR_MARKER;
+use crate::transcript::{
+    InlineImageRender, ToolCallComponent, ToolCallState, ToolGroup, TranscriptEntry,
+    TranscriptStore, render_tool_group,
+};
+use crate::widgets::box_draw;
+use crate::{
+    ImageRenderPolicy, ImageSource, InlineImage, NeoTuiApp, PromptState, TerminalImageCapabilities,
+    ToolStatusKind, wrap_width,
+};
+
+const DEFAULT_LIVE_CHROME_HEIGHT: usize = 5;
+
+/// Uniform 1-column left/right gutter applied to ALL chrome (body, banner,
+/// prompt box, footer). Matches kimi-code's `CHROME_GUTTER = 1`. Applied once
+/// by [`apply_gutter`] after body + chrome are merged, so nothing renders
+/// flush against the screen edge.
+pub const CHROME_GUTTER: usize = 1;
+
+/// Prepend `CHROME_GUTTER` spaces to every non-empty line. Empty separator
+/// lines stay empty so vertical spacing isn't shifted.
+pub fn apply_gutter(lines: &mut [String]) {
+    if CHROME_GUTTER == 0 {
+        return;
+    }
+    let lead = " ".repeat(CHROME_GUTTER);
+    for line in lines.iter_mut() {
+        if !line.is_empty() {
+            line.insert_str(0, &lead);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TranscriptPane {
+    width: usize,
+    height: usize,
+    live_chrome_height: usize,
+    transcript: TranscriptStore,
+    dirty: bool,
+    tool_output_expanded: bool,
+    streaming_tool_args: BTreeMap<String, String>,
+    completed_tool_result_ids: Vec<String>,
+    next_image_id: u64,
+    /// Cache of the last composed body frame (ANSI strings, no chrome), so
+    /// tests can inspect rendered output via [`frame_ansi_lines`] without
+    /// recomposing unchanged rows.
+    last_frame: Vec<String>,
+    /// Theme used to color the live transcript body. Mirrors [`NeoTuiApp`]'s
+    /// theme; kept here (rather than borrowed) so the runtime can render
+    /// without holding a reference to the app. The interactive mode keeps it
+    /// in sync via [`Self::set_theme`].
+    theme: TuiTheme,
+}
+
+impl TranscriptPane {
+    #[must_use]
+    pub fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            height,
+            live_chrome_height: DEFAULT_LIVE_CHROME_HEIGHT,
+            transcript: TranscriptStore::new(),
+            dirty: false,
+            tool_output_expanded: false,
+            streaming_tool_args: BTreeMap::new(),
+            completed_tool_result_ids: Vec::new(),
+            next_image_id: 0,
+            last_frame: Vec::new(),
+            theme: TuiTheme::default(),
+        }
+    }
+
+    /// Update the theme used to color the live transcript body. Called by the
+    /// interactive mode whenever the app's theme changes (e.g. from a
+    /// `~/.neo/themes/*.json` file).
+    pub fn set_theme(&mut self, theme: TuiTheme) {
+        if self.theme == theme {
+            return;
+        }
+        self.theme = theme;
+        self.mark_dirty();
+    }
+
+    #[must_use]
+    pub const fn theme(&self) -> TuiTheme {
+        self.theme
+    }
+
+    pub fn push_transcript(&mut self, entry: TranscriptEntry) {
+        self.transcript.push(entry);
+        self.mark_dirty();
+    }
+
+    pub fn push_user_message(&mut self, content: impl Into<String>) {
+        self.push_transcript(TranscriptEntry::user_message(content));
+    }
+
+    pub fn push_assistant_message(&mut self, content: impl Into<String>) {
+        self.push_transcript(TranscriptEntry::assistant_message(content));
+    }
+
+    pub fn push_banner(&mut self, title: impl Into<String>) {
+        self.push_transcript(TranscriptEntry::banner(title));
+    }
+
+    /// Push a rich welcome banner (rounded box + logo + metadata) built from
+    /// the app's title/session/model/workspace info.
+    pub fn push_welcome_banner(
+        &mut self,
+        title: &str,
+        session: &str,
+        model: &str,
+        directory: &str,
+        version: &str,
+        mcp: Option<String>,
+    ) {
+        use crate::transcript::BannerData;
+        let data = BannerData {
+            title: format!("Welcome to {title}!"),
+            subtitle: "Send /help for help information.".to_owned(),
+            directory: directory.to_owned(),
+            session: session.to_owned(),
+            model: model.to_owned(),
+            version: version.to_owned(),
+            mcp,
+        };
+        self.push_transcript(TranscriptEntry::welcome_banner(data));
+    }
+
+    pub fn replay_user_message(&mut self, content: impl Into<String>) {
+        self.push_user_message(content);
+    }
+
+    pub fn replay_assistant_message(&mut self, content: impl Into<String>) {
+        self.push_assistant_message(content);
+    }
+
+    pub fn push_status(&mut self, content: impl Into<String>) {
+        self.push_transcript(TranscriptEntry::status(content));
+    }
+
+    pub fn replay_message(&mut self, message: &AgentMessage) {
+        match message {
+            AgentMessage::User { content } => {
+                let text = content_display_text(content);
+                if !text.is_empty() {
+                    self.replay_user_message(text);
+                }
+            }
+            AgentMessage::Assistant {
+                content,
+                tool_calls,
+                ..
+            } => {
+                self.replay_assistant_content(content);
+                for tool_call in tool_calls {
+                    self.apply_agent_event(AgentEvent::ToolExecutionStarted {
+                        turn: 0,
+                        id: tool_call.id.clone(),
+                        name: tool_call.name.clone(),
+                        arguments: tool_call.arguments.clone(),
+                    });
+                }
+            }
+            AgentMessage::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                is_error,
+            } => {
+                if take_completed_tool_result(&mut self.completed_tool_result_ids, tool_call_id) {
+                    return;
+                }
+                let text = content_display_text(content);
+                self.apply_agent_event(AgentEvent::ToolExecutionFinished {
+                    turn: 0,
+                    id: tool_call_id.clone(),
+                    name: tool_name.clone(),
+                    result: neo_agent_core::ToolResult {
+                        content: text,
+                        is_error: *is_error,
+                        details: None,
+                        terminate: false,
+                    },
+                });
+            }
+            AgentMessage::System { content } => {
+                let text = content_display_text(content);
+                if !text.is_empty() {
+                    self.push_status(text);
+                }
+            }
+        }
+    }
+
+    pub fn replay_assistant_content(&mut self, content: &[Content]) {
+        let mut text = String::new();
+        for part in content {
+            match part {
+                Content::Text { text: part_text } => {
+                    text.push_str(part_text);
+                }
+                Content::Thinking {
+                    text: thinking_text,
+                    redacted,
+                    signature: _,
+                } => {
+                    if !text.is_empty() {
+                        self.replay_assistant_message(std::mem::take(&mut text));
+                    }
+                    if !thinking_text.is_empty() {
+                        self.push_transcript(TranscriptEntry::thinking_complete(
+                            thinking_text.clone(),
+                        ));
+                    } else if *redacted {
+                        self.push_transcript(TranscriptEntry::thinking_complete(
+                            "[Reasoning redacted]",
+                        ));
+                    }
+                }
+                Content::Image { mime_type, data } => {
+                    if !text.is_empty() {
+                        self.replay_assistant_message(std::mem::take(&mut text));
+                    }
+                    self.push_image(mime_type, data);
+                }
+            }
+        }
+        if !text.is_empty() {
+            self.replay_assistant_message(text);
+        }
+    }
+
+    pub fn push_image(&mut self, mime_type: &str, data: &ImageRef) {
+        self.next_image_id = self.next_image_id.saturating_add(1);
+        let id = format!("image-{}", self.next_image_id);
+        let entry = match data {
+            ImageRef::Base64(encoded) => {
+                let bytes = decode_base64(encoded).unwrap_or_else(|| encoded.as_bytes().to_vec());
+                let inline = InlineImage::bytes(
+                    id.clone(),
+                    mime_type.to_owned(),
+                    bytes,
+                    None::<String>,
+                    ImageSource::Base64,
+                );
+                TranscriptEntry::image(
+                    id,
+                    mime_type.to_owned(),
+                    inline.size_bytes(),
+                    None::<String>,
+                    ImageSource::Base64,
+                    inline.metadata_summary(),
+                    inline.into_payload_bytes(),
+                )
+            }
+            ImageRef::Url(url) => {
+                let inline = InlineImage::remote_url(
+                    id.clone(),
+                    mime_type.to_owned(),
+                    sanitized_image_url(url),
+                    None::<String>,
+                );
+                TranscriptEntry::image(
+                    id,
+                    mime_type.to_owned(),
+                    None,
+                    None::<String>,
+                    ImageSource::RemoteUrl,
+                    inline.metadata_summary(),
+                    None,
+                )
+            }
+        };
+        self.push_transcript(entry);
+    }
+
+    #[must_use]
+    pub fn inline_image_renders(
+        &self,
+        policy: ImageRenderPolicy,
+        capabilities: TerminalImageCapabilities,
+    ) -> Vec<InlineImageRender> {
+        self.transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.inline_image_render(policy, capabilities))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn inline_image_sequences(
+        &self,
+        policy: ImageRenderPolicy,
+        capabilities: TerminalImageCapabilities,
+    ) -> Vec<String> {
+        self.inline_image_renders(policy, capabilities)
+            .into_iter()
+            .map(|render| render.escape_sequence)
+            .collect()
+    }
+
+    pub fn scroll_transcript_up(&mut self, rows: usize) {
+        self.transcript.viewport_mut().scroll_up(rows);
+    }
+
+    pub fn scroll_transcript_down(&mut self, rows: usize) {
+        self.transcript.viewport_mut().scroll_down(rows);
+    }
+
+    pub fn sync_transcript_view(&mut self, content_rows: usize, viewport_rows: usize) {
+        self.transcript
+            .viewport_mut()
+            .sync(content_rows, viewport_rows);
+    }
+
+    pub fn select_visible_transcript_entry(&mut self) {
+        self.transcript.select_visible_entry();
+    }
+
+    pub fn clear_transcript_selection(&mut self) {
+        self.transcript.clear_selection();
+    }
+
+    pub fn extend_transcript_selection_up(&mut self, rows: usize) {
+        self.transcript.extend_selection_up(rows);
+    }
+
+    pub fn extend_transcript_selection_down(&mut self, rows: usize) {
+        self.transcript.extend_selection_down(rows);
+    }
+
+    #[must_use]
+    pub fn has_transcript_selection(&self) -> bool {
+        self.transcript.has_selection()
+    }
+
+    #[must_use]
+    pub fn copy_selected_transcript_text(&self) -> Option<String> {
+        self.transcript.copy_selection()
+    }
+
+    pub fn start_assistant_message(&mut self) {
+        self.transcript.start_assistant();
+        self.mark_dirty();
+    }
+
+    pub fn append_assistant_delta(&mut self, text: &str) {
+        self.transcript.finish_thinking();
+        self.transcript.append_assistant_delta(text);
+        self.mark_dirty();
+    }
+
+    pub fn finish_assistant_message(&mut self) {
+        self.transcript.finish_assistant();
+        self.mark_dirty();
+    }
+
+    pub fn set_tool_output_expanded(&mut self, expanded: bool) {
+        self.tool_output_expanded = expanded;
+        for entry in self.transcript.entries_mut() {
+            if let TranscriptEntry::ToolRun { component } = entry {
+                component.set_expanded(expanded);
+            }
+        }
+        self.mark_dirty();
+    }
+
+    pub fn toggle_tool_output_expanded(&mut self) -> bool {
+        if !self
+            .transcript
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::ToolRun { .. }))
+        {
+            return false;
+        }
+        self.set_tool_output_expanded(!self.tool_output_expanded);
+        true
+    }
+
+    #[must_use]
+    pub const fn tool_output_expanded(&self) -> bool {
+        self.tool_output_expanded
+    }
+
+    pub fn set_live_chrome_height(&mut self, height: usize) {
+        self.live_chrome_height = height;
+        self.mark_dirty();
+    }
+
+    #[must_use]
+    pub const fn live_chrome_height(&self) -> usize {
+        self.live_chrome_height
+    }
+
+    pub fn apply_agent_event(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::MessageStarted { .. } => {
+                self.mark_dirty();
+            }
+            AgentEvent::TextDelta { text, .. } => self.append_assistant_delta(&text),
+            AgentEvent::MessageFinished { .. } | AgentEvent::TurnFinished { .. } => {
+                self.finish_active_text_blocks();
+            }
+            AgentEvent::ThinkingStarted { .. } => {
+                self.finish_assistant_message();
+                self.transcript.start_thinking();
+                self.mark_dirty();
+            }
+            AgentEvent::ThinkingDelta { text, .. } => {
+                self.transcript.append_thinking_delta(&text);
+                self.mark_dirty();
+            }
+            AgentEvent::ThinkingFinished { .. } => {
+                self.transcript.finish_thinking();
+                self.mark_dirty();
+            }
+            AgentEvent::ToolCallStarted { id, name, .. } => {
+                self.upsert_tool(id, name, None, ToolStatusKind::Running);
+                self.mark_dirty();
+            }
+            AgentEvent::ToolCallArgumentsDelta {
+                id, json_fragment, ..
+            } => {
+                let arguments = self.streaming_tool_args.entry(id.clone()).or_default();
+                arguments.push_str(&json_fragment);
+                if let Some(tool) = self.transcript.tool_mut(&id) {
+                    tool.update_call(Some(arguments.clone()));
+                    self.mark_dirty();
+                }
+            }
+            AgentEvent::ToolCallFinished { tool_call, .. } => {
+                let arguments = tool_call.arguments.to_string();
+                self.streaming_tool_args
+                    .insert(tool_call.id.clone(), arguments.clone());
+                self.upsert_tool(
+                    tool_call.id,
+                    tool_call.name,
+                    Some(arguments),
+                    ToolStatusKind::Running,
+                );
+                self.mark_dirty();
+            }
+            AgentEvent::ToolExecutionStarted {
+                id,
+                name,
+                arguments,
+                ..
+            } => {
+                let arguments = self
+                    .streaming_tool_args
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| arguments.to_string());
+                self.upsert_tool(id, name, Some(arguments), ToolStatusKind::Running);
+                self.mark_dirty();
+            }
+            AgentEvent::ToolExecutionUpdate {
+                id,
+                name,
+                partial_result,
+                ..
+            } => {
+                self.upsert_tool(id.clone(), name, None, ToolStatusKind::Running);
+                if let Some(tool) = self.transcript.tool_mut(&id) {
+                    tool.append_live_output(partial_result.content);
+                }
+                self.mark_dirty();
+            }
+            AgentEvent::ToolExecutionFinished {
+                id, name, result, ..
+            } => {
+                self.upsert_tool(id.clone(), name, None, ToolStatusKind::Running);
+                self.streaming_tool_args.remove(&id);
+                if let Some(tool) = self.transcript.tool_mut(&id) {
+                    let details = result.details;
+                    let exit_code = details
+                        .as_ref()
+                        .and_then(|details| details.get("exit_code"))
+                        .and_then(serde_json::Value::as_i64)
+                        .and_then(|code| i32::try_from(code).ok());
+                    tool.set_result(Some(result.content), details, result.is_error, exit_code);
+                }
+                self.completed_tool_result_ids.push(id);
+                self.mark_dirty();
+            }
+            AgentEvent::ShellCommandStarted {
+                id, command, cwd, ..
+            } => {
+                self.upsert_tool(
+                    id,
+                    "shell.run".to_owned(),
+                    Some(format!("{command} ({})", cwd.display())),
+                    ToolStatusKind::Running,
+                );
+                self.mark_dirty();
+            }
+            AgentEvent::ShellCommandFinished {
+                id,
+                exit_code,
+                stdout,
+                stderr,
+                truncated,
+                ..
+            } => {
+                let detail = shell_finished_detail(exit_code, &stdout, &stderr, truncated);
+                self.upsert_tool(
+                    id.clone(),
+                    "shell.run".to_owned(),
+                    None,
+                    ToolStatusKind::Running,
+                );
+                if let Some(tool) = self.transcript.tool_mut(&id) {
+                    tool.set_result(Some(detail), None, exit_code != Some(0), exit_code);
+                }
+                self.completed_tool_result_ids.push(id);
+                self.mark_dirty();
+            }
+            AgentEvent::SteeringQueued { message } => {
+                self.push_status(format!("Steering queued: {}", message_text(&message)));
+            }
+            AgentEvent::FollowUpQueued { message } => {
+                self.push_status(format!("Follow-up queued: {}", message_text(&message)));
+            }
+            AgentEvent::QueueDrained { kind, count } => {
+                self.push_status(format!("{kind:?} queue drained ({count})"));
+            }
+            AgentEvent::CompactionStarted {
+                tokens_before,
+                message_count,
+                ..
+            } => self.upsert_compaction(
+                Some(neo_agent_core::CompactionPhase::Estimating),
+                0,
+                message_count,
+                tokens_before,
+            ),
+            AgentEvent::CompactionProgress { phase, percent } => {
+                self.update_compaction_progress(phase, percent.min(99));
+            }
+            AgentEvent::CompactionApplied { summary } => self.upsert_compaction(
+                Some(neo_agent_core::CompactionPhase::Applying),
+                100,
+                summary.first_kept_message_index,
+                summary.tokens_before,
+            ),
+            AgentEvent::MessageAppended { .. } => {}
+            AgentEvent::Error { message, .. } => {
+                self.push_status(format!("Error: {message}"));
+            }
+            AgentEvent::RunFinished { turn, stop_reason } => {
+                if let Some(notice) = run_finished_notice(turn, stop_reason) {
+                    self.push_status(notice);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    pub fn resize(&mut self, width: usize, height: usize) {
+        if self.width == width && self.height == height {
+            return;
+        }
+        self.width = width;
+        self.height = height;
+        self.dirty = true;
+    }
+
+    pub fn render_tick(&mut self) {
+        let _ = self.render_frame(self.width, self.height);
+    }
+
+    /// Render a single flat frame of all non-chrome content lines as ANSI
+    /// strings.
+    ///
+    /// The chrome (prompt box + footer) depends on [`NeoTuiApp`] state and is
+    /// appended by the caller via [`render_chrome_lines`] before the
+    /// whole frame is handed to [`crate::pi_tui::TuiRenderer::render`].
+    /// This mirrors pi-tui's single-buffer model: every screen line lives in
+    /// one `Vec<String>`, so the renderer can diff the whole frame and rewrite
+    /// only what changed.
+    ///
+    /// Returns `None` when the transcript pane has no pending body changes.
+    #[must_use]
+    pub fn render_frame(&mut self, width: usize, height: usize) -> Option<Vec<String>> {
+        if !self.dirty {
+            return None;
+        }
+        self.dirty = false;
+        self.width = width;
+        self.height = height;
+
+        let lines = self.render_body_lines(width);
+        self.last_frame.clone_from(&lines);
+        Some(lines)
+    }
+
+    /// Build the non-chrome body lines without consuming the dirty flag.
+    /// Shared between [`render_frame`] (live path) and [`frame_ansi_lines`]
+    /// (read-only snapshot for tests).
+    ///
+    fn render_body_lines(&mut self, width: usize) -> Vec<String> {
+        let content_width = frame_content_width(width);
+        self.render_transcript_rows(content_width)
+            .into_iter()
+            .map(|line| line.to_ansi())
+            .collect()
+    }
+
+    /// Read-only snapshot of the most recently rendered body frame (ANSI
+    /// strings, no chrome). Returns an empty vec before the first render.
+    /// Used by tests that need to inspect what the runtime would draw.
+    #[must_use]
+    pub fn frame_ansi_lines(&self) -> Vec<String> {
+        self.last_frame.clone()
+    }
+
+    #[must_use]
+    pub const fn transcript(&self) -> &TranscriptStore {
+        &self.transcript
+    }
+
+    pub fn transcript_mut(&mut self) -> &mut TranscriptStore {
+        self.mark_dirty();
+        &mut self.transcript
+    }
+
+    #[must_use]
+    pub const fn dimensions(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
+    fn upsert_tool(
+        &mut self,
+        id: String,
+        name: String,
+        arguments: Option<String>,
+        status: ToolStatusKind,
+    ) {
+        use crate::core::Expandable as _;
+
+        if let Some(tool) = self.transcript.tool_mut(&id) {
+            if arguments.is_some() {
+                tool.update_call(arguments);
+            }
+            return;
+        }
+
+        self.finish_active_text_blocks();
+        let mut component = ToolCallComponent::new(ToolCallState {
+            id: id.clone(),
+            name,
+            arguments,
+            result: None,
+            details: None,
+            status,
+            exit_code: None,
+        });
+        component.set_expanded(self.tool_output_expanded);
+        self.transcript.push(TranscriptEntry::tool_run(component));
+    }
+
+    fn finish_active_text_blocks(&mut self) {
+        self.finish_assistant_message();
+        self.transcript.finish_thinking();
+    }
+
+    fn upsert_compaction(
+        &mut self,
+        phase: Option<neo_agent_core::CompactionPhase>,
+        percent: u8,
+        compacted_message_count: usize,
+        tokens_before: usize,
+    ) {
+        if let Some(TranscriptEntry::Compaction {
+            phase: existing_phase,
+            percent: existing_percent,
+            compacted_message_count: existing_count,
+            tokens_before: existing_tokens,
+        }) = self
+            .transcript
+            .entries_mut()
+            .iter_mut()
+            .rev()
+            .find(|entry| matches!(entry, TranscriptEntry::Compaction { .. }))
+        {
+            *existing_phase = phase;
+            *existing_percent = percent;
+            *existing_count = compacted_message_count;
+            *existing_tokens = tokens_before;
+        } else {
+            self.transcript.push(TranscriptEntry::Compaction {
+                phase,
+                percent,
+                compacted_message_count,
+                tokens_before,
+            });
+        }
+        self.mark_dirty();
+    }
+
+    fn update_compaction_progress(&mut self, phase: neo_agent_core::CompactionPhase, percent: u8) {
+        if let Some(TranscriptEntry::Compaction {
+            phase: existing_phase,
+            percent: existing_percent,
+            ..
+        }) = self
+            .transcript
+            .entries_mut()
+            .iter_mut()
+            .rev()
+            .find(|entry| matches!(entry, TranscriptEntry::Compaction { .. }))
+        {
+            *existing_phase = Some(phase);
+            *existing_percent = percent;
+        } else {
+            self.upsert_compaction(Some(phase), percent, 0, 0);
+            return;
+        }
+        self.mark_dirty();
+    }
+
+    fn render_transcript_rows(&mut self, width: usize) -> Vec<Line> {
+        let mut rows = Vec::new();
+        let mut tool_run = Vec::new();
+        let entries = self.transcript.entries().to_owned();
+
+        for entry in entries {
+            match entry {
+                TranscriptEntry::ToolRun { component } => tool_run.push(component),
+                entry => {
+                    append_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
+                    append_transcript_block(&mut rows, entry.render(width, &self.theme));
+                }
+            }
+        }
+        append_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
+        rows
+    }
+
+    fn flush_tool_run(&mut self, tool_run: &mut Vec<ToolCallComponent>, width: usize) -> Vec<Line> {
+        if tool_run.is_empty() {
+            return Vec::new();
+        }
+        let mut ordered = std::mem::take(tool_run);
+        render_ordered_tools(&mut ordered, width, &self.theme)
+    }
+}
+
+fn append_transcript_block(rows: &mut Vec<Line>, block: Vec<Line>) {
+    let first = block.iter().position(|line| !line.text().trim().is_empty());
+    let last = block
+        .iter()
+        .rposition(|line| !line.text().trim().is_empty());
+    let (Some(first), Some(last)) = (first, last) else {
+        return;
+    };
+    if rows
+        .last()
+        .is_some_and(|line| !line.text().trim().is_empty())
+    {
+        rows.push(Line::raw(""));
+    }
+    rows.extend(block.into_iter().skip(first).take(last - first + 1));
+}
+
+/// Render an ordered slice of tool components, collapsing consecutive runs of
+/// the same groupable tool (read/grep/glob/find) into a single tree card.
+///
+/// A run of length 1 still renders as a normal solo card. Any non-groupable
+/// tool (bash/edit/write/...) breaks an in-progress run. Live output buffers
+/// are preserved because we render from the components directly (not cloned
+/// states).
+fn render_ordered_tools(
+    ordered: &mut [ToolCallComponent],
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    use crate::core::Expandable as _;
+
+    let mut rows = Vec::new();
+    let mut i = 0;
+    while i < ordered.len() {
+        if !rows.is_empty() {
+            rows.push(Line::raw(""));
+        }
+        let current_name = ordered[i].name().to_owned();
+        let groupable = is_groupable(&current_name);
+        if !groupable {
+            ordered[i].set_expanded(false);
+            rows.extend(ordered[i].render_with_theme(width, theme));
+            i += 1;
+            continue;
+        }
+        // Greedy run of consecutive same-name groupable tools.
+        let mut j = i + 1;
+        while j < ordered.len()
+            && ordered[j].name().eq_ignore_ascii_case(&current_name)
+            && is_groupable(ordered[j].name())
+        {
+            j += 1;
+        }
+        if j - i >= 2 {
+            // Group of >= 2: render as a tree card. Only group tools that are
+            // NOT still streaming live output (a running read shows solo).
+            let any_live_output = ordered[i..j].iter().any(|t| !t.progress().is_empty());
+            if any_live_output {
+                for tool in &mut ordered[i..j] {
+                    tool.set_expanded(false);
+                    rows.extend(tool.render_with_theme(width, theme));
+                }
+            } else {
+                let states: Vec<&ToolCallState> =
+                    ordered[i..j].iter().map(ToolCallComponent::state).collect();
+                let group = ToolGroup {
+                    tool: current_name.clone(),
+                    states,
+                };
+                rows.extend(render_tool_group(&group, width, theme));
+            }
+        } else {
+            ordered[i].set_expanded(false);
+            rows.extend(ordered[i].render_with_theme(width, theme));
+        }
+        i = j;
+    }
+    rows
+}
+
+/// Whether a tool name is eligible for consecutive-call grouping.
+fn is_groupable(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().as_str(),
+        "read" | "grep" | "glob" | "find" | "list"
+    )
+}
+
+fn message_text(message: &AgentMessage) -> String {
+    let content = match message {
+        AgentMessage::System { content }
+        | AgentMessage::User { content }
+        | AgentMessage::Assistant { content, .. }
+        | AgentMessage::ToolResult { content, .. } => content,
+    };
+    content_display_text(content)
+}
+
+fn content_display_text(content: &[Content]) -> String {
+    content.iter().filter_map(content_visible_text).collect()
+}
+
+fn content_visible_text(content: &Content) -> Option<String> {
+    match content {
+        Content::Text { text } => Some(text.clone()),
+        Content::Thinking { .. } => None,
+        Content::Image { mime_type, data } => Some(image_summary(mime_type, data)),
+    }
+}
+
+fn image_summary(mime_type: &str, data: &ImageRef) -> String {
+    match data {
+        ImageRef::Url(url) => format!("[image: {mime_type} url={}]", sanitized_image_url(url)),
+        ImageRef::Base64(data) => format!("[image: {mime_type} data={} bytes]", data.len()),
+    }
+}
+
+fn sanitized_image_url(url: &str) -> String {
+    let end = url.find(['?', '#']).unwrap_or(url.len());
+    url[..end].to_owned()
+}
+
+fn decode_base64(encoded: &str) -> Option<Vec<u8>> {
+    let mut output = Vec::with_capacity(encoded.len() / 4 * 3);
+    let mut buffer = 0_u32;
+    let mut bits = 0_u8;
+
+    for byte in encoded.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
+        if byte == b'=' {
+            break;
+        }
+        let value = base64_value(byte)?;
+        buffer = (buffer << 6) | u32::from(value);
+        bits += 6;
+        while bits >= 8 {
+            bits -= 8;
+            output.push(((buffer >> bits) & 0xff) as u8);
+        }
+    }
+
+    Some(output)
+}
+
+const fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+fn shell_finished_detail(
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+    truncated: bool,
+) -> String {
+    use std::fmt::Write as _;
+
+    let exit_label = exit_code.map_or_else(|| "signal".to_owned(), |code| code.to_string());
+    let mut detail = format!("exit {exit_label}");
+    if !stdout.is_empty() {
+        let _ = write!(detail, ", stdout: {stdout}");
+    }
+    if !stderr.is_empty() {
+        let _ = write!(detail, ", stderr: {stderr}");
+    }
+    if truncated {
+        detail.push_str(", truncated");
+    }
+    detail
+}
+
+fn run_finished_notice(turn: u32, stop_reason: neo_agent_core::StopReason) -> Option<String> {
+    match stop_reason {
+        neo_agent_core::StopReason::MaxTokens => Some(format!(
+            "Run stopped after turn {turn}: model token limit reached."
+        )),
+        neo_agent_core::StopReason::Error => {
+            Some(format!("Run stopped after turn {turn}: runtime error."))
+        }
+        neo_agent_core::StopReason::Cancelled => {
+            Some(format!("Run stopped after turn {turn}: cancelled."))
+        }
+        neo_agent_core::StopReason::EndTurn | neo_agent_core::StopReason::ToolUse => None,
+    }
+}
+
+fn take_completed_tool_result(completed_tool_result_ids: &mut Vec<String>, id: &str) -> bool {
+    if let Some(index) = completed_tool_result_ids
+        .iter()
+        .position(|completed_id| completed_id == id)
+    {
+        completed_tool_result_ids.remove(index);
+        true
+    } else {
+        false
+    }
+}
+
+/// Chrome lines, optional cursor position, and the row where the prompt box
+/// starts within those lines.
+pub struct ChromeRender {
+    pub lines: Vec<String>,
+    pub cursor: Option<crate::CursorPos>,
+    pub prompt_start_row: usize,
+}
+
+#[must_use]
+pub fn render_chrome_lines(app: &NeoTuiApp, width: usize) -> ChromeRender {
+    let content_width = frame_content_width(width);
+    let mut lines = Vec::new();
+    let prompt_start_row = lines.len();
+    let (prompt_lines, prompt_cursor) = render_prompt_lines(app, content_width);
+    lines.extend(prompt_lines);
+    if let Some(dropdown) = render_prompt_completion_dropdown(app, content_width) {
+        lines.extend(dropdown);
+    }
+    lines.extend(render_footer_lines(app, content_width));
+    ChromeRender {
+        lines,
+        cursor: prompt_cursor,
+        prompt_start_row,
+    }
+}
+
+/// Render only the footer lines (status bar + hint line), without the prompt
+/// box. Used when a session picker overlay replaces the prompt/editor area.
+#[must_use]
+pub fn render_footer_only_lines(app: &NeoTuiApp, width: usize) -> Vec<String> {
+    let content_width = frame_content_width(width);
+    render_footer_lines(app, content_width)
+}
+
+#[must_use]
+pub fn frame_content_width(width: usize) -> usize {
+    width.saturating_sub(CHROME_GUTTER + 1).max(1)
+}
+
+/// Render the `/` command dropdown below the prompt box, if active.
+fn render_prompt_completion_dropdown(app: &NeoTuiApp, width: usize) -> Option<Vec<String>> {
+    let overlay = app.focused_overlay()?;
+    let crate::app::OverlayKind::PromptCompletion(state) = &overlay.kind else {
+        return None;
+    };
+    let inner_width = width.saturating_sub(2).max(1);
+    let raw_lines = state.render_lines(inner_width);
+    if raw_lines.is_empty() {
+        return None;
+    }
+    let theme = app.theme();
+    let border_style = Style::default().fg(theme.brand);
+    let mut lines = Vec::with_capacity(raw_lines.len() + 1);
+    for raw in raw_lines {
+        lines.push(box_draw::side_bordered_line(&raw, width, border_style));
+    }
+    lines.push(box_draw::bottom_border(width, border_style));
+    Some(lines)
+}
+
+/// Render the rounded prompt input box. The first content line carries the
+/// `> ` prompt symbol; continuation lines use a 4-space hanging indent so
+/// wrapped/explicit-newline text aligns under the body (matching kimi-code's
+/// `paddingX: 4` editor). Border color is weak by default and switches to
+/// the brand color when the input starts with `/` or plan mode is active.
+fn render_prompt_lines(app: &NeoTuiApp, width: usize) -> (Vec<String>, Option<crate::CursorPos>) {
+    let theme = app.theme();
+    let prompt = app.prompt();
+    let highlighted = app.is_plan_mode() || prompt.text.trim_start().starts_with('/');
+    let border_color = if highlighted {
+        theme.brand
+    } else {
+        theme.text_muted
+    };
+    let border_style = Style::default().fg(border_color);
+    let text_style = Style::default().fg(theme.text_primary);
+
+    let inner_width = width.saturating_sub(2).max(1);
+    let body_width = inner_width.saturating_sub(4).max(1);
+
+    let logical_lines = build_prompt_logical_lines(prompt, body_width);
+
+    let mut lines = Vec::with_capacity(logical_lines.len() + 2);
+    lines.push(box_draw::top_border(width, border_style));
+    for (idx, line) in logical_lines.iter().enumerate() {
+        let prefix = if idx == 0 { "  > " } else { "    " };
+        let content = paint(&format!("{prefix}{line}"), text_style);
+        lines.push(box_draw::content_line(&content, width, border_style));
+    }
+    lines.push(box_draw::bottom_border(width, border_style));
+
+    let cursor = find_cursor(&lines);
+    let lines = lines
+        .into_iter()
+        .map(|line| line.replace(CURSOR_MARKER, ""))
+        .collect();
+    (lines, cursor)
+}
+
+/// Build the per-line content (already wrapped) for the prompt, inserting the
+/// cursor marker on the active line. Each returned string is the body text
+/// (without the `  > `/`    ` prefix, which is added by the caller).
+fn build_prompt_logical_lines(prompt: &PromptState, body_width: usize) -> Vec<String> {
+    let chars: Vec<char> = prompt.text.chars().collect();
+    let cursor = prompt.cursor.min(chars.len());
+    let before: String = chars[..cursor].iter().collect();
+    let after: String = chars[cursor..].iter().collect();
+    let marked = format!("{before}{CURSOR_MARKER}{after}");
+    let mut out = Vec::new();
+    for logical in marked.split('\n') {
+        let wrapped = wrap_width(logical, body_width);
+        if wrapped.is_empty() {
+            out.push(String::new());
+        } else {
+            out.extend(wrapped);
+        }
+    }
+    if out.len() > 6 {
+        out.truncate(6);
+    }
+    out
+}
+
+fn find_cursor(lines: &[String]) -> Option<crate::CursorPos> {
+    for (row, line) in lines.iter().enumerate() {
+        if let Some(byte_pos) = line.find(CURSOR_MARKER) {
+            let col = visible_width(&line[..byte_pos]);
+            return Some(crate::CursorPos { row, col });
+        }
+    }
+    None
+}
+
+fn render_footer_lines(app: &NeoTuiApp, width: usize) -> Vec<String> {
+    let theme = app.theme();
+    let (perm_label, perm_color) = app.permission_badge();
+    let mut left_parts = vec![paint(
+        &format!("[{perm_label}]"),
+        Style::default().fg(perm_color),
+    )];
+    if !app.model_label().is_empty() {
+        left_parts.push(paint(
+            app.model_label(),
+            Style::default().fg(theme.text_muted),
+        ));
+    }
+    if app.thinking_enabled() {
+        left_parts.push(paint(
+            "thinking",
+            Style::default().fg(theme.footer_working).italic(),
+        ));
+    }
+    if let Some(exit) = app.exit_confirmation_label() {
+        left_parts.push(paint(exit, Style::default().fg(theme.status_warn).bold()));
+    }
+    if app.is_plan_mode() {
+        left_parts.push(paint(
+            "[PLAN MODE]",
+            Style::default().fg(theme.status_warn).bold(),
+        ));
+    }
+    if let Some(working) = app.working_label() {
+        const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let spinner = SPINNER[app.activity_frame() % SPINNER.len()];
+        left_parts.push(paint(
+            &format!("{spinner} {working}"),
+            Style::default().fg(theme.footer_working),
+        ));
+    }
+    left_parts.push(paint(
+        &app.cwd_label(),
+        Style::default().fg(theme.text_muted),
+    ));
+
+    let left_text = left_parts.join(" ");
+    let row = if let Some(context) = app.context_window_label() {
+        let context = paint(&context, Style::default().fg(app.context_color()));
+        let total = visible_width(&left_text) + visible_width(&context);
+        if total < width {
+            format!("{left_text}{}{context}", " ".repeat(width - total))
+        } else {
+            let room = width
+                .saturating_sub(visible_width(&context))
+                .saturating_sub(1);
+            format!("{} {context}", truncate_to_width(&left_text, room))
+        }
+    } else {
+        truncate_to_width(&left_text, width)
+    };
+
+    let hints = if width < 50 {
+        "enter send · esc interrupt"
+    } else {
+        "enter send · shift+enter/ctrl+j newline · / commands"
+    };
+    vec![row, paint(hints, Style::default().fg(theme.footer_hint))]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{NeoTuiApp, PickerItem, PromptCompletionPrefix, TuiTheme};
+
+    #[test]
+    fn prompt_box_lines_are_exact_width() {
+        let mut app = NeoTuiApp::new("neo", "s", "m", "/tmp");
+        app.set_theme(TuiTheme::default());
+        app.prompt_mut()
+            .apply_edit(crate::PromptEdit::Insert("hello world"));
+        let render = render_chrome_lines(&app, 40);
+        // Lines render below terminal width so the caller can apply
+        // CHROME_GUTTER without triggering terminal autowrap.
+        let expected_width = frame_content_width(40);
+        for line in &render.lines {
+            assert!(
+                crate::ansi::visible_width(line) <= expected_width,
+                "line: {line:?}"
+            );
+        }
+        // The prompt box borders and content rows must be exactly content_width.
+        let prompt_box_lines: Vec<&String> = render
+            .lines
+            .iter()
+            .filter(|l| {
+                let s = crate::ansi::strip_ansi(l);
+                s.starts_with('│') || s.starts_with('╭') || s.starts_with('╰')
+            })
+            .collect();
+        assert!(!prompt_box_lines.is_empty(), "prompt box lines missing");
+        for line in prompt_box_lines {
+            assert_eq!(
+                crate::ansi::visible_width(line),
+                expected_width,
+                "line: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_dropdown_is_below_prompt() {
+        let mut app = NeoTuiApp::new("neo", "s", "m", "/tmp");
+        app.prompt_mut().apply_edit(crate::PromptEdit::Insert("/"));
+        app.open_prompt_completion_picker(
+            PromptCompletionPrefix {
+                start: 0,
+                end: 1,
+                text: "/".to_owned(),
+            },
+            vec![
+                PickerItem::new("/model", "model", Some("switch model")),
+                PickerItem::new("/plan", "plan", Some("toggle plan")),
+            ],
+        );
+        let render = render_chrome_lines(&app, 60);
+        // First line is the prompt top border.
+        assert!(render.lines[0].contains('╭'));
+        let dropdown_start = render
+            .lines
+            .iter()
+            .position(|l| l.contains("model"))
+            .expect("dropdown missing");
+        assert!(dropdown_start > 1);
+        // The line immediately before the dropdown must be the prompt bottom border.
+        assert!(render.lines[dropdown_start - 1].contains('╰'));
+        // Dropdown items are side-bordered.
+        let stripped = crate::ansi::strip_ansi(&render.lines[dropdown_start]);
+        assert!(stripped.starts_with('│'));
+        assert!(stripped.ends_with('│'));
+    }
+}

@@ -1,7 +1,6 @@
 use neo_tui::ansi::{Color, Style};
 use neo_tui::core::{
-    Component, Container, Finalization, GutterContainer, InputResult, Line, RenderKind,
-    RenderScheduler, Span, Text,
+    Component, Container, Finalization, GutterContainer, InputResult, Line, Span, Text,
 };
 
 struct StaticComponent {
@@ -92,31 +91,4 @@ fn text_wraps_by_visible_width() {
 
     assert!(rendered.iter().all(|line| line.visible_width() <= 8));
     assert_eq!(rendered[0], Line::raw("hello"));
-}
-
-#[test]
-fn scheduler_coalesces_multiple_incremental_requests() {
-    let mut scheduler = RenderScheduler::new();
-    assert!(!scheduler.is_dirty());
-
-    scheduler.request(RenderKind::Incremental);
-    scheduler.request(RenderKind::Incremental);
-    assert!(scheduler.is_dirty());
-    assert!(!scheduler.requires_full_redraw());
-
-    let kind = scheduler.take_next().expect("pending render kind");
-    assert_eq!(kind, RenderKind::Incremental);
-    assert!(!scheduler.is_dirty());
-}
-
-#[test]
-fn scheduler_promotes_force_full_over_incremental() {
-    let mut scheduler = RenderScheduler::new();
-
-    scheduler.request(RenderKind::Incremental);
-    scheduler.request(RenderKind::ForceFull);
-
-    assert!(scheduler.requires_full_redraw());
-    assert_eq!(scheduler.take_next(), Some(RenderKind::ForceFull));
-    assert!(!scheduler.requires_full_redraw());
 }

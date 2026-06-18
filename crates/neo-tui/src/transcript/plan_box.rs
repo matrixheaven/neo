@@ -34,9 +34,9 @@ impl PlanBoxComponent {
             return vec![];
         }
 
-        let border_color = theme.success;
-        let content_color = theme.assistant;
-        let muted_color = theme.muted;
+        let border_color = theme.status_ok;
+        let content_color = theme.text_primary;
+        let muted_color = theme.text_muted;
 
         let content_width = width.saturating_sub(4).max(1); // │ + space + content + space + │
 

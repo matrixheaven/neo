@@ -28,23 +28,27 @@ impl ProjectTrustStore {
         Self { path }
     }
 
+    #[cfg(test)]
+    fn set(&self, project_dir: &Path, value: Option<bool>) -> anyhow::Result<()> {
+        let key = project_key(project_dir)?;
+        let mut data = self.read()?;
+        if let Some(value) = value {
+            data.insert(key, value);
+        } else {
+            data.remove(&key);
+        }
+        let parent = self.path.parent().context("trust store has no parent")?;
+        fs::create_dir_all(parent)?;
+        fs::write(
+            &self.path,
+            serde_json::to_string_pretty(&data).context("serialize trust store")?,
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn get(&self, project_dir: &Path) -> anyhow::Result<Option<bool>> {
         let data = self.read()?;
         Ok(data.get(&project_key(project_dir)?).copied())
-    }
-
-    pub(crate) fn set(&self, project_dir: &Path, decision: Option<bool>) -> anyhow::Result<()> {
-        let key = project_key(project_dir)?;
-        let mut data = self.read()?;
-        match decision {
-            Some(decision) => {
-                data.insert(key, decision);
-            }
-            None => {
-                data.remove(&key);
-            }
-        }
-        self.write(&data)
     }
 
     fn read(&self) -> anyhow::Result<BTreeMap<String, bool>> {
@@ -59,31 +63,10 @@ impl ProjectTrustStore {
         serde_json::from_str(&content)
             .with_context(|| format!("failed to parse trust store {}", self.path.display()))
     }
-
-    fn write(&self, data: &BTreeMap<String, bool>) -> anyhow::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create trust store directory {}",
-                    parent.display()
-                )
-            })?;
-        }
-        let content = format!("{}\n", serde_json::to_string_pretty(data)?);
-        fs::write(&self.path, content)
-            .with_context(|| format!("failed to write trust store {}", self.path.display()))
-    }
 }
 
-pub(crate) fn resolve_project_trust(
-    project_dir: &Path,
-    approve: bool,
-    no_approve: bool,
-) -> anyhow::Result<bool> {
-    if approve {
-        return Ok(true);
-    }
-    if no_approve {
+pub(crate) fn resolve_project_trust(project_dir: &Path, yolo: bool) -> anyhow::Result<bool> {
+    if yolo {
         return Ok(false);
     }
     if !has_project_trust_inputs(project_dir) {
@@ -92,32 +75,6 @@ pub(crate) fn resolve_project_trust(
     Ok(ProjectTrustStore::from_home()?
         .get(project_dir)?
         .unwrap_or(false))
-}
-
-pub(crate) fn status(project_dir: &Path) -> anyhow::Result<String> {
-    let decision = ProjectTrustStore::from_home()?.get(project_dir)?;
-    let status = match decision {
-        Some(true) => "trusted",
-        Some(false) => "untrusted",
-        None if has_project_trust_inputs(project_dir) => "untrusted",
-        None => "trusted (no project trust inputs)",
-    };
-    Ok(format!("{status}: {}\n", project_key(project_dir)?))
-}
-
-pub(crate) fn approve(project_dir: &Path) -> anyhow::Result<String> {
-    ProjectTrustStore::from_home()?.set(project_dir, Some(true))?;
-    Ok(format!("trusted: {}\n", project_key(project_dir)?))
-}
-
-pub(crate) fn deny(project_dir: &Path) -> anyhow::Result<String> {
-    ProjectTrustStore::from_home()?.set(project_dir, Some(false))?;
-    Ok(format!("untrusted: {}\n", project_key(project_dir)?))
-}
-
-pub(crate) fn clear(project_dir: &Path) -> anyhow::Result<String> {
-    ProjectTrustStore::from_home()?.set(project_dir, None)?;
-    Ok(format!("cleared trust: {}\n", project_key(project_dir)?))
 }
 
 pub(crate) fn has_project_trust_inputs(project_dir: &Path) -> bool {

@@ -65,7 +65,7 @@ struct InlineStyle {
 
 impl InlineStyle {
     fn to_style(self, theme: &TuiTheme) -> Style {
-        let mut style = Style::default().fg(self.fg.unwrap_or(theme.assistant));
+        let mut style = Style::default().fg(self.fg.unwrap_or(theme.text_primary));
         style.bold = self.bold;
         style.italic = self.italic;
         style.crossed_out = self.strike;
@@ -169,7 +169,7 @@ impl<'a> MdRenderer<'a> {
             }
             Event::Code(code) => {
                 let mut style = self.inline_style;
-                style.fg = Some(self.theme.accent);
+                style.fg = Some(self.theme.brand);
                 self.inline
                     .push(Span::styled(code.into_string(), style.to_style(self.theme)));
             }
@@ -181,7 +181,7 @@ impl<'a> MdRenderer<'a> {
             Event::TaskListMarker(checked) => {
                 let marker = if checked { "[x] " } else { "[ ] " };
                 let mut style = self.inline_style;
-                style.fg = Some(self.theme.accent);
+                style.fg = Some(self.theme.brand);
                 self.inline
                     .push(Span::styled(marker.to_owned(), style.to_style(self.theme)));
             }
@@ -230,7 +230,7 @@ impl<'a> MdRenderer<'a> {
                 self.quote_depth += 1;
             }
             Tag::Link { .. } => {
-                self.inline_style.fg = Some(self.theme.accent);
+                self.inline_style.fg = Some(self.theme.brand);
                 self.inline_style.underline = true;
             }
             Tag::Table(_) => {
@@ -376,8 +376,10 @@ impl<'a> MdRenderer<'a> {
     fn emit_rule(&mut self) {
         let len = self.width.min(80);
         let rule = "─".repeat(len);
-        self.out
-            .push(Line::styled(rule, Style::default().fg(self.theme.muted)));
+        self.out.push(Line::styled(
+            rule,
+            Style::default().fg(self.theme.text_muted),
+        ));
         self.out.push(Line::raw(""));
     }
 
@@ -393,7 +395,7 @@ impl<'a> MdRenderer<'a> {
         };
         self.out.push(Line::styled(
             format!("  {border}"),
-            Style::default().fg(self.theme.muted),
+            Style::default().fg(self.theme.text_muted),
         ));
         if lang.eq_ignore_ascii_case("diff") {
             for line in &lines {
@@ -407,7 +409,7 @@ impl<'a> MdRenderer<'a> {
         }
         self.out.push(Line::styled(
             "  ```".to_owned(),
-            Style::default().fg(self.theme.muted),
+            Style::default().fg(self.theme.text_muted),
         ));
         self.out.push(Line::raw(""));
     }
@@ -474,7 +476,7 @@ fn highlight_code(code: &str, lang: &str, theme: &TuiTheme) -> Vec<String> {
     let fallback = || {
         code.trim_end_matches('\n')
             .lines()
-            .map(|l| crate::ansi::paint(l, Style::default().fg(theme.assistant)))
+            .map(|l| crate::ansi::paint(l, Style::default().fg(theme.text_primary)))
             .collect::<Vec<_>>()
     };
     let ss = syntax_set();
@@ -498,7 +500,7 @@ fn highlight_code(code: &str, lang: &str, theme: &TuiTheme) -> Vec<String> {
             Ok(ranges) => out.push(syntect_to_ansi(&ranges, theme)),
             Err(_) => out.push(crate::ansi::paint(
                 line.trim_end_matches('\n'),
-                Style::default().fg(theme.assistant),
+                Style::default().fg(theme.text_primary),
             )),
         }
     }
@@ -510,7 +512,7 @@ fn syntect_to_ansi(ranges: &[(syntect::highlighting::Style, &str)], theme: &TuiT
         .iter()
         .map(|(st, text)| {
             let mut style = Style::default();
-            style.fg = Some(syntect_color(st.foreground).unwrap_or(theme.assistant));
+            style.fg = Some(syntect_color(st.foreground).unwrap_or(theme.text_primary));
             if st
                 .font_style
                 .contains(syntect::highlighting::FontStyle::BOLD)
@@ -589,9 +591,9 @@ fn render_table(
         }
     }
 
-    let border_style = Style::default().fg(theme.muted);
-    let header_style = Style::default().fg(theme.assistant).bold();
-    let body_style = Style::default().fg(theme.assistant);
+    let border_style = Style::default().fg(theme.text_muted);
+    let header_style = Style::default().fg(theme.text_primary).bold();
+    let body_style = Style::default().fg(theme.text_primary);
 
     let border_line = |joiners: &[char; 2]| -> String {
         let mut s = String::from(joiners[0]);

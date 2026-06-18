@@ -2,7 +2,7 @@
 //!
 //! Mirrors the kimi-code read-group layout: a single header line summarizing
 //! the whole batch, followed by one indented row per call using `├─`/`└─`
-//! branch characters. Used by [`crate::runtime::NeoTuiRuntime`] so a run of
+//! branch characters. Used by [`crate::transcript::TranscriptPane`] so a run of
 //! consecutive reads renders as one card instead of N cards.
 
 use crate::ToolStatusKind;
@@ -33,8 +33,11 @@ pub struct ToolGroup<'a> {
 ///
 /// Body: one `├─`/`└─` row per file (path, status chip). Files beyond
 /// [`FILE_PREVIEW_LIMIT`] collapse into a single `… {n} more files` row.
+///
+/// `width` is the content width (without the gutter) that the caller will
+/// apply later; rows are truncated so they do not exceed it.
 #[must_use]
-pub fn render_tool_group(group: &ToolGroup, theme: &TuiTheme) -> Vec<Line> {
+pub fn render_tool_group(group: &ToolGroup, width: usize, theme: &TuiTheme) -> Vec<Line> {
     let n = group.states.len();
     let lower = group.tool.to_lowercase();
     let unit = group_unit(&lower);
@@ -53,17 +56,18 @@ pub fn render_tool_group(group: &ToolGroup, theme: &TuiTheme) -> Vec<Line> {
 
     // ---- Header -------------------------------------------------------
     // The header reads `● Read 3 files · 484 lines`. The tool name (Read/
-    // Grep/...) is rendered in the magenta accent (bold), matching the
-    // standalone tool-card header; the symbol + count use the status color;
-    // the chip (`· 484 lines`) uses the muted color.
+    // Grep/...) uses the brand color; the symbol + count use the status color;
+    // the chip (`· 484 lines`) uses weak text.
     let verb_past = group_verb_past(&lower);
     let verb_prog = group_verb_progressive(&lower);
     let (symbol, symbol_color, count, chip) = if any_running {
-        ("●", theme.accent, format!("{n} {unit}"), String::new())
+        // Match the finished-state layout: only the tool name stays branded;
+        // the status symbol and count use the ok status color.
+        ("●", theme.status_ok, format!("{n} {unit}"), String::new())
     } else if all_failed {
         (
             "✗",
-            theme.danger,
+            theme.status_error,
             format!("{n} {unit}"),
             " · failed".to_owned(),
         )
@@ -80,45 +84,47 @@ pub fn render_tool_group(group: &ToolGroup, theme: &TuiTheme) -> Vec<Line> {
         } else {
             format!(" · {total} lines")
         };
-        ("●", theme.success, format!("{n} {unit}"), chip)
+        ("●", theme.status_ok, format!("{n} {unit}"), chip)
     };
-    let muted = Style::default().fg(theme.muted);
+    let weak = Style::default().fg(theme.text_muted);
     // The tool name uses the progressive verb while running, the past verb
     // once finished.
     let name = if any_running { verb_prog } else { verb_past };
     rows.push(Line::from_spans(vec![
         Span::styled(format!("{symbol} "), Style::default().fg(symbol_color)),
-        Span::styled(name, Style::default().fg(theme.accent).bold()),
+        Span::styled(name, Style::default().fg(theme.brand).bold()),
         Span::styled(format!(" {count}"), Style::default().fg(symbol_color)),
-        Span::styled(chip, muted),
+        Span::styled(chip, weak),
     ]));
 
     // ---- Body: per-file tree rows ------------------------------------
     let preview = n.min(FILE_PREVIEW_LIMIT);
-    let muted = Style::default().fg(theme.muted);
+    let weak = Style::default().fg(theme.text_muted);
     for (idx, state) in group.states.iter().take(preview).enumerate() {
         let is_last = idx == preview.min(n) - 1;
         let branch = if is_last { "└─" } else { "├─" };
         let path = key_argument(state.arguments.as_deref());
         let tail = per_file_tail(state, &lower);
         rows.push(Line::from_spans(vec![
-            Span::styled(format!("  {branch} "), muted),
+            Span::styled(format!("  {branch} "), weak),
             Span::styled(
                 path,
                 Style::default().fg(if matches!(state.status, ToolStatusKind::Failed) {
-                    theme.danger
+                    theme.status_error
                 } else {
-                    theme.header
+                    theme.text_primary
                 }),
             ),
-            Span::styled(tail, muted),
+            Span::styled(tail, weak),
         ]));
     }
     if n > FILE_PREVIEW_LIMIT {
         let extra = n - FILE_PREVIEW_LIMIT;
-        rows.push(Line::styled(format!("  … {extra} more {unit}"), muted));
+        rows.push(Line::styled(format!("  … {extra} more {unit}"), weak));
     }
-    rows
+    rows.into_iter()
+        .map(|row| row.truncate_to_width(width))
+        .collect()
 }
 
 /// The countable noun for the tool ("files" for read/glob/find, "patterns"

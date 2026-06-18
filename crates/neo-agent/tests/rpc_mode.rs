@@ -135,13 +135,22 @@ default_model = "claude-sonnet-4-5"
 }
 
 #[test]
-fn mode_rpc_flag_uses_the_real_rpc_loop_without_subcommand() {
+fn config_mode_rpc_uses_the_real_rpc_loop_without_subcommand() {
     let temp = TempDir::new().expect("tempdir");
     std::fs::create_dir_all(temp.path().join(".neo/sessions")).expect("create sessions");
     std::fs::write(temp.path().join(".neo/sessions/alpha.jsonl"), "{}\n").expect("write session");
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        temp.path().join(".neo/config.toml"),
+        r#"
+[defaults]
+mode = "rpc"
+"#,
+    )
+    .expect("write config");
 
     let mut command = neo();
-    command.current_dir(temp.path()).args(["--mode", "rpc"]);
+    command.current_dir(temp.path());
     let stdout = run_with_stdin(
         command,
         r#"{"type":"request","id":"state-mode-rpc","method":"get_state","params":{}}"#,
@@ -791,12 +800,17 @@ prompt_templates = ["-prompts/review.md"]
 fn rpc_prompt_streams_agent_events_and_returns_assistant_text() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-rpc", "rpc answer")]);
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
+    std::fs::write(
+        temp.path().join(".neo/config.toml"),
+        format!(r#"api_base = "{}""#, server.url),
+    )
+    .expect("write config");
+
     let mut command = neo();
     command
         .current_dir(temp.path())
         .env("OPENAI_API_KEY", "test-key")
-        .arg("--api-base")
-        .arg(&server.url)
         .arg("rpc");
 
     let stdout = run_with_stdin(

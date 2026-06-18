@@ -33,18 +33,17 @@ pub fn tool_header(state: &ToolCallState) -> String {
 /// Build the tool header as styled spans: `{symbol} {verb} {name} ({key}){chip}`.
 ///
 /// Color mapping (mirrors kimi-code's tool header):
-/// - symbol + verb → status color (accent while running, success/failed on
-///   completion)
-/// - tool name → bold accent
-/// - `(key arg)` → muted
-/// - chip (`· N lines`) → muted
+/// - symbol + verb → status color
+/// - tool name → bold brand color
+/// - `(key arg)` → weak text
+/// - chip (`· N lines`) → weak text
 #[must_use]
 pub fn tool_header_spans(state: &ToolCallState, theme: &TuiTheme) -> Vec<Span> {
     let symbol = tool_symbol(state.status);
     let verb = tool_verb(state.status);
     let status_color = tool_status_color(state.status, theme);
-    let name_color = theme.accent;
-    let meta_color = theme.muted;
+    let name_color = theme.brand;
+    let meta_color = theme.text_muted;
 
     let mut spans = vec![
         Span::styled(format!("{symbol} "), Style::default().fg(status_color)),
@@ -67,9 +66,8 @@ pub fn tool_header_spans(state: &ToolCallState, theme: &TuiTheme) -> Vec<Span> {
 
 fn tool_symbol(status: ToolStatusKind) -> &'static str {
     match status {
-        // Running and succeeded both use ●; they are distinguished by color
-        // (accent while running, success green when done) — matching the
-        // kimi-code bullet convention and the read-group card.
+        // Running and succeeded both use ● and the ok status color, matching
+        // the grouped tool card.
         ToolStatusKind::Pending | ToolStatusKind::Running | ToolStatusKind::Succeeded => "●",
         ToolStatusKind::Failed => "✗",
         ToolStatusKind::Cancelled => "⊘",
@@ -87,11 +85,11 @@ fn tool_verb(status: ToolStatusKind) -> &'static str {
 
 fn tool_status_color(status: ToolStatusKind, theme: &TuiTheme) -> Color {
     match status {
-        ToolStatusKind::Pending => theme.pending,
-        ToolStatusKind::Running => theme.accent,
-        ToolStatusKind::Succeeded => theme.success,
-        ToolStatusKind::Failed => theme.danger,
-        ToolStatusKind::Cancelled => theme.cancelled,
+        ToolStatusKind::Pending => theme.status_pending,
+        ToolStatusKind::Running => theme.status_ok,
+        ToolStatusKind::Succeeded => theme.status_ok,
+        ToolStatusKind::Failed => theme.status_error,
+        ToolStatusKind::Cancelled => theme.status_cancelled,
     }
 }
 
@@ -172,10 +170,10 @@ pub fn render_tool_body(state: &ToolCallState, expanded: bool, width: usize) -> 
 }
 
 /// Theme-aware variant of [`render_tool_body`]. Emits styled lines:
-/// - Write/Edit preview headers and generic result bodies → `theme.muted`
+/// - Write/Edit preview headers and generic result bodies → `theme.text_muted`
 /// - Edit diff lines → `theme.diff_added` / `theme.diff_removed` (kept
 ///   colored instead of ANSI-stripped)
-/// - Collapsed overflow hints → `theme.muted`
+/// - Collapsed overflow hints → `theme.text_muted`
 #[must_use]
 pub fn render_tool_body_themed(
     state: &ToolCallState,
@@ -183,8 +181,8 @@ pub fn render_tool_body_themed(
     width: usize,
     theme: &TuiTheme,
 ) -> Vec<Line> {
-    let muted = Style::default().fg(theme.muted);
-    let body_style = Style::default().fg(theme.header);
+    let weak = Style::default().fg(theme.text_muted);
+    let body_style = Style::default().fg(theme.text_primary);
 
     if state.name.eq_ignore_ascii_case("Write") {
         if let Some((path, content)) = parse_write_arguments(state.arguments.as_deref()) {
@@ -195,7 +193,7 @@ pub fn render_tool_body_themed(
             } else {
                 COMMAND_PREVIEW_LINES.min(total)
             };
-            let mut rows = vec![Line::styled(format!("  {path} · {total} lines"), muted)];
+            let mut rows = vec![Line::styled(format!("  {path} · {total} lines"), weak)];
             for (index, line) in lines.iter().take(limit).enumerate() {
                 rows.push(Line::styled(
                     format!("  {:>4} {line}", index + 1),
@@ -208,7 +206,7 @@ pub fn render_tool_body_themed(
                         "  ... ({} more lines, {total} total, ctrl+o to expand)",
                         total - limit
                     ),
-                    muted,
+                    weak,
                 ));
             }
             return rows;
@@ -253,7 +251,7 @@ pub fn render_tool_body_themed(
                 let remaining = result_line_count.saturating_sub(rendered);
                 rows.push(Line::styled(
                     format!("  ... ({remaining} more lines, ctrl+o to expand)"),
-                    muted,
+                    weak,
                 ));
                 return rows;
             }

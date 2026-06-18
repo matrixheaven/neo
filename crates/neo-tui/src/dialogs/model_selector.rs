@@ -146,7 +146,7 @@ impl ModelSelectorState {
         lines.push(style_line(
             &format!(" {HINT}"),
             inner_w,
-            self.theme.muted,
+            self.theme.text_muted,
             Color::Reset,
         ));
 
@@ -155,7 +155,7 @@ impl ModelSelectorState {
             lines.push(style_line(
                 &format!(" /{query}"),
                 inner_w,
-                self.theme.accent,
+                self.theme.brand,
                 Color::Reset,
             ));
         } else {
@@ -180,7 +180,7 @@ impl ModelSelectorState {
             lines.push(style_line(
                 &format!(" ▼ {remaining} more"),
                 inner_w,
-                self.theme.muted,
+                self.theme.text_muted,
                 Color::Reset,
             ));
         }
@@ -194,9 +194,9 @@ impl ModelSelectorState {
                 "○ thinking"
             };
             let color = if thinking {
-                self.theme.accent
+                self.theme.brand
             } else {
-                self.theme.muted
+                self.theme.text_muted
             };
             lines.push(style_line(
                 &format!(" {indicator}"),
@@ -237,7 +237,7 @@ impl ModelSelectorState {
         let (fg, bg) = if selected {
             (self.theme.selected_fg, self.theme.selected_bg)
         } else if is_current {
-            (self.theme.accent, Color::Reset)
+            (self.theme.brand, Color::Reset)
         } else {
             (Color::Reset, Color::Reset)
         };
