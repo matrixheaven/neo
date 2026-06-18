@@ -28,12 +28,12 @@ xtask maintenance commands
   persistence, and JSONL session helpers.
 - `neo-agent` exposes the local command-line and TUI surface.
 - `neo-tui` owns terminal rendering via a component-tree architecture:
-  - `core/`: `Component` trait, `Line`/`Span` styled primitives, `Container`,
-    `RenderScheduler`, `TerminalRenderer` with differential rendering.
+  - `pi_tui/`: pi-style terminal rendering, input parsing, and low-level UI
+    primitives.
+  - `neo_tui.rs`: the Neo surface that combines transcript, chrome, prompt,
+    overlays, and footer state.
   - `transcript/`: `TranscriptStore`, ordered transcript entries, tool call
     lifecycle rendering, per-tool-type renderers, LCS-based inline diff preview.
-  - `runtime.rs`: `NeoTuiRuntime` bridging `AgentEvent` to terminal output.
-  - `streaming.rs`: `StreamingController` for tool call state during streaming.
   - `widgets/`: `QuestionStateMachine` (multi-question dialog), `TodoPanel`.
   - `image.rs`: Kitty, iTerm2, and Sixel inline image encoding.
 - `neo-sdk` provides JSONL RPC frame types, skill manifest loading, and safe

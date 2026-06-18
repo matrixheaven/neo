@@ -26,10 +26,15 @@ use neo_agent_core::{
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
 };
 use neo_tui::{
-    ApprovalChoice, ApprovalResult, CommandSpec, ContextWindow, ImageProtocolPreference,
-    ImageRenderPolicy, InputEvent, InputParser, InputResult, KeyId, KeybindingAction,
-    KeybindingsManager, NeoTuiApp, PickerItem, PromptEdit, TerminalImageCapabilities,
-    TranscriptPane, TuiRenderer,
+    chrome::{
+        ApprovalChoice, ApprovalResult, CommandSpec, ContextWindow, NeoChromeState, OverlayKind,
+        PickerItem, PromptEdit, SessionPickerItem, SessionPickerScope, StreamUpdate,
+    },
+    core::InputResult,
+    image::{ImageProtocolPreference, ImageRenderPolicy, TerminalImageCapabilities},
+    input::{InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager},
+    pi_tui::TuiRenderer,
+    transcript::TranscriptPane,
 };
 
 use tokio::{
@@ -160,6 +165,7 @@ pub(crate) struct TurnChannels {
     questions: mpsc::UnboundedSender<PendingQuestion>,
 }
 
+#[cfg(test)]
 impl TurnChannels {
     fn send_event(&self, event: AgentEvent) {
         let _ = self.events.send(Ok(event));
@@ -307,96 +313,8 @@ impl ForkedSessionTranscript {
 }
 
 impl InteractiveController {
-    #[allow(dead_code)]
-    pub fn new<RunTurn, Fut>(
-        title: impl Into<String>,
-        session_label: impl Into<String>,
-        model_label: impl Into<String>,
-        workspace_root: impl Into<PathBuf>,
-        run_turn: RunTurn,
-    ) -> Self
-    where
-        RunTurn: Fn(TurnRequest) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Vec<AgentEvent>>> + Send + 'static,
-    {
-        Self::new_with_session_forker(
-            title,
-            session_label,
-            model_label,
-            workspace_root,
-            run_turn,
-            PickerCatalogs::default(),
-            empty_session_loader,
-            empty_session_forker,
-        )
-    }
-
-    #[allow(dead_code)]
-    pub fn new_with_sessions<RunTurn, Fut, LoadSession, LoadFut>(
-        title: impl Into<String>,
-        session_label: impl Into<String>,
-        model_label: impl Into<String>,
-        workspace_root: impl Into<PathBuf>,
-        run_turn: RunTurn,
-        catalogs: PickerCatalogs,
-        load_session: LoadSession,
-    ) -> Self
-    where
-        RunTurn: Fn(TurnRequest) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Vec<AgentEvent>>> + Send + 'static,
-        LoadSession: Fn(String) -> LoadFut + Send + Sync + 'static,
-        LoadFut: Future<Output = Result<LoadedSessionTranscript>> + Send + 'static,
-    {
-        Self::new_with_session_forker(
-            title,
-            session_label,
-            model_label,
-            workspace_root,
-            run_turn,
-            catalogs,
-            load_session,
-            empty_session_forker,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_session_forker<RunTurn, Fut, LoadSession, LoadFut, ForkSession, ForkFut>(
-        title: impl Into<String>,
-        session_label: impl Into<String>,
-        model_label: impl Into<String>,
-        workspace_root: impl Into<PathBuf>,
-        run_turn: RunTurn,
-        catalogs: PickerCatalogs,
-        load_session: LoadSession,
-        fork_session: ForkSession,
-    ) -> Self
-    where
-        RunTurn: Fn(TurnRequest) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Vec<AgentEvent>>> + Send + 'static,
-        LoadSession: Fn(String) -> LoadFut + Send + Sync + 'static,
-        LoadFut: Future<Output = Result<LoadedSessionTranscript>> + Send + 'static,
-        ForkSession: Fn(String) -> ForkFut + Send + Sync + 'static,
-        ForkFut: Future<Output = Result<ForkedSessionTranscript>> + Send + 'static,
-    {
-        let run_turn = legacy_turn_driver(run_turn);
-        let load_session: SessionLoader =
-            Arc::new(move |session_id| Box::pin(load_session(session_id)));
-        let fork_session: SessionForker =
-            Arc::new(move |session_id| Box::pin(fork_session(session_id)));
-        Self::new_with_turn_driver(
-            title,
-            session_label,
-            model_label,
-            workspace_root,
-            run_turn,
-            catalogs,
-            load_session,
-            fork_session,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_turn_driver(
+    pub fn new(
         title: impl Into<String>,
         session_label: impl Into<String>,
         model_label: impl Into<String>,
@@ -409,7 +327,7 @@ impl InteractiveController {
         let workspace_root = workspace_root.into();
         Self {
             tui: neo_tui::NeoTui::with_welcome_banner(
-                NeoTuiApp::new(title, session_label, model_label, workspace_root.clone()),
+                NeoChromeState::new(title, session_label, model_label, workspace_root.clone()),
                 80,
                 24,
                 env!("CARGO_PKG_VERSION"),
@@ -441,10 +359,110 @@ impl InteractiveController {
         }
     }
 
+    #[cfg(test)]
+    fn new_with_event_driver<RunTurn, TurnFut, LoadSession, LoadFut>(
+        title: impl Into<String>,
+        session_label: impl Into<String>,
+        model_label: impl Into<String>,
+        workspace_root: impl Into<PathBuf>,
+        run_turn: RunTurn,
+        catalogs: PickerCatalogs,
+        load_session: LoadSession,
+    ) -> Self
+    where
+        RunTurn: Fn(TurnRequest) -> TurnFut + Send + Sync + 'static,
+        TurnFut: Future<Output = Result<Vec<AgentEvent>>> + Send + 'static,
+        LoadSession: Fn(String) -> LoadFut + Send + Sync + 'static,
+        LoadFut: Future<Output = Result<LoadedSessionTranscript>> + Send + 'static,
+    {
+        Self::new_with_event_driver_and_forker(
+            title,
+            session_label,
+            model_label,
+            workspace_root,
+            run_turn,
+            catalogs,
+            load_session,
+            empty_session_forker,
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_event_driver_and_forker<
+        RunTurn,
+        TurnFut,
+        LoadSession,
+        LoadFut,
+        ForkSession,
+        ForkFut,
+    >(
+        title: impl Into<String>,
+        session_label: impl Into<String>,
+        model_label: impl Into<String>,
+        workspace_root: impl Into<PathBuf>,
+        run_turn: RunTurn,
+        catalogs: PickerCatalogs,
+        load_session: LoadSession,
+        fork_session: ForkSession,
+    ) -> Self
+    where
+        RunTurn: Fn(TurnRequest) -> TurnFut + Send + Sync + 'static,
+        TurnFut: Future<Output = Result<Vec<AgentEvent>>> + Send + 'static,
+        LoadSession: Fn(String) -> LoadFut + Send + Sync + 'static,
+        LoadFut: Future<Output = Result<LoadedSessionTranscript>> + Send + 'static,
+        ForkSession: Fn(String) -> ForkFut + Send + Sync + 'static,
+        ForkFut: Future<Output = Result<ForkedSessionTranscript>> + Send + 'static,
+    {
+        let run_turn = Arc::new(run_turn);
+        let driver: TurnDriver = Arc::new(move |request, channels| {
+            let run_turn = Arc::clone(&run_turn);
+            Box::pin(async move {
+                let events = run_turn(request).await?;
+                for event in events {
+                    let _ = channels.events.send(Ok(event));
+                }
+                Ok(TurnOutcome::default())
+            })
+        });
+        Self::new(
+            title,
+            session_label,
+            model_label,
+            workspace_root,
+            driver,
+            catalogs,
+            Arc::new(move |session_id| Box::pin(load_session(session_id))),
+            Arc::new(move |session_id| Box::pin(fork_session(session_id))),
+        )
+    }
+
+    #[cfg(test)]
+    fn new_for_test<RunTurn, Fut>(
+        title: impl Into<String>,
+        session_label: impl Into<String>,
+        model_label: impl Into<String>,
+        workspace_root: impl Into<PathBuf>,
+        run_turn: RunTurn,
+    ) -> Self
+    where
+        RunTurn: Fn(TurnRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<AgentEvent>>> + Send + 'static,
+    {
+        Self::new_with_event_driver(
+            title,
+            session_label,
+            model_label,
+            workspace_root,
+            run_turn,
+            PickerCatalogs::default(),
+            empty_session_loader,
+        )
+    }
+
     #[allow(dead_code)]
     pub fn type_text(&mut self, text: &str) {
         self.tui
-            .app_mut()
+            .chrome_mut()
             .prompt_mut()
             .apply_edit(PromptEdit::Insert(text));
     }
@@ -452,6 +470,11 @@ impl InteractiveController {
     #[cfg(test)]
     fn set_clipboard_writer(&mut self, writer: ClipboardWriter) {
         self.clipboard_writer = writer;
+    }
+
+    #[cfg(test)]
+    const fn chrome(&self) -> &NeoChromeState {
+        self.tui.chrome()
     }
 
     /// Returns the filesystem path to the active config file, if known.
@@ -479,7 +502,7 @@ impl InteractiveController {
                 self.session_items = catalogs.session_items;
                 self.session_list_error = catalogs.session_error;
                 self.model_items = catalogs.model_items;
-                self.tui.app_mut().set_theme(config.theme.theme);
+                self.tui.chrome_mut().set_theme(config.theme.theme);
                 self.local_config = Some(config);
             }
             Err(error) => {
@@ -501,25 +524,27 @@ impl InteractiveController {
         let loaded = (self.load_session)(session_id.to_owned())
             .await
             .with_context(|| format!("failed to load session {session_id}"))?;
-        self.tui.app_mut().set_session_label(loaded.label.clone());
+        self.tui
+            .chrome_mut()
+            .set_session_label(loaded.label.clone());
         self.rebuild_transcript_from_session(&loaded);
         self.active_session_id = Some(session_id.to_owned());
         Ok(())
     }
 
     pub fn apply_startup_options(&mut self, config: &AppConfig, options: InteractiveOptions) {
-        self.tui.app_mut().set_theme(config.theme.theme);
+        self.tui.chrome_mut().set_theme(config.theme.theme);
         self.tui
-            .app_mut()
+            .chrome_mut()
             .set_permission_decision(config.permissions.shell);
         self.tui
-            .app_mut()
+            .chrome_mut()
             .set_image_render_policy(ImageRenderPolicy::new(
                 config.tui.image_protocol,
                 config.tui.fetch_remote_images,
             ));
         self.tui
-            .app_mut()
+            .chrome_mut()
             .set_image_capabilities(terminal_image_capabilities_for_policy(
                 config.tui.image_protocol,
                 |name| env::var(name),
@@ -544,28 +569,11 @@ impl InteractiveController {
     #[cfg(test)]
     pub async fn run_terminal_loop(
         &mut self,
-        mut render: impl FnMut(&mut NeoTuiApp) -> Result<()>,
+        mut render: impl FnMut(&mut NeoChromeState) -> Result<()>,
         events: impl TerminalEvents,
     ) -> Result<()> {
-        self.run_terminal_loop_with_suspend(|tui| render(tui.app_mut()), || Ok(()), events)
+        self.run_terminal_loop_with_suspend(|tui| render(tui.chrome_mut()), || Ok(()), events)
             .await
-    }
-
-    #[cfg(test)]
-    pub async fn run_terminal_loop_with_transcript(
-        &mut self,
-        mut render: impl FnMut(&mut NeoTuiApp, &mut neo_tui::TranscriptPane) -> Result<()>,
-        events: impl TerminalEvents,
-    ) -> Result<()> {
-        self.run_terminal_loop_with_suspend(
-            |tui| {
-                let (app, transcript) = tui.split_mut();
-                render(app, transcript)
-            },
-            || Ok(()),
-            events,
-        )
-        .await
     }
 
     async fn run_terminal_loop_with_suspend(
@@ -600,7 +608,7 @@ impl InteractiveController {
             }
             self.drain_active_turn().await?;
             self.poll_pending_catalog_fetch().await;
-            self.tui.app_mut().advance_activity_frame();
+            self.tui.chrome_mut().advance_activity_frame();
             render(&mut self.tui)?;
         }
         Ok(())
@@ -609,8 +617,8 @@ impl InteractiveController {
     async fn handle_input_event(&mut self, event: InputEvent) -> Result<bool> {
         // If a rich dialog overlay is focused, forward ALL input events to it
         // first. Rich dialogs consume keys, actions, submit, cancel, etc.
-        if self.tui.app_mut().focused_overlay_is_rich_dialog() {
-            let result = self.tui.app_mut().handle_focused_dialog_input(event);
+        if self.tui.chrome_mut().focused_overlay_is_rich_dialog() {
+            let result = self.tui.chrome_mut().handle_focused_dialog_input(event);
             self.process_rich_dialog_result(result).await?;
             return Ok(false);
         }
@@ -618,7 +626,7 @@ impl InteractiveController {
             InputEvent::Insert(character) => {
                 self.clear_pending_exit_confirmation();
                 self.tui
-                    .app_mut()
+                    .chrome_mut()
                     .prompt_mut()
                     .apply_edit(PromptEdit::Insert(&character.to_string()));
                 self.sync_inline_prompt_completion();
@@ -626,7 +634,7 @@ impl InteractiveController {
             InputEvent::Paste(text) => {
                 self.clear_pending_exit_confirmation();
                 self.tui
-                    .app_mut()
+                    .chrome_mut()
                     .prompt_mut()
                     .apply_edit(PromptEdit::Insert(&text));
                 self.sync_inline_prompt_completion();
@@ -636,7 +644,7 @@ impl InteractiveController {
             InputEvent::Backspace => {
                 self.clear_pending_exit_confirmation();
                 self.tui
-                    .app_mut()
+                    .chrome_mut()
                     .prompt_mut()
                     .apply_edit(PromptEdit::Backspace);
                 self.sync_inline_prompt_completion();
@@ -644,7 +652,7 @@ impl InteractiveController {
             InputEvent::Delete => {
                 self.clear_pending_exit_confirmation();
                 self.tui
-                    .app_mut()
+                    .chrome_mut()
                     .prompt_mut()
                     .apply_edit(PromptEdit::Delete);
                 self.sync_inline_prompt_completion();
@@ -652,7 +660,7 @@ impl InteractiveController {
             InputEvent::MoveLeft => {
                 self.clear_pending_exit_confirmation();
                 self.tui
-                    .app_mut()
+                    .chrome_mut()
                     .prompt_mut()
                     .apply_edit(PromptEdit::MoveLeft);
                 self.sync_inline_prompt_completion();
@@ -660,7 +668,7 @@ impl InteractiveController {
             InputEvent::MoveRight => {
                 self.clear_pending_exit_confirmation();
                 self.tui
-                    .app_mut()
+                    .chrome_mut()
                     .prompt_mut()
                     .apply_edit(PromptEdit::MoveRight);
                 self.sync_inline_prompt_completion();
@@ -668,7 +676,7 @@ impl InteractiveController {
             InputEvent::MoveHome => {
                 self.clear_pending_exit_confirmation();
                 self.tui
-                    .app_mut()
+                    .chrome_mut()
                     .prompt_mut()
                     .apply_edit(PromptEdit::MoveHome);
                 self.sync_inline_prompt_completion();
@@ -676,7 +684,7 @@ impl InteractiveController {
             InputEvent::MoveEnd => {
                 self.clear_pending_exit_confirmation();
                 self.tui
-                    .app_mut()
+                    .chrome_mut()
                     .prompt_mut()
                     .apply_edit(PromptEdit::MoveEnd);
                 self.sync_inline_prompt_completion();
@@ -684,7 +692,7 @@ impl InteractiveController {
             InputEvent::NewLine => {
                 self.clear_pending_exit_confirmation();
                 self.tui
-                    .app_mut()
+                    .chrome_mut()
                     .prompt_mut()
                     .apply_edit(PromptEdit::Insert("\n"));
                 self.sync_inline_prompt_completion();
@@ -726,11 +734,14 @@ impl InteractiveController {
 
     async fn handle_keybinding_key(&mut self, key: &KeyId) -> Result<bool> {
         let actions = self.keybindings.matching_actions(key);
-        let priority = if self.tui.app_mut().focused_overlay().is_some_and(|overlay| {
-            matches!(overlay.kind, neo_tui::OverlayKind::PromptCompletion(_))
-        }) {
+        let priority = if self
+            .tui
+            .chrome_mut()
+            .focused_overlay()
+            .is_some_and(|overlay| matches!(overlay.kind, OverlayKind::PromptCompletion(_)))
+        {
             PROMPT_COMPLETION_ACTION_PRIORITY
-        } else if self.tui.app_mut().focused_overlay_id().is_some() {
+        } else if self.tui.chrome_mut().focused_overlay_id().is_some() {
             OVERLAY_ACTION_PRIORITY
         } else {
             EDITING_ACTION_PRIORITY
@@ -762,7 +773,7 @@ impl InteractiveController {
             KeybindingAction::InputNewLine => {
                 self.clear_pending_exit_confirmation();
                 self.tui
-                    .app_mut()
+                    .chrome_mut()
                     .prompt_mut()
                     .apply_edit(PromptEdit::Insert("\n"));
             }
@@ -781,7 +792,7 @@ impl InteractiveController {
                 self.toggle_session_picker_scope()?;
             }
             KeybindingAction::SessionFork => {
-                if self.tui.app_mut().selected_session().is_some() {
+                if self.tui.chrome_mut().selected_session().is_some() {
                     self.fork_selected_session().await?;
                 }
             }
@@ -791,8 +802,8 @@ impl InteractiveController {
                 }
             }
             KeybindingAction::TogglePlanMode => {
-                let currently_active = self.tui.app_mut().is_plan_mode();
-                self.tui.app_mut().set_plan_mode(!currently_active);
+                let currently_active = self.tui.chrome_mut().is_plan_mode();
+                self.tui.chrome_mut().set_plan_mode(!currently_active);
                 self.push_status(if !currently_active {
                     " Entered plan mode — read-only until you exit"
                 } else {
@@ -803,30 +814,32 @@ impl InteractiveController {
                 self.clear_pending_exit_confirmation();
                 self.submit_current_prompt().await?;
             }
-            KeybindingAction::SelectUp => self.tui.app_mut().move_overlay_selection_up(),
-            KeybindingAction::SelectDown => self.tui.app_mut().move_overlay_selection_down(),
-            KeybindingAction::SelectPageUp => self.tui.app_mut().move_overlay_selection_page_up(),
+            KeybindingAction::SelectUp => self.tui.chrome_mut().move_overlay_selection_up(),
+            KeybindingAction::SelectDown => self.tui.chrome_mut().move_overlay_selection_down(),
+            KeybindingAction::SelectPageUp => {
+                self.tui.chrome_mut().move_overlay_selection_page_up()
+            }
             KeybindingAction::SelectPageDown => {
-                self.tui.app_mut().move_overlay_selection_page_down()
+                self.tui.chrome_mut().move_overlay_selection_page_down()
             }
             KeybindingAction::SelectConfirm => {
-                if self.tui.app_mut().selected_command().is_some() {
+                if self.tui.chrome_mut().selected_command().is_some() {
                     self.run_selected_command().await?;
-                } else if self.tui.app_mut().approval_choice().is_some() {
-                    if let Some(result) = self.tui.app_mut().confirm_approval() {
+                } else if self.tui.chrome_mut().approval_choice().is_some() {
+                    if let Some(result) = self.tui.chrome_mut().confirm_approval() {
                         self.resolve_approval(&result);
                     }
-                } else if self.tui.app_mut().question_dialog_state().is_some() {
-                    if let Some(result) = self.tui.app_mut().confirm_question() {
+                } else if self.tui.chrome_mut().question_dialog_state().is_some() {
+                    if let Some(result) = self.tui.chrome_mut().confirm_question() {
                         self.resolve_question(&result.id, result.answers);
                     }
-                } else if self.tui.app_mut().selected_session().is_some() {
+                } else if self.tui.chrome_mut().selected_session().is_some() {
                     self.load_selected_session().await?;
-                } else if self.tui.app_mut().selected_model().is_some() {
+                } else if self.tui.chrome_mut().selected_model().is_some() {
                     self.apply_selected_model()?;
-                } else if self.tui.app_mut().selected_prompt_completion().is_some() {
-                    let _ = self.tui.app_mut().confirm_prompt_completion();
-                } else if self.tui.app_mut().focused_overlay_id().is_none() {
+                } else if self.tui.chrome_mut().selected_prompt_completion().is_some() {
+                    let _ = self.tui.chrome_mut().confirm_prompt_completion();
+                } else if self.tui.chrome_mut().focused_overlay_id().is_none() {
                     self.submit_current_prompt().await?;
                 }
             }
@@ -876,16 +889,16 @@ impl InteractiveController {
     fn cancel_focused_overlay(&mut self) -> bool {
         // Check if the focused overlay is a question dialog and handle its
         // cancellation (drops response_tx → AskUserTool gets "cancelled").
-        if self.tui.app_mut().question_dialog_is_focused() {
-            if let Some(id) = self.tui.app_mut().cancel_question() {
+        if self.tui.chrome_mut().question_dialog_is_focused() {
+            if let Some(id) = self.tui.chrome_mut().cancel_question() {
                 self.pending_questions.remove(&id);
             }
             return true;
         }
-        let Some(overlay) = self.tui.app_mut().close_focused_overlay() else {
+        let Some(overlay) = self.tui.chrome_mut().close_focused_overlay() else {
             return false;
         };
-        if let neo_tui::OverlayKind::Approval(modal) = overlay.kind {
+        if let OverlayKind::Approval(modal) = overlay.kind {
             self.resolve_approval(&ApprovalResult {
                 request_id: modal.request_id,
                 choice: ApprovalChoice::Deny,
@@ -897,13 +910,13 @@ impl InteractiveController {
 
     fn complete_prompt_or_insert_tab(&mut self) {
         self.clear_pending_exit_confirmation();
-        if self.tui.app_mut().selected_prompt_completion().is_some() {
-            let _ = self.tui.app_mut().confirm_prompt_completion();
+        if self.tui.chrome_mut().selected_prompt_completion().is_some() {
+            let _ = self.tui.chrome_mut().confirm_prompt_completion();
             return;
         }
-        let Some(prefix) = self.tui.app_mut().prompt().completion_prefix() else {
+        let Some(prefix) = self.tui.chrome_mut().prompt().completion_prefix() else {
             self.tui
-                .app_mut()
+                .chrome_mut()
                 .prompt_mut()
                 .apply_edit(PromptEdit::Insert("\t"));
             return;
@@ -919,7 +932,7 @@ impl InteractiveController {
 
         if completions.is_empty() {
             self.tui
-                .app_mut()
+                .chrome_mut()
                 .prompt_mut()
                 .apply_edit(PromptEdit::Insert("\t"));
             return;
@@ -930,7 +943,7 @@ impl InteractiveController {
         {
             let _ = self
                 .tui
-                .app_mut()
+                .chrome_mut()
                 .prompt_mut()
                 .replace_completion_prefix(&prefix, &common_prefix);
             return;
@@ -939,19 +952,19 @@ impl InteractiveController {
         if completions.len() == 1 {
             let _ = self
                 .tui
-                .app_mut()
+                .chrome_mut()
                 .prompt_mut()
                 .replace_completion_prefix(&prefix, &completions[0].value);
             return;
         }
 
         self.tui
-            .app_mut()
+            .chrome_mut()
             .open_prompt_completion_picker(prefix, completions);
     }
 
     fn sync_inline_prompt_completion(&mut self) {
-        let Some(prefix) = self.tui.app_mut().prompt().completion_prefix() else {
+        let Some(prefix) = self.tui.chrome_mut().prompt().completion_prefix() else {
             self.close_inline_prompt_completion();
             return;
         };
@@ -976,26 +989,30 @@ impl InteractiveController {
             return;
         }
 
-        let focused_is_prompt_completion =
-            self.tui.app_mut().focused_overlay().is_some_and(|overlay| {
-                matches!(overlay.kind, neo_tui::OverlayKind::PromptCompletion(_))
-            });
+        let focused_is_prompt_completion = self
+            .tui
+            .chrome_mut()
+            .focused_overlay()
+            .is_some_and(|overlay| matches!(overlay.kind, OverlayKind::PromptCompletion(_)));
         if focused_is_prompt_completion {
-            let _ = self.tui.app_mut().close_focused_overlay();
-        } else if self.tui.app_mut().focused_overlay_id().is_some() {
+            let _ = self.tui.chrome_mut().close_focused_overlay();
+        } else if self.tui.chrome_mut().focused_overlay_id().is_some() {
             return;
         }
 
         self.tui
-            .app_mut()
+            .chrome_mut()
             .open_prompt_completion_picker(prefix, completions);
     }
 
     fn close_inline_prompt_completion(&mut self) {
-        if self.tui.app_mut().focused_overlay().is_some_and(|overlay| {
-            matches!(overlay.kind, neo_tui::OverlayKind::PromptCompletion(_))
-        }) {
-            let _ = self.tui.app_mut().close_focused_overlay();
+        if self
+            .tui
+            .chrome_mut()
+            .focused_overlay()
+            .is_some_and(|overlay| matches!(overlay.kind, OverlayKind::PromptCompletion(_)))
+        {
+            let _ = self.tui.chrome_mut().close_focused_overlay();
         }
     }
 
@@ -1003,13 +1020,13 @@ impl InteractiveController {
         match action {
             KeybindingAction::EditorCursorUp => {
                 self.clear_pending_exit_confirmation();
-                self.tui.app_mut().prompt_mut().recall_previous_history();
+                self.tui.chrome_mut().prompt_mut().recall_previous_history();
                 self.sync_inline_prompt_completion();
                 return true;
             }
             KeybindingAction::EditorCursorDown => {
                 self.clear_pending_exit_confirmation();
-                self.tui.app_mut().prompt_mut().recall_next_history();
+                self.tui.chrome_mut().prompt_mut().recall_next_history();
                 self.sync_inline_prompt_completion();
                 return true;
             }
@@ -1034,7 +1051,7 @@ impl InteractiveController {
             _ => return false,
         };
         self.clear_pending_exit_confirmation();
-        self.tui.app_mut().prompt_mut().apply_edit(edit);
+        self.tui.chrome_mut().prompt_mut().apply_edit(edit);
         self.sync_inline_prompt_completion();
         true
     }
@@ -1068,7 +1085,7 @@ impl InteractiveController {
     }
 
     fn copy_prompt_to_clipboard(&mut self) {
-        let Some(copied) = self.tui.app_mut().copy_prompt_text() else {
+        let Some(copied) = self.tui.chrome_mut().copy_prompt_text() else {
             return;
         };
         self.write_clipboard_text(&copied);
@@ -1093,9 +1110,9 @@ impl InteractiveController {
             self.clear_pending_exit_confirmation();
             return false;
         }
-        if !self.tui.app_mut().prompt().text.is_empty() {
+        if !self.tui.chrome_mut().prompt().text.is_empty() {
             self.tui
-                .app_mut()
+                .chrome_mut()
                 .prompt_mut()
                 .apply_edit(PromptEdit::Clear);
         }
@@ -1103,12 +1120,12 @@ impl InteractiveController {
     }
 
     fn handle_app_exit(&mut self) -> bool {
-        if self.tui.app_mut().prompt().text.is_empty() {
+        if self.tui.chrome_mut().prompt().text.is_empty() {
             return self.handle_exit_confirmation(ExitGesture::CtrlD);
         }
         self.clear_pending_exit_confirmation();
         self.tui
-            .app_mut()
+            .chrome_mut()
             .prompt_mut()
             .apply_edit(PromptEdit::Delete);
         false
@@ -1121,7 +1138,7 @@ impl InteractiveController {
             .is_some_and(|confirmation| confirmation.matches(gesture))
         {
             self.pending_exit_confirmation = None;
-            self.tui.app_mut().set_exit_confirmation_label(None);
+            self.tui.chrome_mut().set_exit_confirmation_label(None);
             return true;
         }
         let message = match gesture {
@@ -1130,7 +1147,7 @@ impl InteractiveController {
         };
         self.show_notice(message);
         self.tui
-            .app_mut()
+            .chrome_mut()
             .set_exit_confirmation_label(Some(message.to_owned()));
         self.pending_exit_confirmation = Some(ExitConfirmation::new(gesture));
         false
@@ -1142,7 +1159,7 @@ impl InteractiveController {
 
     fn clear_pending_exit_confirmation(&mut self) {
         self.pending_exit_confirmation = None;
-        self.tui.app_mut().set_exit_confirmation_label(None);
+        self.tui.chrome_mut().set_exit_confirmation_label(None);
     }
 
     fn open_command_palette(&mut self) {
@@ -1150,16 +1167,16 @@ impl InteractiveController {
         if let Some(error) = error {
             self.push_status(format!("Error loading prompt templates: {error}"));
         }
-        self.tui.app_mut().open_command_palette(commands);
+        self.tui.chrome_mut().open_command_palette(commands);
     }
 
     async fn run_selected_command(&mut self) -> Result<()> {
-        let Some(command) = self.tui.app_mut().confirm_command_palette() else {
+        let Some(command) = self.tui.chrome_mut().confirm_command_palette() else {
             return Ok(());
         };
         if let Some(name) = command.id.strip_prefix("prompt-template.") {
             self.tui
-                .app_mut()
+                .chrome_mut()
                 .prompt_mut()
                 .apply_edit(PromptEdit::Insert(&format!("/{name} ")));
             return Ok(());
@@ -1179,8 +1196,8 @@ impl InteractiveController {
                 // Toggle is handled in submit_current_prompt where we have
                 // access to the raw prompt text for /plan on|off|clear parsing.
                 // This path is for bare command invocation via picker.
-                let currently_active = self.tui.app_mut().is_plan_mode();
-                self.tui.app_mut().set_plan_mode(!currently_active);
+                let currently_active = self.tui.chrome_mut().is_plan_mode();
+                self.tui.chrome_mut().set_plan_mode(!currently_active);
                 self.push_status(if !currently_active {
                     " Entered plan mode — read-only until you exit"
                 } else {
@@ -1219,12 +1236,12 @@ impl InteractiveController {
     fn handle_slash_command(&mut self, prompt: &str) -> bool {
         match prompt.trim() {
             "/resume" => {
-                self.tui.app_mut().prompt_mut().clear_after_submit();
+                self.tui.chrome_mut().prompt_mut().clear_after_submit();
                 self.open_session_picker();
                 return true;
             }
             "/provider" => {
-                self.tui.app_mut().prompt_mut().clear_after_submit();
+                self.tui.chrome_mut().prompt_mut().clear_after_submit();
                 self.open_provider_picker();
                 return true;
             }
@@ -1232,7 +1249,7 @@ impl InteractiveController {
         }
         // /model [alias] — opens model picker, optionally pre-selected
         if prompt.trim() == "/model" || prompt.trim().starts_with("/model ") {
-            self.tui.app_mut().prompt_mut().clear_after_submit();
+            self.tui.chrome_mut().prompt_mut().clear_after_submit();
             let alias = prompt.trim().strip_prefix("/model").unwrap_or("").trim();
             if alias.is_empty() {
                 self.open_model_picker();
@@ -1244,20 +1261,20 @@ impl InteractiveController {
             return true;
         }
         if let Some(rest) = prompt.trim().strip_prefix("/plan") {
-            self.tui.app_mut().prompt_mut().clear_after_submit();
+            self.tui.chrome_mut().prompt_mut().clear_after_submit();
             let arg = rest.trim();
             match arg {
                 "" | "on" => {
-                    if self.tui.app_mut().is_plan_mode() {
+                    if self.tui.chrome_mut().is_plan_mode() {
                         self.push_status("Plan mode is already active");
                     } else {
-                        self.tui.app_mut().set_plan_mode(true);
+                        self.tui.chrome_mut().set_plan_mode(true);
                         self.push_status(" Entered plan mode — read-only until you exit");
                     }
                 }
                 "off" => {
-                    if self.tui.app_mut().is_plan_mode() {
-                        self.tui.app_mut().set_plan_mode(false);
+                    if self.tui.chrome_mut().is_plan_mode() {
+                        self.tui.chrome_mut().set_plan_mode(false);
                         self.push_status("Exited plan mode");
                     } else {
                         self.push_status("Plan mode is not active");
@@ -1292,7 +1309,7 @@ impl InteractiveController {
             self.push_status("A turn is already running");
             return Ok(());
         }
-        let prompt = self.tui.app_mut().prompt().text.trim_end().to_owned();
+        let prompt = self.tui.chrome_mut().prompt().text.trim_end().to_owned();
         if prompt.trim().is_empty() {
             return Ok(());
         }
@@ -1306,7 +1323,7 @@ impl InteractiveController {
             return Ok(());
         }
 
-        let Some(prompt) = self.tui.app_mut().submit_prompt() else {
+        let Some(prompt) = self.tui.chrome_mut().submit_prompt() else {
             return Ok(());
         };
         let PromptSubmission {
@@ -1442,8 +1459,8 @@ impl InteractiveController {
                 }
                 Err(error) => {
                     self.tui
-                        .app_mut()
-                        .apply_stream_update(neo_tui::StreamUpdate::Error {
+                        .chrome_mut()
+                        .apply_stream_update(StreamUpdate::Error {
                             text: error.to_string(),
                         });
                 }
@@ -1456,7 +1473,7 @@ impl InteractiveController {
 
     fn set_active_session_id(&mut self, session_id: String) {
         self.active_session_id = Some(session_id.clone());
-        self.tui.app_mut().set_session_label(session_id);
+        self.tui.chrome_mut().set_session_label(session_id);
     }
 
     fn apply_turn_event(&mut self, event: AgentEvent) {
@@ -1464,7 +1481,7 @@ impl InteractiveController {
             return;
         }
         self.tui.transcript_mut().apply_agent_event(event.clone());
-        self.tui.app_mut().apply_agent_event(event);
+        self.tui.chrome_mut().apply_agent_event(event);
     }
 
     fn register_pending_approval(&mut self, approval: crate::modes::run::PromptApprovalRequest) {
@@ -1523,7 +1540,7 @@ impl InteractiveController {
         // The TUI's apply_agent_event will push a question overlay (implemented by
         // the TUI subagent).
         self.tui
-            .app_mut()
+            .chrome_mut()
             .apply_agent_event(AgentEvent::QuestionRequested {
                 turn: 0,
                 id: id.clone(),
@@ -1565,15 +1582,15 @@ impl InteractiveController {
         }
         let current_session_id = self.active_session_id.clone().unwrap_or_default();
         let picker_scope = match scope {
-            SessionDataScope::Workspace => neo_tui::SessionPickerScope::Workspace,
-            SessionDataScope::All => neo_tui::SessionPickerScope::All,
+            SessionDataScope::Workspace => SessionPickerScope::Workspace,
+            SessionDataScope::All => SessionPickerScope::All,
         };
-        let items: Vec<neo_tui::SessionPickerItem> = self
+        let items: Vec<SessionPickerItem> = self
             .session_items
             .iter()
             .map(|summary| {
                 let title = summary.title.clone().unwrap_or_else(|| summary.id.clone());
-                neo_tui::SessionPickerItem::new(
+                SessionPickerItem::new(
                     summary.id.clone(),
                     title,
                     summary.last_prompt.clone(),
@@ -1584,7 +1601,7 @@ impl InteractiveController {
             })
             .collect();
         self.tui
-            .app_mut()
+            .chrome_mut()
             .open_session_picker(&current_session_id, picker_scope, items);
     }
 
@@ -1599,8 +1616,8 @@ impl InteractiveController {
             .as_ref()
             .map(|m| format!("{}/{}", m.provider, m.model))
             .unwrap_or_default();
-        let theme = self.tui.app().theme();
-        self.tui.app_mut().open_tabbed_model_selector(
+        let theme = self.tui.chrome().theme();
+        self.tui.chrome_mut().open_tabbed_model_selector(
             neo_tui::dialogs::TabbedModelSelectorOptions {
                 models: entries,
                 current_alias,
@@ -1628,8 +1645,8 @@ impl InteractiveController {
             .iter()
             .find(|e| e.alias == alias)
             .map(|e| e.provider_id.clone());
-        let theme = self.tui.app().theme();
-        self.tui.app_mut().open_tabbed_model_selector(
+        let theme = self.tui.chrome().theme();
+        self.tui.chrome_mut().open_tabbed_model_selector(
             neo_tui::dialogs::TabbedModelSelectorOptions {
                 models: entries,
                 current_alias,
@@ -1642,15 +1659,12 @@ impl InteractiveController {
     }
 
     /// Resolve the ordered list of `ModelEntry` to show in the picker.
-    /// Only providers/models explicitly configured via `[models.*]` or
-    /// `model_catalogs` are included; the seeded default catalog is not shown
+    /// Only providers/models explicitly configured via `[models.*]` are shown
     /// so the picker does not list providers the user has not set up.
     fn model_entries_for_picker(&self) -> Vec<neo_tui::dialogs::ModelEntry> {
-        self.local_config.as_ref().map_or_else(Vec::new, |config| {
-            let mut entries = model_entries_from_config(config);
-            entries.extend(model_entries_from_model_catalogs(config));
-            entries
-        })
+        self.local_config
+            .as_ref()
+            .map_or_else(Vec::new, model_entries_from_config)
     }
 
     fn open_provider_picker(&mut self) {
@@ -1676,9 +1690,9 @@ impl InteractiveController {
                 }
             })
             .collect();
-        let theme = self.tui.app().theme();
+        let theme = self.tui.chrome().theme();
         self.tui
-            .app_mut()
+            .chrome_mut()
             .open_provider_manager(neo_tui::dialogs::ProviderManagerOptions {
                 sources,
                 active_provider_id,
@@ -1687,7 +1701,7 @@ impl InteractiveController {
     }
 
     async fn load_selected_session(&mut self) -> Result<()> {
-        let Some(session) = self.tui.app_mut().confirm_session_picker() else {
+        let Some(session) = self.tui.chrome_mut().confirm_session_picker() else {
             return Ok(());
         };
 
@@ -1695,7 +1709,9 @@ impl InteractiveController {
             let loaded = (self.load_session)(session.id.clone())
                 .await
                 .with_context(|| format!("failed to load session {}", session.id))?;
-            self.tui.app_mut().set_session_label(loaded.label.clone());
+            self.tui
+                .chrome_mut()
+                .set_session_label(loaded.label.clone());
             self.rebuild_transcript_from_session(&loaded);
             self.active_session_id = Some(session.id);
             return Ok(());
@@ -1715,17 +1731,17 @@ impl InteractiveController {
 
     fn toggle_session_picker_scope(&mut self) -> Result<()> {
         let current_scope = {
-            let Some(overlay) = self.tui.app_mut().focused_overlay() else {
+            let Some(overlay) = self.tui.chrome_mut().focused_overlay() else {
                 return Ok(());
             };
-            let neo_tui::OverlayKind::SessionPicker(picker) = &overlay.kind else {
+            let OverlayKind::SessionPicker(picker) = &overlay.kind else {
                 return Ok(());
             };
             picker.scope()
         };
         let new_scope = match current_scope {
-            neo_tui::SessionPickerScope::Workspace => SessionDataScope::All,
-            neo_tui::SessionPickerScope::All => SessionDataScope::Workspace,
+            SessionPickerScope::Workspace => SessionDataScope::All,
+            SessionPickerScope::All => SessionDataScope::Workspace,
         };
         let Some(config) = self.local_config.as_ref() else {
             return Ok(());
@@ -1733,7 +1749,7 @@ impl InteractiveController {
         match session_summaries(config, new_scope) {
             Ok(summaries) => {
                 self.session_items = summaries;
-                self.tui.app_mut().close_focused_overlay();
+                self.tui.chrome_mut().close_focused_overlay();
                 self.open_session_picker_with_scope(new_scope);
             }
             Err(error) => {
@@ -1744,14 +1760,14 @@ impl InteractiveController {
     }
 
     async fn fork_selected_session(&mut self) -> Result<()> {
-        let Some(parent) = self.tui.app_mut().confirm_session_picker() else {
+        let Some(parent) = self.tui.chrome_mut().confirm_session_picker() else {
             return Ok(());
         };
         let forked = (self.fork_session)(parent.id.clone())
             .await
             .with_context(|| format!("failed to fork session {}", parent.id))?;
         self.tui
-            .app_mut()
+            .chrome_mut()
             .set_session_label(forked.transcript.label.clone());
         self.rebuild_transcript_from_session(&forked.transcript);
         self.active_session_id = Some(forked.session_id);
@@ -1768,7 +1784,7 @@ impl InteractiveController {
             .with_context(|| format!("failed to fork session {parent_id}"))?;
         let child_id = forked.session_id.clone();
         self.tui
-            .app_mut()
+            .chrome_mut()
             .set_session_label(forked.transcript.label.clone());
         self.rebuild_transcript_from_session(&forked.transcript);
         self.active_session_id = Some(forked.session_id);
@@ -1779,28 +1795,28 @@ impl InteractiveController {
     fn rebuild_transcript_from_session(&mut self, loaded: &LoadedSessionTranscript) {
         let (cols, rows) = size().unwrap_or((80, 24));
         let mut transcript = TranscriptPane::new(usize::from(cols), usize::from(rows));
-        transcript.set_theme(self.tui.app().theme());
+        transcript.set_theme(self.tui.chrome().theme());
         transcript.push_welcome_banner(
-            self.tui.app().title(),
-            self.tui.app().session_label(),
-            self.tui.app().model_label(),
-            &self.tui.app().cwd_label(),
+            self.tui.chrome().title(),
+            self.tui.chrome().session_label(),
+            self.tui.chrome().model_label(),
+            &self.tui.chrome().cwd_label(),
             env!("CARGO_PKG_VERSION"),
             None,
         );
         replay_session_into_transcript(&mut transcript, loaded);
-        self.tui.replace_transcript(transcript);
+        *self.tui.transcript_mut() = transcript;
     }
 
     fn apply_selected_model(&mut self) -> Result<()> {
-        let Some(item) = self.tui.app_mut().confirm_model_picker() else {
+        let Some(item) = self.tui.chrome_mut().confirm_model_picker() else {
             return Ok(());
         };
         match SelectedModel::from_picker_item(&item) {
             Ok(selected) => {
-                self.tui.app_mut().set_model_label(item.label);
+                self.tui.chrome_mut().set_model_label(item.label);
                 self.tui
-                    .app_mut()
+                    .chrome_mut()
                     .set_context_window(selected.max_context_tokens.map(ContextWindow::new));
                 self.active_model = Some(selected);
             }
@@ -1828,17 +1844,27 @@ impl InteractiveController {
         }
         // For ModelSelector / TabbedModelSelector, the Submit path stores the
         // result in the state. We poll the accessor to apply it.
-        if self.tui.app_mut().tabbed_model_selector_result().is_some() {
+        if self
+            .tui
+            .chrome_mut()
+            .tabbed_model_selector_result()
+            .is_some()
+        {
             self.apply_tabbed_model_selection()?;
-        } else if self.tui.app_mut().model_selector_result().is_some() {
+        } else if self.tui.chrome_mut().model_selector_result().is_some() {
             self.apply_model_selector_result()?;
-        } else if self.tui.app_mut().provider_manager_action().is_some() {
+        } else if self.tui.chrome_mut().provider_manager_action().is_some() {
             self.handle_provider_manager_action()?;
-        } else if self.tui.app_mut().choice_picker_result().is_some() {
+        } else if self.tui.chrome_mut().choice_picker_result().is_some() {
             self.handle_choice_picker_result().await;
-        } else if self.tui.app_mut().api_key_input_result().is_some() {
+        } else if self.tui.chrome_mut().api_key_input_result().is_some() {
             self.handle_api_key_input_result().await;
-        } else if self.tui.app_mut().custom_registry_import_result().is_some() {
+        } else if self
+            .tui
+            .chrome_mut()
+            .custom_registry_import_result()
+            .is_some()
+        {
             self.handle_custom_registry_import_result().await;
         }
         Ok(())
@@ -1851,14 +1877,16 @@ impl InteractiveController {
             .alias
             .split_once('/')
             .unwrap_or((&selection.alias, ""));
-        self.tui.app_mut().set_model_label(selection.alias.clone());
+        self.tui
+            .chrome_mut()
+            .set_model_label(selection.alias.clone());
         let max_ctx = self
             .model_items
             .iter()
             .find(|item| item.value == selection.alias)
             .and_then(context_window_from_picker_item);
         self.tui
-            .app_mut()
+            .chrome_mut()
             .set_context_window(max_ctx.map(ContextWindow::new));
         self.active_model = Some(SelectedModel {
             provider: provider.to_owned(),
@@ -1866,7 +1894,9 @@ impl InteractiveController {
             max_context_tokens: max_ctx,
         });
         self.current_thinking = selection.thinking;
-        self.tui.app_mut().set_thinking_enabled(selection.thinking);
+        self.tui
+            .chrome_mut()
+            .set_thinking_enabled(selection.thinking);
         if let Some(config) = self.local_config.as_mut() {
             config.runtime.reasoning_effort = if selection.thinking {
                 Some(neo_ai::ReasoningEffort::High)
@@ -1884,12 +1914,16 @@ impl InteractiveController {
 
     /// Apply the selection from the rich `TabbedModelSelector` dialog.
     fn apply_tabbed_model_selection(&mut self) -> Result<()> {
-        let result = self.tui.app_mut().tabbed_model_selector_result().cloned();
+        let result = self
+            .tui
+            .chrome_mut()
+            .tabbed_model_selector_result()
+            .cloned();
         let result = match result {
             Some(r) => r,
             None => return Ok(()),
         };
-        self.tui.app_mut().close_focused_overlay();
+        self.tui.chrome_mut().close_focused_overlay();
         if let neo_tui::dialogs::ModelSelectorResult::Selected(selection) = result {
             self.apply_model_selection(&selection);
         }
@@ -1898,12 +1932,12 @@ impl InteractiveController {
 
     /// Apply the selection from the flat `ModelSelector` dialog.
     fn apply_model_selector_result(&mut self) -> Result<()> {
-        let result = self.tui.app_mut().model_selector_result().cloned();
+        let result = self.tui.chrome_mut().model_selector_result().cloned();
         let result = match result {
             Some(r) => r,
             None => return Ok(()),
         };
-        self.tui.app_mut().close_focused_overlay();
+        self.tui.chrome_mut().close_focused_overlay();
         if let neo_tui::dialogs::ModelSelectorResult::Selected(selection) = result {
             self.apply_model_selection(&selection);
         }
@@ -1912,21 +1946,21 @@ impl InteractiveController {
 
     /// Handle a `ProviderManager` action (Add / `DeleteSource` / Close).
     fn handle_provider_manager_action(&mut self) -> Result<()> {
-        let action = self.tui.app_mut().provider_manager_action();
+        let action = self.tui.chrome_mut().provider_manager_action();
         let action = match action {
             Some(a) => a,
             None => return Ok(()),
         };
         match action {
             neo_tui::dialogs::ProviderManagerAction::Close => {
-                self.tui.app_mut().close_focused_overlay();
+                self.tui.chrome_mut().close_focused_overlay();
             }
             neo_tui::dialogs::ProviderManagerAction::Add => {
-                self.tui.app_mut().close_focused_overlay();
+                self.tui.chrome_mut().close_focused_overlay();
                 // Open choice picker for add method
-                let theme = self.tui.app().theme();
+                let theme = self.tui.chrome().theme();
                 self.tui
-                    .app_mut()
+                    .chrome_mut()
                     .open_choice_picker(neo_tui::dialogs::ChoicePickerOptions {
                         title: "Add Provider".to_owned(),
                         items: vec![
@@ -1947,7 +1981,7 @@ impl InteractiveController {
                     });
             }
             neo_tui::dialogs::ProviderManagerAction::DeleteSource(ids) => {
-                self.tui.app_mut().close_focused_overlay();
+                self.tui.chrome_mut().close_focused_overlay();
                 if let Some(config_path) = self.config_path() {
                     for id in &ids {
                         if let Err(e) = crate::config_ops::remove_provider(&config_path, id) {
@@ -1964,14 +1998,14 @@ impl InteractiveController {
 
     /// Handle a `ChoicePicker` result.
     async fn handle_choice_picker_result(&mut self) {
-        let Some(result) = self.tui.app_mut().choice_picker_result().cloned() else {
+        let Some(result) = self.tui.chrome_mut().choice_picker_result().cloned() else {
             return;
         };
-        self.tui.app_mut().close_focused_overlay();
+        self.tui.chrome_mut().close_focused_overlay();
         match result {
             neo_tui::dialogs::ChoiceResult::Selected(item) => match item.id.as_str() {
                 "known" => {
-                    self.tui.app_mut().set_custom_working_label(Some(
+                    self.tui.chrome_mut().set_custom_working_label(Some(
                         "Fetching models.dev catalog...".to_owned(),
                     ));
                     let handle =
@@ -1982,7 +2016,7 @@ impl InteractiveController {
                     });
                 }
                 "custom" => {
-                    self.tui.app_mut().open_custom_registry_import(
+                    self.tui.chrome_mut().open_custom_registry_import(
                         neo_tui::dialogs::CustomRegistryImportOptions {
                             title: "Import Custom Registry".to_owned(),
                         },
@@ -1992,12 +2026,12 @@ impl InteractiveController {
                     // Catalog provider selected — ask for API key
                     let provider_id = id.strip_prefix("catalog:").unwrap_or(id);
                     self.pending_catalog_provider_id = Some(provider_id.to_owned());
-                    self.tui
-                        .app_mut()
-                        .open_api_key_input(neo_tui::dialogs::ApiKeyInputOptions {
+                    self.tui.chrome_mut().open_api_key_input(
+                        neo_tui::dialogs::ApiKeyInputOptions {
                             title: "API Key".to_owned(),
                             provider_name: provider_id.to_owned(),
-                        });
+                        },
+                    );
                 }
                 id if id.starts_with("custom-catalog:") => {
                     let provider_id = id.strip_prefix("custom-catalog:").unwrap_or(id);
@@ -2042,10 +2076,10 @@ impl InteractiveController {
 
     /// Handle an API key input result.
     async fn handle_api_key_input_result(&mut self) {
-        let Some(result) = self.tui.app_mut().api_key_input_result().cloned() else {
+        let Some(result) = self.tui.chrome_mut().api_key_input_result().cloned() else {
             return;
         };
-        self.tui.app_mut().close_focused_overlay();
+        self.tui.chrome_mut().close_focused_overlay();
         match result {
             neo_tui::dialogs::ApiKeyInputResult::Submitted(key) => {
                 if let Some(provider_id) = self.pending_catalog_provider_id.take() {
@@ -2086,14 +2120,19 @@ impl InteractiveController {
 
     /// Handle a custom registry import result.
     async fn handle_custom_registry_import_result(&mut self) {
-        let Some(result) = self.tui.app_mut().custom_registry_import_result().cloned() else {
+        let Some(result) = self
+            .tui
+            .chrome_mut()
+            .custom_registry_import_result()
+            .cloned()
+        else {
             return;
         };
-        self.tui.app_mut().close_focused_overlay();
+        self.tui.chrome_mut().close_focused_overlay();
         match result {
             neo_tui::dialogs::CustomRegistryImportResult::Submitted(source) => {
                 self.tui
-                    .app_mut()
+                    .chrome_mut()
                     .set_custom_working_label(Some("Fetching custom registry...".to_owned()));
                 let url = source.url.clone();
                 let handle =
@@ -2117,7 +2156,7 @@ impl InteractiveController {
             self.pending_catalog_fetch = Some(pending);
             return;
         }
-        self.tui.app_mut().set_custom_working_label(None);
+        self.tui.chrome_mut().set_custom_working_label(None);
         match pending.handle.await {
             Ok(Ok(catalog)) => {
                 let items: Vec<_> = catalog
@@ -2135,8 +2174,8 @@ impl InteractiveController {
                 }
                 match pending.source {
                     CatalogFetchSource::Known => {
-                        let theme = self.tui.app().theme();
-                        self.tui.app_mut().open_choice_picker(
+                        let theme = self.tui.chrome().theme();
+                        self.tui.chrome_mut().open_choice_picker(
                             neo_tui::dialogs::ChoicePickerOptions {
                                 title: "Select a provider".to_owned(),
                                 items,
@@ -2156,8 +2195,8 @@ impl InteractiveController {
                                 item
                             })
                             .collect();
-                        let theme = self.tui.app().theme();
-                        self.tui.app_mut().open_choice_picker(
+                        let theme = self.tui.chrome().theme();
+                        self.tui.chrome_mut().open_choice_picker(
                             neo_tui::dialogs::ChoicePickerOptions {
                                 title: "Select a provider".to_owned(),
                                 items: custom_items,
@@ -2180,8 +2219,8 @@ impl InteractiveController {
 
     #[allow(dead_code)]
     #[must_use]
-    pub const fn app(&self) -> &NeoTuiApp {
-        self.tui.app()
+    pub const fn app(&self) -> &NeoChromeState {
+        self.tui.chrome()
     }
 
     #[cfg(test)]
@@ -2199,12 +2238,8 @@ impl InteractiveController {
 
     #[must_use]
     pub fn render_snapshot(&self) -> String {
-        let mut transcript = self.transcript_snapshot_source();
-        render_transcript_snapshot(self.tui.app(), &mut transcript, 80, 24)
-    }
-
-    fn transcript_snapshot_source(&self) -> TranscriptPane {
-        self.tui.transcript().clone()
+        let mut transcript = self.tui.transcript().clone();
+        render_transcript_snapshot(self.tui.chrome(), &mut transcript, 80, 24)
     }
 }
 
@@ -3083,8 +3118,8 @@ impl NeoTerminal {
 /// the terminal. Used by tests that need to inspect what would be drawn.
 #[cfg(test)]
 fn compose_tui_frame(
-    app: &NeoTuiApp,
-    transcript: &mut neo_tui::TranscriptPane,
+    app: &NeoChromeState,
+    transcript: &mut TranscriptPane,
     cols: u16,
     rows: u16,
 ) -> Option<Vec<String>> {
@@ -3121,7 +3156,14 @@ impl NeoTerminal {
 
 pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     let catalogs = picker_catalogs_for_config(config);
-    let config = config.clone();
+    let selected_model = crate::modes::run::model_registry_for_config(config)
+        .and_then(|registry| crate::modes::run::select_config_model(&registry, config))
+        .ok();
+    let mut config = config.clone();
+    if let Some(model) = &selected_model {
+        config.default_provider.clone_from(&model.provider.0);
+        config.default_model.clone_from(&model.model);
+    }
     let run_config = config.clone();
     let run_turn: TurnDriver = Arc::new(move |request, channels| {
         let mut effective_config = run_config.clone();
@@ -3170,7 +3212,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         Box::pin(async move { fork_session_transcript(session_id, &config).await })
     });
 
-    let mut controller = InteractiveController::new_with_turn_driver(
+    let mut controller = InteractiveController::new(
         "neo",
         "new",
         format!("{}/{}", config.default_provider, config.default_model),
@@ -3190,40 +3232,29 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     controller.keybindings = keybindings;
     controller.completion_root.clone_from(&config.project_dir);
     let default_model_value = format!("{}/{}", config.default_provider, config.default_model);
-    let default_context_window = controller
-        .model_items
-        .iter()
-        .find(|item| item.value == default_model_value)
-        .and_then(context_window_from_picker_item);
+    let default_context_window = selected_model
+        .as_ref()
+        .and_then(|model| model.capabilities.max_context_tokens)
+        .map(ContextWindow::new)
+        .or_else(|| {
+            controller
+                .model_items
+                .iter()
+                .find(|item| item.value == default_model_value)
+                .and_then(context_window_from_picker_item)
+                .map(ContextWindow::new)
+        });
     controller
         .tui
-        .app_mut()
-        .set_context_window(default_context_window.map(ContextWindow::new));
+        .chrome_mut()
+        .set_context_window(default_context_window);
     controller.current_thinking = config.runtime.reasoning_effort.is_some();
     controller
         .tui
-        .app_mut()
+        .chrome_mut()
         .set_thinking_enabled(controller.current_thinking);
     controller.local_config = Some(config);
     controller
-}
-
-fn legacy_turn_driver<RunTurn, Fut>(run_turn: RunTurn) -> TurnDriver
-where
-    RunTurn: Fn(TurnRequest) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<Vec<AgentEvent>>> + Send + 'static,
-{
-    let run_turn = Arc::new(run_turn);
-    Arc::new(move |request, channels| {
-        let run_turn = Arc::clone(&run_turn);
-        Box::pin(async move {
-            let events = run_turn(request).await?;
-            for event in events {
-                channels.send_event(event);
-            }
-            Ok(TurnOutcome::default())
-        })
-    })
 }
 
 #[allow(dead_code)]
@@ -3250,14 +3281,14 @@ struct SessionCatalog {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ModelCatalog {
+struct ModelPickerCatalog {
     items: Vec<PickerItem>,
     error: Option<String>,
 }
 
 fn picker_catalogs_for_config(config: &AppConfig) -> PickerCatalogs {
     let sessions = session_catalog_for_config(config);
-    let models = model_catalog_for_config(config);
+    let models = model_picker_catalog_for_config(config);
     PickerCatalogs {
         session_items: sessions.items,
         session_error: sessions.error,
@@ -3275,17 +3306,17 @@ fn session_catalog_for_config(config: &AppConfig) -> SessionCatalog {
     }
 }
 
-fn model_catalog_for_config(config: &AppConfig) -> ModelCatalog {
+fn model_picker_catalog_for_config(config: &AppConfig) -> ModelPickerCatalog {
     match crate::modes::run::model_registry_for_config(config) {
         Ok(registry) => {
             let models = registry.list();
             let models = config::scoped_models(models.iter(), &config.model_scope);
-            ModelCatalog {
+            ModelPickerCatalog {
                 items: models.iter().map(model_to_picker_item).collect(),
                 error: None,
             }
         }
-        Err(error) => ModelCatalog {
+        Err(error) => ModelPickerCatalog {
             items: Vec::new(),
             error: Some(error.to_string()),
         },
@@ -3334,52 +3365,6 @@ fn model_entries_from_config(config: &AppConfig) -> Vec<neo_tui::dialogs::ModelE
             .collect();
     }
     Vec::new()
-}
-
-/// Build ModelEntry list from configured `model_catalogs` JSON files only.
-/// Does not include the seeded default catalog.
-fn model_entries_from_model_catalogs(config: &AppConfig) -> Vec<neo_tui::dialogs::ModelEntry> {
-    let mut registry = neo_ai::ModelRegistry::new();
-    for path in &config.model_catalogs {
-        if let Err(error) = registry.load_catalog_path(path) {
-            tracing::warn!("failed to load model catalog {}: {error}", path.display());
-        }
-    }
-    let models = registry.list();
-    let models = crate::config::scoped_models(models.iter(), &config.model_scope);
-    models.iter().map(model_spec_to_model_entry).collect()
-}
-
-fn model_spec_to_model_entry(model: &neo_ai::ModelSpec) -> neo_tui::dialogs::ModelEntry {
-    let alias = format!("{}/{}", model.provider.0, model.model);
-    let provider_id = model.provider.0.clone();
-    let mut capabilities = Vec::new();
-    if model.capabilities.streaming {
-        capabilities.push("streaming".to_owned());
-    }
-    if model.capabilities.tools {
-        capabilities.push("tools".to_owned());
-    }
-    if model.capabilities.images {
-        capabilities.push("images".to_owned());
-    }
-    if model.capabilities.reasoning {
-        capabilities.push("reasoning".to_owned());
-        if !capabilities.iter().any(|c| c == "thinking") {
-            capabilities.push("thinking".to_owned());
-        }
-    }
-    if model.capabilities.embeddings {
-        capabilities.push("embeddings".to_owned());
-    }
-    neo_tui::dialogs::ModelEntry {
-        alias: alias.clone(),
-        provider_id,
-        display_name: model.model.clone(),
-        model_id: model.model.clone(),
-        capabilities,
-        max_context_tokens: model.capabilities.max_context_tokens,
-    }
 }
 
 fn context_window_from_picker_item(item: &PickerItem) -> Option<u32> {
@@ -3528,7 +3513,7 @@ async fn fork_session_transcript(
 }
 
 fn render_transcript_snapshot(
-    app: &NeoTuiApp,
+    app: &NeoChromeState,
     transcript: &mut TranscriptPane,
     width: usize,
     height: usize,
@@ -3547,22 +3532,20 @@ fn render_transcript_snapshot(
     format!("{}\n", lines.join("\n").trim_end())
 }
 
-fn render_overlay_snapshot(app: &NeoTuiApp, width: usize) -> Vec<String> {
+fn render_overlay_snapshot(app: &NeoChromeState, width: usize) -> Vec<String> {
     let content_width = neo_tui::transcript::frame_content_width(width);
     let mut lines = match app.focused_overlay().map(|overlay| &overlay.kind) {
-        Some(neo_tui::OverlayKind::SessionPicker(picker)) => {
+        Some(OverlayKind::SessionPicker(picker)) => {
             let theme = app.theme();
             picker.render_lines(content_width, &theme)
         }
-        Some(neo_tui::OverlayKind::ModelPicker(picker)) => {
+        Some(OverlayKind::ModelPicker(picker)) => {
             render_picker_snapshot("Models", picker, content_width)
         }
-        Some(neo_tui::OverlayKind::CommandPalette(_)) => vec!["Commands".to_owned()],
-        Some(neo_tui::OverlayKind::PromptCompletion(_)) => vec![],
-        Some(neo_tui::OverlayKind::Message(message)) => vec![message.clone()],
-        Some(neo_tui::OverlayKind::Approval(_) | neo_tui::OverlayKind::QuestionDialog(_)) => {
-            Vec::new()
-        }
+        Some(OverlayKind::CommandPalette(_)) => vec!["Commands".to_owned()],
+        Some(OverlayKind::PromptCompletion(_)) => vec![],
+        Some(OverlayKind::Message(message)) => vec![message.clone()],
+        Some(OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_)) => Vec::new(),
         // Rich dialogs — use their own render_lines.
         Some(_) => app.focused_overlay_lines(content_width),
         None => Vec::new(),
@@ -3576,7 +3559,11 @@ fn render_overlay_snapshot(app: &NeoTuiApp, width: usize) -> Vec<String> {
     lines
 }
 
-fn render_picker_snapshot(title: &str, picker: &neo_tui::PickerState, width: usize) -> Vec<String> {
+fn render_picker_snapshot(
+    title: &str,
+    picker: &neo_tui::chrome::PickerState,
+    width: usize,
+) -> Vec<String> {
     let mut lines = vec![title.to_owned()];
     lines.extend(picker.render_lines(width));
     lines
@@ -3592,7 +3579,11 @@ mod tests {
 
     use neo_agent_core::ToolResult;
     use neo_agent_core::{AgentEvent, AgentMessage, Content, PermissionPolicy, StopReason};
-    use neo_tui::{KeybindingAction, OverlayKind, TranscriptEntry};
+    use neo_tui::{
+        chrome::{ApprovalChoice, ChromeMode, CommandPaletteState, Overlay, OverlayKind},
+        input::KeybindingAction,
+        transcript::TranscriptEntry,
+    };
 
     use super::*;
     use crate::config::{Defaults, McpConfig, ModelConfig, RuntimeConfig, TuiConfig};
@@ -3640,15 +3631,20 @@ mod tests {
             .scrollback()
     }
 
+    fn render_tui_snapshot(tui: &neo_tui::NeoTui) -> String {
+        let mut transcript = tui.transcript().clone();
+        render_transcript_snapshot(tui.chrome(), &mut transcript, 80, 24)
+    }
+
     #[test]
     fn transcript_pane_exposes_live_rows_for_neo_tui_draw() {
-        let mut app = NeoTuiApp::new(
+        let mut app = NeoChromeState::new(
             "neo",
             "test-session",
             "openai/gpt-4.1",
             test_workspace_root(),
         );
-        let mut transcript = neo_tui::TranscriptPane::new(80, 12);
+        let mut transcript = TranscriptPane::new(80, 12);
         transcript.apply_agent_event(AgentEvent::ToolExecutionStarted {
             turn: 0,
             id: "tool-1".to_owned(),
@@ -3669,7 +3665,7 @@ mod tests {
 
     #[test]
     fn neo_tui_draw_composes_body_then_chrome_in_one_frame() {
-        let mut app = NeoTuiApp::new(
+        let mut app = NeoChromeState::new(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -3677,7 +3673,7 @@ mod tests {
         );
         app.prompt_mut().text = "next".to_owned();
         app.prompt_mut().cursor = 4;
-        let mut transcript = neo_tui::TranscriptPane::new(80, 12);
+        let mut transcript = TranscriptPane::new(80, 12);
         transcript.push_banner("Welcome to neo");
         transcript.apply_agent_event(AgentEvent::ToolExecutionStarted {
             turn: 0,
@@ -3707,7 +3703,7 @@ mod tests {
 
     #[test]
     fn neo_tui_draw_replays_finished_tool_before_prompt_chrome() {
-        let mut app = NeoTuiApp::new(
+        let mut app = NeoChromeState::new(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -3737,7 +3733,7 @@ mod tests {
                 ),
             ],
         );
-        let mut transcript = neo_tui::TranscriptPane::new(80, 12);
+        let mut transcript = TranscriptPane::new(80, 12);
         transcript.push_banner("Welcome to neo");
         replay_session_into_transcript(&mut transcript, &loaded);
 
@@ -3763,7 +3759,7 @@ mod tests {
 
     #[tokio::test]
     async fn controller_snapshot_uses_transcript_tool_card_rendering() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -3798,7 +3794,7 @@ mod tests {
 
     #[tokio::test]
     async fn controller_submits_prompt_reduces_turn_events_and_renders_snapshot() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -3837,7 +3833,7 @@ mod tests {
         // The user prompt and assistant reply appear in the rendered frame.
         assert!(snapshot.contains("hello neo"));
         assert!(snapshot.contains("Hello, Neo"));
-        assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
+        assert_eq!(controller.chrome().mode(), ChromeMode::Editing);
     }
 
     #[tokio::test]
@@ -3855,7 +3851,7 @@ mod tests {
         }
 
         let mut rendered = Vec::new();
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -3882,11 +3878,12 @@ mod tests {
         );
 
         controller
-            .run_terminal_loop_with_transcript(
-                |app, transcript| {
-                    rendered.push(render_transcript_snapshot(app, transcript, 80, 24));
+            .run_terminal_loop_with_suspend(
+                |tui| {
+                    rendered.push(render_tui_snapshot(tui));
                     Ok(())
                 },
+                || Ok(()),
                 FakeEvents {
                     events: vec![
                         InputEvent::Insert('h'),
@@ -3901,7 +3898,7 @@ mod tests {
             .await
             .expect("event loop succeeds");
 
-        assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
+        assert_eq!(controller.chrome().mode(), ChromeMode::Editing);
         assert!(rendered.iter().any(|snapshot| snapshot.contains("> hi")));
         assert!(
             rendered
@@ -3927,7 +3924,7 @@ mod tests {
             }
         }
 
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -3956,7 +3953,7 @@ mod tests {
         let snapshot = controller.render_snapshot();
         assert!(snapshot.contains("Error: provider stream error: http status 400"));
         assert!(snapshot.contains("> ok"));
-        assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
+        assert_eq!(controller.chrome().mode(), ChromeMode::Editing);
     }
 
     #[tokio::test]
@@ -3974,7 +3971,7 @@ mod tests {
         }
 
         let mut rendered = Vec::new();
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -3989,11 +3986,12 @@ mod tests {
         );
 
         controller
-            .run_terminal_loop_with_transcript(
-                |app, transcript| {
-                    rendered.push(render_transcript_snapshot(app, transcript, 80, 24));
+            .run_terminal_loop_with_suspend(
+                |tui| {
+                    rendered.push(render_tui_snapshot(tui));
                     Ok(())
                 },
+                || Ok(()),
                 FakeEvents {
                     events: vec![
                         InputEvent::Paste("alpha\nbeta".to_owned()),
@@ -4026,7 +4024,7 @@ mod tests {
         }
 
         let mut rendered = Vec::new();
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4039,11 +4037,12 @@ mod tests {
         );
 
         controller
-            .run_terminal_loop_with_transcript(
-                |app, transcript| {
-                    rendered.push(render_transcript_snapshot(app, transcript, 80, 24));
+            .run_terminal_loop_with_suspend(
+                |tui| {
+                    rendered.push(render_tui_snapshot(tui));
                     Ok(())
                 },
+                || Ok(()),
                 FakeEvents {
                     events: vec![
                         InputEvent::Insert('h'),
@@ -4063,7 +4062,7 @@ mod tests {
 
         assert_eq!(rendered.len(), 4);
         assert!(rendered[1].contains("> h"));
-        assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
+        assert_eq!(controller.chrome().mode(), ChromeMode::Editing);
     }
 
     #[tokio::test]
@@ -4080,7 +4079,7 @@ mod tests {
             }
         }
 
-        let mut controller = InteractiveController::new_with_sessions(
+        let mut controller = InteractiveController::new_with_event_driver(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4146,14 +4145,14 @@ mod tests {
             .await
             .expect("event loop succeeds");
 
-        assert_eq!(controller.app().copy_buffer(), Some("hello brave world"));
+        assert_eq!(controller.chrome().copy_buffer(), Some("hello brave world"));
         assert_eq!(last_prompt_text, "hello \tworld");
         assert_eq!(last_prompt_cursor, 7);
     }
 
     #[tokio::test]
     async fn event_loop_default_ctrl_c_clears_prompt_instead_of_copying() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4168,15 +4167,15 @@ mod tests {
             .await
             .expect("clear keybinding handled");
 
-        assert_eq!(controller.app().copy_buffer(), None);
-        assert_eq!(controller.app().prompt().text, "");
+        assert_eq!(controller.chrome().copy_buffer(), None);
+        assert_eq!(controller.chrome().prompt().text, "");
     }
 
     #[tokio::test]
     async fn event_loop_copy_action_writes_prompt_to_injected_clipboard() {
         let copied = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = std::sync::Arc::clone(&copied);
-        let mut controller = InteractiveController::new_with_sessions(
+        let mut controller = InteractiveController::new_with_event_driver(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4219,7 +4218,7 @@ mod tests {
             ["copy to system clipboard"]
         );
         assert_eq!(
-            controller.app().copy_buffer(),
+            controller.chrome().copy_buffer(),
             Some("copy to system clipboard")
         );
     }
@@ -4228,7 +4227,7 @@ mod tests {
     async fn event_loop_ctrl_c_prefers_selected_transcript_region() {
         let copied = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = std::sync::Arc::clone(&copied);
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4271,16 +4270,16 @@ mod tests {
             copied.lock().expect("clipboard writes").as_slice(),
             ["You\nselected user prompt\n\nAssistant\nselected assistant reply"]
         );
-        assert_eq!(controller.app().copy_buffer(), None);
+        assert_eq!(controller.chrome().copy_buffer(), None);
         assert_eq!(
-            controller.app().prompt().text,
+            controller.chrome().prompt().text,
             "prompt text stays out of clipboard"
         );
     }
 
     #[tokio::test]
     async fn event_loop_clipboard_failure_keeps_internal_copy_buffer() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4297,7 +4296,7 @@ mod tests {
             .await
             .expect("clipboard failure is non-fatal");
 
-        assert_eq!(controller.app().copy_buffer(), Some("copy fallback"));
+        assert_eq!(controller.chrome().copy_buffer(), Some("copy fallback"));
         assert!(transcript_entries(&controller).iter().any(|entry| {
             matches!(
                 entry,
@@ -4312,7 +4311,7 @@ mod tests {
     async fn event_loop_ctrl_c_cancels_overlay_without_copying_prompt() {
         let copied = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = std::sync::Arc::clone(&copied);
-        let mut controller = InteractiveController::new_with_sessions(
+        let mut controller = InteractiveController::new_with_event_driver(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4346,21 +4345,21 @@ mod tests {
 
         controller.type_text("do not copy while overlay is focused");
         controller.open_session_picker();
-        assert!(controller.app().focused_overlay().is_some());
+        assert!(controller.chrome().focused_overlay().is_some());
 
         controller
             .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
             .await
             .expect("overlay cancel succeeds");
 
-        assert!(controller.app().focused_overlay().is_none());
-        assert_eq!(controller.app().copy_buffer(), None);
+        assert!(controller.chrome().focused_overlay().is_none());
+        assert_eq!(controller.chrome().copy_buffer(), None);
         assert!(copied.lock().expect("clipboard writes").is_empty());
     }
 
     #[tokio::test]
     async fn event_loop_ctrl_c_clears_prompt_before_confirming_exit() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4375,7 +4374,7 @@ mod tests {
             .expect("ctrl-c handles prompt clear");
 
         assert!(!should_exit);
-        assert_eq!(controller.app().prompt().text, "");
+        assert_eq!(controller.chrome().prompt().text, "");
         assert!(transcript_has_status(
             &controller,
             "Press Ctrl-C again to exit"
@@ -4384,7 +4383,7 @@ mod tests {
 
     #[tokio::test]
     async fn event_loop_ctrl_c_requires_second_press_to_exit_when_prompt_is_empty() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4407,7 +4406,7 @@ mod tests {
 
     #[tokio::test]
     async fn event_loop_ctrl_d_deletes_forward_until_prompt_is_empty_then_confirms_exit() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4438,7 +4437,7 @@ mod tests {
             .expect("second empty ctrl-d exits");
 
         assert!(!delete);
-        assert_eq!(controller.app().prompt().text, "");
+        assert_eq!(controller.chrome().prompt().text, "");
         assert!(!first_exit);
         assert!(second_exit);
         assert!(transcript_has_status(
@@ -4449,7 +4448,7 @@ mod tests {
 
     #[tokio::test]
     async fn event_loop_ctrl_z_reports_suspend_request() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4473,7 +4472,7 @@ mod tests {
         fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").expect("write main");
         fs::write(temp.path().join("src/matrix.rs"), "pub fn matrix() {}\n").expect("write matrix");
 
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4490,7 +4489,7 @@ mod tests {
 
         assert!(matches!(
             controller
-                .app()
+                .chrome()
                 .focused_overlay()
                 .map(|overlay| &overlay.kind),
             Some(OverlayKind::PromptCompletion(_))
@@ -4501,14 +4500,14 @@ mod tests {
             .await
             .expect("completion confirms");
 
-        assert_eq!(controller.app().prompt().text, "open src/main.rs");
-        assert_eq!(controller.app().prompt().cursor, 16);
-        assert!(controller.app().focused_overlay().is_none());
+        assert_eq!(controller.chrome().prompt().text, "open src/main.rs");
+        assert_eq!(controller.chrome().prompt().cursor, 16);
+        assert!(controller.chrome().focused_overlay().is_none());
     }
 
     #[tokio::test]
     async fn event_loop_opens_slash_completion_after_typing_slash() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4521,23 +4520,23 @@ mod tests {
             .await
             .expect("slash insert opens completion");
 
-        assert_eq!(controller.app().prompt().text, "/");
+        assert_eq!(controller.chrome().prompt().text, "/");
         assert!(matches!(
             controller
-                .app()
+                .chrome()
                 .focused_overlay()
                 .map(|overlay| &overlay.kind),
             Some(OverlayKind::PromptCompletion(_))
         ));
         assert!(
-            controller.app().selected_prompt_completion().is_some(),
+            controller.chrome().selected_prompt_completion().is_some(),
             "slash completion should select the first local command"
         );
     }
 
     #[tokio::test]
     async fn event_loop_backspace_deletes_slash_while_completion_is_open() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4555,14 +4554,14 @@ mod tests {
             .await
             .expect("backspace edits prompt");
 
-        assert_eq!(controller.app().prompt().text, "");
-        assert_eq!(controller.app().prompt().cursor, 0);
-        assert!(controller.app().focused_overlay().is_none());
+        assert_eq!(controller.chrome().prompt().text, "");
+        assert_eq!(controller.chrome().prompt().cursor, 0);
+        assert!(controller.chrome().focused_overlay().is_none());
     }
 
     #[tokio::test]
     async fn event_loop_escape_closes_slash_completion_without_exiting() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4580,8 +4579,8 @@ mod tests {
             .expect("escape closes completion");
 
         assert!(!should_exit);
-        assert_eq!(controller.app().prompt().text, "/");
-        assert!(controller.app().focused_overlay().is_none());
+        assert_eq!(controller.chrome().prompt().text, "/");
+        assert!(controller.chrome().focused_overlay().is_none());
     }
 
     #[tokio::test]
@@ -4620,7 +4619,7 @@ mod tests {
                 Ok(TurnOutcome::default())
             })
         });
-        let mut controller = InteractiveController::new_with_turn_driver(
+        let mut controller = InteractiveController::new(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4660,7 +4659,7 @@ mod tests {
 
     #[tokio::test]
     async fn event_loop_escape_is_noop_when_idle() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4678,7 +4677,7 @@ mod tests {
 
         assert!(!should_exit, "ESC should not exit the app when idle");
         // Prompt text should be preserved (ESC is not clearing it)
-        assert_eq!(controller.app().prompt().text, "hello");
+        assert_eq!(controller.chrome().prompt().text, "hello");
     }
 
     #[tokio::test]
@@ -4700,7 +4699,7 @@ mod tests {
 
         assert!(matches!(
             controller
-                .app()
+                .chrome()
                 .focused_overlay()
                 .map(|overlay| &overlay.kind),
             Some(OverlayKind::CommandPalette(_))
@@ -4776,7 +4775,7 @@ mod tests {
         )
         .expect("write review prompt");
 
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4791,14 +4790,14 @@ mod tests {
             .await
             .expect("tab completes slash prompt");
 
-        assert_eq!(controller.app().prompt().text, "/review");
-        assert_eq!(controller.app().prompt().cursor, 7);
-        assert!(controller.app().focused_overlay().is_none());
+        assert_eq!(controller.chrome().prompt().text, "/review");
+        assert_eq!(controller.chrome().prompt().cursor, 7);
+        assert!(controller.chrome().focused_overlay().is_none());
     }
 
     #[tokio::test]
     async fn tab_confirms_selected_prompt_completion() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4812,21 +4811,21 @@ mod tests {
             .await
             .expect("tab opens completion picker");
 
-        assert!(controller.app().focused_overlay().is_some());
-        assert!(controller.app().selected_prompt_completion().is_some());
+        assert!(controller.chrome().focused_overlay().is_some());
+        assert!(controller.chrome().selected_prompt_completion().is_some());
 
         controller
             .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
             .await
             .expect("tab confirms selected completion");
 
-        assert!(controller.app().focused_overlay().is_none());
-        assert!(!controller.app().prompt().text.is_empty());
+        assert!(controller.chrome().focused_overlay().is_none());
+        assert!(!controller.chrome().prompt().text.is_empty());
     }
 
     #[tokio::test]
     async fn slash_model_does_not_enter_streaming_mode() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4838,13 +4837,13 @@ mod tests {
             .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
             .await
             .expect("submit handled");
-        assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
-        assert!(controller.app().prompt().text.is_empty());
+        assert_eq!(controller.chrome().mode(), ChromeMode::Editing);
+        assert!(controller.chrome().prompt().text.is_empty());
     }
 
     #[tokio::test]
     async fn slash_provider_does_not_enter_streaming_mode() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -4856,8 +4855,8 @@ mod tests {
             .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
             .await
             .expect("submit handled");
-        assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
-        assert!(controller.app().prompt().text.is_empty());
+        assert_eq!(controller.chrome().mode(), ChromeMode::Editing);
+        assert!(controller.chrome().prompt().text.is_empty());
     }
 
     #[test]
@@ -5060,7 +5059,7 @@ command = "python3"
     async fn event_loop_slash_resume_opens_local_session_picker() {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured_requests = std::sync::Arc::clone(&requests);
-        let mut controller = InteractiveController::new_with_sessions(
+        let mut controller = InteractiveController::new_with_event_driver(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -5102,12 +5101,12 @@ command = "python3"
 
         assert!(matches!(
             controller
-                .app()
+                .chrome()
                 .focused_overlay()
                 .map(|overlay| &overlay.kind),
             Some(OverlayKind::SessionPicker(_))
         ));
-        assert!(controller.app().prompt().text.is_empty());
+        assert!(controller.chrome().prompt().text.is_empty());
         assert!(requests.lock().expect("recorded requests").is_empty());
     }
 
@@ -5123,7 +5122,7 @@ command = "python3"
 
     #[tokio::test]
     async fn event_loop_tab_completes_provider_model_prefix() {
-        let mut controller = InteractiveController::new_with_sessions(
+        let mut controller = InteractiveController::new_with_event_driver(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -5156,16 +5155,19 @@ command = "python3"
             .await
             .expect("tab completes provider/model prefix");
 
-        assert_eq!(controller.app().prompt().text, "@anthropic/claude-sonnet");
-        assert_eq!(controller.app().prompt().cursor, 24);
-        assert!(controller.app().focused_overlay().is_none());
+        assert_eq!(
+            controller.chrome().prompt().text,
+            "@anthropic/claude-sonnet"
+        );
+        assert_eq!(controller.chrome().prompt().cursor, 24);
+        assert!(controller.chrome().focused_overlay().is_none());
     }
 
     #[tokio::test]
     async fn event_loop_inline_provider_model_prefix_overrides_submitted_turn() {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured_requests = std::sync::Arc::clone(&requests);
-        let mut controller = InteractiveController::new_with_sessions(
+        let mut controller = InteractiveController::new_with_event_driver(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -5241,7 +5243,7 @@ command = "python3"
     async fn event_loop_keeps_unknown_at_prefix_as_prompt_text() {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured_requests = std::sync::Arc::clone(&requests);
-        let mut controller = InteractiveController::new_with_sessions(
+        let mut controller = InteractiveController::new_with_event_driver(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -5296,7 +5298,7 @@ command = "python3"
     async fn event_loop_inline_model_token_without_prompt_does_not_override_model() {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured_requests = std::sync::Arc::clone(&requests);
-        let mut controller = InteractiveController::new_with_sessions(
+        let mut controller = InteractiveController::new_with_event_driver(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -5353,7 +5355,7 @@ command = "python3"
         fs::write(temp.path().join("README.md"), "readme\n").expect("write readme");
         fs::write(temp.path().join("RELEASE.md"), "release\n").expect("write release");
 
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -5368,14 +5370,14 @@ command = "python3"
             .await
             .expect("tab extends common prefix");
 
-        assert_eq!(controller.app().prompt().text, "open RE");
-        assert_eq!(controller.app().prompt().cursor, 7);
-        assert!(controller.app().focused_overlay().is_none());
+        assert_eq!(controller.chrome().prompt().text, "open RE");
+        assert_eq!(controller.chrome().prompt().cursor, 7);
+        assert!(controller.chrome().focused_overlay().is_none());
     }
 
     #[tokio::test]
     async fn event_loop_dispatches_editor_scroll_actions_to_transcript_view() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -5410,7 +5412,7 @@ command = "python3"
 
     #[tokio::test]
     async fn event_loop_uses_up_down_keys_for_prompt_history() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -5442,30 +5444,30 @@ command = "python3"
             .handle_input_event(InputEvent::Key(KeyId::new("up").expect("valid key")))
             .await
             .expect("up recalls latest prompt");
-        assert_eq!(controller.app().prompt().text, "second prompt");
+        assert_eq!(controller.chrome().prompt().text, "second prompt");
 
         controller
             .handle_input_event(InputEvent::Key(KeyId::new("up").expect("valid key")))
             .await
             .expect("up recalls older prompt");
-        assert_eq!(controller.app().prompt().text, "first prompt");
+        assert_eq!(controller.chrome().prompt().text, "first prompt");
 
         controller
             .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
             .await
             .expect("down moves toward newer prompt");
-        assert_eq!(controller.app().prompt().text, "second prompt");
+        assert_eq!(controller.chrome().prompt().text, "second prompt");
 
         controller
             .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
             .await
             .expect("down restores empty draft");
-        assert_eq!(controller.app().prompt().text, "");
+        assert_eq!(controller.chrome().prompt().text, "");
     }
 
     #[tokio::test]
     async fn event_loop_dispatches_mouse_wheel_to_transcript_view() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -5495,7 +5497,7 @@ command = "python3"
 
     #[tokio::test]
     async fn event_loop_ctrl_o_toggles_selected_tool_detail_before_model_picker() {
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -5527,7 +5529,7 @@ command = "python3"
             .await
             .expect("ctrl-o toggles selected tool detail");
 
-        assert!(controller.app().focused_overlay().is_none());
+        assert!(controller.chrome().focused_overlay().is_none());
         assert!(
             controller
                 .transcript()
@@ -5538,7 +5540,7 @@ command = "python3"
 
     #[tokio::test]
     async fn event_loop_ctrl_o_still_opens_model_picker_without_selected_detail() {
-        let mut controller = InteractiveController::new_with_sessions(
+        let mut controller = InteractiveController::new_with_event_driver(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -5575,8 +5577,8 @@ command = "python3"
             .expect("ctrl-o opens model picker");
 
         assert!(
-            controller.app().tabbed_model_selector_result().is_some()
-                || controller.app().focused_overlay().is_some()
+            controller.chrome().tabbed_model_selector_result().is_some()
+                || controller.chrome().focused_overlay().is_some()
         );
     }
 
@@ -5594,7 +5596,7 @@ command = "python3"
             }
         }
 
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -5603,7 +5605,7 @@ command = "python3"
         );
         controller
             .tui
-            .app_mut()
+            .chrome_mut()
             .request_approval("approval-1", "Run command?", "cargo test");
 
         controller
@@ -5611,8 +5613,8 @@ command = "python3"
             .await
             .expect("selection moves down");
         assert_eq!(
-            controller.app().approval_choice(),
-            Some(neo_tui::ApprovalChoice::Deny)
+            controller.chrome().approval_choice(),
+            Some(ApprovalChoice::Deny)
         );
 
         controller
@@ -5620,20 +5622,20 @@ command = "python3"
             .await
             .expect("selection moves up");
         assert_eq!(
-            controller.app().approval_choice(),
-            Some(neo_tui::ApprovalChoice::Approve)
+            controller.chrome().approval_choice(),
+            Some(ApprovalChoice::Approve)
         );
 
         controller
             .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
             .await
             .expect("approval confirms");
-        assert!(controller.app().focused_overlay().is_none());
+        assert!(controller.chrome().focused_overlay().is_none());
 
-        controller.tui.app_mut().push_overlay(neo_tui::Overlay::new(
+        controller.tui.chrome_mut().push_overlay(Overlay::new(
             "palette",
-            OverlayKind::CommandPalette(neo_tui::CommandPaletteState::new((0..10).map(|index| {
-                neo_tui::CommandSpec::new(
+            OverlayKind::CommandPalette(CommandPaletteState::new((0..10).map(|index| {
+                CommandSpec::new(
                     format!("command-{index}"),
                     format!("Command {index}"),
                     None::<String>,
@@ -5645,7 +5647,7 @@ command = "python3"
             .await
             .expect("selection pages down");
         let Some(OverlayKind::CommandPalette(palette)) = controller
-            .app()
+            .chrome()
             .focused_overlay()
             .map(|overlay| &overlay.kind)
         else {
@@ -5658,16 +5660,16 @@ command = "python3"
             .await
             .expect("selection pages up");
         let Some(OverlayKind::CommandPalette(palette)) = controller
-            .app()
+            .chrome()
             .focused_overlay()
             .map(|overlay| &overlay.kind)
         else {
             panic!("expected command palette overlay");
         };
         assert_eq!(palette.selected_command().expect("command").id, "command-0");
-        let _ = controller.tui.app_mut().close_focused_overlay();
+        let _ = controller.tui.chrome_mut().close_focused_overlay();
 
-        controller.tui.app_mut().push_overlay(neo_tui::Overlay::new(
+        controller.tui.chrome_mut().push_overlay(Overlay::new(
             "custom",
             OverlayKind::Message("Body".to_owned()),
         ));
@@ -5686,12 +5688,12 @@ command = "python3"
             .await
             .expect("event loop exits after canceling overlay and receiving cancel again");
 
-        assert!(controller.app().focused_overlay().is_none());
+        assert!(controller.chrome().focused_overlay().is_none());
     }
 
     #[tokio::test]
     async fn event_loop_opens_command_palette_and_runs_local_model_command() {
-        let mut controller = InteractiveController::new_with_sessions(
+        let mut controller = InteractiveController::new_with_event_driver(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -5733,7 +5735,7 @@ command = "python3"
             .await
             .expect("command palette opens");
         let Some(OverlayKind::CommandPalette(palette)) = controller
-            .app()
+            .chrome()
             .focused_overlay()
             .map(|overlay| &overlay.kind)
         else {
@@ -5752,7 +5754,7 @@ command = "python3"
 
         assert!(matches!(
             controller
-                .app()
+                .chrome()
                 .focused_overlay()
                 .map(|overlay| &overlay.kind),
             Some(OverlayKind::TabbedModelSelector(_))
@@ -5772,7 +5774,7 @@ command = "python3"
 
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured_requests = std::sync::Arc::clone(&requests);
-        let mut controller = InteractiveController::new(
+        let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -5796,7 +5798,7 @@ command = "python3"
             .expect("command palette opens");
         for _ in 0..32 {
             let selected = controller
-                .app()
+                .chrome()
                 .selected_command()
                 .expect("selected command");
             if selected.id == "prompt-template.review" {
@@ -5809,7 +5811,7 @@ command = "python3"
         }
         assert_eq!(
             controller
-                .app()
+                .chrome()
                 .selected_command()
                 .expect("review command")
                 .id,
@@ -5821,9 +5823,9 @@ command = "python3"
             .await
             .expect("prompt template command inserts invocation");
 
-        assert_eq!(controller.app().prompt().text, "/review ");
-        assert_eq!(controller.app().prompt().cursor, 8);
-        assert!(controller.app().focused_overlay().is_none());
+        assert_eq!(controller.chrome().prompt().text, "/review ");
+        assert_eq!(controller.chrome().prompt().cursor, 8);
+        assert!(controller.chrome().focused_overlay().is_none());
 
         controller.type_text("src/lib.rs");
         controller
@@ -5873,7 +5875,7 @@ command = "python3"
             .expect("command palette opens");
         for _ in 0..32 {
             let selected = controller
-                .app()
+                .chrome()
                 .selected_command()
                 .expect("selected command");
             if selected.id == "session.exportHtml" {
@@ -5886,7 +5888,7 @@ command = "python3"
         }
         assert_eq!(
             controller
-                .app()
+                .chrome()
                 .selected_command()
                 .expect("export command")
                 .id,
@@ -5927,7 +5929,7 @@ command = "python3"
             .expect("command palette opens");
         for _ in 0..32 {
             let selected = controller
-                .app()
+                .chrome()
                 .selected_command()
                 .expect("selected command");
             if selected.id == "session.exportHtml" {
@@ -6008,7 +6010,7 @@ command = "python3"
                 Ok(TurnOutcome::default())
             })
         });
-        let mut controller = InteractiveController::new_with_turn_driver(
+        let mut controller = InteractiveController::new(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -6041,7 +6043,7 @@ command = "python3"
             *decisions.lock().expect("decisions lock"),
             vec![PermissionDecision::Allow]
         );
-        assert!(controller.app().focused_overlay().is_none());
+        assert!(controller.chrome().focused_overlay().is_none());
         assert!(controller.render_snapshot().contains("approved"));
     }
 
@@ -6081,7 +6083,7 @@ command = "python3"
                 Ok(TurnOutcome::default())
             })
         });
-        let mut controller = InteractiveController::new_with_turn_driver(
+        let mut controller = InteractiveController::new(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -6174,7 +6176,7 @@ command = "python3"
                 Ok(TurnOutcome::default())
             })
         });
-        let mut controller = InteractiveController::new_with_turn_driver(
+        let mut controller = InteractiveController::new(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -6210,7 +6212,7 @@ command = "python3"
             .clone()
             .expect("turn token captured");
         assert!(token.is_cancelled());
-        assert_eq!(controller.app().mode(), neo_tui::AppMode::Editing);
+        assert_eq!(controller.chrome().mode(), ChromeMode::Editing);
         assert!(controller.active_turn.is_none());
     }
 
@@ -6262,7 +6264,7 @@ command = "python3"
     async fn event_loop_opens_session_picker_and_continues_selected_transcript() {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured_requests = std::sync::Arc::clone(&requests);
-        let mut controller = InteractiveController::new_with_sessions(
+        let mut controller = InteractiveController::new_with_event_driver(
             "neo",
             "new",
             "openai/gpt-4.1",
@@ -6323,7 +6325,7 @@ command = "python3"
             .expect("session picker opens");
         assert!(matches!(
             controller
-                .app()
+                .chrome()
                 .focused_overlay()
                 .map(|overlay| &overlay.kind),
             Some(OverlayKind::SessionPicker(_))
@@ -6334,8 +6336,8 @@ command = "python3"
             .await
             .expect("session loads");
 
-        assert_eq!(controller.app().session_label(), "alpha");
-        assert!(controller.app().focused_overlay().is_none());
+        assert_eq!(controller.chrome().session_label(), "alpha");
+        assert!(controller.chrome().focused_overlay().is_none());
         assert!(transcript_has_status(
             &controller,
             "branch summary: Local branch summary"
@@ -6397,7 +6399,7 @@ command = "python3"
                 Ok(TurnOutcome::session("session-1"))
             })
         });
-        let mut controller = InteractiveController::new_with_turn_driver(
+        let mut controller = InteractiveController::new(
             "neo",
             "new",
             "openai/gpt-4.1",
@@ -6434,7 +6436,7 @@ command = "python3"
         assert_eq!(requests[0].session_id, None);
         assert_eq!(requests[1].prompt, vec!["continue".to_owned()]);
         assert_eq!(requests[1].session_id.as_deref(), Some("session-1"));
-        assert_eq!(controller.app().session_label(), "session-1");
+        assert_eq!(controller.chrome().session_label(), "session-1");
     }
 
     #[tokio::test]
@@ -6480,7 +6482,7 @@ command = "python3"
                 Ok(TurnOutcome::session("session-1"))
             })
         });
-        let mut controller = InteractiveController::new_with_turn_driver(
+        let mut controller = InteractiveController::new(
             "neo",
             "new",
             "openai/gpt-4.1",
@@ -6501,7 +6503,7 @@ command = "python3"
             .await
             .expect("failed first turn is drained");
 
-        assert_eq!(controller.app().session_label(), "session-1");
+        assert_eq!(controller.chrome().session_label(), "session-1");
         assert!(
             controller
                 .render_snapshot()
@@ -6530,7 +6532,7 @@ command = "python3"
     async fn event_loop_forks_selected_session_and_continues_child_session() {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured_requests = std::sync::Arc::clone(&requests);
-        let mut controller = InteractiveController::new_with_session_forker(
+        let mut controller = InteractiveController::new_with_event_driver_and_forker(
             "neo",
             "new",
             "openai/gpt-4.1",
@@ -6602,8 +6604,8 @@ command = "python3"
             .await
             .expect("session fork loads child transcript");
 
-        assert_eq!(controller.app().session_label(), "alpha-fork-1");
-        assert!(controller.app().focused_overlay().is_none());
+        assert_eq!(controller.chrome().session_label(), "alpha-fork-1");
+        assert!(controller.chrome().focused_overlay().is_none());
         assert!(transcript_has_status(&controller, "forked from alpha"));
         assert!(transcript_entries(&controller).iter().any(|entry| {
             matches!(entry, TranscriptEntry::UserMessage(content) if content == "hello")
@@ -6629,7 +6631,7 @@ command = "python3"
     async fn event_loop_opens_model_picker_and_submits_with_selected_model() {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured_requests = std::sync::Arc::clone(&requests);
-        let mut controller = InteractiveController::new_with_sessions(
+        let mut controller = InteractiveController::new_with_event_driver(
             "neo",
             "new",
             "anthropic/claude-sonnet-4-5",
@@ -6713,7 +6715,7 @@ command = "python3"
             .expect("model selection applies");
 
         assert_eq!(
-            controller.app().model_label(),
+            controller.chrome().model_label(),
             "anthropic/claude-sonnet-4-5"
         );
         controller.type_text("use selected model");
@@ -6736,12 +6738,12 @@ command = "python3"
     }
 
     #[test]
-    fn model_catalog_for_config_applies_cli_models_scope() {
+    fn model_picker_catalog_for_config_applies_cli_models_scope() {
         let temp = tempfile::tempdir().expect("tempdir");
         let mut config = test_config(temp.path(), temp.path().join(".neo/sessions"));
         config.model_scope = vec!["sonnet".to_owned()];
 
-        let catalog = model_catalog_for_config(&config);
+        let catalog = model_picker_catalog_for_config(&config);
 
         assert_eq!(catalog.error, None);
         assert!(!catalog.items.is_empty());
@@ -6767,7 +6769,7 @@ command = "python3"
         let controller = controller_for_config(&config);
 
         assert_eq!(
-            controller.app().context_window(),
+            controller.chrome().context_window(),
             Some(ContextWindow::new(1_047_576))
         );
     }
@@ -6989,11 +6991,11 @@ command = "python3"
             .handle_input_event(InputEvent::Action(KeybindingAction::SessionPickerOpen))
             .await
             .expect("session picker opens");
-        let overlay = controller.app().focused_overlay().expect("picker open");
+        let overlay = controller.chrome().focused_overlay().expect("picker open");
         assert!(
             matches!(
                 &overlay.kind,
-                neo_tui::OverlayKind::SessionPicker(p) if p.scope() == neo_tui::SessionPickerScope::Workspace
+                OverlayKind::SessionPicker(p) if p.scope() == SessionPickerScope::Workspace
             ),
             "workspace scope on open"
         );
@@ -7014,13 +7016,13 @@ command = "python3"
             .await
             .expect("scope toggles");
         let overlay = controller
-            .app()
+            .chrome()
             .focused_overlay()
             .expect("picker still open");
         assert!(
             matches!(
                 &overlay.kind,
-                neo_tui::OverlayKind::SessionPicker(p) if p.scope() == neo_tui::SessionPickerScope::All
+                OverlayKind::SessionPicker(p) if p.scope() == SessionPickerScope::All
             ),
             "all scope after toggle"
         );
@@ -7038,7 +7040,7 @@ command = "python3"
     #[tokio::test]
     async fn session_picker_cross_cwd_shows_resume_command() {
         let other_dir = tempfile::tempdir().expect("tempdir");
-        let mut controller = InteractiveController::new_with_sessions(
+        let mut controller = InteractiveController::new_with_event_driver(
             "neo",
             "new",
             "openai/gpt-4.1",
@@ -7077,13 +7079,13 @@ command = "python3"
             "cd '{}' && neo --resume 'alpha'",
             other_dir.path().display()
         );
-        assert!(controller.app().focused_overlay().is_none());
+        assert!(controller.chrome().focused_overlay().is_none());
         assert!(transcript_has_status(&controller, &expected));
     }
 
     #[test]
     fn composed_frame_lines_do_not_exceed_content_width() {
-        let app = NeoTuiApp::new("neo", "s", "openai/gpt-4.1", "/tmp");
+        let app = NeoChromeState::new("neo", "s", "openai/gpt-4.1", "/tmp");
         let mut transcript = TranscriptPane::new(80, 12);
         transcript.push_welcome_banner("neo", "s", "m", "~Workspace/neo", "0.1.0", None);
         let lines = compose_tui_frame(&app, &mut transcript, 80, 12).expect("frame composes");
@@ -7101,11 +7103,9 @@ command = "python3"
         AppConfig {
             default_model: "gpt-4.1".to_owned(),
             default_provider: "openai".to_owned(),
-            api_base: None,
             api_key_env: None,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
-            model_catalogs: Vec::new(),
             model_scope: Vec::new(),
             sessions_dir,
             permissions: PermissionPolicy::default(),

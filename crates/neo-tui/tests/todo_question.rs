@@ -1,7 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use neo_tui::{
-    NeoTuiApp, QuestionDialogAction, QuestionDisplayData, QuestionDisplayOption,
-    QuestionStateMachine, TodoDisplayItem, TodoDisplayStatus, select_visible_todos,
+use neo_tui::chrome::NeoChromeState;
+use neo_tui::widgets::{
+    QuestionDialogAction, QuestionDisplayData, QuestionDisplayOption, QuestionStateMachine,
+    TodoDisplayItem, TodoDisplayStatus, select_visible_todos,
 };
 
 // ---------------------------------------------------------------------------
@@ -60,7 +61,7 @@ fn make_two_questions() -> Vec<QuestionDisplayData> {
 
 #[test]
 fn app_pushes_question_overlay() {
-    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
     app.push_question_overlay("q-123", make_single_question());
 
     assert!(app.question_dialog_is_focused());
@@ -69,7 +70,7 @@ fn app_pushes_question_overlay() {
 
 #[test]
 fn app_confirm_question_returns_answers() {
-    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
     app.push_question_overlay("q-1", make_single_question());
 
     // Answer the question
@@ -85,7 +86,7 @@ fn app_confirm_question_returns_answers() {
 
 #[test]
 fn app_cancel_question_returns_id() {
-    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
     app.push_question_overlay("q-456", make_single_question());
 
     let id = app.cancel_question();
@@ -95,7 +96,7 @@ fn app_cancel_question_returns_id() {
 
 #[test]
 fn question_dialog_esc_cancels() {
-    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
     app.push_question_overlay("q-1", make_single_question());
 
     let action = app
@@ -107,7 +108,7 @@ fn question_dialog_esc_cancels() {
 
 #[test]
 fn question_dialog_tab_navigation_through_keys() {
-    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
     app.push_question_overlay("q-1", make_two_questions());
 
     let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -122,7 +123,7 @@ fn question_dialog_tab_navigation_through_keys() {
 
 #[test]
 fn question_dialog_number_key_selection() {
-    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
     app.push_question_overlay("q-1", make_single_question());
 
     let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
@@ -134,7 +135,7 @@ fn question_dialog_number_key_selection() {
 
 #[test]
 fn question_dialog_full_flow_two_questions() {
-    let mut app = NeoTuiApp::new("neo", "s1", "m1", "/tmp/ws");
+    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
     app.push_question_overlay("q-full", make_two_questions());
 
     let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

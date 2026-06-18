@@ -186,44 +186,39 @@ fn provider_resolver_builds_real_clients_by_model_api() {
 
 #[test]
 fn provider_resolver_rejects_model_api_mismatches() {
-    // When a provider has NO provider_type, the model's api must be supported.
-    // We test with a custom provider that has no provider_type.
     let mut registry = ProviderRegistry::production();
     registry.register(ProviderSpec {
-        id: "legacy-provider".to_owned(),
-        display_name: "Legacy".to_owned(),
+        id: "untyped-provider".to_owned(),
+        display_name: "Untyped".to_owned(),
         api: ApiKind::OpenAiResponses,
         supported_apis: vec![ApiKind::OpenAiResponses],
         base_url: Some("https://api.example.com/v1".to_owned()),
         api_key: None,
-        api_key_env_vars: vec!["LEGACY_KEY".to_owned()],
+        api_key_env_vars: vec!["UNTYPED_KEY".to_owned()],
         ambient_auth_env_vars: vec![],
         provider_type: None,
     });
-    let env = BTreeMap::from([("LEGACY_KEY".to_owned(), "legacy-key".to_owned())]);
+    let env = BTreeMap::from([("UNTYPED_KEY".to_owned(), "key".to_owned())]);
     let resolver = registry.resolver_from(env);
 
-    let Err(mismatch) = resolver.resolve(&model(
-        "legacy-provider",
+    let Err(missing_type) = resolver.resolve(&model(
+        "untyped-provider",
         "bad-claude",
         ApiKind::AnthropicMessages,
     )) else {
-        panic!("legacy provider must reject anthropic messages models");
+        panic!("untyped provider must be rejected");
     };
-    assert!(matches!(mismatch, AiError::Configuration(_)));
+    assert!(matches!(missing_type, AiError::Configuration(_)));
     assert!(
-        mismatch
+        missing_type
             .to_string()
-            .contains("provider legacy-provider does not support model API AnthropicMessages")
+            .contains("provider untyped-provider must declare a provider type")
     );
 
-    // When a provider HAS provider_type, the type is used instead of model.api.
-    // An OpenAI provider with provider_type=OpenAiResponses will use OpenAiResponses
-    // regardless of what the model's api field says.
+    // Provider type selects the wire client regardless of the model's api field.
     let registry2 = ProviderRegistry::production();
     let env2 = BTreeMap::from([("OPENAI_API_KEY".to_owned(), "openai-key".to_owned())]);
     let resolver2 = registry2.resolver_from(env2);
-    // This should succeed because provider_type=OpenAiResponses overrides model.api
     let result = resolver2.resolve(&model("openai", "some-model", ApiKind::AnthropicMessages));
     assert!(
         result.is_ok(),
@@ -233,23 +228,22 @@ fn provider_resolver_rejects_model_api_mismatches() {
 
 #[test]
 fn provider_resolver_reports_api_mismatch_before_credential_lookup() {
-    // With a legacy provider (no provider_type), API mismatch fails before credential lookup.
     let mut registry = ProviderRegistry::production();
     registry.register(ProviderSpec {
-        id: "legacy-provider".to_owned(),
-        display_name: "Legacy".to_owned(),
+        id: "untyped-provider".to_owned(),
+        display_name: "Untyped".to_owned(),
         api: ApiKind::OpenAiResponses,
         supported_apis: vec![ApiKind::OpenAiResponses],
         base_url: Some("https://api.example.com/v1".to_owned()),
         api_key: None,
-        api_key_env_vars: vec!["LEGACY_KEY".to_owned()],
+        api_key_env_vars: vec!["UNTYPED_KEY".to_owned()],
         ambient_auth_env_vars: vec![],
         provider_type: None,
     });
     let resolver = registry.resolver_from(BTreeMap::new());
 
     let Err(mismatch) = resolver.resolve(&model(
-        "legacy-provider",
+        "untyped-provider",
         "bad-claude",
         ApiKind::AnthropicMessages,
     )) else {
@@ -259,9 +253,9 @@ fn provider_resolver_reports_api_mismatch_before_credential_lookup() {
     assert!(
         mismatch
             .to_string()
-            .contains("provider legacy-provider does not support model API AnthropicMessages")
+            .contains("provider untyped-provider must declare a provider type")
     );
-    assert!(!mismatch.to_string().contains("LEGACY_KEY"));
+    assert!(!mismatch.to_string().contains("UNTYPED_KEY"));
 }
 
 #[test]

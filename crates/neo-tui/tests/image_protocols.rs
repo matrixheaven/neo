@@ -1,10 +1,11 @@
-use neo_tui::{
+use neo_tui::chrome::InlineImageRenderCache;
+use neo_tui::image::{
     ImageProtocolError, ImageProtocolPreference, ImageRenderPolicy, ImageSource, InlineImage,
-    InlineImageRender, InlineImageRenderCache, Iterm2Dimension, Iterm2InlineImageOptions,
-    KittyGraphicsOptions, KittyImageFormat, NegotiatedImageProtocol, SixelImageOptions,
-    SixelPaletteColor, TerminalImageCapabilities, encode_iterm2_inline_image,
-    encode_kitty_graphics, encode_sixel_image,
+    Iterm2Dimension, Iterm2InlineImageOptions, KittyGraphicsOptions, KittyImageFormat,
+    NegotiatedImageProtocol, SixelImageOptions, SixelPaletteColor, TerminalImageCapabilities,
+    encode_iterm2_inline_image, encode_kitty_graphics, encode_sixel_image,
 };
+use neo_tui::transcript::InlineImageRender;
 
 #[test]
 fn kitty_graphics_encodes_png_bytes_as_direct_apc_transfer() {

@@ -34,7 +34,7 @@ Use `neo_ai::tool_schema::schema_for<T>()` to generate JSON Schema from small se
 | `glob` | `{ "pattern": "**/*.rs", "path": "crates", "max_matches": 50 }` | file read |
 | `write` | `{ "path": "tmp.txt", "content": "hello" }` | file write |
 | `edit` | `{ "path": "tmp.txt", "old": "hello", "new": "hi", "replace_all": false }` | file write |
-| `bash` | `{ "command": "cargo test -p xtask", "timeout_ms": 30000, "max_output_bytes": 65536 }` or `{ "mode": "start", "command": "cargo test -p xtask" }` then `{ "mode": "poll", "handle": "..." }` / `{ "mode": "stop", "handle": "..." }` | shell |
+| `bash` | `{ "mode": "foreground", "command": "cargo test -p xtask", "timeout_ms": 30000, "max_output_bytes": 65536 }` or `{ "mode": "start", "command": "cargo test -p xtask" }` then `{ "mode": "poll", "handle": "..." }` / `{ "mode": "stop", "handle": "..." }` | shell |
 | `terminal` | `{ "mode": "start", "command": "bash" }` then `{ "mode": "write", "handle": "...", "input": "ls\n" }` / `{ "mode": "read", "handle": "..." }` / `{ "mode": "resize", "handle": "...", "cols": 120, "rows": 40 }` / `{ "mode": "stop", "handle": "..." }` | shell |
 | `todo` | `{ "todos": [{ "title": "Fix bug", "status": "in_progress" }] }` | tool |
 | `enter_plan_mode` | `{}` | tool |
@@ -46,7 +46,7 @@ registered by default (requires a channel sender).
 All file paths are resolved inside `ToolContext::workspace_root()`. Attempts to
 escape the workspace fail before execution.
 
-`bash` defaults to foreground mode for compatibility. Background mode is compact:
+`bash` requires an explicit `mode`. Background mode is compact:
 `start` launches a real child process and returns a handle; `poll` returns the
 current status, exit code when finished, and captured stdout/stderr; `stop`
 terminates the background shell process group, removes the handle, and returns

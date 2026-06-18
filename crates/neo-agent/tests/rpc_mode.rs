@@ -3,6 +3,7 @@ use std::{
     fmt::Write as _,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
 };
@@ -73,6 +74,11 @@ fn isolated_home() -> std::path::PathBuf {
     })
 }
 
+fn session_bucket(project_dir: &Path) -> PathBuf {
+    let sessions_root = isolated_home().join(".neo").join("sessions");
+    neo_agent_core::session::workspace_sessions_dir(&sessions_root, project_dir)
+}
+
 fn run_with_stdin(mut command: Command, stdin: &str) -> String {
     let mut child = command
         .stdin(Stdio::piped())
@@ -100,8 +106,9 @@ fn run_with_stdin(mut command: Command, stdin: &str) -> String {
 fn rpc_get_state_reports_project_runtime_state() {
     let temp = TempDir::new().expect("tempdir");
     std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    std::fs::create_dir_all(temp.path().join(".neo/sessions")).expect("create sessions");
-    std::fs::write(temp.path().join(".neo/sessions/alpha.jsonl"), "{}\n").expect("write session");
+    let sessions = session_bucket(temp.path());
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    std::fs::write(sessions.join("alpha.jsonl"), "{}\n").expect("write session");
     std::fs::write(
         temp.path().join(".neo/config.toml"),
         r#"
@@ -137,8 +144,9 @@ default_model = "claude-sonnet-4-5"
 #[test]
 fn config_mode_rpc_uses_the_real_rpc_loop_without_subcommand() {
     let temp = TempDir::new().expect("tempdir");
-    std::fs::create_dir_all(temp.path().join(".neo/sessions")).expect("create sessions");
-    std::fs::write(temp.path().join(".neo/sessions/alpha.jsonl"), "{}\n").expect("write session");
+    let sessions = session_bucket(temp.path());
+    std::fs::create_dir_all(&sessions).expect("create sessions");
+    std::fs::write(sessions.join("alpha.jsonl"), "{}\n").expect("write session");
     std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
     std::fs::write(
         temp.path().join(".neo/config.toml"),
@@ -167,7 +175,7 @@ mode = "rpc"
 #[test]
 fn rpc_get_messages_replays_session_jsonl_messages() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
     std::fs::write(
         sessions.join("alpha.jsonl"),
@@ -207,7 +215,7 @@ fn rpc_get_messages_replays_session_jsonl_messages() {
 #[test]
 fn rpc_get_messages_returns_empty_replay_for_empty_session() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
     std::fs::write(sessions.join("empty.jsonl"), "").expect("write empty session");
 
@@ -232,7 +240,7 @@ fn rpc_get_messages_returns_empty_replay_for_empty_session() {
 #[test]
 fn rpc_get_messages_resolves_unique_session_prefix() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
     std::fs::write(sessions.join("alpha-main.jsonl"), "").expect("write session");
 
@@ -257,7 +265,7 @@ fn rpc_get_messages_resolves_unique_session_prefix() {
 #[test]
 fn rpc_get_messages_accepts_in_directory_jsonl_path() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
     let session_path = sessions.join("alpha-main.jsonl");
     std::fs::write(&session_path, "").expect("write session");
@@ -310,7 +318,7 @@ fn rpc_get_messages_reports_missing_session_as_invalid_params() {
 #[test]
 fn rpc_sessions_list_returns_local_session_metadata() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
     std::fs::write(sessions.join("alpha.jsonl"), "{}\n").expect("write parent session");
     std::fs::write(sessions.join("alpha-fork-1.jsonl"), "{}\n").expect("write child session");
@@ -368,7 +376,7 @@ fn rpc_sessions_list_returns_local_session_metadata() {
 #[test]
 fn rpc_sessions_tree_method_is_not_exposed() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
     std::fs::write(sessions.join("alpha.jsonl"), "{}\n").expect("write session");
 
@@ -389,7 +397,7 @@ fn rpc_sessions_tree_method_is_not_exposed() {
 #[test]
 fn rpc_sessions_get_returns_local_session_metadata_and_messages() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
     std::fs::write(
         sessions.join("alpha-main.jsonl"),
@@ -462,7 +470,7 @@ fn rpc_sessions_get_returns_local_session_metadata_and_messages() {
 #[test]
 fn rpc_sessions_get_resolves_unique_session_prefix() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
     std::fs::write(sessions.join("alpha-main.jsonl"), "").expect("write session");
 
@@ -511,7 +519,7 @@ fn rpc_sessions_get_reports_missing_session_as_invalid_params() {
 #[test]
 fn rpc_sessions_export_html_returns_rendered_local_session() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
     std::fs::write(
         sessions.join("alpha.jsonl"),
@@ -548,7 +556,7 @@ fn rpc_sessions_export_html_returns_rendered_local_session() {
 #[test]
 fn rpc_sessions_export_json_returns_sanitized_replayed_session_artifact() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
     std::fs::write(
         sessions.join("alpha-main.jsonl"),
@@ -622,7 +630,7 @@ fn rpc_sessions_export_json_returns_sanitized_replayed_session_artifact() {
 #[test]
 fn rpc_set_session_name_updates_local_session_metadata() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
     std::fs::write(sessions.join("alpha-main.jsonl"), "{}\n").expect("write session");
 
@@ -803,7 +811,7 @@ fn rpc_prompt_streams_agent_events_and_returns_assistant_text() {
     std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
     std::fs::write(
         temp.path().join(".neo/config.toml"),
-        format!(r#"api_base = "{}""#, server.url),
+        mock_responses_config(&server.url),
     )
     .expect("write config");
 
@@ -836,7 +844,19 @@ fn rpc_prompt_streams_agent_events_and_returns_assistant_text() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].method, "POST");
     assert_eq!(requests[0].path, "/responses");
-    assert_eq!(requests[0].body["input"][0]["content"], "hello rpc");
+    assert_eq!(user_input_contents(&requests[0]), vec!["hello rpc"]);
+}
+
+fn input_messages(request: &RecordedRequest) -> &[Value] {
+    request.body["input"].as_array().expect("input messages")
+}
+
+fn user_input_contents(request: &RecordedRequest) -> Vec<&str> {
+    input_messages(request)
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .map(|message| message["content"].as_str().expect("user content"))
+        .collect()
 }
 
 fn parse_jsonl(stdout: &str) -> Vec<Value> {
@@ -859,6 +879,25 @@ fn openai_response_sse(id: &str, text: &str) -> String {
             }
         }),
     ])
+}
+
+fn mock_responses_config(base_url: &str) -> String {
+    format!(
+        r#"
+default_provider = "mock"
+default_model = "gpt-4.1"
+
+[providers.mock]
+type = "openai-responses"
+base_url = "{base_url}"
+api_key_env = "OPENAI_API_KEY"
+
+[models."mock/gpt-4.1"]
+provider = "mock"
+model = "gpt-4.1"
+capabilities = ["streaming", "tools"]
+"#
+    )
 }
 
 fn sse_response(events: &[Value]) -> String {

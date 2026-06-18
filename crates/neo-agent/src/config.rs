@@ -7,8 +7,11 @@ use std::{
 use anyhow::Context;
 use neo_agent_core::session::workspace_sessions_dir as compute_workspace_sessions_dir;
 use neo_agent_core::{PermissionPolicy, QueueMode, ToolExecutionMode};
-use neo_ai::{ModelRegistry, ModelSpec, ReasoningEffort};
-use neo_tui::{ImageProtocolPreference, KeyId, KeybindingAction, KeybindingsManager};
+use neo_ai::{ModelSpec, ReasoningEffort};
+use neo_tui::{
+    image::ImageProtocolPreference,
+    input::{KeyId, KeybindingAction, KeybindingsManager},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -136,12 +139,10 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
 pub struct AppConfig {
     pub default_model: String,
     pub default_provider: String,
-    pub api_base: Option<String>,
     pub api_key_env: Option<String>,
     pub providers: BTreeMap<String, ProviderConfig>,
     /// Models defined inline in config.toml `[models.<alias>]`.
     pub models: BTreeMap<String, ModelConfig>,
-    pub model_catalogs: Vec<PathBuf>,
     #[serde(skip)]
     pub model_scope: Vec<String>,
     pub sessions_dir: PathBuf,
@@ -233,17 +234,6 @@ pub struct ProviderConfig {
     /// Environment variable name that holds the API key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
-    /// Legacy alias for `api_base` (used by `api_base` top-level override).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_base: Option<String>,
-}
-
-impl ProviderConfig {
-    /// Returns the effective base URL: `base_url` takes priority, then `api_base`.
-    #[must_use]
-    pub fn effective_base_url(&self) -> Option<&str> {
-        self.base_url.as_deref().or(self.api_base.as_deref())
-    }
 }
 
 /// A model definition in `config.toml` `[models.<alias>]`.
@@ -320,13 +310,11 @@ const fn default_runtime_compaction_keep_recent_messages() -> usize {
 pub(crate) struct FileConfig {
     pub(crate) default_model: Option<String>,
     pub(crate) default_provider: Option<String>,
-    pub(crate) api_base: Option<String>,
     pub(crate) api_key_env: Option<String>,
     pub(crate) providers: Option<BTreeMap<String, ProviderConfig>>,
     /// Models defined inline via `[models.<alias>]` tables.
     pub(crate) models: Option<BTreeMap<String, ModelConfig>>,
     pub(crate) model_scope: Option<Vec<String>>,
-    pub(crate) model_catalogs: Option<Vec<PathBuf>>,
     pub(crate) prompt_templates: Option<Vec<String>>,
     pub(crate) sessions_dir: Option<PathBuf>,
     pub(crate) permissions: Option<PermissionPolicy>,
@@ -398,31 +386,18 @@ impl AppConfig {
         let file_config = merge_file_configs(global_config, project_config);
         let project_trusted = project_trusted_from_yolo(&project_dir, overrides.yolo)?;
 
-        let mut default_model = file_config
+        let default_model = file_config
             .default_model
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
-        let mut default_provider = file_config
+        let default_provider = file_config
             .default_provider
             .unwrap_or_else(|| DEFAULT_PROVIDER.to_owned());
         let providers = file_config.providers.unwrap_or_default();
         let models = file_config.models.unwrap_or_default();
-        let api_base = file_config.api_base;
         let api_key_env = file_config
             .api_key_env
             .or_else(|| provider_api_key_env(&providers, &default_provider));
-        let model_catalogs: Vec<PathBuf> = file_config
-            .model_catalogs
-            .unwrap_or_default()
-            .into_iter()
-            .map(|path| resolve_project_path(&project_dir, path))
-            .collect();
         let model_scope = file_config.model_scope.unwrap_or_default();
-        apply_scoped_default_model(
-            &mut default_provider,
-            &mut default_model,
-            &model_catalogs,
-            &model_scope,
-        )?;
         let prompt_templates = file_config.prompt_templates.unwrap_or_default();
         let sessions_dir = file_config
             .sessions_dir
@@ -448,11 +423,9 @@ impl AppConfig {
         Ok(Self {
             default_model,
             default_provider,
-            api_base,
             api_key_env,
             providers,
             models,
-            model_catalogs,
             model_scope,
             sessions_dir,
             permissions,
@@ -471,39 +444,6 @@ impl AppConfig {
 
 fn project_trusted_from_yolo(project_dir: &Path, yolo: bool) -> anyhow::Result<bool> {
     trust::resolve_project_trust(project_dir, yolo)
-}
-
-fn scoped_default_model(catalogs: &[PathBuf], model_scope: &[String]) -> anyhow::Result<ModelSpec> {
-    let mut registry = ModelRegistry::seeded();
-    for path in catalogs {
-        registry
-            .load_catalog_path(path)
-            .map_err(anyhow::Error::from)?;
-    }
-    let models = registry.list();
-    let scoped = scoped_models(models.iter(), model_scope);
-    scoped.first().cloned().with_context(|| {
-        format!(
-            "no models match model_scope {}; run `neo models list` for supported entries",
-            model_scope.join(",")
-        )
-    })
-}
-
-fn apply_scoped_default_model(
-    default_provider: &mut String,
-    default_model: &mut String,
-    model_catalogs: &[PathBuf],
-    model_scope: &[String],
-) -> anyhow::Result<()> {
-    if model_scope.is_empty() {
-        return Ok(());
-    }
-    let scoped_default = scoped_default_model(model_catalogs, model_scope)
-        .with_context(|| format!("failed to resolve model_scope {}", model_scope.join(",")))?;
-    *default_provider = scoped_default.provider.0;
-    *default_model = scoped_default.model;
-    Ok(())
 }
 
 fn provider_api_key_env(
@@ -569,12 +509,10 @@ fn merge_file_configs(base: FileConfig, layer: FileConfig) -> FileConfig {
     FileConfig {
         default_model: layer.default_model.or(base.default_model),
         default_provider: layer.default_provider.or(base.default_provider),
-        api_base: layer.api_base.or(base.api_base),
         api_key_env: layer.api_key_env.or(base.api_key_env),
         providers: merge_provider_configs(base.providers, layer.providers),
         models: merge_model_configs(base.models, layer.models),
         model_scope: merge_string_lists(base.model_scope, layer.model_scope),
-        model_catalogs: merge_path_lists(base.model_catalogs, layer.model_catalogs),
         prompt_templates: merge_string_lists(base.prompt_templates, layer.prompt_templates),
         sessions_dir: layer.sessions_dir.or(base.sessions_dir),
         permissions: layer.permissions.or(base.permissions),
@@ -612,7 +550,6 @@ fn merge_provider_config(base: ProviderConfig, layer: ProviderConfig) -> Provide
         base_url: layer.base_url.or(base.base_url),
         api_key: layer.api_key.or(base.api_key),
         api_key_env: layer.api_key_env.or(base.api_key_env),
-        api_base: layer.api_base.or(base.api_base),
     }
 }
 
@@ -643,24 +580,6 @@ fn merge_string_lists(
             for value in layer {
                 if !base.contains(&value) {
                     base.push(value);
-                }
-            }
-            Some(base)
-        }
-    }
-}
-
-fn merge_path_lists(
-    base: Option<Vec<PathBuf>>,
-    layer: Option<Vec<PathBuf>>,
-) -> Option<Vec<PathBuf>> {
-    match (base, layer) {
-        (None, None) => None,
-        (Some(paths), None) | (None, Some(paths)) => Some(paths),
-        (Some(mut base), Some(layer)) => {
-            for path in layer {
-                if !base.contains(&path) {
-                    base.push(path);
                 }
             }
             Some(base)
@@ -1025,15 +944,6 @@ fn expand_user_path(path: PathBuf) -> PathBuf {
         return path;
     };
     home_dir().map_or(path, |home| home.join(rest))
-}
-
-fn resolve_project_path(project_dir: &Path, path: PathBuf) -> PathBuf {
-    let path = expand_user_path(path);
-    if path.is_absolute() {
-        path
-    } else {
-        project_dir.join(path)
-    }
 }
 
 pub(crate) fn read_file_config(path: &Path) -> anyhow::Result<FileConfig> {

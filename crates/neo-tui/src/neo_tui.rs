@@ -1,4 +1,4 @@
-use crate::app::{NeoTuiApp, OverlayKind};
+use crate::chrome::{NeoChromeState, OverlayKind};
 use crate::pi_tui::CursorPos;
 use crate::transcript::{
     CHROME_GUTTER, ChromeRender, TranscriptPane, apply_gutter, frame_content_width,
@@ -6,38 +6,43 @@ use crate::transcript::{
 };
 
 pub struct NeoTui {
-    app: NeoTuiApp,
+    chrome: NeoChromeState,
     transcript: TranscriptPane,
 }
 
 impl NeoTui {
     #[must_use]
-    pub fn new(app: NeoTuiApp, transcript: TranscriptPane) -> Self {
-        Self { app, transcript }
+    pub fn new(chrome: NeoChromeState, transcript: TranscriptPane) -> Self {
+        Self { chrome, transcript }
     }
 
     #[must_use]
-    pub fn with_welcome_banner(app: NeoTuiApp, width: usize, height: usize, version: &str) -> Self {
+    pub fn with_welcome_banner(
+        chrome: NeoChromeState,
+        width: usize,
+        height: usize,
+        version: &str,
+    ) -> Self {
         let mut transcript = TranscriptPane::new(width, height);
-        transcript.set_theme(app.theme());
+        transcript.set_theme(chrome.theme());
         transcript.push_welcome_banner(
-            app.title(),
-            app.session_label(),
-            app.model_label(),
-            &app.cwd_label(),
+            chrome.title(),
+            chrome.session_label(),
+            chrome.model_label(),
+            &chrome.cwd_label(),
             version,
             None,
         );
-        Self { app, transcript }
+        Self { chrome, transcript }
     }
 
     #[must_use]
-    pub const fn app(&self) -> &NeoTuiApp {
-        &self.app
+    pub const fn chrome(&self) -> &NeoChromeState {
+        &self.chrome
     }
 
-    pub fn app_mut(&mut self) -> &mut NeoTuiApp {
-        &mut self.app
+    pub fn chrome_mut(&mut self) -> &mut NeoChromeState {
+        &mut self.chrome
     }
 
     #[must_use]
@@ -49,28 +54,20 @@ impl NeoTui {
         &mut self.transcript
     }
 
-    pub fn split_mut(&mut self) -> (&mut NeoTuiApp, &mut TranscriptPane) {
-        (&mut self.app, &mut self.transcript)
-    }
-
-    pub fn replace_transcript(&mut self, transcript: TranscriptPane) {
-        self.transcript = transcript;
-    }
-
     pub fn render_frame(
         &mut self,
         width: usize,
         height: usize,
     ) -> (Vec<String>, Option<CursorPos>) {
-        let app = &self.app;
-        self.transcript.set_theme(app.theme());
+        let chrome = &self.chrome;
+        self.transcript.set_theme(chrome.theme());
         self.transcript.resize(width, height);
         let mut lines = self
             .transcript
             .render_frame(width, height)
             .unwrap_or_else(|| self.transcript.frame_ansi_lines());
-        let chrome = render_chrome(app, width);
-        let cursor = append_chrome(&mut lines, chrome);
+        let chrome_render = render_chrome(chrome, width);
+        let cursor = append_chrome(&mut lines, chrome_render);
         (lines, cursor)
     }
 
@@ -79,7 +76,7 @@ impl NeoTui {
     }
 }
 
-fn render_chrome(app: &NeoTuiApp, width: usize) -> ChromeRender {
+fn render_chrome(app: &NeoChromeState, width: usize) -> ChromeRender {
     if app.focused_overlay().is_some_and(|overlay| {
         matches!(
             overlay.kind,

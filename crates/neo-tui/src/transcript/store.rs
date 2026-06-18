@@ -1,5 +1,5 @@
-use crate::ToolStatusKind;
-use crate::app::TuiTheme;
+use crate::chrome::ToolStatusKind;
+use crate::chrome::TuiTheme;
 use crate::core::Line;
 use crate::transcript::{ToolCallComponent, ToolCallState};
 

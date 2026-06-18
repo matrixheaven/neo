@@ -103,30 +103,30 @@ async fn jsonl_session_create_writes_schema_metadata_without_replay_message() {
 }
 
 #[tokio::test]
-async fn jsonl_session_replays_existing_event_only_files() {
+async fn jsonl_session_replays_event_only_files() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("legacy.jsonl");
-    let legacy_event = AgentEvent::MessageAppended {
-        message: AgentMessage::user_text("legacy still works"),
+    let path = dir.path().join("event-only.jsonl");
+    let event = AgentEvent::MessageAppended {
+        message: AgentMessage::user_text("event-only replay works"),
     };
     std::fs::write(
         &path,
         format!(
             "{}\n",
-            serde_json::to_string(&legacy_event).expect("serialize legacy event")
+            serde_json::to_string(&event).expect("serialize event")
         ),
     )
-    .expect("write legacy session");
+    .expect("write event-only session");
 
     let events = JsonlSessionReader::read_all(&path).await.expect("read all");
-    assert_eq!(events, vec![legacy_event.clone()]);
+    assert_eq!(events, vec![event.clone()]);
 
     let replayed = JsonlSessionReader::replay_messages(&path)
         .await
         .expect("replay");
     assert_eq!(
         replayed,
-        vec![AgentMessage::user_text("legacy still works")]
+        vec![AgentMessage::user_text("event-only replay works")]
     );
 }
 

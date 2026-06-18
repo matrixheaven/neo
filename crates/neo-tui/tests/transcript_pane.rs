@@ -1,6 +1,6 @@
-use neo_tui::ToolStatusKind;
-use neo_tui::TuiTheme;
 use neo_tui::ansi::strip_ansi;
+use neo_tui::chrome::ToolStatusKind;
+use neo_tui::chrome::TuiTheme;
 use neo_tui::transcript::TranscriptEntry;
 use neo_tui::transcript::TranscriptPane;
 

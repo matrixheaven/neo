@@ -71,7 +71,11 @@ async fn bash_requires_permission_and_honors_timeout() {
         .with_permission_policy(PermissionPolicy::read_only());
 
     let denied = registry
-        .run("bash", &denied_context, json!({ "command": "echo denied" }))
+        .run(
+            "bash",
+            &denied_context,
+            json!({ "mode": "foreground", "command": "echo denied" }),
+        )
         .await
         .expect_err("bash should be denied");
     assert!(matches!(denied, ToolError::PermissionDenied { .. }));
@@ -85,7 +89,7 @@ async fn bash_requires_permission_and_honors_timeout() {
         .run(
             "bash",
             &allowed_context,
-            json!({ "command": "printf 1234567890", "max_output_bytes": 4 }),
+            json!({ "mode": "foreground", "command": "printf 1234567890", "max_output_bytes": 4 }),
         )
         .await
         .expect("bash should run");
@@ -96,7 +100,7 @@ async fn bash_requires_permission_and_honors_timeout() {
         .run(
             "bash",
             &allowed_context,
-            json!({ "command": "sleep 1", "timeout_ms": 10 }),
+            json!({ "mode": "foreground", "command": "sleep 1", "timeout_ms": 10 }),
         )
         .await
         .expect_err("bash should time out");

@@ -4,8 +4,8 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-use neo_tui::TuiTheme;
 use neo_tui::ansi::Color;
+use neo_tui::chrome::TuiTheme;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

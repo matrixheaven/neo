@@ -1,8 +1,8 @@
-use neo_tui::ToolStatusKind;
+use neo_tui::chrome::{ToolStatusKind, TuiTheme};
 use neo_tui::core::{Component, Expandable, Finalization, Line};
 use neo_tui::transcript::diff_preview::render_diff_lines_clustered;
 use neo_tui::transcript::tool_renderers::tool_header_spans;
-use neo_tui::transcript::{ToolCallComponent, ToolCallState};
+use neo_tui::transcript::{ToolCallComponent, ToolCallState, TranscriptPane};
 
 fn plain(rows: Vec<Line>) -> Vec<String> {
     rows.into_iter()
@@ -12,7 +12,7 @@ fn plain(rows: Vec<Line>) -> Vec<String> {
 
 #[test]
 fn running_tool_header_uses_finished_status_color() {
-    let theme = neo_tui::TuiTheme::default();
+    let theme = TuiTheme::default();
     let running = ToolCallState {
         id: "tool-1".to_owned(),
         name: "Read".to_owned(),
@@ -202,8 +202,8 @@ fn edit_tool_card_renders_finalized_clustered_diff_from_args() {
 
 #[test]
 fn transcript_pane_expansion_state_is_instance_local() {
-    let mut expanded_pane = neo_tui::TranscriptPane::new(80, 12);
-    let collapsed_pane = neo_tui::TranscriptPane::new(80, 12);
+    let mut expanded_pane = TranscriptPane::new(80, 12);
+    let collapsed_pane = TranscriptPane::new(80, 12);
 
     expanded_pane.set_tool_output_expanded(true);
 
@@ -222,7 +222,7 @@ fn tool_card_lines_do_not_exceed_terminal_width_after_gutter() {
     use neo_tui::transcript::{apply_gutter, frame_content_width};
 
     const WIDTH: usize = 40;
-    let mut runtime = neo_tui::TranscriptPane::new(WIDTH, 20);
+    let mut runtime = TranscriptPane::new(WIDTH, 20);
 
     runtime.apply_agent_event(AgentEvent::ToolCallStarted {
         turn: 1,
@@ -294,7 +294,7 @@ fn grouped_read_lines_do_not_exceed_terminal_width_after_gutter() {
     use neo_tui::transcript::{apply_gutter, frame_content_width};
 
     const WIDTH: usize = 30;
-    let mut runtime = neo_tui::TranscriptPane::new(WIDTH, 20);
+    let mut runtime = TranscriptPane::new(WIDTH, 20);
 
     for (idx, path) in ["very/long/path/to/alpha.rs", "very/long/path/to/beta.rs"]
         .into_iter()

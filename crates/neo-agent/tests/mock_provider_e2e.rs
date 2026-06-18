@@ -121,8 +121,27 @@ fn write_config(temp: &TempDir, content: &str) {
     std::fs::write(temp.path().join(".neo/config.toml"), content).expect("write config");
 }
 
-fn write_api_base_config(temp: &TempDir, api_base: &str) {
-    write_config(temp, &format!(r#"api_base = "{api_base}""#));
+fn mock_responses_config(base_url: &str) -> String {
+    format!(
+        r#"
+default_provider = "mock"
+default_model = "gpt-4.1"
+
+[providers.mock]
+type = "openai-responses"
+base_url = "{base_url}"
+api_key_env = "OPENAI_API_KEY"
+
+[models."mock/gpt-4.1"]
+provider = "mock"
+model = "gpt-4.1"
+capabilities = ["streaming", "tools"]
+"#
+    )
+}
+
+fn write_mock_responses_config(temp: &TempDir, base_url: &str) {
+    write_config(temp, &mock_responses_config(base_url));
 }
 
 fn write_trust_store(home: &std::path::Path, project: &std::path::Path, trusted: bool) {
@@ -136,13 +155,11 @@ fn write_trust_store(home: &std::path::Path, project: &std::path::Path, trusted:
     .expect("write trust store");
 }
 
-fn session_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+fn session_files(_root: &std::path::Path) -> Vec<std::path::PathBuf> {
     // Sessions are stored under the isolated home in workspace-scoped bucket dirs.
     let home_sessions = isolated_home_path().join(".neo").join("sessions");
     let mut entries = Vec::new();
     collect_jsonl_recursive(&home_sessions, &mut entries);
-    // Also check project-local legacy layout.
-    collect_jsonl_recursive(&root.join(".neo/sessions"), &mut entries);
     entries.sort();
     entries
 }
@@ -170,6 +187,36 @@ fn model_tool_names(body: &Value) -> Vec<&str> {
         .collect::<Vec<_>>();
     names.sort_unstable();
     names
+}
+
+fn input_messages(request: &RecordedRequest) -> &[Value] {
+    request.body["input"].as_array().expect("input messages")
+}
+
+fn input_roles_without_system(request: &RecordedRequest) -> Vec<&str> {
+    input_messages(request)
+        .iter()
+        .filter_map(|message| {
+            let role = message["role"].as_str().expect("role");
+            (role != "system").then_some(role)
+        })
+        .collect()
+}
+
+fn user_input_contents(request: &RecordedRequest) -> Vec<&str> {
+    input_messages(request)
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .map(|message| message["content"].as_str().expect("user content"))
+        .collect()
+}
+
+fn system_input_contents(request: &RecordedRequest) -> Vec<&str> {
+    input_messages(request)
+        .iter()
+        .filter(|message| message["role"] == "system")
+        .filter_map(|message| message["content"].as_str())
+        .collect()
 }
 
 fn write_echo_extension_at(extension: &std::path::Path) -> std::path::PathBuf {
@@ -336,7 +383,7 @@ fn run_text_uses_production_openai_responses_adapter_against_mock_provider() {
         "resp-run-text",
         "hello from mock",
     )]);
-    write_api_base_config(&temp, &server.url);
+    write_mock_responses_config(&temp, &server.url);
 
     let mut command = neo();
     command
@@ -358,8 +405,7 @@ fn run_text_uses_production_openai_responses_adapter_against_mock_provider() {
     );
     assert_eq!(sent.body["model"], "gpt-4.1");
     assert_eq!(sent.body["stream"], true);
-    assert_eq!(sent.body["input"][0]["role"], "user");
-    assert_eq!(sent.body["input"][0]["content"], "hello neo");
+    assert_eq!(user_input_contents(sent), vec!["hello neo"]);
 
     let sessions = session_files(temp.path());
     assert_eq!(sessions.len(), 1);
@@ -375,7 +421,7 @@ fn run_text_uses_production_openai_responses_adapter_against_mock_provider() {
 fn run_emits_jsonl_events_from_mock_provider_without_fake_output() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-run", "run reply")]);
-    write_api_base_config(&temp, &server.url);
+    write_mock_responses_config(&temp, &server.url);
 
     let mut command = neo();
     command
@@ -399,13 +445,8 @@ fn run_output_json_emits_stable_typed_events_from_mock_provider() {
     write_config(
         &temp,
         &format!(
-            r#"
-api_base = "{}"
-
-[defaults]
-mode = "json"
-"#,
-            server.url
+            "{}\n[defaults]\nmode = \"json\"\n",
+            mock_responses_config(&server.url)
         ),
     );
 
@@ -432,10 +473,19 @@ fn run_output_json_emits_thinking_content_events_from_mock_provider() {
         &temp,
         &format!(
             r#"
-api_base = "{}"
-default_provider = "openai"
+default_provider = "mock"
 default_model = "reasoning-model"
-model_catalogs = [".neo/models.json"]
+
+[providers.mock]
+type = "openai-responses"
+base_url = "{}"
+api_key_env = "OPENAI_API_KEY"
+
+[models."mock/reasoning-model"]
+provider = "mock"
+model = "reasoning-model"
+max_context_tokens = 128000
+capabilities = ["streaming", "tools", "reasoning"]
 
 [runtime]
 reasoning_effort = "high"
@@ -446,30 +496,6 @@ mode = "json"
             server.url
         ),
     );
-    std::fs::write(
-        temp.path().join(".neo/models.json"),
-        r#"
-{
-  "default": { "provider": "openai", "model": "reasoning-model" },
-  "models": [
-    {
-      "provider": "openai",
-      "model": "reasoning-model",
-      "api": "OpenAiResponses",
-      "capabilities": {
-        "streaming": true,
-        "tools": true,
-        "images": false,
-        "reasoning": true,
-        "embeddings": false,
-        "max_context_tokens": 128000
-      }
-    }
-  ]
-}
-"#,
-    )
-    .expect("write model catalog");
 
     let mut command = neo();
     command
@@ -513,13 +539,8 @@ fn run_continue_flag_uses_latest_session_in_stable_json_output() {
     write_config(
         &temp,
         &format!(
-            r#"
-api_base = "{}"
-
-[defaults]
-mode = "json"
-"#,
-            server.url
+            "{}\n[defaults]\nmode = \"json\"\n",
+            mock_responses_config(&server.url)
         ),
     );
 
@@ -541,23 +562,21 @@ mode = "json"
     assert!(stdout.contains("second reply"));
     let requests = server.requests();
     assert_eq!(requests.len(), 3);
-    let input = requests[2].body["input"]
-        .as_array()
-        .expect("input messages");
-    let roles = input
-        .iter()
-        .map(|message| message["role"].as_str().expect("role"))
-        .collect::<Vec<_>>();
-    assert_eq!(roles, vec!["user", "assistant", "user"]);
-    assert_eq!(input[0]["content"], "first prompt");
-    assert_eq!(input[2]["content"], "second prompt");
+    assert_eq!(
+        input_roles_without_system(&requests[2]),
+        vec!["user", "assistant", "user"]
+    );
+    assert_eq!(
+        user_input_contents(&requests[2]),
+        vec!["first prompt", "second prompt"]
+    );
 }
 
 #[test]
 fn run_text_no_session_flag_runs_without_creating_session_files() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-no-session", "ephemeral")]);
-    write_api_base_config(&temp, &server.url);
+    write_mock_responses_config(&temp, &server.url);
 
     let mut command = neo();
     command
@@ -579,36 +598,24 @@ fn run_text_models_scope_selects_first_matching_runtime_model() {
         &temp,
         &format!(
             r#"
-api_base = "{}"
-model_catalogs = [".neo/models.json"]
+default_provider = "mock"
+default_model = "scoped-runtime-model"
 model_scope = ["scoped"]
+
+[providers.mock]
+type = "openai-responses"
+base_url = "{}"
+api_key_env = "OPENAI_API_KEY"
+
+[models."mock/scoped-runtime-model"]
+provider = "mock"
+model = "scoped-runtime-model"
+max_context_tokens = 128000
+capabilities = ["streaming", "tools"]
 "#,
             server.url
         ),
     );
-    std::fs::write(
-        temp.path().join(".neo/models.json"),
-        r#"
-{
-  "models": [
-    {
-      "provider": "openai",
-      "model": "scoped-runtime-model",
-      "api": "OpenAiResponses",
-      "capabilities": {
-        "streaming": true,
-        "tools": true,
-        "images": false,
-        "reasoning": false,
-        "embeddings": false,
-        "max_context_tokens": 128000
-      }
-    }
-  ]
-}
-"#,
-    )
-    .expect("write model catalog");
 
     let mut command = neo();
     command
@@ -631,14 +638,11 @@ fn run_text_applies_project_runtime_generation_options_to_provider_request() {
     write_config(
         &temp,
         &format!(
-            r#"
-api_base = "{}"
-
-[runtime]
+            "{}\n[runtime]\n\
 temperature = 0.35
 max_tokens = 512
-"#,
-            server.url
+",
+            mock_responses_config(&server.url)
         ),
     );
 
@@ -663,7 +667,7 @@ fn run_text_continue_flag_replays_latest_session_and_appends_turn() {
         openai_response_sse("resp-run-text-cont-title", "title"),
         openai_response_sse("resp-run-text-cont-2", "second"),
     ]);
-    write_api_base_config(&temp, &server.url);
+    write_mock_responses_config(&temp, &server.url);
 
     let mut first = neo();
     first
@@ -683,23 +687,18 @@ fn run_text_continue_flag_replays_latest_session_and_appends_turn() {
     assert_eq!(stdout, "second\n");
     let requests = server.requests();
     assert_eq!(requests.len(), 3);
-    let input = requests[2].body["input"]
-        .as_array()
-        .expect("input messages");
-    let roles = input
-        .iter()
-        .map(|message| message["role"].as_str().expect("role"))
-        .collect::<Vec<_>>();
-    assert_eq!(roles, vec!["user", "assistant", "user"]);
-    assert_eq!(input[0]["content"], "first");
-    assert_eq!(input[2]["content"], "second");
+    assert_eq!(
+        input_roles_without_system(&requests[2]),
+        vec!["user", "assistant", "user"]
+    );
+    assert_eq!(user_input_contents(&requests[2]), vec!["first", "second"]);
 }
 
 #[test]
 fn run_merges_piped_stdin_with_cli_prompt() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-stdin", "merged")]);
-    write_api_base_config(&temp, &server.url);
+    write_mock_responses_config(&temp, &server.url);
 
     let mut command = neo();
     command
@@ -711,14 +710,14 @@ fn run_merges_piped_stdin_with_cli_prompt() {
 
     assert!(stdout.contains("merged"));
     let requests = server.requests();
-    assert_eq!(requests[0].body["input"][0]["content"], "piped\nextra");
+    assert_eq!(user_input_contents(&requests[0]), vec!["piped\nextra"]);
 }
 
 #[test]
 fn run_text_merges_piped_stdin_with_cli_prompt() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-run-text-stdin", "merged")]);
-    write_api_base_config(&temp, &server.url);
+    write_mock_responses_config(&temp, &server.url);
 
     let mut command = neo();
     command
@@ -730,7 +729,7 @@ fn run_text_merges_piped_stdin_with_cli_prompt() {
 
     assert_eq!(stdout, "merged\n");
     let requests = server.requests();
-    assert_eq!(requests[0].body["input"][0]["content"], "piped\nextra");
+    assert_eq!(user_input_contents(&requests[0]), vec!["piped\nextra"]);
 }
 
 #[test]
@@ -743,7 +742,7 @@ fn root_run_text_flag_expands_workspace_relative_file_prompt_args() {
         "resp-root-run-text-file",
         "root file",
     )]);
-    write_api_base_config(&temp, &server.url);
+    write_mock_responses_config(&temp, &server.url);
 
     let mut command = neo();
     command
@@ -757,8 +756,8 @@ fn root_run_text_flag_expands_workspace_relative_file_prompt_args() {
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(
-        requests[0].body["input"][0]["content"],
-        "root file context\nsummarize"
+        user_input_contents(&requests[0]),
+        vec!["root file context\nsummarize"]
     );
 }
 
@@ -775,14 +774,8 @@ fn run_expands_project_prompt_template_before_json_output() {
     write_config(
         &temp,
         &format!(
-            r#"
-api_base = "{}"
-prompt_templates = ["review"]
-
-[defaults]
-mode = "json"
-"#,
-            server.url
+            "prompt_templates = [\"review\"]\n{}\n[defaults]\nmode = \"json\"\n",
+            mock_responses_config(&server.url)
         ),
     );
 
@@ -797,8 +790,8 @@ mode = "json"
     assert!(stdout.contains("reviewed"));
     let requests = server.requests();
     assert_eq!(
-        requests[0].body["input"][0]["content"],
-        "Review the following code: fn main()"
+        user_input_contents(&requests[0]),
+        vec!["Review the following code: fn main()"]
     );
 }
 
@@ -812,7 +805,7 @@ fn run_text_expands_project_prompt_template_with_arguments() {
     )
     .expect("write template");
     let server = MockSseServer::start(vec![openai_response_sse("resp-slash", "slash")]);
-    write_api_base_config(&temp, &server.url);
+    write_mock_responses_config(&temp, &server.url);
 
     let mut command = neo();
     command
@@ -825,31 +818,23 @@ fn run_text_expands_project_prompt_template_with_arguments() {
     assert_eq!(stdout, "slash\n");
     let requests = server.requests();
     assert_eq!(
-        requests[0].body["input"][0]["content"],
-        "Review the following code: fn main()"
+        user_input_contents(&requests[0]),
+        vec!["Review the following code: fn main()"]
     );
 }
 
 #[test]
 fn run_text_includes_project_system_prompt_file_before_user_message() {
     let temp = TempDir::new().expect("tempdir");
-    write_config(&temp, "default_model = \"gpt-4.1\"");
     write_trust_store(&isolated_home_path(), temp.path(), true);
+    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
     std::fs::write(
         temp.path().join(".neo/SYSTEM.md"),
         "You are a test assistant.",
     )
     .expect("write system prompt");
     let server = MockSseServer::start(vec![openai_response_sse("resp-sys", "sys")]);
-    write_config(
-        &temp,
-        &format!(
-            r#"
-api_base = "{}"
-"#,
-            server.url
-        ),
-    );
+    write_mock_responses_config(&temp, &server.url);
 
     let mut command = neo();
     command
@@ -860,29 +845,18 @@ api_base = "{}"
     run(command);
 
     let requests = server.requests();
-    let input = requests[0].body["input"].as_array().expect("input");
-    assert_eq!(input[0]["role"], "system");
-    assert_eq!(input[0]["content"], "You are a test assistant.");
-    assert_eq!(input[1]["role"], "user");
+    assert!(system_input_contents(&requests[0]).contains(&"You are a test assistant."));
+    assert_eq!(user_input_contents(&requests[0]), vec!["hello"]);
 }
 
 #[test]
 fn run_text_loads_project_context_after_persisted_trust() {
     let temp = TempDir::new().expect("tempdir");
-    write_config(&temp, "");
     write_trust_store(&isolated_home_path(), temp.path(), true);
     std::fs::write(temp.path().join("AGENTS.md"), "Project context: use Rust.")
         .expect("write agents");
     let server = MockSseServer::start(vec![openai_response_sse("resp-trust", "trusted")]);
-    write_config(
-        &temp,
-        &format!(
-            r#"
-api_base = "{}"
-"#,
-            server.url
-        ),
-    );
+    write_mock_responses_config(&temp, &server.url);
 
     let mut command = neo();
     command
@@ -893,29 +867,21 @@ api_base = "{}"
     run(command);
 
     let requests = server.requests();
-    let system = &requests[0].body["input"][0];
-    assert_eq!(system["role"], "system");
-    let content = system["content"].as_str().expect("content");
-    assert!(content.contains("Project context: use Rust."));
+    assert!(
+        system_input_contents(&requests[0])
+            .iter()
+            .any(|content| content.contains("Project context: use Rust."))
+    );
 }
 
 #[test]
 fn run_text_yolo_skips_project_context_even_after_persisted_trust() {
     let temp = TempDir::new().expect("tempdir");
-    write_config(&temp, "");
     write_trust_store(&isolated_home_path(), temp.path(), true);
     std::fs::write(temp.path().join("AGENTS.md"), "Project context: use Rust.")
         .expect("write agents");
     let server = MockSseServer::start(vec![openai_response_sse("resp-yolo", "yolo")]);
-    write_config(
-        &temp,
-        &format!(
-            r#"
-api_base = "{}"
-"#,
-            server.url
-        ),
-    );
+    write_mock_responses_config(&temp, &server.url);
 
     let mut command = neo();
     command
@@ -945,7 +911,7 @@ fn run_text_rejects_prompt_file_args_outside_workspace() {
     let outside = TempDir::new().expect("outside tempdir");
     std::fs::write(outside.path().join("secret.txt"), "secret").expect("write outside file");
     let server = MockSseServer::start(vec![openai_response_sse("resp-reject", "no")]);
-    write_api_base_config(&temp, &server.url);
+    write_mock_responses_config(&temp, &server.url);
 
     let mut command = neo();
     command
@@ -969,7 +935,7 @@ fn run_text_registers_enabled_extension_tool_in_model_request() {
     let temp = TempDir::new().expect("tempdir");
     write_echo_extension_at(&temp.path().join(".neo/extensions/echo"));
     let server = MockSseServer::start(vec![openai_response_sse("resp-ext", "extension ready")]);
-    write_api_base_config(&temp, &server.url);
+    write_mock_responses_config(&temp, &server.url);
 
     let mut command = neo();
     command
@@ -995,8 +961,7 @@ fn run_text_registers_enabled_stdio_mcp_tools_from_project_config() {
     write_config(
         &temp,
         &format!(
-            r#"
-api_base = "{}"
+            r#"{}
 
 [[mcp.servers]]
 id = "docs-server"
@@ -1005,7 +970,7 @@ transport = "stdio"
 command = "python3"
 args = ["-u", "{}"]
 "#,
-            server.url,
+            mock_responses_config(&server.url),
             mcp_fixture.display()
         ),
     );

@@ -21,8 +21,7 @@ pub use image_generation::{
 pub use options::{CacheRetention, ReasoningEffort, RequestMetadata, RequestOptions};
 pub use reasoning::{ReasoningContinuation, ReasoningPolicy, sanitize_reasoning_continuation};
 pub use registry::{
-    ImageGenerationPricing, ModelPricing, ModelRegistry, ModelSourceMetadata,
-    ProviderCredentialStatus, ProviderRegistry, ProviderResolver, ProviderSpec, TokenPricing,
+    ModelRegistry, ProviderCredentialStatus, ProviderRegistry, ProviderResolver, ProviderSpec,
 };
 pub use stream::collect_tool_arguments;
 pub use tool_schema::schema_for;

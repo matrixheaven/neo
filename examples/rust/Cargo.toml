@@ -17,10 +17,6 @@ serde_json.workspace = true
 tokio.workspace = true
 
 [[example]]
-name = "model_catalog"
-path = "model_catalog.rs"
-
-[[example]]
 name = "provider_registry"
 path = "provider_registry.rs"
 

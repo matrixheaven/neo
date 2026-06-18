@@ -2,6 +2,7 @@ use neo_tui::ansi::{Color, Style};
 use neo_tui::core::{
     Component, Container, Finalization, GutterContainer, InputResult, Line, Span, Text,
 };
+use neo_tui::input::InputEvent;
 
 struct StaticComponent {
     rows: Vec<Line>,
@@ -50,7 +51,7 @@ fn component_defaults_to_live_and_ignored_input() {
 
     assert_eq!(component.finalization(), Finalization::Live);
     assert_eq!(
-        component.handle_input(neo_tui::InputEvent::Cancel),
+        component.handle_input(InputEvent::Cancel),
         InputResult::Ignored
     );
     assert_eq!(component.render(80), vec![Line::raw("ready")]);

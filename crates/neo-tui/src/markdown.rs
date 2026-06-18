@@ -10,7 +10,8 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use unicode_width::UnicodeWidthChar;
 
 use crate::ansi::{Color, Style, visible_width};
-use crate::app::TuiTheme;
+use crate::chrome::TuiTheme;
+use crate::components::wrap_width;
 use crate::core::{Line, Span};
 
 /// Render markdown `text` into styled lines, wrapped to `width`.
@@ -361,7 +362,7 @@ impl<'a> MdRenderer<'a> {
     fn emit_wrapped_spans(&mut self, spans: Vec<Span>, prefix: &str) {
         let body_width = self.width.saturating_sub(visible_width(prefix)).max(1);
         let single = spans_to_ansi(&spans);
-        let wrapped = crate::wrap_width(&single, body_width);
+        let wrapped = wrap_width(&single, body_width);
         let indent = " ".repeat(visible_width(prefix));
         for (i, line) in wrapped.into_iter().enumerate() {
             let text = crate::ansi::strip_ansi(&line);

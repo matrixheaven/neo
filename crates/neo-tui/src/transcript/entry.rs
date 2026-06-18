@@ -1,10 +1,10 @@
 use crate::ansi::{Color, Style, paint, visible_width};
-use crate::app::TuiTheme;
+use crate::chrome::TuiTheme;
+use crate::components::wrap_width;
 use crate::core::Line;
-use crate::image::InlineImage;
+use crate::image::{ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities};
 use crate::transcript::ToolCallComponent;
 use crate::widgets::box_draw;
-use crate::{ImageRenderPolicy, ImageSource, TerminalImageCapabilities, wrap_width};
 
 /// Rich welcome-banner content rendered as a rounded box (matching kimi-code).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -527,7 +527,7 @@ fn thinking_style(theme: &TuiTheme) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::TuiTheme;
+    use crate::chrome::TuiTheme;
 
     #[test]
     fn welcome_banner_has_correct_width_and_logo() {

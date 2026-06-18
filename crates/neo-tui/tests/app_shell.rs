@@ -1,13 +1,13 @@
-use neo_tui::transcript::render_chrome_lines;
-use neo_tui::{
-    AppMode, CommandPaletteState, CommandSpec, ContextWindow, ImageProtocolPreference,
-    ImageRenderPolicy, ModelPickerState, NeoTuiApp, Overlay, OverlayKind, PickerItem,
-    SessionPickerItem, SessionPickerScope, SessionPickerState, StreamUpdate,
-    TerminalImageCapabilities,
+use neo_tui::chrome::{
+    ApprovalChoice, ChromeMode, CommandPaletteState, CommandSpec, ContextWindow, ModelPickerState,
+    NeoChromeState, Overlay, OverlayKind, PickerItem, PromptEdit, SessionPickerItem,
+    SessionPickerScope, SessionPickerState, StreamUpdate, ToolStatusKind,
 };
+use neo_tui::image::{ImageProtocolPreference, ImageRenderPolicy, TerminalImageCapabilities};
+use neo_tui::transcript::{TranscriptPane, render_chrome_lines};
 use std::path::PathBuf;
 
-fn render_app(width: u16, app: &NeoTuiApp) -> Vec<String> {
+fn render_app(width: u16, app: &NeoChromeState) -> Vec<String> {
     render_chrome_lines(app, usize::from(width))
         .lines
         .into_iter()
@@ -15,11 +15,7 @@ fn render_app(width: u16, app: &NeoTuiApp) -> Vec<String> {
         .collect()
 }
 
-fn render_transcript(
-    width: usize,
-    height: usize,
-    transcript: &mut neo_tui::TranscriptPane,
-) -> Vec<String> {
+fn render_transcript(width: usize, height: usize, transcript: &mut TranscriptPane) -> Vec<String> {
     transcript
         .render_frame(width, height)
         .expect("transcript frame")
@@ -30,10 +26,9 @@ fn render_transcript(
 
 #[test]
 fn app_shell_renders_context_window_and_working_status() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
-    app.prompt_mut()
-        .apply_edit(neo_tui::PromptEdit::Insert("hello"));
+    app.prompt_mut().apply_edit(PromptEdit::Insert("hello"));
     assert_eq!(app.submit_prompt(), Some("hello".to_owned()));
 
     let lines = render_app(100, &app);
@@ -44,8 +39,8 @@ fn app_shell_renders_context_window_and_working_status() {
 
 #[test]
 fn transcript_pane_renders_startup_banner() {
-    let app = NeoTuiApp::new("neo", "test-session", "openai/gpt-4.1", "/tmp/neo-ws");
-    let mut runtime = neo_tui::TranscriptPane::new(80, 12);
+    let app = NeoChromeState::new("neo", "test-session", "openai/gpt-4.1", "/tmp/neo-ws");
+    let mut runtime = TranscriptPane::new(80, 12);
     runtime.push_welcome_banner(
         app.title(),
         app.session_label(),
@@ -65,7 +60,7 @@ fn transcript_pane_renders_startup_banner() {
 
 #[test]
 fn app_shell_context_color_changes_by_threshold() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
     app.set_context_window(Some(ContextWindow::new(100_000).with_used_tokens(50_000)));
     assert_eq!(app.context_color(), app.theme().footer_context_ok);
@@ -79,7 +74,7 @@ fn app_shell_context_color_changes_by_threshold() {
 
 #[test]
 fn app_shell_footer_has_two_lines_when_tall() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
 
     let lines = render_app(100, &app);
@@ -93,7 +88,7 @@ fn app_shell_footer_has_two_lines_when_tall() {
 
 #[test]
 fn app_shell_working_status_hides_running_tool_names_from_chrome() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.apply_stream_update(StreamUpdate::ToolStarted {
         id: "tool-1".to_owned(),
         name: "shell.run".to_owned(),
@@ -111,7 +106,7 @@ fn app_shell_working_status_hides_running_tool_names_from_chrome() {
 
 #[test]
 fn app_shell_updates_context_usage_from_agent_event() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.set_context_window(Some(ContextWindow::new(200_000)));
 
     app.apply_agent_event(neo_agent_core::AgentEvent::TokenUsage {
@@ -132,7 +127,7 @@ fn app_shell_updates_context_usage_from_agent_event() {
 
 #[test]
 fn app_shell_maps_agent_core_approval_request_to_approval_overlay() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
     app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
         turn: 7,
@@ -142,11 +137,8 @@ fn app_shell_maps_agent_core_approval_request_to_approval_overlay() {
         arguments: serde_json::json!({ "command": "cargo test -p neo-tui" }),
     });
 
-    assert_eq!(app.mode(), AppMode::Approval);
-    assert_eq!(
-        app.approval_choice(),
-        Some(neo_tui::ApprovalChoice::Approve)
-    );
+    assert_eq!(app.mode(), ChromeMode::Approval);
+    assert_eq!(app.approval_choice(), Some(ApprovalChoice::Approve));
     assert!(matches!(
         app.focused_overlay().map(|overlay| &overlay.kind),
         Some(OverlayKind::Approval(modal))
@@ -158,10 +150,9 @@ fn app_shell_maps_agent_core_approval_request_to_approval_overlay() {
 
 #[test]
 fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
-    let mut app = NeoTuiApp::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
+    let mut app = NeoChromeState::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
     app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
-    app.prompt_mut()
-        .apply_edit(neo_tui::PromptEdit::Insert("/"));
+    app.prompt_mut().apply_edit(PromptEdit::Insert("/"));
 
     let lines = render_app(92, &app);
     let composer_row = lines
@@ -188,7 +179,7 @@ fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
 
 #[test]
 fn transcript_pane_frame_keeps_latest_live_row_visible() {
-    let mut runtime = neo_tui::TranscriptPane::new(80, 12);
+    let mut runtime = TranscriptPane::new(80, 12);
     runtime.set_live_chrome_height(5);
     for index in 0..36 {
         runtime.start_assistant_message();
@@ -202,7 +193,7 @@ fn transcript_pane_frame_keeps_latest_live_row_visible() {
 
 #[test]
 fn transcript_pane_maps_shell_command_lifecycle_to_tool_run() {
-    let mut runtime = neo_tui::TranscriptPane::new(100, 12);
+    let mut runtime = TranscriptPane::new(100, 12);
 
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ShellCommandStarted {
         turn: 1,
@@ -224,7 +215,7 @@ fn transcript_pane_maps_shell_command_lifecycle_to_tool_run() {
         entries.last(),
         Some(neo_tui::transcript::TranscriptEntry::ToolRun { component })
             if component.name() == "shell.run"
-                && component.status() == neo_tui::ToolStatusKind::Succeeded
+                && component.status() == ToolStatusKind::Succeeded
                 && component.result().is_some_and(|result| result.contains("stdout: ok"))
     ));
     let lines = render_transcript(100, 12, &mut runtime);
@@ -233,7 +224,7 @@ fn transcript_pane_maps_shell_command_lifecycle_to_tool_run() {
 
 #[test]
 fn transcript_pane_running_tool_call_is_rendered_before_finish() {
-    let mut runtime = neo_tui::TranscriptPane::new(100, 12);
+    let mut runtime = TranscriptPane::new(100, 12);
 
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
         turn: 1,
@@ -248,7 +239,7 @@ fn transcript_pane_running_tool_call_is_rendered_before_finish() {
         entries.last(),
         Some(neo_tui::transcript::TranscriptEntry::ToolRun { component })
             if component.name() == "List"
-                && component.status() == neo_tui::ToolStatusKind::Running
+                && component.status() == ToolStatusKind::Running
                 && component.arguments().is_some_and(|arguments| arguments.contains("crates/neo-tui/src"))
     ));
 
@@ -258,7 +249,7 @@ fn transcript_pane_running_tool_call_is_rendered_before_finish() {
 
 #[test]
 fn transcript_pane_preserves_tool_arguments_separately_from_result() {
-    let mut runtime = neo_tui::TranscriptPane::new(100, 12);
+    let mut runtime = TranscriptPane::new(100, 12);
 
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
         turn: 1,
@@ -302,7 +293,7 @@ fn transcript_pane_preserves_tool_arguments_separately_from_result() {
         runtime.transcript().entries().last(),
         Some(neo_tui::transcript::TranscriptEntry::ToolRun { component })
             if component.name() == "read"
-                && component.status() == neo_tui::ToolStatusKind::Succeeded
+                && component.status() == ToolStatusKind::Succeeded
                 && component.arguments() == Some(r#"{"path":"README.md"}"#)
                 && component.result() == Some("read README")
     ));
@@ -310,7 +301,7 @@ fn transcript_pane_preserves_tool_arguments_separately_from_result() {
 
 #[test]
 fn transcript_pane_maps_queue_notice_and_compaction_boundary() {
-    let mut runtime = neo_tui::TranscriptPane::new(100, 12);
+    let mut runtime = TranscriptPane::new(100, 12);
 
     runtime.apply_agent_event(neo_agent_core::AgentEvent::QueueDrained {
         kind: neo_agent_core::QueueKind::FollowUp,
@@ -338,7 +329,7 @@ fn transcript_pane_maps_queue_notice_and_compaction_boundary() {
 
 #[test]
 fn transcript_pane_replays_thinking_tool_assistant_in_order() {
-    let mut runtime = neo_tui::TranscriptPane::new(100, 20);
+    let mut runtime = TranscriptPane::new(100, 20);
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ThinkingStarted {
         turn: 1,
         id: "thinking-1".to_owned(),
@@ -403,7 +394,7 @@ fn transcript_pane_replays_thinking_tool_assistant_in_order() {
 
 #[test]
 fn transcript_pane_inline_images_are_structured_entries() {
-    let mut runtime = neo_tui::TranscriptPane::new(100, 12);
+    let mut runtime = TranscriptPane::new(100, 12);
     runtime.push_image(
         "image/png",
         &neo_agent_core::ImageRef::Base64("aGVsbG8=".to_owned()),
@@ -424,7 +415,7 @@ fn transcript_pane_inline_images_are_structured_entries() {
 
 #[test]
 fn plan_mode_and_todo_events_remain_app_ui_state() {
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
     app.apply_stream_update(StreamUpdate::PlanModeChanged { active: true });
     assert!(app.is_plan_mode());
@@ -503,7 +494,7 @@ fn model_picker_confirms_selected_item() {
 
 #[test]
 fn overlay_message_renders_plain_line() {
-    let mut app = NeoTuiApp::new("neo", "s", "m", "/tmp");
+    let mut app = NeoChromeState::new("neo", "s", "m", "/tmp");
     app.push_overlay(Overlay::new(
         "message",
         OverlayKind::Message("hello".to_owned()),

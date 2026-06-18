@@ -1,10 +1,13 @@
 use crate::ansi::Rect;
 use unicode_width::UnicodeWidthChar;
 
-use crate::{ApprovalModal, NeoTuiApp, OverlayKind, PromptState, TodoPanel};
+use crate::{
+    chrome::{ApprovalModal, NeoChromeState, OverlayKind, PromptState},
+    widgets::TodoPanel,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AppLayout {
+pub struct ChromeLayout {
     pub body: Rect,
     pub todo: Rect,
     pub status: Rect,
@@ -16,7 +19,7 @@ pub struct AppLayout {
 }
 
 #[must_use]
-pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
+pub fn chrome_layout(app: &NeoChromeState, area: Rect) -> ChromeLayout {
     let prompt_height = prompt_height(app.prompt(), area.width);
     let footer_bar_height = if area.height >= 12 {
         2
@@ -108,7 +111,7 @@ pub fn app_layout(app: &NeoTuiApp, area: Rect) -> AppLayout {
         height: footer_bar_height,
     };
 
-    AppLayout {
+    ChromeLayout {
         body,
         todo,
         status,

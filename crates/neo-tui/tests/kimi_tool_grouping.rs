@@ -4,8 +4,8 @@
 //! so they cover what the user actually sees.
 
 use neo_agent_core::AgentEvent;
-use neo_tui::TranscriptPane;
 use neo_tui::ansi::strip_ansi;
+use neo_tui::transcript::TranscriptPane;
 
 fn plain_frame(runtime: &mut TranscriptPane, width: usize, height: usize) -> Vec<String> {
     runtime

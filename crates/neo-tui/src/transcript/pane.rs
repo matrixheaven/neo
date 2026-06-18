@@ -3,18 +3,16 @@ use std::collections::BTreeMap;
 use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef};
 
 use crate::ansi::{Style, paint, truncate_to_width, visible_width};
-use crate::app::TuiTheme;
+use crate::chrome::{NeoChromeState, PromptState, ToolStatusKind, TuiTheme};
+use crate::components::wrap_width;
 use crate::core::{Expandable, Line};
-use crate::pi_tui::CURSOR_MARKER;
+use crate::image::{ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities};
+use crate::pi_tui::{CURSOR_MARKER, CursorPos};
 use crate::transcript::{
     InlineImageRender, ToolCallComponent, ToolCallState, ToolGroup, TranscriptEntry,
     TranscriptStore, render_tool_group,
 };
 use crate::widgets::box_draw;
-use crate::{
-    ImageRenderPolicy, ImageSource, InlineImage, NeoTuiApp, PromptState, TerminalImageCapabilities,
-    ToolStatusKind, wrap_width,
-};
 
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 5;
 
@@ -53,7 +51,7 @@ pub struct TranscriptPane {
     /// tests can inspect rendered output via [`frame_ansi_lines`] without
     /// recomposing unchanged rows.
     last_frame: Vec<String>,
-    /// Theme used to color the live transcript body. Mirrors [`NeoTuiApp`]'s
+    /// Theme used to color the live transcript body. Mirrors [`NeoChromeState`]'s
     /// theme; kept here (rather than borrowed) so the runtime can render
     /// without holding a reference to the app. The interactive mode keeps it
     /// in sync via [`Self::set_theme`].
@@ -586,7 +584,7 @@ impl TranscriptPane {
     /// Render a single flat frame of all non-chrome content lines as ANSI
     /// strings.
     ///
-    /// The chrome (prompt box + footer) depends on [`NeoTuiApp`] state and is
+    /// The chrome (prompt box + footer) depends on [`NeoChromeState`] state and is
     /// appended by the caller via [`render_chrome_lines`] before the
     /// whole frame is handed to [`crate::pi_tui::TuiRenderer::render`].
     /// This mirrors pi-tui's single-buffer model: every screen line lives in
@@ -967,12 +965,12 @@ fn take_completed_tool_result(completed_tool_result_ids: &mut Vec<String>, id: &
 /// starts within those lines.
 pub struct ChromeRender {
     pub lines: Vec<String>,
-    pub cursor: Option<crate::CursorPos>,
+    pub cursor: Option<CursorPos>,
     pub prompt_start_row: usize,
 }
 
 #[must_use]
-pub fn render_chrome_lines(app: &NeoTuiApp, width: usize) -> ChromeRender {
+pub fn render_chrome_lines(app: &NeoChromeState, width: usize) -> ChromeRender {
     let content_width = frame_content_width(width);
     let mut lines = Vec::new();
     let prompt_start_row = lines.len();
@@ -992,7 +990,7 @@ pub fn render_chrome_lines(app: &NeoTuiApp, width: usize) -> ChromeRender {
 /// Render only the footer lines (status bar + hint line), without the prompt
 /// box. Used when a session picker overlay replaces the prompt/editor area.
 #[must_use]
-pub fn render_footer_only_lines(app: &NeoTuiApp, width: usize) -> Vec<String> {
+pub fn render_footer_only_lines(app: &NeoChromeState, width: usize) -> Vec<String> {
     let content_width = frame_content_width(width);
     render_footer_lines(app, content_width)
 }
@@ -1003,9 +1001,9 @@ pub fn frame_content_width(width: usize) -> usize {
 }
 
 /// Render the `/` command dropdown below the prompt box, if active.
-fn render_prompt_completion_dropdown(app: &NeoTuiApp, width: usize) -> Option<Vec<String>> {
+fn render_prompt_completion_dropdown(app: &NeoChromeState, width: usize) -> Option<Vec<String>> {
     let overlay = app.focused_overlay()?;
-    let crate::app::OverlayKind::PromptCompletion(state) = &overlay.kind else {
+    let crate::chrome::OverlayKind::PromptCompletion(state) = &overlay.kind else {
         return None;
     };
     let inner_width = width.saturating_sub(2).max(1);
@@ -1028,7 +1026,7 @@ fn render_prompt_completion_dropdown(app: &NeoTuiApp, width: usize) -> Option<Ve
 /// wrapped/explicit-newline text aligns under the body (matching kimi-code's
 /// `paddingX: 4` editor). Border color is weak by default and switches to
 /// the brand color when the input starts with `/` or plan mode is active.
-fn render_prompt_lines(app: &NeoTuiApp, width: usize) -> (Vec<String>, Option<crate::CursorPos>) {
+fn render_prompt_lines(app: &NeoChromeState, width: usize) -> (Vec<String>, Option<CursorPos>) {
     let theme = app.theme();
     let prompt = app.prompt();
     let highlighted = app.is_plan_mode() || prompt.text.trim_start().starts_with('/');
@@ -1086,17 +1084,17 @@ fn build_prompt_logical_lines(prompt: &PromptState, body_width: usize) -> Vec<St
     out
 }
 
-fn find_cursor(lines: &[String]) -> Option<crate::CursorPos> {
+fn find_cursor(lines: &[String]) -> Option<CursorPos> {
     for (row, line) in lines.iter().enumerate() {
         if let Some(byte_pos) = line.find(CURSOR_MARKER) {
             let col = visible_width(&line[..byte_pos]);
-            return Some(crate::CursorPos { row, col });
+            return Some(CursorPos { row, col });
         }
     }
     None
 }
 
-fn render_footer_lines(app: &NeoTuiApp, width: usize) -> Vec<String> {
+fn render_footer_lines(app: &NeoChromeState, width: usize) -> Vec<String> {
     let theme = app.theme();
     let (perm_label, perm_color) = app.permission_badge();
     let mut left_parts = vec![paint(
@@ -1164,14 +1162,14 @@ fn render_footer_lines(app: &NeoTuiApp, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{NeoTuiApp, PickerItem, PromptCompletionPrefix, TuiTheme};
+    use crate::chrome::{NeoChromeState, PickerItem, PromptCompletionPrefix, PromptEdit, TuiTheme};
 
     #[test]
     fn prompt_box_lines_are_exact_width() {
-        let mut app = NeoTuiApp::new("neo", "s", "m", "/tmp");
+        let mut app = NeoChromeState::new("neo", "s", "m", "/tmp");
         app.set_theme(TuiTheme::default());
         app.prompt_mut()
-            .apply_edit(crate::PromptEdit::Insert("hello world"));
+            .apply_edit(PromptEdit::Insert("hello world"));
         let render = render_chrome_lines(&app, 40);
         // Lines render below terminal width so the caller can apply
         // CHROME_GUTTER without triggering terminal autowrap.
@@ -1203,8 +1201,8 @@ mod tests {
 
     #[test]
     fn completion_dropdown_is_below_prompt() {
-        let mut app = NeoTuiApp::new("neo", "s", "m", "/tmp");
-        app.prompt_mut().apply_edit(crate::PromptEdit::Insert("/"));
+        let mut app = NeoChromeState::new("neo", "s", "m", "/tmp");
+        app.prompt_mut().apply_edit(PromptEdit::Insert("/"));
         app.open_prompt_completion_picker(
             PromptCompletionPrefix {
                 start: 0,

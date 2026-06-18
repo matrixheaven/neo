@@ -325,7 +325,6 @@ struct ReleaseSmokeFixture {
     _temp_dir: tempfile::TempDir,
     home_dir: PathBuf,
     config_path: PathBuf,
-    sessions_dir: PathBuf,
     extension_source_dir: PathBuf,
 }
 
@@ -409,7 +408,6 @@ MCP_PID_FILE = "{}"
             _temp_dir: temp_dir,
             home_dir,
             config_path,
-            sessions_dir,
             extension_source_dir,
         })
     }
@@ -420,10 +418,6 @@ MCP_PID_FILE = "{}"
             (
                 "NEO_CONFIG".to_owned(),
                 self.config_path.display().to_string(),
-            ),
-            (
-                "NEO_SESSIONS_DIR".to_owned(),
-                self.sessions_dir.display().to_string(),
             ),
         ]
     }
@@ -684,8 +678,9 @@ struct ParitySources {
     runtime: String,
     interactive: String,
     input: String,
-    tui_app: String,
-    tui_components: String,
+    tui_transcript_store: String,
+    tui_transcript_pane: String,
+    tui_tool_diff: String,
     tui_image: String,
     ai_options: String,
     anthropic: String,
@@ -702,8 +697,9 @@ impl ParitySources {
             runtime: read_agent_core_source(root, &["runtime.rs"])?,
             interactive: read_neo_agent_source(root, &["modes", "interactive.rs"])?,
             input: read_tui_source(root, &["input.rs"])?,
-            tui_app: read_tui_source(root, &["app.rs"])?,
-            tui_components: read_tui_source(root, &["components.rs"])?,
+            tui_transcript_store: read_tui_source(root, &["transcript", "store.rs"])?,
+            tui_transcript_pane: read_tui_source(root, &["transcript", "pane.rs"])?,
+            tui_tool_diff: read_tui_source(root, &["tool_diff.rs"])?,
             tui_image: read_tui_source(root, &["image.rs"])?,
             ai_options: read_crate_source(root, "ai", &["options.rs"])?,
             anthropic: read_ai_provider_source(root, "anthropic.rs")?,
@@ -793,7 +789,9 @@ fn insert_interactive_surfaces(
     }
     if sources.interactive.contains("open_model_picker")
         && sources.interactive.contains("apply_selected_model")
-        && sources.interactive.contains("model_catalog_for_config")
+        && sources
+            .interactive
+            .contains("model_picker_catalog_for_config")
         && sources.input.contains("ModelPickerOpen")
     {
         implemented.insert(ImplementedSurface::InteractiveModelPicker);
@@ -808,9 +806,9 @@ fn insert_interactive_surfaces(
 }
 
 fn insert_tui_surfaces(sources: &ParitySources, implemented: &mut BTreeSet<ImplementedSurface>) {
-    if sources.tui_app.contains("DiffAdded")
-        && sources.tui_app.contains("DiffRemoved")
-        && sources.tui_components.contains("transcript_line_style")
+    if sources.tui_tool_diff.contains("DiffModel")
+        && sources.tui_tool_diff.contains("DiffRenderState")
+        && sources.tui_tool_diff.contains("parse_unified")
     {
         implemented.insert(ImplementedSurface::TuiUnifiedDiffRenderer);
     }
@@ -820,10 +818,11 @@ fn insert_tui_surfaces(sources: &ParitySources, implemented: &mut BTreeSet<Imple
     {
         implemented.insert(ImplementedSurface::TuiPasteBuffering);
     }
-    if sources.tui_app.contains("TranscriptSelection")
-        && sources.tui_app.contains("copy_selection")
-        && sources.tui_app.contains("copy_selected_transcript_text")
-        && sources.tui_components.contains("with_selection")
+    if sources.tui_transcript_store.contains("TranscriptSelection")
+        && sources.tui_transcript_store.contains("copy_selection")
+        && sources
+            .tui_transcript_pane
+            .contains("copy_selected_transcript_text")
         && sources.input.contains("TranscriptSelectionStart")
         && sources.input.contains("TranscriptCopySelection")
         && sources.input.contains("tui.transcript.copySelection")
@@ -835,8 +834,8 @@ fn insert_tui_surfaces(sources: &ParitySources, implemented: &mut BTreeSet<Imple
     }
     if terminal_image_protocol_symbols_exist(&[
         &sources.input,
-        &sources.tui_app,
-        &sources.tui_components,
+        &sources.tui_transcript_store,
+        &sources.tui_transcript_pane,
         &sources.tui_image,
     ]) {
         implemented.insert(ImplementedSurface::TerminalImageProtocol);
@@ -890,7 +889,7 @@ fn read_neo_agent_source(root: &Path, parts: &[&str]) -> Result<String> {
 }
 
 fn read_tui_source(root: &Path, parts: &[&str]) -> Result<String> {
-    read_crate_source(root, "tui", parts)
+    read_crate_source(root, "neo-tui", parts)
 }
 
 fn read_ai_provider_source(root: &Path, file: &str) -> Result<String> {
@@ -1818,9 +1817,9 @@ fn validate_minimal_config(root: &Path, path: &Path) -> Result<Vec<String>> {
         }
     }
 
-    if keys.contains(&"api_base") {
+    if keys.contains(&"transport_override") {
         errors.push(format!(
-            "{} must not set api_base in the minimal development fixture",
+            "{} must not set transport_override in the minimal development fixture",
             relative.display()
         ));
     }
@@ -2556,7 +2555,7 @@ mod tests {
     #[test]
     fn parity_validation_rejects_image_runtime_detection_claims_from_encoder_symbols() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let tui_src = dir.path().join("crates").join("tui").join("src");
+        let tui_src = dir.path().join("crates").join("neo-tui").join("src");
         std::fs::create_dir_all(&tui_src).expect("tui source dir");
         std::fs::write(
             tui_src.join("image.rs"),
@@ -2810,7 +2809,7 @@ mod tests {
             .join("neo-agent")
             .join("src")
             .join("modes");
-        let input_dir = dir.path().join("crates").join("tui").join("src");
+        let input_dir = dir.path().join("crates").join("neo-tui").join("src");
         std::fs::create_dir_all(&interactive_dir).expect("interactive source dir");
         std::fs::create_dir_all(&input_dir).expect("input source dir");
         std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
@@ -2849,13 +2848,13 @@ mod tests {
             .join("neo-agent")
             .join("src")
             .join("modes");
-        let input_dir = dir.path().join("crates").join("tui").join("src");
+        let input_dir = dir.path().join("crates").join("neo-tui").join("src");
         std::fs::create_dir_all(&interactive_dir).expect("interactive source dir");
         std::fs::create_dir_all(&input_dir).expect("input source dir");
         std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
         std::fs::write(
             interactive_dir.join("interactive.rs"),
-            "fn open_model_picker() {} fn apply_selected_model() {} fn model_catalog_for_config() {}\n",
+            "fn open_model_picker() {} fn apply_selected_model() {} fn model_picker_catalog_for_config() {}\n",
         )
         .expect("write interactive source");
         std::fs::write(input_dir.join("input.rs"), "enum Key { ModelPickerOpen }\n")
@@ -2885,7 +2884,7 @@ mod tests {
             .join("neo-agent")
             .join("src")
             .join("modes");
-        let input_dir = dir.path().join("crates").join("tui").join("src");
+        let input_dir = dir.path().join("crates").join("neo-tui").join("src");
         std::fs::create_dir_all(&interactive_dir).expect("interactive source dir");
         std::fs::create_dir_all(&input_dir).expect("input source dir");
         std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
@@ -2955,19 +2954,14 @@ mod tests {
     #[test]
     fn parity_validation_rejects_stale_tui_diff_gap_after_renderer_symbols_exist() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let tui_src = dir.path().join("crates").join("tui").join("src");
+        let tui_src = dir.path().join("crates").join("neo-tui").join("src");
         std::fs::create_dir_all(&tui_src).expect("tui source dir");
         std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
         std::fs::write(
-            tui_src.join("app.rs"),
-            "enum TranscriptLine { DiffAdded, DiffRemoved }\n",
+            tui_src.join("tool_diff.rs"),
+            "struct DiffModel; struct DiffRenderState; fn parse_unified() {}\n",
         )
-        .expect("write tui app source");
-        std::fs::write(
-            tui_src.join("components.rs"),
-            "fn transcript_line_style() {}\n",
-        )
-        .expect("write tui components source");
+        .expect("write tui diff source");
         std::fs::write(
             dir.path().join("docs").join("gap").join("tui.md"),
             "Keep TUI docs scoped until diff rendering lands.\n",
@@ -2987,19 +2981,14 @@ mod tests {
     #[test]
     fn parity_validation_allows_advanced_diff_affordance_gaps_after_basic_renderer_symbols_exist() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let tui_src = dir.path().join("crates").join("tui").join("src");
+        let tui_src = dir.path().join("crates").join("neo-tui").join("src");
         std::fs::create_dir_all(&tui_src).expect("tui source dir");
         std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
         std::fs::write(
-            tui_src.join("app.rs"),
-            "enum TranscriptLine { DiffAdded, DiffRemoved }\n",
+            tui_src.join("tool_diff.rs"),
+            "struct DiffModel; struct DiffRenderState; fn parse_unified() {}\n",
         )
-        .expect("write tui app source");
-        std::fs::write(
-            tui_src.join("components.rs"),
-            "fn transcript_line_style() {}\n",
-        )
-        .expect("write tui components source");
+        .expect("write tui diff source");
         std::fs::write(
             dir.path().join("docs").join("gap").join("tui.md"),
             "Advanced diff affordances remain not implemented.\n",
@@ -3014,7 +3003,7 @@ mod tests {
     #[test]
     fn parity_validation_rejects_stale_tui_paste_buffering_gap_after_input_parser_symbols_exist() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let tui_src = dir.path().join("crates").join("tui").join("src");
+        let tui_src = dir.path().join("crates").join("neo-tui").join("src");
         std::fs::create_dir_all(&tui_src).expect("tui source dir");
         std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
         std::fs::write(
@@ -3045,30 +3034,30 @@ mod tests {
     #[test]
     fn parity_validation_rejects_stale_tui_transcript_selection_copy_gap_after_symbols_exist() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let tui_src = dir.path().join("crates").join("tui").join("src");
+        let tui_src = dir.path().join("crates").join("neo-tui").join("src");
+        let transcript_src = tui_src.join("transcript");
         let interactive_dir = dir
             .path()
             .join("crates")
             .join("neo-agent")
             .join("src")
             .join("modes");
-        std::fs::create_dir_all(&tui_src).expect("tui source dir");
+        std::fs::create_dir_all(&transcript_src).expect("tui transcript source dir");
         std::fs::create_dir_all(&interactive_dir).expect("interactive source dir");
         std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
         std::fs::write(
-            tui_src.join("app.rs"),
+            transcript_src.join("store.rs"),
             concat!(
                 "struct TranscriptSelection;\n",
-                "impl ChatTranscript { fn copy_selection(&self) {} }\n",
-                "impl NeoTuiApp { fn copy_selected_transcript_text(&self) {} }\n",
+                "impl TranscriptStore { fn copy_selection(&self) {} }\n",
             ),
         )
-        .expect("write tui app source");
+        .expect("write tui transcript store source");
         std::fs::write(
-            tui_src.join("components.rs"),
-            "impl TranscriptWidget<'_> { fn with_selection(&self) {} }\n",
+            transcript_src.join("pane.rs"),
+            "impl TranscriptPane { fn copy_selected_transcript_text(&self) {} }\n",
         )
-        .expect("write tui components source");
+        .expect("write tui transcript pane source");
         std::fs::write(
             tui_src.join("input.rs"),
             concat!(
@@ -3101,7 +3090,7 @@ mod tests {
     #[test]
     fn parity_validation_rejects_stale_terminal_image_protocol_gap_after_symbols_exist() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let tui_src = dir.path().join("crates").join("tui").join("src");
+        let tui_src = dir.path().join("crates").join("neo-tui").join("src");
         std::fs::create_dir_all(&tui_src).expect("tui source dir");
         std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
         std::fs::write(
@@ -3133,7 +3122,7 @@ mod tests {
     #[test]
     fn parity_validation_allows_specific_unimplemented_image_protocol_gaps() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let tui_src = dir.path().join("crates").join("tui").join("src");
+        let tui_src = dir.path().join("crates").join("neo-tui").join("src");
         std::fs::create_dir_all(&tui_src).expect("tui source dir");
         std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
         std::fs::write(
@@ -3159,7 +3148,7 @@ mod tests {
     #[test]
     fn parity_validation_rejects_stale_sixel_gap_after_encoder_symbols_exist() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let tui_src = dir.path().join("crates").join("tui").join("src");
+        let tui_src = dir.path().join("crates").join("neo-tui").join("src");
         std::fs::create_dir_all(&tui_src).expect("tui source dir");
         std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
         std::fs::write(

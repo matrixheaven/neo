@@ -290,36 +290,16 @@ fn session_id_from_jsonl_path(
         .and_then(|stem| stem.to_str())
         .ok_or_else(|| anyhow::anyhow!("invalid session path {}", path.display()))?;
 
-    // Try canonicalize for path-containment checks. If the file doesn't exist
-    // (e.g. it was migrated to a bucket), fall back to the un-canonicalized path.
+    // Try canonicalize for path-containment checks. If the file does not exist,
+    // fall back to the un-canonicalized path for direct bucket paths.
     let canonical = path.canonicalize();
     let check_path = canonical.as_deref().unwrap_or(&path);
 
-    // Accept paths inside the workspace-scoped bucket directory (primary).
+    // Accept paths inside the workspace-scoped bucket directory.
     let bucket_dir = workspace_sessions_dir(config);
     if let Ok(bucket_canonical) = bucket_dir.canonicalize()
         && (check_path.starts_with(&bucket_canonical) || path.starts_with(&bucket_dir))
     {
-        validate_session_id(session_id)
-            .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
-        return Ok(Some(session_id.to_owned()));
-    }
-
-    // Also accept paths directly under the sessions root (legacy/compat).
-    let sessions_root = &config.sessions_dir;
-    if let Ok(root_canonical) = sessions_root.canonicalize()
-        && check_path.starts_with(&root_canonical)
-    {
-        validate_session_id(session_id)
-            .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
-        return Ok(Some(session_id.to_owned()));
-    }
-
-    // Also accept paths that look like they were under a project's sessions
-    // directory. We check containment broadly by looking for ".neo/sessions/"
-    // in the path, which covers both legacy and canonicalized variants.
-    // This is a fallback for migrated files whose original path no longer exists.
-    if path.to_string_lossy().contains(".neo/sessions/") {
         validate_session_id(session_id)
             .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
         return Ok(Some(session_id.to_owned()));

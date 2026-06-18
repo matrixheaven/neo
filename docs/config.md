@@ -57,7 +57,6 @@ arbitrary name you choose — it can be anything (e.g. `openai`, `anthropic`,
 | `base_url` | string | Yes* | API base URL |
 | `api_key` | string | No | Inline API key (stored in config) |
 | `api_key_env` | string | No | Environment variable name for the key |
-| `api_base` | string | No | Legacy alias for `base_url` |
 
 \* `base_url` can be omitted for built-in providers that have a default URL.
 
@@ -66,7 +65,7 @@ arbitrary name you choose — it can be anything (e.g. `openai`, `anthropic`,
 | Type | Wire Protocol | Example Providers |
 |------|--------------|-------------------|
 | `openai-responses` | OpenAI Responses API | OpenAI |
-| `openai-chat` | OpenAI Chat Completions | OpenAI (legacy) |
+| `openai-chat` | OpenAI Chat Completions | OpenAI |
 | `openai-compatible` | OpenAI-compatible Chat Completions | OpenRouter, Ollama, vLLM, local LLMs |
 | `anthropic` | Anthropic Messages API | Anthropic, Amazon Bedrock |
 | `google` | Google Generative AI | Google Gemini |
@@ -209,32 +208,16 @@ neo provider catalog add deepseek --api-key sk-...
 This fetches the catalog, infers the wire type, and writes the provider +
 all its models to `config.toml` automatically.
 
-## JSON Catalog Files (Legacy)
-
-For backward compatibility, Neo still supports JSON catalog files via
-`model_catalogs`:
-
-```toml
-model_catalogs = [".neo/models.json"]
-```
-
-Models from JSON catalogs are loaded in addition to those defined in
-`config.toml`. New users should prefer `[models.<alias>]` tables.
-
 ## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `NEO_MODEL` | Override default model |
-| `NEO_PROVIDER` | Override default provider |
-| `NEO_API_BASE` | Override base URL for selected provider |
-| `NEO_API_KEY_ENV` | Override API key env var name |
 | `NEO_CONFIG` | Path to config file |
+| `NEO_HOME` | Override Neo's home directory |
 
 ## Config Precedence
 
 1. CLI flags (`--model`, `--provider`, `--api-key`)
-2. Environment variables (`NEO_*`)
-3. Project config (`.neo/config.toml`)
-4. User-global config (`~/.neo/config.toml`)
+2. Project config (`.neo/config.toml`)
+3. User-global config (`~/.neo/config.toml`)
 5. Built-in defaults

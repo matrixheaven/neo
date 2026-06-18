@@ -30,7 +30,7 @@ use super::{
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct BashInput {
-    mode: Option<BashMode>,
+    mode: BashMode,
     command: Option<String>,
     workdir: Option<String>,
     handle: Option<String>,
@@ -67,7 +67,7 @@ impl Tool for BashTool {
             ctx.ensure_shell_allowed()?;
             let input: BashInput = parse_input(self.name(), input)?;
             let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
-            match input.mode.unwrap_or(BashMode::Foreground) {
+            match input.mode {
                 BashMode::Foreground => {
                     let command = required_field(self.name(), input.command, "command")?;
                     let workdir = input.workdir.as_deref();

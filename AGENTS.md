@@ -42,9 +42,9 @@ Key files at the root:
   time, sync, net).
 - **Networking**: `reqwest` with `rustls-tls`, streaming, JSON.
 - **CLI**: `clap` derive-based parser in `crates/neo-agent/src/cli.rs`.
-- **TUI**: `crossterm`-based custom terminal renderer (`InlineRenderer`) with
-  differential rendering, inline image protocols (Kitty, iTerm2, Sixel),
-  bracketed-paste handling, and a component-tree architecture.
+- **TUI**: `crossterm`-based terminal UI with pi-style rendering primitives,
+  inline image protocols (Kitty, iTerm2, Sixel), bracketed-paste handling, and
+  a component-tree architecture.
 - **Serialization / schemas**: `serde`, `serde_json`, `schemars`, `toml`.
 - **Markdown**: `pulldown-cmark` for rendering and export.
 - **Tracing**: `tracing` / `tracing-subscriber`.
@@ -190,7 +190,7 @@ crate.
 2. The runtime opens or creates a local JSONL session via
    `neo_agent_core::session`.
 3. The configured model is resolved through `neo_ai::ModelRegistry`
-   (seeded catalog + inline `[models.*]` TOML + legacy JSON catalogs) and
+   (seeded catalog + inline `[models.*]` TOML) and
    `neo_ai::ProviderRegistry` (built-in defaults + config-driven custom
    providers). `ProviderResolver` selects the wire client by the provider's
    declared `type`.
@@ -228,10 +228,6 @@ canonicalized absolute path. This ensures:
 - `/resume` only shows sessions from the **current workspace**
 - Different projects with the same basename get different buckets
 - The `NEO_HOME` env var overrides the home directory (`~/.neo` by default)
-
-On startup, `migrate_legacy_sessions()` automatically moves any sessions from
-the old `{project_dir}/.neo/sessions/` layout into the new bucket directory.
-Migration is idempotent.
 
 The global `session_index.jsonl` enables `neo resume <session_id>` to locate
 sessions across workspaces.
@@ -329,22 +325,19 @@ methods.
 Config precedence:
 
 1. CLI flags.
-2. `NEO_*` environment variables.
-3. Project `.neo/config.toml` (or path from `--config` / `NEO_CONFIG`).
-4. User-global `~/.neo/config.toml`.
-5. Built-in defaults (`openai/gpt-4.1`).
+2. Project `.neo/config.toml` (or path from `--config` / `NEO_CONFIG`).
+3. User-global `~/.neo/config.toml`.
+4. Built-in defaults (`openai/gpt-4.1`).
 
 Project config merges over user-global config field by field. Provider maps are
 merged by provider id; MCP servers are merged by server id. Important sections:
 
-- `default_provider`, `default_model`, `api_key_env`, `api_base`.
+- `default_provider`, `default_model`, `api_key_env`.
 - `providers.<id>` — full provider definition with `type`, `base_url`,
   `api_key` (inline) or `api_key_env` (environment variable).
   Users can define arbitrary provider ids.
 - `models.<alias>` — inline model definitions with `provider`, `model`,
   `max_context_tokens`, `capabilities`, `display_name`.
-- `model_catalogs` — legacy JSON model catalog files (still supported,
-  loaded in addition to inline `[models.*]` entries).
 - `permissions` — `Allow` / `Ask` / `Deny` for `file_read`, `file_write`,
   `shell`, `tool`.
 - `runtime` — `temperature`, `max_tokens`, `reasoning_effort`, queue modes,

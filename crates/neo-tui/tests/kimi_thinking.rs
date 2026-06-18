@@ -4,9 +4,9 @@
 //! (scrolling tail). Completed thinking shows the *first* 2 rows + a collapse
 //! hint when the full text was longer.
 
-use neo_tui::TranscriptPane;
 use neo_tui::ansi::strip_ansi;
 use neo_tui::transcript::TranscriptEntry;
+use neo_tui::transcript::TranscriptPane;
 
 fn plain_frame(runtime: &mut TranscriptPane, width: usize, height: usize) -> Vec<String> {
     runtime

@@ -1,9 +1,11 @@
 //! Model selector dialog — flat searchable model list with thinking toggle.
 
 use crate::ansi::Color;
+use crate::chrome::TuiTheme;
 use crate::components::{truncate_width, visible_width};
+use crate::core::InputResult;
+use crate::input::{InputEvent, KeybindingAction};
 use crate::searchable_list::SearchableList;
-use crate::{InputEvent, InputResult, TuiTheme};
 
 /// One model entry in the picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,23 +290,23 @@ impl ModelSelectorState {
                 InputResult::Handled
             }
             // Arrow up/down from keybindings
-            InputEvent::Action(crate::KeybindingAction::SelectUp) => {
+            InputEvent::Action(KeybindingAction::SelectUp) => {
                 self.list.move_up();
                 InputResult::Handled
             }
-            InputEvent::Action(crate::KeybindingAction::SelectDown) => {
+            InputEvent::Action(KeybindingAction::SelectDown) => {
                 self.list.move_down();
                 InputResult::Handled
             }
-            InputEvent::Action(crate::KeybindingAction::SelectPageUp) => {
+            InputEvent::Action(KeybindingAction::SelectPageUp) => {
                 self.list.page_up();
                 InputResult::Handled
             }
-            InputEvent::Action(crate::KeybindingAction::SelectPageDown) => {
+            InputEvent::Action(KeybindingAction::SelectPageDown) => {
                 self.list.page_down();
                 InputResult::Handled
             }
-            InputEvent::Action(crate::KeybindingAction::SelectConfirm) => {
+            InputEvent::Action(KeybindingAction::SelectConfirm) => {
                 if let Some(entry) = self.selected_entry().cloned() {
                     let thinking = self.effective_thinking(&entry);
                     self.result = Some(ModelSelectorResult::Selected(ModelSelection {
@@ -316,7 +318,7 @@ impl ModelSelectorState {
                     InputResult::Ignored
                 }
             }
-            InputEvent::Action(crate::KeybindingAction::SelectCancel) => {
+            InputEvent::Action(KeybindingAction::SelectCancel) => {
                 if self.list.clear_query() {
                     InputResult::Handled
                 } else {
@@ -534,13 +536,13 @@ mod tests {
         assert!(state.effective_thinking(&entry2)); // now on
 
         // Second model (claude) always_thinking → stays on regardless
-        state.handle_input(InputEvent::Action(crate::KeybindingAction::SelectDown));
+        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
         let entry3 = state.selected_entry().cloned().unwrap();
         assert_eq!(entry3.alias, "anthropic/claude-sonnet");
         assert!(state.effective_thinking(&entry3));
 
         // Third model (gemini) no thinking → stays off
-        state.handle_input(InputEvent::Action(crate::KeybindingAction::SelectDown));
+        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
         let entry4 = state.selected_entry().cloned().unwrap();
         assert_eq!(entry4.alias, "google/gemini-flash");
         assert!(!state.effective_thinking(&entry4));

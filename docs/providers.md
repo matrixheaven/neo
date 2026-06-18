@@ -18,9 +18,6 @@ test client.
   `AiStreamEvent` values.
 - `ModelRegistry` stores available `ModelSpec` values and exposes the first
   registered model as the default unless replaced by configuration.
-- `ModelRegistry::load_catalog_path` and `ModelRegistry::load_catalog_str` load
-  strict local JSON catalogs that use either the existing `ModelSpec` wire
-  shape or the supported custom-model subset of Pi `models.json`.
 - `ProviderRegistry::production()` registers the provider catalog used by
   production resolution: OpenAI, Anthropic, Google Generative AI, OpenRouter,
   and Amazon Bedrock credential hints.
@@ -77,14 +74,12 @@ succeeded.
 - `OpenAiCompatibleClient` for OpenAI-compatible Chat Completions providers
   such as OpenRouter.
 
-The production resolver requires a registered provider, a supported API kind,
-credentials from the provider's environment-key list, and a base URL. Built-in
-provider base URLs and credential environment names can be overridden from
-`neo-agent` project config with `providers.<provider-id>.api_base` and
-`providers.<provider-id>.api_key_env`. Provider/API compatibility is checked
-before credential lookup so a Pi catalog or custom catalog cannot accidentally
-route an Anthropic Messages model through OpenAI just because a matching API key
-exists. OpenAI supports both Responses and Chat Completions models; OpenRouter
+The production resolver requires a registered provider with an explicit
+`type`, credentials from the provider's environment-key list, and a base URL.
+Built-in provider base URLs and credential environment names can be overridden
+from `neo-agent` project config with `providers.<provider-id>.base_url` and
+`providers.<provider-id>.api_key_env`. The provider `type` selects the wire
+client. OpenAI supports both Responses and Chat Completions models; OpenRouter
 supports OpenAI-compatible and Chat Completions models. Anthropic, Google, and
 Amazon Bedrock are restricted to their registered protocol families. Bedrock is
 still credential metadata only until a production adapter/base URL contract
@@ -99,12 +94,11 @@ request. Google Generative AI sends base64 images as `inlineData` and rejects
 image URLs before issuing a request.
 
 `ImageGenerationClient` and `OpenAiImagesClient` support OpenAI-style
-`/images/generations` requests for local catalog models that advertise
-image-generation capability metadata. `neo images generate` writes base64
-provider image data directly to a workspace-contained output path. If a
-provider returns only a remote image URL, Neo refuses to fetch it unless
-`tui.fetch_remote_images = true` is set in config. Remote image fetches must
-use HTTP(S), return an image content type, and stay under the remote image size
+`/images/generations` requests. `neo images generate` writes base64 provider
+image data directly to a workspace-contained output path. If a provider returns
+only a remote image URL, Neo refuses to fetch it unless
+`tui.fetch_remote_images = true` is set in config. Remote image fetches must use
+HTTP(S), return an image content type, and stay under the remote image size
 limit.
 
 OpenAI reasoning controls use the typed `RequestOptions::reasoning_effort`
@@ -130,78 +124,6 @@ Requests that include image content, tool schemas, or reasoning effort fail
 locally when the selected model does not advertise the matching capability, so
 unsupported combinations do not become provider-specific transport failures.
 
-## Local Model Catalogs
-
-Neo supports strict local JSON model catalogs. They extend or replace
-`ModelRegistry::seeded()` entries by `provider` and `model`.
-
-The native Neo shape stores the exact `ModelSpec` fields:
-
-```json
-{
-  "models": [
-    {
-      "provider": "openrouter",
-      "model": "anthropic/claude-sonnet-4.5",
-      "api": "OpenAiCompatible",
-      "capabilities": {
-        "streaming": true,
-        "tools": true,
-        "images": false,
-        "reasoning": true,
-        "embeddings": false,
-        "max_context_tokens": 200000
-      }
-    }
-  ],
-  "default": {
-    "provider": "openrouter",
-    "model": "anthropic/claude-sonnet-4.5"
-  }
-}
-```
-
-Catalog loading fails on missing files, invalid JSON, empty model lists, empty
-provider/model strings, zero `max_context_tokens`, or a `default` that does not
-match a registered model. `neo-agent` project config can reference catalog files
-with `model_catalogs = [".neo/models.json"]`; relative paths resolve from the
-project root.
-
-Neo also accepts the custom-model subset of Pi `models.json`, detected by a
-top-level `providers` object:
-
-```json
-{
-  "providers": {
-    "ollama": {
-      "api": "openai-completions",
-      "models": [
-        {
-          "id": "llama3.1:8b",
-          "input": ["text"],
-          "contextWindow": 128000
-        }
-      ]
-    }
-  }
-}
-```
-
-Supported Pi API names are `openai-responses`, `openai-completions`,
-`openai-compatible`, `anthropic-messages`, `google-generative-ai`, and `local`.
-The loader maps Pi `id`, provider map key, `api`, `reasoning`, `input`, and
-`contextWindow` into `ModelSpec`. It rejects unsupported Pi APIs such as
-`bedrock-converse-stream` instead of silently downgrading them. It also rejects
-Pi metadata that would affect requests, credentials, cost accounting, or
-provider compatibility if imported without a Neo runtime contract. Provider
-fields such as `baseUrl`, `apiKey`, `headers`, `authHeader`, `compat`, and
-`modelOverrides`, plus model fields such as `baseUrl`, `cost`, `maxTokens`,
-`headers`, `compat`, and `thinkingLevelMap`, must be represented through
-explicit Neo provider config or future Neo runtime fields before they can be
-accepted. Pure display metadata such as provider/model `name` is preserved as
-`ModelRegistry` display metadata and shown by `neo models list`; it is not part
-of `ModelSpec` and is never sent to provider request payloads.
-
 ## Test Provider
 
 `neo_ai::providers::fake::FakeModelClient` is available for tests. It stores
@@ -223,6 +145,4 @@ Do not expose provider-native request or response types to `neo-agent-core`.
 ## Example
 
 See [examples/rust/provider_registry.rs](../examples/rust/provider_registry.rs)
-for a small registry and `RequestOptions` snippet, and
-[examples/rust/model_catalog.rs](../examples/rust/model_catalog.rs) for loading
-a local JSON catalog.
+for a small registry and `RequestOptions` snippet.

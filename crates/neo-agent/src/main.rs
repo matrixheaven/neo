@@ -43,12 +43,6 @@ async fn main() -> anyhow::Result<()> {
 async fn dispatch(cli: Cli) -> anyhow::Result<String> {
     let config = AppConfig::load(ConfigOverrides::from_cli(&cli))?;
 
-    // Migrate legacy sessions from {project_dir}/.neo/sessions/ to the new
-    // workspace-scoped layout. Idempotent — no-op if already migrated.
-    if let Err(error) = modes::session_migrate::migrate_legacy_sessions(&config) {
-        tracing::warn!("session migration failed (continuing): {error:#}");
-    }
-
     if cli.resume_picker && cli.command.is_some() {
         anyhow::bail!(
             "--resume/-r starts the interactive session picker and cannot be combined with a subcommand"
@@ -201,7 +195,6 @@ async fn dispatch_command(
                         base_url,
                         api_key,
                         api_key_env,
-                        api_base: None,
                     },
                 )
             }

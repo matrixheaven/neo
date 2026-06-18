@@ -1,4 +1,4 @@
-use crate::InputEvent;
+use crate::input::InputEvent;
 
 use super::Line;
 

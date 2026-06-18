@@ -1,6 +1,6 @@
 //! Markdown rendering: verify each element is styled and laid out like kimi-code.
 
-use neo_tui::app::TuiTheme;
+use neo_tui::chrome::TuiTheme;
 use neo_tui::markdown::render_markdown;
 
 fn plain(text: &str, width: usize) -> Vec<String> {

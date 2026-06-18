@@ -2820,7 +2820,7 @@ async fn runtime_emits_shell_lifecycle_for_bash_tool() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "command": "printf shell-ok" }),
+                arguments: json!({ "mode": "foreground", "command": "printf shell-ok" }),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -2889,6 +2889,7 @@ async fn runtime_events_and_session_jsonl_do_not_leak_capped_bash_output() {
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
                 arguments: json!({
+                    "mode": "foreground",
                     "command": "printf keep; printf '%s%s%s%s' runtime -bash -leak -tail",
                     "max_output_bytes": 4
                 }),

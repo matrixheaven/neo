@@ -1,8 +1,10 @@
 //! Choice picker dialog — simple single-select list.
 
 use crate::ansi::Color;
+use crate::chrome::TuiTheme;
 use crate::components::visible_width;
-use crate::{InputEvent, InputResult, TuiTheme};
+use crate::core::InputResult;
+use crate::input::{InputEvent, KeybindingAction};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChoiceItem {
@@ -174,7 +176,7 @@ impl ChoicePickerState {
             return InputResult::Ignored;
         }
         match input {
-            InputEvent::Action(crate::KeybindingAction::SelectUp) | InputEvent::ScrollUp(1) => {
+            InputEvent::Action(KeybindingAction::SelectUp) | InputEvent::ScrollUp(1) => {
                 if !self.items.is_empty() && self.selected == 0 {
                     self.selected = self.items.len() - 1;
                 } else {
@@ -183,28 +185,28 @@ impl ChoicePickerState {
                 self.ensure_selected_visible();
                 InputResult::Handled
             }
-            InputEvent::Action(crate::KeybindingAction::SelectDown) | InputEvent::ScrollDown(1) => {
+            InputEvent::Action(KeybindingAction::SelectDown) | InputEvent::ScrollDown(1) => {
                 if !self.items.is_empty() {
                     self.selected = (self.selected + 1) % self.items.len();
                 }
                 self.ensure_selected_visible();
                 InputResult::Handled
             }
-            InputEvent::Action(crate::KeybindingAction::SelectPageUp) | InputEvent::MoveLeft => {
+            InputEvent::Action(KeybindingAction::SelectPageUp) | InputEvent::MoveLeft => {
                 if !self.items.is_empty() {
                     self.selected = self.selected.saturating_sub(self.page_size);
                     self.scroll_offset = Self::page_start_for(self.selected, self.page_size);
                 }
                 InputResult::Handled
             }
-            InputEvent::Action(crate::KeybindingAction::SelectPageDown) | InputEvent::MoveRight => {
+            InputEvent::Action(KeybindingAction::SelectPageDown) | InputEvent::MoveRight => {
                 if !self.items.is_empty() {
                     self.selected = (self.selected + self.page_size).min(self.items.len() - 1);
                     self.scroll_offset = Self::page_start_for(self.selected, self.page_size);
                 }
                 InputResult::Handled
             }
-            InputEvent::Action(crate::KeybindingAction::SelectConfirm) | InputEvent::Submit => {
+            InputEvent::Action(KeybindingAction::SelectConfirm) | InputEvent::Submit => {
                 if let Some(item) = self.items.get(self.selected).cloned() {
                     self.result = Some(ChoiceResult::Selected(item));
                     InputResult::Submitted
@@ -212,7 +214,7 @@ impl ChoicePickerState {
                     InputResult::Ignored
                 }
             }
-            InputEvent::Action(crate::KeybindingAction::SelectCancel) | InputEvent::Cancel => {
+            InputEvent::Action(KeybindingAction::SelectCancel) | InputEvent::Cancel => {
                 self.result = Some(ChoiceResult::Cancelled);
                 InputResult::Cancelled
             }
@@ -341,9 +343,9 @@ mod tests {
             theme: theme(),
         });
         assert_eq!(state.selected, 0);
-        state.handle_input(InputEvent::Action(crate::KeybindingAction::SelectDown));
+        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
         assert_eq!(state.selected, 1);
-        state.handle_input(InputEvent::Action(crate::KeybindingAction::SelectDown));
+        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
         assert_eq!(state.selected, 0); // wraps
     }
 
@@ -391,17 +393,17 @@ mod tests {
         assert_eq!(state.current_page(), 1);
         assert_eq!(state.total_pages(), 3);
 
-        state.handle_input(InputEvent::Action(crate::KeybindingAction::SelectPageDown));
+        state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
         assert_eq!(state.selected, 10);
         assert_eq!(state.scroll_offset, 10);
         assert_eq!(state.current_page(), 2);
 
-        state.handle_input(InputEvent::Action(crate::KeybindingAction::SelectPageDown));
+        state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
         assert_eq!(state.selected, 20);
         assert_eq!(state.scroll_offset, 20);
         assert_eq!(state.current_page(), 3);
 
-        state.handle_input(InputEvent::Action(crate::KeybindingAction::SelectPageUp));
+        state.handle_input(InputEvent::Action(KeybindingAction::SelectPageUp));
         assert_eq!(state.selected, 10);
         assert_eq!(state.scroll_offset, 10);
         assert_eq!(state.current_page(), 2);
@@ -416,7 +418,7 @@ mod tests {
 
         // Page indicator follows selected item even when scroll offset is unaligned.
         for _ in 0..12 {
-            state.handle_input(InputEvent::Action(crate::KeybindingAction::SelectDown));
+            state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
         }
         assert_eq!(state.selected, 22);
         assert_eq!(state.current_page(), 3);

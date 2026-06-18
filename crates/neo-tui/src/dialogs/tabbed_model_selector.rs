@@ -1,9 +1,11 @@
 //! Tabbed model selector — wraps ModelSelectorState with provider tabs.
 
+use crate::chrome::TuiTheme;
+use crate::core::InputResult;
 use crate::dialogs::model_selector::{
     ModelEntry, ModelSelectorOptions, ModelSelectorResult, ModelSelectorState,
 };
-use crate::{InputEvent, InputResult, TuiTheme};
+use crate::input::InputEvent;
 
 /// Options for the tabbed model selector.
 pub struct TabbedModelSelectorOptions {

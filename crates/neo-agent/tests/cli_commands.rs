@@ -98,6 +98,11 @@ fn find_jsonl_files_recursive(dir: &Path, results: &mut Vec<PathBuf>) {
     }
 }
 
+fn session_bucket(project_dir: &Path) -> PathBuf {
+    let sessions_root = isolated_home().join(".neo").join("sessions");
+    neo_agent_core::session::workspace_sessions_dir(&sessions_root, project_dir)
+}
+
 #[test]
 fn root_command_reports_interactive_entrypoint_without_placeholders() {
     let command = neo();
@@ -114,14 +119,14 @@ fn root_command_reports_interactive_entrypoint_without_placeholders() {
 }
 
 #[test]
-fn root_command_fallback_renders_configured_tui_session_state() {
+fn root_command_renders_configured_tui_session_state() {
     let temp = TempDir::new().expect("tempdir");
     fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
     fs::write(
         temp.path().join(".neo/config.toml"),
         r#"
 default_provider = "anthropic"
-default_model = "claude-sonnet"
+default_model = "claude-sonnet-4-5"
 "#,
     )
     .expect("write config");
@@ -132,7 +137,7 @@ default_model = "claude-sonnet"
     let stdout = run(command);
 
     assert!(stdout.contains("Welcome to neo"));
-    assert!(stdout.contains("anthropic/claude-sonnet"));
+    assert!(stdout.contains("anthropic/claude-sonnet-4-5"));
     assert!(stdout.contains('>'));
     assert!(!stdout.contains("commands:"));
 }
@@ -201,7 +206,7 @@ fn project_theme_auto_discovery_loads_theme_for_verbose_startup() {
 #[test]
 fn root_resume_flag_opens_real_local_session_picker() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(
         sessions.join("alpha.jsonl"),
@@ -261,7 +266,6 @@ fn run_text_command_without_credentials_fails_without_local_response() {
     command
         .current_dir(temp.path())
         .env_remove("OPENAI_API_KEY")
-        .env_remove("NEO_API_KEY_ENV")
         .args(["run", "--output", "text", "hello", "neo"]);
 
     let output = command.output().expect("neo command should run");
@@ -281,7 +285,6 @@ fn run_command_without_credentials_fails_without_local_response() {
     command
         .current_dir(temp.path())
         .env_remove("OPENAI_API_KEY")
-        .env_remove("NEO_API_KEY_ENV")
         .args(["run", "build", "this"]);
 
     let output = command.output().expect("neo command should run");
@@ -297,9 +300,9 @@ fn run_command_without_credentials_fails_without_local_response() {
 }
 
 #[test]
-fn sessions_list_uses_project_session_directory() {
+fn sessions_list_uses_workspace_session_bucket() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(sessions.join("alpha.jsonl"), "{}\n").expect("write session");
 
@@ -314,7 +317,7 @@ fn sessions_list_uses_project_session_directory() {
 #[test]
 fn sessions_rename_and_fork_surface_flat_metadata_without_tree_command() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(sessions.join("alpha.jsonl"), "{}\n").expect("write session");
 
@@ -365,7 +368,6 @@ fn run_text_with_missing_credentials_does_not_persist_assistant_response() {
     command
         .current_dir(temp.path())
         .env_remove("OPENAI_API_KEY")
-        .env_remove("NEO_API_KEY_ENV")
         .args(["run", "--output", "text", "hello", "neo"]);
 
     let output = command.output().expect("neo command should run");
@@ -387,7 +389,7 @@ fn run_text_with_missing_credentials_does_not_persist_assistant_response() {
 #[test]
 fn sessions_show_and_resume_read_jsonl_transcripts() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(
         sessions.join("alpha.jsonl"),
@@ -415,9 +417,9 @@ fn sessions_show_and_resume_read_jsonl_transcripts() {
 }
 
 #[test]
-fn sessions_accept_unique_prefixes_and_local_jsonl_paths() {
+fn sessions_accept_unique_prefixes_and_workspace_bucket_ids() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(
         sessions.join("alpha-main.jsonl"),
@@ -449,7 +451,7 @@ fn sessions_accept_unique_prefixes_and_local_jsonl_paths() {
 #[test]
 fn sessions_reject_ambiguous_prefixes_without_guessing() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(sessions.join("alpha-main.jsonl"), "{}\n").expect("write alpha");
     fs::write(sessions.join("alpha-side.jsonl"), "{}\n").expect("write alpha side");
@@ -470,7 +472,7 @@ fn sessions_reject_ambiguous_prefixes_without_guessing() {
 #[test]
 fn sessions_compact_stores_algorithmic_summary_and_resume_replays_kept_context() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(
         sessions.join("alpha.jsonl"),
@@ -493,8 +495,7 @@ fn sessions_compact_stores_algorithmic_summary_and_resume_replays_kept_context()
     assert!(compact_stdout.contains("Algorithmic transcript summary"));
     assert!(!compact_stdout.contains("fake"));
 
-    // Verify compaction via neo sessions show (not direct file read,
-    // because migration may have moved the file to a shared home dir).
+    // Verify compaction through the public session reader.
     let mut show = neo();
     show.current_dir(temp.path())
         .args(["sessions", "show", "alpha"]);
@@ -518,7 +519,7 @@ fn sessions_compact_stores_algorithmic_summary_and_resume_replays_kept_context()
 #[test]
 fn sessions_export_html_renders_replayed_messages() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(
         sessions.join("alpha.jsonl"),
@@ -544,7 +545,7 @@ fn sessions_export_html_renders_replayed_messages() {
 #[test]
 fn sessions_export_json_returns_sanitized_replayed_session_artifact() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(
         sessions.join("alpha-main.jsonl"),
@@ -610,7 +611,7 @@ fn sessions_export_json_returns_sanitized_replayed_session_artifact() {
 #[test]
 fn sessions_reject_path_traversal_ids() {
     let temp = TempDir::new().expect("tempdir");
-    let sessions = temp.path().join(".neo/sessions");
+    let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(temp.path().join("escape.jsonl"), "{}\n").expect("write escape target");
 
@@ -1342,8 +1343,7 @@ fn run_text_registers_enabled_stdio_mcp_tools_from_project_config() {
     fs::write(
         temp.path().join(".neo/config.toml"),
         format!(
-            r#"
-api_base = "{}"
+            r#"{}
 
 [[mcp.servers]]
 id = "docs-server"
@@ -1352,7 +1352,7 @@ transport = "stdio"
 command = "python3"
 args = ["-u", "{}"]
 "#,
-            provider.url,
+            mock_responses_config(&provider.url),
             mcp_fixture.display()
         ),
     )
@@ -1423,8 +1423,7 @@ fn run_text_registers_enabled_http_mcp_tools_from_project_config() {
     fs::write(
         temp.path().join(".neo/config.toml"),
         format!(
-            r#"
-api_base = "{}"
+            r#"{}
 
 [[mcp.servers]]
 id = "remote-docs"
@@ -1435,7 +1434,8 @@ url = "{}"
 [mcp.servers.headers]
 "x-neo-test" = "remote-mcp"
 "#,
-            provider.url, mcp_server.url
+            mock_responses_config(&provider.url),
+            mcp_server.url
         ),
     )
     .expect("write config");
@@ -1480,15 +1480,14 @@ fn run_text_rejects_remote_mcp_server_missing_url() {
     fs::write(
         temp.path().join(".neo/config.toml"),
         format!(
-            r#"
-api_base = "{}"
+            r#"{}
 
 [[mcp.servers]]
 id = "remote-docs"
 enabled = true
 transport = "http"
 "#,
-            provider.url
+            mock_responses_config(&provider.url)
         ),
     )
     .expect("write config");
@@ -1559,6 +1558,25 @@ fn openai_response_sse(id: &str, text: &str) -> String {
             }
         }),
     ])
+}
+
+fn mock_responses_config(base_url: &str) -> String {
+    format!(
+        r#"
+default_provider = "mock"
+default_model = "gpt-4.1"
+
+[providers.mock]
+type = "openai-responses"
+base_url = "{base_url}"
+api_key_env = "OPENAI_API_KEY"
+
+[models."mock/gpt-4.1"]
+provider = "mock"
+model = "gpt-4.1"
+capabilities = ["streaming", "tools"]
+"#
+    )
 }
 
 fn mcp_json_response(id: u64, result: &Value) -> String {

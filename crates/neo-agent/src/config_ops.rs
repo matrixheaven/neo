@@ -136,7 +136,6 @@ pub fn add_provider_from_catalog_entry(
         base_url: provider_config.base_url,
         api_key: api_key.map(str::to_owned),
         api_key_env: provider_config.api_key_env,
-        api_base: None,
     };
     providers.insert(provider_id.to_owned(), pcfg);
 
@@ -211,7 +210,7 @@ pub fn list_providers(config: &AppConfig, json: bool) -> anyhow::Result<String> 
                     .provider_type
                     .as_ref()
                     .map_or("unknown", |t| t.as_config_str());
-                let base = cfg.effective_base_url().unwrap_or("(none)");
+                let base = cfg.base_url.as_deref().unwrap_or("(none)");
                 let model_count = models.values().filter(|m| m.provider == *id).count();
                 let is_default = config.default_model.starts_with(&format!("{id}/"));
                 json!({
@@ -236,7 +235,7 @@ pub fn list_providers(config: &AppConfig, json: bool) -> anyhow::Result<String> 
             .provider_type
             .as_ref()
             .map_or("unknown", |t| t.as_config_str());
-        let base = cfg.effective_base_url().unwrap_or("(none)");
+        let base = cfg.base_url.as_deref().unwrap_or("(none)");
         let model_count = models.values().filter(|m| m.provider == *id).count();
         let current = if config.default_model.starts_with(&format!("{id}/")) {
             " ← current"

@@ -1,6 +1,6 @@
-use crate::ToolStatusKind;
 use crate::ansi::Style;
-use crate::app::TuiTheme;
+use crate::chrome::ToolStatusKind;
+use crate::chrome::TuiTheme;
 use crate::core::{Component, Expandable, Finalization, Line};
 
 use super::plan_box::PlanBoxComponent;

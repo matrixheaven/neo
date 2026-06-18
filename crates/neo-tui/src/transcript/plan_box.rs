@@ -1,5 +1,5 @@
 use crate::ansi::{Color, Style};
-use crate::app::TuiTheme;
+use crate::chrome::TuiTheme;
 use crate::core::Line;
 
 /// Renders plan content inside a bordered box, displayed within the

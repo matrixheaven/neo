@@ -1,6 +1,8 @@
 use crate::ansi::{Style, paint};
+use crate::chrome::TuiTheme;
 use crate::components::{truncate_width, visible_width};
-use crate::{InputEvent, InputResult, KeybindingAction, TuiTheme};
+use crate::core::InputResult;
+use crate::input::{InputEvent, KeybindingAction};
 
 /// A group of providers treated as a single row in the provider manager.
 #[derive(Debug, Clone, PartialEq, Eq)]

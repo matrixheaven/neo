@@ -1,6 +1,6 @@
-use crate::ToolStatusKind;
 use crate::ansi::{Color, Style};
-use crate::app::TuiTheme;
+use crate::chrome::ToolStatusKind;
+use crate::chrome::TuiTheme;
 use crate::core::{Line, Span, Text};
 
 use super::tool_call::ToolCallState;

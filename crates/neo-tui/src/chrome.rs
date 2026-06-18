@@ -5,13 +5,18 @@ use std::{
     time::SystemTime,
 };
 
-use crate::ansi::Color;
 use neo_agent_core::{AgentEvent, PermissionDecision};
 
 use crate::{
-    ImageRenderPolicy, InputEvent, InputResult, KeybindingAction, TerminalImageCapabilities,
-    TodoDisplayItem, TodoDisplayStatus,
-    widgets::{QuestionDialogAction, QuestionResult, QuestionStateMachine},
+    ansi::Color,
+    components::{truncate_width, visible_width},
+    core::InputResult,
+    image::{ImageRenderPolicy, TerminalImageCapabilities},
+    input::{InputEvent, KeybindingAction},
+    widgets::{
+        QuestionDialogAction, QuestionDisplayData, QuestionDisplayOption, QuestionResult,
+        QuestionStateMachine, TodoDisplayItem, TodoDisplayStatus,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,7 +229,7 @@ impl TuiTheme {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AppMode {
+pub enum ChromeMode {
     Editing,
     Streaming,
     Overlay,
@@ -272,7 +277,7 @@ fn format_token_count(tokens: u32) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NeoTuiApp {
+pub struct NeoChromeState {
     title: String,
     session_label: String,
     model_label: String,
@@ -281,7 +286,7 @@ pub struct NeoTuiApp {
     activity_frame: usize,
     prompt: PromptState,
     copy_buffer: Option<String>,
-    mode: AppMode,
+    mode: ChromeMode,
     overlays: Vec<Overlay>,
     next_overlay_id: OverlayId,
     focused_overlay: Option<OverlayId>,
@@ -301,7 +306,7 @@ pub struct NeoTuiApp {
     exit_confirmation_label: Option<String>,
 }
 
-impl NeoTuiApp {
+impl NeoChromeState {
     #[must_use]
     pub fn new(
         title: impl Into<String>,
@@ -318,7 +323,7 @@ impl NeoTuiApp {
             activity_frame: 0,
             prompt: PromptState::default(),
             copy_buffer: None,
-            mode: AppMode::Editing,
+            mode: ChromeMode::Editing,
             overlays: Vec::new(),
             next_overlay_id: OverlayId::default(),
             focused_overlay: None,
@@ -373,7 +378,7 @@ impl NeoTuiApp {
         if let Some(label) = &self.custom_working_label {
             return Some(label.clone());
         }
-        matches!(self.mode, AppMode::Streaming).then(|| "working · esc interrupt".to_owned())
+        matches!(self.mode, ChromeMode::Streaming).then(|| "working · esc interrupt".to_owned())
     }
 
     /// Set a custom footer working label. Pass `None` to clear it.
@@ -461,7 +466,7 @@ impl NeoTuiApp {
     }
 
     #[must_use]
-    pub const fn mode(&self) -> AppMode {
+    pub const fn mode(&self) -> ChromeMode {
         self.mode
     }
 
@@ -577,7 +582,7 @@ impl NeoTuiApp {
 
         self.prompt.remember_history(submitted.clone());
         self.prompt.clear_after_submit();
-        self.mode = AppMode::Streaming;
+        self.mode = ChromeMode::Streaming;
         Some(submitted)
     }
 
@@ -590,7 +595,7 @@ impl NeoTuiApp {
             | StreamUpdate::ToolFinished { .. }
             | StreamUpdate::ThinkingStarted
             | StreamUpdate::ThinkingDelta { .. } => {
-                self.mode = AppMode::Streaming;
+                self.mode = ChromeMode::Streaming;
             }
             StreamUpdate::ThinkingFinished => {}
             StreamUpdate::Error { text } => {
@@ -635,7 +640,7 @@ impl NeoTuiApp {
             | AgentEvent::ToolExecutionFinished { .. }
             | AgentEvent::ShellCommandStarted { .. }
             | AgentEvent::ShellCommandFinished { .. } => {
-                self.mode = AppMode::Streaming;
+                self.mode = ChromeMode::Streaming;
             }
             AgentEvent::ApprovalRequested {
                 id,
@@ -719,16 +724,16 @@ impl NeoTuiApp {
                 }
             }
             AgentEvent::QuestionRequested { id, questions, .. } => {
-                let display: Vec<crate::QuestionDisplayData> = questions
+                let display: Vec<QuestionDisplayData> = questions
                     .iter()
-                    .map(|q| crate::QuestionDisplayData {
+                    .map(|q| QuestionDisplayData {
                         question: q.question.clone(),
                         header: q.header.clone(),
                         body: q.body.clone(),
                         options: q
                             .options
                             .iter()
-                            .map(|o| crate::QuestionDisplayOption {
+                            .map(|o| QuestionDisplayOption {
                                 label: o.label.clone(),
                                 description: o.description.clone(),
                             })
@@ -1065,10 +1070,10 @@ impl NeoTuiApp {
             InputEvent::Key(key) => match key.as_str() {
                 "enter" => InputEvent::Submit,
                 "escape" => InputEvent::Cancel,
-                "up" => InputEvent::Action(crate::KeybindingAction::SelectUp),
-                "down" => InputEvent::Action(crate::KeybindingAction::SelectDown),
-                "pageup" => InputEvent::Action(crate::KeybindingAction::SelectPageUp),
-                "pagedown" => InputEvent::Action(crate::KeybindingAction::SelectPageDown),
+                "up" => InputEvent::Action(KeybindingAction::SelectUp),
+                "down" => InputEvent::Action(KeybindingAction::SelectDown),
+                "pageup" => InputEvent::Action(KeybindingAction::SelectPageUp),
+                "pagedown" => InputEvent::Action(KeybindingAction::SelectPageDown),
                 "tab" => InputEvent::Insert('\t'),
                 "backspace" => InputEvent::Backspace,
                 "delete" => InputEvent::Delete,
@@ -1162,7 +1167,7 @@ impl NeoTuiApp {
     pub fn push_question_overlay(
         &mut self,
         id: impl Into<String>,
-        questions: Vec<crate::QuestionDisplayData>,
+        questions: Vec<QuestionDisplayData>,
     ) -> OverlayId {
         let state = QuestionStateMachine::new(id, questions);
         self.push_overlay(Overlay::new(
@@ -1270,18 +1275,18 @@ impl NeoTuiApp {
         }
     }
 
-    fn overlay_mode(&self) -> AppMode {
+    fn overlay_mode(&self) -> ChromeMode {
         if let Some(overlay) = self.focused_overlay() {
             if matches!(
                 overlay.kind,
                 OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_)
             ) {
-                AppMode::Approval
+                ChromeMode::Approval
             } else {
-                AppMode::Overlay
+                ChromeMode::Overlay
             }
         } else {
-            AppMode::Editing
+            ChromeMode::Editing
         }
     }
 }
@@ -1330,7 +1335,7 @@ pub enum StreamUpdate {
     },
     QuestionRequested {
         id: String,
-        questions: Vec<crate::QuestionDisplayData>,
+        questions: Vec<QuestionDisplayData>,
     },
 }
 
@@ -2988,8 +2993,6 @@ impl SelectListState {
 
     #[must_use]
     pub fn render_lines(&self, width: usize) -> Vec<String> {
-        use crate::truncate_width;
-
         if self.filtered_indices.is_empty() {
             return vec![truncate_width("  No matching commands", width, "", false)];
         }
@@ -3021,8 +3024,6 @@ impl SelectListState {
 }
 
 fn render_select_item(item: &SelectItem, selected: bool, width: usize) -> String {
-    use crate::{truncate_width, visible_width};
-
     let prefix = if selected { "> " } else { "  " };
     let label = if item.label.is_empty() {
         &item.value

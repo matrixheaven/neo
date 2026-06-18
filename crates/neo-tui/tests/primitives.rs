@@ -1,9 +1,8 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use neo_tui::{
-    InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager, NeoTuiApp, PromptEdit,
-    PromptState, SelectItem, SelectListState, TranscriptEntry, TranscriptStore, TranscriptViewport,
-    truncate_width, visible_width, wrap_width,
-};
+use neo_tui::chrome::{NeoChromeState, PromptEdit, PromptState, SelectItem, SelectListState};
+use neo_tui::components::{truncate_width, visible_width, wrap_width};
+use neo_tui::input::{InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager};
+use neo_tui::transcript::{TranscriptEntry, TranscriptPane, TranscriptStore, TranscriptViewport};
 
 fn strip_ansi_escapes(text: &str) -> String {
     let mut visible = String::new();
@@ -934,7 +933,7 @@ fn prompt_copy_uses_internal_buffer_without_mutating_editor_state() {
     assert_eq!(prompt.cursor, 5);
     assert_eq!(prompt.apply_edit(PromptEdit::Yank), None);
 
-    let mut app = NeoTuiApp::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.prompt_mut().apply_edit(PromptEdit::Insert("copy me"));
 
     assert_eq!(app.copy_prompt_text().as_deref(), Some("copy me"));
@@ -965,7 +964,7 @@ fn transcript_selection_copies_item_range_with_roles() {
 
 #[test]
 fn transcript_pane_copy_uses_store_selection() {
-    let mut runtime = neo_tui::TranscriptPane::new(80, 24);
+    let mut runtime = TranscriptPane::new(80, 24);
     runtime.push_user_message("copy selected prompt");
     runtime.push_assistant_message("copy selected answer");
     runtime.select_visible_transcript_entry();
@@ -979,7 +978,7 @@ fn transcript_pane_copy_uses_store_selection() {
 
 #[test]
 fn transcript_pane_toggles_tool_detail_expansion() {
-    let mut runtime = neo_tui::TranscriptPane::new(80, 24);
+    let mut runtime = TranscriptPane::new(80, 24);
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
         turn: 1,
         id: "tool-1".to_owned(),

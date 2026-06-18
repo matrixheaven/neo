@@ -1,8 +1,10 @@
 //! Custom registry import dialog — two-field form (URL + Bearer token).
 
 use crate::ansi::Color;
+use crate::chrome::TuiTheme;
 use crate::components::visible_width;
-use crate::{InputEvent, InputResult, TuiTheme};
+use crate::core::InputResult;
+use crate::input::{InputEvent, KeybindingAction};
 
 pub struct CustomRegistryImportOptions {
     pub title: String,
@@ -184,8 +186,8 @@ impl CustomRegistryImportState {
                 }
                 InputResult::Handled
             }
-            InputEvent::Action(crate::KeybindingAction::SelectDown)
-            | InputEvent::Action(crate::KeybindingAction::SelectUp) => {
+            InputEvent::Action(KeybindingAction::SelectDown)
+            | InputEvent::Action(KeybindingAction::SelectUp) => {
                 self.switch_field(true);
                 InputResult::Handled
             }

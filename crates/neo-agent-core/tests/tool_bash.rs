@@ -171,19 +171,19 @@ async fn bash_background_finished_poll_does_not_wait_for_inherited_output_handle
 }
 
 #[tokio::test]
-async fn bash_without_mode_remains_foreground_compatible() {
+async fn bash_requires_explicit_mode() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
         .with_permission_policy(PermissionPolicy::allow_all());
 
-    let result = registry
+    let error = registry
         .run("bash", &context, json!({ "command": "printf foreground" }))
         .await
-        .expect("foreground bash should still run");
+        .expect_err("bash missing mode should be rejected");
 
-    assert_eq!(result.details.expect("details")["stdout"], "foreground");
+    assert!(matches!(error, ToolError::InvalidInput { .. }));
 }
 
 #[tokio::test]
@@ -200,7 +200,7 @@ async fn bash_workdir_runs_command_from_workspace_subdirectory() {
         .run(
             "bash",
             &context,
-            json!({ "command": "pwd", "workdir": "sub" }),
+            json!({ "mode": "foreground", "command": "pwd", "workdir": "sub" }),
         )
         .await
         .expect("foreground bash should run");
@@ -226,7 +226,7 @@ async fn bash_workdir_rejects_paths_outside_workspace() {
         .run(
             "bash",
             &context,
-            json!({ "command": "pwd", "workdir": ".." }),
+            json!({ "mode": "foreground", "command": "pwd", "workdir": ".." }),
         )
         .await
         .expect_err("workdir should stay inside workspace");
@@ -247,7 +247,11 @@ async fn bash_foreground_returns_after_shell_exits_with_inherited_background_out
         registry.run(
             "bash",
             &context,
-            json!({ "command": "sleep 5 & printf done", "timeout_ms": 10000 }),
+            json!({
+                "mode": "foreground",
+                "command": "sleep 5 & printf done",
+                "timeout_ms": 10000
+            }),
         ),
     )
     .await
@@ -271,6 +275,7 @@ async fn bash_foreground_reports_missing_cd_promptly() {
             "bash",
             &context,
             json!({
+                "mode": "foreground",
                 "command": "cd /definitely/not/a/neo/workspace && printf nope",
                 "timeout_ms": 10000
             }),
@@ -303,6 +308,7 @@ async fn bash_foreground_details_do_not_leak_output_past_max_output_bytes() {
             "bash",
             &context,
             json!({
+                "mode": "foreground",
                 "command": "printf 'keep-secret-leak-tail'",
                 "max_output_bytes": 4
             }),
@@ -387,6 +393,7 @@ async fn bash_foreground_kills_child_when_context_is_cancelled() {
                 "bash",
                 &context,
                 json!({
+                    "mode": "foreground",
                     "command": "printf $$ > child.pid; sleep 5",
                     "timeout_ms": 10000
                 }),
@@ -442,6 +449,7 @@ async fn bash_foreground_cancellation_kills_descendant_process_group() {
                 "bash",
                 &context,
                 json!({
+                    "mode": "foreground",
                     "command": "sleep 5 & echo $! > descendant.pid; wait",
                     "timeout_ms": 10000
                 }),

@@ -16,8 +16,8 @@ use neo_agent_core::{
     ToolRegistry,
 };
 use neo_ai::{
-    ApiKind, ApiType, ChatMessage, ContentPart, CredentialResolver, ModelClient, ModelRegistry,
-    ModelSpec, ProviderRegistry, ProviderSpec, RequestOptions, ResolvedCredential,
+    ChatMessage, ContentPart, CredentialResolver, ModelClient, ModelRegistry, ModelSpec,
+    ProviderRegistry, ProviderSpec, RequestOptions, ResolvedCredential,
 };
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
@@ -673,9 +673,6 @@ fn provider_with_invocation_overrides(
 ) -> Option<ProviderSpec> {
     let registry = provider_registry_for_config(config);
     let mut provider = registry.get(provider_id).cloned()?;
-    if let Some(base_url) = &config.api_base {
-        provider.base_url = Some(base_url.clone());
-    }
     if let Some(env_name) = &config.api_key_env {
         provider.api_key_env_vars = vec![env_name.clone()];
     }
@@ -704,8 +701,8 @@ fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: 
             if let Some(t) = &provider_config.provider_type {
                 p.provider_type = Some(*t);
             }
-            if let Some(base_url) = provider_config.effective_base_url() {
-                p.base_url = Some(base_url.to_owned());
+            if let Some(base_url) = &provider_config.base_url {
+                p.base_url = Some(base_url.clone());
             }
             if let Some(key) = &provider_config.api_key {
                 p.api_key = Some(key.clone());
@@ -715,37 +712,22 @@ fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: 
             }
             p
         } else {
-            // Create a brand-new provider from config.
-            // When type is not specified, accept ALL api kinds so the model's
-            // own `api` field determines the wire protocol (backward compat
-            // with legacy config that only has api_base + api_key).
             let provider_type = provider_config.provider_type;
-            let (default_api, supported) = match provider_type {
-                Some(t) => {
-                    let k = t.to_api_kind();
-                    (k, vec![k])
-                }
-                None => (
-                    ApiKind::OpenAiCompatible,
-                    vec![
-                        ApiKind::OpenAiResponses,
-                        ApiKind::OpenAiChatCompletions,
-                        ApiKind::AnthropicMessages,
-                        ApiKind::GoogleGenerativeAi,
-                        ApiKind::OpenAiCompatible,
-                    ],
-                ),
+            let Some(provider_type) = provider_type else {
+                tracing::warn!("ignoring provider {provider_id}: missing required `type`");
+                continue;
             };
+            let default_api = provider_type.to_api_kind();
             ProviderSpec {
                 id: provider_id.clone(),
                 display_name: provider_id.clone(),
                 api: default_api,
-                supported_apis: supported,
-                base_url: provider_config.effective_base_url().map(str::to_owned),
+                supported_apis: vec![default_api],
+                base_url: provider_config.base_url.clone(),
                 api_key: provider_config.api_key.clone(),
                 api_key_env_vars: provider_config.api_key_env.iter().cloned().collect(),
                 ambient_auth_env_vars: vec![],
-                provider_type,
+                provider_type: Some(provider_type),
             }
         };
         registry.register(provider);
@@ -1502,25 +1484,7 @@ pub(crate) fn latest_session_id(config: &AppConfig) -> anyhow::Result<String> {
 
 fn resolve_model(config: &AppConfig) -> anyhow::Result<ModelSpec> {
     let registry = model_registry_for_config(config)?;
-    let models = registry.list();
-    let candidates = config::scoped_models(models.iter(), &config.model_scope);
-    if !config.model_scope.is_empty() && candidates.is_empty() {
-        anyhow::bail!(
-            "no models match model_scope {}; run `neo models list` for supported catalog entries",
-            config.model_scope.join(",")
-        );
-    }
-    candidates
-        .into_iter()
-        .find(|model| {
-            model.provider.0 == config.default_provider && model.model == config.default_model
-        })
-        .with_context(|| {
-            format!(
-                "unknown model {}/{}; run `neo models list` for supported catalog entries",
-                config.default_provider, config.default_model
-            )
-        })
+    select_config_model(&registry, config)
 }
 
 fn record_session_activity(config: &AppConfig, session_id: &str, prompt: &str) {
@@ -1626,19 +1590,51 @@ fn one_line(text: &str, max_chars: usize) -> String {
 pub(crate) fn model_registry_for_config(config: &AppConfig) -> anyhow::Result<ModelRegistry> {
     let mut registry = ModelRegistry::seeded();
 
-    // 1. Load models from config.toml [models.<alias>]
     for (alias, model_cfg) in &config.models {
         let spec = model_config_to_spec(alias, model_cfg, &config.providers)?;
         registry.register(spec);
     }
 
-    // 2. Load from JSON catalog files (backward compat)
-    for path in &config.model_catalogs {
-        registry
-            .load_catalog_path(path)
-            .map_err(anyhow::Error::from)?;
-    }
     Ok(registry)
+}
+
+pub(crate) fn select_config_model(
+    registry: &ModelRegistry,
+    config: &AppConfig,
+) -> anyhow::Result<ModelSpec> {
+    let models = registry.list();
+    let candidates = config::scoped_models(models.iter(), &config.model_scope);
+    if !config.model_scope.is_empty() && candidates.is_empty() {
+        anyhow::bail!(
+            "no models match model_scope {}; run `neo models list` for supported catalog entries",
+            config.model_scope.join(",")
+        );
+    }
+    let default = models.iter().find(|model| {
+        model.provider.0 == config.default_provider && model.model == config.default_model
+    });
+    if config.model_scope.is_empty() {
+        return default.cloned().with_context(|| {
+            format!(
+                "unknown model {}/{}; run `neo models list` for supported catalog entries",
+                config.default_provider, config.default_model
+            )
+        });
+    }
+
+    candidates
+        .iter()
+        .find(|model| {
+            model.provider.0 == config.default_provider && model.model == config.default_model
+        })
+        .or_else(|| candidates.first())
+        .cloned()
+        .with_context(|| {
+            format!(
+                "unknown model {}/{}; run `neo models list` for supported catalog entries",
+                config.default_provider, config.default_model
+            )
+        })
 }
 
 /// Convert a `[models.<alias>]` config entry into a `ModelSpec`.
@@ -1656,10 +1652,9 @@ fn model_config_to_spec(
         )
     })?;
 
-    // Derive ApiKind from provider's declared type
     let api = provider_cfg
         .provider_type
-        .unwrap_or(ApiType::OpenAiCompatible)
+        .with_context(|| format!("provider '{}' must declare `type`", cfg.provider))?
         .to_api_kind();
 
     // Parse capabilities from string list
@@ -1770,11 +1765,9 @@ mod tests {
         let config = AppConfig {
             default_model: "test-model".to_owned(),
             default_provider: "openai".to_owned(),
-            api_base: None,
             api_key_env: None,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
-            model_catalogs: Vec::new(),
             model_scope: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
             permissions: PermissionPolicy::default(),
@@ -1886,16 +1879,14 @@ mod tests {
     }
 
     #[test]
-    fn agent_config_for_app_scales_legacy_default_compaction_to_model_context_window() {
+    fn agent_config_for_app_scales_default_compaction_to_model_context_window() {
         let temp = tempfile::tempdir().expect("tempdir");
         let config = AppConfig {
             default_model: "large-context-model".to_owned(),
             default_provider: "anthropic".to_owned(),
-            api_base: None,
             api_key_env: None,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
-            model_catalogs: Vec::new(),
             model_scope: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
             permissions: PermissionPolicy::default(),
@@ -1949,11 +1940,9 @@ mod tests {
         let config = AppConfig {
             default_model: "large-context-model".to_owned(),
             default_provider: "anthropic".to_owned(),
-            api_base: None,
             api_key_env: None,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
-            model_catalogs: Vec::new(),
             model_scope: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
             permissions: PermissionPolicy::default(),
@@ -2007,11 +1996,9 @@ mod tests {
         let config = AppConfig {
             default_model: "test-model".to_owned(),
             default_provider: "openai".to_owned(),
-            api_base: None,
             api_key_env: None,
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
-            model_catalogs: Vec::new(),
             model_scope: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
             permissions: PermissionPolicy::default(),

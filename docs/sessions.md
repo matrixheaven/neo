@@ -27,10 +27,6 @@ canonicalized absolute path. This ensures:
 - Different projects with the same basename get different buckets
 - The `NEO_HOME` env var overrides the home directory (`~/.neo` by default)
 
-On startup, `migrate_legacy_sessions()` automatically moves any sessions from
-the old `{project_dir}/.neo/sessions/` layout into the new bucket directory.
-Migration is idempotent.
-
 The global `session_index.jsonl` enables `neo resume <session_id>` to locate
 sessions across workspaces.
 
@@ -107,8 +103,7 @@ neo resume <session-ref>
 ```
 
 Session directory defaults to `~/.neo/sessions/` with workspace-scoped bucket
-subdirectories. Can be overridden with `sessions_dir` or `NEO_SESSIONS_DIR`.
-Legacy `{project_dir}/.neo/sessions/` layouts are migrated automatically.
+subdirectories. Can be overridden with `sessions_dir`.
 
 `export-html` replays `MessageAppended` events and renders a standalone HTML
 conversation with `neo-sdk`'s safe Markdown renderer. `export-json` replays the

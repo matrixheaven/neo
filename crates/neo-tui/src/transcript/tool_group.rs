@@ -5,9 +5,9 @@
 //! branch characters. Used by [`crate::transcript::TranscriptPane`] so a run of
 //! consecutive reads renders as one card instead of N cards.
 
-use crate::ToolStatusKind;
 use crate::ansi::Style;
-use crate::app::TuiTheme;
+use crate::chrome::ToolStatusKind;
+use crate::chrome::TuiTheme;
 use crate::core::{Line, Span};
 
 use super::tool_call::ToolCallState;

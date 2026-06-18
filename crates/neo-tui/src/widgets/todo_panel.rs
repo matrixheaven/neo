@@ -1,4 +1,5 @@
-use crate::TuiTheme;
+use crate::chrome::TuiTheme;
+use crate::components::wrap_width;
 
 /// Maximum number of todo items visible without truncation.
 pub const MAX_VISIBLE_TODOS: usize = 5;
@@ -116,11 +117,7 @@ impl<'a> TodoPanel<'a> {
         let inner_width = usize::from(width.saturating_sub(6).max(1));
         let item_lines: usize = visible
             .iter()
-            .map(|&i| {
-                crate::wrap_width(&self.todos[i].title, inner_width)
-                    .len()
-                    .max(1)
-            })
+            .map(|&i| wrap_width(&self.todos[i].title, inner_width).len().max(1))
             .sum();
         let hidden = self.todos.len() > visible.len();
         let total = 2 + 1 + item_lines + usize::from(hidden);
