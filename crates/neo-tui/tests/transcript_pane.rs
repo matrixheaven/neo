@@ -55,7 +55,7 @@ fn transcript_pane_renders_transcript_entries_in_one_ordered_frame() {
         .iter()
         .position(|l| l.contains("Welcome to neo"))
         .expect("banner");
-    // User message is now bullet-led (kimi-style), no "You" label.
+    // User message is now bullet-led (Neo), no "You" label.
     let hello = frame
         .iter()
         .position(|l| l.contains("✨") && l.contains("hello"))

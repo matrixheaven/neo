@@ -7,7 +7,7 @@ use crate::chrome::{NeoChromeState, PromptState, ToolStatusKind, TuiTheme};
 use crate::components::wrap_width;
 use crate::core::{Expandable, Line};
 use crate::image::{ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities};
-use crate::pi_tui::{CURSOR_MARKER, CursorPos};
+use crate::terminal::{CURSOR_MARKER, CursorPos};
 use crate::transcript::{
     InlineImageRender, ToolCallComponent, ToolCallState, ToolGroup, TranscriptEntry,
     TranscriptStore, render_tool_group,
@@ -17,7 +17,7 @@ use crate::widgets::box_draw;
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 5;
 
 /// Uniform 1-column left/right gutter applied to ALL chrome (body, banner,
-/// prompt box, footer). Matches kimi-code's `CHROME_GUTTER = 1`. Applied once
+/// prompt box, footer). Matches Neo's `CHROME_GUTTER = 1`. Applied once
 /// by [`apply_gutter`] after body + chrome are merged, so nothing renders
 /// flush against the screen edge.
 pub const CHROME_GUTTER: usize = 1;
@@ -586,10 +586,10 @@ impl TranscriptPane {
     ///
     /// The chrome (prompt box + footer) depends on [`NeoChromeState`] state and is
     /// appended by the caller via [`render_chrome_lines`] before the
-    /// whole frame is handed to [`crate::pi_tui::TuiRenderer::render`].
-    /// This mirrors pi-tui's single-buffer model: every screen line lives in
-    /// one `Vec<String>`, so the renderer can diff the whole frame and rewrite
-    /// only what changed.
+    /// whole frame is handed to [`crate::terminal::TuiRenderer::render`].
+    /// This uses the single-buffer model: every screen line lives in one
+    /// `Vec<String>`, so the renderer can diff the whole frame and rewrite only
+    /// what changed.
     ///
     /// Returns `None` when the transcript pane has no pending body changes.
     #[must_use]
@@ -1023,7 +1023,7 @@ fn render_prompt_completion_dropdown(app: &NeoChromeState, width: usize) -> Opti
 
 /// Render the rounded prompt input box. The first content line carries the
 /// `> ` prompt symbol; continuation lines use a 4-space hanging indent so
-/// wrapped/explicit-newline text aligns under the body (matching kimi-code's
+/// wrapped/explicit-newline text aligns under the body (matching Neo's
 /// `paddingX: 4` editor). Border color is weak by default and switches to
 /// the brand color when the input starts with `/` or plan mode is active.
 fn render_prompt_lines(app: &NeoChromeState, width: usize) -> (Vec<String>, Option<CursorPos>) {

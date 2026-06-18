@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn strip_ansi_removes_cursor_marker() {
-        assert_eq!(strip_ansi(crate::pi_tui::CURSOR_MARKER), "");
+        assert_eq!(strip_ansi(crate::terminal::CURSOR_MARKER), "");
     }
 
     #[test]
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn visible_width_ignores_cursor_marker() {
-        let line = format!("> {}hello", crate::pi_tui::CURSOR_MARKER);
+        let line = format!("> {}hello", crate::terminal::CURSOR_MARKER);
         assert_eq!(visible_width(&line), "> hello".chars().count());
     }
 

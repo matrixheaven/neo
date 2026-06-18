@@ -6,7 +6,7 @@ use crate::image::{ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCap
 use crate::transcript::ToolCallComponent;
 use crate::widgets::box_draw;
 
-/// Rich welcome-banner content rendered as a rounded box (matching kimi-code).
+/// Rich welcome-banner content rendered as a rounded box (matching Neo).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BannerData {
     pub title: String,
@@ -176,7 +176,7 @@ impl TranscriptEntry {
             Self::Banner(data) => render_welcome_banner(data, inner_width, theme),
             // User: no "You" label — a sparkle bullet (roleUser amber) on the
             // first line, continuation lines indented to align after the
-            // bullet (kimi-code style).
+            // bullet (Neo style).
             Self::UserMessage(content) => {
                 let style = Style::default().fg(theme.user_message);
                 bulleted_wrap(content, inner_width, "✨ ", style)
@@ -313,7 +313,7 @@ pub struct InlineImageRender {
 }
 
 /// Wrap `text` and apply a bullet prefix to the first row, indenting the rest
-/// to align under the body (prefix width of spaces). This is the kimi-code
+/// to align under the body (prefix width of spaces). This is the Neo
 /// "bullet + indented continuation" layout used by user/assistant messages.
 fn bulleted_wrap(text: &str, width: usize, prefix: &str, style: Style) -> Vec<Line> {
     let indent = " ".repeat(visible_width(prefix));
@@ -351,7 +351,7 @@ fn format_token_count_usize(tokens: usize) -> String {
 }
 
 /// Number of thinking lines shown in the floating window (streaming) or as a
-/// compact preview. Matches kimi-code's `THINKING_PREVIEW_LINES = 2`.
+/// compact preview. Matches Neo's `THINKING_PREVIEW_LINES = 2`.
 const THINKING_PREVIEW_LINES: usize = 2;
 
 /// Render the thinking block as a fixed-height floating window.
@@ -414,7 +414,7 @@ fn styled_wrap(text: &str, width: usize, style: Style) -> Vec<Line> {
 }
 
 /// Render the welcome banner as a rounded box with an ASCII-art logo and
-/// aligned metadata, matching kimi-code's `welcome.ts`.
+/// aligned metadata, matching Neo's `welcome.ts`.
 ///
 /// Layout:
 /// ```text

@@ -1,4 +1,4 @@
-//! Markdown rendering: verify each element is styled and laid out like kimi-code.
+//! Markdown rendering: verify each element is styled and laid out like Neo.
 
 use neo_tui::chrome::TuiTheme;
 use neo_tui::markdown::render_markdown;

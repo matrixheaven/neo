@@ -1,6 +1,6 @@
 //! Tree-style grouping for consecutive same-tool calls (read/grep/glob/find).
 //!
-//! Mirrors the kimi-code read-group layout: a single header line summarizing
+//! Mirrors the Neo read-group layout: a single header line summarizing
 //! the whole batch, followed by one indented row per call using `├─`/`└─`
 //! branch characters. Used by [`crate::transcript::TranscriptPane`] so a run of
 //! consecutive reads renders as one card instead of N cards.

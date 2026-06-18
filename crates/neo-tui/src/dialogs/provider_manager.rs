@@ -52,7 +52,7 @@ enum Row {
     Add,
 }
 
-/// Provider list/manager dialog matching Kimi Code's `/provider` UI.
+/// Provider list/manager dialog matching Neo's `/provider` UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderManagerState {
     rows: Vec<Row>,

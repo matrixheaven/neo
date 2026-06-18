@@ -1,6 +1,6 @@
 /// Reusable searchable list with fuzzy filtering and pagination.
 ///
-/// Ported from kimi-code `SearchableList<T>`.
+/// Ported from Neo `SearchableList<T>`.
 
 /// Options for constructing a [`SearchableList`].
 #[derive(Debug, Clone)]

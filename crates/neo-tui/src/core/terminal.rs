@@ -1,5 +1,5 @@
-//! Terminal rendering is now handled entirely by [`crate::pi_tui::TuiRenderer`],
-//! which implements the pi-tui single-buffer differential render algorithm.
+//! Terminal rendering is now handled entirely by [`crate::terminal::TuiRenderer`],
+//! which implements the single-buffer differential render algorithm.
 //!
 //! The previous `TerminalRenderer` (a split committed/live-region model) was
 //! removed: it could not track the hardware cursor across frames and caused the

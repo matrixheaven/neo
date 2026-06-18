@@ -33,7 +33,7 @@ use neo_tui::{
     core::InputResult,
     image::{ImageProtocolPreference, ImageRenderPolicy, TerminalImageCapabilities},
     input::{InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager},
-    pi_tui::TuiRenderer,
+    terminal::TuiRenderer,
     transcript::TranscriptPane,
 };
 
@@ -3094,9 +3094,9 @@ impl NeoTerminal {
             return Ok(());
         }
         let (lines, cursor) = tui.render_frame(usize::from(cols), usize::from(rows));
-        // Single-buffer differential render (pi-tui model): hand the whole
-        // frame to TuiRenderer::render, which diffs against the previous
-        // frame and rewrites only changed lines in place.
+        // Single-buffer differential render: hand the whole frame to
+        // TuiRenderer::render, which diffs against the previous frame and
+        // rewrites only changed lines in place.
         self.tui.render(lines, cursor)?;
         Ok(())
     }

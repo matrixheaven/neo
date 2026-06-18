@@ -27,7 +27,7 @@ impl TodoDisplayItem {
     }
 }
 
-/// Smart truncation algorithm matching kimi-code's `todo-panel.ts`.
+/// Smart truncation algorithm matching Neo's `todo-panel.ts`.
 ///
 /// 1. Include ALL in_progress items (capped at `max_visible`).
 /// 2. If slots remain: include 1 latest done item.

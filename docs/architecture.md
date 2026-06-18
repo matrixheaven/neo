@@ -28,7 +28,7 @@ xtask maintenance commands
   persistence, and JSONL session helpers.
 - `neo-agent` exposes the local command-line and TUI surface.
 - `neo-tui` owns terminal rendering via a component-tree architecture:
-  - `pi_tui/`: pi-style terminal rendering, input parsing, and low-level UI
+  - `terminal/`: single-buffer terminal rendering, input parsing, and low-level UI
     primitives.
   - `neo_tui.rs`: the Neo surface that combines transcript, chrome, prompt,
     overlays, and footer state.

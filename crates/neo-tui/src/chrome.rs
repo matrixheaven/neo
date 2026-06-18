@@ -714,7 +714,7 @@ impl NeoChromeState {
                         },
                     })
                     .collect();
-                // Auto-clear when all done (kimi-code behavior).
+                // Auto-clear when all done (Neo behavior).
                 if !display.is_empty()
                     && display.iter().all(|t| t.status == TodoDisplayStatus::Done)
                 {
@@ -928,7 +928,7 @@ impl NeoChromeState {
         Some(selected)
     }
 
-    // -- Rich Kimi-style dialog overlays ---------------------------------------
+    // -- Rich Neo dialog overlays ---------------------------------------
 
     pub fn open_model_selector(&mut self, opts: crate::dialogs::ModelSelectorOptions) -> OverlayId {
         let state = crate::dialogs::ModelSelectorState::new(opts);
@@ -1502,7 +1502,7 @@ pub enum OverlayKind {
     Approval(ApprovalRequestModal),
     QuestionDialog(QuestionStateMachine),
     Message(String),
-    // Kimi-style rich dialogs
+    // Neo rich dialogs
     ModelSelector(crate::dialogs::ModelSelectorState),
     TabbedModelSelector(crate::dialogs::TabbedModelSelectorState),
     ProviderManager(crate::dialogs::ProviderManagerState),
@@ -1663,7 +1663,7 @@ impl SessionPickerState {
         self.selected_item()
     }
 
-    /// Render the picker as ANSI-styled lines matching the Kimi card layout.
+    /// Render the picker as ANSI-styled lines matching the Neo card layout.
     #[must_use]
     pub fn render_lines(&self, width: usize, theme: &TuiTheme) -> Vec<String> {
         let brand = theme.brand;

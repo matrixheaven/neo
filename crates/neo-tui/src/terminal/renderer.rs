@@ -1,7 +1,6 @@
 //! Custom differential renderer for inline terminal output.
 //!
-//! This is a 1:1 Rust port of pi-tui's `TUI.doRender()` / `fullRender()` /
-//! `positionHardwareCursor()` algorithm (see `docs/pi/packages/tui/src/tui.ts`).
+//! This implements Neo's single-buffer terminal rendering algorithm.
 //! It renders content as `Vec<String>` (each string = one terminal line with
 //! embedded ANSI codes), diffs against the previous frame, and writes only
 //! changed lines.
@@ -166,13 +165,13 @@ pub struct TuiRenderer {
     previous_height: u16,
     /// Whether this is the first render (no diff, just output everything).
     first_render: bool,
-    /// Track terminal's working area (max lines ever rendered). Mirrors
-    /// pi-tui's `maxLinesRendered`: grows but doesn't shrink unless cleared.
+    /// Track terminal's working area (max lines ever rendered).
+    /// Grows but doesn't shrink unless the renderer takes a clear path.
     max_lines_rendered: usize,
-    /// Logical end-of-content row (mirrors pi-tui's `cursorRow`).
+    /// Logical end-of-content row.
     cursor_row: usize,
-    /// Mirrors pi-tui's `clearOnShrink`: defaults to off; when enabled, a
-    /// shrink below the historical high-water mark takes the full clear path.
+    /// Defaults to off; when enabled, a shrink below the historical high-water
+    /// mark takes the full clear path.
     clear_on_shrink: bool,
     show_hardware_cursor: bool,
 }
@@ -215,7 +214,6 @@ impl TuiRenderer {
     pub fn leave(&mut self) {
         let mut output = stdout();
         // Move cursor to the end of the content to prevent overwriting on exit.
-        // 1:1 port of pi-tui's `stop()`.
         if !self.previous_lines.is_empty() {
             let target_row = self.previous_lines.len(); // Line after the last content
             let line_diff = target_row as isize - self.hardware_cursor_row as isize;
@@ -262,7 +260,7 @@ impl TuiRenderer {
         Ok(())
     }
 
-    /// Force the next `render()` call down pi-tui's `fullRender(true)` path.
+    /// Force the next `render()` call down the full clear render path.
     pub fn force_clear(&mut self) {
         // Set width_changed=true by making previous_width nonzero but different.
         // The render() method checks `previous_width != 0 && previous_width != width`.
@@ -283,7 +281,7 @@ impl TuiRenderer {
     /// Render a frame. `new_lines` contains all content lines (with ANSI codes).
     /// `cursor` is the optional prompt cursor position in the rendered content.
     ///
-    /// This is a 1:1 port of pi-tui's `TUI.doRender()`.
+    /// Render a complete frame using single-buffer diffing.
     pub fn render(
         &mut self,
         new_lines: Vec<String>,
@@ -349,8 +347,8 @@ impl TuiRenderer {
         let mut hardware_cursor_row = self.hardware_cursor_row;
 
         // Helper: line diff (in screen rows) from the current cursor to a
-        // target content row. Mirrors pi-tui's `computeLineDiff` closure; kept
-        // as a free function so the loop body can mutate the viewport state.
+        // target content row. Kept as a free function so the loop body can
+        // mutate the viewport state.
         let compute_line_diff =
             |target_row: usize, hwc: usize, prev_vt: usize, vt: usize| -> isize {
                 let current_screen_row = hwc as isize - prev_vt as isize;
@@ -562,8 +560,8 @@ impl TuiRenderer {
         }
 
         // Differential rendering can only touch what was actually visible.
-        // If the first changed line is above the previous viewport, pi-tui
-        // falls back to fullRender(true).
+        // If the first changed line is above the previous viewport, use a full
+        // clear render.
         if first_changed_u < prev_viewport_top {
             self.full_render(
                 output,
@@ -724,8 +722,8 @@ impl TuiRenderer {
         Ok(())
     }
 
-    /// pi-tui fullRender(clear): optionally clear screen/scrollback, then write
-    /// the full rendered frame.
+    /// Full render: optionally clear screen/scrollback, then write the full
+    /// rendered frame.
     fn full_render(
         &mut self,
         output: &mut dyn Write,
@@ -800,8 +798,7 @@ impl TuiRenderer {
         Ok(())
     }
 
-    /// Position the hardware cursor for IME candidate window.
-    /// 1:1 port of pi-tui's `positionHardwareCursor`.
+    /// Position the hardware cursor for IME candidate windows.
     fn position_hardware_cursor(
         &mut self,
         output: &mut dyn Write,

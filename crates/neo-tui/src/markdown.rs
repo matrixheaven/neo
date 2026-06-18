@@ -2,7 +2,7 @@
 //!
 //! Parses assistant content with [`pulldown_cmark`] (CommonMark + GFM) and
 //! emits styled [`Line`]s. Code blocks are syntax-highlighted with
-//! [`syntect`]. Styling mirrors the kimi-code markdown theme.
+//! [`syntect`]. Styling mirrors the Neo markdown theme.
 
 use std::sync::OnceLock;
 

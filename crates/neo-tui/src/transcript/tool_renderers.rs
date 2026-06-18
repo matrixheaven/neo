@@ -32,7 +32,7 @@ pub fn tool_header(state: &ToolCallState) -> String {
 
 /// Build the tool header as styled spans: `{symbol} {verb} {name} ({key}){chip}`.
 ///
-/// Color mapping (mirrors kimi-code's tool header):
+/// Color mapping (mirrors Neo's tool header):
 /// - symbol + verb → status color
 /// - tool name → bold brand color
 /// - `(key arg)` → weak text

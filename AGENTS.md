@@ -42,7 +42,7 @@ Key files at the root:
   time, sync, net).
 - **Networking**: `reqwest` with `rustls-tls`, streaming, JSON.
 - **CLI**: `clap` derive-based parser in `crates/neo-agent/src/cli.rs`.
-- **TUI**: `crossterm`-based terminal UI with pi-style rendering primitives,
+- **TUI**: `crossterm`-based terminal UI with single-buffer rendering primitives,
   inline image protocols (Kitty, iTerm2, Sixel), bracketed-paste handling, and
   a component-tree architecture.
 - **Serialization / schemas**: `serde`, `serde_json`, `schemars`, `toml`.
