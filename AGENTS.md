@@ -492,9 +492,10 @@ loaded from project/user/extra/built-in tiers, the runtime exposes an internal
 
 - `neo-ai` clippy warnings (missing backticks, collapsible `if`) are fixed.
 - `neo-agent-core` clippy passes.
-- `neo-agent-core` and `neo-agent` tests pass except for the stale
-  `tool_permissions::bash_requires_permission_and_honors_timeout` test, which
-  still sends an old `mode` field to the bash tool schema.
+- `neo-agent-core`, `neo-agent`, and `neo-tui` tests pass after the
+  `neo-sdk` / `neo-extensions` consolidation, the PascalCase tool rename
+  (incl. `Bash` schema reshape with `TaskOutput` / `TaskStop`), the
+  skills runtime, and the TUI pending-approval queue.
 - `neo-tui` and the rest of `neo-agent` still carry pre-existing clippy
   warnings unrelated to the skill work.
 
