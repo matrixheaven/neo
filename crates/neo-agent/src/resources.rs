@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::Context;
-use neo_sdk::{ResourceContent, ResourceKind, SkillLoadOptions, load_skill};
+use neo_agent_core::skills::{LoadedSkill, SkillStore, builtin::builtin_skills, discovery};
 
 const CONFIG_DIR: &str = ".neo";
 const SYSTEM_PROMPT_FILE: &str = "SYSTEM.md";
@@ -17,6 +17,7 @@ const CONTEXT_FILE_CANDIDATES: &[&str] = &["AGENTS.md", "AGENTS.MD", "CLAUDE.md"
 pub(crate) fn load_system_prompt(
     project_dir: &Path,
     project_trusted: bool,
+    skill_store: &SkillStore,
 ) -> anyhow::Result<Option<String>> {
     let system_prompt =
         read_first_existing(&system_prompt_candidates(project_dir), "system prompt")?;
@@ -26,7 +27,23 @@ pub(crate) fn load_system_prompt(
     )?
     .into_iter()
     .collect();
-    append_prompts.extend(load_skill_prompts(project_dir)?);
+    if let Some(available_skills) = format_available_skills(skill_store) {
+        append_prompts.push(available_skills);
+    }
+    if let Some(project_context) =
+        format_project_context(&load_context_files(project_dir, project_trusted)?)
+    {
+        append_prompts.push(project_context);
+    }
+    let mut append_prompts: Vec<String> = read_first_existing(
+        &append_system_prompt_candidates(project_dir),
+        "append system prompt",
+    )?
+    .into_iter()
+    .collect();
+    if let Some(available_skills) = format_available_skills(skill_store) {
+        append_prompts.push(available_skills);
+    }
     if let Some(project_context) =
         format_project_context(&load_context_files(project_dir, project_trusted)?)
     {
@@ -34,6 +51,23 @@ pub(crate) fn load_system_prompt(
     }
 
     Ok(join_system_prompt_parts(system_prompt, append_prompts))
+}
+
+pub(crate) fn load_skill_store(
+    project_dir: &Path,
+    user_dir: Option<&Path>,
+    extra_dirs: &[String],
+) -> anyhow::Result<SkillStore> {
+    let mut extra = Vec::new();
+    for dir in extra_dirs {
+        extra.push(expand_user_path(PathBuf::from(dir)));
+    }
+    let mut user = Vec::new();
+    if let Some(user_dir) = user_dir {
+        user.extend(discovery::user_skill_dirs(user_dir));
+    }
+    SkillStore::load(Some(project_dir), &user, &extra, builtin_skills()?)
+        .map_err(anyhow::Error::from)
 }
 
 #[derive(Debug, Clone)]
@@ -112,101 +146,63 @@ fn format_project_context(context_files: &[ContextFile]) -> Option<String> {
     Some(prompt)
 }
 
-fn load_skill_prompts(project_dir: &Path) -> anyhow::Result<Vec<String>> {
-    let paths = discover_skill_paths(project_dir)?;
-    paths
-        .iter()
-        .map(|path| {
-            let skill = load_skill(
-                path,
-                SkillLoadOptions {
-                    load_resources: true,
-                },
-            )
-            .with_context(|| format!("failed to load skill {}", path.display()))?;
-            let mut prompt = format!(
-                "<skill name=\"{}\" description=\"{}\">\n{}",
-                skill.manifest.name,
-                skill.manifest.description,
-                skill.body.trim()
-            );
-            for resource in &skill.resources {
-                match &resource.content {
-                    ResourceContent::Text(content) => {
-                        write!(
-                            prompt,
-                            "\n\n<skill_resource path=\"{}\" kind=\"{}\">\n{}\n</skill_resource>",
-                            resource.spec.path,
-                            resource_kind_label(resource.spec.kind),
-                            content.trim()
-                        )
-                        .expect("writing to String should not fail");
-                    }
-                    ResourceContent::Binary(_) => {
-                        write!(
-                            prompt,
-                            "\n\n<skill_resource path=\"{}\" kind=\"{}\" content=\"binary\" />",
-                            resource.spec.path,
-                            resource_kind_label(resource.spec.kind)
-                        )
-                        .expect("writing to String should not fail");
-                    }
-                }
-            }
-            prompt.push_str("\n</skill>");
-            Ok(prompt)
-        })
-        .collect()
-}
-
-fn resource_kind_label(kind: ResourceKind) -> &'static str {
-    match kind {
-        ResourceKind::Text => "text",
-        ResourceKind::Binary => "binary",
-        ResourceKind::Executable => "executable",
+fn format_available_skills(skill_store: &SkillStore) -> Option<String> {
+    let skills: Vec<&LoadedSkill> = skill_store.auto_invokable();
+    if skills.is_empty() {
+        return None;
     }
-}
-
-fn discover_skill_paths(project_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    if let Some(home) = home_dir() {
-        paths.extend(discover_skill_paths_in_dir(
-            &home.join(CONFIG_DIR).join("skills"),
-        )?);
-    }
-    paths.extend(discover_skill_paths_in_dir(
-        &project_dir.join(CONFIG_DIR).join("skills"),
-    )?);
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
-}
-
-fn discover_skill_paths_in_dir(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut paths = Vec::new();
-    collect_skill_paths(dir, &mut paths)?;
-    Ok(paths)
-}
-
-fn collect_skill_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    let direct_skill = dir.join("SKILL.md");
-    if direct_skill.is_file() {
-        paths.push(dir.to_path_buf());
-        return Ok(());
-    }
-    for entry in fs::read_dir(dir)
-        .with_context(|| format!("failed to read skills directory {}", dir.display()))?
-    {
-        let entry = entry.with_context(|| format!("failed to inspect {}", dir.display()))?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_skill_paths(&path, paths)?;
+    let mut prompt = String::from("<available_skills>\n");
+    for skill in skills {
+        prompt.push_str("<skill name=\"");
+        prompt.push_str(&skill.name);
+        prompt.push_str("\" description=\"");
+        prompt.push_str(&xml_escape(&skill.manifest.description));
+        prompt.push('"');
+        if let Some(when) = &skill.manifest.when_to_use {
+            prompt.push_str(" whenToUse=\"");
+            prompt.push_str(&xml_escape(when));
+            prompt.push('"');
         }
+        prompt.push_str(">\n");
+        if !skill.manifest.arguments.is_empty() {
+            prompt.push_str("<arguments>\n");
+            for arg in &skill.manifest.arguments {
+                prompt.push_str("<arg name=\"");
+                prompt.push_str(&arg.name);
+                prompt.push('"');
+                if arg.required {
+                    prompt.push_str(" required=\"true\"");
+                }
+                if let Some(default) = &arg.default {
+                    prompt.push_str(" default=\"");
+                    prompt.push_str(&xml_escape(default));
+                    prompt.push('"');
+                }
+                prompt.push_str(" />\n");
+            }
+            prompt.push_str("</arguments>\n");
+        }
+        prompt.push_str("</skill>\n");
     }
-    Ok(())
+    prompt.push_str("</available_skills>");
+    Some(prompt)
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn expand_user_path(path: PathBuf) -> PathBuf {
+    if let Some(rest) = path.to_string_lossy().strip_prefix("~/")
+        && let Some(home) = home_dir()
+    {
+        return home.join(rest);
+    }
+    path
 }
 
 fn normalize_prompt(prompt: &str) -> String {

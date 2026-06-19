@@ -1,10 +1,11 @@
 use crate::{
-    config::{self, AppConfig, workspace_sessions_dir},
+    config::{self, AppConfig, neo_home, workspace_sessions_dir},
     modes::sessions::{SessionPickerScope as SessionDataScope, session_summaries},
     prompt_templates::{
         PromptTemplateLocation, discover_prompt_template_commands, expand_prompt_template_args,
         load_project_prompt_templates,
     },
+    resources,
 };
 use std::{
     cell::RefCell,
@@ -24,6 +25,7 @@ use crossterm::{event, terminal::size};
 use neo_agent_core::{
     AgentEvent, AgentMessage, PendingQuestion, PermissionDecision, QuestionResponse,
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
+    skills::SkillStore,
 };
 use neo_tui::{
     chrome::{
@@ -50,6 +52,25 @@ type TurnDriver = Arc<dyn Fn(TurnRequest, TurnChannels) -> BoxedTurnFuture + Sen
 type SessionLoader = Arc<dyn Fn(String) -> BoxedSessionFuture + Send + Sync>;
 type SessionForker = Arc<dyn Fn(String) -> BoxedForkFuture + Send + Sync>;
 type ClipboardWriter = Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
+
+fn approval_number(character: char) -> Option<usize> {
+    match character {
+        '1' => Some(1),
+        '2' => Some(2),
+        '3' => Some(3),
+        '4' => Some(4),
+        _ => None,
+    }
+}
+
+fn approval_result_label(choice: ApprovalChoice) -> &'static str {
+    match choice {
+        ApprovalChoice::Approve => "Approved",
+        ApprovalChoice::AlwaysApprove => "Approved for this session",
+        ApprovalChoice::Deny => "Rejected",
+        ApprovalChoice::Revise => "Rejected with feedback",
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupAction {
@@ -154,6 +175,7 @@ pub(crate) struct InteractiveController {
     pending_custom_registry: Option<PendingCustomRegistry>,
     pending_catalog_provider_id: Option<String>,
     pending_catalog_fetch: Option<PendingCatalogFetch>,
+    skill_store: Option<neo_agent_core::skills::SkillStore>,
 }
 
 pub(crate) struct TurnChannels {
@@ -356,6 +378,7 @@ impl InteractiveController {
             pending_custom_registry: None,
             pending_catalog_provider_id: None,
             pending_catalog_fetch: None,
+            skill_store: None,
         }
     }
 
@@ -624,6 +647,12 @@ impl InteractiveController {
         }
         match event {
             InputEvent::Insert(character) => {
+                if let Some(number) = approval_number(character) {
+                    if let Some(result) = self.tui.chrome_mut().choose_approval_number(number) {
+                        self.resolve_approval(&result);
+                        return Ok(false);
+                    }
+                }
                 self.clear_pending_exit_confirmation();
                 self.tui
                     .chrome_mut()
@@ -711,6 +740,9 @@ impl InteractiveController {
             }
             InputEvent::Resize { .. } => {}
             InputEvent::Cancel => {
+                if self.reject_pending_approval() {
+                    return Ok(false);
+                }
                 if self.cancel_focused_overlay() {
                     return Ok(false);
                 }
@@ -722,6 +754,13 @@ impl InteractiveController {
                 return Ok(false);
             }
             InputEvent::Interrupt => {
+                if self.reject_all_pending_approvals() {
+                    if self.active_turn.is_some() {
+                        self.cancel_active_turn().await?;
+                        self.show_notice("Interrupted");
+                    }
+                    return Ok(false);
+                }
                 if self.active_turn.is_some() {
                     return Ok(true);
                 }
@@ -741,7 +780,9 @@ impl InteractiveController {
             .is_some_and(|overlay| matches!(overlay.kind, OverlayKind::PromptCompletion(_)))
         {
             PROMPT_COMPLETION_ACTION_PRIORITY
-        } else if self.tui.chrome_mut().focused_overlay_id().is_some() {
+        } else if self.tui.chrome().approval_is_pending()
+            || self.tui.chrome_mut().focused_overlay_id().is_some()
+        {
             OVERLAY_ACTION_PRIORITY
         } else {
             EDITING_ACTION_PRIORITY
@@ -796,10 +837,11 @@ impl InteractiveController {
                     self.fork_selected_session().await?;
                 }
             }
+            KeybindingAction::ToolOutputToggle => {
+                self.transcript_mut().toggle_tool_output_expanded();
+            }
             KeybindingAction::ModelPickerOpen => {
-                if !self.transcript_mut().toggle_tool_output_expanded() {
-                    self.open_model_picker();
-                }
+                self.open_model_picker();
             }
             KeybindingAction::TogglePlanMode => {
                 let currently_active = self.tui.chrome_mut().is_plan_mode();
@@ -814,8 +856,14 @@ impl InteractiveController {
                 self.clear_pending_exit_confirmation();
                 self.submit_current_prompt().await?;
             }
-            KeybindingAction::SelectUp => self.tui.chrome_mut().move_overlay_selection_up(),
-            KeybindingAction::SelectDown => self.tui.chrome_mut().move_overlay_selection_down(),
+            KeybindingAction::SelectUp => {
+                self.tui.chrome_mut().move_overlay_selection_up();
+                self.sync_inline_approval_selection();
+            }
+            KeybindingAction::SelectDown => {
+                self.tui.chrome_mut().move_overlay_selection_down();
+                self.sync_inline_approval_selection();
+            }
             KeybindingAction::SelectPageUp => {
                 self.tui.chrome_mut().move_overlay_selection_page_up()
             }
@@ -844,6 +892,9 @@ impl InteractiveController {
                 }
             }
             KeybindingAction::SelectCancel => {
+                if self.reject_pending_approval() {
+                    return Ok(false);
+                }
                 if self.cancel_focused_overlay() {
                     return Ok(false);
                 }
@@ -908,6 +959,32 @@ impl InteractiveController {
         true
     }
 
+    fn reject_pending_approval(&mut self) -> bool {
+        let Some(result) = self.tui.chrome_mut().deny_approval() else {
+            return false;
+        };
+        self.resolve_approval(&result);
+        true
+    }
+
+    fn reject_all_pending_approvals(&mut self) -> bool {
+        let chrome_results = self.tui.chrome_mut().cancel_all_approvals();
+        let had_pending = !chrome_results.is_empty() || !self.pending_approvals.is_empty();
+        for result in chrome_results {
+            self.resolve_approval(&result);
+        }
+        for (request_id, tx) in std::mem::take(&mut self.pending_approvals) {
+            self.tui
+                .transcript_mut()
+                .resolve_approval(&request_id, "Rejected");
+            let _ = tx.send(PermissionDecision::Deny);
+        }
+        self.tui
+            .transcript_mut()
+            .resolve_unresolved_approvals("Rejected");
+        had_pending
+    }
+
     fn complete_prompt_or_insert_tab(&mut self) {
         self.clear_pending_exit_confirmation();
         if self.tui.chrome_mut().selected_prompt_completion().is_some() {
@@ -921,14 +998,18 @@ impl InteractiveController {
                 .apply_edit(PromptEdit::Insert("\t"));
             return;
         };
-        let completions =
-            match prompt_completions(&self.completion_root, &prefix.text, &self.model_items) {
-                Ok(completions) => completions,
-                Err(error) => {
-                    self.push_status(format!("Completion error: {error}"));
-                    return;
-                }
-            };
+        let completions = match prompt_completions(
+            &self.completion_root,
+            &prefix.text,
+            &self.model_items,
+            self.skill_store.as_ref(),
+        ) {
+            Ok(completions) => completions,
+            Err(error) => {
+                self.push_status(format!("Completion error: {error}"));
+                return;
+            }
+        };
 
         if completions.is_empty() {
             self.tui
@@ -974,15 +1055,19 @@ impl InteractiveController {
             return;
         }
 
-        let completions =
-            match prompt_completions(&self.completion_root, &prefix.text, &self.model_items) {
-                Ok(completions) => completions,
-                Err(error) => {
-                    self.close_inline_prompt_completion();
-                    self.push_status(format!("Completion error: {error}"));
-                    return;
-                }
-            };
+        let completions = match prompt_completions(
+            &self.completion_root,
+            &prefix.text,
+            &self.model_items,
+            self.skill_store.as_ref(),
+        ) {
+            Ok(completions) => completions,
+            Err(error) => {
+                self.close_inline_prompt_completion();
+                self.push_status(format!("Completion error: {error}"));
+                return;
+            }
+        };
 
         if completions.is_empty() {
             self.close_inline_prompt_completion();
@@ -1260,6 +1345,16 @@ impl InteractiveController {
             }
             return true;
         }
+        if let Some(rest) = prompt.trim().strip_prefix("/skill:") {
+            self.tui.chrome_mut().prompt_mut().clear_after_submit();
+            let arg = rest.trim();
+            if arg.is_empty() {
+                self.push_status("Usage: /skill:<name> [args]");
+            } else if let Err(err) = self.handle_skill_invocation(arg) {
+                self.push_status(format!("Skill error: {err}"));
+            }
+            return true;
+        }
         if let Some(rest) = prompt.trim().strip_prefix("/plan") {
             self.tui.chrome_mut().prompt_mut().clear_after_submit();
             let arg = rest.trim();
@@ -1302,6 +1397,31 @@ impl InteractiveController {
             return true;
         }
         false
+    }
+
+    fn handle_skill_invocation(&mut self, arg: &str) -> Result<()> {
+        let skill_store = self
+            .skill_store
+            .as_ref()
+            .context("skill store not loaded")?;
+        let (name, args_str) = match arg.find(' ') {
+            Some(pos) => (&arg[..pos], &arg[pos + 1..]),
+            None => (arg, ""),
+        };
+        let skill = skill_store
+            .get(name)
+            .with_context(|| format!("skill `{name}` not found"))?;
+        let mut invocation = neo_agent_core::skills::parse_skill_invocation(args_str)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        name.clone_into(&mut invocation.name);
+        let expanded = neo_agent_core::skills::expand_skill_body(skill, &invocation)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        self.transcript_mut()
+            .push_transcript(neo_tui::transcript::TranscriptEntry::skill_activated(name));
+        let prompt = self.tui.chrome_mut().prompt_mut();
+        prompt.text = expanded;
+        prompt.cursor = prompt.text.chars().count();
+        Ok(())
     }
 
     async fn submit_current_prompt(&mut self) -> Result<()> {
@@ -1484,6 +1604,14 @@ impl InteractiveController {
         self.tui.chrome_mut().apply_agent_event(event);
     }
 
+    fn sync_inline_approval_selection(&mut self) {
+        let Some((id, selected)) = self.tui.chrome().approval_selection() else {
+            return;
+        };
+        let id = id.to_owned();
+        self.tui.transcript_mut().select_approval(&id, selected);
+    }
+
     fn register_pending_approval(&mut self, approval: crate::modes::run::PromptApprovalRequest) {
         if self.always_approve {
             self.resolved_approvals.remove(&approval.id);
@@ -1499,6 +1627,9 @@ impl InteractiveController {
     }
 
     fn resolve_approval(&mut self, result: &ApprovalResult) {
+        self.tui
+            .transcript_mut()
+            .resolve_approval(&result.request_id, approval_result_label(result.choice));
         let decision = match result.choice {
             ApprovalChoice::Approve => PermissionDecision::Allow,
             ApprovalChoice::AlwaysApprove => {
@@ -2295,12 +2426,13 @@ fn prompt_completions(
     root: &Path,
     prefix: &str,
     model_items: &[PickerItem],
+    skill_store: Option<&SkillStore>,
 ) -> Result<Vec<PickerItem>> {
     let catalog = CompletionCatalog {
         slash_prompts: slash_prompt_template_completion_items(root, prefix)?.unwrap_or_default(),
         prompt_packages: prompt_package_completion_items(root)?,
         extension_commands: extension_command_completion_items(root)?,
-        session_commands: session_completion_items(),
+        session_commands: session_completion_items(skill_store),
         model_items: model_items.to_vec(),
     };
     Ok(completion_source_candidates(root, prefix, &catalog)?
@@ -2341,11 +2473,11 @@ fn prompt_package_completion_items(root: &Path) -> Result<Vec<PickerItem>> {
 }
 
 fn extension_command_completion_items(root: &Path) -> Result<Vec<PickerItem>> {
-    let extension_root = crate::extension_tools::default_extension_root(root);
+    let extension_root = neo_agent_core::tools::extensions::default_extension_root(root);
     if !extension_root.exists() {
         return Ok(Vec::new());
     }
-    let mut items = neo_extensions::ExtensionDiscovery::new(&extension_root)
+    let mut items = neo_agent_core::tools::extensions::ExtensionDiscovery::new(&extension_root)
         .discover()
         .with_context(|| {
             format!(
@@ -2370,41 +2502,60 @@ fn extension_command_completion_items(root: &Path) -> Result<Vec<PickerItem>> {
     Ok(items)
 }
 
-fn session_completion_items() -> Vec<PickerItem> {
-    [
-        (
-            "/resume",
-            "Resume a local session",
-            "local sessions",
-            "local",
-        ),
-        ("/model", "Switch active model", "model picker", "local"),
-        (
-            "/provider",
-            "View configured providers",
-            "provider picker",
-            "local",
-        ),
-        (
-            "/plan",
-            "Toggle plan mode (on / off / clear)",
-            "plan mode",
-            "local",
-        ),
-    ]
-    .into_iter()
-    .map(|(value, description, provider, trust)| {
+fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<PickerItem> {
+    let mut items = vec![
         PickerItem::new(
-            value,
-            value,
+            "/resume",
+            "/resume",
             Some(prompt_source_description(
-                Some(description),
-                Some(provider),
-                Some(trust),
+                Some("Resume a local session"),
+                Some("local sessions"),
+                Some("local"),
             )),
-        )
-    })
-    .collect()
+        ),
+        PickerItem::new(
+            "/model",
+            "/model",
+            Some(prompt_source_description(
+                Some("Switch active model"),
+                Some("model picker"),
+                Some("local"),
+            )),
+        ),
+        PickerItem::new(
+            "/provider",
+            "/provider",
+            Some(prompt_source_description(
+                Some("View configured providers"),
+                Some("provider picker"),
+                Some("local"),
+            )),
+        ),
+        PickerItem::new(
+            "/plan",
+            "/plan",
+            Some(prompt_source_description(
+                Some("Toggle plan mode (on / off / clear)"),
+                Some("plan mode"),
+                Some("local"),
+            )),
+        ),
+    ];
+    if let Some(skill_store) = skill_store {
+        for skill in skill_store.iter() {
+            let value = format!("/skill:{}", skill.name);
+            items.push(PickerItem::new(
+                value.clone(),
+                value,
+                Some(prompt_source_description(
+                    Some(&skill.manifest.description),
+                    Some("skill"),
+                    Some("local"),
+                )),
+            ));
+        }
+    }
+    items
 }
 
 fn prompt_source_description(
@@ -3021,6 +3172,7 @@ const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::TranscriptSelectionExtendPageDown,
     KeybindingAction::CommandPaletteOpen,
     KeybindingAction::SessionPickerOpen,
+    KeybindingAction::ToolOutputToggle,
     KeybindingAction::ModelPickerOpen,
     KeybindingAction::EditorCursorUp,
     KeybindingAction::EditorCursorDown,
@@ -3253,7 +3405,13 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         .tui
         .chrome_mut()
         .set_thinking_enabled(controller.current_thinking);
-    controller.local_config = Some(config);
+    controller.local_config = Some(config.clone());
+    controller.skill_store = resources::load_skill_store(
+        &config.project_dir,
+        neo_home().as_deref(),
+        &config.extra_skill_dirs,
+    )
+    .ok();
     controller
 }
 
@@ -4890,7 +5048,8 @@ command = "echo"
         )
         .expect("write extension manifest");
 
-        let completions = prompt_completions(temp.path(), "/", &[]).expect("slash completions");
+        let completions =
+            prompt_completions(temp.path(), "/", &[], None).expect("slash completions");
         let by_value = completions
             .iter()
             .map(|item| (item.value.as_str(), item))
@@ -5044,7 +5203,8 @@ command = "python3"
         )
         .expect("write manifest");
 
-        let completions = prompt_completions(temp.path(), "/rev", &[]).expect("prompt completions");
+        let completions =
+            prompt_completions(temp.path(), "/rev", &[], None).expect("prompt completions");
 
         assert!(completions.iter().any(|item| {
             item.value == "/review-extension"
@@ -5113,7 +5273,8 @@ command = "python3"
     #[test]
     fn event_loop_slash_tree_absent() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let completions = prompt_completions(temp.path(), "/", &[]).expect("slash completions");
+        let completions =
+            prompt_completions(temp.path(), "/", &[], None).expect("slash completions");
         assert!(
             !completions.iter().any(|item| item.value == "/tree"),
             "/tree should not appear in slash completion items"
@@ -5496,7 +5657,7 @@ command = "python3"
     }
 
     #[tokio::test]
-    async fn event_loop_ctrl_o_toggles_selected_tool_detail_before_model_picker() {
+    async fn event_loop_ctrl_o_toggles_tool_detail() {
         let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
@@ -5509,7 +5670,7 @@ command = "python3"
             .apply_agent_event(AgentEvent::ToolExecutionStarted {
                 turn: 1,
                 id: "tool-1".to_owned(),
-                name: "read".to_owned(),
+                name: "Read".to_owned(),
                 arguments: serde_json::json!({ "path": "README.md" }),
             });
         controller
@@ -5517,7 +5678,7 @@ command = "python3"
             .apply_agent_event(AgentEvent::ToolExecutionFinished {
                 turn: 1,
                 id: "tool-1".to_owned(),
-                name: "read".to_owned(),
+                name: "Read".to_owned(),
                 result: ToolResult::ok("expanded file content"),
             });
         controller
@@ -5525,9 +5686,9 @@ command = "python3"
             .select_visible_transcript_entry();
 
         controller
-            .handle_input_event(InputEvent::Action(KeybindingAction::ModelPickerOpen))
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")))
             .await
-            .expect("ctrl-o toggles selected tool detail");
+            .expect("ctrl-o key toggles tool detail");
 
         assert!(controller.chrome().focused_overlay().is_none());
         assert!(
@@ -5539,7 +5700,7 @@ command = "python3"
     }
 
     #[tokio::test]
-    async fn event_loop_ctrl_o_still_opens_model_picker_without_selected_detail() {
+    async fn event_loop_model_picker_action_opens_model_picker() {
         let mut controller = InteractiveController::new_with_event_driver(
             "neo",
             "test-session",
@@ -5574,7 +5735,7 @@ command = "python3"
         controller
             .handle_input_event(InputEvent::Action(KeybindingAction::ModelPickerOpen))
             .await
-            .expect("ctrl-o opens model picker");
+            .expect("model picker action opens model picker");
 
         assert!(
             controller.chrome().tabbed_model_selector_result().is_some()
@@ -5614,7 +5775,7 @@ command = "python3"
             .expect("selection moves down");
         assert_eq!(
             controller.chrome().approval_choice(),
-            Some(ApprovalChoice::Deny)
+            Some(ApprovalChoice::AlwaysApprove)
         );
 
         controller
@@ -5983,7 +6144,7 @@ command = "python3"
                     turn: 1,
                     id: "tool-1".to_owned(),
                     operation: neo_agent_core::PermissionOperation::Tool,
-                    subject: "write".to_owned(),
+                    subject: "Write".to_owned(),
                     arguments: serde_json::json!({"path": "approved.txt"}),
                 });
                 let (decision_tx, decision_rx) = oneshot::channel();
@@ -6045,6 +6206,331 @@ command = "python3"
         );
         assert!(controller.chrome().focused_overlay().is_none());
         assert!(controller.render_snapshot().contains("approved"));
+    }
+
+    #[tokio::test]
+    async fn approval_number_shortcut_confirms_session_approval() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Tool,
+            subject: "Write".to_owned(),
+            arguments: serde_json::json!({"path": "approved.txt"}),
+        });
+        let (decision_tx, decision_rx) = oneshot::channel();
+        controller
+            .pending_approvals
+            .insert("tool-1".to_owned(), decision_tx);
+
+        controller
+            .handle_input_event(InputEvent::Insert('2'))
+            .await
+            .expect("number shortcut handles approval");
+
+        assert_eq!(
+            decision_rx.await.expect("approval decision"),
+            PermissionDecision::Allow
+        );
+        assert!(controller.always_approve);
+        assert!(controller.chrome().focused_overlay().is_none());
+        assert!(
+            controller
+                .render_snapshot()
+                .contains("Approved for this session")
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_uses_selection_priority_for_real_keys() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.type_text("draft");
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Tool,
+            subject: "Write".to_owned(),
+            arguments: serde_json::json!({"path": "approved.txt"}),
+        });
+        let (decision_tx, decision_rx) = oneshot::channel();
+        controller
+            .pending_approvals
+            .insert("tool-1".to_owned(), decision_tx);
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
+            .await
+            .expect("down selects approval option");
+        assert_eq!(
+            controller.chrome().approval_choice(),
+            Some(ApprovalChoice::AlwaysApprove)
+        );
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("enter").expect("valid key")))
+            .await
+            .expect("enter confirms approval");
+
+        assert_eq!(
+            decision_rx.await.expect("approval decision"),
+            PermissionDecision::Allow
+        );
+        assert_eq!(controller.chrome().prompt().text, "draft");
+        assert!(controller.chrome().focused_overlay().is_none());
+    }
+
+    #[tokio::test]
+    async fn approval_cancel_rejects_pending_approval() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Tool,
+            subject: "Write".to_owned(),
+            arguments: serde_json::json!({"path": "denied.txt"}),
+        });
+        let (decision_tx, decision_rx) = oneshot::channel();
+        controller
+            .pending_approvals
+            .insert("tool-1".to_owned(), decision_tx);
+
+        controller
+            .handle_input_event(InputEvent::Cancel)
+            .await
+            .expect("cancel rejects approval");
+
+        assert_eq!(
+            decision_rx.await.expect("approval decision"),
+            PermissionDecision::Deny
+        );
+        assert!(controller.render_snapshot().contains("Rejected"));
+    }
+
+    #[tokio::test]
+    async fn approval_requests_are_handled_one_at_a_time() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Shell,
+            subject: "printf one".to_owned(),
+            arguments: serde_json::json!({"command": "printf one"}),
+        });
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-2".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Shell,
+            subject: "printf two".to_owned(),
+            arguments: serde_json::json!({"command": "printf two"}),
+        });
+        let (first_tx, first_rx) = oneshot::channel();
+        let (second_tx, _second_rx) = oneshot::channel();
+        controller
+            .pending_approvals
+            .insert("tool-1".to_owned(), first_tx);
+        controller
+            .pending_approvals
+            .insert("tool-2".to_owned(), second_tx);
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+            .await
+            .expect("first approval confirms");
+
+        assert_eq!(
+            first_rx.await.expect("first decision"),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            controller.chrome().approval_selection().map(|(id, _)| id),
+            Some("tool-2")
+        );
+        let snapshot = controller.render_snapshot();
+        assert!(snapshot.contains("printf two"));
+    }
+
+    #[tokio::test]
+    async fn approval_transcript_only_shows_active_request() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Shell,
+            subject: "printf one".to_owned(),
+            arguments: serde_json::json!({"command": "printf one"}),
+        });
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-2".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Shell,
+            subject: "printf two".to_owned(),
+            arguments: serde_json::json!({"command": "printf two"}),
+        });
+
+        let snapshot = controller.render_snapshot();
+        assert!(snapshot.contains("printf one"));
+        assert!(!snapshot.contains("printf two"));
+        assert!(snapshot.contains("queued: 1 bash approval waiting"));
+    }
+
+    #[tokio::test]
+    async fn approval_cancel_advances_next_visible_request() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Shell,
+            subject: "printf one".to_owned(),
+            arguments: serde_json::json!({"command": "printf one"}),
+        });
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-2".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Shell,
+            subject: "printf two".to_owned(),
+            arguments: serde_json::json!({"command": "printf two"}),
+        });
+        let (first_tx, first_rx) = oneshot::channel();
+        let (second_tx, _second_rx) = oneshot::channel();
+        controller
+            .pending_approvals
+            .insert("tool-1".to_owned(), first_tx);
+        controller
+            .pending_approvals
+            .insert("tool-2".to_owned(), second_tx);
+
+        controller
+            .handle_input_event(InputEvent::Cancel)
+            .await
+            .expect("cancel rejects current approval");
+
+        assert_eq!(
+            first_rx.await.expect("first decision"),
+            PermissionDecision::Deny
+        );
+        let snapshot = controller.render_snapshot();
+        assert!(snapshot.contains("Rejected"));
+        assert!(snapshot.contains("printf two"));
+        assert!(!snapshot.contains("queued:"));
+    }
+
+    #[tokio::test]
+    async fn approval_interrupt_rejects_all_pending_approvals() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Shell,
+            subject: "printf one".to_owned(),
+            arguments: serde_json::json!({"command": "printf one"}),
+        });
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-2".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Shell,
+            subject: "printf two".to_owned(),
+            arguments: serde_json::json!({"command": "printf two"}),
+        });
+        let (first_tx, first_rx) = oneshot::channel();
+        let (second_tx, second_rx) = oneshot::channel();
+        controller
+            .pending_approvals
+            .insert("tool-1".to_owned(), first_tx);
+        controller
+            .pending_approvals
+            .insert("tool-2".to_owned(), second_tx);
+
+        controller
+            .handle_input_event(InputEvent::Interrupt)
+            .await
+            .expect("interrupt rejects pending approvals");
+
+        assert_eq!(
+            first_rx.await.expect("first decision"),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            second_rx.await.expect("second decision"),
+            PermissionDecision::Deny
+        );
+        assert!(controller.pending_approvals.is_empty());
+        assert!(!controller.chrome().approval_is_pending());
+    }
+
+    #[tokio::test]
+    async fn approval_interrupt_preserves_rejection_for_late_channel_registration() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Shell,
+            subject: "printf one".to_owned(),
+            arguments: serde_json::json!({"command": "printf one"}),
+        });
+
+        controller
+            .handle_input_event(InputEvent::Interrupt)
+            .await
+            .expect("interrupt rejects visible approval");
+        let (decision_tx, decision_rx) = oneshot::channel();
+        controller.register_pending_approval(crate::modes::run::PromptApprovalRequest {
+            id: "tool-1".to_owned(),
+            decision_tx,
+        });
+
+        assert_eq!(
+            decision_rx.await.expect("late approval decision"),
+            PermissionDecision::Deny
+        );
+        assert!(controller.pending_approvals.is_empty());
     }
 
     #[tokio::test]
@@ -7117,6 +7603,7 @@ command = "python3"
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
             prompt_templates: Vec::new(),
+            extra_skill_dirs: Vec::new(),
             project_trusted: true,
             project_dir: project_dir.to_path_buf(),
             config_path: project_dir.join(".neo/config.toml"),

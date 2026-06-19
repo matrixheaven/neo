@@ -9,6 +9,7 @@ use std::{
 use anyhow::Context;
 use futures::StreamExt;
 use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionMetadataStore};
+use neo_agent_core::skills::SkillStore;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool,
     CompactionSettings, Content, McpHttpConfig, McpHttpToolAdapter, McpStdioConfig,
@@ -25,8 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     cli::RunOutput,
-    config::{self, AppConfig, McpServerConfig, workspace_sessions_dir},
-    extension_tools,
+    config::{self, AppConfig, McpServerConfig, neo_home, workspace_sessions_dir},
     modes::sessions,
     resources,
 };
@@ -1088,10 +1088,16 @@ async fn runtime_for_config(
     if let Some(question_tx) = question_tx {
         tools.register(AskUserTool::new(question_tx));
     }
-    Ok(AgentRuntime::with_tools(
-        agent_config_for_app(model, config, approval_tx)?,
+    let skill_store = resources::load_skill_store(
+        &config.project_dir,
+        neo_home().as_deref(),
+        &config.extra_skill_dirs,
+    )?;
+    Ok(AgentRuntime::with_tools_and_skills(
+        agent_config_for_app(model, config, approval_tx, &skill_store)?,
         client,
         tools,
+        skill_store,
     ))
 }
 
@@ -1272,6 +1278,7 @@ fn agent_config_for_app(
     model: ModelSpec,
     config: &AppConfig,
     approval_tx: Option<mpsc::UnboundedSender<PromptApprovalRequest>>,
+    skill_store: &SkillStore,
 ) -> anyhow::Result<AgentConfig> {
     let mut agent_config = AgentConfig::for_model(model)
         .with_tool_permission_policy(config.permissions.clone())
@@ -1286,7 +1293,7 @@ fn agent_config_for_app(
     agent_config.reasoning_effort = config.runtime.reasoning_effort;
     agent_config.replay_reasoning = config.runtime.replay_reasoning;
     if let Some(system_prompt) =
-        resources::load_system_prompt(&config.project_dir, config.project_trusted)?
+        resources::load_system_prompt(&config.project_dir, config.project_trusted, skill_store)?
     {
         agent_config = agent_config.with_system_prompt(system_prompt);
     }
@@ -1341,10 +1348,10 @@ fn effective_compaction_max_estimated_tokens(
 
 async fn tool_registry_for_config(config: &AppConfig) -> anyhow::Result<ToolRegistry> {
     let mut registry = ToolRegistry::with_builtin_tools();
-    extension_tools::register_enabled_extension_tools(
+    neo_agent_core::tools::extensions::register_enabled_extension_tools(
         &mut registry,
-        &extension_tools::default_extension_root(&config.project_dir),
-        &extension_tools::default_extension_state_path(&config.project_dir),
+        &neo_agent_core::tools::extensions::default_extension_root(&config.project_dir),
+        &neo_agent_core::tools::extensions::default_extension_state_path(&config.project_dir),
     )
     .await?;
     for server in config.mcp.servers.iter().filter(|server| server.enabled) {
@@ -1746,6 +1753,7 @@ mod tests {
         PermissionDecision, PermissionOperation, PermissionPolicy, QueueMode,
         StopReason as AgentStopReason, ToolExecutionMode,
         session::{JsonlSessionReader, JsonlSessionWriter},
+        skills::SkillStore,
     };
     use neo_ai::{
         AiStreamEvent, ApiKind, ChatMessage, ContentPart, ModelCapabilities, ModelSpec, ProviderId,
@@ -1792,6 +1800,7 @@ mod tests {
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
             prompt_templates: Vec::new(),
+            extra_skill_dirs: Vec::new(),
             project_trusted: true,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
@@ -1803,7 +1812,9 @@ mod tests {
             capabilities: ModelCapabilities::tool_chat(),
         };
 
-        let agent_config = agent_config_for_app(model, &config, None).expect("agent config");
+        let skill_store = SkillStore::load(None, &[], &[], Vec::new()).expect("skill store");
+        let agent_config =
+            agent_config_for_app(model, &config, None, &skill_store).expect("agent config");
 
         assert_eq!(agent_config.temperature, Some(0.35));
         assert_eq!(agent_config.max_tokens, Some(512));
@@ -1911,6 +1922,7 @@ mod tests {
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
             prompt_templates: Vec::new(),
+            extra_skill_dirs: Vec::new(),
             project_trusted: true,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
@@ -1922,7 +1934,9 @@ mod tests {
             capabilities: ModelCapabilities::tool_chat().with_max_context_tokens(1_000_000),
         };
 
-        let agent_config = agent_config_for_app(model, &config, None).expect("agent config");
+        let skill_store = SkillStore::load(None, &[], &[], Vec::new()).expect("skill store");
+        let agent_config =
+            agent_config_for_app(model, &config, None, &skill_store).expect("agent config");
 
         assert_eq!(
             agent_config.compaction,
@@ -1967,6 +1981,7 @@ mod tests {
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
             prompt_templates: Vec::new(),
+            extra_skill_dirs: Vec::new(),
             project_trusted: true,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
@@ -1978,7 +1993,9 @@ mod tests {
             capabilities: ModelCapabilities::tool_chat().with_max_context_tokens(1_000_000),
         };
 
-        let agent_config = agent_config_for_app(model, &config, None).expect("agent config");
+        let skill_store = SkillStore::load(None, &[], &[], Vec::new()).expect("skill store");
+        let agent_config =
+            agent_config_for_app(model, &config, None, &skill_store).expect("agent config");
 
         assert_eq!(
             agent_config.compaction,
@@ -2010,6 +2027,7 @@ mod tests {
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
             prompt_templates: Vec::new(),
+            extra_skill_dirs: Vec::new(),
             project_trusted: true,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
@@ -2021,8 +2039,9 @@ mod tests {
             capabilities: ModelCapabilities::tool_chat(),
         };
         let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
-        let agent_config =
-            agent_config_for_app(model, &config, Some(approval_tx)).expect("agent config");
+        let skill_store = SkillStore::load(None, &[], &[], Vec::new()).expect("skill store");
+        let agent_config = agent_config_for_app(model, &config, Some(approval_tx), &skill_store)
+            .expect("agent config");
         let handler = agent_config
             .async_approval_handler
             .expect("async approval handler");
@@ -2031,7 +2050,7 @@ mod tests {
             turn: 1,
             id: "tool-1".to_owned(),
             operation: PermissionOperation::Tool,
-            subject: "write".to_owned(),
+            subject: "Write".to_owned(),
             arguments: serde_json::json!({"path": "approved.txt"}),
         }));
         let PromptApprovalRequest { id, decision_tx } =

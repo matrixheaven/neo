@@ -1,7 +1,7 @@
 use std::{
     future::Future,
     path::PathBuf,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock, atomic::AtomicBool},
 };
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream, stream::FuturesUnordered};
@@ -15,6 +15,7 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::skills::SkillStore;
 use crate::{
     AgentEvent, AgentMessage, AgentToolCall, CompactionPhase, CompactionReason, CompactionSummary,
     Content, InjectionManager, PermissionDecision, PermissionOperation, PermissionPolicy, PlanMode,
@@ -103,11 +104,11 @@ pub struct AgentConfig {
     pub async_approval_handler: Option<AsyncApprovalHandler>,
     /// Shared plan-mode state. Checked before every tool call via
     /// [`check_plan_mode_guard`]. Updated when the model calls
-    /// `enter_plan_mode` / `exit_plan_mode`.
+    /// `EnterPlanMode` / `ExitPlanMode`.
     #[serde(skip)]
     #[schemars(skip)]
     pub plan_mode: Arc<RwLock<PlanMode>>,
-    /// Side-channel for ExitPlanMode Revise feedback, keyed by tool_call.id.
+    /// Side-channel for `ExitPlanMode` Revise feedback, keyed by `tool_call.id`.
     /// Populated by the approval handler when the user picks Revise.
     #[serde(skip)]
     #[schemars(skip)]
@@ -527,6 +528,8 @@ pub struct AgentRuntime {
     config: AgentConfig,
     model: Arc<dyn ModelClient>,
     tools: Option<Arc<ToolRegistry>>,
+    skills: Option<Arc<SkillStore>>,
+    skill_invocation_active: Arc<AtomicBool>,
 }
 
 impl AgentRuntime {
@@ -536,6 +539,8 @@ impl AgentRuntime {
             config,
             model,
             tools: None,
+            skills: None,
+            skill_invocation_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -551,6 +556,27 @@ impl AgentRuntime {
             config,
             model,
             tools: Some(Arc::new(tools)),
+            skills: None,
+            skill_invocation_active: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[must_use]
+    pub fn with_tools_and_skills(
+        mut config: AgentConfig,
+        model: Arc<dyn ModelClient>,
+        tools: ToolRegistry,
+        skills: SkillStore,
+    ) -> Self {
+        let mut tool_specs = tools.specs();
+        tool_specs.push(invoke_skill_tool_spec());
+        config.tools = tool_specs;
+        Self {
+            config,
+            model,
+            tools: Some(Arc::new(tools)),
+            skills: Some(Arc::new(skills)),
+            skill_invocation_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -571,7 +597,7 @@ impl AgentRuntime {
             return;
         };
         if let Ok(mut pm) = self.config.plan_mode.write() {
-            pm.restore_enter(&plans_dir, id.to_owned());
+            pm.restore_enter(&plans_dir, id);
         }
     }
 
@@ -597,6 +623,8 @@ impl AgentRuntime {
         let live_context = context.clone();
         let model = Arc::clone(&self.model);
         let tools = self.tools.clone();
+        let skills = self.skills.clone();
+        let skill_invocation_active = Arc::clone(&self.skill_invocation_active);
         let config = self.config.clone();
         let process_supervisor = ProcessSupervisor::default();
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -612,6 +640,8 @@ impl AgentRuntime {
                 model,
                 config,
                 tools,
+                skills,
+                skill_invocation_active,
                 &mut emitter,
                 cancel_token,
                 process_supervisor.clone(),
@@ -719,7 +749,7 @@ async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatReque
 fn workspace_context_message(config: &AgentConfig) -> Option<AgentMessage> {
     let workspace_root = config.workspace_root.as_ref()?;
     Some(AgentMessage::system_text(format!(
-        "<environment_context>\n<cwd>{}</cwd>\n</environment_context>\n\nShell tools already run in this workspace. Do not prefix shell commands with `cd <cwd> &&`; use the bash `workdir` field for a workspace subdirectory.",
+        "<environment_context>\n<cwd>{}</cwd>\n</environment_context>\n\nShell tools already run in this workspace. Do not prefix shell commands with `cd <cwd> &&`; use the bash `cwd` field for a workspace subdirectory.",
         workspace_root.display()
     )))
 }
@@ -899,15 +929,18 @@ impl EventPublisher for EventSink {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn run_agent_turn(
     model: Arc<dyn ModelClient>,
     config: AgentConfig,
     tools: Option<Arc<ToolRegistry>>,
+    skills: Option<Arc<SkillStore>>,
+    skill_invocation_active: Arc<AtomicBool>,
     emitter: &mut EventEmitter,
     cancel_token: CancellationToken,
     process_supervisor: ProcessSupervisor,
 ) -> Result<(), AgentRuntimeError> {
+    skill_invocation_active.store(false, std::sync::atomic::Ordering::SeqCst);
     let mut final_turn: u32;
     let mut final_stop_reason = StopReason::EndTurn;
     let mut pending_messages = drain_steering_queue(&config, emitter);
@@ -961,6 +994,8 @@ async fn run_agent_turn(
         let mut tool_results = execute_tool_calls(
             &config,
             registry,
+            skills.as_deref(),
+            &skill_invocation_active,
             turn,
             &tool_calls,
             emitter,
@@ -985,35 +1020,34 @@ async fn run_agent_turn(
             );
             emitter.emit(AgentEvent::MessageAppended { message });
         }
-        // Inject plan data into exit_plan_mode tool results for TUI PlanBox rendering.
+        // Inject plan data into ExitPlanMode tool results for TUI PlanBox rendering.
         {
             let pm = config.plan_mode.read().unwrap();
-            if pm.is_active() {
-                if let Some(plan_data) = pm.data().ok().flatten() {
-                    for (tool_call, result) in &mut tool_results {
-                        if tool_call.name == "exit_plan_mode" && result.details.is_none() {
-                            result.details = Some(serde_json::json!({
-                                "plan_content": plan_data.content,
-                                "plan_path": plan_data.path.display().to_string(),
-                            }));
-                        }
+            if pm.is_active()
+                && let Some(plan_data) = pm.data().ok().flatten()
+            {
+                for (tool_call, result) in &mut tool_results {
+                    if tool_call.name == "ExitPlanMode" && result.details.is_none() {
+                        result.details = Some(serde_json::json!({
+                            "plan_content": plan_data.content,
+                            "plan_path": plan_data.path.display().to_string(),
+                        }));
                     }
                 }
             }
         }
-        // Intercept plan-mode tools and todo tool to emit structured events.
+        // Intercept plan-mode tools and TodoList tool to emit structured events.
         for (tool_call, result) in &tool_results {
             if result.terminate {
                 match tool_call.name.as_str() {
-                    "enter_plan_mode" => {
+                    "EnterPlanMode" => {
                         let mut pm = config.plan_mode.write().unwrap();
                         let id = if let Some(plans_dir) = plan_mode_plans_dir(&config) {
-                            match pm.enter(&plans_dir, true) {
-                                Ok(data) => data.id,
-                                Err(_) => {
-                                    pm.enter_in_memory();
-                                    pm.plan_id().unwrap_or("").to_owned()
-                                }
+                            if let Ok(data) = pm.enter(&plans_dir, true) {
+                                data.id
+                            } else {
+                                pm.enter_in_memory();
+                                pm.plan_id().unwrap_or("").to_owned()
                             }
                         } else {
                             pm.enter_in_memory();
@@ -1029,7 +1063,7 @@ async fn run_agent_turn(
                             enabled: true,
                         });
                     }
-                    "exit_plan_mode" => {
+                    "ExitPlanMode" => {
                         // Exit plan mode and emit events. In non-auto permission
                         // mode, the TUI layer can intercept with an approval
                         // dialog before this code runs; if we reach here the
@@ -1047,7 +1081,7 @@ async fn run_agent_turn(
                     _ => {}
                 }
             }
-            if tool_call.name == "todo"
+            if tool_call.name == "TodoList"
                 && !result.is_error
                 && let Some(details) = &result.details
                 && let Some(todos_val) = details.get("todos")
@@ -1282,9 +1316,12 @@ fn terminates_tool_batch(tool_results: &[(AgentToolCall, ToolResult)]) -> bool {
     !tool_results.is_empty() && tool_results.iter().all(|(_, result)| result.terminate)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool_calls(
     config: &AgentConfig,
     registry: &ToolRegistry,
+    skills: Option<&SkillStore>,
+    skill_invocation_active: &AtomicBool,
     turn: u32,
     tool_calls: &[AgentToolCall],
     emitter: &mut EventEmitter,
@@ -1296,6 +1333,8 @@ async fn execute_tool_calls(
             execute_tool_calls_sequential(
                 config,
                 registry,
+                skills,
+                skill_invocation_active,
                 turn,
                 tool_calls,
                 emitter,
@@ -1308,6 +1347,8 @@ async fn execute_tool_calls(
             execute_tool_calls_parallel(
                 config,
                 registry,
+                skills,
+                skill_invocation_active,
                 turn,
                 tool_calls,
                 emitter,
@@ -1319,9 +1360,12 @@ async fn execute_tool_calls(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool_calls_sequential(
     config: &AgentConfig,
     registry: &ToolRegistry,
+    skills: Option<&SkillStore>,
+    skill_invocation_active: &AtomicBool,
     turn: u32,
     tool_calls: &[AgentToolCall],
     emitter: &mut EventEmitter,
@@ -1344,6 +1388,8 @@ async fn execute_tool_calls_sequential(
                 prepare_and_run_tool(
                     config,
                     registry,
+                    skills,
+                    skill_invocation_active,
                     &tool_context,
                     turn,
                     tool_call,
@@ -1371,9 +1417,12 @@ async fn execute_tool_calls_sequential(
     Ok(results)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool_calls_parallel(
     config: &AgentConfig,
     registry: &ToolRegistry,
+    skills: Option<&SkillStore>,
+    skill_invocation_active: &AtomicBool,
     turn: u32,
     tool_calls: &[AgentToolCall],
     emitter: &mut EventEmitter,
@@ -1435,6 +1484,8 @@ async fn execute_tool_calls_parallel(
                 tool_call.name.clone(),
             ));
             let mut result = run_tool_with_cancel(
+                skills,
+                skill_invocation_active,
                 registry,
                 &tool_call,
                 &tool_context,
@@ -1734,9 +1785,12 @@ async fn next_model_event(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn prepare_and_run_tool(
     config: &AgentConfig,
     registry: &ToolRegistry,
+    skills: Option<&SkillStore>,
+    skill_invocation_active: &AtomicBool,
     tool_context: &ToolContext,
     turn: u32,
     tool_call: &AgentToolCall,
@@ -1756,7 +1810,27 @@ async fn prepare_and_run_tool(
                 tool_call.id.clone(),
                 tool_call.name.clone(),
             ));
-            Ok(run_tool_with_cancel(registry, tool_call, &context, cancel_token).await)
+            let result = run_tool_with_cancel(
+                skills,
+                skill_invocation_active,
+                registry,
+                tool_call,
+                &context,
+                cancel_token,
+            )
+            .await;
+            if tool_call.name == "Skill" && !result.is_error {
+                emitter.emit(AgentEvent::SkillActivated {
+                    turn,
+                    name: tool_call
+                        .arguments
+                        .get("skill")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown")
+                        .to_owned(),
+                });
+            }
+            Ok(result)
         }
         ToolPreparation::Skip(result) => Ok(result),
     }
@@ -1787,11 +1861,16 @@ fn make_tool_update_callback(
 }
 
 async fn run_tool_with_cancel(
+    skills: Option<&SkillStore>,
+    skill_invocation_active: &AtomicBool,
     registry: &ToolRegistry,
     tool_call: &AgentToolCall,
     tool_context: &ToolContext,
     cancel_token: &CancellationToken,
 ) -> ToolResult {
+    if tool_call.name == "Skill" {
+        return execute_invoke_skill(skills, skill_invocation_active, tool_call);
+    }
     tokio::select! {
         biased;
         result = registry.run(&tool_call.name, tool_context, tool_call.arguments.clone()) => {
@@ -1805,6 +1884,76 @@ fn cancelled_tool_result() -> ToolResult {
     ToolResult::error(ToolError::Cancelled.to_string())
 }
 
+fn invoke_skill_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: "Skill".to_owned(),
+        description: "Invoke an available skill by name with arguments. Use this when the user's request matches a skill's description or whenToUse.".to_owned(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "skill": {
+                    "type": "string",
+                    "description": "Name of the skill to invoke"
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "Named arguments for the skill"
+                }
+            },
+            "required": ["skill"]
+        }),
+    }
+}
+
+fn execute_invoke_skill(
+    skills: Option<&SkillStore>,
+    skill_invocation_active: &AtomicBool,
+    tool_call: &AgentToolCall,
+) -> ToolResult {
+    let Some(skills) = skills else {
+        return ToolResult::error("skill system is not enabled");
+    };
+    if skill_invocation_active.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return ToolResult::error("nested skill invocation is not allowed");
+    }
+    let request = match serde_json::from_value::<serde_json::Value>(tool_call.arguments.clone()) {
+        Ok(value) => value,
+        Err(err) => return ToolResult::error(format!("invalid Skill arguments: {err}")),
+    };
+    let Some(skill_name) = request.get("skill").and_then(|value| value.as_str()) else {
+        return ToolResult::error("Skill requires a `skill` string argument");
+    };
+    let Some(skill) = skills.get(skill_name) else {
+        return ToolResult::error(format!("skill `{skill_name}` is not available"));
+    };
+    if matches!(skill.manifest.skill_type, crate::skills::SkillType::Flow) {
+        return ToolResult::error(format!(
+            "skill `{skill_name}` is type `flow` and can only be invoked manually via /skill:{skill_name}"
+        ));
+    }
+
+    let raw_args = request
+        .get("arguments")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let invocation = crate::skills::SkillInvocation {
+        name: skill_name.to_owned(),
+        raw_arguments: serde_json::to_string(&raw_args).unwrap_or_default(),
+        positional: Vec::new(),
+        named: raw_args
+            .into_iter()
+            .filter_map(|(key, value)| value.as_str().map(|string| (key, string.to_owned())))
+            .collect(),
+    };
+
+    match crate::skills::expand_skill_body(skill, &invocation) {
+        Ok(body) => ToolResult::ok(body),
+        Err(err) => ToolResult::error(format!("failed to expand skill `{skill_name}`: {err}")),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 async fn prepare_tool_context(
     config: &AgentConfig,
     base_context: &ToolContext,
@@ -1827,13 +1976,11 @@ async fn prepare_tool_context(
     }
 
     // --- ExitPlanMode approval: ask the user to review the plan ---
-    if tool_call.name == "exit_plan_mode" {
+    if tool_call.name == "ExitPlanMode" {
         // Read plan info under a short-lived guard, then drop it before any .await
         let (plan_content, plan_path) = {
             let pm = config.plan_mode.read().unwrap();
-            if !pm.is_active() {
-                (String::new(), String::new())
-            } else {
+            if pm.is_active() {
                 let content = pm
                     .data()
                     .ok()
@@ -1845,6 +1992,8 @@ async fn prepare_tool_context(
                     .map(|p| p.display().to_string())
                     .unwrap_or_default();
                 (content, path)
+            } else {
+                (String::new(), String::new())
             }
         };
         // Guard is now dropped — safe to .await
@@ -1919,7 +2068,7 @@ async fn prepare_tool_context(
         PermissionOperation::Shell => context.permissions.shell = PermissionDecision::Allow,
         PermissionOperation::Tool => context.permissions.tool = PermissionDecision::Allow,
     }
-    if tool_call.name == "bash" {
+    if tool_call.name == "Bash" {
         emit_shell_started(turn, tool_call, &context, emitter);
     }
     ToolPreparation::Run(context)
@@ -2005,20 +2154,26 @@ fn permission_operation_for_tool(
     tool_call: &AgentToolCall,
 ) -> Option<(PermissionOperation, String)> {
     match tool_call.name.as_str() {
-        "read" | "List" | "grep" | "find" => Some((
+        "Read" | "List" | "Grep" | "Find" | "Glob" => Some((
             PermissionOperation::FileRead,
             path_subject(&tool_call.arguments).unwrap_or_else(|| tool_call.name.clone()),
         )),
-        "write" | "edit" => Some((
+        "Write" | "Edit" => Some((
             PermissionOperation::FileWrite,
             path_subject(&tool_call.arguments).unwrap_or_else(|| tool_call.name.clone()),
         )),
-        "bash" | "terminal" => Some((
+        "Bash" | "Terminal" | "TaskStop" => Some((
             PermissionOperation::Shell,
             tool_call
                 .arguments
                 .get("command")
                 .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    tool_call
+                        .arguments
+                        .get("task_id")
+                        .and_then(serde_json::Value::as_str)
+                })
                 .or_else(|| {
                     tool_call
                         .arguments
@@ -2045,7 +2200,7 @@ fn emit_shell_started(
     tool_context: &ToolContext,
     emitter: &mut impl EventPublisher,
 ) {
-    if tool_call.name != "bash" {
+    if tool_call.name != "Bash" {
         return;
     }
     if let Some(command) = tool_call
@@ -2068,7 +2223,7 @@ fn emit_shell_finished(
     result: &ToolResult,
     emitter: &mut impl EventPublisher,
 ) {
-    if tool_call.name != "bash" {
+    if tool_call.name != "Bash" {
         return;
     }
     let Some(details) = &result.details else {
@@ -2109,7 +2264,7 @@ fn emit_terminal_events(
     tool_context: &ToolContext,
     emitter: &mut impl EventPublisher,
 ) {
-    if tool_call.name != "terminal" {
+    if tool_call.name != "Terminal" {
         return;
     }
     let Some(details) = &result.details else {

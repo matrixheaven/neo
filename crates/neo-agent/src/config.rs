@@ -156,6 +156,8 @@ pub struct AppConfig {
     #[serde(skip)]
     pub prompt_templates: Vec<String>,
     #[serde(skip)]
+    pub extra_skill_dirs: Vec<String>,
+    #[serde(skip)]
     pub project_trusted: bool,
     pub project_dir: PathBuf,
 
@@ -316,6 +318,7 @@ pub(crate) struct FileConfig {
     pub(crate) models: Option<BTreeMap<String, ModelConfig>>,
     pub(crate) model_scope: Option<Vec<String>>,
     pub(crate) prompt_templates: Option<Vec<String>>,
+    pub(crate) extra_skill_dirs: Option<Vec<String>>,
     pub(crate) sessions_dir: Option<PathBuf>,
     pub(crate) permissions: Option<PermissionPolicy>,
     pub(crate) defaults: Option<FileDefaults>,
@@ -399,6 +402,7 @@ impl AppConfig {
             .or_else(|| provider_api_key_env(&providers, &default_provider));
         let model_scope = file_config.model_scope.unwrap_or_default();
         let prompt_templates = file_config.prompt_templates.unwrap_or_default();
+        let extra_skill_dirs = file_config.extra_skill_dirs.unwrap_or_default();
         let sessions_dir = file_config
             .sessions_dir
             .map(expand_user_path)
@@ -435,6 +439,7 @@ impl AppConfig {
             theme,
             mcp,
             prompt_templates,
+            extra_skill_dirs,
             project_trusted,
             project_dir,
             config_path,
@@ -514,6 +519,7 @@ fn merge_file_configs(base: FileConfig, layer: FileConfig) -> FileConfig {
         models: merge_model_configs(base.models, layer.models),
         model_scope: merge_string_lists(base.model_scope, layer.model_scope),
         prompt_templates: merge_string_lists(base.prompt_templates, layer.prompt_templates),
+        extra_skill_dirs: merge_string_lists(base.extra_skill_dirs, layer.extra_skill_dirs),
         sessions_dir: layer.sessions_dir.or(base.sessions_dir),
         permissions: layer.permissions.or(base.permissions),
         defaults: merge_defaults(base.defaults, layer.defaults),

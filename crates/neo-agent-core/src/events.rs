@@ -107,6 +107,10 @@ pub enum AgentEvent {
         name: String,
         partial_result: ToolResult,
     },
+    SkillActivated {
+        turn: u32,
+        name: String,
+    },
     ApprovalRequested {
         turn: u32,
         id: String,

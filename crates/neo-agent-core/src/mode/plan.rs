@@ -30,7 +30,7 @@ pub enum PlanInjectionVariant {
 }
 
 /// Plan mode state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PlanMode {
     is_active: bool,
     plan_id: Option<String>,
@@ -38,19 +38,6 @@ pub struct PlanMode {
     assistant_turns_since_injection: u32,
     last_variant: Option<PlanInjectionVariant>,
     exit_reminder_emitted: bool,
-}
-
-impl Default for PlanMode {
-    fn default() -> Self {
-        Self {
-            is_active: false,
-            plan_id: None,
-            plan_file_path: None,
-            assistant_turns_since_injection: 0,
-            last_variant: None,
-            exit_reminder_emitted: false,
-        }
-    }
 }
 
 impl PlanMode {
@@ -102,22 +89,22 @@ impl PlanMode {
     }
 
     /// Restore plan mode from a persisted plan id (resume).
-    pub fn restore_enter(&mut self, plans_dir: &Path, id: String) {
+    pub fn restore_enter(&mut self, plans_dir: &Path, id: &str) {
         self.is_active = true;
-        self.plan_id = Some(id.clone());
+        self.plan_id = Some(id.to_owned());
         self.plan_file_path = Some(plans_dir.join(format!("{id}.md")));
         self.assistant_turns_since_injection = 0;
         self.last_variant = None;
         self.exit_reminder_emitted = false;
     }
 
-    /// Exit plan mode but retain plan_file_path/plan_id.
+    /// Exit plan mode but retain `plan_file_path`/`plan_id`.
     pub fn exit(&mut self) {
         self.is_active = false;
         self.assistant_turns_since_injection = 0;
     }
 
-    /// Cancel plan mode, dropping plan_id/path.
+    /// Cancel plan mode, dropping `plan_id`/`path`.
     pub fn cancel(&mut self) {
         self.is_active = false;
         self.plan_id = None;
@@ -250,7 +237,7 @@ mod tests {
     fn restore_enter_reconstructs() {
         let d = tempfile::tempdir().unwrap();
         let mut s = PlanMode::default();
-        s.restore_enter(d.path(), "abc".into());
+        s.restore_enter(d.path(), "abc");
         assert!(s.is_active());
         assert_eq!(s.plan_id(), Some("abc"));
     }
