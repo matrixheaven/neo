@@ -11,17 +11,17 @@ async fn file_tools_read_search_write_and_edit_inside_workspace() {
 
     registry
         .run(
-            "write",
+            "Write",
             &context,
             json!({ "path": "src/lib.txt", "content": "alpha\nbeta\nalphabet\n" }),
         )
         .await
-        .expect("write");
+        .expect("Write");
 
     let read = registry
-        .run("read", &context, json!({ "path": "src/lib.txt" }))
+        .run("Read", &context, json!({ "path": "src/lib.txt" }))
         .await
-        .expect("read");
+        .expect("Read");
     assert_eq!(read.content, "alpha\nbeta\nalphabet\n");
 
     let listed = registry
@@ -31,30 +31,30 @@ async fn file_tools_read_search_write_and_edit_inside_workspace() {
     assert!(listed.content.contains("src/"));
 
     let found = registry
-        .run("find", &context, json!({ "path": ".", "pattern": "lib" }))
+        .run("Find", &context, json!({ "path": ".", "pattern": "lib" }))
         .await
-        .expect("find");
+        .expect("Find");
     assert!(found.content.contains("src/lib.txt"));
 
     let grep = registry
         .run(
-            "grep",
+            "Grep",
             &context,
             json!({ "path": ".", "pattern": "alpha", "limit": 2 }),
         )
         .await
-        .expect("grep");
+        .expect("Grep");
     assert!(grep.content.contains("src/lib.txt:1:alpha"));
     assert!(grep.content.contains("src/lib.txt:3:alphabet"));
 
     let edit = registry
         .run(
-            "edit",
+            "Edit",
             &context,
             json!({ "path": "src/lib.txt", "old": "beta", "new": "gamma" }),
         )
         .await
-        .expect("edit");
+        .expect("Edit");
     assert!(!edit.is_error);
     let details = edit.details.expect("edit details");
     assert_eq!(details["path"], "src/lib.txt");

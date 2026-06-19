@@ -270,7 +270,7 @@ async fn jsonl_session_replay_context_drops_incomplete_trailing_tool_turn() {
                 [],
                 [AgentToolCall {
                     id: "call-1".to_owned(),
-                    name: "read".to_owned(),
+                    name: "Read".to_owned(),
                     arguments: json!({ "path": "README.md" }),
                 }],
                 StopReason::ToolUse,
@@ -308,13 +308,13 @@ async fn jsonl_session_replay_context_keeps_complete_trailing_tool_turn() {
         [],
         [AgentToolCall {
             id: "call-1".to_owned(),
-            name: "read".to_owned(),
+            name: "Read".to_owned(),
             arguments: json!({ "path": "README.md" }),
         }],
         StopReason::ToolUse,
     );
     let tool_result =
-        AgentMessage::tool_result("call-1", "read", [Content::text("README contents")], false);
+        AgentMessage::tool_result("call-1", "Read", [Content::text("README contents")], false);
 
     for event in [
         AgentEvent::MessageAppended {

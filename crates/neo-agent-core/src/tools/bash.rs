@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     process::Stdio,
     sync::{Arc, LazyLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use schemars::JsonSchema;
@@ -24,38 +24,59 @@ use rustix::{
 
 use super::{
     ProcessKind, Tool, ToolContext, ToolError, ToolFuture, ToolResult, ToolUpdateCallback,
-    cap_output, parse_input, schema,
+    parse_input, schema,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct BashInput {
-    mode: BashMode,
-    command: Option<String>,
-    workdir: Option<String>,
-    handle: Option<String>,
-    timeout_ms: Option<u64>,
+    #[schemars(description = "The shell command to execute.")]
+    command: String,
+    #[schemars(
+        description = "The workspace-relative working directory in which to run the command. When omitted, the command runs in the session working directory."
+    )]
+    cwd: Option<String>,
+    #[schemars(description = "Optional timeout in seconds for the command to execute.")]
+    timeout: Option<u64>,
+    #[schemars(description = "Whether to run the command as a background task.")]
+    run_in_background: Option<bool>,
+    #[schemars(
+        description = "A short description for the background task. Required when run_in_background is true."
+    )]
+    description: Option<String>,
+    #[schemars(
+        description = "If true, do not apply a timeout to the command. Only applies when run_in_background is true."
+    )]
+    disable_timeout: Option<bool>,
+    max_output_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TaskOutputInput {
+    task_id: String,
+    block: Option<bool>,
+    timeout: Option<u64>,
     max_output_bytes: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum BashMode {
-    Foreground,
-    Start,
-    Poll,
-    Stop,
+#[serde(deny_unknown_fields)]
+struct TaskStopInput {
+    task_id: String,
+    reason: Option<String>,
+    max_output_bytes: Option<usize>,
 }
 
 pub struct BashTool;
 
 impl Tool for BashTool {
     fn name(&self) -> &'static str {
-        "bash"
+        "Bash"
     }
 
     fn description(&self) -> &'static str {
-        "Run a shell command in the workspace, or start/poll/stop a compact background command."
+        "Run a shell command in the workspace. Use cwd for a workspace-relative working directory and run_in_background for long-running commands."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -67,51 +88,108 @@ impl Tool for BashTool {
             ctx.ensure_shell_allowed()?;
             let input: BashInput = parse_input(self.name(), input)?;
             let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
-            match input.mode {
-                BashMode::Foreground => {
-                    let command = required_field(self.name(), input.command, "command")?;
-                    let workdir = input.workdir.as_deref();
-                    let timeout_ms = input.timeout_ms.unwrap_or_else(|| {
-                        u64::try_from(ctx.bash_timeout.as_millis()).unwrap_or(u64::MAX)
+            let _disable_timeout = input.disable_timeout.unwrap_or(false);
+            if input.run_in_background == Some(true) {
+                if input.description.as_deref().unwrap_or("").trim().is_empty() {
+                    return Err(ToolError::InvalidInput {
+                        tool: self.name().to_owned(),
+                        message: "description is required when run_in_background is true"
+                            .to_owned(),
                     });
-                    let output = run_command(
-                        ctx,
-                        &command,
-                        workdir,
-                        Duration::from_millis(timeout_ms),
-                        max_output_bytes,
-                    )
-                    .await?;
-                    Ok(command_result(&output, max_output_bytes))
                 }
-                BashMode::Start => {
-                    let command = required_field(self.name(), input.command, "command")?;
-                    start_background_command(
-                        ctx,
-                        &command,
-                        input.workdir.as_deref(),
-                        max_output_bytes,
-                    )
-                    .await
-                }
-                BashMode::Poll => {
-                    reject_field(self.name(), input.workdir.is_some(), "workdir")?;
-                    let handle = required_field(self.name(), input.handle, "handle")?;
-                    poll_background_command(ctx, self.name(), &handle, max_output_bytes).await
-                }
-                BashMode::Stop => {
-                    reject_field(self.name(), input.command.is_some(), "command")?;
-                    reject_field(self.name(), input.workdir.is_some(), "workdir")?;
-                    let handle = required_field(self.name(), input.handle, "handle")?;
-                    stop_background_command(ctx, self.name(), &handle, max_output_bytes).await
-                }
+                return start_background_command(
+                    ctx,
+                    &input.command,
+                    input.cwd.as_deref(),
+                    max_output_bytes,
+                )
+                .await;
             }
+
+            let timeout_ms = input.timeout.map_or_else(
+                || u64::try_from(ctx.bash_timeout.as_millis()).unwrap_or(u64::MAX),
+                |s| s.saturating_mul(1000),
+            );
+            let output = run_command(
+                ctx,
+                &input.command,
+                input.cwd.as_deref(),
+                Duration::from_millis(timeout_ms),
+                max_output_bytes,
+            )
+            .await?;
+            Ok(command_result(&output, max_output_bytes))
         })
     }
 }
 
-static BACKGROUND_COMMANDS: LazyLock<Mutex<HashMap<String, BackgroundCommand>>> =
+pub struct TaskOutputTool;
+
+impl Tool for TaskOutputTool {
+    fn name(&self) -> &'static str {
+        "TaskOutput"
+    }
+
+    fn description(&self) -> &'static str {
+        "Read output from a background Bash task."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        schema::<TaskOutputInput>()
+    }
+
+    fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let input: TaskOutputInput = parse_input(self.name(), input)?;
+            let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
+            task_output(
+                ctx,
+                self.name(),
+                &input.task_id,
+                input.block.unwrap_or(false),
+                Duration::from_secs(input.timeout.unwrap_or(30)),
+                max_output_bytes,
+            )
+            .await
+        })
+    }
+}
+
+pub struct TaskStopTool;
+
+impl Tool for TaskStopTool {
+    fn name(&self) -> &'static str {
+        "TaskStop"
+    }
+
+    fn description(&self) -> &'static str {
+        "Stop a running background Bash task."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        schema::<TaskStopInput>()
+    }
+
+    fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            ctx.ensure_shell_allowed()?;
+            let input: TaskStopInput = parse_input(self.name(), input)?;
+            let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
+            task_stop(ctx, self.name(), &input.task_id, max_output_bytes).await
+        })
+    }
+}
+
+static BACKGROUND_COMMANDS: LazyLock<Mutex<HashMap<String, BackgroundTask>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+enum BackgroundTask {
+    Running(BackgroundCommand),
+    Finished {
+        status: &'static str,
+        output: CommandOutput,
+    },
+}
 
 struct BackgroundCommand {
     process: ManagedChild,
@@ -135,34 +213,34 @@ struct CommandOutput {
 
 const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 
-fn required_field<T>(tool: &str, value: Option<T>, field: &'static str) -> Result<T, ToolError> {
-    value.ok_or_else(|| ToolError::InvalidInput {
-        tool: tool.to_owned(),
-        message: format!("missing required field `{field}`"),
-    })
-}
-
-fn reject_field(tool: &str, present: bool, field: &'static str) -> Result<(), ToolError> {
-    if present {
-        return Err(ToolError::InvalidInput {
-            tool: tool.to_owned(),
-            message: format!("field `{field}` is not supported for this mode"),
-        });
-    }
-    Ok(())
-}
-
 fn command_result(output: &CommandOutput, max_output_bytes: usize) -> ToolResult {
-    let (stdout_capped, stdout_truncated) = cap_output(&output.stdout, max_output_bytes);
-    let (stderr_capped, stderr_truncated) = cap_output(&output.stderr, max_output_bytes);
+    let (stdout_capped, stdout_truncated) = cap_plain_output(&output.stdout, max_output_bytes);
+    let (stderr_capped, stderr_truncated) = cap_plain_output(&output.stderr, max_output_bytes);
     let stdout_details = cap_output_details(&output.stdout, max_output_bytes);
     let stderr_details = cap_output_details(&output.stderr, max_output_bytes);
     let truncated = stdout_truncated || stderr_truncated;
-    let combined = format!(
-        "exit_code: {:?}\nstdout:\n{}\nstderr:\n{}",
-        output.exit_code, stdout_capped, stderr_capped
-    );
-    ToolResult::ok(format!("{combined}\ntruncated: {truncated}")).with_details(json!({
+    let mut content = format!("{stdout_capped}{stderr_capped}");
+    if output.exit_code != Some(0) {
+        let exit_label = output
+            .exit_code
+            .map_or_else(|| "signal".to_owned(), |code| code.to_string());
+        if !content.ends_with('\n') && !content.is_empty() {
+            content.push('\n');
+        }
+        content.push_str(&format!("Command failed with exit code: {exit_label}."));
+    }
+    if truncated {
+        if !content.ends_with('\n') && !content.is_empty() {
+            content.push('\n');
+        }
+        content.push_str("[output truncated]");
+    }
+    let result = if output.exit_code == Some(0) {
+        ToolResult::ok(content)
+    } else {
+        ToolResult::error(content)
+    };
+    result.with_details(json!({
         "exit_code": output.exit_code,
         "stdout": stdout_details,
         "stderr": stderr_details,
@@ -296,16 +374,16 @@ async fn start_background_command(
         stderr.clone(),
     );
 
-    let handle = Uuid::new_v4().to_string();
+    let handle = format!("bash-{}", Uuid::new_v4());
     BACKGROUND_COMMANDS.lock().await.insert(
         handle.clone(),
-        BackgroundCommand {
+        BackgroundTask::Running(BackgroundCommand {
             process,
             stdout,
             stderr,
             stdout_task,
             stderr_task,
-        },
+        }),
     );
     ctx.process_supervisor
         .register(handle.clone(), ProcessKind::BashBackground, |handle| {
@@ -314,8 +392,8 @@ async fn start_background_command(
         .await;
 
     Ok(
-        ToolResult::ok(format!("started background command: {handle}")).with_details(json!({
-            "handle": handle,
+        ToolResult::ok(format!("started background task: {handle}")).with_details(json!({
+            "task_id": handle,
             "status": "running",
             "stdout": "",
             "stderr": "",
@@ -374,76 +452,137 @@ where
     })
 }
 
-async fn poll_background_command(
+async fn task_output(
     ctx: &ToolContext,
     tool: &str,
-    handle: &str,
+    task_id: &str,
+    block: bool,
+    timeout: Duration,
     max_output_bytes: usize,
 ) -> Result<ToolResult, ToolError> {
-    let mut commands = BACKGROUND_COMMANDS.lock().await;
-    let command = commands
-        .get_mut(handle)
-        .ok_or_else(|| ToolError::InvalidInput {
-            tool: tool.to_owned(),
-            message: format!("unknown background handle `{handle}`"),
-        })?;
-
-    let status = command.process.child.try_wait()?;
-    if let Some(status) = status {
-        let command = commands.remove(handle).expect("command existed");
-        drop(commands);
-        ctx.process_supervisor.unregister(handle).await;
-        drain_reader(command.stdout_task).await;
-        drain_reader(command.stderr_task).await;
-        let output = output_from_buffers(status.code(), command.stdout, command.stderr).await;
-        return Ok(background_command_result(
-            handle,
-            "exited",
-            &output,
-            max_output_bytes,
-        ));
+    let deadline = Instant::now() + timeout;
+    loop {
+        let snapshot = task_snapshot(ctx, tool, task_id, max_output_bytes).await?;
+        let is_running = snapshot
+            .details
+            .as_ref()
+            .and_then(|details| details.get("status"))
+            .and_then(serde_json::Value::as_str)
+            == Some("running");
+        if !block || !is_running || Instant::now() >= deadline {
+            return Ok(snapshot);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-
-    let stdout = command.stdout.clone();
-    let stderr = command.stderr.clone();
-    drop(commands);
-    let stdout = stdout.lock_owned().await;
-    let stderr = stderr.lock_owned().await;
-    let output = output_from_locked_buffers(None, &stdout, &stderr);
-    Ok(background_command_result(
-        handle,
-        "running",
-        &output,
-        max_output_bytes,
-    ))
 }
 
-async fn stop_background_command(
+async fn task_stop(
     ctx: &ToolContext,
     tool: &str,
-    handle: &str,
+    task_id: &str,
     max_output_bytes: usize,
 ) -> Result<ToolResult, ToolError> {
     let mut commands = BACKGROUND_COMMANDS.lock().await;
-    let mut command = commands
-        .remove(handle)
-        .ok_or_else(|| ToolError::InvalidInput {
+    let Some(task) = commands.get_mut(task_id) else {
+        return Err(ToolError::InvalidInput {
             tool: tool.to_owned(),
-            message: format!("unknown background handle `{handle}`"),
-        })?;
-    drop(commands);
-    ctx.process_supervisor.unregister(handle).await;
+            message: format!("unknown background task `{task_id}`"),
+        });
+    };
+    match task {
+        BackgroundTask::Finished { status, output } => Ok(background_command_result(
+            task_id,
+            status,
+            output,
+            max_output_bytes,
+        )),
+        BackgroundTask::Running(_) => {
+            let BackgroundTask::Running(mut command) =
+                commands.remove(task_id).expect("task existed")
+            else {
+                unreachable!();
+            };
+            drop(commands);
+            ctx.process_supervisor.unregister(task_id).await;
 
-    let exit_code = kill_child(&mut command.process).await;
-    drain_reader(command.stdout_task).await;
-    drain_reader(command.stderr_task).await;
-    let output = output_from_buffers(exit_code, command.stdout, command.stderr).await;
-    Ok(background_command_result(
-        handle,
-        "stopped",
-        &output,
-        max_output_bytes,
-    ))
+            let exit_code = kill_child(&mut command.process).await;
+            drain_reader(command.stdout_task).await;
+            drain_reader(command.stderr_task).await;
+            let output = output_from_buffers(exit_code, command.stdout, command.stderr).await;
+            let result = background_command_result(task_id, "stopped", &output, max_output_bytes);
+            BACKGROUND_COMMANDS.lock().await.insert(
+                task_id.to_owned(),
+                BackgroundTask::Finished {
+                    status: "stopped",
+                    output,
+                },
+            );
+            Ok(result)
+        }
+    }
+}
+
+async fn task_snapshot(
+    ctx: &ToolContext,
+    tool: &str,
+    task_id: &str,
+    max_output_bytes: usize,
+) -> Result<ToolResult, ToolError> {
+    let mut commands = BACKGROUND_COMMANDS.lock().await;
+    let Some(task) = commands.get_mut(task_id) else {
+        return Err(ToolError::InvalidInput {
+            tool: tool.to_owned(),
+            message: format!("unknown background task `{task_id}`"),
+        });
+    };
+
+    match task {
+        BackgroundTask::Finished { status, output } => Ok(background_command_result(
+            task_id,
+            status,
+            output,
+            max_output_bytes,
+        )),
+        BackgroundTask::Running(command) => {
+            let status = command.process.child.try_wait()?;
+            if let Some(status) = status {
+                let BackgroundTask::Running(command) =
+                    commands.remove(task_id).expect("task existed")
+                else {
+                    unreachable!();
+                };
+                drop(commands);
+                ctx.process_supervisor.unregister(task_id).await;
+                drain_reader(command.stdout_task).await;
+                drain_reader(command.stderr_task).await;
+                let output =
+                    output_from_buffers(status.code(), command.stdout, command.stderr).await;
+                let result =
+                    background_command_result(task_id, "exited", &output, max_output_bytes);
+                BACKGROUND_COMMANDS.lock().await.insert(
+                    task_id.to_owned(),
+                    BackgroundTask::Finished {
+                        status: "exited",
+                        output,
+                    },
+                );
+                Ok(result)
+            } else {
+                let stdout = command.stdout.clone();
+                let stderr = command.stderr.clone();
+                drop(commands);
+                let stdout = stdout.lock_owned().await;
+                let stderr = stderr.lock_owned().await;
+                let output = output_from_locked_buffers(None, &stdout, &stderr);
+                Ok(background_command_result(
+                    task_id,
+                    "running",
+                    &output,
+                    max_output_bytes,
+                ))
+            }
+        }
+    }
 }
 
 async fn output_from_buffers(
@@ -469,22 +608,39 @@ fn output_from_locked_buffers(
 }
 
 fn background_command_result(
-    handle: &str,
+    task_id: &str,
     status: &str,
     output: &CommandOutput,
     max_output_bytes: usize,
 ) -> ToolResult {
-    let (stdout_capped, stdout_truncated) = cap_output(&output.stdout, max_output_bytes);
-    let (stderr_capped, stderr_truncated) = cap_output(&output.stderr, max_output_bytes);
+    let (stdout_capped, stdout_truncated) = cap_plain_output(&output.stdout, max_output_bytes);
+    let (stderr_capped, stderr_truncated) = cap_plain_output(&output.stderr, max_output_bytes);
     let stdout_details = cap_output_details(&output.stdout, max_output_bytes);
     let stderr_details = cap_output_details(&output.stderr, max_output_bytes);
     let truncated = stdout_truncated || stderr_truncated;
-    let content = format!(
-        "handle: {handle}\nstatus: {status}\nexit_code: {:?}\nstdout:\n{}\nstderr:\n{}\ntruncated: {truncated}",
-        output.exit_code, stdout_capped, stderr_capped
-    );
-    ToolResult::ok(content).with_details(json!({
-        "handle": handle,
+    let mut content = format!("{stdout_capped}{stderr_capped}");
+    if output.exit_code != Some(0) {
+        let exit_label = output
+            .exit_code
+            .map_or_else(|| "signal".to_owned(), |code| code.to_string());
+        if !content.ends_with('\n') && !content.is_empty() {
+            content.push('\n');
+        }
+        content.push_str(&format!("Command failed with exit code: {exit_label}."));
+    }
+    if truncated {
+        if !content.ends_with('\n') && !content.is_empty() {
+            content.push('\n');
+        }
+        content.push_str("[output truncated]");
+    }
+    let result = if output.exit_code == Some(0) || status == "running" {
+        ToolResult::ok(content)
+    } else {
+        ToolResult::error(content)
+    };
+    result.with_details(json!({
+        "task_id": task_id,
         "status": status,
         "exit_code": output.exit_code,
         "stdout": stdout_details,
@@ -496,12 +652,29 @@ fn background_command_result(
 }
 
 async fn cleanup_background_command(handle: &str) {
-    let Some(mut command) = BACKGROUND_COMMANDS.lock().await.remove(handle) else {
+    let Some(task) = BACKGROUND_COMMANDS.lock().await.remove(handle) else {
         return;
     };
-    let _ = kill_child(&mut command.process).await;
-    drain_reader(command.stdout_task).await;
-    drain_reader(command.stderr_task).await;
+    if let BackgroundTask::Running(mut command) = task {
+        let _ = kill_child(&mut command.process).await;
+        drain_reader(command.stdout_task).await;
+        drain_reader(command.stderr_task).await;
+    }
+}
+
+fn cap_plain_output(content: &str, max_bytes: usize) -> (String, bool) {
+    if content.len() <= max_bytes {
+        return (content.to_owned(), false);
+    }
+    let mut capped = String::new();
+    for character in content.chars() {
+        let next_len = capped.len() + character.len_utf8();
+        if next_len > max_bytes {
+            break;
+        }
+        capped.push(character);
+    }
+    (capped, true)
 }
 
 fn cap_output_details(content: &str, max_bytes: usize) -> String {

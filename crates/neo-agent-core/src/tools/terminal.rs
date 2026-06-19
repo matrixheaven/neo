@@ -50,7 +50,7 @@ pub struct TerminalTool;
 
 impl Tool for TerminalTool {
     fn name(&self) -> &'static str {
-        "terminal"
+        "Terminal"
     }
 
     fn description(&self) -> &'static str {

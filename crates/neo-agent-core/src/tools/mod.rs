@@ -311,6 +311,8 @@ impl ToolRegistry {
         registry.register(write::WriteTool);
         registry.register(edit::EditTool);
         registry.register(bash::BashTool);
+        registry.register(bash::TaskOutputTool);
+        registry.register(bash::TaskStopTool);
         registry.register(terminal::TerminalTool);
         registry.register(plan_mode::EnterPlanModeTool);
         registry.register(plan_mode::ExitPlanModeTool);

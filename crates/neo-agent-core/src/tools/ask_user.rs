@@ -108,7 +108,7 @@ impl AskUserTool {
 
 impl Tool for AskUserTool {
     fn name(&self) -> &'static str {
-        "ask_user"
+        "AskUserQuestion"
     }
 
     fn description(&self) -> &'static str {
@@ -160,7 +160,7 @@ impl Tool for AskUserTool {
                     response_tx,
                 })
                 .map_err(|_| super::ToolError::InvalidInput {
-                    tool: "ask_user".to_owned(),
+                    tool: "AskUserQuestion".to_owned(),
                     message: "question channel closed".to_owned(),
                 })?;
 
@@ -216,7 +216,7 @@ mod tests {
     fn tool_name_and_description() {
         let (tx, _rx) = mpsc::unbounded_channel::<PendingQuestion>();
         let tool = AskUserTool::new(tx);
-        assert_eq!(tool.name(), "ask_user");
+        assert_eq!(tool.name(), "AskUserQuestion");
         assert!(!tool.description().is_empty());
     }
 

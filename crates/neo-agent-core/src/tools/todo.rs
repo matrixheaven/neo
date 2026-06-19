@@ -138,7 +138,7 @@ impl TodoTool {
 
 impl Tool for TodoTool {
     fn name(&self) -> &'static str {
-        "todo"
+        "TodoList"
     }
 
     fn description(&self) -> &'static str {

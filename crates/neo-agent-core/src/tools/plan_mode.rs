@@ -11,7 +11,7 @@ pub struct EnterPlanModeTool;
 
 impl Tool for EnterPlanModeTool {
     fn name(&self) -> &'static str {
-        "enter_plan_mode"
+        "EnterPlanMode"
     }
 
     fn description(&self) -> &'static str {
@@ -49,7 +49,7 @@ pub struct ExitPlanModeTool;
 
 impl Tool for ExitPlanModeTool {
     fn name(&self) -> &'static str {
-        "exit_plan_mode"
+        "ExitPlanMode"
     }
 
     fn description(&self) -> &'static str {
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn tool_names() {
-        assert_eq!(EnterPlanModeTool.name(), "enter_plan_mode");
-        assert_eq!(ExitPlanModeTool.name(), "exit_plan_mode");
+        assert_eq!(EnterPlanModeTool.name(), "EnterPlanMode");
+        assert_eq!(ExitPlanModeTool.name(), "ExitPlanMode");
     }
 }

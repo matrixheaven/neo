@@ -14,7 +14,7 @@ pub struct WriteTool;
 
 impl Tool for WriteTool {
     fn name(&self) -> &'static str {
-        "write"
+        "Write"
     }
 
     fn description(&self) -> &'static str {

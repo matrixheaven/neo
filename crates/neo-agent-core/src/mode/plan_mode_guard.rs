@@ -13,7 +13,7 @@ pub fn check_plan_mode_guard(
         return PermissionDecision::Allow;
     }
     match tool_name {
-        "write" | "edit" => {
+        "Write" | "Edit" => {
             if let Some(path) = args.get("path").and_then(serde_json::Value::as_str)
                 && let Some(plan_path) = plan_mode.plan_file_path()
                 && paths_match(plan_path, Path::new(path))
@@ -22,9 +22,7 @@ pub fn check_plan_mode_guard(
             }
             PermissionDecision::Deny
         }
-        "bash" | "terminal" | "task_stop" | "cron_create" | "cron_delete" => {
-            PermissionDecision::Deny
-        }
+        "Bash" | "Terminal" | "TaskStop" | "CronCreate" | "CronDelete" => PermissionDecision::Deny,
         _ => PermissionDecision::Allow,
     }
 }
@@ -59,7 +57,7 @@ mod tests {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("x");
-        state.restore_enter(dir, id.into());
+        state.restore_enter(dir, id);
         state
     }
 
@@ -67,7 +65,7 @@ mod tests {
     fn inactive_allows() {
         let s = PlanMode::default();
         assert_eq!(
-            check_plan_mode_guard(&s, "write", &json!({"path":"a"})),
+            check_plan_mode_guard(&s, "Write", &json!({"path":"a"})),
             PermissionDecision::Allow
         );
     }
@@ -75,7 +73,7 @@ mod tests {
     fn active_denies_write() {
         let s = active_state(Path::new("/tmp/p.md"));
         assert_eq!(
-            check_plan_mode_guard(&s, "write", &json!({"path":"a"})),
+            check_plan_mode_guard(&s, "Write", &json!({"path":"a"})),
             PermissionDecision::Deny
         );
     }
@@ -83,7 +81,7 @@ mod tests {
     fn active_allows_plan_file_write() {
         let s = active_state(Path::new("/h/p.md"));
         assert_eq!(
-            check_plan_mode_guard(&s, "write", &json!({"path":"/h/p.md"})),
+            check_plan_mode_guard(&s, "Write", &json!({"path":"/h/p.md"})),
             PermissionDecision::Allow
         );
     }
@@ -91,7 +89,7 @@ mod tests {
     fn active_denies_bash() {
         let s = active_state(Path::new("/tmp/p.md"));
         assert_eq!(
-            check_plan_mode_guard(&s, "bash", &json!({})),
+            check_plan_mode_guard(&s, "Bash", &json!({})),
             PermissionDecision::Deny
         );
     }

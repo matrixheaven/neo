@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -19,7 +21,7 @@ pub struct EditTool;
 
 impl Tool for EditTool {
     fn name(&self) -> &'static str {
-        "edit"
+        "Edit"
     }
 
     fn description(&self) -> &'static str {
@@ -85,9 +87,10 @@ fn unified_diff(path: &str, before: &str, after: &str) -> String {
             last.new_range().end - first.new_range().start,
         );
 
-        result.push_str(&format!(
-            "@@ -{old_line},{old_count} +{new_line},{new_count} @@\n"
-        ));
+        let _ = writeln!(
+            result,
+            "@@ -{old_line},{old_count} +{new_line},{new_count} @@"
+        );
 
         for op in &group {
             for change in diff.iter_changes(op) {

@@ -336,7 +336,7 @@ async fn runtime_records_tool_calls_and_sends_tool_specs_to_model() {
         },
         AiStreamEvent::ToolCallStart {
             id: "tool_1".to_owned(),
-            name: "read".to_owned(),
+            name: "Read".to_owned(),
         },
         AiStreamEvent::ToolCallArgsDelta {
             id: "tool_1".to_owned(),
@@ -352,7 +352,7 @@ async fn runtime_records_tool_calls_and_sends_tool_specs_to_model() {
         },
     ]);
     let tool = ToolSpec {
-        name: "read".to_owned(),
+        name: "Read".to_owned(),
         description: "read file".to_owned(),
         input_schema: json!({ "type": "object" }),
     };
@@ -374,7 +374,7 @@ async fn runtime_records_tool_calls_and_sends_tool_specs_to_model() {
         turn: 1,
         tool_call: AgentToolCall {
             id: "tool_1".to_owned(),
-            name: "read".to_owned(),
+            name: "Read".to_owned(),
             arguments: json!({ "path": "README.md" }),
         },
     }));
@@ -384,7 +384,7 @@ async fn runtime_records_tool_calls_and_sends_tool_specs_to_model() {
             Vec::new(),
             vec![AgentToolCall {
                 id: "tool_1".to_owned(),
-                name: "read".to_owned(),
+                name: "Read".to_owned(),
                 arguments: json!({ "path": "README.md" }),
             }],
             StopReason::ToolUse,
@@ -399,7 +399,7 @@ async fn runtime_rejects_tools_when_model_lacks_tools_before_request() {
         stop_reason: neo_ai::StopReason::EndTurn,
         usage: None,
     }]);
-    let tool = ToolSpec::string_arg("read", "read file", "path", "file path");
+    let tool = ToolSpec::string_arg("Read", "read file", "path", "file path");
     let runtime = AgentRuntime::new(
         AgentConfig::for_model(model_with_capabilities(ModelCapabilities::chat()))
             .with_tools(vec![tool]),
@@ -1040,7 +1040,7 @@ async fn runtime_compaction_keeps_valid_tool_result_boundaries() {
         [
             AgentToolCall {
                 id: "tool_1".to_owned(),
-                name: "read".to_owned(),
+                name: "Read".to_owned(),
                 arguments: json!({ "path": "a.rs" }),
             },
             AgentToolCall {
@@ -1053,7 +1053,7 @@ async fn runtime_compaction_keeps_valid_tool_result_boundaries() {
     ));
     context.append_message(AgentMessage::tool_result(
         "tool_1",
-        "read",
+        "Read",
         [Content::text("large content")],
         false,
     ));
@@ -2684,7 +2684,7 @@ async fn runtime_parallel_mode_runs_allowed_tool_while_async_approval_is_pending
             content,
             is_error,
         } if tool_call_id == "tool_1"
-            && tool_name == "write"
+            && tool_name == "Write"
             && content
                 .iter()
                 .any(|part| matches!(part, Content::Text { text } if text.contains("approved.txt")))
@@ -2709,7 +2709,7 @@ fn parallel_write_and_echo_harness() -> FakeHarness {
             },
             AiStreamEvent::ToolCallStart {
                 id: "tool_1".to_owned(),
-                name: "write".to_owned(),
+                name: "Write".to_owned(),
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
@@ -2742,7 +2742,7 @@ async fn runtime_approval_handler_allows_file_write_tool_permission() {
             },
             AiStreamEvent::ToolCallStart {
                 id: "tool_1".to_owned(),
-                name: "write".to_owned(),
+                name: "Write".to_owned(),
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
@@ -2816,11 +2816,11 @@ async fn runtime_emits_shell_lifecycle_for_bash_tool() {
             },
             AiStreamEvent::ToolCallStart {
                 id: "tool_1".to_owned(),
-                name: "bash".to_owned(),
+                name: "Bash".to_owned(),
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "mode": "foreground", "command": "printf shell-ok" }),
+                arguments: json!({ "command": "printf shell-ok" }),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -2884,12 +2884,11 @@ async fn runtime_events_and_session_jsonl_do_not_leak_capped_bash_output() {
             },
             AiStreamEvent::ToolCallStart {
                 id: "tool_1".to_owned(),
-                name: "bash".to_owned(),
+                name: "Bash".to_owned(),
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
                 arguments: json!({
-                    "mode": "foreground",
                     "command": "printf keep; printf '%s%s%s%s' runtime -bash -leak -tail",
                     "max_output_bytes": 4
                 }),
@@ -3071,7 +3070,7 @@ async fn runtime_events_and_session_jsonl_do_not_leak_capped_terminal_output() {
             name,
             result,
             ..
-        } if name == "terminal"
+        } if name == "Terminal"
             && result
                 .details
                 .as_ref()
@@ -3512,7 +3511,7 @@ fn bash_tool_turn(
         },
         AiStreamEvent::ToolCallStart {
             id: tool_id.to_owned(),
-            name: "bash".to_owned(),
+            name: "Bash".to_owned(),
         },
         AiStreamEvent::ToolCallEnd {
             id: tool_id.to_owned(),
@@ -3627,7 +3626,7 @@ fn terminal_tool_turn(
         },
         AiStreamEvent::ToolCallStart {
             id: tool_id.to_owned(),
-            name: "terminal".to_owned(),
+            name: "Terminal".to_owned(),
         },
         AiStreamEvent::ToolCallEnd {
             id: tool_id.to_owned(),

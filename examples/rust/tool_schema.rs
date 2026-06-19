@@ -10,7 +10,7 @@ struct ReadInput {
 }
 
 fn main() {
-    let tool = ToolSpec::from_schema::<ReadInput>("read", "Read a UTF-8 file from the workspace.");
+    let tool = ToolSpec::from_schema::<ReadInput>("Read", "Read a UTF-8 file from the workspace.");
 
     println!(
         "{}",

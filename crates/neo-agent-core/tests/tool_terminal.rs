@@ -13,7 +13,7 @@ async fn terminal_stop_returns_promptly_for_interactive_shell() {
 
     let started = registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({
                 "mode": "start",
@@ -30,7 +30,7 @@ async fn terminal_stop_returns_promptly_for_interactive_shell() {
     tokio::time::timeout(
         std::time::Duration::from_millis(500),
         registry.run(
-            "terminal",
+            "Terminal",
             &context,
             json!({ "mode": "stop", "handle": handle }),
         ),
@@ -54,7 +54,7 @@ async fn terminal_read_waits_briefly_for_fresh_running_output() {
 
     let started = registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({
                 "mode": "start",
@@ -70,7 +70,7 @@ async fn terminal_read_waits_briefly_for_fresh_running_output() {
 
     let read = registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({ "mode": "read", "handle": handle, "max_output_bytes": 4096 }),
         )
@@ -84,7 +84,7 @@ async fn terminal_read_waits_briefly_for_fresh_running_output() {
 
     registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({ "mode": "stop", "handle": handle }),
         )
@@ -104,7 +104,7 @@ async fn terminal_write_then_read_observes_interactive_shell_output() {
 
     let started = registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({
                 "mode": "start",
@@ -122,7 +122,7 @@ async fn terminal_write_then_read_observes_interactive_shell_output() {
 
     registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({
                 "mode": "write",
@@ -141,7 +141,7 @@ async fn terminal_write_then_read_observes_interactive_shell_output() {
 
     registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({ "mode": "stop", "handle": handle }),
         )
@@ -161,7 +161,7 @@ async fn terminal_tool_start_write_read_resize_and_stop_uses_real_pty() {
 
     let started = registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({
                 "mode": "start",
@@ -180,7 +180,7 @@ async fn terminal_tool_start_write_read_resize_and_stop_uses_real_pty() {
 
     registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({
                 "mode": "write",
@@ -199,7 +199,7 @@ async fn terminal_tool_start_write_read_resize_and_stop_uses_real_pty() {
 
     let resized = registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({ "mode": "resize", "handle": handle, "cols": 72, "rows": 18 }),
         )
@@ -216,7 +216,7 @@ async fn terminal_tool_start_write_read_resize_and_stop_uses_real_pty() {
 
     registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({
                 "mode": "write",
@@ -234,7 +234,7 @@ async fn terminal_tool_start_write_read_resize_and_stop_uses_real_pty() {
 
     let stopped = registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({ "mode": "stop", "handle": handle }),
         )
@@ -248,7 +248,7 @@ async fn terminal_tool_start_write_read_resize_and_stop_uses_real_pty() {
 
     let missing = registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({ "mode": "read", "handle": handle }),
         )
@@ -269,7 +269,7 @@ async fn process_supervisor_cleanup_stops_terminal_handles() {
 
     let started = registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({ "mode": "start", "command": "bash --noprofile --norc" }),
         )
@@ -286,7 +286,7 @@ async fn process_supervisor_cleanup_stops_terminal_handles() {
 
     let missing = registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({ "mode": "read", "handle": handle }),
         )
@@ -307,7 +307,7 @@ async fn terminal_read_details_do_not_leak_output_past_max_output_bytes() {
 
     let started = registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({ "mode": "start", "command": "printf 'keep-terminal-leak-tail'; sleep 1" }),
         )
@@ -341,7 +341,7 @@ async fn terminal_read_details_do_not_leak_output_past_max_output_bytes() {
 
     let stopped = registry
         .run(
-            "terminal",
+            "Terminal",
             &context,
             json!({ "mode": "stop", "handle": handle, "max_output_bytes": 4 }),
         )
@@ -361,7 +361,7 @@ async fn read_terminal_until(
     for _ in 0..50 {
         let read = registry
             .run(
-                "terminal",
+                "Terminal",
                 context,
                 json!({ "mode": "read", "handle": handle, "max_output_bytes": 4096 }),
             )
@@ -392,7 +392,7 @@ async fn read_terminal_result_until_truncated_or_leaked(
     for _ in 0..50 {
         let read = registry
             .run(
-                "terminal",
+                "Terminal",
                 context,
                 json!({ "mode": "read", "handle": handle, "max_output_bytes": max_output_bytes }),
             )

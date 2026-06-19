@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "read",
+  "title": "Read",
   "description": "Read a UTF-8 file from the workspace.",
   "type": "object",
   "required": ["path"],

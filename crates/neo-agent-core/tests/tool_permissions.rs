@@ -13,7 +13,7 @@ async fn write_requires_mutation_permission() {
 
     let error = registry
         .run(
-            "write",
+            "Write",
             &context,
             json!({ "path": "note.txt", "content": "nope" }),
         )
@@ -35,7 +35,7 @@ async fn read_rejects_paths_outside_workspace() {
     let context = ToolContext::new(workspace.path()).expect("context");
 
     let error = registry
-        .run("read", &context, json!({ "path": outside_file }))
+        .run("Read", &context, json!({ "path": outside_file }))
         .await
         .expect_err("outside read should be denied");
 
@@ -55,7 +55,7 @@ async fn read_rejects_symlink_escape_from_workspace() {
     let context = ToolContext::new(workspace.path()).expect("context");
 
     let error = registry
-        .run("read", &context, json!({ "path": "secret-link.txt" }))
+        .run("Read", &context, json!({ "path": "secret-link.txt" }))
         .await
         .expect_err("symlink escape should be denied");
 
@@ -71,11 +71,7 @@ async fn bash_requires_permission_and_honors_timeout() {
         .with_permission_policy(PermissionPolicy::read_only());
 
     let denied = registry
-        .run(
-            "bash",
-            &denied_context,
-            json!({ "mode": "foreground", "command": "echo denied" }),
-        )
+        .run("Bash", &denied_context, json!({ "command": "echo denied" }))
         .await
         .expect_err("bash should be denied");
     assert!(matches!(denied, ToolError::PermissionDenied { .. }));
@@ -87,20 +83,20 @@ async fn bash_requires_permission_and_honors_timeout() {
 
     let capped = registry
         .run(
-            "bash",
+            "Bash",
             &allowed_context,
-            json!({ "mode": "foreground", "command": "printf 1234567890", "max_output_bytes": 4 }),
+            json!({ "command": "printf 1234567890", "max_output_bytes": 4 }),
         )
         .await
         .expect("bash should run");
     assert!(capped.content.contains("1234"));
-    assert!(capped.content.contains("truncated: true"));
+    assert!(capped.content.contains("[output truncated]"));
 
     let timed_out = registry
         .run(
-            "bash",
+            "Bash",
             &allowed_context,
-            json!({ "mode": "foreground", "command": "sleep 1", "timeout_ms": 10 }),
+            json!({ "command": "sleep 1", "timeout": 0 }),
         )
         .await
         .expect_err("bash should time out");

@@ -26,7 +26,7 @@ pub struct FindTool;
 
 impl Tool for FindTool {
     fn name(&self) -> &'static str {
-        "find"
+        "Find"
     }
 
     fn description(&self) -> &'static str {

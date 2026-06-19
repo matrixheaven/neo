@@ -16,8 +16,119 @@ fn bash_default_timeout_allows_long_workspace_commands() {
     );
 }
 
+#[test]
+fn bash_model_schema_matches_kimi_style_shape() {
+    let registry = ToolRegistry::with_builtin_tools();
+    let bash = registry
+        .specs()
+        .into_iter()
+        .find(|spec| spec.name == "Bash")
+        .expect("Bash tool spec");
+    let schema = bash
+        .input_schema
+        .get("schema")
+        .unwrap_or(&bash.input_schema);
+    let required = schema["required"].as_array().expect("required array");
+    let properties = schema["properties"].as_object().expect("schema properties");
+
+    assert!(required.iter().any(|field| field == "command"));
+    assert!(!required.iter().any(|field| field == "mode"));
+    assert!(!properties.contains_key("mode"));
+    for field in [
+        "command",
+        "cwd",
+        "timeout",
+        "run_in_background",
+        "description",
+        "disable_timeout",
+    ] {
+        assert!(
+            properties
+                .get(field)
+                .and_then(|property| property.get("description"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|description| !description.trim().is_empty()),
+            "{field} should have a non-empty description"
+        );
+    }
+}
+
+#[test]
+fn builtin_tool_names_use_model_facing_kimi_style_casing() {
+    let mut names = ToolRegistry::with_builtin_tools()
+        .specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
+    names.sort();
+
+    assert_eq!(
+        names,
+        vec![
+            "Bash",
+            "Edit",
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "Find",
+            "Glob",
+            "Grep",
+            "List",
+            "Read",
+            "TaskOutput",
+            "TaskStop",
+            "Terminal",
+            "TodoList",
+            "Write",
+        ]
+    );
+}
+
 #[tokio::test]
-async fn bash_background_start_poll_and_finish_returns_real_process_output() {
+async fn bash_foreground_output_is_raw_terminal_text_with_structured_details() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let result = registry
+        .run(
+            "Bash",
+            &context,
+            json!({ "command": "printf out; printf err >&2" }),
+        )
+        .await
+        .expect("Bash should run");
+
+    assert_eq!(result.content, "outerr");
+    assert!(!result.content.contains("exit_code:"));
+    assert!(!result.content.contains("stdout:"));
+    assert!(!result.content.contains("stderr:"));
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details["exit_code"].as_i64()),
+        Some(0)
+    );
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details["stdout"].as_str()),
+        Some("out")
+    );
+    assert_eq!(
+        result
+            .details
+            .as_ref()
+            .and_then(|details| details["stderr"].as_str()),
+        Some("err")
+    );
+}
+
+#[tokio::test]
+async fn bash_background_run_returns_task_id_and_task_output_finishes() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
@@ -26,152 +137,43 @@ async fn bash_background_start_poll_and_finish_returns_real_process_output() {
 
     let started = registry
         .run(
-            "bash",
+            "Bash",
             &context,
             json!({
-                "mode": "start",
                 "command": "printf started; sleep 0.05; printf done",
+                "run_in_background": true,
+                "description": "short background command",
                 "max_output_bytes": 64
             }),
         )
         .await
-        .expect("background start should succeed");
+        .expect("background bash should start");
     let start_details = started.details.as_ref().expect("start details");
-    let handle = start_details
-        .get("handle")
-        .and_then(serde_json::Value::as_str)
-        .expect("start should return a handle");
-    assert!(!handle.is_empty());
+    let task_id = start_details["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+    assert!(task_id.starts_with("bash-"));
     assert_eq!(start_details["status"], "running");
 
-    let running = registry
+    let finished = registry
         .run(
-            "bash",
+            "TaskOutput",
             &context,
-            json!({ "mode": "poll", "handle": handle, "max_output_bytes": 64 }),
+            json!({ "task_id": task_id, "block": true, "timeout": 1, "max_output_bytes": 64 }),
         )
         .await
-        .expect("background poll should succeed");
-    let running_details = running.details.as_ref().expect("running details");
-    assert_eq!(running_details["handle"], handle);
-    assert!(matches!(
-        running_details["status"].as_str(),
-        Some("running" | "exited")
-    ));
-
-    let mut finished_details = running_details.clone();
-    for _ in 0..20 {
-        if finished_details["status"] == "exited" {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        let polled = registry
-            .run(
-                "bash",
-                &context,
-                json!({ "mode": "poll", "handle": handle, "max_output_bytes": 64 }),
-            )
-            .await
-            .expect("background poll should succeed");
-        finished_details = polled.details.expect("poll details");
-    }
-
-    assert_eq!(finished_details["status"], "exited");
-    assert_eq!(finished_details["exit_code"], 0);
-    assert_eq!(finished_details["stdout"], "starteddone");
-    assert_eq!(finished_details["stderr"], "");
-    assert_eq!(finished_details["truncated"], false);
-}
-
-#[tokio::test]
-async fn bash_background_handles_are_removed_after_finished_poll() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let registry = ToolRegistry::with_builtin_tools();
-    let context = ToolContext::new(workspace.path())
-        .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
-
-    let started = registry
-        .run(
-            "bash",
-            &context,
-            json!({ "mode": "start", "command": "printf once" }),
-        )
-        .await
-        .expect("background start should succeed");
-    let handle = started.details.as_ref().expect("start details")["handle"]
-        .as_str()
-        .expect("handle")
-        .to_owned();
-
-    for _ in 0..20 {
-        let polled = registry
-            .run(
-                "bash",
-                &context,
-                json!({ "mode": "poll", "handle": handle }),
-            )
-            .await
-            .expect("poll should succeed");
-        if polled.details.expect("poll details")["status"] == "exited" {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-
-    let missing = registry
-        .run(
-            "bash",
-            &context,
-            json!({ "mode": "poll", "handle": handle }),
-        )
-        .await
-        .expect_err("finished handle should be removed");
-    assert!(matches!(missing, ToolError::InvalidInput { .. }));
-}
-
-#[tokio::test]
-async fn bash_background_finished_poll_does_not_wait_for_inherited_output_handles() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let registry = ToolRegistry::with_builtin_tools();
-    let context = ToolContext::new(workspace.path())
-        .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
-
-    let started = registry
-        .run(
-            "bash",
-            &context,
-            json!({ "mode": "start", "command": "sleep 2 & printf done" }),
-        )
-        .await
-        .expect("background start should succeed");
-    let handle = started.details.as_ref().expect("start details")["handle"]
-        .as_str()
-        .expect("handle")
-        .to_owned();
-
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let polled = tokio::time::timeout(
-        std::time::Duration::from_millis(300),
-        registry.run(
-            "bash",
-            &context,
-            json!({ "mode": "poll", "handle": handle }),
-        ),
-    )
-    .await
-    .expect("finished poll should not wait for inherited pipe handles")
-    .expect("background poll should succeed");
-
-    let details = polled.details.expect("poll details");
+        .expect("TaskOutput should read background output");
+    let details = finished.details.expect("output details");
     assert_eq!(details["status"], "exited");
     assert_eq!(details["exit_code"], 0);
-    assert_eq!(details["stdout"], "done");
+    assert_eq!(details["stdout"], "starteddone");
+    assert_eq!(details["stderr"], "");
+    assert_eq!(details["truncated"], false);
 }
 
 #[tokio::test]
-async fn bash_requires_explicit_mode() {
+async fn bash_background_requires_description() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
@@ -179,15 +181,162 @@ async fn bash_requires_explicit_mode() {
         .with_permission_policy(PermissionPolicy::allow_all());
 
     let error = registry
-        .run("bash", &context, json!({ "command": "printf foreground" }))
+        .run(
+            "Bash",
+            &context,
+            json!({ "command": "sleep 1", "run_in_background": true }),
+        )
         .await
-        .expect_err("bash missing mode should be rejected");
+        .expect_err("background bash requires description");
 
     assert!(matches!(error, ToolError::InvalidInput { .. }));
 }
 
 #[tokio::test]
-async fn bash_workdir_runs_command_from_workspace_subdirectory() {
+async fn bash_rejects_old_mode_background_api() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let error = registry
+        .run(
+            "Bash",
+            &context,
+            json!({ "mode": "start", "command": "printf old" }),
+        )
+        .await
+        .expect_err("old mode field should be rejected");
+
+    assert!(matches!(error, ToolError::InvalidInput { .. }));
+}
+
+#[tokio::test]
+async fn task_output_block_times_out_while_task_is_running() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let started = registry
+        .run(
+            "Bash",
+            &context,
+            json!({
+                "command": "sleep 1; printf done",
+                "run_in_background": true,
+                "description": "sleep briefly"
+            }),
+        )
+        .await
+        .expect("background bash should start");
+    let task_id = started.details.as_ref().expect("start details")["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+
+    let output = registry
+        .run(
+            "TaskOutput",
+            &context,
+            json!({ "task_id": task_id, "block": true, "timeout": 0 }),
+        )
+        .await
+        .expect("TaskOutput timeout should still return snapshot");
+    let details = output.details.expect("output details");
+    assert_eq!(details["status"], "running");
+
+    let _ = registry
+        .run("TaskStop", &context, json!({ "task_id": task_id }))
+        .await;
+}
+
+#[tokio::test]
+async fn task_stop_is_safe_for_finished_task() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let started = registry
+        .run(
+            "Bash",
+            &context,
+            json!({
+                "command": "printf once",
+                "run_in_background": true,
+                "description": "quick command"
+            }),
+        )
+        .await
+        .expect("background bash should start");
+    let task_id = started.details.as_ref().expect("start details")["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+
+    let _ = registry
+        .run(
+            "TaskOutput",
+            &context,
+            json!({ "task_id": task_id, "block": true, "timeout": 1 }),
+        )
+        .await
+        .expect("task should finish");
+    let stopped = registry
+        .run("TaskStop", &context, json!({ "task_id": task_id }))
+        .await
+        .expect("TaskStop should be safe after completion");
+    let details = stopped.details.expect("stop details");
+    assert_eq!(details["status"], "exited");
+    assert_eq!(details["stdout"], "once");
+}
+
+#[tokio::test]
+async fn bash_defaults_to_foreground_when_mode_is_missing() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let result = registry
+        .run("Bash", &context, json!({ "command": "printf foreground" }))
+        .await
+        .expect("bash missing mode should run in foreground");
+
+    assert_eq!(result.details.expect("details")["stdout"], "foreground");
+}
+
+#[tokio::test]
+async fn bash_foreground_accepts_kimi_optional_fields() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let result = registry
+        .run(
+            "Bash",
+            &context,
+            json!({
+                "command": "printf optional",
+                "description": "short foreground command",
+                "disable_timeout": false,
+            }),
+        )
+        .await
+        .expect("foreground bash should accept Kimi optional fields");
+
+    assert_eq!(result.details.expect("details")["stdout"], "optional");
+}
+
+#[tokio::test]
+async fn bash_cwd_runs_command_from_workspace_subdirectory() {
     let workspace = tempfile::tempdir().expect("workspace");
     let subdir = workspace.path().join("sub");
     std::fs::create_dir(&subdir).expect("subdir");
@@ -197,11 +346,7 @@ async fn bash_workdir_runs_command_from_workspace_subdirectory() {
         .with_permission_policy(PermissionPolicy::allow_all());
 
     let result = registry
-        .run(
-            "bash",
-            &context,
-            json!({ "mode": "foreground", "command": "pwd", "workdir": "sub" }),
-        )
+        .run("Bash", &context, json!({ "command": "pwd", "cwd": "sub" }))
         .await
         .expect("foreground bash should run");
 
@@ -215,7 +360,7 @@ async fn bash_workdir_runs_command_from_workspace_subdirectory() {
 }
 
 #[tokio::test]
-async fn bash_workdir_rejects_paths_outside_workspace() {
+async fn bash_cwd_rejects_paths_outside_workspace() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
@@ -223,13 +368,9 @@ async fn bash_workdir_rejects_paths_outside_workspace() {
         .with_permission_policy(PermissionPolicy::allow_all());
 
     let error = registry
-        .run(
-            "bash",
-            &context,
-            json!({ "mode": "foreground", "command": "pwd", "workdir": ".." }),
-        )
+        .run("Bash", &context, json!({ "command": "pwd", "cwd": ".." }))
         .await
-        .expect_err("workdir should stay inside workspace");
+        .expect_err("cwd should stay inside workspace");
 
     assert!(matches!(error, ToolError::PathOutsideWorkspace { .. }));
 }
@@ -245,12 +386,11 @@ async fn bash_foreground_returns_after_shell_exits_with_inherited_background_out
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         registry.run(
-            "bash",
+            "Bash",
             &context,
             json!({
-                "mode": "foreground",
                 "command": "sleep 5 & printf done",
-                "timeout_ms": 10000
+                "timeout": 10
             }),
         ),
     )
@@ -272,12 +412,11 @@ async fn bash_foreground_reports_missing_cd_promptly() {
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         registry.run(
-            "bash",
+            "Bash",
             &context,
             json!({
-                "mode": "foreground",
                 "command": "cd /definitely/not/a/neo/workspace && printf nope",
-                "timeout_ms": 10000
+                "timeout": 10
             }),
         ),
     )
@@ -305,10 +444,9 @@ async fn bash_foreground_details_do_not_leak_output_past_max_output_bytes() {
 
     let result = registry
         .run(
-            "bash",
+            "Bash",
             &context,
             json!({
-                "mode": "foreground",
                 "command": "printf 'keep-secret-leak-tail'",
                 "max_output_bytes": 4
             }),
@@ -317,7 +455,7 @@ async fn bash_foreground_details_do_not_leak_output_past_max_output_bytes() {
         .expect("foreground bash should run");
     let serialized = serde_json::to_string(&result).expect("result serializes");
 
-    assert!(result.content.contains("truncated: true"));
+    assert!(result.content.contains("[output truncated]"));
     assert!(!result.content.contains("secret-leak-tail"));
     assert!(!serialized.contains("secret-leak-tail"));
     let details = result.details.expect("details");
@@ -326,7 +464,7 @@ async fn bash_foreground_details_do_not_leak_output_past_max_output_bytes() {
 }
 
 #[tokio::test]
-async fn bash_background_details_do_not_leak_output_past_max_output_bytes() {
+async fn task_output_details_do_not_leak_output_past_max_output_bytes() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
@@ -335,41 +473,33 @@ async fn bash_background_details_do_not_leak_output_past_max_output_bytes() {
 
     let started = registry
         .run(
-            "bash",
+            "Bash",
             &context,
             json!({
-                "mode": "start",
                 "command": "printf 'keep-background-leak-tail'",
+                "run_in_background": true,
+                "description": "truncated output",
                 "max_output_bytes": 4
             }),
         )
         .await
-        .expect("background start should succeed");
-    let handle = started.details.as_ref().expect("start details")["handle"]
+        .expect("background bash should start");
+    let task_id = started.details.as_ref().expect("start details")["task_id"]
         .as_str()
-        .expect("handle")
+        .expect("task id")
         .to_owned();
 
-    let mut result = None;
-    for _ in 0..20 {
-        let polled = registry
-            .run(
-                "bash",
-                &context,
-                json!({ "mode": "poll", "handle": handle, "max_output_bytes": 4 }),
-            )
-            .await
-            .expect("background poll should succeed");
-        if polled.details.as_ref().expect("poll details")["status"] == "exited" {
-            result = Some(polled);
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    let result = result.expect("background command should exit");
+    let result = registry
+        .run(
+            "TaskOutput",
+            &context,
+            json!({ "task_id": task_id, "block": true, "timeout": 1, "max_output_bytes": 4 }),
+        )
+        .await
+        .expect("TaskOutput should finish");
     let serialized = serde_json::to_string(&result).expect("result serializes");
 
-    assert!(result.content.contains("truncated: true"));
+    assert!(result.content.contains("[output truncated]"));
     assert!(!result.content.contains("background-leak-tail"));
     assert!(!serialized.contains("background-leak-tail"));
     let details = result.details.expect("details");
@@ -390,12 +520,11 @@ async fn bash_foreground_kills_child_when_context_is_cancelled() {
     let command = tokio::spawn(async move {
         registry
             .run(
-                "bash",
+                "Bash",
                 &context,
                 json!({
-                    "mode": "foreground",
                     "command": "printf $$ > child.pid; sleep 5",
-                    "timeout_ms": 10000
+                    "timeout": 10
                 }),
             )
             .await
@@ -446,12 +575,11 @@ async fn bash_foreground_cancellation_kills_descendant_process_group() {
     let command = tokio::spawn(async move {
         registry
             .run(
-                "bash",
+                "Bash",
                 &context,
                 json!({
-                    "mode": "foreground",
                     "command": "sleep 5 & echo $! > descendant.pid; wait",
-                    "timeout_ms": 10000
+                    "timeout": 10
                 }),
             )
             .await
@@ -479,7 +607,7 @@ async fn bash_foreground_cancellation_kills_descendant_process_group() {
 
 #[tokio::test]
 #[cfg(unix)]
-async fn bash_background_stop_kills_descendant_process_group_and_removes_handle() {
+async fn task_stop_kills_descendant_process_group() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
@@ -488,19 +616,20 @@ async fn bash_background_stop_kills_descendant_process_group_and_removes_handle(
 
     let started = registry
         .run(
-            "bash",
+            "Bash",
             &context,
             json!({
-                "mode": "start",
                 "command": "sleep 5 & echo $! > background-descendant.pid; wait",
+                "run_in_background": true,
+                "description": "sleep with descendant",
                 "max_output_bytes": 64
             }),
         )
         .await
-        .expect("background start should succeed");
-    let handle = started.details.as_ref().expect("start details")["handle"]
+        .expect("background bash should start");
+    let task_id = started.details.as_ref().expect("start details")["task_id"]
         .as_str()
-        .expect("handle")
+        .expect("task id")
         .to_owned();
 
     let descendant_pid_path = workspace.path().join("background-descendant.pid");
@@ -508,19 +637,24 @@ async fn bash_background_stop_kills_descendant_process_group_and_removes_handle(
 
     let stopped = registry
         .run(
-            "bash",
+            "TaskStop",
             &context,
-            json!({ "mode": "stop", "handle": handle, "max_output_bytes": 64 }),
+            json!({ "task_id": task_id, "max_output_bytes": 64 }),
         )
         .await;
     if stopped.is_err() {
         terminate_process(&descendant_pid).await;
-        drain_background_handle(&registry, &context, &handle).await;
     }
-    let stopped = stopped.expect("background stop should succeed");
+    let stopped = stopped.expect("TaskStop should succeed");
     let stopped_details = stopped.details.as_ref().expect("stop details");
-    assert_eq!(stopped_details["handle"], handle);
     assert_eq!(stopped_details["status"], "stopped");
+
+    let output_after_stop = registry
+        .run("TaskOutput", &context, json!({ "task_id": task_id }))
+        .await
+        .expect("TaskOutput should retain stopped task");
+    let output_details = output_after_stop.details.expect("output details");
+    assert_eq!(output_details["status"], "stopped");
 
     let descendant_exited = wait_for_process_exit(&descendant_pid).await;
     if !descendant_exited {
@@ -528,39 +662,8 @@ async fn bash_background_stop_kills_descendant_process_group_and_removes_handle(
     }
     assert!(
         descendant_exited,
-        "background stop should terminate descendant processes in the shell process group"
+        "TaskStop should terminate descendant processes in the shell process group"
     );
-
-    let missing = registry
-        .run(
-            "bash",
-            &context,
-            json!({ "mode": "poll", "handle": handle }),
-        )
-        .await
-        .expect_err("stopped handle should be removed");
-    assert!(matches!(missing, ToolError::InvalidInput { .. }));
-}
-
-#[cfg(unix)]
-async fn drain_background_handle(registry: &ToolRegistry, context: &ToolContext, handle: &str) {
-    for _ in 0..20 {
-        let Ok(polled) = registry
-            .run("bash", context, json!({ "mode": "poll", "handle": handle }))
-            .await
-        else {
-            break;
-        };
-        if polled
-            .details
-            .as_ref()
-            .and_then(|details| details["status"].as_str())
-            == Some("exited")
-        {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
 }
 
 #[cfg(unix)]

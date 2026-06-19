@@ -13,7 +13,7 @@ pub struct ReadTool;
 
 impl Tool for ReadTool {
     fn name(&self) -> &'static str {
-        "read"
+        "Read"
     }
 
     fn description(&self) -> &'static str {

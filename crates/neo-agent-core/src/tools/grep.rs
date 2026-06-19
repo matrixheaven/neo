@@ -27,7 +27,7 @@ pub struct GrepTool;
 
 impl Tool for GrepTool {
     fn name(&self) -> &'static str {
-        "grep"
+        "Grep"
     }
 
     fn description(&self) -> &'static str {
