@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     ops::Range,
     path::{Path, PathBuf},
     time::SystemTime,
@@ -290,6 +290,7 @@ pub struct NeoChromeState {
     overlays: Vec<Overlay>,
     next_overlay_id: OverlayId,
     focused_overlay: Option<OverlayId>,
+    pending_approvals: VecDeque<ApprovalRequestModal>,
     image_render_policy: ImageRenderPolicy,
     image_capabilities: TerminalImageCapabilities,
     theme: TuiTheme,
@@ -327,6 +328,7 @@ impl NeoChromeState {
             overlays: Vec::new(),
             next_overlay_id: OverlayId::default(),
             focused_overlay: None,
+            pending_approvals: VecDeque::new(),
             image_render_policy: ImageRenderPolicy::default(),
             image_capabilities: TerminalImageCapabilities::default(),
             theme: TuiTheme::default(),
@@ -622,6 +624,7 @@ impl NeoChromeState {
             StreamUpdate::QuestionRequested { id, questions } => {
                 self.push_question_overlay(id, questions);
             }
+            StreamUpdate::SkillActivated { .. } => {}
         }
     }
 
@@ -655,15 +658,13 @@ impl NeoChromeState {
                 } else {
                     format!("{subject}\n{arguments}")
                 };
-                if is_plan_review {
-                    // Use plan-review modal with Approve/Reject/Revise
-                    self.push_overlay(Overlay::new(
-                        "approval",
-                        OverlayKind::Approval(ApprovalRequestModal::new_plan_review(id, body)),
-                    ));
+                self.pending_approvals.push_back(if is_plan_review {
+                    ApprovalRequestModal::new_plan_review(id, body)
                 } else {
-                    self.request_approval(id, format!("{operation:?} approval"), body);
-                }
+                    ApprovalRequestModal::new(id, format!("{operation:?} approval"), body)
+                });
+                self.focused_overlay = None;
+                self.mode = ChromeMode::Approval;
             }
             AgentEvent::TokenUsage { usage, .. } => {
                 if let Some(context_window) = &mut self.context_window {
@@ -692,7 +693,8 @@ impl NeoChromeState {
             | AgentEvent::MessageFinished { .. }
             | AgentEvent::TerminalSessionStarted { .. }
             | AgentEvent::TerminalSessionOutput { .. }
-            | AgentEvent::TerminalSessionFinished { .. } => {}
+            | AgentEvent::TerminalSessionFinished { .. }
+            | AgentEvent::SkillActivated { .. } => {}
             AgentEvent::PlanModeEntered { .. } => {
                 self.plan_mode_active = true;
             }
@@ -786,10 +788,11 @@ impl NeoChromeState {
         title: impl Into<String>,
         body: impl Into<String>,
     ) -> OverlayId {
-        self.push_overlay(Overlay::new(
-            "approval",
-            OverlayKind::Approval(ApprovalRequestModal::new(request_id, title, body)),
-        ))
+        self.pending_approvals
+            .push_back(ApprovalRequestModal::new(request_id, title, body));
+        self.focused_overlay = None;
+        self.mode = ChromeMode::Approval;
+        OverlayId::default()
     }
 
     pub fn open_command_palette(
@@ -1139,13 +1142,91 @@ impl NeoChromeState {
 
     #[must_use]
     pub fn approval_choice(&self) -> Option<ApprovalChoice> {
+        if let Some(approval) = self.pending_approvals.front() {
+            return approval.modal.selected_choice();
+        }
         let OverlayKind::Approval(modal) = &self.focused_overlay()?.kind else {
             return None;
         };
         modal.modal.selected_choice()
     }
 
+    #[must_use]
+    pub fn approval_is_pending(&self) -> bool {
+        !self.pending_approvals.is_empty()
+    }
+
+    #[must_use]
+    pub fn approval_selection(&self) -> Option<(&str, usize)> {
+        self.pending_approvals
+            .front()
+            .map(|approval| (approval.request_id.as_str(), approval.modal.selected))
+    }
+
+    pub fn choose_approval_number(&mut self, number: usize) -> Option<ApprovalResult> {
+        let approval = self.pending_approvals.front_mut()?;
+        if number == 0 || number > approval.modal.options.len() {
+            return None;
+        }
+        approval.modal.selected = number - 1;
+        self.confirm_approval()
+    }
+
+    pub fn deny_approval(&mut self) -> Option<ApprovalResult> {
+        if let Some(approval) = self.pending_approvals.front_mut() {
+            if let Some(index) = approval
+                .modal
+                .options
+                .iter()
+                .position(|option| option.choice == ApprovalChoice::Deny)
+            {
+                approval.modal.selected = index;
+            }
+            return self.confirm_approval();
+        }
+
+        let id = self.focused_overlay;
+        let overlay = self.focused_overlay()?;
+        let OverlayKind::Approval(modal) = &overlay.kind else {
+            return None;
+        };
+        let result = ApprovalResult {
+            request_id: modal.request_id.clone(),
+            choice: ApprovalChoice::Deny,
+            feedback: None,
+        };
+        if let Some(id) = id {
+            let _ = self.close_overlay(id);
+        }
+        Some(result)
+    }
+
+    pub fn cancel_all_approvals(&mut self) -> Vec<ApprovalResult> {
+        let results = self
+            .pending_approvals
+            .drain(..)
+            .map(|modal| ApprovalResult {
+                request_id: modal.request_id,
+                choice: ApprovalChoice::Deny,
+                feedback: None,
+            })
+            .collect();
+        self.mode = self.overlay_mode();
+        results
+    }
+
     pub fn confirm_approval(&mut self) -> Option<ApprovalResult> {
+        if let Some(modal) = self.pending_approvals.pop_front() {
+            let choice = modal.modal.selected_choice()?;
+            let result = ApprovalResult {
+                request_id: modal.request_id,
+                choice,
+                feedback: None,
+            };
+            self.mode = self.overlay_mode();
+            return Some(result);
+        }
+
         let id = self.focused_overlay;
         let overlay = self.focused_overlay()?;
         let OverlayKind::Approval(modal) = &overlay.kind else {
@@ -1251,10 +1332,20 @@ impl NeoChromeState {
     }
 
     pub fn move_overlay_selection_down(&mut self) {
+        if let Some(approval) = self.pending_approvals.front_mut() {
+            approval.move_down();
+            self.mode = ChromeMode::Approval;
+            return;
+        }
         self.with_focused_overlay_mut(Overlay::move_selection_down);
     }
 
     pub fn move_overlay_selection_up(&mut self) {
+        if let Some(approval) = self.pending_approvals.front_mut() {
+            approval.move_up();
+            self.mode = ChromeMode::Approval;
+            return;
+        }
         self.with_focused_overlay_mut(Overlay::move_selection_up);
     }
 
@@ -1276,6 +1367,9 @@ impl NeoChromeState {
     }
 
     fn overlay_mode(&self) -> ChromeMode {
+        if !self.pending_approvals.is_empty() {
+            return ChromeMode::Approval;
+        }
         if let Some(overlay) = self.focused_overlay() {
             if matches!(
                 overlay.kind,
@@ -1336,6 +1430,9 @@ pub enum StreamUpdate {
     QuestionRequested {
         id: String,
         questions: Vec<QuestionDisplayData>,
+    },
+    SkillActivated {
+        name: String,
     },
 }
 
@@ -2251,8 +2348,9 @@ impl ApprovalRequestModal {
                 body,
                 [
                     ApprovalOption::new(ApprovalChoice::Approve, "Approve once"),
-                    ApprovalOption::new(ApprovalChoice::Deny, "Deny"),
-                    ApprovalOption::new(ApprovalChoice::AlwaysApprove, "Always approve"),
+                    ApprovalOption::new(ApprovalChoice::AlwaysApprove, "Approve for this session"),
+                    ApprovalOption::new(ApprovalChoice::Deny, "Reject"),
+                    ApprovalOption::new(ApprovalChoice::Revise, "Reject with feedback"),
                 ],
             ),
         }

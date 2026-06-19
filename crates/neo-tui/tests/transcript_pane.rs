@@ -1,4 +1,4 @@
-use neo_tui::ansi::strip_ansi;
+use neo_tui::ansi::{strip_ansi, visible_width};
 use neo_tui::chrome::ToolStatusKind;
 use neo_tui::chrome::TuiTheme;
 use neo_tui::transcript::TranscriptEntry;
@@ -89,6 +89,115 @@ fn transcript_pane_exposes_frame_ansi_lines_for_inspection() {
         lines.iter().any(|line| plain(line).contains("Using Bash")),
         "frame lines: {lines:?}"
     );
+}
+
+#[test]
+fn transcript_pane_renders_inline_bash_approval_prompt() {
+    let mut transcript_pane = TranscriptPane::new(100, 16);
+
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: serde_json::json!({ "command": "echo hello" }),
+    });
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::Shell,
+        subject: "echo hello".to_owned(),
+        arguments: serde_json::json!({
+            "command": "echo hello",
+            "cwd": "/Users/chenyuanhao/Workspace/neo"
+        }),
+    });
+
+    let frame = plain_frame(&mut transcript_pane, 100, 16);
+    let using = frame
+        .iter()
+        .position(|line| line.contains("Using Bash"))
+        .expect("running bash tool");
+    let approval = frame
+        .iter()
+        .position(|line| line.contains("Run this command?"))
+        .expect("inline approval prompt");
+
+    assert!(using < approval);
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("cwd: /Users/chenyuanhao/Workspace/neo"))
+    );
+    assert!(frame.iter().any(|line| line.contains("$ echo hello")));
+    assert!(frame.iter().any(|line| line.contains("1. Approve once")));
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("2. Approve for this session"))
+    );
+    assert!(frame.iter().any(|line| line.contains("3. Reject")));
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("4. Reject with feedback"))
+    );
+    assert!(frame.iter().any(|line| line.contains("1/2/3/4 choose")));
+
+    transcript_pane.resize(36, 24);
+    let narrow = plain_frame(&mut transcript_pane, 36, 24);
+    assert!(
+        narrow.iter().all(|line| visible_width(line) <= 34),
+        "approval prompt lines should fit narrow transcript width: {narrow:?}"
+    );
+}
+
+#[test]
+fn transcript_pane_only_renders_active_approval_and_queued_count() {
+    let mut transcript_pane = TranscriptPane::new(100, 24);
+
+    for number in 1..=3 {
+        let command = format!("printf {number}");
+        transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: format!("bash-{number}"),
+            operation: neo_agent_core::PermissionOperation::Shell,
+            subject: command.clone(),
+            arguments: serde_json::json!({ "command": command }),
+        });
+    }
+
+    let frame = plain_frame(&mut transcript_pane, 100, 24);
+    assert!(frame.iter().any(|line| line.contains("$ printf 1")));
+    assert!(!frame.iter().any(|line| line.contains("$ printf 2")));
+    assert!(!frame.iter().any(|line| line.contains("$ printf 3")));
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("queued: 2 bash approvals waiting")),
+        "frame: {frame:?}"
+    );
+}
+
+#[test]
+fn transcript_pane_advances_next_queued_approval_after_resolution() {
+    let mut transcript_pane = TranscriptPane::new(100, 24);
+
+    for number in 1..=2 {
+        let command = format!("printf {number}");
+        transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: format!("bash-{number}"),
+            operation: neo_agent_core::PermissionOperation::Shell,
+            subject: command.clone(),
+            arguments: serde_json::json!({ "command": command }),
+        });
+    }
+    transcript_pane.resolve_approval("bash-1", "Approved");
+
+    let frame = plain_frame(&mut transcript_pane, 100, 24);
+    assert!(frame.iter().any(|line| line.contains("Approved")));
+    assert!(frame.iter().any(|line| line.contains("$ printf 2")));
+    assert!(!frame.iter().any(|line| line.contains("queued:")));
 }
 
 #[test]

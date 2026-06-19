@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
-use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef};
+use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, PermissionOperation};
 
 use crate::ansi::{Style, paint, truncate_to_width, visible_width};
 use crate::chrome::{NeoChromeState, PromptState, ToolStatusKind, TuiTheme};
@@ -9,8 +9,8 @@ use crate::core::{Expandable, Line};
 use crate::image::{ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities};
 use crate::terminal::{CURSOR_MARKER, CursorPos};
 use crate::transcript::{
-    InlineImageRender, ToolCallComponent, ToolCallState, ToolGroup, TranscriptEntry,
-    TranscriptStore, render_tool_group,
+    ApprovalPromptData, InlineImageRender, ToolCallComponent, ToolCallState, ToolGroup,
+    TranscriptEntry, TranscriptStore, render_tool_group,
 };
 use crate::widgets::box_draw;
 
@@ -45,6 +45,7 @@ pub struct TranscriptPane {
     dirty: bool,
     tool_output_expanded: bool,
     streaming_tool_args: BTreeMap<String, String>,
+    queued_approvals: VecDeque<ApprovalPromptData>,
     completed_tool_result_ids: Vec<String>,
     next_image_id: u64,
     /// Cache of the last composed body frame (ANSI strings, no chrome), so
@@ -69,6 +70,7 @@ impl TranscriptPane {
             dirty: false,
             tool_output_expanded: false,
             streaming_tool_args: BTreeMap::new(),
+            queued_approvals: VecDeque::new(),
             completed_tool_result_ids: Vec::new(),
             next_image_id: 0,
             last_frame: Vec::new(),
@@ -462,6 +464,16 @@ impl TranscriptPane {
                 self.upsert_tool(id, name, Some(arguments), ToolStatusKind::Running);
                 self.mark_dirty();
             }
+            AgentEvent::ApprovalRequested {
+                id,
+                operation,
+                subject,
+                arguments,
+                ..
+            } => {
+                self.upsert_approval(id, operation, subject, arguments);
+                self.mark_dirty();
+            }
             AgentEvent::ToolExecutionUpdate {
                 id,
                 name,
@@ -496,7 +508,7 @@ impl TranscriptPane {
             } => {
                 self.upsert_tool(
                     id,
-                    "shell.run".to_owned(),
+                    "Bash".to_owned(),
                     Some(format!("{command} ({})", cwd.display())),
                     ToolStatusKind::Running,
                 );
@@ -511,12 +523,7 @@ impl TranscriptPane {
                 ..
             } => {
                 let detail = shell_finished_detail(exit_code, &stdout, &stderr, truncated);
-                self.upsert_tool(
-                    id.clone(),
-                    "shell.run".to_owned(),
-                    None,
-                    ToolStatusKind::Running,
-                );
+                self.upsert_tool(id.clone(), "Bash".to_owned(), None, ToolStatusKind::Running);
                 if let Some(tool) = self.transcript.tool_mut(&id) {
                     tool.set_result(Some(detail), None, exit_code != Some(0), exit_code);
                 }
@@ -559,6 +566,9 @@ impl TranscriptPane {
                 if let Some(notice) = run_finished_notice(turn, stop_reason) {
                     self.push_status(notice);
                 }
+            }
+            AgentEvent::SkillActivated { name, .. } => {
+                self.push_transcript(TranscriptEntry::skill_activated(name));
             }
             _ => {}
         }
@@ -636,6 +646,43 @@ impl TranscriptPane {
         &mut self.transcript
     }
 
+    pub fn select_approval(&mut self, id: &str, selected: usize) {
+        if let Some(approval) = self.transcript.approval_mut(id) {
+            approval.selected = selected;
+            self.mark_dirty();
+        }
+    }
+
+    pub fn resolve_approval(&mut self, id: &str, label: impl Into<String>) {
+        if let Some(approval) = self.transcript.approval_mut(id) {
+            approval.resolved = Some(label.into());
+            approval.queued_count = 0;
+            self.advance_queued_approval();
+            self.mark_dirty();
+        }
+    }
+
+    pub fn resolve_unresolved_approvals(&mut self, label: impl Into<String>) {
+        let label = label.into();
+        let mut changed = false;
+        for entry in self.transcript.entries_mut() {
+            if let TranscriptEntry::ApprovalPrompt(data) = entry
+                && data.resolved.is_none()
+            {
+                data.resolved = Some(label.clone());
+                data.queued_count = 0;
+                changed = true;
+            }
+        }
+        if !self.queued_approvals.is_empty() {
+            self.queued_approvals.clear();
+            changed = true;
+        }
+        if changed {
+            self.mark_dirty();
+        }
+    }
+
     #[must_use]
     pub const fn dimensions(&self) -> (usize, usize) {
         (self.width, self.height)
@@ -674,6 +721,89 @@ impl TranscriptPane {
     fn finish_active_text_blocks(&mut self) {
         self.finish_assistant_message();
         self.transcript.finish_thinking();
+    }
+
+    fn upsert_approval(
+        &mut self,
+        id: String,
+        operation: PermissionOperation,
+        subject: String,
+        arguments: serde_json::Value,
+    ) {
+        let title = match operation {
+            PermissionOperation::Shell => "Run this command?".to_owned(),
+            PermissionOperation::FileRead
+            | PermissionOperation::FileWrite
+            | PermissionOperation::Tool => "Approve this action?".to_owned(),
+        };
+        let command = arguments
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(&subject)
+            .to_owned();
+        let cwd = arguments
+            .get("cwd")
+            .or_else(|| arguments.get("workdir"))
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned);
+
+        if let Some(approval) = self.transcript.approval_mut(&id) {
+            approval.title = title;
+            approval.cwd = cwd;
+            approval.command = command;
+            approval.queued_count = self.queued_approvals.len();
+            approval.resolved = None;
+            return;
+        }
+
+        let data = ApprovalPromptData {
+            id,
+            title,
+            cwd,
+            command,
+            queued_count: 0,
+            selected: 0,
+            resolved: None,
+        };
+        if self.active_approval_mut().is_some() {
+            self.queued_approvals.push_back(data);
+            self.update_active_approval_queue_count();
+            return;
+        }
+
+        self.finish_active_text_blocks();
+        self.transcript.push(TranscriptEntry::ApprovalPrompt(data));
+    }
+
+    fn active_approval_mut(&mut self) -> Option<&mut ApprovalPromptData> {
+        self.transcript
+            .entries_mut()
+            .iter_mut()
+            .rev()
+            .find_map(|entry| {
+                if let TranscriptEntry::ApprovalPrompt(data) = entry
+                    && data.resolved.is_none()
+                {
+                    return Some(data);
+                }
+                None
+            })
+    }
+
+    fn update_active_approval_queue_count(&mut self) {
+        let queued_count = self.queued_approvals.len();
+        if let Some(approval) = self.active_approval_mut() {
+            approval.queued_count = queued_count;
+            self.mark_dirty();
+        }
+    }
+
+    fn advance_queued_approval(&mut self) {
+        let Some(mut next) = self.queued_approvals.pop_front() else {
+            return;
+        };
+        next.queued_count = self.queued_approvals.len();
+        self.transcript.push(TranscriptEntry::ApprovalPrompt(next));
     }
 
     fn upsert_compaction(
@@ -787,8 +917,6 @@ fn render_ordered_tools(
     width: usize,
     theme: &TuiTheme,
 ) -> Vec<Line> {
-    use crate::core::Expandable as _;
-
     let mut rows = Vec::new();
     let mut i = 0;
     while i < ordered.len() {
@@ -798,7 +926,6 @@ fn render_ordered_tools(
         let current_name = ordered[i].name().to_owned();
         let groupable = is_groupable(&current_name);
         if !groupable {
-            ordered[i].set_expanded(false);
             rows.extend(ordered[i].render_with_theme(width, theme));
             i += 1;
             continue;
@@ -806,7 +933,7 @@ fn render_ordered_tools(
         // Greedy run of consecutive same-name groupable tools.
         let mut j = i + 1;
         while j < ordered.len()
-            && ordered[j].name().eq_ignore_ascii_case(&current_name)
+            && ordered[j].name() == current_name
             && is_groupable(ordered[j].name())
         {
             j += 1;
@@ -817,20 +944,19 @@ fn render_ordered_tools(
             let any_live_output = ordered[i..j].iter().any(|t| !t.progress().is_empty());
             if any_live_output {
                 for tool in &mut ordered[i..j] {
-                    tool.set_expanded(false);
                     rows.extend(tool.render_with_theme(width, theme));
                 }
             } else {
                 let states: Vec<&ToolCallState> =
                     ordered[i..j].iter().map(ToolCallComponent::state).collect();
+                let expanded = ordered[i..j].iter().all(ToolCallComponent::is_expanded);
                 let group = ToolGroup {
                     tool: current_name.clone(),
                     states,
                 };
-                rows.extend(render_tool_group(&group, width, theme));
+                rows.extend(render_tool_group(&group, width, theme, expanded));
             }
         } else {
-            ordered[i].set_expanded(false);
             rows.extend(ordered[i].render_with_theme(width, theme));
         }
         i = j;
@@ -840,10 +966,7 @@ fn render_ordered_tools(
 
 /// Whether a tool name is eligible for consecutive-call grouping.
 fn is_groupable(name: &str) -> bool {
-    matches!(
-        name.to_lowercase().as_str(),
-        "read" | "grep" | "glob" | "find" | "list"
-    )
+    matches!(name, "Read" | "Grep" | "Glob" | "Find" | "List")
 }
 
 fn message_text(message: &AgentMessage) -> String {
@@ -918,18 +1041,19 @@ fn shell_finished_detail(
     stderr: &str,
     truncated: bool,
 ) -> String {
-    use std::fmt::Write as _;
-
-    let exit_label = exit_code.map_or_else(|| "signal".to_owned(), |code| code.to_string());
-    let mut detail = format!("exit {exit_label}");
-    if !stdout.is_empty() {
-        let _ = write!(detail, ", stdout: {stdout}");
-    }
-    if !stderr.is_empty() {
-        let _ = write!(detail, ", stderr: {stderr}");
+    let mut detail = format!("{stdout}{stderr}");
+    if exit_code != Some(0) {
+        let exit_label = exit_code.map_or_else(|| "signal".to_owned(), |code| code.to_string());
+        if !detail.ends_with('\n') && !detail.is_empty() {
+            detail.push('\n');
+        }
+        detail.push_str(&format!("Command failed with exit code: {exit_label}."));
     }
     if truncated {
-        detail.push_str(", truncated");
+        if !detail.ends_with('\n') && !detail.is_empty() {
+            detail.push('\n');
+        }
+        detail.push_str("[output truncated]");
     }
     detail
 }

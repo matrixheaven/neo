@@ -95,7 +95,7 @@ fn tool_status_color(status: ToolStatusKind, theme: &TuiTheme) -> Color {
 
 #[must_use]
 pub fn render_tool_body(state: &ToolCallState, expanded: bool, width: usize) -> Vec<Line> {
-    if state.name.eq_ignore_ascii_case("Write") {
+    if state.name == "Write" {
         if let Some((path, content)) = parse_write_arguments(state.arguments.as_deref()) {
             let lines: Vec<&str> = content.lines().collect();
             let total = lines.len();
@@ -118,7 +118,7 @@ pub fn render_tool_body(state: &ToolCallState, expanded: bool, width: usize) -> 
         }
     }
 
-    if state.name.eq_ignore_ascii_case("Edit") {
+    if state.name == "Edit" {
         if let Some(arguments) = state.arguments.as_deref().and_then(parse_edit_arguments) {
             let max = if expanded {
                 None
@@ -184,7 +184,7 @@ pub fn render_tool_body_themed(
     let weak = Style::default().fg(theme.text_muted);
     let body_style = Style::default().fg(theme.text_primary);
 
-    if state.name.eq_ignore_ascii_case("Write") {
+    if state.name == "Write" {
         if let Some((path, content)) = parse_write_arguments(state.arguments.as_deref()) {
             let lines: Vec<&str> = content.lines().collect();
             let total = lines.len();
@@ -213,7 +213,7 @@ pub fn render_tool_body_themed(
         }
     }
 
-    if state.name.eq_ignore_ascii_case("Edit") {
+    if state.name == "Edit" {
         if let Some(arguments) = state.arguments.as_deref().and_then(parse_edit_arguments) {
             let max = if expanded {
                 None
@@ -349,15 +349,8 @@ fn result_chip(state: &ToolCallState) -> String {
     let Some(result) = state.result.as_deref().filter(|value| !value.is_empty()) else {
         return String::new();
     };
-    let lower = state.name.to_lowercase();
-    if lower == "read" || lower == "write" {
+    if state.name == "Read" || state.name == "Write" {
         return format!(" · {} lines", result.lines().count());
-    }
-    if (lower == "bash" || lower == "shell")
-        && let Some(code) = state.exit_code
-        && code != 0
-    {
-        return format!(" · exit {code}");
     }
     String::new()
 }

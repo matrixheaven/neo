@@ -3,7 +3,7 @@ use crate::chrome::TuiTheme;
 use crate::core::Line;
 use crate::transcript::{ToolCallComponent, ToolCallState};
 
-use super::entry::{ThinkingPhase, TranscriptEntry};
+use super::entry::{ApprovalPromptData, ThinkingPhase, TranscriptEntry};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TranscriptSelection {
@@ -221,6 +221,13 @@ impl TranscriptStore {
     pub fn tool_mut(&mut self, id: &str) -> Option<&mut ToolCallComponent> {
         self.entries.iter_mut().find_map(|entry| match entry {
             TranscriptEntry::ToolRun { component } if component.id() == id => Some(component),
+            _ => None,
+        })
+    }
+
+    pub fn approval_mut(&mut self, id: &str) -> Option<&mut ApprovalPromptData> {
+        self.entries.iter_mut().find_map(|entry| match entry {
+            TranscriptEntry::ApprovalPrompt(data) if data.id == id => Some(data),
             _ => None,
         })
     }

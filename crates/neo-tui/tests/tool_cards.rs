@@ -212,6 +212,65 @@ fn transcript_pane_expansion_state_is_instance_local() {
 }
 
 #[test]
+fn transcript_pane_expansion_reaches_rendered_bash_tool_body() {
+    use neo_agent_core::AgentEvent;
+    use neo_tui::ansi::strip_ansi;
+
+    let mut runtime = TranscriptPane::new(80, 20);
+    runtime.apply_agent_event(AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        name: "Bash".to_owned(),
+    });
+    runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        json_fragment: r#"{"command":"printf many"}"#.to_owned(),
+    });
+    runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        name: "Bash".to_owned(),
+        result: neo_agent_core::ToolResult::ok("1\n2\n3\n4\n5\n6\n7\n8"),
+    });
+
+    let collapsed = runtime
+        .render_frame(80, 20)
+        .expect("collapsed frame")
+        .iter()
+        .map(|line| strip_ansi(line).to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        collapsed
+            .iter()
+            .any(|line| line.contains("ctrl+o to expand")),
+        "collapsed frame should show expansion hint: {collapsed:?}"
+    );
+    assert!(
+        !collapsed.iter().any(|line| line.trim() == "8"),
+        "collapsed frame should not show final result line: {collapsed:?}"
+    );
+
+    runtime.set_tool_output_expanded(true);
+    let expanded = runtime
+        .render_frame(80, 20)
+        .expect("expanded frame")
+        .iter()
+        .map(|line| strip_ansi(line).to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        expanded.iter().any(|line| line.trim() == "8"),
+        "expanded frame should show final result line: {expanded:?}"
+    );
+    assert!(
+        !expanded
+            .iter()
+            .any(|line| line.contains("ctrl+o to expand")),
+        "expanded frame should hide expansion hint: {expanded:?}"
+    );
+}
+
+#[test]
 fn tool_card_lines_do_not_exceed_terminal_width_after_gutter() {
     // Regression for the post-turn duplicate/right-shift bug: tool-card rows
     // were rendered at the full terminal width, then the TUI applied a 1-col

@@ -32,15 +32,20 @@ pub struct ToolGroup<'a> {
 /// - mixed: `● Read {n} files · {lines} lines · {f} failed`
 ///
 /// Body: one `├─`/`└─` row per file (path, status chip). Files beyond
-/// [`FILE_PREVIEW_LIMIT`] collapse into a single `… {n} more files` row.
+/// [`FILE_PREVIEW_LIMIT`] collapse into a single `… {n} more files` row unless
+/// the group is expanded.
 ///
 /// `width` is the content width (without the gutter) that the caller will
 /// apply later; rows are truncated so they do not exceed it.
 #[must_use]
-pub fn render_tool_group(group: &ToolGroup, width: usize, theme: &TuiTheme) -> Vec<Line> {
+pub fn render_tool_group(
+    group: &ToolGroup,
+    width: usize,
+    theme: &TuiTheme,
+    expanded: bool,
+) -> Vec<Line> {
     let n = group.states.len();
-    let lower = group.tool.to_lowercase();
-    let unit = group_unit(&lower);
+    let unit = group_unit(&group.tool);
     let any_running = group
         .states
         .iter()
@@ -58,8 +63,8 @@ pub fn render_tool_group(group: &ToolGroup, width: usize, theme: &TuiTheme) -> V
     // The header reads `● Read 3 files · 484 lines`. The tool name (Read/
     // Grep/...) uses the brand color; the symbol + count use the status color;
     // the chip (`· 484 lines`) uses weak text.
-    let verb_past = group_verb_past(&lower);
-    let verb_prog = group_verb_progressive(&lower);
+    let verb_past = group_verb_past(&group.tool);
+    let verb_prog = group_verb_progressive(&group.tool);
     let (symbol, symbol_color, count, chip) = if any_running {
         // Match the finished-state layout: only the tool name stays branded;
         // the status symbol and count use the ok status color.
@@ -98,13 +103,17 @@ pub fn render_tool_group(group: &ToolGroup, width: usize, theme: &TuiTheme) -> V
     ]));
 
     // ---- Body: per-file tree rows ------------------------------------
-    let preview = n.min(FILE_PREVIEW_LIMIT);
+    let preview = if expanded {
+        n
+    } else {
+        n.min(FILE_PREVIEW_LIMIT)
+    };
     let weak = Style::default().fg(theme.text_muted);
     for (idx, state) in group.states.iter().take(preview).enumerate() {
         let is_last = idx == preview.min(n) - 1;
         let branch = if is_last { "└─" } else { "├─" };
         let path = key_argument(state.arguments.as_deref());
-        let tail = per_file_tail(state, &lower);
+        let tail = per_file_tail(state, &group.tool);
         rows.push(Line::from_spans(vec![
             Span::styled(format!("  {branch} "), weak),
             Span::styled(
@@ -118,7 +127,7 @@ pub fn render_tool_group(group: &ToolGroup, width: usize, theme: &TuiTheme) -> V
             Span::styled(tail, weak),
         ]));
     }
-    if n > FILE_PREVIEW_LIMIT {
+    if !expanded && n > FILE_PREVIEW_LIMIT {
         let extra = n - FILE_PREVIEW_LIMIT;
         rows.push(Line::styled(format!("  … {extra} more {unit}"), weak));
     }
@@ -131,7 +140,7 @@ pub fn render_tool_group(group: &ToolGroup, width: usize, theme: &TuiTheme) -> V
 /// for grep). Falls back to "files".
 fn group_unit(lower: &str) -> &'static str {
     match lower {
-        "grep" => "patterns",
+        "Grep" => "patterns",
         _ => "files",
     }
 }
@@ -140,11 +149,11 @@ fn group_unit(lower: &str) -> &'static str {
 /// Capitalized so the header reads `● Read 3 files`, not `● read 3 files`.
 fn group_verb_past(lower: &str) -> &'static str {
     match lower {
-        "read" => "Read",
-        "grep" => "Grep",
-        "glob" => "Glob",
-        "find" => "Find",
-        "list" => "List",
+        "Read" => "Read",
+        "Grep" => "Grep",
+        "Glob" => "Glob",
+        "Find" => "Find",
+        "List" => "List",
         _ => "Read",
     }
 }
@@ -153,11 +162,11 @@ fn group_verb_past(lower: &str) -> &'static str {
 /// "Grepping", ...).
 fn group_verb_progressive(lower: &str) -> &'static str {
     match lower {
-        "read" => "Reading",
-        "grep" => "Grepping",
-        "glob" => "Globbing",
-        "find" => "Finding",
-        "list" => "Listing",
+        "Read" => "Reading",
+        "Grep" => "Grepping",
+        "Glob" => "Globbing",
+        "Find" => "Finding",
+        "List" => "Listing",
         _ => "Reading",
     }
 }
@@ -172,8 +181,8 @@ fn per_file_tail(state: &ToolCallState, lower: &str) -> String {
         ToolStatusKind::Succeeded => {
             let result = state.result.as_deref().unwrap_or("");
             match lower {
-                "read" | "write" => format!(" · {} lines", result.lines().count()),
-                "grep" => {
+                "Read" | "Write" => format!(" · {} lines", result.lines().count()),
+                "Grep" => {
                     let matches = grep_match_count(result);
                     format!(" · {matches} matches")
                 }

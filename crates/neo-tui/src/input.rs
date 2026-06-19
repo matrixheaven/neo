@@ -65,7 +65,9 @@ impl InputEvent {
 
         match (event.code, event.modifiers) {
             (KeyCode::Char('c' | 'C'), KeyModifiers::CONTROL) => Some(Self::Interrupt),
-            (KeyCode::Char(character), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+            (KeyCode::Char(character), KeyModifiers::NONE | KeyModifiers::SHIFT)
+                if !character.is_control() =>
+            {
                 Some(Self::Insert(character))
             }
             (KeyCode::Backspace, _) => Some(Self::Backspace),
@@ -111,6 +113,7 @@ impl InputEvent {
 
         if matches!(event.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
             && let KeyCode::Char(character) = event.code
+            && !character.is_control()
         {
             return Some(Self::Insert(character));
         }
@@ -348,6 +351,13 @@ impl KeyId {
             return None;
         }
 
+        if event.modifiers == KeyModifiers::NONE
+            && let KeyCode::Char(character) = event.code
+            && let Some(key) = key_id_from_ascii_control(character)
+        {
+            return Some(key);
+        }
+
         let base = key_base(event.code)?;
         let mut parts = Vec::new();
         if event.modifiers.contains(KeyModifiers::CONTROL) {
@@ -362,6 +372,20 @@ impl KeyId {
         parts.push(base.as_str());
         Self::new(parts.join("+")).ok()
     }
+}
+
+fn key_id_from_ascii_control(character: char) -> Option<KeyId> {
+    let code = character as u32;
+    let base = match code {
+        0 => "space".to_owned(),
+        1..=26 => char::from(b'a' + u8::try_from(code).ok()? - 1).to_string(),
+        28 => "\\".to_owned(),
+        29 => "]".to_owned(),
+        30 => "^".to_owned(),
+        31 => "_".to_owned(),
+        _ => return None,
+    };
+    KeyId::new(format!("ctrl+{base}")).ok()
 }
 
 impl fmt::Display for KeyId {
@@ -414,6 +438,7 @@ pub enum KeybindingAction {
     TranscriptSelectionExtendPageUp,
     TranscriptSelectionExtendPageDown,
     TranscriptCopySelection,
+    ToolOutputToggle,
     AppClear,
     AppExit,
     AppSuspend,
@@ -464,6 +489,7 @@ impl KeybindingAction {
             Self::TranscriptSelectionExtendPageUp => "tui.transcript.selection.extendPageUp",
             Self::TranscriptSelectionExtendPageDown => "tui.transcript.selection.extendPageDown",
             Self::TranscriptCopySelection => "tui.transcript.copySelection",
+            Self::ToolOutputToggle => "tui.tool.toggleOutput",
             Self::AppClear => "app.clear",
             Self::AppExit => "app.exit",
             Self::AppSuspend => "app.suspend",
@@ -514,6 +540,7 @@ impl KeybindingAction {
             "tui.transcript.selection.extendPageUp" => Self::TranscriptSelectionExtendPageUp,
             "tui.transcript.selection.extendPageDown" => Self::TranscriptSelectionExtendPageDown,
             "tui.transcript.copySelection" => Self::TranscriptCopySelection,
+            "tui.tool.toggleOutput" => Self::ToolOutputToggle,
             "app.clear" => Self::AppClear,
             "app.exit" => Self::AppExit,
             "app.suspend" => Self::AppSuspend,
@@ -793,6 +820,7 @@ fn transcript_keybinding_definitions() -> Vec<KeybindingDefinition> {
             &["ctrl+c"],
             "Copy transcript selection",
         ),
+        definition(Action::ToolOutputToggle, &["ctrl+o"], "Toggle tool output"),
     ]
 }
 
@@ -822,7 +850,7 @@ fn picker_keybinding_definitions() -> Vec<KeybindingDefinition> {
             "Toggle session scope",
         ),
         definition(Action::SessionFork, &["ctrl+n"], "Fork selected session"),
-        definition(Action::ModelPickerOpen, &["ctrl+o"], "Open models"),
+        definition(Action::ModelPickerOpen, &[], "Open models"),
         definition(Action::TogglePlanMode, &["shift+tab"], "Toggle plan mode"),
         definition(Action::SelectUp, &["up"], "Move selection up"),
         definition(Action::SelectDown, &["down"], "Move selection down"),

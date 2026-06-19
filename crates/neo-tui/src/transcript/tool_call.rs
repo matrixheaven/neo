@@ -143,6 +143,11 @@ impl ToolCallComponent {
     }
 
     #[must_use]
+    pub const fn is_expanded(&self) -> bool {
+        self.expanded
+    }
+
+    #[must_use]
     pub const fn finalization(&self) -> Finalization {
         match self.state.status {
             ToolStatusKind::Succeeded | ToolStatusKind::Failed | ToolStatusKind::Cancelled => {
@@ -182,8 +187,8 @@ impl ToolCallComponent {
         let header_spans = tool_header_spans(&self.state, theme);
         let mut rows = vec![Line::from_spans(header_spans)];
 
-        // For exit_plan_mode, render a PlanBox from the tool result details.
-        if self.state.name == "exit_plan_mode" {
+        // For ExitPlanMode, render a PlanBox from the tool result details.
+        if self.state.name == "ExitPlanMode" {
             if let Some(details) = &self.state.details
                 && let Some(plan_content) = details.get("plan_content").and_then(|v| v.as_str())
             {

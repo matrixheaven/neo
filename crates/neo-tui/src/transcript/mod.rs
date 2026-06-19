@@ -7,7 +7,10 @@ pub mod tool_call;
 pub mod tool_group;
 pub mod tool_renderers;
 
-pub use entry::{BannerData, InlineImageRender, StatusSeverity, ThinkingPhase, TranscriptEntry};
+pub use entry::{
+    ApprovalPromptData, BannerData, InlineImageRender, StatusSeverity, ThinkingPhase,
+    TranscriptEntry,
+};
 pub use pane::{
     CHROME_GUTTER, ChromeRender, TranscriptPane, apply_gutter, frame_content_width,
     render_chrome_lines, render_footer_only_lines,

@@ -96,6 +96,95 @@ fn single_read_still_renders_as_solo_card() {
 }
 
 #[test]
+fn single_read_respects_transcript_expansion_state() {
+    let mut runtime = TranscriptPane::new(80, 16);
+    runtime.apply_agent_event(AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "read-0".to_owned(),
+        name: "Read".to_owned(),
+    });
+    runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
+        turn: 1,
+        id: "read-0".to_owned(),
+        json_fragment: r#"{"path":"only.rs"}"#.to_owned(),
+    });
+    runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "read-0".to_owned(),
+        name: "Read".to_owned(),
+        result: neo_agent_core::ToolResult::ok("1\n2\n3\n4\n5\n6\n7\n8"),
+    });
+
+    let collapsed = plain_frame(&mut runtime, 80, 16).join("\n");
+    assert!(
+        collapsed.contains("ctrl+o to expand"),
+        "collapsed read shows hint: {collapsed}"
+    );
+    assert!(
+        !collapsed.lines().any(|line| line.trim() == "8"),
+        "collapsed read hides final line: {collapsed}"
+    );
+
+    runtime.set_tool_output_expanded(true);
+    let expanded = plain_frame(&mut runtime, 80, 16).join("\n");
+    assert!(
+        expanded.lines().any(|line| line.trim() == "8"),
+        "expanded read shows final line: {expanded}"
+    );
+    assert!(
+        !expanded.contains("ctrl+o to expand"),
+        "expanded read hides hint: {expanded}"
+    );
+}
+
+#[test]
+fn grouped_reads_respect_transcript_expansion_state() {
+    let mut runtime = TranscriptPane::new(80, 20);
+    for (id, path) in ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"]
+        .into_iter()
+        .enumerate()
+    {
+        runtime.apply_agent_event(AgentEvent::ToolCallStarted {
+            turn: 1,
+            id: format!("read-{id}"),
+            name: "Read".to_owned(),
+        });
+        runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
+            turn: 1,
+            id: format!("read-{id}"),
+            json_fragment: format!(r#"{{"path":"{path}"}}"#),
+        });
+        runtime.apply_agent_event(AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: format!("read-{id}"),
+            name: "Read".to_owned(),
+            result: neo_agent_core::ToolResult::ok("one\ntwo"),
+        });
+    }
+
+    let collapsed = plain_frame(&mut runtime, 80, 20).join("\n");
+    assert!(
+        collapsed.contains("… 1 more files"),
+        "collapsed group shows overflow row: {collapsed}"
+    );
+    assert!(
+        !collapsed.contains("f.rs"),
+        "collapsed group hides sixth read: {collapsed}"
+    );
+
+    runtime.set_tool_output_expanded(true);
+    let expanded = plain_frame(&mut runtime, 80, 20).join("\n");
+    assert!(
+        expanded.contains("f.rs · 2 lines"),
+        "expanded group shows sixth read: {expanded}"
+    );
+    assert!(
+        !expanded.contains("… 1 more files"),
+        "expanded group hides overflow row: {expanded}"
+    );
+}
+
+#[test]
 fn non_groupable_tool_between_reads_breaks_the_group() {
     let mut runtime = TranscriptPane::new(80, 20);
     for (id, name, is_path, fragment) in [
@@ -321,7 +410,7 @@ fn multiple_consecutive_tool_cards_are_each_separated_by_blank_lines() {
     // list, then bash (non-groupable, breaks any list run), then list.
     for (id, name, fragment) in [
         ("list-0", "List", r#"{"path":"crates"}"#),
-        ("bash-0", "bash", r#"{"command":"echo hi"}"#),
+        ("bash-0", "Bash", r#"{"command":"echo hi"}"#),
         ("list-1", "List", r#"{"path":"docs"}"#),
     ] {
         runtime.apply_agent_event(AgentEvent::ToolCallStarted {
@@ -345,7 +434,7 @@ fn multiple_consecutive_tool_cards_are_each_separated_by_blank_lines() {
     let frame = plain_frame(&mut runtime, 80, 20);
     // Each card header is present.
     let list0 = frame.iter().position(|l| l.contains("Used List (crates)"));
-    let bash0 = frame.iter().position(|l| l.contains("Used bash"));
+    let bash0 = frame.iter().position(|l| l.contains("Used Bash"));
     let list1 = frame.iter().position(|l| l.contains("Used List (docs)"));
     let (list0, bash0, list1) = (
         list0.expect("list0"),

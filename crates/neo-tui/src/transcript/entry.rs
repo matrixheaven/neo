@@ -19,6 +19,17 @@ pub struct BannerData {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalPromptData {
+    pub id: String,
+    pub title: String,
+    pub cwd: Option<String>,
+    pub command: String,
+    pub queued_count: usize,
+    pub selected: usize,
+    pub resolved: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptEntry {
     Banner(BannerData),
     UserMessage(String),
@@ -32,6 +43,7 @@ pub enum TranscriptEntry {
     ToolRun {
         component: ToolCallComponent,
     },
+    ApprovalPrompt(ApprovalPromptData),
     Image {
         id: String,
         mime_type: String,
@@ -165,6 +177,14 @@ impl TranscriptEntry {
     }
 
     #[must_use]
+    pub fn skill_activated(name: impl Into<String>) -> Self {
+        Self::Status {
+            text: format!("▶ Activated skill: {}", name.into()),
+            severity: None,
+        }
+    }
+
+    #[must_use]
     pub fn render(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
         // Every `Line` returned here MUST map to exactly one terminal row:
         // content is split on `\n` and soft-wrapped to `width` so no line ever
@@ -207,6 +227,7 @@ impl TranscriptEntry {
                 let mut component = component.clone();
                 component.render_with_theme(inner_width, theme)
             }
+            Self::ApprovalPrompt(data) => render_approval_prompt(data, inner_width, theme),
             Self::Image { metadata, .. } => styled_wrap(metadata, inner_width, status_style(theme)),
             Self::Compaction {
                 compacted_message_count,
@@ -255,6 +276,7 @@ impl TranscriptEntry {
                     format!("{} {} ({detail})", state.status.marker(), state.name),
                 )
             }
+            Self::ApprovalPrompt(data) => ("Approval", data.title.clone()),
             Self::Image { metadata, .. } => ("Image", metadata.clone()),
             Self::Compaction {
                 compacted_message_count,
@@ -411,6 +433,144 @@ fn styled_wrap(text: &str, width: usize, style: Style) -> Vec<Line> {
         .into_iter()
         .map(|line| Line::styled(line, style))
         .collect()
+}
+
+fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTheme) -> Vec<Line> {
+    let border = Style::default().fg(theme.status_warn);
+    let title = Style::default().fg(theme.status_warn).bold();
+    let body = Style::default().fg(theme.text_primary);
+    let muted = Style::default().fg(theme.text_muted);
+    let selected = Style::default().fg(theme.status_ok).bold();
+    let line = "\u{2500}".repeat(width.max(1));
+    let mut rows = vec![Line::styled(line.clone(), border)];
+
+    if let Some(resolved) = &data.resolved {
+        rows.push(Line::styled(format!("  {resolved}"), muted));
+        rows.push(Line::styled(line, border));
+        return rows;
+    }
+
+    rows.extend(styled_wrap_with_indent(
+        &format!("▶ {}", data.title),
+        width,
+        2,
+        2,
+        title,
+    ));
+    rows.push(Line::raw(""));
+    if let Some(cwd) = &data.cwd {
+        rows.extend(styled_wrap_with_indent(
+            &format!("cwd: {cwd}"),
+            width,
+            2,
+            7,
+            muted,
+        ));
+    }
+    rows.extend(styled_wrap_with_indent(
+        &format!("$ {}", data.command),
+        width,
+        2,
+        4,
+        body,
+    ));
+    rows.push(Line::raw(""));
+    for (index, label) in [
+        "Approve once",
+        "Approve for this session",
+        "Reject",
+        "Reject with feedback",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let prefix = if data.selected == index {
+            "  ▶ "
+        } else {
+            "    "
+        };
+        let style = if data.selected == index {
+            selected
+        } else {
+            body
+        };
+        rows.extend(styled_wrap_with_prefix(
+            &format!("{}. {label}", index + 1),
+            width,
+            prefix,
+            "     ",
+            style,
+        ));
+    }
+    rows.push(Line::raw(""));
+    if data.queued_count > 0 {
+        let suffix = if data.queued_count == 1 {
+            "approval"
+        } else {
+            "approvals"
+        };
+        rows.extend(styled_wrap_with_indent(
+            &format!("queued: {} bash {suffix} waiting", data.queued_count),
+            width,
+            2,
+            2,
+            muted,
+        ));
+        rows.push(Line::raw(""));
+    }
+    rows.extend(styled_wrap_with_indent(
+        "  ↑/↓ select · 1/2/3/4 choose · ↵ confirm",
+        width,
+        0,
+        2,
+        muted,
+    ));
+    rows.push(Line::styled(line, border));
+    rows
+}
+
+fn styled_wrap_with_indent(
+    text: &str,
+    width: usize,
+    first_indent: usize,
+    continuation_indent: usize,
+    style: Style,
+) -> Vec<Line> {
+    styled_wrap_with_prefix(
+        text,
+        width,
+        &" ".repeat(first_indent),
+        &" ".repeat(continuation_indent),
+        style,
+    )
+}
+
+fn styled_wrap_with_prefix(
+    text: &str,
+    width: usize,
+    first_prefix: &str,
+    continuation_prefix: &str,
+    style: Style,
+) -> Vec<Line> {
+    let first_width = width.saturating_sub(visible_width(first_prefix)).max(1);
+    let next_width = width
+        .saturating_sub(visible_width(continuation_prefix))
+        .max(1);
+    let wrapped = wrap_width(text, first_width);
+    let mut rows = Vec::with_capacity(wrapped.len());
+    for (index, line) in wrapped.into_iter().enumerate() {
+        if index == 0 {
+            rows.push(Line::styled(format!("{first_prefix}{line}"), style));
+        } else {
+            for continued in wrap_width(&line, next_width) {
+                rows.push(Line::styled(
+                    format!("{continuation_prefix}{continued}"),
+                    style,
+                ));
+            }
+        }
+    }
+    rows
 }
 
 /// Render the welcome banner as a rounded box with an ASCII-art logo and

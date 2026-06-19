@@ -126,8 +126,17 @@ fn app_shell_updates_context_usage_from_agent_event() {
 }
 
 #[test]
-fn app_shell_maps_agent_core_approval_request_to_approval_overlay() {
+fn app_shell_tracks_agent_core_approval_request_without_overlay_panel() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.push_overlay(Overlay::new(
+        "commands",
+        OverlayKind::CommandPalette(CommandPaletteState::new([CommandSpec::new(
+            "cmd",
+            "Command",
+            None::<String>,
+        )])),
+    ));
+    assert!(app.focused_overlay().is_some());
 
     app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
         turn: 7,
@@ -139,13 +148,7 @@ fn app_shell_maps_agent_core_approval_request_to_approval_overlay() {
 
     assert_eq!(app.mode(), ChromeMode::Approval);
     assert_eq!(app.approval_choice(), Some(ApprovalChoice::Approve));
-    assert!(matches!(
-        app.focused_overlay().map(|overlay| &overlay.kind),
-        Some(OverlayKind::Approval(modal))
-            if modal.request_id == "approval-7"
-                && modal.modal.title.contains("Tool")
-                && modal.modal.body.contains("cargo test -p neo-tui")
-    ));
+    assert!(app.focused_overlay().is_none());
 }
 
 #[test]
@@ -214,12 +217,44 @@ fn transcript_pane_maps_shell_command_lifecycle_to_tool_run() {
     assert!(matches!(
         entries.last(),
         Some(neo_tui::transcript::TranscriptEntry::ToolRun { component })
-            if component.name() == "shell.run"
+            if component.name() == "Bash"
                 && component.status() == ToolStatusKind::Succeeded
-                && component.result().is_some_and(|result| result.contains("stdout: ok"))
+                && component.result().is_some_and(|result| result.contains("ok"))
     ));
     let lines = render_transcript(100, 12, &mut runtime);
-    assert!(lines.iter().any(|line| line.contains("● Used shell.run")));
+    assert!(lines.iter().any(|line| line.contains("● Used Bash")));
+}
+
+#[test]
+fn transcript_pane_renders_bash_result_as_terminal_output_without_structural_labels() {
+    let mut runtime = TranscriptPane::new(100, 12);
+
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: serde_json::json!({ "command": "printf out; printf err >&2" }),
+    });
+    runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        name: "Bash".to_owned(),
+        result: neo_agent_core::ToolResult::ok("outerr").with_details(serde_json::json!({
+            "exit_code": 0,
+            "stdout": "out",
+            "stderr": "err",
+            "stdout_truncated": false,
+            "stderr_truncated": false,
+            "truncated": false
+        })),
+    });
+
+    let joined = render_transcript(100, 12, &mut runtime).join("\n");
+    assert!(joined.contains("● Used Bash"));
+    assert!(joined.contains("outerr"));
+    assert!(!joined.contains("exit_code:"));
+    assert!(!joined.contains("stdout:"));
+    assert!(!joined.contains("stderr:"));
 }
 
 #[test]
@@ -254,7 +289,7 @@ fn transcript_pane_preserves_tool_arguments_separately_from_result() {
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
         turn: 1,
         id: "tool-1".to_owned(),
-        name: "read".to_owned(),
+        name: "Read".to_owned(),
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolCallArgumentsDelta {
         turn: 1,
@@ -264,19 +299,19 @@ fn transcript_pane_preserves_tool_arguments_separately_from_result() {
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
         turn: 1,
         id: "tool-1".to_owned(),
-        name: "read".to_owned(),
+        name: "Read".to_owned(),
         arguments: serde_json::json!({ "path": "README.md" }),
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "tool-1".to_owned(),
-        name: "read".to_owned(),
+        name: "Read".to_owned(),
         result: neo_agent_core::ToolResult::ok("read README"),
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::MessageAppended {
         message: neo_agent_core::AgentMessage::tool_result(
             "tool-1",
-            "read",
+            "Read",
             [neo_agent_core::Content::text("read README")],
             false,
         ),
@@ -292,7 +327,7 @@ fn transcript_pane_preserves_tool_arguments_separately_from_result() {
     assert!(matches!(
         runtime.transcript().entries().last(),
         Some(neo_tui::transcript::TranscriptEntry::ToolRun { component })
-            if component.name() == "read"
+            if component.name() == "Read"
                 && component.status() == ToolStatusKind::Succeeded
                 && component.arguments() == Some(r#"{"path":"README.md"}"#)
                 && component.result() == Some("read README")

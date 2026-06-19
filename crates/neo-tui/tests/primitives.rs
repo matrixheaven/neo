@@ -92,6 +92,20 @@ fn input_event_with_keybindings_maps_modified_chars_to_keys() {
 }
 
 #[test]
+fn input_event_with_keybindings_maps_raw_ctrl_o_to_tool_toggle_key() {
+    let event = KeyEvent::new_with_kind(
+        KeyCode::Char('\u{f}'),
+        KeyModifiers::NONE,
+        KeyEventKind::Press,
+    );
+
+    assert_eq!(
+        InputEvent::from_key_event_with_keybindings(event, &KeybindingsManager::default()),
+        Some(InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")))
+    );
+}
+
+#[test]
 fn input_event_maps_terminal_resize_events() {
     assert_eq!(
         InputEvent::from_crossterm_event(&Event::Resize(100, 30)),
@@ -436,6 +450,14 @@ fn keybinding_manager_matches_defaults_overrides_and_conflicts() {
     assert!(manager.matches(
         &KeyId::new("ctrl+c").expect("valid key"),
         KeybindingAction::TranscriptCopySelection
+    ));
+    assert!(manager.matches(
+        &KeyId::new("ctrl+o").expect("valid key"),
+        KeybindingAction::ToolOutputToggle
+    ));
+    assert!(!manager.matches(
+        &KeyId::new("ctrl+o").expect("valid key"),
+        KeybindingAction::ModelPickerOpen
     ));
     assert!(manager.matches(
         &KeyId::new("ctrl+c").expect("valid key"),
@@ -982,13 +1004,13 @@ fn transcript_pane_toggles_tool_detail_expansion() {
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
         turn: 1,
         id: "tool-1".to_owned(),
-        name: "read".to_owned(),
+        name: "Read".to_owned(),
         arguments: serde_json::json!({ "path": "README.md" }),
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "tool-1".to_owned(),
-        name: "read".to_owned(),
+        name: "Read".to_owned(),
         result: neo_agent_core::ToolResult::ok("expanded file content"),
     });
 
