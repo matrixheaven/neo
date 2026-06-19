@@ -3,11 +3,9 @@
 Rust-native local AI agent monorepo inspired by pi. The workspace contains:
 
 - `neo-ai`: provider abstraction and streaming event normalization
-- `neo-agent-core`: agent loop, tools, permissions, sessions, and harness
+- `neo-agent-core`: agent loop, tools, permissions, sessions, MCP, local extensions, skill loading, JSONL RPC, and HTML export
 - `neo-tui`: reusable terminal UI primitives
 - `neo-agent`: CLI/TUI application binary
-- `neo-sdk`: JSONL RPC, skill loading, and HTML export helpers
-- `neo-extensions`: extension discovery and stdio JSONL runner
 
 ## Start
 

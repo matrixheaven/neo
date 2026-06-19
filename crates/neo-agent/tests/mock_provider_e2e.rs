@@ -845,7 +845,12 @@ fn run_text_includes_project_system_prompt_file_before_user_message() {
     run(command);
 
     let requests = server.requests();
-    assert!(system_input_contents(&requests[0]).contains(&"You are a test assistant."));
+    assert!(
+        system_input_contents(&requests[0])
+            .iter()
+            .any(|content| content.contains("You are a test assistant.")),
+        "expected system prompt to contain project SYSTEM.md"
+    );
     assert_eq!(user_input_contents(&requests[0]), vec!["hello"]);
 }
 

@@ -106,7 +106,7 @@ Session directory defaults to `~/.neo/sessions/` with workspace-scoped bucket
 subdirectories. Can be overridden with `sessions_dir`.
 
 `export-html` replays `MessageAppended` events and renders a standalone HTML
-conversation with `neo-sdk`'s safe Markdown renderer. `export-json` replays the
+conversation with `neo-agent-core`'s safe Markdown renderer. `export-json` replays the
 same events and emits a stable local-only artifact:
 
 ```json

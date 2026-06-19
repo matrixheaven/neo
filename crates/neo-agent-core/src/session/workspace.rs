@@ -57,11 +57,14 @@ pub fn encode_workdir_key(workdir: &Path) -> String {
     let normalized = normalize_workdir(workdir);
     let slug = slugify_basename(&normalized);
     let hash = Sha256::digest(normalized.to_string_lossy().as_bytes());
-    let hash_hex: String = hash
-        .iter()
-        .take(HASH_LENGTH.div_ceil(2))
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let hash_hex: String =
+        hash.iter()
+            .take(HASH_LENGTH.div_ceil(2))
+            .fold(String::new(), |mut acc, byte| {
+                use std::fmt::Write;
+                let _ = write!(acc, "{byte:02x}");
+                acc
+            });
     // Take exactly HASH_LENGTH hex characters.
     let hash_hex = hash_hex.chars().take(HASH_LENGTH).collect::<String>();
     format!("{WORKDIR_KEY_PREFIX}{slug}_{hash_hex}")

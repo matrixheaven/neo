@@ -134,10 +134,10 @@ pub async fn fetch_catalog_from(
 #[must_use]
 pub fn infer_api_type(entry: &CatalogEntry) -> Option<ApiType> {
     // 1. Explicit `type` field
-    if let Some(t) = &entry.explicit_type {
-        if let Some(api) = ApiType::from_config_str(t) {
-            return Some(api);
-        }
+    if let Some(t) = &entry.explicit_type
+        && let Some(api) = ApiType::from_config_str(t)
+    {
+        return Some(api);
     }
     // 2. npm/id matching
     let npm = entry.npm.as_deref().unwrap_or("");
@@ -203,10 +203,10 @@ fn catalog_model_capabilities(model: &CatalogModel) -> Vec<String> {
     if model.reasoning.unwrap_or(false) {
         caps.push("reasoning".to_owned());
     }
-    if let Some(mods) = &model.modalities {
-        if mods.input.iter().any(|m| m == "image") {
-            caps.push("images".to_owned());
-        }
+    if let Some(mods) = &model.modalities
+        && mods.input.iter().any(|m| m == "image")
+    {
+        caps.push("images".to_owned());
     }
     caps
 }

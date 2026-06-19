@@ -20,15 +20,16 @@ pub enum ApiKind {
 /// Provider protocol type — the user-facing type declared in `config.toml`
 /// `[providers.<id>].type`. It determines which wire-protocol client is used.
 /// This is the config-level counterpart of [`ApiKind`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ApiType {
-    /// OpenAI Responses API (`/responses` endpoint).
+    /// `OpenAI` Responses API (`/responses` endpoint).
     #[serde(rename = "openai-responses")]
     OpenAiResponses,
-    /// OpenAI Chat Completions — third-party compatible endpoints.
+    /// `OpenAI` Chat Completions — third-party compatible endpoints.
     #[serde(rename = "openai-compatible")]
+    #[default]
     OpenAiCompatible,
-    /// OpenAI Chat Completions — native OpenAI endpoint.
+    /// `OpenAI` Chat Completions — native `OpenAI` endpoint.
     #[serde(rename = "openai-chat")]
     OpenAiChat,
     /// Anthropic Messages API.
@@ -37,12 +38,6 @@ pub enum ApiType {
     /// Google Generative AI.
     #[serde(rename = "google")]
     Google,
-}
-
-impl Default for ApiType {
-    fn default() -> Self {
-        Self::OpenAiCompatible
-    }
 }
 
 impl ApiType {

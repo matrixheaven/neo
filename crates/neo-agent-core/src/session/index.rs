@@ -126,9 +126,8 @@ impl SessionIndex {
                 Err(error) => return Err(SessionIndexError::Io(error)),
             };
 
-            let metadata = match serde_json::from_str::<SessionMetadataFile>(&content) {
-                Ok(metadata) => metadata,
-                Err(_) => continue,
+            let Ok(metadata) = serde_json::from_str::<SessionMetadataFile>(&content) else {
+                continue;
             };
 
             let Some(stored) = metadata.sessions.get(&entry.session_id) else {

@@ -38,8 +38,8 @@ registry for `print`, `run`, RPC prompts, and live TUI turns:
 ```bash
 cargo run -p neo-agent -- --no-tools print "answer without tools"
 cargo run -p neo-agent -- --no-builtin-tools print "use configured MCP tools only"
-cargo run -p neo-agent -- --tools read,bash print "inspect with only read and bash"
-cargo run -p neo-agent -- --tools read,mcp__docs__search --exclude-tools read print "use docs search"
+cargo run -p neo-agent -- --tools Read,Bash print "inspect with only Read and Bash"
+cargo run -p neo-agent -- --tools Read,mcp__docs__search --exclude-tools Read print "use docs search"
 ```
 
 `print` and `run` merge piped stdin with the CLI prompt, and prompt arguments

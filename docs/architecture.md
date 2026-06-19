@@ -7,11 +7,10 @@ agent-core runtime that can be tested without a terminal UI.
 
 ```text
 neo-agent CLI/TUI
-  -> neo-agent-core runtime, sessions, permissions, tools, MCP
+  -> neo-agent-core runtime, sessions, permissions, tools, MCP, local extensions,
+     skill loading, JSONL RPC, and HTML export
       -> neo-ai provider-neutral model and stream contracts
   -> neo-tui terminal UI primitives (crossterm-based component tree)
-  -> neo-sdk JSONL RPC, skill loading, HTML export
-  -> neo-extensions local extension discovery/runner/lifecycle
 xtask maintenance commands
 ```
 
@@ -23,9 +22,10 @@ xtask maintenance commands
   OpenAI-compatible, and OpenAI-style image generation network clients.
 - `neo-ai::providers::fake::FakeModelClient` records requests and replays stream events for tests.
 - `neo-agent-core` contains a runtime turn loop, fake harness, permissions,
-  built-in tools (read, list, grep, find, glob, write, edit, bash, terminal,
-  todo, enter_plan_mode, exit_plan_mode), MCP adapters, reasoning event
-  persistence, and JSONL session helpers.
+  built-in tools (Read, List, Grep, Find, Glob, Write, Edit, Bash, Terminal,
+  TodoList, EnterPlanMode, ExitPlanMode), MCP adapters, local extension adapters,
+  skill loading, JSONL RPC primitives, HTML export, reasoning event persistence,
+  and JSONL session helpers.
 - `neo-agent` exposes the local command-line and TUI surface.
 - `neo-tui` owns terminal rendering via a component-tree architecture:
   - `terminal/`: single-buffer terminal rendering, input parsing, and low-level UI
@@ -36,10 +36,6 @@ xtask maintenance commands
     lifecycle rendering, per-tool-type renderers, LCS-based inline diff preview.
   - `widgets/`: `QuestionStateMachine` (multi-question dialog), `TodoPanel`.
   - `image.rs`: Kitty, iTerm2, and Sixel inline image encoding.
-- `neo-sdk` provides JSONL RPC frame types, skill manifest loading, and safe
-  Markdown-to-HTML export.
-- `neo-extensions` provides local extension discovery, installation, lifecycle
-  (enable/disable), and stdio JSONL runner.
 - `xtask check` verifies the stable developer tooling slice, and
   `xtask release-smoke` exercises local-only CLI surfaces.
 

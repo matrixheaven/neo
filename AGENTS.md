@@ -63,9 +63,7 @@ Key files at the root:
 ├── README.md
 ├── crates/
 │   ├── ai                     # neo-ai: provider-neutral chat/types/options/registry
-│   ├── agent-core             # neo-agent-core: runtime, tools, permissions, sessions, MCP
-│   ├── sdk                    # neo-sdk: JSONL RPC, skill loading, HTML export
-│   ├── extensions             # neo-extensions: local extension discovery/runner/lifecycle
+│   ├── agent-core             # neo-agent-core: runtime, tools, permissions, sessions, MCP, extensions, skills, RPC, export
 │   ├── tui                    # neo-tui: reusable terminal UI primitives
 │   └── neo-agent              # neo-agent: CLI/TUI binary crate (binary name: neo)
 ├── examples/
@@ -82,9 +80,7 @@ Key files at the root:
 | Crate | Package name | Public API role |
 |-------|--------------|-----------------|
 | `crates/neo-ai` | `neo-ai` | Provider-neutral `ChatRequest`, `ModelClient`, `AiStreamEvent`, registries, reasoning options, image generation, `FakeModelClient`. |
-| `crates/neo-agent-core` | `neo-agent-core` | `AgentRuntime`, `AgentContext`, `ToolRegistry`, built-in tools, `PermissionPolicy`, `FakeHarness`, JSONL session helpers, MCP adapters. |
-| `crates/neo-sdk` | `neo-sdk` | JSONL RPC frame types, skill manifest helpers, safe Markdown-to-HTML export. |
-| `crates/neo-extensions` | `neo-extensions` | `neo-extension.toml` discovery, installation, lifecycle, stdio JSONL runner. |
+| `crates/neo-agent-core` | `neo-agent-core` | `AgentRuntime`, `AgentContext`, `ToolRegistry`, built-in tools, `PermissionPolicy`, `FakeHarness`, JSONL session helpers, MCP adapters, local extension adapters, skill loading, JSONL RPC primitives, HTML export. |
 | `crates/neo-tui` | `neo-tui` | Reusable terminal UI components, input handling, diff rendering, inline image encoding. |
 | `crates/neo-agent` | `neo-agent` | The `neo` binary. Parses args, loads config, dispatches to `print`/`run`/`resume`/sessions/extensions/MCP/RPC/TUI modes. |
 | `xtask` | `xtask` | Maintenance commands: check, parity, release-smoke, catalog check. |
@@ -137,8 +133,6 @@ cargo test --workspace --all-features
 # Individual crate
 cargo test -p neo-ai
 cargo test -p neo-agent-core
-cargo test -p neo-extensions
-cargo test -p neo-sdk
 cargo test -p neo-tui
 cargo test -p neo-agent
 cargo test -p xtask
@@ -202,7 +196,12 @@ crate.
    `ToolRegistry`, and returned as `ChatMessage::ToolResult`.
 7. Reasoning events are preserved as `ContentPart::Thinking` blocks, not mixed
    into plain assistant text.
-8. Session events are appended to local JSONL so `resume` can reconstruct
+8. Skills are loaded from project, user, extra, and built-in tiers; an
+   `<available_skills>` block is injected into the system prompt, and the
+   internal `invoke_skill` tool is offered to the model. Skill expansion is
+   intercepted by the runtime and nested invocations within a single turn are
+   rejected.
+9. Session events are appended to local JSONL so `resume` can reconstruct
    conversation and tool state.
 
 ### Session storage and workspace scoping
@@ -288,6 +287,24 @@ neo prompts preview review
 neo --prompt-template review print src/lib.rs
 ```
 
+### Skills
+
+Skills are reusable prompt fragments with YAML frontmatter. They are discovered
+from four tiers: project `.neo/skills/**/SKILL.md`, user `~/.neo/skills/**/SKILL.md`,
+`extra_skill_dirs` in config, and built-in skills shipped with Neo. The model
+sees an `<available_skills>` block in the system prompt and can call the
+internal `invoke_skill` tool; users can also trigger skills manually in the TUI
+with `/skill:<name>`.
+
+Key manifest fields: `name`, `description`, `type` (`prompt`/`inline`/`flow`),
+`whenToUse`, `disableModelInvocation`, `arguments`, `slashCommands`. Placeholders
+`$<name>`, `$0`, `$ARGUMENTS`, and `${NEO_SKILL_DIR}` are expanded at invocation
+time.
+
+Built-in skills: `write-goal`, `update-config`, `mcp-config`, `custom-theme`.
+
+See `docs/skills.md` for the full skill specification.
+
 ### Trust management
 
 Project context files (`AGENTS.md`, `CLAUDE.md`) are loaded only when the
@@ -341,7 +358,7 @@ merged by provider id; MCP servers are merged by server id. Important sections:
 - `permissions` — `Allow` / `Ask` / `Deny` for `file_read`, `file_write`,
   `shell`, `tool`.
 - `runtime` — `temperature`, `max_tokens`, `reasoning_effort`, queue modes,
-  tool execution mode, compaction.
+  tool execution mode, compaction, `extra_skill_dirs`.
 - `tui` — `image_protocol`, `fetch_remote_images`, `keybindings`.
 - `mcp.servers` — stdio/HTTP/SSE MCP server entries.
 
@@ -354,7 +371,8 @@ CLI provider/model management: `neo provider add/remove/list`,
 `neo models add/remove/list/set`.
 
 TUI slash commands: `/model` (model picker), `/provider` (provider list),
-`/resume` (session picker).
+`/resume` (session picker), `/skill:<name>` (activate a skill and expand it
+into the prompt).
 
 CLI session management: `neo sessions list/show/rename/fork/summarize/compact/export-html/export-json`.
 
@@ -468,10 +486,17 @@ subagent / background task / hook 中也不行：
 
 ## Current workspace health (as of last exploration)
 
-The workspace compiles and all tests in `neo-agent-core` and `neo-agent` pass
-as of the workspace-scoped session storage refactor. The `neo-ai` crate has
-some pre-existing clippy warnings (missing backticks, collapsible `if`) that
-are unrelated to session management.
+The workspace compiles. The skill-system refactor is in place: skills are
+loaded from project/user/extra/built-in tiers, the runtime exposes an internal
+`invoke_skill` tool with nested-guard, and the TUI supports `/skill:<name>`.
+
+- `neo-ai` clippy warnings (missing backticks, collapsible `if`) are fixed.
+- `neo-agent-core` clippy passes.
+- `neo-agent-core` and `neo-agent` tests pass except for the stale
+  `tool_permissions::bash_requires_permission_and_honors_timeout` test, which
+  still sends an old `mode` field to the bash tool schema.
+- `neo-tui` and the rest of `neo-agent` still carry pre-existing clippy
+  warnings unrelated to the skill work.
 
 <!-- icm:start -->
 
