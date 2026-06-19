@@ -1,11 +1,11 @@
 use std::{fmt::Write as _, path::Path};
 
 use anyhow::{Context, bail};
-use neo_extensions::{
+use neo_agent_core::rpc::{RpcOutcome, RpcRequest};
+use neo_agent_core::tools::extensions::{
     ExtensionDiscovery, ExtensionInstaller, ExtensionLifecycleStatus, ExtensionLifecycleStore,
     ExtensionRunner, ExtensionStatus, LifecycleStateSource,
 };
-use neo_sdk::{RpcOutcome, RpcRequest};
 use serde_json::Value;
 
 pub fn list(root: &Path, state_path: &Path, registry_path: &Path) -> anyhow::Result<String> {
@@ -124,7 +124,9 @@ pub async fn call(
     Ok(format!("{}\n", serde_json::to_string(&result)?))
 }
 
-fn discover(root: &Path) -> anyhow::Result<Vec<neo_extensions::DiscoveredExtension>> {
+fn discover(
+    root: &Path,
+) -> anyhow::Result<Vec<neo_agent_core::tools::extensions::DiscoveredExtension>> {
     if !root.exists() {
         return Ok(Vec::new());
     }

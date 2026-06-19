@@ -1,14 +1,16 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use neo_agent_core::{Tool, ToolContext, ToolError, ToolFuture, ToolRegistry, ToolResult};
-use neo_extensions::{
+use serde::Deserialize;
+use serde_json::{Map, Value};
+
+use crate::rpc::{RpcOutcome, RpcRequest};
+use crate::tools::{Tool, ToolContext, ToolError, ToolFuture, ToolRegistry, ToolResult};
+
+use super::{
     DiscoveredExtension, ExtensionDiscovery, ExtensionLifecycleStore, ExtensionRunner,
     ExtensionStatus, ExtensionTransport,
 };
-use neo_sdk::{RpcOutcome, RpcRequest};
-use serde::Deserialize;
-use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, Deserialize)]
 struct ExtensionToolSpec {
@@ -18,7 +20,7 @@ struct ExtensionToolSpec {
     method: String,
 }
 
-pub(crate) async fn register_enabled_extension_tools(
+pub async fn register_enabled_extension_tools(
     registry: &mut ToolRegistry,
     root: &Path,
     state_path: &Path,
@@ -64,7 +66,7 @@ async fn discover_extension_tools(
         anyhow::bail!(
             "extension {} returned tools.list failure",
             extension.manifest.id
-        );
+        )
     };
     let tools = serde_json::from_value::<Vec<ExtensionToolSpec>>(result).with_context(|| {
         format!(
@@ -254,11 +256,13 @@ fn sanitize_tool_name(value: &str) -> String {
         .collect()
 }
 
-pub(crate) fn default_extension_root(project_dir: &Path) -> PathBuf {
+#[must_use]
+pub fn default_extension_root(project_dir: &Path) -> PathBuf {
     project_dir.join(".neo/extensions")
 }
 
-pub(crate) fn default_extension_state_path(project_dir: &Path) -> PathBuf {
+#[must_use]
+pub fn default_extension_state_path(project_dir: &Path) -> PathBuf {
     project_dir.join(".neo/extensions-state.toml")
 }
 

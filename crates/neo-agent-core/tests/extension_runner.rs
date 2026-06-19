@@ -1,5 +1,5 @@
-use neo_extensions::{ExtensionRunner, ExtensionTransport};
-use neo_sdk::{JsonlCodec, RpcErrorCode, RpcMessage, RpcRequest, RpcResponse};
+use neo_agent_core::rpc::{RpcErrorCode, RpcMessage, RpcRequest, RpcResponse, codec::JsonlCodec};
+use neo_agent_core::tools::extensions::{ExtensionRunner, ExtensionTransport};
 use serde_json::json;
 
 #[tokio::test]

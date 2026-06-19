@@ -6,8 +6,9 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
+use super::{
     DiscoveredExtension, ExtensionDiscovery, ExtensionDiscoveryError, ExtensionLifecycleStore,
+    ExtensionManifest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,7 +16,7 @@ pub struct InstalledExtension {
     pub manifest_path: PathBuf,
     pub root: PathBuf,
     pub source: String,
-    pub manifest: crate::ExtensionManifest,
+    pub manifest: ExtensionManifest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

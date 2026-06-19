@@ -19,9 +19,8 @@ crossterm.workspace = true
 futures.workspace = true
 neo-agent-core = { path = "../neo-agent-core" }
 neo-ai = { path = "../neo-ai" }
-neo-extensions = { path = "../neo-extensions" }
 neo-tui = { path = "../neo-tui" }
-neo-sdk = { path = "../neo-sdk" }
+schemars.workspace = true
 reqwest.workspace = true
 rustix.workspace = true
 serde.workspace = true

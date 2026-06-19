@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DiscoveredExtension, ExtensionDiscovery, ExtensionDiscoveryError};
+use super::{DiscoveredExtension, ExtensionDiscovery, ExtensionDiscoveryError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

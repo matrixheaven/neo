@@ -1,12 +1,12 @@
 use std::process::Stdio;
 
-use neo_sdk::{JsonlCodec, RpcMessage, RpcOutcome, RpcRequest, RpcResponse};
+use crate::rpc::{RpcMessage, RpcOutcome, RpcRequest, RpcResponse, codec::JsonlCodec};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
 };
 
-use crate::{ExtensionEnv, ExtensionTransport};
+use super::{ExtensionEnv, ExtensionTransport};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExtensionRunnerError {
@@ -26,14 +26,14 @@ pub enum ExtensionRunnerError {
     #[error("extension closed stdout before sending a response")]
     Eof,
     #[error("failed to decode extension RPC frame: {0}")]
-    Decode(#[from] neo_sdk::RpcCodecError),
+    Decode(#[from] crate::rpc::codec::RpcCodecError),
     #[error("expected RPC response, received {0:?}")]
     UnexpectedMessage(RpcMessage),
     #[error("response id mismatch: expected {expected:?}, got {actual:?}")]
     ResponseIdMismatch { expected: String, actual: String },
     #[error("extension returned RPC error {code:?}: {message}")]
     RpcFailure {
-        code: neo_sdk::RpcErrorCode,
+        code: crate::rpc::RpcErrorCode,
         message: String,
     },
 }

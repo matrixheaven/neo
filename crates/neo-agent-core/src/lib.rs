@@ -4,8 +4,10 @@ pub mod injection;
 pub mod messages;
 pub mod mode;
 pub mod permissions;
+pub mod rpc;
 pub mod runtime;
 pub mod session;
+pub mod skills;
 pub mod tools;
 
 pub use events::*;

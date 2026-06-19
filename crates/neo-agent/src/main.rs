@@ -2,11 +2,11 @@ mod cli;
 mod config;
 mod config_ops;
 mod extension_commands;
-mod extension_tools;
 mod modes;
 mod prompt_templates;
 mod resources;
 mod rpc_mode;
+mod rpc_types;
 mod themes;
 mod trust;
 

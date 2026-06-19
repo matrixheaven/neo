@@ -1,15 +1,18 @@
 use std::io::{self, BufRead};
 
 use anyhow::Context;
+use neo_agent_core::rpc::{
+    RpcError, RpcErrorCode, RpcMessage, RpcNotification, RpcRequest, RpcResponse, codec::JsonlCodec,
+};
 use neo_agent_core::session::{
     JsonlSessionReader, SessionMetadataStore, SessionRecord, SessionSummarySource,
 };
-use neo_sdk::{
-    JsonlCodec, RpcCommandKind, RpcCommandRecord, RpcCommandsResult, RpcError, RpcErrorCode,
-    RpcMessage, RpcNotification, RpcRequest, RpcResponse, RpcSessionExportHtmlResult,
+use serde_json::{Value, json};
+
+use crate::rpc_types::{
+    RpcCommandKind, RpcCommandRecord, RpcCommandsResult, RpcSessionExportHtmlResult,
     RpcSessionGetResult, RpcSessionRecord, RpcSessionsListResult,
 };
-use serde_json::{Value, json};
 
 use crate::{
     config::{self, AppConfig, workspace_sessions_dir},

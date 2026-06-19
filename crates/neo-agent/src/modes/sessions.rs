@@ -4,12 +4,12 @@ use std::{
 };
 
 use anyhow::Context;
+use neo_agent_core::session::export::{ExportConversation, ExportMessage, HtmlExportOptions};
 use neo_agent_core::session::{
     JsonlSessionReader, SessionCompactionOptions, SessionIndex, SessionMetadataStore,
     SessionSummary, compact_jsonl_session, validate_session_id,
 };
 use neo_agent_core::{AgentMessage, Content};
-use neo_sdk::{ExportConversation, ExportMessage, HtmlExportOptions, export_html as render_html};
 use serde::Serialize;
 
 use crate::config::{AppConfig, workspace_sessions_dir};
@@ -224,7 +224,8 @@ fn render_messages_html(title: String, messages: &[AgentMessage]) -> anyhow::Res
         .map(|message| ExportMessage::new(message_role(message), message_text(message)))
         .collect();
     let conversation = ExportConversation::new(title, export_messages);
-    render_html(&conversation, &HtmlExportOptions::default()).map_err(anyhow::Error::from)
+    neo_agent_core::session::export::export_html(&conversation, &HtmlExportOptions::default())
+        .map_err(anyhow::Error::from)
 }
 
 pub fn session_path(session_ref: &str, config: &AppConfig) -> anyhow::Result<PathBuf> {

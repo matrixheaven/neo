@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::{AgentContext, AgentEvent, AgentMessage, CompactionSummary, Content};
 
+pub mod export;
 pub mod index;
 pub mod workspace;
 

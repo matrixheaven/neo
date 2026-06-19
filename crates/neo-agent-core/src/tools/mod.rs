@@ -1,6 +1,7 @@
 mod ask_user;
 mod bash;
 mod edit;
+pub mod extensions;
 mod find;
 mod glob;
 mod grep;
