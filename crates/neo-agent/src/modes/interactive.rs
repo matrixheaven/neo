@@ -3721,13 +3721,20 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         .chrome_mut()
         .set_thinking_enabled(controller.current_thinking);
     controller.local_config = Some(config.clone());
-    controller.skill_store = resources::load_skill_store(
+    let skill_store = resources::load_skill_store(
         &config.project_dir,
         neo_home().as_deref(),
         &config.extra_skill_dirs,
         &config.skill_path,
     )
     .ok();
+    controller.skill_store = skill_store.clone();
+    if let Some(ref store) = skill_store {
+        controller
+            .tui
+            .transcript_mut()
+            .set_skill_store(store.clone());
+    }
     controller
 }
 

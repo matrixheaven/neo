@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 
+use neo_agent_core::skills::SkillStore;
 use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, PermissionOperation};
 
 use crate::ansi::{Style, paint, truncate_to_width, visible_width};
@@ -59,6 +60,7 @@ pub struct TranscriptPane {
     /// without holding a reference to the app. The interactive mode keeps it
     /// in sync via [`Self::set_theme`].
     theme: TuiTheme,
+    skill_store: Option<SkillStore>,
 }
 
 impl TranscriptPane {
@@ -77,7 +79,13 @@ impl TranscriptPane {
             next_image_id: 0,
             last_frame: Vec::new(),
             theme: TuiTheme::default(),
+            skill_store: None,
         }
+    }
+
+    /// Set the skill store used to enrich runtime skill events with metadata.
+    pub fn set_skill_store(&mut self, store: SkillStore) {
+        self.skill_store = Some(store);
     }
 
     /// Update the theme used to color the live transcript body. Called by the
@@ -577,7 +585,16 @@ impl TranscriptPane {
                 }
             }
             AgentEvent::SkillActivated { name, .. } => {
-                self.push_transcript(TranscriptEntry::skill_activated(name));
+                let description = self
+                    .skill_store
+                    .as_ref()
+                    .and_then(|store| store.get(&name))
+                    .map(|skill| skill.manifest.description.clone());
+                self.push_transcript(TranscriptEntry::skill_activated(
+                    name,
+                    description,
+                    None::<String>,
+                ));
             }
             AgentEvent::GoalStarted { objective, .. } => {
                 self.push_transcript(TranscriptEntry::goal_card(
