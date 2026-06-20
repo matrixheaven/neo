@@ -968,4 +968,67 @@ mod tests {
         );
         assert!(expanded.len() > collapsed.len());
     }
+
+    #[test]
+    fn skill_used_renders_header_and_description() {
+        let entry = TranscriptEntry::skill_activated(
+            "executing-plans",
+            Some("Execute a plan task-by-task."),
+            None::<String>,
+        );
+        let lines = entry
+            .render(60, &TuiTheme::default())
+            .into_iter()
+            .map(|l| l.text().to_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("✦ Used Skill: executing-plans"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Execute a plan task-by-task."))
+        );
+    }
+
+    #[test]
+    fn skill_used_prefers_args_over_description() {
+        let entry = TranscriptEntry::skill_activated(
+            "sub-skill",
+            Some("Decompose into sub-skills."),
+            Some("refactor auth module".to_owned()),
+        );
+        let lines = entry
+            .render(60, &TuiTheme::default())
+            .into_iter()
+            .map(|l| l.text().to_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("args: refactor auth module"))
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains("Decompose into sub-skills."))
+        );
+    }
+
+    #[test]
+    fn skill_used_wraps_long_description() {
+        let entry = TranscriptEntry::skill_activated(
+            "brainstorming",
+            Some("Explore user intent, requirements and design before implementation."),
+            None::<String>,
+        );
+        let lines = entry
+            .render(40, &TuiTheme::default())
+            .into_iter()
+            .map(|l| l.text().to_owned())
+            .collect::<Vec<_>>();
+        assert!(lines.len() >= 3); // header + 2+ wrapped body lines + blank
+    }
 }
