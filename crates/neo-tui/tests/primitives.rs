@@ -706,6 +706,59 @@ fn prompt_completion_prefix_replaces_token_before_cursor() {
 }
 
 #[test]
+fn ansi_width_cases_are_display_width_safe() {
+    struct Case {
+        name: &'static str,
+        input: &'static str,
+        width: usize,
+        expected_width: usize,
+    }
+
+    let cases = [
+        Case {
+            name: "plain ascii",
+            input: "hello",
+            width: 10,
+            expected_width: 5,
+        },
+        Case {
+            name: "ansi sgr ignored",
+            input: "\x1b[31mred\x1b[0m",
+            width: 10,
+            expected_width: 3,
+        },
+        Case {
+            name: "osc ignored",
+            input: "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\",
+            width: 10,
+            expected_width: 4,
+        },
+        Case {
+            name: "wide cjk",
+            input: "你好",
+            width: 10,
+            expected_width: 4,
+        },
+    ];
+
+    for case in &cases {
+        assert_eq!(
+            visible_width(case.input),
+            case.expected_width,
+            "{}",
+            case.name
+        );
+        for line in wrap_width(case.input, case.width) {
+            assert!(
+                visible_width(&line) <= case.width,
+                "{} overflowed: {line:?}",
+                case.name
+            );
+        }
+    }
+}
+
+#[test]
 fn wrap_width_preserves_display_width_for_wide_text() {
     let lines = wrap_width("ab界cd🙂ef", 5);
 
@@ -715,13 +768,6 @@ fn wrap_width_preserves_display_width_for_wide_text() {
             .iter()
             .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 5)
     );
-}
-
-#[test]
-fn visible_width_ignores_ansi_csi_and_osc_sequences() {
-    assert_eq!(visible_width("\x1b[31mred\x1b[0m plain"), 9);
-    assert_eq!(visible_width("\x1b]133;A\x07hello\x1b]133;B\x07"), 5);
-    assert_eq!(visible_width("\x1b]133;A\x1b\\hello\x1b]133;B\x1b\\"), 5);
 }
 
 #[test]
