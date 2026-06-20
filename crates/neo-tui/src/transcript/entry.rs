@@ -74,6 +74,11 @@ pub enum TranscriptEntry {
         detail: Option<String>,
         turns: Option<u32>,
     },
+    SkillActivation {
+        name: String,
+        description: Option<String>,
+        args: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,10 +201,15 @@ impl TranscriptEntry {
     }
 
     #[must_use]
-    pub fn skill_activated(name: impl Into<String>) -> Self {
-        Self::Status {
-            text: format!("▶ Activated skill: {}", name.into()),
-            severity: None,
+    pub fn skill_activated(
+        name: impl Into<String>,
+        description: Option<impl Into<String>>,
+        args: Option<impl Into<String>>,
+    ) -> Self {
+        Self::SkillActivation {
+            name: name.into(),
+            description: description.map(Into::into),
+            args: args.map(Into::into),
         }
     }
 
@@ -292,6 +302,9 @@ impl TranscriptEntry {
                 inner_width,
                 theme,
             ),
+            Self::SkillActivation { name, description, args } => {
+                render_skill_used(name, description.as_deref(), args.as_deref(), inner_width, theme)
+            }
         }
     }
 
@@ -354,6 +367,10 @@ impl TranscriptEntry {
                     detail.as_deref().unwrap_or(""),
                     turns.map_or_else(String::new, |t| format!("Turns: {t}"))
                 ),
+            ),
+            Self::SkillActivation { name, description, .. } => (
+                "Skill",
+                format!("Used skill: {name}\n{}", description.as_deref().unwrap_or("")),
             ),
         }
     }
@@ -806,6 +823,36 @@ fn render_goal_card(
         }
     }
     rows.push(Line::raw(box_draw::bottom_border(width, border_style)));
+    rows.push(Line::raw(""));
+    rows
+}
+
+fn render_skill_used(
+    name: &str,
+    description: Option<&str>,
+    args: Option<&str>,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    let brand = Style::default().fg(theme.brand).bold();
+    let muted = Style::default().fg(theme.text_muted);
+
+    let mut rows = Vec::new();
+    rows.push(Line::styled(format!("✦ Used Skill: {name}"), brand));
+
+    let body = args
+        .filter(|s| !s.trim().is_empty())
+        .map(|a| format!("args: {a}"))
+        .or_else(|| description.map(ToOwned::to_owned));
+
+    if let Some(body) = body {
+        let indent = "   ";
+        let body_width = width.saturating_sub(indent.len()).max(1);
+        for line in wrap_width(&body, body_width) {
+            rows.push(Line::styled(format!("{indent}{line}"), muted));
+        }
+    }
+
     rows.push(Line::raw(""));
     rows
 }
