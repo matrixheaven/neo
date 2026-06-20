@@ -1646,8 +1646,15 @@ impl InteractiveController {
         name.clone_into(&mut invocation.name);
         let expanded = neo_agent_core::skills::expand_skill_body(skill, &invocation)
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        self.transcript_mut()
-            .push_transcript(neo_tui::transcript::TranscriptEntry::skill_activated(name));
+        let description = Some(skill.manifest.description.clone());
+        let args = if invocation.raw_arguments.trim().is_empty() {
+            None
+        } else {
+            Some(invocation.raw_arguments.clone())
+        };
+        self.transcript_mut().push_transcript(
+            neo_tui::transcript::TranscriptEntry::skill_activated(name, description, args),
+        );
         self.pending_skill_context = Some(expanded);
         let prompt = self.tui.chrome_mut().prompt_mut();
         args_str.clone_into(&mut prompt.text);
