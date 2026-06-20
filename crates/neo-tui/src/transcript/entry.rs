@@ -392,7 +392,12 @@ impl TranscriptEntry {
                             .map(std::borrow::ToOwned::to_owned)
                     })
                     .unwrap_or_default();
-                ("Skill", format!("Used Skill: {name}\n{body}"))
+                let text = if body.is_empty() {
+                    format!("Used Skill: {name}")
+                } else {
+                    format!("Used Skill: {name}\n{body}")
+                };
+                ("Skill", text)
             }
         }
     }
@@ -864,7 +869,7 @@ fn render_skill_used(
         name,
         width,
         "✦ Used Skill: ",
-        "                ",
+        &" ".repeat(visible_width("✦ Used Skill: ")),
         brand,
     ));
 
