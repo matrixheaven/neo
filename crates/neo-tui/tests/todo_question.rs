@@ -164,61 +164,87 @@ fn app_confirm_question_returns_answers() {
 }
 
 #[test]
-fn app_cancel_question_returns_id() {
+fn question_dialog_cancel_paths_close_overlay() {
     let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
-    app.push_question_overlay("q-456", make_single_question());
-
-    let id = app.cancel_question();
-    assert_eq!(id, Some("q-456".to_owned()));
+    app.push_question_overlay("q-cancel", make_single_question());
+    assert_eq!(app.cancel_question(), Some("q-cancel".to_owned()));
     assert!(!app.question_dialog_is_focused());
-}
 
-#[test]
-fn app_closes_question_overlay_by_question_id() {
     let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
-    app.push_question_overlay("question-1", make_single_question());
-
-    assert!(app.close_question_overlay("question-1").is_some());
+    app.push_question_overlay("q-close", make_single_question());
+    assert!(app.close_question_overlay("q-close").is_some());
     assert!(!app.question_dialog_is_focused());
-}
 
-#[test]
-fn question_dialog_esc_cancels() {
     let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
-    app.push_question_overlay("q-1", make_single_question());
-
+    app.push_question_overlay("q-esc", make_single_question());
     let action = app
         .handle_question_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-        .unwrap();
+        .expect("question handles esc");
     assert_eq!(action, QuestionDialogAction::Cancel);
     assert!(!app.question_dialog_is_focused());
 }
 
 #[test]
-fn question_dialog_tab_navigation_through_keys() {
-    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
-    app.push_question_overlay("q-1", make_two_questions());
+fn question_dialog_key_behaviors() {
+    struct Case {
+        name: &'static str,
+        keys: &'static [KeyCode],
+        assert_state: fn(&NeoChromeState),
+    }
 
-    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.question_dialog_state().unwrap().active_tab == 1);
+    fn assert_enter_selects_first_and_advances_to_submit(app: &NeoChromeState) {
+        let state = app.question_dialog_state().expect("focused");
+        assert!(state.on_submit_tab(), "expected submit tab");
+        assert!(state.questions[0].selected[0], "first option selected");
+    }
 
-    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    assert!(app.question_dialog_state().unwrap().on_submit_tab());
+    fn assert_number_selects_matching_option(app: &NeoChromeState) {
+        let state = app.question_dialog_state().expect("focused");
+        assert!(state.questions[0].selected[1], "second option selected");
+        assert!(!state.questions[0].selected[0], "first option unselected");
+    }
 
-    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-    assert!(!app.question_dialog_state().unwrap().on_submit_tab());
-}
+    fn assert_down_moves_one_row(app: &NeoChromeState) {
+        let state = app.question_dialog_state().expect("focused");
+        assert_eq!(state.cursor, 1);
+    }
 
-#[test]
-fn question_dialog_number_key_selection() {
-    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
-    app.push_question_overlay("q-1", make_single_question());
+    fn assert_right_reaches_submit_and_left_returns(app: &NeoChromeState) {
+        let state = app.question_dialog_state().expect("focused");
+        assert_eq!(state.active_tab, 0);
+    }
 
-    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+    let cases = [
+        Case {
+            name: "enter selects first option and reaches submit",
+            keys: &[KeyCode::Enter],
+            assert_state: assert_enter_selects_first_and_advances_to_submit,
+        },
+        Case {
+            name: "number selects matching option",
+            keys: &[KeyCode::Char('2')],
+            assert_state: assert_number_selects_matching_option,
+        },
+        Case {
+            name: "down moves one row",
+            keys: &[KeyCode::Down],
+            assert_state: assert_down_moves_one_row,
+        },
+        Case {
+            name: "right reaches submit and left returns",
+            keys: &[KeyCode::Enter, KeyCode::Right, KeyCode::Left],
+            assert_state: assert_right_reaches_submit_and_left_returns,
+        },
+    ];
 
-    let state = app.question_dialog_state().unwrap();
-    assert!(state.questions[0].selected[1]);
-    assert!(!state.questions[0].selected[0]);
+    for case in &cases {
+        let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
+        app.push_question_overlay("q-1", make_single_question());
+        for key in case.keys {
+            let _ = app.handle_question_dialog_key(KeyEvent::new(*key, KeyModifiers::NONE));
+        }
+        (case.assert_state)(&app);
+    }
 }
 
 #[test]
@@ -247,17 +273,6 @@ fn focused_dialog_input_drives_question_dialog_other_text() {
     let state = app.question_dialog_state().unwrap();
     assert!(state.questions[0].other_selected);
     assert_eq!(state.questions[0].other_text, "custom answer");
-}
-
-#[test]
-fn question_dialog_down_moves_one_option_at_a_time() {
-    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
-    app.push_question_overlay("q-1", make_single_question());
-
-    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-
-    let state = app.question_dialog_state().unwrap();
-    assert_eq!(state.cursor, 1);
 }
 
 #[test]
