@@ -5558,39 +5558,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slash_model_does_not_enter_streaming_mode() {
-        let mut controller = InteractiveController::new_for_test(
-            "neo",
-            "test-session",
-            "openai/gpt-4.1",
-            test_workspace_root(),
-            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
-        );
-        controller.type_text("/model");
-        controller
-            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
-            .await
-            .expect("submit handled");
-        assert_eq!(controller.chrome().mode(), ChromeMode::Editing);
-        assert!(controller.chrome().prompt().text.is_empty());
-    }
-
-    #[tokio::test]
-    async fn slash_provider_does_not_enter_streaming_mode() {
-        let mut controller = InteractiveController::new_for_test(
-            "neo",
-            "test-session",
-            "openai/gpt-4.1",
-            test_workspace_root(),
-            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
-        );
-        controller.type_text("/provider");
-        controller
-            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
-            .await
-            .expect("submit handled");
-        assert_eq!(controller.chrome().mode(), ChromeMode::Editing);
-        assert!(controller.chrome().prompt().text.is_empty());
+    async fn slash_picker_commands_do_not_enter_streaming_mode() {
+        for command in ["/model", "/provider"] {
+            let mut controller = InteractiveController::new_for_test(
+                "neo",
+                "test-session",
+                "openai/gpt-4.1",
+                test_workspace_root(),
+                |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+            );
+            controller.type_text(command);
+            controller
+                .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+                .await
+                .unwrap_or_else(|e| panic!("{command} submit failed: {e}"));
+            assert_eq!(
+                controller.chrome().mode(),
+                ChromeMode::Editing,
+                "{command} should keep editing mode"
+            );
+            assert!(
+                controller.chrome().prompt().text.is_empty(),
+                "{command} should leave the prompt empty"
+            );
+        }
     }
 
     #[test]
