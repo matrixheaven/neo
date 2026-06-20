@@ -302,9 +302,17 @@ impl TranscriptEntry {
                 inner_width,
                 theme,
             ),
-            Self::SkillActivation { name, description, args } => {
-                render_skill_used(name, description.as_deref(), args.as_deref(), inner_width, theme)
-            }
+            Self::SkillActivation {
+                name,
+                description,
+                args,
+            } => render_skill_used(
+                name,
+                description.as_deref(),
+                args.as_deref(),
+                inner_width,
+                theme,
+            ),
         }
     }
 
@@ -368,12 +376,21 @@ impl TranscriptEntry {
                     turns.map_or_else(String::new, |t| format!("Turns: {t}"))
                 ),
             ),
-            Self::SkillActivation { name, description, args } => {
+            Self::SkillActivation {
+                name,
+                description,
+                args,
+            } => {
                 let body = args
                     .as_deref()
                     .filter(|s| !s.trim().is_empty())
                     .map(|a| format!("args: {a}"))
-                    .or_else(|| description.clone())
+                    .or_else(|| {
+                        description
+                            .as_deref()
+                            .filter(|s| !s.trim().is_empty())
+                            .map(std::borrow::ToOwned::to_owned)
+                    })
                     .unwrap_or_default();
                 ("Skill", format!("Used Skill: {name}\n{body}"))
             }
@@ -843,12 +860,22 @@ fn render_skill_used(
     let muted = Style::default().fg(theme.text_muted);
 
     let mut rows = Vec::new();
-    rows.push(Line::styled(format!("✦ Used Skill: {name}"), brand));
+    rows.extend(styled_wrap_with_prefix(
+        name,
+        width,
+        "✦ Used Skill: ",
+        "                ",
+        brand,
+    ));
 
     let body = args
         .filter(|s| !s.trim().is_empty())
         .map(|a| format!("args: {a}"))
-        .or_else(|| description.map(ToOwned::to_owned));
+        .or_else(|| {
+            description
+                .filter(|s| !s.trim().is_empty())
+                .map(std::borrow::ToOwned::to_owned)
+        });
 
     if let Some(body) = body {
         let indent = "   ";
