@@ -71,6 +71,13 @@ pub struct LoadedSkill {
     pub source: SkillSource,
 }
 
+impl LoadedSkill {
+    #[must_use]
+    pub fn is_builtin_extracted(&self) -> bool {
+        self.root.components().any(|c| c.as_os_str() == ".builtin")
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SkillLoadError {
     #[error("failed to read skill file {path}: {source}")]
@@ -93,6 +100,9 @@ pub struct SkillStore {
 }
 
 impl SkillStore {
+    /// Load skills from all tiers. If `user_dir` is provided, built-in skills
+    /// are extracted into `user_dir/skills/.builtin/` first and then loaded
+    /// from disk, so users can inspect and override them.
     pub fn load(
         project_dir: Option<&Path>,
         user_dirs: &[PathBuf],
@@ -101,7 +111,14 @@ impl SkillStore {
     ) -> Result<Self, SkillLoadError> {
         let mut skills: HashMap<String, LoadedSkill> = HashMap::new();
 
-        for skill in builtin_skills {
+        // Extract built-in skills into the first user dir (usually ~/.neo) so
+        // they are visible on disk and can be overridden by user skills.
+        let extracted = if let Some(user_dir) = user_dirs.first() {
+            crate::skills::builtin::extract_builtin_skills(user_dir).unwrap_or(builtin_skills)
+        } else {
+            builtin_skills
+        };
+        for skill in extracted {
             skills.insert(skill.name.clone(), skill);
         }
 
@@ -113,6 +130,9 @@ impl SkillStore {
 
         for dir in user_dirs {
             for skill in discover_skills(dir, SkillSource::User)? {
+                if skill.is_builtin_extracted() {
+                    continue;
+                }
                 skills.insert(skill.name.clone(), skill);
             }
         }

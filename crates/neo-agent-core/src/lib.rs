@@ -1,4 +1,5 @@
 pub mod events;
+pub mod goal;
 pub mod harness;
 pub mod injection;
 pub mod messages;

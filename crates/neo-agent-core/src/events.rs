@@ -111,6 +111,28 @@ pub enum AgentEvent {
         turn: u32,
         name: String,
     },
+    GoalStarted {
+        turn: u32,
+        objective: String,
+    },
+    GoalPaused {
+        turn: u32,
+        objective: String,
+    },
+    GoalResumed {
+        turn: u32,
+        objective: String,
+    },
+    GoalBlocked {
+        turn: u32,
+        objective: String,
+        reason: String,
+    },
+    GoalFinished {
+        turn: u32,
+        objective: String,
+        outcome: String,
+    },
     ApprovalRequested {
         turn: u32,
         id: String,
