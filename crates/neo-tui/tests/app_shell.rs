@@ -153,6 +153,108 @@ fn app_shell_tracks_agent_core_approval_request_without_overlay_panel() {
 }
 
 #[test]
+fn blocking_question_dialog_hides_composer_prompt() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.prompt_mut().apply_edit(PromptEdit::Insert("draft"));
+    app.push_question_overlay(
+        "question-1",
+        vec![neo_tui::widgets::QuestionDisplayData {
+            question: "Pick one".to_owned(),
+            header: Some("Question".to_owned()),
+            body: None,
+            options: vec![neo_tui::widgets::QuestionDisplayOption {
+                label: "Yes".to_owned(),
+                description: None,
+            }],
+            multi_select: false,
+        }],
+    );
+
+    let mut tui = neo_tui::NeoTui::new(app, TranscriptPane::new(80, 20));
+    let (lines, cursor) = tui.render_frame(80, 20);
+    let frame = lines
+        .iter()
+        .map(|line| neo_tui::ansi::strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(frame.contains("question"));
+    assert!(
+        !frame.contains("> draft"),
+        "composer should be hidden: {frame}"
+    );
+    assert!(
+        cursor.is_none(),
+        "blocking dialog should not expose prompt cursor"
+    );
+}
+
+#[test]
+fn pending_approval_hides_composer_prompt() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.prompt_mut().apply_edit(PromptEdit::Insert("draft"));
+    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "approval-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::Tool,
+        subject: "Bash".to_owned(),
+        arguments: serde_json::json!({ "command": "echo hi" }),
+    });
+
+    let mut tui = neo_tui::NeoTui::new(app, TranscriptPane::new(80, 20));
+    let (lines, cursor) = tui.render_frame(80, 20);
+    let frame = lines
+        .iter()
+        .map(|line| neo_tui::ansi::strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !frame.contains("> draft"),
+        "composer should be hidden: {frame}"
+    );
+    assert!(
+        frame.contains("[ask]"),
+        "footer should remain visible: {frame}"
+    );
+    assert!(
+        cursor.is_none(),
+        "blocking approval should not expose prompt cursor"
+    );
+}
+
+#[test]
+fn prompt_completion_keeps_composer_prompt_visible() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.prompt_mut()
+        .apply_edit(PromptEdit::Insert("open src/ma"));
+    app.open_prompt_completion_picker(
+        app.prompt()
+            .completion_prefix()
+            .expect("completion prefix should exist"),
+        [PickerItem::new(
+            "src/main.rs",
+            "src/main.rs",
+            None::<String>,
+        )],
+    );
+
+    let mut tui = neo_tui::NeoTui::new(app, TranscriptPane::new(80, 20));
+    let (lines, cursor) = tui.render_frame(80, 20);
+    let frame = lines
+        .iter()
+        .map(|line| neo_tui::ansi::strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(frame.contains("> open src/ma"));
+    assert!(
+        cursor.is_some(),
+        "prompt completion depends on composer cursor"
+    );
+}
+
+#[test]
 fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
     let mut app = NeoChromeState::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
     app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));

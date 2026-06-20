@@ -676,6 +676,14 @@ impl InteractiveController {
 
     #[allow(clippy::too_many_lines)]
     async fn handle_input_event(&mut self, event: InputEvent) -> Result<bool> {
+        if self.tui.chrome().approval_is_pending() {
+            if let Some(result) = self.tui.chrome_mut().handle_pending_approval_input(event) {
+                self.resolve_approval(&result);
+            } else {
+                self.sync_inline_approval_selection();
+            }
+            return Ok(false);
+        }
         // If a rich dialog overlay is focused, forward ALL input events to it
         // first. Rich dialogs consume keys, actions, submit, cancel, etc.
         if self.tui.chrome_mut().focused_overlay_is_rich_dialog() {
@@ -1866,11 +1874,14 @@ impl InteractiveController {
     }
 
     fn sync_inline_approval_selection(&mut self) {
-        let Some((id, selected)) = self.tui.chrome().approval_selection() else {
+        let Some((id, selected, feedback_input)) = self.tui.chrome().approval_selection() else {
             return;
         };
         let id = id.to_owned();
-        self.tui.transcript_mut().select_approval(&id, selected);
+        let feedback_input = feedback_input.to_owned();
+        self.tui
+            .transcript_mut()
+            .select_approval(&id, selected, &feedback_input);
     }
 
     fn register_pending_approval(&mut self, approval: crate::modes::run::PromptApprovalRequest) {
@@ -7190,6 +7201,74 @@ command = "python3"
     }
 
     #[tokio::test]
+    async fn approval_revise_collects_feedback_without_editing_prompt() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.type_text("draft");
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Tool,
+            subject: "Write".to_owned(),
+            arguments: serde_json::json!({"path": "denied.txt"}),
+        });
+        let (decision_tx, decision_rx) = oneshot::channel();
+        controller
+            .pending_approvals
+            .insert("tool-1".to_owned(), decision_tx);
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
+            .await
+            .expect("down selects approval option");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
+            .await
+            .expect("down selects approval option");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
+            .await
+            .expect("down selects revise option");
+        assert_eq!(
+            controller.chrome().approval_choice(),
+            Some(ApprovalChoice::Revise)
+        );
+
+        controller
+            .handle_input_event(InputEvent::Insert('n'))
+            .await
+            .expect("typed feedback is captured by approval dialog");
+        controller
+            .handle_input_event(InputEvent::Paste("o thanks".to_owned()))
+            .await
+            .expect("pasted feedback is captured by approval dialog");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("backspace").expect("valid key")))
+            .await
+            .expect("backspace edits approval feedback");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("enter").expect("valid key")))
+            .await
+            .expect("enter confirms revise");
+
+        assert_eq!(controller.chrome().prompt().text, "draft");
+        assert_eq!(
+            decision_rx.await.expect("approval decision"),
+            PermissionDecision::Deny
+        );
+        let snapshot = controller.render_snapshot();
+        assert!(
+            snapshot.contains("Revision feedback: no thank"),
+            "feedback should be surfaced after resolve: {snapshot}"
+        );
+    }
+
+    #[tokio::test]
     async fn approval_cancel_rejects_pending_approval() {
         let mut controller = InteractiveController::new_for_test(
             "neo",
@@ -7264,7 +7343,10 @@ command = "python3"
             PermissionDecision::Allow
         );
         assert_eq!(
-            controller.chrome().approval_selection().map(|(id, _)| id),
+            controller
+                .chrome()
+                .approval_selection()
+                .map(|(id, _, _)| id),
             Some("tool-2")
         );
         let snapshot = controller.render_snapshot();

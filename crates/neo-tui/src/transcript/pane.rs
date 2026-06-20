@@ -702,9 +702,10 @@ impl TranscriptPane {
         &mut self.transcript
     }
 
-    pub fn select_approval(&mut self, id: &str, selected: usize) {
+    pub fn select_approval(&mut self, id: &str, selected: usize, feedback_input: &str) {
         if let Some(approval) = self.transcript.approval_mut(id) {
             approval.selected = selected;
+            approval.feedback_input = feedback_input.to_owned();
             self.mark_dirty();
         }
     }
@@ -820,6 +821,7 @@ impl TranscriptPane {
             queued_label: prompt.queued_label,
             queued_count: 0,
             selected: 0,
+            feedback_input: String::new(),
             resolved: None,
         };
         if self.active_approval_mut().is_some() {
@@ -1311,9 +1313,15 @@ pub fn render_chrome_lines(app: &NeoChromeState, width: usize) -> ChromeRender {
         lines.extend(question.render_lines(content_width));
     }
     let prompt_start_row = lines.len();
-    let (prompt_lines, prompt_cursor) = render_prompt_lines(app, content_width);
+    let (prompt_lines, prompt_cursor) = if app.focused_overlay_blocks_prompt() {
+        (Vec::new(), None)
+    } else {
+        render_prompt_lines(app, content_width)
+    };
     lines.extend(prompt_lines);
-    if let Some(dropdown) = render_prompt_completion_dropdown(app, content_width) {
+    if !app.focused_overlay_blocks_prompt()
+        && let Some(dropdown) = render_prompt_completion_dropdown(app, content_width)
+    {
         lines.extend(dropdown);
     }
     lines.extend(render_footer_lines(app, content_width));

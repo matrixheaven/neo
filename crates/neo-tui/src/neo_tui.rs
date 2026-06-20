@@ -80,18 +80,14 @@ impl NeoTui {
 }
 
 fn render_chrome(app: &NeoChromeState, width: usize) -> ChromeRender {
-    if app.focused_overlay().is_some_and(|overlay| {
-        matches!(
-            overlay.kind,
-            OverlayKind::SessionPicker(_)
-                | OverlayKind::ModelSelector(_)
-                | OverlayKind::TabbedModelSelector(_)
-                | OverlayKind::ProviderManager(_)
-                | OverlayKind::ChoicePicker(_)
-                | OverlayKind::ApiKeyInput(_)
-                | OverlayKind::CustomRegistryImport(_)
-        )
-    }) {
+    if app.focused_overlay_blocks_prompt()
+        && app.focused_overlay().is_some_and(|overlay| {
+            !matches!(
+                overlay.kind,
+                OverlayKind::QuestionDialog(_) | OverlayKind::Approval(_)
+            )
+        })
+    {
         let content_width = frame_content_width(width);
         let overlay = app
             .render_focused_overlay(content_width)

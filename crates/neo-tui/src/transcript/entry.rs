@@ -26,6 +26,7 @@ pub struct ApprovalPromptData {
     pub queued_label: String,
     pub queued_count: usize,
     pub selected: usize,
+    pub feedback_input: String,
     pub resolved: Option<String>,
 }
 
@@ -563,6 +564,15 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         ));
     }
     rows.push(Line::raw(""));
+    if data.selected == 3 {
+        let feedback = if data.feedback_input.is_empty() {
+            "feedback: ▌".to_owned()
+        } else {
+            format!("feedback: {}▌", data.feedback_input)
+        };
+        rows.extend(styled_wrap_with_indent(&feedback, width, 2, 4, selected));
+        rows.push(Line::raw(""));
+    }
     if data.queued_count > 0 {
         let suffix = if data.queued_count == 1 {
             "approval"

@@ -1191,10 +1191,14 @@ impl NeoChromeState {
     }
 
     #[must_use]
-    pub fn approval_selection(&self) -> Option<(&str, usize)> {
-        self.pending_approvals
-            .front()
-            .map(|approval| (approval.request_id.as_str(), approval.modal.selected))
+    pub fn approval_selection(&self) -> Option<(&str, usize, &str)> {
+        self.pending_approvals.front().map(|approval| {
+            (
+                approval.request_id.as_str(),
+                approval.modal.selected,
+                approval.feedback_input.as_str(),
+            )
+        })
     }
 
     pub fn choose_approval_number(&mut self, number: usize) -> Option<ApprovalResult> {
@@ -1203,6 +1207,9 @@ impl NeoChromeState {
             return None;
         }
         approval.modal.selected = number - 1;
+        if approval.is_collecting_feedback() {
+            return None;
+        }
         self.confirm_approval()
     }
 
@@ -1255,7 +1262,9 @@ impl NeoChromeState {
             let result = ApprovalResult {
                 request_id: modal.request_id,
                 choice,
-                feedback: None,
+                feedback: (choice == ApprovalChoice::Revise)
+                    .then_some(modal.feedback_input)
+                    .filter(|feedback| !feedback.is_empty()),
             };
             self.mode = self.overlay_mode();
             return Some(result);
@@ -1383,6 +1392,46 @@ impl NeoChromeState {
         self.with_focused_overlay_mut(Overlay::move_selection_up);
     }
 
+    pub fn handle_pending_approval_input(&mut self, input: InputEvent) -> Option<ApprovalResult> {
+        let input = Self::translate_key_event_for_dialog(input);
+        match input {
+            InputEvent::Insert(character) => {
+                if let Some(number) = approval_number(character)
+                    && let Some(result) = self.choose_approval_number(number)
+                {
+                    return Some(result);
+                }
+                if let Some(approval) = self.pending_approvals.front_mut() {
+                    approval.insert_feedback(&character.to_string());
+                }
+                None
+            }
+            InputEvent::Paste(text) => {
+                if let Some(approval) = self.pending_approvals.front_mut() {
+                    approval.insert_feedback(&text);
+                }
+                None
+            }
+            InputEvent::Backspace | InputEvent::Delete => {
+                if let Some(approval) = self.pending_approvals.front_mut() {
+                    approval.backspace_feedback();
+                }
+                None
+            }
+            InputEvent::Action(KeybindingAction::SelectDown) => {
+                self.move_overlay_selection_down();
+                None
+            }
+            InputEvent::Action(KeybindingAction::SelectUp) => {
+                self.move_overlay_selection_up();
+                None
+            }
+            InputEvent::Submit => self.confirm_approval(),
+            InputEvent::Cancel => self.deny_approval(),
+            _ => None,
+        }
+    }
+
     pub fn move_overlay_selection_page_down(&mut self) {
         self.with_focused_overlay_mut(Overlay::move_selection_page_down);
     }
@@ -1416,6 +1465,39 @@ impl NeoChromeState {
         } else {
             ChromeMode::Editing
         }
+    }
+
+    #[must_use]
+    pub fn focused_overlay_blocks_prompt(&self) -> bool {
+        if !self.pending_approvals.is_empty() {
+            return true;
+        }
+        let Some(overlay) = self.focused_overlay() else {
+            return false;
+        };
+        matches!(
+            overlay.kind,
+            OverlayKind::SessionPicker(_)
+                | OverlayKind::ModelPicker(_)
+                | OverlayKind::ModelSelector(_)
+                | OverlayKind::TabbedModelSelector(_)
+                | OverlayKind::ProviderManager(_)
+                | OverlayKind::ChoicePicker(_)
+                | OverlayKind::ApiKeyInput(_)
+                | OverlayKind::CustomRegistryImport(_)
+                | OverlayKind::QuestionDialog(_)
+                | OverlayKind::Approval(_)
+        )
+    }
+}
+
+fn approval_number(character: char) -> Option<usize> {
+    match character {
+        '1' => Some(1),
+        '2' => Some(2),
+        '3' => Some(3),
+        '4' => Some(4),
+        _ => None,
     }
 }
 
@@ -2369,6 +2451,7 @@ fn command_from_select_item(item: &SelectItem) -> CommandSpec {
 pub struct ApprovalRequestModal {
     pub request_id: String,
     pub modal: ApprovalModal,
+    pub feedback_input: String,
 }
 
 impl ApprovalRequestModal {
@@ -2380,6 +2463,7 @@ impl ApprovalRequestModal {
     ) -> Self {
         Self {
             request_id: request_id.into(),
+            feedback_input: String::new(),
             modal: ApprovalModal::new(
                 title,
                 body,
@@ -2398,6 +2482,7 @@ impl ApprovalRequestModal {
     pub fn new_plan_review(request_id: impl Into<String>, body: impl Into<String>) -> Self {
         Self {
             request_id: request_id.into(),
+            feedback_input: String::new(),
             modal: ApprovalModal::new(
                 "Plan Review".to_string(),
                 body,
@@ -2425,6 +2510,23 @@ impl ApprovalRequestModal {
             self.modal.selected = 0;
         } else {
             self.modal.selected = (self.modal.selected + 1) % self.modal.options.len();
+        }
+    }
+
+    #[must_use]
+    pub fn is_collecting_feedback(&self) -> bool {
+        self.modal.selected_choice() == Some(ApprovalChoice::Revise)
+    }
+
+    pub fn insert_feedback(&mut self, text: &str) {
+        if self.is_collecting_feedback() {
+            self.feedback_input.push_str(text);
+        }
+    }
+
+    pub fn backspace_feedback(&mut self) {
+        if self.is_collecting_feedback() {
+            self.feedback_input.pop();
         }
     }
 }

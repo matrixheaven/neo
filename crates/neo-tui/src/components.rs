@@ -20,7 +20,11 @@ pub struct ChromeLayout {
 
 #[must_use]
 pub fn chrome_layout(app: &NeoChromeState, area: Rect) -> ChromeLayout {
-    let prompt_height = prompt_height(app.prompt(), area.width);
+    let prompt_height = if app.focused_overlay_blocks_prompt() {
+        0
+    } else {
+        prompt_height(app.prompt(), area.width)
+    };
     let footer_bar_height = u16::from(area.height >= 8);
     let session_picker_height = match app.focused_overlay().map(|overlay| &overlay.kind) {
         Some(OverlayKind::SessionPicker(_)) => 16,

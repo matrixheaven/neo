@@ -408,13 +408,6 @@ impl DiffFile {
         }
     }
 
-    fn change_count(&self) -> usize {
-        self.hunks
-            .iter()
-            .map(|hunk| hunk.stats.added + hunk.stats.removed)
-            .sum()
-    }
-
     fn stats(&self) -> DiffStats {
         let mut stats = DiffStats::default();
         for hunk in &self.hunks {
