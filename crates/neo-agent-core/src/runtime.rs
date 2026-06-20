@@ -15,7 +15,9 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::goal::GoalManager;
 use crate::skills::SkillStore;
+use crate::tools::BackgroundTaskManager;
 use crate::{
     AgentEvent, AgentMessage, AgentToolCall, CompactionPhase, CompactionReason, CompactionSummary,
     Content, InjectionManager, PermissionDecision, PermissionOperation, PermissionPolicy, PlanMode,
@@ -81,6 +83,9 @@ pub struct AgentConfig {
     pub tool_execution_mode: ToolExecutionMode,
     pub tool_permission_policy: PermissionPolicy,
     pub compaction: Option<CompactionSettings>,
+    /// Maximum number of autonomous turns a goal may run before blocking.
+    #[serde(default)]
+    pub max_goal_turns: Option<u32>,
     #[serde(skip)]
     #[schemars(skip)]
     pub context_transform: Option<ContextTransform>,
@@ -116,11 +121,15 @@ pub struct AgentConfig {
     /// Home directory used for plan file creation (e.g. `~/.neo`).
     /// Falls back to `workspace_root` if unset.
     pub home_dir: Option<PathBuf>,
-    /// Shared todo list state. Written by `TodoTool`, read for event emission
-    /// after each tool call batch, and restored on resume replay.
+    /// Shared todo list state. Used by `TodoTool` read mode and kept in sync
+    /// with replayed/runtime `TodoUpdated` events.
     #[serde(skip)]
     #[schemars(skip)]
     pub todos: Arc<Mutex<Vec<TodoEventData>>>,
+    /// Shared background task manager for Bash and `AskUserQuestion` background tasks.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub background_tasks: BackgroundTaskManager,
 }
 
 impl AgentConfig {
@@ -140,6 +149,7 @@ impl AgentConfig {
             tool_execution_mode: ToolExecutionMode::Parallel,
             tool_permission_policy: PermissionPolicy::default(),
             compaction: None,
+            max_goal_turns: None,
             context_transform: None,
             before_tool_call: None,
             async_before_tool_call: None,
@@ -151,6 +161,7 @@ impl AgentConfig {
             plan_review_feedback: Arc::new(Mutex::new(std::collections::HashMap::new())),
             home_dir: None,
             todos: Arc::new(Mutex::new(Vec::new())),
+            background_tasks: BackgroundTaskManager::new(),
         }
     }
 
@@ -290,6 +301,13 @@ impl AgentConfig {
         self.todos = todos;
         self
     }
+
+    /// Replace the shared background task manager.
+    #[must_use]
+    pub fn with_background_tasks(mut self, background_tasks: BackgroundTaskManager) -> Self {
+        self.background_tasks = background_tasks;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -317,6 +335,9 @@ pub struct AgentContext {
     cancelled: bool,
     steering_queue: Vec<AgentMessage>,
     follow_up_queue: Vec<AgentMessage>,
+    /// Skill context injected before the next user message in the current turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    skill_context: Option<AgentMessage>,
     compaction_summary: Option<CompactionSummary>,
     /// Whether plan mode was active at the end of the last replayed/exected turn.
     #[serde(default)]
@@ -355,6 +376,17 @@ impl AgentContext {
 
     pub fn queue_follow_up_message(&mut self, message: AgentMessage) {
         self.follow_up_queue.push(message);
+    }
+
+    /// Set a skill context message to be inserted before the next user message.
+    pub fn set_skill_context(&mut self, message: AgentMessage) {
+        self.skill_context = Some(message);
+    }
+
+    /// Take the pending skill context message, if any.
+    #[must_use]
+    pub fn take_skill_context(&mut self) -> Option<AgentMessage> {
+        self.skill_context.take()
     }
 
     pub fn apply_compaction(&mut self, summary: CompactionSummary) {
@@ -530,6 +562,7 @@ pub struct AgentRuntime {
     tools: Option<Arc<ToolRegistry>>,
     skills: Option<Arc<SkillStore>>,
     skill_invocation_active: Arc<AtomicBool>,
+    goal_manager: Option<Arc<GoalManager>>,
 }
 
 impl AgentRuntime {
@@ -541,6 +574,7 @@ impl AgentRuntime {
             tools: None,
             skills: None,
             skill_invocation_active: Arc::new(AtomicBool::new(false)),
+            goal_manager: None,
         }
     }
 
@@ -558,6 +592,7 @@ impl AgentRuntime {
             tools: Some(Arc::new(tools)),
             skills: None,
             skill_invocation_active: Arc::new(AtomicBool::new(false)),
+            goal_manager: None,
         }
     }
 
@@ -577,7 +612,18 @@ impl AgentRuntime {
             tools: Some(Arc::new(tools)),
             skills: Some(Arc::new(skills)),
             skill_invocation_active: Arc::new(AtomicBool::new(false)),
+            goal_manager: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_goal_manager(mut self, manager: &Arc<GoalManager>) -> Self {
+        self.goal_manager = Some(Arc::clone(manager));
+        self
+    }
+
+    pub fn tools_mut(&mut self) -> Option<&mut Arc<ToolRegistry>> {
+        self.tools.as_mut()
     }
 
     #[must_use]
@@ -619,12 +665,16 @@ impl AgentRuntime {
             let turn = context.turns.saturating_add(1);
             return terminal_lifecycle_stream(turn, StopReason::Cancelled);
         }
+        if let Ok(mut todos) = self.config.todos.lock() {
+            todos.clone_from(&context.todos);
+        }
 
         let live_context = context.clone();
         let model = Arc::clone(&self.model);
         let tools = self.tools.clone();
         let skills = self.skills.clone();
         let skill_invocation_active = Arc::clone(&self.skill_invocation_active);
+        let goal_manager = self.goal_manager.clone();
         let config = self.config.clone();
         let process_supervisor = ProcessSupervisor::default();
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -635,6 +685,11 @@ impl AgentRuntime {
             emitter.emit(AgentEvent::RunStarted {
                 turn: emitter.context.turns.saturating_add(1),
             });
+            if let Some(skill_context) = emitter.context.take_skill_context() {
+                emitter.emit(AgentEvent::MessageAppended {
+                    message: skill_context,
+                });
+            }
             emitter.emit(AgentEvent::MessageAppended { message });
             if let Err(err) = run_agent_turn(
                 model,
@@ -642,6 +697,7 @@ impl AgentRuntime {
                 tools,
                 skills,
                 skill_invocation_active,
+                goal_manager,
                 &mut emitter,
                 cancel_token,
                 process_supervisor.clone(),
@@ -936,6 +992,7 @@ async fn run_agent_turn(
     tools: Option<Arc<ToolRegistry>>,
     skills: Option<Arc<SkillStore>>,
     skill_invocation_active: Arc<AtomicBool>,
+    goal_manager: Option<Arc<GoalManager>>,
     emitter: &mut EventEmitter,
     cancel_token: CancellationToken,
     process_supervisor: ProcessSupervisor,
@@ -982,6 +1039,12 @@ async fn run_agent_turn(
         else {
             pending_messages = drain_next_pending_queue(&config, emitter);
             if pending_messages.is_empty() {
+                if let Some(messages) =
+                    goal_continuation_messages(goal_manager.as_deref(), &config).await
+                {
+                    pending_messages = messages;
+                    continue;
+                }
                 break;
             }
             continue;
@@ -1103,6 +1166,31 @@ async fn run_agent_turn(
     process_supervisor.cleanup_all().await;
     emit_run_finished(emitter, final_turn, final_stop_reason);
     Ok(())
+}
+
+async fn goal_continuation_messages(
+    manager: Option<&GoalManager>,
+    config: &AgentConfig,
+) -> Option<Vec<AgentMessage>> {
+    let manager = manager?;
+    let goal = manager.active()?;
+    let max_turns = config.max_goal_turns.unwrap_or(30);
+    if goal.turn_count >= max_turns {
+        let _ = manager
+            .update_status(
+                crate::goal::GoalStatus::Blocked,
+                Some(format!("turn budget of {max_turns} exceeded")),
+            )
+            .await;
+        return None;
+    }
+    let _ = manager.increment_turn().await;
+    let objective = goal.objective;
+    Some(vec![AgentMessage::system_text(format!(
+        "Goal still active: {objective}. Continue making progress. \
+         Use `UpdateGoalStatus` when the goal is complete or blocked, \
+         or `GetGoalStatus` to check current state."
+    ))])
 }
 
 fn drain_next_pending_queue(config: &AgentConfig, emitter: &mut EventEmitter) -> Vec<AgentMessage> {
@@ -2367,6 +2455,7 @@ fn default_tool_context(
                 .with_permission_policy(config.tool_permission_policy.clone())
                 .with_cancel_token(cancel_token.clone())
                 .with_process_supervisor(process_supervisor)
+                .with_background_tasks(config.background_tasks.clone())
         })
         .map_err(AgentRuntimeError::Tool)
 }

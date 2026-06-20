@@ -18,6 +18,9 @@ use crate::{QuestionEventData, QuestionOptionData};
 pub struct AskUserInput {
     /// 1–4 questions to ask the user.
     pub questions: Vec<AskUserQuestionInput>,
+    /// If true, ask the question as a background task and return immediately.
+    #[serde(default)]
+    pub background: bool,
 }
 
 /// A single question in the model-facing input schema.
@@ -151,6 +154,45 @@ impl Tool for AskUserTool {
 
             let id = Uuid::new_v4().to_string();
             let (response_tx, response_rx) = oneshot::channel::<QuestionResponse>();
+            let id = if input.background {
+                format!("question-{id}")
+            } else {
+                id
+            };
+
+            if input.background {
+                let description = questions
+                    .first()
+                    .and_then(|question| question.header.clone())
+                    .unwrap_or_else(|| {
+                        questions.first().map_or_else(
+                            || "Question".to_owned(),
+                            |question| question.question.clone(),
+                        )
+                    });
+                let result = ctx
+                    .background_tasks
+                    .start_question(id.clone(), description)
+                    .await;
+                let manager = ctx.background_tasks.clone();
+                let task_id = id.clone();
+                self.question_tx
+                    .send(PendingQuestion {
+                        id,
+                        questions,
+                        response_tx,
+                    })
+                    .map_err(|_| super::ToolError::InvalidInput {
+                        tool: "AskUserQuestion".to_owned(),
+                        message: "question channel closed".to_owned(),
+                    })?;
+                tokio::spawn(async move {
+                    if let Ok(response) = response_rx.await {
+                        manager.complete_question(&task_id, response.answers).await;
+                    }
+                });
+                return Ok(result);
+            }
 
             // Send the pending question through the channel.
             self.question_tx
@@ -356,5 +398,160 @@ mod tests {
             .as_object()
             .unwrap();
         assert!(props.contains_key("questions"));
+    }
+
+    #[test]
+    fn schema_has_background_flag() {
+        let (tx, _rx) = mpsc::unbounded_channel::<PendingQuestion>();
+        let tool = AskUserTool::new(tx);
+        let schema = tool.input_schema();
+        let props = schema
+            .get("properties")
+            .expect("properties")
+            .as_object()
+            .unwrap();
+        assert!(props.contains_key("background"));
+    }
+
+    #[tokio::test]
+    async fn ask_user_background_returns_task_without_waiting() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingQuestion>();
+        let tool = AskUserTool::new(tx);
+        let ctx = make_ctx();
+
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "background": true,
+                    "questions": [{
+                        "question": "Where should config live?",
+                        "header": "Config",
+                        "options": [{ "label": "Project" }, { "label": "User" }],
+                        "multi_select": false
+                    }]
+                }),
+            )
+            .await
+            .expect("background question should start");
+
+        assert!(!result.is_error);
+        let details = result.details.expect("details");
+        let task_id = details["task_id"].as_str().expect("task id");
+        assert!(task_id.starts_with("question-"));
+        assert_eq!(details["kind"], "question");
+        assert_eq!(details["status"], "waiting_for_user");
+        assert_eq!(details["automatic_notification"], true);
+
+        let pending = rx.try_recv().expect("question should be visible to host");
+        assert_eq!(pending.id, task_id);
+        assert_eq!(pending.questions[0].question, "Where should config live?");
+    }
+
+    #[tokio::test]
+    async fn ask_user_background_answer_is_visible_through_task_output() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingQuestion>();
+        let tool = AskUserTool::new(tx);
+        let ctx = make_ctx();
+
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "background": true,
+                    "questions": [{
+                        "question": "Where should config live?",
+                        "options": [{ "label": "Project" }, { "label": "User" }],
+                        "multi_select": false
+                    }]
+                }),
+            )
+            .await
+            .expect("background question should start");
+        let task_id = result.details.as_ref().unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let pending = rx.recv().await.expect("pending question");
+        pending
+            .response_tx
+            .send(QuestionResponse {
+                answers: vec!["Project".to_owned()],
+            })
+            .expect("send response");
+        for _ in 0..20 {
+            let output = ctx
+                .background_tasks
+                .output(
+                    &task_id,
+                    false,
+                    std::time::Duration::from_secs(0),
+                    ctx.max_output_bytes,
+                )
+                .await
+                .expect("TaskOutput result");
+            if output.details.as_ref().unwrap()["status"] == "completed" {
+                let details = output.details.unwrap();
+                assert_eq!(details["kind"], "question");
+                assert_eq!(details["answers"], json!(["Project"]));
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("background question should complete");
+    }
+
+    #[tokio::test]
+    async fn ask_user_background_stopped_question_ignores_late_answer() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingQuestion>();
+        let tool = AskUserTool::new(tx);
+        let ctx = make_ctx();
+
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "background": true,
+                    "questions": [{
+                        "question": "Continue?",
+                        "options": [{ "label": "Yes" }, { "label": "No" }],
+                        "multi_select": false
+                    }]
+                }),
+            )
+            .await
+            .expect("background question should start");
+        let task_id = result.details.as_ref().unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let pending = rx.recv().await.expect("pending question");
+
+        ctx.background_tasks
+            .stop(&task_id, "no longer needed", ctx.max_output_bytes)
+            .await
+            .expect("TaskStop should stop question");
+        pending
+            .response_tx
+            .send(QuestionResponse {
+                answers: vec!["Yes".to_owned()],
+            })
+            .expect("late response can still be sent");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let output = ctx
+            .background_tasks
+            .output(
+                &task_id,
+                false,
+                std::time::Duration::from_secs(0),
+                ctx.max_output_bytes,
+            )
+            .await
+            .expect("TaskOutput result");
+        let details = output.details.unwrap();
+        assert_eq!(details["status"], "stopped");
+        assert!(details.get("answers").is_none());
     }
 }

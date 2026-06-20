@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use neo_agent_core::{PermissionPolicy, ToolContext, ToolError, ToolRegistry};
+use neo_agent_core::{
+    BackgroundTaskManager, PermissionPolicy, ToolContext, ToolError, ToolRegistry,
+};
 use serde_json::json;
 
 #[tokio::test]
@@ -101,4 +103,89 @@ async fn bash_requires_permission_and_honors_timeout() {
         .await
         .expect_err("bash should time out");
     assert!(matches!(timed_out, ToolError::CommandTimedOut { .. }));
+}
+
+#[tokio::test]
+async fn task_stop_rejects_question_without_shell_permission() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let background_tasks = BackgroundTaskManager::new();
+    background_tasks
+        .start_question("question-permission".to_owned(), "Pick one".to_owned())
+        .await;
+
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::read_only())
+        .with_background_tasks(background_tasks);
+
+    let error = registry
+        .run(
+            "TaskStop",
+            &context,
+            json!({ "task_id": "question-permission" }),
+        )
+        .await
+        .expect_err("TaskStop should require shell permission");
+
+    assert!(matches!(
+        error,
+        ToolError::PermissionDenied { operation: "shell" }
+    ));
+}
+
+#[tokio::test]
+async fn task_stop_can_cancel_question_with_shell_permission() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let background_tasks = BackgroundTaskManager::new();
+    background_tasks
+        .start_question("question-permission".to_owned(), "Pick one".to_owned())
+        .await;
+
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_background_tasks(background_tasks);
+
+    let stopped = registry
+        .run(
+            "TaskStop",
+            &context,
+            json!({ "task_id": "question-permission" }),
+        )
+        .await
+        .expect("TaskStop should cancel question after shell approval");
+
+    assert!(stopped.content.contains("status: stopped"));
+    assert_eq!(stopped.details.as_ref().unwrap()["kind"], "question");
+}
+
+#[tokio::test]
+async fn task_stop_requires_shell_permission_by_default() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let background_tasks = BackgroundTaskManager::new();
+    background_tasks
+        .start_question("question-needs-approval".to_owned(), "Pick one".to_owned())
+        .await;
+
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::default())
+        .with_background_tasks(background_tasks);
+
+    let error = registry
+        .run(
+            "TaskStop",
+            &context,
+            json!({ "task_id": "question-needs-approval" }),
+        )
+        .await
+        .expect_err("TaskStop should require shell approval by default");
+
+    assert!(matches!(
+        error,
+        ToolError::PermissionDenied { operation: "shell" }
+    ));
 }

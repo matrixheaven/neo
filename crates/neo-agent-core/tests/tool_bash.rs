@@ -74,6 +74,7 @@ fn builtin_tool_names_use_model_facing_kimi_style_casing() {
             "Grep",
             "List",
             "Read",
+            "TaskList",
             "TaskOutput",
             "TaskStop",
             "Terminal",
@@ -128,6 +129,61 @@ async fn bash_foreground_output_is_raw_terminal_text_with_structured_details() {
 }
 
 #[tokio::test]
+async fn task_list_defaults_to_active_background_tasks() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let empty = registry
+        .run("TaskList", &context, json!({}))
+        .await
+        .expect("TaskList should run");
+    assert_eq!(empty.content, "active_background_tasks: 0");
+
+    let started = registry
+        .run(
+            "Bash",
+            &context,
+            json!({
+                "command": "sleep 1",
+                "run_in_background": true,
+                "description": "sleeping background command"
+            }),
+        )
+        .await
+        .expect("background bash should start");
+    let task_id = started.details.as_ref().expect("start details")["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_owned();
+
+    let listed = registry
+        .run("TaskList", &context, json!({}))
+        .await
+        .expect("TaskList should list active tasks");
+    assert!(listed.content.contains("active_background_tasks: 1"));
+    assert!(listed.content.contains(&format!("task_id: {task_id}")));
+    assert!(listed.content.contains("kind: bash"));
+    assert!(listed.content.contains("status: running"));
+    assert!(
+        listed
+            .content
+            .contains("description: sleeping background command")
+    );
+
+    let details = listed.details.expect("list details");
+    assert_eq!(details["active_background_tasks"], 1);
+    assert_eq!(details["tasks"][0]["task_id"], task_id);
+    assert_eq!(details["tasks"][0]["kind"], "bash");
+
+    let _ = registry
+        .run("TaskStop", &context, json!({ "task_id": task_id }))
+        .await;
+}
+
+#[tokio::test]
 async fn bash_background_run_returns_task_id_and_task_output_finishes() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
@@ -165,7 +221,7 @@ async fn bash_background_run_returns_task_id_and_task_output_finishes() {
         .await
         .expect("TaskOutput should read background output");
     let details = finished.details.expect("output details");
-    assert_eq!(details["status"], "exited");
+    assert_eq!(details["status"], "completed");
     assert_eq!(details["exit_code"], 0);
     assert_eq!(details["stdout"], "starteddone");
     assert_eq!(details["stderr"], "");
@@ -291,7 +347,7 @@ async fn task_stop_is_safe_for_finished_task() {
         .await
         .expect("TaskStop should be safe after completion");
     let details = stopped.details.expect("stop details");
-    assert_eq!(details["status"], "exited");
+    assert_eq!(details["status"], "completed");
     assert_eq!(details["stdout"], "once");
 }
 

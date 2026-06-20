@@ -2,8 +2,8 @@ use futures::StreamExt;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentRuntimeError,
     AgentToolCall, ApprovalRequest, CompactionSettings, Content, PermissionDecision,
-    PermissionOperation, PermissionPolicy, QueueMode, StopReason, Tool, ToolContext, ToolError,
-    ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult,
+    PermissionOperation, PermissionPolicy, QueueMode, StopReason, TodoEventData, Tool, ToolContext,
+    ToolError, ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult,
     harness::{FakeHarness, fake_model},
     session::JsonlSessionWriter,
 };
@@ -1255,6 +1255,164 @@ async fn runtime_executes_tool_call_and_continues_until_end_turn() {
             stop_reason: StopReason::EndTurn,
         })
     );
+}
+
+#[tokio::test]
+async fn runtime_emits_todo_update_only_for_writes() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_write".to_owned(),
+                name: "TodoList".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_write".to_owned(),
+                arguments: json!({
+                    "todos": [{ "title": "Read code", "status": "in_progress" }]
+                }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_read".to_owned(),
+                name: "TodoList".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_read".to_owned(),
+                arguments: json!({}),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_3".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let config = AgentConfig::for_model(harness.model());
+    let tools = ToolRegistry::with_builtin_tools_and_todos(Arc::clone(&config.todos));
+    let runtime = AgentRuntime::with_tools(config, harness.client(), tools);
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("track todos"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("todo tool loop should succeed");
+
+    let todo_events = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TodoUpdated { todos, .. } => Some(todos),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(todo_events.len(), 1);
+    assert_eq!(todo_events[0][0].title, "Read code");
+    assert_eq!(todo_events[0][0].status, "in_progress");
+    assert_eq!(context.todos(), todo_events[0].as_slice());
+    assert!(
+        context.messages().iter().any(|message| {
+            matches!(
+                message,
+                AgentMessage::ToolResult { tool_call_id, content, .. }
+                    if tool_call_id == "tool_read"
+                        && content.iter().any(|part| matches!(part, Content::Text { text } if text.contains("[in_progress] Read code")))
+            )
+        }),
+        "read-mode tool result should include current todos"
+    );
+}
+
+#[tokio::test]
+async fn runtime_emits_empty_todo_update_for_clear() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_clear".to_owned(),
+                name: "TodoList".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_clear".to_owned(),
+                arguments: json!({ "todos": [] }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "cleared".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let config = AgentConfig::for_model(harness.model());
+    config
+        .todos
+        .lock()
+        .expect("todo state")
+        .push(TodoEventData {
+            title: "Old".to_owned(),
+            status: "done".to_owned(),
+        });
+    let tools = ToolRegistry::with_builtin_tools_and_todos(Arc::clone(&config.todos));
+    let runtime = AgentRuntime::with_tools(config, harness.client(), tools);
+    let mut context = AgentContext::from_replay(
+        [AgentEvent::TodoUpdated {
+            turn: 0,
+            todos: vec![TodoEventData {
+                title: "Old".to_owned(),
+                status: "done".to_owned(),
+            }],
+        }]
+        .iter(),
+    );
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("clear todos"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("todo clear should succeed");
+
+    assert!(events.iter().any(|event| {
+        matches!(event, AgentEvent::TodoUpdated { todos, .. } if todos.is_empty())
+    }));
+    assert!(context.todos().is_empty());
 }
 
 #[tokio::test]

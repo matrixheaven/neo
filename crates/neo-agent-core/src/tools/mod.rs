@@ -1,15 +1,19 @@
 mod ask_user;
+mod background_tasks;
 mod bash;
 mod edit;
 pub mod extensions;
 mod find;
 mod glob;
+mod goal;
 mod grep;
 mod list;
 mod mcp;
 mod plan_mode;
 mod process_supervisor;
 mod read;
+mod sessions;
+mod skills_manager;
 mod terminal;
 mod todo;
 mod write;
@@ -19,7 +23,7 @@ use std::{
     future::Future,
     path::{Component, Path, PathBuf},
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -30,6 +34,8 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::PermissionPolicy;
+use crate::TodoEventData;
+use crate::goal::GoalManager;
 
 pub const DEFAULT_BASH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
@@ -41,8 +47,19 @@ pub use ask_user::{
     AskUserInput, AskUserOptionInput, AskUserQuestionInput, AskUserTool, PendingQuestion,
     QuestionResponse,
 };
+pub use background_tasks::{
+    BackgroundTaskKind, BackgroundTaskManager, BackgroundTaskSnapshot, BackgroundTaskStatus,
+    CommandOutput, ManagedBackgroundCommand, TaskListTool, TaskOutputTool, TaskStopTool,
+    cap_output_details, cap_plain_output, format_collected_answers, output_from_buffers,
+};
 // Re-export Todo tool types.
 pub use todo::{TodoInput, TodoItem, TodoStatus, TodoTool};
+// Re-export Goal tool types.
+pub use goal::{GetGoalStatusTool, StartGoalTool, UpdateGoalStatusTool};
+// Re-export session tool types.
+pub use sessions::SummarizeSessionsTool;
+// Re-export skill-manager tool types.
+pub use skills_manager::{CreateSkillTool, ListSkillsTool, MoveSkillTool};
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolResult, ToolError>> + Send + 'a>>;
 
@@ -91,6 +108,7 @@ pub struct ToolContext {
     pub max_output_bytes: usize,
     pub cancel_token: CancellationToken,
     pub process_supervisor: ProcessSupervisor,
+    pub background_tasks: BackgroundTaskManager,
     /// Optional callback for streaming intermediate tool output (e.g. bash
     /// stdout lines). Set by the runtime so tools can emit live updates.
     pub tool_update: Option<ToolUpdateCallback>,
@@ -105,6 +123,7 @@ impl std::fmt::Debug for ToolContext {
             .field("max_output_bytes", &self.max_output_bytes)
             .field("cancel_token", &self.cancel_token)
             .field("process_supervisor", &self.process_supervisor)
+            .field("background_tasks", &self.background_tasks)
             .field("tool_update", &self.tool_update.is_some())
             .finish()
     }
@@ -120,6 +139,7 @@ impl ToolContext {
             max_output_bytes: 64 * 1024,
             cancel_token: CancellationToken::new(),
             process_supervisor: ProcessSupervisor::default(),
+            background_tasks: BackgroundTaskManager::new(),
             tool_update: None,
         })
     }
@@ -145,6 +165,12 @@ impl ToolContext {
     #[must_use]
     pub fn with_process_supervisor(mut self, process_supervisor: ProcessSupervisor) -> Self {
         self.process_supervisor = process_supervisor;
+        self
+    }
+
+    #[must_use]
+    pub fn with_background_tasks(mut self, background_tasks: BackgroundTaskManager) -> Self {
+        self.background_tasks = background_tasks;
         self
     }
 
@@ -301,18 +327,24 @@ impl ToolRegistry {
 
     #[must_use]
     pub fn with_builtin_tools() -> Self {
+        Self::with_builtin_tools_and_todos(Arc::new(Mutex::new(Vec::new())))
+    }
+
+    #[must_use]
+    pub fn with_builtin_tools_and_todos(todos: Arc<Mutex<Vec<TodoEventData>>>) -> Self {
         let mut registry = Self::new();
         registry.register(read::ReadTool);
         registry.register(list::ListTool);
         registry.register(grep::GrepTool);
         registry.register(find::FindTool);
         registry.register(glob::GlobTool);
-        registry.register(self::todo::TodoTool::new());
+        registry.register(self::todo::TodoTool::with_state(todos));
         registry.register(write::WriteTool);
         registry.register(edit::EditTool);
         registry.register(bash::BashTool);
-        registry.register(bash::TaskOutputTool);
-        registry.register(bash::TaskStopTool);
+        registry.register(background_tasks::TaskListTool);
+        registry.register(background_tasks::TaskOutputTool);
+        registry.register(background_tasks::TaskStopTool);
         registry.register(terminal::TerminalTool);
         registry.register(plan_mode::EnterPlanModeTool);
         registry.register(plan_mode::ExitPlanModeTool);
@@ -324,6 +356,12 @@ impl ToolRegistry {
         T: Tool + 'static,
     {
         self.tools.insert(tool.name().to_owned(), Box::new(tool));
+    }
+
+    pub fn register_goal_tools(&mut self, manager: Arc<GoalManager>) {
+        self.register(goal::StartGoalTool::new(Arc::clone(&manager)));
+        self.register(goal::UpdateGoalStatusTool::new(Arc::clone(&manager)));
+        self.register(goal::GetGoalStatusTool::new(manager));
     }
 
     pub fn retain_named(&mut self, names: &BTreeSet<String>) {
