@@ -47,6 +47,10 @@ Kimi reference paths:
 - `docs/kimi-code/packages/agent-core/src/agent/permission/policies/auto-mode-ask-user-question-deny.ts`
 - `docs/kimi-code/packages/agent-core/src/agent/permission/policies/exit-plan-mode-review-ask.ts`
 - `docs/kimi-code/apps/kimi-code/src/tui/components/dialogs/permission-selector.ts`
+- `docs/kimi-code/packages/agent-core/src/loop/tool-call.ts`
+- `docs/kimi-code/packages/agent-core/src/loop/tool-scheduler.ts`
+- `docs/kimi-code/packages/agent-core/src/loop/tool-access.ts`
+- `docs/kimi-code/packages/agent-core/src/tools/builtin/collaboration/ask-user.ts`
 
 ### Policy Precedence
 
@@ -65,6 +69,49 @@ Runtime policy must be evaluated in this order:
 11. Manual fallback ask.
 
 Neo does not need to copy Kimi's entire permission-rule DSL in this task. The scope is mode replacement and the existing approval UX.
+
+### Runtime Tool Scheduling
+
+Kimi does **not** execute every tool call in a response with a blind
+`Promise.all`. Its `runToolCallBatch` prepares and authorizes tool calls in
+provider/source order, then submits executable tasks to `ToolScheduler`.
+`ToolScheduler` starts tasks only when their declared `ToolAccesses` do not
+conflict with currently active tasks or queued earlier tasks. Terminal
+`tool.result` records are still finalized and emitted in provider order.
+
+Neo should adopt the conservative part of this design:
+
+- Permission and plan policies run before a tool is scheduled.
+- The policy result must tell the scheduler whether the call can open a
+  blocking user dialog.
+- If a batch contains any blocking-dialog call, later calls in that model batch
+  must not start until the dialog-producing call resolves.
+- Non-blocking tools may still run in parallel when their runtime access class
+  permits it.
+- Results must remain appended to model context in source order, even if
+  non-blocking executions finish out of order.
+
+Blocking-dialog calls are mode-dependent:
+
+- `manual`: `Write`, `Edit`, foreground `Bash`, foreground `Terminal`, unknown
+  external tools, non-session-approved asks, and non-background
+  `AskUserQuestion` can block.
+- `auto`: tool approvals are auto-approved, but `AskUserQuestion` is denied
+  before scheduling so it must not block the runtime.
+- `yolo`: normal tool approvals are auto-approved, but non-background
+  `AskUserQuestion` remains allowed and blocking.
+- `ExitPlanMode` with non-empty reviewable plan is blocking in `manual` and
+  `yolo`, and non-blocking in `auto`.
+
+Kimi's `AskUserQuestion` **does** have `background?: boolean`. In Kimi, setting
+`background=true` registers a `QuestionBackgroundTask`, returns a `task_id`
+immediately, and says the answer will arrive automatically in a later turn. That
+is only safe when the model can continue without the answer. Neo may keep this
+semantics only if the TUI/runtime actually keeps the pending question visible,
+lets the user answer it later, and injects the answer back into a later turn. If
+that full background-question path is not implemented or not visible, then
+`background=true` must be rejected with a clear tool error instead of becoming a
+hidden indefinite wait.
 
 ### Plan Mode
 
@@ -131,11 +178,15 @@ Show `← current` on the current mode row.
 - `crates/neo-agent-core/src/runtime.rs`
   - Replace `AgentConfig.tool_permission_policy` with `permission_mode`.
   - Rewrite tool preparation policy order.
+  - Add runtime scheduling metadata so mode-dependent blocking dialogs serialize
+    their model tool-call batch before later tools start.
   - Preserve approval event emission and session approval behavior.
 - `crates/neo-agent-core/src/mode/plan_mode_guard.rs`
   - Stop returning old `PermissionDecision`; return a dedicated hard-guard result.
 - `crates/neo-agent-core/src/tools/ask_user.rs`
   - Ensure auto mode denies `AskUserQuestion` before tool execution.
+  - Keep `background=true` only if the background-question task path is fully
+    visible and answerable; otherwise reject it with a clear tool error.
 - `crates/neo-agent-core/src/tools/plan_mode.rs`
   - Ensure tool result semantics support plan review approve/reject/revise.
 
@@ -545,6 +596,417 @@ rtk cargo test -p neo-agent-core runtime_turn -- --nocapture
 ```
 
 Expected: pass.
+
+## Task 3.5: Runtime Tool Scheduling Refactor
+
+**Files:**
+- Modify: `crates/neo-agent-core/src/runtime.rs`
+- Modify: `crates/neo-agent-core/src/tools/ask_user.rs`
+- Modify: `crates/neo-agent-core/tests/runtime_turn.rs`
+- Modify: `docs/tools.md` if runtime scheduling docs become stale
+
+**Why this task exists:** Permission modes change which tools can open
+Approval dialogs. A tool batch that is safe to run in parallel in `auto` can be
+blocking in `manual`. Do not keep the current scheduling as a separate ad-hoc
+check bolted onto old `PermissionDecision`; make scheduling consume the new
+mode-policy result from Task 3.
+
+- [ ] **Step 1: Write the failing Ask User scheduling test**
+
+Add this test to `crates/neo-agent-core/tests/runtime_turn.rs`. Adjust helper
+names to match the migrated types from Task 3, but keep the behavior exactly:
+
+```rust
+#[tokio::test]
+async fn parallel_mode_serializes_non_background_ask_user_question() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart { id: "msg_1".to_owned() },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "AskUserQuestion".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({
+                    "questions": [{
+                        "question": "Continue?",
+                        "header": "Flow",
+                        "options": [
+                            { "label": "Yes", "description": "Continue now" },
+                            { "label": "No", "description": "Stop now" }
+                        ],
+                        "multi_select": false
+                    }]
+                }),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_2".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_2".to_owned(),
+                arguments: json!({ "text": "must wait" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let (question_tx, mut question_rx) = mpsc::unbounded_channel();
+    let mut tools = ToolRegistry::new();
+    tools.register(neo_agent_core::AskUserTool::new(question_tx));
+    tools.register(RecordingEchoTool { executed: Arc::clone(&executed) });
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Yolo)
+            .with_tool_execution_mode(ToolExecutionMode::Parallel),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+
+    let mut stream = runtime.run_turn(&mut context, AgentMessage::user_text("ask then echo"));
+    let pending = timeout(Duration::from_millis(250), question_rx.recv())
+        .await
+        .expect("question should be requested")
+        .expect("question should be pending");
+
+    assert!(
+        executed.lock().expect("executed lock poisoned").is_empty(),
+        "later tools must not start while a blocking user question waits"
+    );
+
+    pending
+        .response_tx
+        .send(neo_agent_core::QuestionResponse {
+            answers: vec!["Yes".to_owned()],
+        })
+        .expect("send question response");
+    while let Some(event) = stream.next().await {
+        event.expect("event should be ok");
+    }
+
+    assert_eq!(
+        *executed.lock().expect("executed lock poisoned"),
+        vec!["must wait".to_owned()]
+    );
+}
+```
+
+Run:
+
+```bash
+rtk cargo test -p neo-agent-core --test runtime_turn parallel_mode_serializes_non_background_ask_user_question -- --nocapture
+```
+
+Expected before implementation: fail because the second tool can start while
+the question is waiting.
+
+- [ ] **Step 2: Write the failing manual Approval scheduling test**
+
+Convert the existing approval-pending parallel test, or add this behavior if
+the old test is gone:
+
+```rust
+#[tokio::test]
+async fn parallel_mode_serializes_manual_approval_batches() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let harness = parallel_write_and_echo_harness();
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::with_builtin_tools();
+    tools.register(RecordingEchoTool { executed: Arc::clone(&executed) });
+    let (decision_sender, decision_receiver) = oneshot::channel();
+    let decision_receiver = Arc::new(Mutex::new(Some(decision_receiver)));
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Manual)
+            .with_tool_execution_mode(ToolExecutionMode::Parallel)
+            .with_workspace_root(workspace.path())
+            .expect("workspace config")
+            .with_async_approval_handler({
+                let decision_receiver = Arc::clone(&decision_receiver);
+                move |_request| {
+                    let decision_receiver = take_decision_receiver(&decision_receiver);
+                    async move {
+                        decision_receiver
+                            .await
+                            .expect("approval decision should be sent")
+                    }
+                }
+            }),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+
+    let mut stream = runtime.run_turn(&mut context, AgentMessage::user_text("call tools"));
+    let mut events = Vec::new();
+    collect_until_approval(&mut stream, &mut events).await;
+
+    assert!(
+        timeout(Duration::from_millis(250), stream.next()).await.is_err(),
+        "later tools in a manual approval batch must wait for the active approval"
+    );
+    assert!(executed.lock().expect("executed lock poisoned").is_empty());
+
+    decision_sender
+        .send(PermissionApprovalDecision::AllowOnce)
+        .expect("send allow decision");
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("event should be ok"));
+    }
+
+    assert_eq!(
+        *executed.lock().expect("executed lock poisoned"),
+        vec!["already allowed".to_owned()]
+    );
+}
+```
+
+Run:
+
+```bash
+rtk cargo test -p neo-agent-core --test runtime_turn parallel_mode_serializes_manual_approval_batches -- --nocapture
+```
+
+Expected before implementation: fail if the allowed `echo` tool starts while
+the write approval is pending.
+
+- [ ] **Step 3: Add scheduling metadata to permission preparation**
+
+In `runtime.rs`, extend the Task 3 preparation result so every runnable or
+synthetic tool carries scheduling metadata:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolSchedulingClass {
+    ParallelSafe,
+    Exclusive,
+    BlockingDialog,
+}
+
+struct PreparedToolCall {
+    tool_call: AgentToolCall,
+    result: PreparedToolCallResult,
+    scheduling: ToolSchedulingClass,
+    access: ToolAccess,
+}
+```
+
+Use simple conservative classification:
+
+```rust
+fn scheduling_class_for_preparation(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+    preparation: &PermissionPreparation,
+) -> ToolSchedulingClass {
+    if matches!(preparation, PermissionPreparation::Ask { .. }) {
+        return ToolSchedulingClass::BlockingDialog;
+    }
+    if tool_call.name == "AskUserQuestion" && !ask_user_runs_in_background(tool_call) {
+        return ToolSchedulingClass::BlockingDialog;
+    }
+    if tool_call.name == "ExitPlanMode"
+        && config.permission_mode != PermissionMode::Auto
+        && exit_plan_mode_has_reviewable_plan(config)
+    {
+        return ToolSchedulingClass::BlockingDialog;
+    }
+    if matches!(tool_call.name.as_str(), "Bash" | "Terminal" | "Write" | "Edit") {
+        return ToolSchedulingClass::Exclusive;
+    }
+    ToolSchedulingClass::ParallelSafe
+}
+
+fn ask_user_runs_in_background(tool_call: &AgentToolCall) -> bool {
+    tool_call
+        .arguments
+        .get("background")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+```
+
+Do not implement file-path conflict scheduling in this plan. Kimi has
+`ToolAccesses.file(...)` and conflict detection; Neo can add that later. This
+plan only needs `ParallelSafe`, `Exclusive`, and `BlockingDialog`.
+
+- [ ] **Step 4: Replace ad-hoc parallel/sequential choice with a scheduler**
+
+Replace the old branch:
+
+```rust
+match config.tool_execution_mode {
+    ToolExecutionMode::Sequential => execute_tool_calls_sequential(...),
+    ToolExecutionMode::Parallel => execute_tool_calls_parallel(...),
+}
+```
+
+with a small scheduler function:
+
+```rust
+async fn execute_tool_calls_scheduled(
+    config: &AgentConfig,
+    registry: &ToolRegistry,
+    skills: Option<&SkillStore>,
+    skill_invocation_active: &AtomicBool,
+    turn: u32,
+    tool_calls: &[AgentToolCall],
+    emitter: &mut EventEmitter,
+    cancel_token: &CancellationToken,
+    process_supervisor: &ProcessSupervisor,
+) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
+    if matches!(config.tool_execution_mode, ToolExecutionMode::Sequential) {
+        return execute_tool_calls_sequential(
+            config,
+            registry,
+            skills,
+            skill_invocation_active,
+            turn,
+            tool_calls,
+            emitter,
+            cancel_token,
+            process_supervisor,
+        )
+        .await;
+    }
+
+    if tool_calls.iter().any(|call| {
+        let prep = permission_preparation_for_mode(config, call);
+        scheduling_class_for_preparation(config, call, &prep) == ToolSchedulingClass::BlockingDialog
+    }) {
+        return execute_tool_calls_sequential(
+            config,
+            registry,
+            skills,
+            skill_invocation_active,
+            turn,
+            tool_calls,
+            emitter,
+            cancel_token,
+            process_supervisor,
+        )
+        .await;
+    }
+
+    if tool_calls.iter().any(|call| {
+        let prep = permission_preparation_for_mode(config, call);
+        scheduling_class_for_preparation(config, call, &prep) == ToolSchedulingClass::Exclusive
+    }) {
+        return execute_tool_calls_sequential(
+            config,
+            registry,
+            skills,
+            skill_invocation_active,
+            turn,
+            tool_calls,
+            emitter,
+            cancel_token,
+            process_supervisor,
+        )
+        .await;
+    }
+
+    execute_tool_calls_parallel(
+        config,
+        registry,
+        skills,
+        skill_invocation_active,
+        turn,
+        tool_calls,
+        emitter,
+        cancel_token,
+        process_supervisor,
+    )
+    .await
+}
+```
+
+This intentionally serializes the whole batch when a blocking or exclusive call
+is present. It is more conservative than Kimi's access-level scheduler but much
+harder to get wrong during the permission-mode migration.
+
+- [ ] **Step 5: Make `AskUserQuestion background=true` honest**
+
+Kimi supports `background=true`, but only because it has a real
+`QuestionBackgroundTask` path. Neo must choose one of these two explicit
+implementations:
+
+Option A, full support:
+
+```rust
+// AskUserTool::execute
+if input.background {
+    // Register a background question task.
+    // Return task_id immediately.
+    // Keep the pending question visible in TUI task state.
+    // Inject the eventual answer into a later turn as a background task notification.
+}
+```
+
+Option B, conservative rejection:
+
+```rust
+if input.background {
+    return Ok(ToolResult::error(
+        "AskUserQuestion background=true is not supported yet. Ask a foreground question or continue without user input.",
+    ));
+}
+```
+
+Do **not** implement a hidden wait. If the UI cannot surface and answer the
+background question later, choose Option B.
+
+- [ ] **Step 6: Add background Ask User tests**
+
+If Option A is implemented, add:
+
+```rust
+#[tokio::test]
+async fn ask_user_background_returns_task_id_without_blocking_later_tools() {
+    /* assert output contains task_id and later echo can execute before answer */
+}
+```
+
+If Option B is implemented, add:
+
+```rust
+#[tokio::test]
+async fn ask_user_background_is_rejected_when_background_question_tasks_are_unavailable() {
+    /* assert ToolResult::error contains "background=true is not supported yet" */
+}
+```
+
+- [ ] **Step 7: Preserve non-blocking parallel behavior**
+
+Keep or add this regression test:
+
+```rust
+#[tokio::test]
+async fn parallel_mode_still_runs_parallel_safe_tools_by_completion_order() {
+    /* two read-only/sleep-echo style tools may finish out of order, but context appends in source order */
+}
+```
+
+Expected: ordinary non-blocking tools still overlap.
+
+- [ ] **Step 8: Verify scheduling**
+
+Run:
+
+```bash
+rtk cargo test -p neo-agent-core --test runtime_turn parallel_mode_serializes_non_background_ask_user_question -- --nocapture
+rtk cargo test -p neo-agent-core --test runtime_turn parallel_mode_serializes_manual_approval_batches -- --nocapture
+rtk cargo test -p neo-agent-core --test runtime_turn parallel_mode_still_runs_parallel_safe_tools_by_completion_order -- --nocapture
+rtk cargo test -p neo-agent-core runtime_turn -- --nocapture
+```
+
+Expected: all pass.
 
 ## Task 4: Config And CLI Mode Replacement
 
@@ -1186,6 +1648,10 @@ Expected: all smoke steps match.
 - Yolo mode skips normal confirmations but still allows explicit user questions.
 - Plan mode guard cannot be bypassed by auto or yolo.
 - Non-empty `ExitPlanMode` review is auto-approved only in auto mode; yolo still reviews.
+- Tool batches containing blocking dialogs are serialized before later tools
+  start, while parallel-safe tools can still overlap.
+- `AskUserQuestion background=true` either has a real visible background-task
+  answer path or is rejected; it must never become a hidden indefinite wait.
 - Footer displays `[manual]`, `[auto]`, or `[yolo]`, never `[ask]`.
 - Docs and examples no longer teach old `[permissions]` config.
 
@@ -1194,6 +1660,9 @@ Expected: all smoke steps match.
 Use at least 3 parallel workers only after the core type shape is agreed:
 
 - Worker A: core runtime and tests (`crates/neo-agent-core`).
+- Worker A2: runtime scheduling and AskUser background semantics
+  (`crates/neo-agent-core/src/runtime.rs`, `tools/ask_user.rs`,
+  `runtime_turn` tests). Run after Worker A defines the new permission types.
 - Worker B: config/CLI/run wiring (`crates/neo-agent/src/config.rs`, `cli.rs`, `modes/run.rs`, CLI tests).
 - Worker C: TUI state/slash/selector/hotkey (`crates/neo-tui`, `crates/neo-agent/src/modes/interactive.rs`).
 - Worker D: docs/examples cleanup after A-C land.

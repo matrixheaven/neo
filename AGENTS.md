@@ -268,6 +268,34 @@ The interactive TUI mode (`neo-agent` with no subcommand) provides:
 - **Approval dialog**: interactive permission approval for tool execution.
 - **Question dialog**: multi-question interactive dialogs via `ask_user` tool.
 
+### Blocking dialog contract
+
+Neo treats focused overlays as blocking dialogs when they require direct user
+choice or text entry outside the main composer. This includes `/resume`,
+`/model`, `/provider`, session/model/provider pickers, API key or registry input,
+approval prompts, non-background `AskUserQuestion`, and plan review dialogs such
+as `ExitPlanMode`.
+
+When a blocking dialog is focused:
+
+- Hide the main prompt/composer completely (`prompt_height = 0`).
+- Route all insert, paste, delete, backspace, arrow, enter, and escape input to
+  the dialog before `PromptState`.
+- Keep any required free-form text inside the dialog itself, for example
+  `Other` text in Ask User or `Reject with feedback` in Approval.
+- Do not reintroduce paths where Approval or Ask User borrow the bottom
+  composer for text input.
+- Add or update regression tests that prove the composer is hidden and typed
+  input does not leak into `PromptState` while the dialog is focused.
+
+Tool execution must respect the same contract. If a model response contains any
+tool call that can open a blocking dialog, the runtime must execute that tool
+batch sequentially in source order, even when `ToolExecutionMode::Parallel` is
+configured. This prevents a later Bash approval, Ask User question, or other
+blocking prompt from being displayed while an earlier dialog is still waiting.
+`AskUserQuestion` with `background = true` is the exception: it may return
+immediately and should not force the batch into blocking-dialog serialization.
+
 ### Image generation
 
 `neo images generate` uses OpenAI-style image endpoints for models that

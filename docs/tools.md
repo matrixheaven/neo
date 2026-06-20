@@ -100,6 +100,15 @@ executes only if the configured approval handler returns `Allow`. Without a
 handler, ask-mode operations return an approval-required tool result instead of
 silently executing.
 
+Tool calls that can open focused blocking dialogs are serialized within their
+model response batch, even when parallel tool execution is enabled. This covers
+non-background `AskUserQuestion`, approval-backed operations such as shell or
+write approvals, and plan review via `ExitPlanMode`. Later tools in the same
+batch do not start until the active dialog-producing call resolves, so the TUI
+never has to stack multiple user-choice dialogs at once. `AskUserQuestion` with
+`background=true` is intentionally non-blocking and may return a task id
+immediately.
+
 ## Example
 
 See [examples/tools/read-file-schema.json](../examples/tools/read-file-schema.json)
