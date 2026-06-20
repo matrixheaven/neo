@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 
-use neo_agent_core::skills::SkillStore;
-use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, PermissionOperation};
+use neo_agent_core::{
+    AgentEvent, AgentMessage, Content, ImageRef, PermissionOperation, skills::SkillStore,
+};
 
 use crate::ansi::{Style, paint, truncate_to_width, visible_width};
 use crate::chrome::{NeoChromeState, PromptState, ToolStatusKind, TuiTheme};
