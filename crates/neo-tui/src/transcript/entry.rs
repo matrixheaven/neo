@@ -368,10 +368,15 @@ impl TranscriptEntry {
                     turns.map_or_else(String::new, |t| format!("Turns: {t}"))
                 ),
             ),
-            Self::SkillActivation { name, description, .. } => (
-                "Skill",
-                format!("Used skill: {name}\n{}", description.as_deref().unwrap_or("")),
-            ),
+            Self::SkillActivation { name, description, args } => {
+                let body = args
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|a| format!("args: {a}"))
+                    .or_else(|| description.clone())
+                    .unwrap_or_default();
+                ("Skill", format!("Used Skill: {name}\n{body}"))
+            }
         }
     }
 
