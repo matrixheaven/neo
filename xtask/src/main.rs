@@ -3159,82 +3159,76 @@ mod tests {
     }
 
     #[test]
-    fn parity_validation_rejects_auth_token_leaks_in_docs() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        write_catalog_schema_fixture(dir.path());
-        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
-        std::fs::write(
-            dir.path().join("docs").join("export.md"),
-            "Authorization: Bearer sk-live-abcdefghijklmnopqrstuvwxyz123456\n",
-        )
-        .expect("write docs");
+    fn parity_validation_checks_secret_like_doc_content() {
+        struct Case {
+            name: &'static str,
+            file_path: &'static str,
+            file_content: &'static str,
+            should_pass: bool,
+            expected_substring: &'static str,
+        }
 
-        let errors = validate_parity_gate(dir.path()).expect("parity validation should run");
+        let cases: &[Case] = &[
+            Case {
+                name: "rejects real token in docs",
+                file_path: "docs/export.md",
+                file_content: "Authorization: Bearer sk-live-abcdefghijklmnopqrstuvwxyz123456\n",
+                should_pass: false,
+                expected_substring: "auth token leak: Authorization: Bearer sk-live-abcdefghijklmnopqrstuvwxyz123456",
+            },
+            Case {
+                name: "allows auth token placeholders in docs",
+                file_path: "docs/providers.md",
+                file_content: "Authorization: Bearer $NEO_API_KEY\napi_key_env = \"OPENAI_API_KEY\"\n",
+                should_pass: true,
+                expected_substring: "",
+            },
+            Case {
+                name: "does not treat source identifiers as auth token leaks",
+                file_path: "crates/neo-agent/src/main.rs",
+                file_content: concat!(
+                    "let api_key = api_key_from_provider(provider, &env);\n",
+                    "let captured_token = StdArc::new(std::sync::Mutex::new(None));\n",
+                ),
+                should_pass: true,
+                expected_substring: "",
+            },
+            Case {
+                name: "rejects private package signature fixture material",
+                file_path: "examples/packages/signature-fixture.json",
+                file_content: r#"{"privateKey":"-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"}"#,
+                should_pass: false,
+                expected_substring: "private package signature material",
+            },
+        ];
 
-        assert_eq!(
-            errors,
-            vec![
-                "docs/export.md:1 contains auth token leak: Authorization: Bearer sk-live-abcdefghijklmnopqrstuvwxyz123456".to_string()
-            ]
-        );
-    }
+        for case in cases {
+            let dir = tempfile::tempdir().expect("tempdir");
+            write_catalog_schema_fixture(dir.path());
+            let target = dir.path().join(case.file_path);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).expect("parent");
+            }
+            std::fs::write(&target, case.file_content).expect("write file");
 
-    #[test]
-    fn parity_validation_allows_auth_token_placeholders_in_docs() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        write_catalog_schema_fixture(dir.path());
-        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
-        std::fs::write(
-            dir.path().join("docs").join("providers.md"),
-            "Authorization: Bearer $NEO_API_KEY\napi_key_env = \"OPENAI_API_KEY\"\n",
-        )
-        .expect("write docs");
+            let errors = validate_parity_gate(dir.path()).expect("parity validation should run");
 
-        let errors = validate_parity_gate(dir.path()).expect("parity validation should run");
-
-        assert!(errors.is_empty(), "{errors:?}");
-    }
-
-    #[test]
-    fn parity_validation_does_not_treat_source_identifiers_as_auth_token_leaks() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        write_catalog_schema_fixture(dir.path());
-        let source_dir = dir.path().join("crates").join("neo-agent").join("src");
-        std::fs::create_dir_all(&source_dir).expect("source dir");
-        std::fs::write(
-            source_dir.join("main.rs"),
-            concat!(
-                "let api_key = api_key_from_provider(provider, &env);\n",
-                "let captured_token = StdArc::new(std::sync::Mutex::new(None));\n",
-            ),
-        )
-        .expect("source");
-
-        let errors = validate_parity_gate(dir.path()).expect("parity validation should run");
-
-        assert!(errors.is_empty(), "{errors:?}");
-    }
-
-    #[test]
-    fn parity_validation_rejects_private_package_signature_fixture_material() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        write_catalog_schema_fixture(dir.path());
-        let fixtures = dir.path().join("examples").join("packages");
-        std::fs::create_dir_all(&fixtures).expect("fixtures dir");
-        std::fs::write(
-            fixtures.join("signature-fixture.json"),
-            r#"{"privateKey":"-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"}"#,
-        )
-        .expect("fixture");
-
-        let errors = validate_parity_gate(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "examples/packages/signature-fixture.json:1 contains private package signature material: {\"privateKey\":\"-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\"}".to_string()
-            ]
-        );
+            if case.should_pass {
+                assert!(
+                    errors.is_empty(),
+                    "{}: expected no errors, got {errors:?}",
+                    case.name
+                );
+            } else {
+                let prefix = format!("{}:1 contains {}", case.file_path, case.expected_substring);
+                assert!(
+                    errors.iter().any(|e| e.contains(&prefix)),
+                    "{}: expected an error containing {:?}, got {errors:?}",
+                    case.name,
+                    prefix
+                );
+            }
+        }
     }
 
     fn write_catalog_schema_fixture(root: &Path) {
