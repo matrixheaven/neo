@@ -2595,390 +2595,6 @@ mod tests {
     }
 
     #[test]
-    fn parity_validation_rejects_stale_mcp_adapter_gap_after_adapter_symbol_exists() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let source_dir = dir
-            .path()
-            .join("crates")
-            .join("agent-core")
-            .join("src")
-            .join("tools");
-        std::fs::create_dir_all(&source_dir).expect("mcp source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            source_dir.join("mcp.rs"),
-            "pub trait McpToolAdapter {}\npub struct McpToolProvider;\n",
-        )
-        .expect("write mcp source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("INDEX.md"),
-            "No MCP client adapter is wired into neo-agent-core yet.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/INDEX.md:1 contains stale MCP adapter gap claim: No MCP client adapter is wired into neo-agent-core yet.".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_mcp_process_gap_after_stdio_adapter_exists() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let source_dir = dir
-            .path()
-            .join("crates")
-            .join("agent-core")
-            .join("src")
-            .join("tools");
-        std::fs::create_dir_all(&source_dir).expect("mcp source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            source_dir.join("mcp.rs"),
-            concat!(
-                "pub trait McpToolAdapter {}\n",
-                "pub struct McpToolProvider;\n",
-                "pub struct McpStdioToolAdapter;\n",
-                "const METHODS: &[&str] = &[\"tools/list\", \"tools/call\"];\n",
-            ),
-        )
-        .expect("write mcp source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("INDEX.md"),
-            "Neo still does not yet spawn external MCP server processes.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/INDEX.md:1 contains stale MCP process adapter gap claim: Neo still does not yet spawn external MCP server processes.".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_http_mcp_json_subscribe_gap_after_event_reader_exists() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let source_dir = dir
-            .path()
-            .join("crates")
-            .join("agent-core")
-            .join("src")
-            .join("tools");
-        std::fs::create_dir_all(&source_dir).expect("mcp source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            source_dir.join("mcp.rs"),
-            concat!(
-                "impl McpHttpToolAdapter {\n",
-                "  async fn start_resource_event_reader(&self) {}\n",
-                "}\n",
-            ),
-        )
-        .expect("write mcp source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("INDEX.md"),
-            "HTTP MCP JSON subscribe ACK cannot receive resource updates yet.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/INDEX.md:1 contains stale HTTP MCP JSON subscribe event gap claim: HTTP MCP JSON subscribe ACK cannot receive resource updates yet.".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_mcp_event_stream_url_gap_after_symbols_exist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let source_dir = dir
-            .path()
-            .join("crates")
-            .join("agent-core")
-            .join("src")
-            .join("tools");
-        std::fs::create_dir_all(&source_dir).expect("mcp source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            source_dir.join("mcp.rs"),
-            concat!(
-                "fn start_resource_event_reader() {}\n",
-                "fn resource_event_stream_url() {",
-                " let _ = \"eventStreamUrl\";",
-                " let _ = \"event_stream_url\";",
-                " let _ = \"event_url\";",
-                " }\n",
-            ),
-        )
-        .expect("write mcp source");
-        std::fs::write(
-            dir.path()
-                .join("docs")
-                .join("gap")
-                .join("neo-agent-core.md"),
-            "MCP JSON subscribe ACK cannot provide alternate event-channel URLs yet.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/neo-agent-core.md:1 contains stale MCP subscribe event URL gap claim: MCP JSON subscribe ACK cannot provide alternate event-channel URLs yet.".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_extension_lifecycle_gap_after_commands_exist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let source_dir = dir.path().join("crates").join("neo-agent").join("src");
-        std::fs::create_dir_all(&source_dir).expect("agent source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            source_dir.join("cli.rs"),
-            "pub enum ExtensionCommand { Status, Enable, Disable }\n",
-        )
-        .expect("write cli source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("neo-agent.md"),
-            "Do not document extension lifecycle management as available Neo features yet.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/neo-agent.md:1 contains stale extension lifecycle gap claim: Do not document extension lifecycle management as available Neo features yet.".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_session_branching_gap_after_fork_exists() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let source_dir = dir
-            .path()
-            .join("crates")
-            .join("agent-core")
-            .join("src")
-            .join("session");
-        std::fs::create_dir_all(&source_dir).expect("session source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            source_dir.join("mod.rs"),
-            "impl SessionMetadataStore { pub fn fork(&self) {} pub fn rename(&self) {} }\n",
-        )
-        .expect("write session source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("INDEX.md"),
-            "Session tree branching and naming remain pi-inspired future work.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/INDEX.md:1 contains stale session branching gap claim: Session tree branching and naming remain pi-inspired future work.".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_live_session_picker_gap_after_interactive_symbols_exist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let interactive_dir = dir
-            .path()
-            .join("crates")
-            .join("neo-agent")
-            .join("src")
-            .join("modes");
-        let input_dir = dir.path().join("crates").join("neo-tui").join("src");
-        std::fs::create_dir_all(&interactive_dir).expect("interactive source dir");
-        std::fs::create_dir_all(&input_dir).expect("input source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            interactive_dir.join("interactive.rs"),
-            "fn open_session_picker() {} fn load_selected_session() {} fn session_catalog_for_config() {}\n",
-        )
-        .expect("write interactive source");
-        std::fs::write(
-            input_dir.join("input.rs"),
-            "enum Key { SessionPickerOpen }\n",
-        )
-        .expect("write input source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("neo-agent.md"),
-            "The live session picker remains future work.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/neo-agent.md:1 contains stale live session picker gap claim: The live session picker remains future work.".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_live_model_picker_gap_after_interactive_symbols_exist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let interactive_dir = dir
-            .path()
-            .join("crates")
-            .join("neo-agent")
-            .join("src")
-            .join("modes");
-        let input_dir = dir.path().join("crates").join("neo-tui").join("src");
-        std::fs::create_dir_all(&interactive_dir).expect("interactive source dir");
-        std::fs::create_dir_all(&input_dir).expect("input source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            interactive_dir.join("interactive.rs"),
-            "fn open_model_picker() {} fn apply_selected_model() {} fn model_picker_catalog_for_config() {}\n",
-        )
-        .expect("write interactive source");
-        std::fs::write(input_dir.join("input.rs"), "enum Key { ModelPickerOpen }\n")
-            .expect("write input source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("neo-agent.md"),
-            "The live model picker is still missing.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/neo-agent.md:1 contains stale live model picker gap claim: The live model picker is still missing.".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_fork_before_continue_gap_after_session_fork_ui_exists() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let interactive_dir = dir
-            .path()
-            .join("crates")
-            .join("neo-agent")
-            .join("src")
-            .join("modes");
-        let input_dir = dir.path().join("crates").join("neo-tui").join("src");
-        std::fs::create_dir_all(&interactive_dir).expect("interactive source dir");
-        std::fs::create_dir_all(&input_dir).expect("input source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            interactive_dir.join("interactive.rs"),
-            "fn fork_selected_session() {} fn fork_session_transcript() {}\n",
-        )
-        .expect("write interactive source");
-        std::fs::write(
-            input_dir.join("input.rs"),
-            "enum Action { SessionFork } const ID: &str = \"tui.session.fork\";\n",
-        )
-        .expect("write input source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("neo-agent.md"),
-            "Explicit fork-before-continue controls are still a gap beyond local JSONL append.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/neo-agent.md:1 contains stale interactive session fork gap claim: Explicit fork-before-continue controls are still a gap beyond local JSONL append.".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_runtime_hook_queue_gap_after_symbols_exist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let source_dir = dir.path().join("crates").join("agent-core").join("src");
-        std::fs::create_dir_all(&source_dir).expect("agent-core source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            source_dir.join("runtime.rs"),
-            concat!(
-                "impl AgentConfig {\n",
-                "  pub fn with_before_tool_call(&self) {}\n",
-                "  pub fn with_after_tool_call(&self) {}\n",
-                "  pub fn with_queue_modes(&self) {}\n",
-                "}\n",
-                "impl AgentContext { pub fn queue_steering_message(&self) {} }\n",
-            ),
-        )
-        .expect("write runtime source");
-        std::fs::write(
-            dir.path()
-                .join("docs")
-                .join("gap")
-                .join("neo-agent-core.md"),
-            "Add hook/steering docs only when the runtime exposes those APIs.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/neo-agent-core.md:1 contains stale runtime hook/queue gap claim: Add hook/steering docs only when the runtime exposes those APIs.".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_tui_diff_gap_after_renderer_symbols_exist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let tui_src = dir.path().join("crates").join("neo-tui").join("src");
-        std::fs::create_dir_all(&tui_src).expect("tui source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            tui_src.join("tool_diff.rs"),
-            "struct DiffModel; struct DiffRenderState; fn parse_unified() {}\n",
-        )
-        .expect("write tui diff source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("tui.md"),
-            "Keep TUI docs scoped until diff rendering lands.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/tui.md:1 contains stale TUI unified diff renderer gap claim: Keep TUI docs scoped until diff rendering lands.".to_string()
-            ]
-        );
-    }
-
-    #[test]
     fn parity_validation_allows_advanced_diff_affordance_gaps_after_basic_renderer_symbols_exist() {
         let dir = tempfile::tempdir().expect("tempdir");
         let tui_src = dir.path().join("crates").join("neo-tui").join("src");
@@ -2998,125 +2614,6 @@ mod tests {
         let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
 
         assert_eq!(errors, Vec::<String>::new());
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_tui_paste_buffering_gap_after_input_parser_symbols_exist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let tui_src = dir.path().join("crates").join("neo-tui").join("src");
-        std::fs::create_dir_all(&tui_src).expect("tui source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            tui_src.join("input.rs"),
-            concat!(
-                "struct InputParser;\n",
-                "const BRACKETED_PASTE_START: &[u8] = b\"\\x1b[200~\";\n",
-                "const BRACKETED_PASTE_END: &[u8] = b\"\\x1b[201~\";\n",
-            ),
-        )
-        .expect("write tui input source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("tui.md"),
-            "Keep TUI docs scoped until stdin buffering lands.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/tui.md:1 contains stale TUI paste buffering gap claim: Keep TUI docs scoped until stdin buffering lands.".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_tui_transcript_selection_copy_gap_after_symbols_exist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let tui_src = dir.path().join("crates").join("neo-tui").join("src");
-        let transcript_src = tui_src.join("transcript");
-        let interactive_dir = dir
-            .path()
-            .join("crates")
-            .join("neo-agent")
-            .join("src")
-            .join("modes");
-        std::fs::create_dir_all(&transcript_src).expect("tui transcript source dir");
-        std::fs::create_dir_all(&interactive_dir).expect("interactive source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            transcript_src.join("store.rs"),
-            concat!(
-                "struct TranscriptSelection;\n",
-                "impl TranscriptStore { fn copy_selection(&self) {} }\n",
-            ),
-        )
-        .expect("write tui transcript store source");
-        std::fs::write(
-            transcript_src.join("pane.rs"),
-            "impl TranscriptPane { fn copy_selected_transcript_text(&self) {} }\n",
-        )
-        .expect("write tui transcript pane source");
-        std::fs::write(
-            tui_src.join("input.rs"),
-            concat!(
-                "enum Action { TranscriptSelectionStart, TranscriptCopySelection }\n",
-                "const ID: &str = \"tui.transcript.copySelection\";\n",
-            ),
-        )
-        .expect("write tui input source");
-        std::fs::write(
-            interactive_dir.join("interactive.rs"),
-            "fn copy_transcript_selection_to_clipboard() {}\n",
-        )
-        .expect("write interactive source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("tui.md"),
-            "Selected transcript-region copy remains future work.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/tui.md:1 contains stale TUI transcript selection copy gap claim: Selected transcript-region copy remains future work.".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_terminal_image_protocol_gap_after_symbols_exist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let tui_src = dir.path().join("crates").join("neo-tui").join("src");
-        std::fs::create_dir_all(&tui_src).expect("tui source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            tui_src.join("image.rs"),
-            concat!(
-                "pub enum ImageProtocolError {}\n",
-                "pub struct KittyGraphicsOptions;\n",
-                "pub fn encode_kitty_graphics() {}\n",
-                "pub fn encode_iterm2_inline_image() {}\n",
-            ),
-        )
-        .expect("write tui image source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("tui.md"),
-            "Terminal image protocols remain not implemented.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/tui.md:1 contains stale terminal image protocol gap claim: Terminal image protocols remain not implemented.".to_string()
-            ]
-        );
     }
 
     #[test]
@@ -3146,166 +2643,325 @@ mod tests {
     }
 
     #[test]
-    fn parity_validation_rejects_stale_sixel_gap_after_encoder_symbols_exist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let tui_src = dir.path().join("crates").join("neo-tui").join("src");
-        std::fs::create_dir_all(&tui_src).expect("tui source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            tui_src.join("image.rs"),
-            concat!(
-                "pub struct SixelImageOptions;\n",
-                "pub struct SixelPaletteColor;\n",
-                "pub fn encode_sixel_image() {}\n",
-            ),
-        )
-        .expect("write tui image source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("tui.md"),
-            "Sixel output remains not implemented.\n",
-        )
-        .expect("write gap doc");
+    fn parity_validation_rejects_stale_gap_claims_after_symbols_exist() {
+        struct SourceFixture {
+            path: &'static str,
+            content: &'static str,
+        }
 
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+        struct Case {
+            name: &'static str,
+            sources: &'static [SourceFixture],
+            doc_path: &'static str,
+            doc_content: &'static str,
+            expected_error: &'static str,
+        }
 
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/tui.md:1 contains stale Sixel image protocol gap claim: Sixel output remains not implemented.".to_string()
-            ]
-        );
-    }
+        let cases: &[Case] = &[
+            Case {
+                name: "mcp adapter gap",
+                sources: &[SourceFixture {
+                    path: "crates/agent-core/src/tools/mcp.rs",
+                    content: "pub trait McpToolAdapter {}\npub struct McpToolProvider;\n",
+                }],
+                doc_path: "docs/gap/INDEX.md",
+                doc_content: "No MCP client adapter is wired into neo-agent-core yet.\n",
+                expected_error: "stale MCP adapter gap claim: No MCP client adapter is wired into neo-agent-core yet.",
+            },
+            Case {
+                name: "session fork gap",
+                sources: &[SourceFixture {
+                    path: "crates/agent-core/src/session/mod.rs",
+                    content: "impl SessionMetadataStore { pub fn fork(&self) {} pub fn rename(&self) {} }\n",
+                }],
+                doc_path: "docs/gap/INDEX.md",
+                doc_content: "Session tree branching and naming remain pi-inspired future work.\n",
+                expected_error: "stale session branching gap claim: Session tree branching and naming remain pi-inspired future work.",
+            },
+            Case {
+                name: "terminal image protocol gap",
+                sources: &[SourceFixture {
+                    path: "crates/neo-tui/src/image.rs",
+                    content: "pub enum ImageProtocolError {}\npub struct KittyGraphicsOptions;\npub fn encode_kitty_graphics() {}\npub fn encode_iterm2_inline_image() {}\n",
+                }],
+                doc_path: "docs/gap/tui.md",
+                doc_content: "Terminal image protocols remain not implemented.\n",
+                expected_error: "stale terminal image protocol gap claim: Terminal image protocols remain not implemented.",
+            },
+            Case {
+                name: "mcp process gap",
+                sources: &[SourceFixture {
+                    path: "crates/agent-core/src/tools/mcp.rs",
+                    content: concat!(
+                        "pub trait McpToolAdapter {}\n",
+                        "pub struct McpToolProvider;\n",
+                        "pub struct McpStdioToolAdapter;\n",
+                        "const METHODS: &[&str] = &[\"tools/list\", \"tools/call\"];\n",
+                    ),
+                }],
+                doc_path: "docs/gap/INDEX.md",
+                doc_content: "Neo still does not yet spawn external MCP server processes.\n",
+                expected_error: "stale MCP process adapter gap claim: Neo still does not yet spawn external MCP server processes.",
+            },
+            Case {
+                name: "http mcp json subscribe gap",
+                sources: &[SourceFixture {
+                    path: "crates/agent-core/src/tools/mcp.rs",
+                    content: concat!(
+                        "impl McpHttpToolAdapter {\n",
+                        "  async fn start_resource_event_reader(&self) {}\n",
+                        "}\n",
+                    ),
+                }],
+                doc_path: "docs/gap/INDEX.md",
+                doc_content: "HTTP MCP JSON subscribe ACK cannot receive resource updates yet.\n",
+                expected_error: "stale HTTP MCP JSON subscribe event gap claim: HTTP MCP JSON subscribe ACK cannot receive resource updates yet.",
+            },
+            Case {
+                name: "mcp event stream url gap",
+                sources: &[SourceFixture {
+                    path: "crates/agent-core/src/tools/mcp.rs",
+                    content: concat!(
+                        "fn start_resource_event_reader() {}\n",
+                        "fn resource_event_stream_url() {",
+                        " let _ = \"eventStreamUrl\";",
+                        " let _ = \"event_stream_url\";",
+                        " let _ = \"event_url\";",
+                        " }\n",
+                    ),
+                }],
+                doc_path: "docs/gap/neo-agent-core.md",
+                doc_content: "MCP JSON subscribe ACK cannot provide alternate event-channel URLs yet.\n",
+                expected_error: "stale MCP subscribe event URL gap claim: MCP JSON subscribe ACK cannot provide alternate event-channel URLs yet.",
+            },
+            Case {
+                name: "extension lifecycle gap",
+                sources: &[SourceFixture {
+                    path: "crates/neo-agent/src/cli.rs",
+                    content: "pub enum ExtensionCommand { Status, Enable, Disable }\n",
+                }],
+                doc_path: "docs/gap/neo-agent.md",
+                doc_content: "Do not document extension lifecycle management as available Neo features yet.\n",
+                expected_error: "stale extension lifecycle gap claim: Do not document extension lifecycle management as available Neo features yet.",
+            },
+            Case {
+                name: "live session picker gap",
+                sources: &[
+                    SourceFixture {
+                        path: "crates/neo-agent/src/modes/interactive.rs",
+                        content: "fn open_session_picker() {} fn load_selected_session() {} fn session_catalog_for_config() {}\n",
+                    },
+                    SourceFixture {
+                        path: "crates/neo-tui/src/input.rs",
+                        content: "enum Key { SessionPickerOpen }\n",
+                    },
+                ],
+                doc_path: "docs/gap/neo-agent.md",
+                doc_content: "The live session picker remains future work.\n",
+                expected_error: "stale live session picker gap claim: The live session picker remains future work.",
+            },
+            Case {
+                name: "live model picker gap",
+                sources: &[
+                    SourceFixture {
+                        path: "crates/neo-agent/src/modes/interactive.rs",
+                        content: "fn open_model_picker() {} fn apply_selected_model() {} fn model_picker_catalog_for_config() {}\n",
+                    },
+                    SourceFixture {
+                        path: "crates/neo-tui/src/input.rs",
+                        content: "enum Key { ModelPickerOpen }\n",
+                    },
+                ],
+                doc_path: "docs/gap/neo-agent.md",
+                doc_content: "The live model picker is still missing.\n",
+                expected_error: "stale live model picker gap claim: The live model picker is still missing.",
+            },
+            Case {
+                name: "fork before continue gap",
+                sources: &[
+                    SourceFixture {
+                        path: "crates/neo-agent/src/modes/interactive.rs",
+                        content: "fn fork_selected_session() {} fn fork_session_transcript() {}\n",
+                    },
+                    SourceFixture {
+                        path: "crates/neo-tui/src/input.rs",
+                        content: "enum Action { SessionFork } const ID: &str = \"tui.session.fork\";\n",
+                    },
+                ],
+                doc_path: "docs/gap/neo-agent.md",
+                doc_content: "Explicit fork-before-continue controls are still a gap beyond local JSONL append.\n",
+                expected_error: "stale interactive session fork gap claim: Explicit fork-before-continue controls are still a gap beyond local JSONL append.",
+            },
+            Case {
+                name: "runtime hook queue gap",
+                sources: &[SourceFixture {
+                    path: "crates/agent-core/src/runtime.rs",
+                    content: concat!(
+                        "impl AgentConfig {\n",
+                        "  pub fn with_before_tool_call(&self) {}\n",
+                        "  pub fn with_after_tool_call(&self) {}\n",
+                        "  pub fn with_queue_modes(&self) {}\n",
+                        "}\n",
+                        "impl AgentContext { pub fn queue_steering_message(&self) {} }\n",
+                    ),
+                }],
+                doc_path: "docs/gap/neo-agent-core.md",
+                doc_content: "Add hook/steering docs only when the runtime exposes those APIs.\n",
+                expected_error: "stale runtime hook/queue gap claim: Add hook/steering docs only when the runtime exposes those APIs.",
+            },
+            Case {
+                name: "tui diff gap",
+                sources: &[SourceFixture {
+                    path: "crates/neo-tui/src/tool_diff.rs",
+                    content: "struct DiffModel; struct DiffRenderState; fn parse_unified() {}\n",
+                }],
+                doc_path: "docs/gap/tui.md",
+                doc_content: "Keep TUI docs scoped until diff rendering lands.\n",
+                expected_error: "stale TUI unified diff renderer gap claim: Keep TUI docs scoped until diff rendering lands.",
+            },
+            Case {
+                name: "tui paste buffering gap",
+                sources: &[SourceFixture {
+                    path: "crates/neo-tui/src/input.rs",
+                    content: concat!(
+                        "struct InputParser;\n",
+                        "const BRACKETED_PASTE_START: &[u8] = b\"\\x1b[200~\";\n",
+                        "const BRACKETED_PASTE_END: &[u8] = b\"\\x1b[201~\";\n",
+                    ),
+                }],
+                doc_path: "docs/gap/tui.md",
+                doc_content: "Keep TUI docs scoped until stdin buffering lands.\n",
+                expected_error: "stale TUI paste buffering gap claim: Keep TUI docs scoped until stdin buffering lands.",
+            },
+            Case {
+                name: "tui transcript selection copy gap",
+                sources: &[
+                    SourceFixture {
+                        path: "crates/neo-tui/src/transcript/store.rs",
+                        content: concat!(
+                            "struct TranscriptSelection;\n",
+                            "impl TranscriptStore { fn copy_selection(&self) {} }\n",
+                        ),
+                    },
+                    SourceFixture {
+                        path: "crates/neo-tui/src/transcript/pane.rs",
+                        content: "impl TranscriptPane { fn copy_selected_transcript_text(&self) {} }\n",
+                    },
+                    SourceFixture {
+                        path: "crates/neo-tui/src/input.rs",
+                        content: concat!(
+                            "enum Action { TranscriptSelectionStart, TranscriptCopySelection }\n",
+                            "const ID: &str = \"tui.transcript.copySelection\";\n",
+                        ),
+                    },
+                    SourceFixture {
+                        path: "crates/neo-agent/src/modes/interactive.rs",
+                        content: "fn copy_transcript_selection_to_clipboard() {}\n",
+                    },
+                ],
+                doc_path: "docs/gap/tui.md",
+                doc_content: "Selected transcript-region copy remains future work.\n",
+                expected_error: "stale TUI transcript selection copy gap claim: Selected transcript-region copy remains future work.",
+            },
+            Case {
+                name: "sixel gap",
+                sources: &[SourceFixture {
+                    path: "crates/neo-tui/src/image.rs",
+                    content: concat!(
+                        "pub struct SixelImageOptions;\n",
+                        "pub struct SixelPaletteColor;\n",
+                        "pub fn encode_sixel_image() {}\n",
+                    ),
+                }],
+                doc_path: "docs/gap/tui.md",
+                doc_content: "Sixel output remains not implemented.\n",
+                expected_error: "stale Sixel image protocol gap claim: Sixel output remains not implemented.",
+            },
+            Case {
+                name: "session export json gap",
+                sources: &[SourceFixture {
+                    path: "crates/neo-agent/src/session_commands.rs",
+                    content: concat!(
+                        "pub async fn export_json() {}\n",
+                        "pub async fn export_json_artifact() {}\n",
+                        "const FORMAT: &str = \"neo.session.export_json\";\n",
+                    ),
+                }],
+                doc_path: "docs/gap/neo-agent.md",
+                doc_content: "Local session export-json remains future work.\n",
+                expected_error: "stale session export-json gap claim: Local session export-json remains future work.",
+            },
+            Case {
+                name: "reasoning replay control gap",
+                sources: &[SourceFixture {
+                    path: "crates/ai/src/options.rs",
+                    content: "pub struct RequestOptions { pub replay_reasoning: bool }\n",
+                }],
+                doc_path: "docs/gap/neo-ai.md",
+                doc_content: "Thinking off cannot suppress signed reasoning replay yet.\n",
+                expected_error: "stale reasoning replay-control gap claim: Thinking off cannot suppress signed reasoning replay yet.",
+            },
+            Case {
+                name: "ai thinking gap",
+                sources: &[
+                    SourceFixture {
+                        path: "crates/ai/src/providers/anthropic.rs",
+                        content: "fn thinking_budget_tokens() { let _ = \"budget_tokens\"; }\n",
+                    },
+                    SourceFixture {
+                        path: "crates/ai/src/providers/google.rs",
+                        content: "fn thinking_budget_tokens() { let _ = \"thinkingConfig\"; }\n",
+                    },
+                ],
+                doc_path: "docs/gap/neo-ai.md",
+                doc_content: "Add Anthropic and Google thinking controls only after Neo has explicit budget contracts.\n",
+                expected_error: "stale Anthropic/Google thinking payload gap claim: Add Anthropic and Google thinking controls only after Neo has explicit budget contracts.",
+            },
+            Case {
+                name: "ai thinking translation gap",
+                sources: &[
+                    SourceFixture {
+                        path: "crates/ai/src/providers/anthropic.rs",
+                        content: "fn thinking_budget_tokens() { let _ = \"budget_tokens\"; }\n",
+                    },
+                    SourceFixture {
+                        path: "crates/ai/src/providers/google.rs",
+                        content: "fn thinking_budget_tokens() { let _ = \"thinkingConfig\"; }\n",
+                    },
+                ],
+                doc_path: "docs/providers.md",
+                doc_content: "Neo intentionally does not translate reasoning effort into Anthropic or Google thinking payloads yet.\n",
+                expected_error: "stale Anthropic/Google thinking payload gap claim: Neo intentionally does not translate reasoning effort into Anthropic or Google thinking payloads yet.",
+            },
+        ];
 
-    #[test]
-    fn parity_validation_rejects_stale_session_export_json_gap_after_symbols_exist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let agent_src = dir.path().join("crates").join("neo-agent").join("src");
-        std::fs::create_dir_all(&agent_src).expect("neo-agent source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            agent_src.join("session_commands.rs"),
-            concat!(
-                "pub async fn export_json() {}\n",
-                "pub async fn export_json_artifact() {}\n",
-                "const FORMAT: &str = \"neo.session.export_json\";\n",
-            ),
-        )
-        .expect("write session commands source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("neo-agent.md"),
-            "Local session export-json remains future work.\n",
-        )
-        .expect("write gap doc");
+        for case in cases {
+            let dir = tempfile::tempdir().expect("tempdir");
+            for source in case.sources {
+                let source_path = dir.path().join(source.path);
+                if let Some(parent) = source_path.parent() {
+                    std::fs::create_dir_all(parent).expect("source parent");
+                }
+                std::fs::write(&source_path, source.content).expect("write source");
+            }
+            let doc_path = dir.path().join(case.doc_path);
+            if let Some(parent) = doc_path.parent() {
+                std::fs::create_dir_all(parent).expect("doc parent");
+            }
+            std::fs::write(&doc_path, case.doc_content).expect("write doc");
 
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
+            let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
 
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/neo-agent.md:1 contains stale session export-json gap claim: Local session export-json remains future work.".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_reasoning_replay_control_gap_after_symbols_exist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let ai_src = dir.path().join("crates").join("ai").join("src");
-        std::fs::create_dir_all(&ai_src).expect("ai source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            ai_src.join("options.rs"),
-            "pub struct RequestOptions { pub replay_reasoning: bool }\n",
-        )
-        .expect("write ai options source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("neo-ai.md"),
-            "Thinking off cannot suppress signed reasoning replay yet.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/neo-ai.md:1 contains stale reasoning replay-control gap claim: Thinking off cannot suppress signed reasoning replay yet.".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_ai_thinking_gap_after_payload_symbols_exist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let providers_dir = dir
-            .path()
-            .join("crates")
-            .join("ai")
-            .join("src")
-            .join("providers");
-        std::fs::create_dir_all(&providers_dir).expect("ai provider source dir");
-        std::fs::create_dir_all(dir.path().join("docs").join("gap")).expect("docs gap dir");
-        std::fs::write(
-            providers_dir.join("anthropic.rs"),
-            "fn thinking_budget_tokens() { let _ = \"budget_tokens\"; }\n",
-        )
-        .expect("write anthropic source");
-        std::fs::write(
-            providers_dir.join("google.rs"),
-            "fn thinking_budget_tokens() { let _ = \"thinkingConfig\"; }\n",
-        )
-        .expect("write google source");
-        std::fs::write(
-            dir.path().join("docs").join("gap").join("neo-ai.md"),
-            "Add Anthropic and Google thinking controls only after Neo has explicit budget contracts.\n",
-        )
-        .expect("write gap doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/gap/neo-ai.md:1 contains stale Anthropic/Google thinking payload gap claim: Add Anthropic and Google thinking controls only after Neo has explicit budget contracts.".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn parity_validation_rejects_stale_ai_thinking_translation_gap_after_payload_symbols_exist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let providers_dir = dir
-            .path()
-            .join("crates")
-            .join("ai")
-            .join("src")
-            .join("providers");
-        std::fs::create_dir_all(&providers_dir).expect("ai provider source dir");
-        std::fs::create_dir_all(dir.path().join("docs")).expect("docs dir");
-        std::fs::write(
-            providers_dir.join("anthropic.rs"),
-            "fn thinking_budget_tokens() { let _ = \"budget_tokens\"; }\n",
-        )
-        .expect("write anthropic source");
-        std::fs::write(
-            providers_dir.join("google.rs"),
-            "fn thinking_budget_tokens() { let _ = \"thinkingConfig\"; }\n",
-        )
-        .expect("write google source");
-        std::fs::write(
-            dir.path().join("docs").join("providers.md"),
-            "Neo intentionally does not translate reasoning effort into Anthropic or Google thinking payloads yet.\n",
-        )
-        .expect("write provider doc");
-
-        let errors = validate_docs_parity(dir.path()).expect("parity validation should run");
-
-        assert_eq!(
-            errors,
-            vec![
-                "docs/providers.md:1 contains stale Anthropic/Google thinking payload gap claim: Neo intentionally does not translate reasoning effort into Anthropic or Google thinking payloads yet.".to_string()
-            ]
-        );
+            assert_eq!(
+                errors,
+                vec![format!(
+                    "{}:1 contains {}",
+                    case.doc_path, case.expected_error
+                )],
+                "case {}",
+                case.name
+            );
+        }
     }
 
     #[test]
