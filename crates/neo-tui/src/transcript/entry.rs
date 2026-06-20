@@ -1031,4 +1031,42 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(lines.len() >= 3); // header + 2+ wrapped body lines + blank
     }
+
+    #[test]
+    fn skill_used_renders_header_only_when_no_body() {
+        let entry =
+            TranscriptEntry::skill_activated("executing-plans", None::<String>, None::<String>);
+        let lines = entry
+            .render(60, &TuiTheme::default())
+            .into_iter()
+            .map(|l| l.text().to_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("✦ Used Skill: executing-plans"))
+        );
+        assert!(!lines.iter().any(|l| l.contains("args:")));
+        assert!(!lines.iter().any(|l| l.contains("Execute")));
+    }
+
+    #[test]
+    fn skill_used_falls_back_to_description_when_args_are_whitespace() {
+        let entry = TranscriptEntry::skill_activated(
+            "executing-plans",
+            Some("Execute a plan task-by-task.".to_owned()),
+            Some("   ".to_owned()),
+        );
+        let lines = entry
+            .render(60, &TuiTheme::default())
+            .into_iter()
+            .map(|l| l.text().to_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Execute a plan task-by-task."))
+        );
+        assert!(!lines.iter().any(|l| l.contains("args:")));
+    }
 }
