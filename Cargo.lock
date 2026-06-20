@@ -1180,6 +1180,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1251,6 +1252,7 @@ dependencies = [
  "serde_json",
  "syntect",
  "tokio",
+ "unicode-segmentation",
  "unicode-width",
 ]
 
