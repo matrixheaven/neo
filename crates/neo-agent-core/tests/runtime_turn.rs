@@ -2288,6 +2288,14 @@ async fn runtime_emits_approval_request_for_ask_permission_and_skips_tool_execut
     );
 }
 
+fn assert_tool_was_executed(executed: &[String], should_execute: bool) {
+    let was_executed = !executed.is_empty();
+    assert_eq!(
+        was_executed, should_execute,
+        "expected should_execute={should_execute}, executed list: {executed:?}"
+    );
+}
+
 #[tokio::test]
 async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
     let harness = FakeHarness::from_turns([
@@ -2363,6 +2371,7 @@ async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
         *executed.lock().expect("executed lock poisoned"),
         vec!["approved".to_owned()]
     );
+    assert_tool_was_executed(&executed.lock().expect("lock poisoned"), true);
     assert!(events.contains(&AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "tool_1".to_owned(),
@@ -2447,6 +2456,7 @@ async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
         arguments: json!({ "text": "denied" }),
     }));
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
+    assert_tool_was_executed(&executed.lock().expect("lock poisoned"), false);
     assert!(events.contains(&AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "tool_1".to_owned(),
@@ -2634,6 +2644,7 @@ async fn runtime_executes_ask_permission_tool_after_async_approval_wait_allows_i
         *executed.lock().expect("executed lock poisoned"),
         vec!["async approved".to_owned()]
     );
+    assert_tool_was_executed(&executed.lock().expect("lock poisoned"), true);
     assert!(events.contains(&AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "tool_1".to_owned(),
@@ -2674,6 +2685,7 @@ async fn runtime_skips_ask_permission_tool_after_async_approval_wait_denies_it()
         arguments: json!({ "text": "async denied" }),
     }));
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
+    assert_tool_was_executed(&executed.lock().expect("lock poisoned"), false);
     assert_waits_for_approval_decision(&mut stream, "denying").await;
 
     decision_sender
@@ -2685,6 +2697,7 @@ async fn runtime_skips_ask_permission_tool_after_async_approval_wait_denies_it()
     drop(stream);
 
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
+    assert_tool_was_executed(&executed.lock().expect("lock poisoned"), false);
     assert!(events.contains(&AgentEvent::ToolExecutionFinished {
         turn: 1,
         id: "tool_1".to_owned(),
