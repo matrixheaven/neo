@@ -1432,20 +1432,74 @@ async fn execute_tool_calls(
             .await
         }
         ToolExecutionMode::Parallel => {
-            execute_tool_calls_parallel(
-                config,
-                registry,
-                skills,
-                skill_invocation_active,
-                turn,
-                tool_calls,
-                emitter,
-                cancel_token,
-                process_supervisor,
-            )
-            .await
+            if tool_calls
+                .iter()
+                .any(|tool_call| tool_call_requires_blocking_dialog(config, tool_call))
+            {
+                execute_tool_calls_sequential(
+                    config,
+                    registry,
+                    skills,
+                    skill_invocation_active,
+                    turn,
+                    tool_calls,
+                    emitter,
+                    cancel_token,
+                    process_supervisor,
+                )
+                .await
+            } else {
+                execute_tool_calls_parallel(
+                    config,
+                    registry,
+                    skills,
+                    skill_invocation_active,
+                    turn,
+                    tool_calls,
+                    emitter,
+                    cancel_token,
+                    process_supervisor,
+                )
+                .await
+            }
         }
     }
+}
+
+fn tool_call_requires_blocking_dialog(config: &AgentConfig, tool_call: &AgentToolCall) -> bool {
+    if tool_call.name == "AskUserQuestion" && !ask_user_runs_in_background(tool_call) {
+        return true;
+    }
+    if tool_call.name == "ExitPlanMode" {
+        return true;
+    }
+    if config.tool_permission_policy.tool == PermissionDecision::Ask
+        && config_has_interactive_approval(config)
+    {
+        return true;
+    }
+    let Some((operation, _)) = permission_operation_for_tool(tool_call) else {
+        return false;
+    };
+    let decision = match operation {
+        PermissionOperation::FileRead => config.tool_permission_policy.file_read,
+        PermissionOperation::FileWrite => config.tool_permission_policy.file_write,
+        PermissionOperation::Shell => config.tool_permission_policy.shell,
+        PermissionOperation::Tool => config.tool_permission_policy.tool,
+    };
+    decision == PermissionDecision::Ask && config_has_interactive_approval(config)
+}
+
+fn config_has_interactive_approval(config: &AgentConfig) -> bool {
+    config.approval_handler.is_some() || config.async_approval_handler.is_some()
+}
+
+fn ask_user_runs_in_background(tool_call: &AgentToolCall) -> bool {
+    tool_call
+        .arguments
+        .get("background")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 #[allow(clippy::too_many_arguments)]

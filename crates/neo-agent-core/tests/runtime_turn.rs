@@ -17,6 +17,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
+    sync::mpsc,
     sync::{Notify, oneshot},
     time::{sleep, timeout},
 };
@@ -2772,7 +2773,7 @@ async fn runtime_cancels_while_waiting_for_async_approval_decision() {
 }
 
 #[tokio::test]
-async fn runtime_parallel_mode_runs_allowed_tool_while_async_approval_is_pending() {
+async fn runtime_parallel_mode_serializes_approval_gated_tool_batches() {
     let workspace = tempfile::tempdir().expect("workspace");
     let harness = parallel_write_and_echo_harness();
     let executed = Arc::new(Mutex::new(Vec::new()));
@@ -2814,25 +2815,13 @@ async fn runtime_parallel_mode_runs_allowed_tool_while_async_approval_is_pending
     let mut events = Vec::new();
     collect_until_approval(&mut stream, &mut events).await;
 
-    let allowed_finish = timeout(Duration::from_millis(250), stream.next())
-        .await
-        .expect("allowed tool should finish while approval is pending")
-        .expect("stream should continue")
-        .expect("event should be ok");
-    assert_eq!(
-        allowed_finish,
-        AgentEvent::ToolExecutionFinished {
-            turn: 1,
-            id: "tool_2".to_owned(),
-            name: "echo".to_owned(),
-            result: ToolResult::ok("already allowed"),
-        }
+    assert!(
+        timeout(Duration::from_millis(250), stream.next())
+            .await
+            .is_err(),
+        "later tools in an approval-gated batch must wait for the active approval"
     );
-    events.push(allowed_finish);
-    assert_eq!(
-        *executed.lock().expect("executed lock poisoned"),
-        vec!["already allowed".to_owned()]
-    );
+    assert!(executed.lock().expect("executed lock poisoned").is_empty());
     assert!(
         !workspace.path().join("approved.txt").exists(),
         "approval-gated write should still be pending"
@@ -3398,6 +3387,86 @@ async fn runtime_parallel_tool_mode_finishes_by_completion_but_appends_in_source
     assert_eq!(
         context.messages()[3],
         AgentMessage::tool_result("tool_2", "sleep_echo", vec![Content::text("fast")], false)
+    );
+}
+
+#[tokio::test]
+async fn runtime_parallel_mode_serializes_blocking_dialog_tools() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "AskUserQuestion".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({
+                    "questions": [{
+                        "question": "Continue?",
+                        "options": [
+                            { "label": "Yes" },
+                            { "label": "No" }
+                        ]
+                    }]
+                }),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_2".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_2".to_owned(),
+                arguments: json!({ "text": "should wait" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let (question_tx, mut question_rx) = mpsc::unbounded_channel();
+    let mut tools = ToolRegistry::new();
+    tools.register(neo_agent_core::AskUserTool::new(question_tx));
+    tools.register(RecordingEchoTool {
+        executed: Arc::clone(&executed),
+    });
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_execution_mode(ToolExecutionMode::Parallel),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+
+    let mut stream = runtime.run_turn(&mut context, AgentMessage::user_text("ask and echo"));
+    let pending = timeout(Duration::from_millis(250), question_rx.recv())
+        .await
+        .expect("question should be requested before other tools run")
+        .expect("question should be pending");
+    assert!(
+        executed.lock().expect("executed lock poisoned").is_empty(),
+        "non-dialog tools must wait while AskUserQuestion is waiting for the user"
+    );
+
+    pending
+        .response_tx
+        .send(neo_agent_core::QuestionResponse {
+            answers: vec!["Yes".to_owned()],
+        })
+        .expect("send question response");
+    while let Some(event) = stream.next().await {
+        event.expect("event should be ok");
+    }
+    drop(stream);
+
+    assert_eq!(
+        *executed.lock().expect("executed lock poisoned"),
+        vec!["should wait".to_owned()]
     );
 }
 
