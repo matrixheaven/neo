@@ -393,6 +393,37 @@ async fn runtime_records_tool_calls_and_sends_tool_specs_to_model() {
     assert_eq!(harness.requests()[0].tools, vec![tool]);
 }
 
+async fn assert_runtime_rejects_unsupported_capability(
+    config: AgentConfig,
+    harness: &FakeHarness,
+    message: AgentMessage,
+    expected_substring: &str,
+    expectation: &str,
+) {
+    let runtime = AgentRuntime::new(config, harness.client());
+    let mut context = AgentContext::new();
+    let error = runtime
+        .run_turn(&mut context, message)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect_err(expectation);
+
+    assert!(matches!(
+        error,
+        AgentRuntimeError::Model(AiError::Configuration(_))
+    ));
+    assert!(
+        error.to_string().contains(expected_substring),
+        "expected {expected_substring:?}, got {error}"
+    );
+    assert!(
+        harness.requests().is_empty(),
+        "request should not reach provider"
+    );
+}
+
 #[tokio::test]
 async fn runtime_rejects_tools_when_model_lacks_tools_before_request() {
     let harness = FakeHarness::from_events([AiStreamEvent::MessageEnd {
@@ -400,27 +431,17 @@ async fn runtime_rejects_tools_when_model_lacks_tools_before_request() {
         usage: None,
     }]);
     let tool = ToolSpec::string_arg("Read", "read file", "path", "file path");
-    let runtime = AgentRuntime::new(
-        AgentConfig::for_model(model_with_capabilities(ModelCapabilities::chat()))
-            .with_tools(vec![tool]),
-        harness.client(),
-    );
-    let mut context = AgentContext::new();
+    let config = AgentConfig::for_model(model_with_capabilities(ModelCapabilities::chat()))
+        .with_tools(vec![tool]);
 
-    let error = runtime
-        .run_turn(&mut context, AgentMessage::user_text("read README"))
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect_err("unsupported tools should fail before provider request");
-
-    assert!(matches!(
-        error,
-        AgentRuntimeError::Model(AiError::Configuration(_))
-    ));
-    assert!(error.to_string().contains("does not support tools"));
-    assert!(harness.requests().is_empty());
+    assert_runtime_rejects_unsupported_capability(
+        config,
+        &harness,
+        AgentMessage::user_text("read README"),
+        "does not support tools",
+        "unsupported tools should fail before provider request",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -429,31 +450,21 @@ async fn runtime_rejects_image_content_when_model_lacks_images_before_request() 
         stop_reason: neo_ai::StopReason::EndTurn,
         usage: None,
     }]);
-    let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
-    let mut context = AgentContext::new();
+    let config = AgentConfig::for_model(harness.model());
 
-    let error = runtime
-        .run_turn(
-            &mut context,
-            AgentMessage::User {
-                content: vec![Content::Image {
-                    mime_type: "image/png".to_owned(),
-                    data: neo_agent_core::ImageRef::Url("https://example.test/cat.png".to_owned()),
-                }],
-            },
-        )
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect_err("unsupported images should fail before provider request");
-
-    assert!(matches!(
-        error,
-        AgentRuntimeError::Model(AiError::Configuration(_))
-    ));
-    assert!(error.to_string().contains("does not support image input"));
-    assert!(harness.requests().is_empty());
+    assert_runtime_rejects_unsupported_capability(
+        config,
+        &harness,
+        AgentMessage::User {
+            content: vec![Content::Image {
+                mime_type: "image/png".to_owned(),
+                data: neo_agent_core::ImageRef::Url("https://example.test/cat.png".to_owned()),
+            }],
+        },
+        "does not support image input",
+        "unsupported images should fail before provider request",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -464,23 +475,15 @@ async fn runtime_rejects_reasoning_effort_when_model_lacks_reasoning_before_requ
     }]);
     let mut config = AgentConfig::for_model(harness.model());
     config.reasoning_effort = Some(ReasoningEffort::Low);
-    let runtime = AgentRuntime::new(config, harness.client());
-    let mut context = AgentContext::new();
 
-    let error = runtime
-        .run_turn(&mut context, AgentMessage::user_text("think lightly"))
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect_err("unsupported reasoning should fail before provider request");
-
-    assert!(matches!(
-        error,
-        AgentRuntimeError::Model(AiError::Configuration(_))
-    ));
-    assert!(error.to_string().contains("does not support reasoning"));
-    assert!(harness.requests().is_empty());
+    assert_runtime_rejects_unsupported_capability(
+        config,
+        &harness,
+        AgentMessage::user_text("think lightly"),
+        "does not support reasoning",
+        "unsupported reasoning should fail before provider request",
+    )
+    .await;
 }
 
 #[tokio::test]
