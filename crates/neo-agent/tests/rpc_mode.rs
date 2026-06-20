@@ -255,30 +255,69 @@ fn rpc_get_messages_returns_empty_replay_for_empty_session() {
 }
 
 #[test]
-fn rpc_get_messages_rejects_incomplete_session_id() {
-    let temp = TempDir::new().expect("tempdir");
-    let sessions = session_bucket(temp.path());
-    std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "").expect("write session");
+fn rpc_session_methods_reject_invalid_or_missing_ids() {
+    #[derive(Debug)]
+    struct Case {
+        method: &'static str,
+        session_id: &'static str,
+        expected: &'static str,
+    }
 
-    let mut command = neo();
-    command.current_dir(temp.path()).arg("rpc");
-    let stdout = run_with_stdin(
-        command,
-        r#"{"type":"request","id":"messages-invalid","method":"get_messages","params":{"session_id":"session_"}}"#,
-    );
+    let cases = [
+        Case {
+            method: "get_messages",
+            session_id: "session_",
+            expected: "invalid session id",
+        },
+        Case {
+            method: "get_messages",
+            session_id: "missing",
+            expected: "missing",
+        },
+        Case {
+            method: "sessions.get",
+            session_id: "session_",
+            expected: "invalid session id",
+        },
+        Case {
+            method: "sessions.get",
+            session_id: "missing",
+            expected: "missing",
+        },
+    ];
 
-    let messages = parse_jsonl(&stdout);
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["type"], "response");
-    assert_eq!(messages[0]["id"], "messages-invalid");
-    assert_eq!(messages[0]["error"]["code"], "invalid_params");
-    assert!(
-        messages[0]["error"]["message"]
+    for (i, case) in cases.iter().enumerate() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut command = neo();
+        command.current_dir(temp.path()).arg("rpc");
+        let request = format!(
+            r#"{{"type":"request","id":"req-{i}","method":"{method}","params":{{"session_id":"{session_id}"}}}}"#,
+            method = case.method,
+            session_id = case.session_id,
+            i = i,
+        );
+        let stdout = run_with_stdin(command, &request);
+
+        let messages = parse_jsonl(&stdout);
+        assert_eq!(messages.len(), 1, "case {i}: {case:?}");
+        assert_eq!(messages[0]["type"], "response", "case {i}: {case:?}");
+        assert_eq!(messages[0]["id"], format!("req-{i}"), "case {i}: {case:?}");
+        assert_eq!(
+            messages[0]["error"]["code"], "invalid_params",
+            "case {i}: {case:?}"
+        );
+        let message = messages[0]["error"]["message"]
             .as_str()
-            .unwrap()
-            .contains("invalid session id")
-    );
+            .unwrap_or_else(|| panic!("case {i}: missing error message"));
+        assert!(
+            message.contains(case.expected),
+            "case {i} ({method} {session_id}): expected to contain {expected:?}, got {message:?}",
+            i = i,
+            method = case.method,
+            session_id = case.session_id,
+            expected = case.expected,
+        );
+    }
 }
 
 #[test]
@@ -307,30 +346,6 @@ fn rpc_get_messages_accepts_in_directory_jsonl_path() {
     assert_eq!(
         messages[0]["result"]["messages"].as_array().unwrap().len(),
         0
-    );
-}
-
-#[test]
-fn rpc_get_messages_reports_missing_session_as_invalid_params() {
-    let temp = TempDir::new().expect("tempdir");
-
-    let mut command = neo();
-    command.current_dir(temp.path()).arg("rpc");
-    let stdout = run_with_stdin(
-        command,
-        r#"{"type":"request","id":"messages-missing","method":"get_messages","params":{"session_id":"missing"}}"#,
-    );
-
-    let messages = parse_jsonl(&stdout);
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["type"], "response");
-    assert_eq!(messages[0]["id"], "messages-missing");
-    assert_eq!(messages[0]["error"]["code"], "invalid_params");
-    assert!(
-        messages[0]["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("missing")
     );
 }
 
@@ -491,57 +506,6 @@ fn rpc_sessions_get_returns_local_session_metadata_and_messages() {
     assert_eq!(
         messages[0]["result"]["messages"][1]["Assistant"]["content"][0]["Text"]["text"],
         "session get reply"
-    );
-}
-
-#[test]
-fn rpc_sessions_get_rejects_incomplete_session_id() {
-    let temp = TempDir::new().expect("tempdir");
-    let sessions = session_bucket(temp.path());
-    std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "").expect("write session");
-
-    let mut command = neo();
-    command.current_dir(temp.path()).arg("rpc");
-    let stdout = run_with_stdin(
-        command,
-        r#"{"type":"request","id":"sessions-get-invalid","method":"sessions.get","params":{"session_id":"session_"}}"#,
-    );
-
-    let messages = parse_jsonl(&stdout);
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["type"], "response");
-    assert_eq!(messages[0]["id"], "sessions-get-invalid");
-    assert_eq!(messages[0]["error"]["code"], "invalid_params");
-    assert!(
-        messages[0]["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("invalid session id")
-    );
-}
-
-#[test]
-fn rpc_sessions_get_reports_missing_session_as_invalid_params() {
-    let temp = TempDir::new().expect("tempdir");
-
-    let mut command = neo();
-    command.current_dir(temp.path()).arg("rpc");
-    let stdout = run_with_stdin(
-        command,
-        r#"{"type":"request","id":"sessions-get-missing","method":"sessions.get","params":{"session_id":"missing"}}"#,
-    );
-
-    let messages = parse_jsonl(&stdout);
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["type"], "response");
-    assert_eq!(messages[0]["id"], "sessions-get-missing");
-    assert_eq!(messages[0]["error"]["code"], "invalid_params");
-    assert!(
-        messages[0]["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("missing")
     );
 }
 
