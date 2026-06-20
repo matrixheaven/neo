@@ -239,32 +239,6 @@ pub fn resolve_session_id(session_ref: &str, config: &AppConfig) -> anyhow::Resu
         return Ok(session_id);
     }
 
-    let bucket_dir = workspace_sessions_dir(config);
-    let exact_id = validate_session_id(session_ref).is_ok();
-    if exact_id && bucket_dir.join(format!("{session_ref}.jsonl")).is_file() {
-        return Ok(session_ref.to_owned());
-    }
-
-    if exact_id {
-        let matches = metadata_store(config)
-            .list()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|session| session.id.starts_with(session_ref))
-            .map(|session| session.id)
-            .collect::<Vec<_>>();
-        match matches.as_slice() {
-            [session_id] => return Ok(session_id.clone()),
-            [] => {}
-            _ => {
-                anyhow::bail!(
-                    "ambiguous session id {session_ref:?}: {}",
-                    matches.join(", ")
-                );
-            }
-        }
-    }
-
     validate_session_id(session_ref)
         .map_err(|_| anyhow::anyhow!("invalid session id {session_ref:?}"))?;
     Ok(session_ref.to_owned())

@@ -57,9 +57,13 @@ pub(crate) fn load_skill_store(
     project_dir: &Path,
     user_dir: Option<&Path>,
     extra_dirs: &[String],
+    skill_path: &[String],
 ) -> anyhow::Result<SkillStore> {
     let mut extra = Vec::new();
     for dir in extra_dirs {
+        extra.push(expand_user_path(PathBuf::from(dir)));
+    }
+    for dir in skill_path {
         extra.push(expand_user_path(PathBuf::from(dir)));
     }
     let mut user = Vec::new();

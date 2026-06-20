@@ -24,6 +24,8 @@ use anyhow::{Context, Result};
 use crossterm::{event, terminal::size};
 use neo_agent_core::{
     AgentEvent, AgentMessage, PendingQuestion, PermissionDecision, QuestionResponse,
+    format_collected_answers,
+    goal::GoalManager,
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
     skills::SkillStore,
 };
@@ -72,6 +74,12 @@ fn approval_result_label(choice: ApprovalChoice) -> &'static str {
     }
 }
 
+fn background_question_followup_prompt(task_id: &str) -> String {
+    format!(
+        "Background question `{task_id}` has been answered. Use TaskOutput with task_id `{task_id}` to read the answer, then continue the current work."
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupAction {
     None,
@@ -109,7 +117,6 @@ pub async fn execute_tty_with_startup(
         return Ok(Some(execute_with_startup(config, &startup, options)));
     }
 
-    let terminal = RefCell::new(NeoTerminal::enter()?);
     let mut controller = controller_for_config(config);
     controller.apply_startup_options(config, options);
     if let StartupAction::LoadSession(session_id) = &startup {
@@ -120,14 +127,25 @@ pub async fn execute_tty_with_startup(
         controller.apply_startup_action(&startup);
     }
     let events = CrosstermEvents::new(controller.keybindings.clone());
-    controller
-        .run_terminal_loop_with_suspend(
-            |tui| terminal.borrow_mut().draw_tui(tui),
-            || terminal.borrow_mut().suspend(),
-            events,
-        )
-        .await?;
-    Ok(None)
+    {
+        let terminal = RefCell::new(NeoTerminal::enter()?);
+        controller
+            .run_terminal_loop_with_suspend(
+                |tui| terminal.borrow_mut().draw_tui(tui),
+                || terminal.borrow_mut().suspend(),
+                events,
+            )
+            .await?;
+    }
+    Ok(Some(exit_message(controller.active_session_id())))
+}
+
+fn exit_message(session_id: Option<&str>) -> String {
+    let mut message = String::from("Bye\n");
+    if let Some(session_id) = session_id {
+        message.push_str(&format!("neo resume {session_id}\n"));
+    }
+    message
 }
 
 struct PendingCustomRegistry {
@@ -166,6 +184,8 @@ pub(crate) struct InteractiveController {
     resolved_approvals: BTreeMap<String, PermissionDecision>,
     /// Pending `AskUser` question response channels, keyed by question id.
     pending_questions: BTreeMap<String, oneshot::Sender<QuestionResponse>>,
+    pending_question_prompts: BTreeMap<String, Vec<neo_agent_core::QuestionEventData>>,
+    pending_background_question_followups: VecDeque<String>,
     clipboard_writer: ClipboardWriter,
     always_approve: bool,
     completion_root: PathBuf,
@@ -176,6 +196,9 @@ pub(crate) struct InteractiveController {
     pending_catalog_provider_id: Option<String>,
     pending_catalog_fetch: Option<PendingCatalogFetch>,
     skill_store: Option<neo_agent_core::skills::SkillStore>,
+    /// Expanded skill body waiting to be injected as context for the next turn.
+    pending_skill_context: Option<String>,
+    goal_manager: Option<Arc<neo_agent_core::goal::GoalManager>>,
 }
 
 pub(crate) struct TurnChannels {
@@ -244,6 +267,8 @@ pub(crate) struct TurnRequest {
     pub session_id: Option<String>,
     pub model: Option<SelectedModel>,
     pub reasoning_effort: Option<neo_ai::ReasoningEffort>,
+    /// Expanded skill body to inject as context before the user prompt.
+    pub skill_context: Option<String>,
 }
 
 impl TurnRequest {
@@ -259,7 +284,14 @@ impl TurnRequest {
             session_id,
             model,
             reasoning_effort,
+            skill_context: None,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_skill_context(mut self, skill_context: impl Into<String>) -> Self {
+        self.skill_context = Some(skill_context.into());
+        self
     }
 }
 
@@ -369,6 +401,8 @@ impl InteractiveController {
             pending_approvals: BTreeMap::new(),
             resolved_approvals: BTreeMap::new(),
             pending_questions: BTreeMap::new(),
+            pending_question_prompts: BTreeMap::new(),
+            pending_background_question_followups: VecDeque::new(),
             clipboard_writer: Arc::new(write_system_clipboard),
             always_approve: false,
             completion_root: workspace_root.clone(),
@@ -379,6 +413,8 @@ impl InteractiveController {
             pending_catalog_provider_id: None,
             pending_catalog_fetch: None,
             skill_store: None,
+            pending_skill_context: None,
+            goal_manager: None,
         }
     }
 
@@ -411,6 +447,7 @@ impl InteractiveController {
     }
 
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     fn new_with_event_driver_and_forker<
         RunTurn,
         TurnFut,
@@ -637,6 +674,7 @@ impl InteractiveController {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn handle_input_event(&mut self, event: InputEvent) -> Result<bool> {
         // If a rich dialog overlay is focused, forward ALL input events to it
         // first. Rich dialogs consume keys, actions, submit, cancel, etc.
@@ -645,13 +683,18 @@ impl InteractiveController {
             self.process_rich_dialog_result(result).await?;
             return Ok(false);
         }
+        if self.tui.chrome().question_dialog_is_focused()
+            && self.handle_question_input_event(&event).await?
+        {
+            return Ok(false);
+        }
         match event {
             InputEvent::Insert(character) => {
-                if let Some(number) = approval_number(character) {
-                    if let Some(result) = self.tui.chrome_mut().choose_approval_number(number) {
-                        self.resolve_approval(&result);
-                        return Ok(false);
-                    }
+                if let Some(number) = approval_number(character)
+                    && let Some(result) = self.tui.chrome_mut().choose_approval_number(number)
+                {
+                    self.resolve_approval(&result);
+                    return Ok(false);
                 }
                 self.clear_pending_exit_confirmation();
                 self.tui
@@ -746,10 +789,7 @@ impl InteractiveController {
                 if self.cancel_focused_overlay() {
                     return Ok(false);
                 }
-                if self.active_turn.is_some() {
-                    self.cancel_active_turn().await?;
-                    self.show_notice("Interrupted");
-                }
+                let _ = self.interrupt_active_or_stale_turn().await?;
                 // When idle, ESC is a no-op (never exits the app).
                 return Ok(false);
             }
@@ -761,8 +801,8 @@ impl InteractiveController {
                     }
                     return Ok(false);
                 }
-                if self.active_turn.is_some() {
-                    return Ok(true);
+                if self.interrupt_active_or_stale_turn().await? {
+                    return Ok(false);
                 }
                 return Ok(self.handle_app_clear());
             }
@@ -771,9 +811,166 @@ impl InteractiveController {
         Ok(false)
     }
 
+    async fn handle_question_input_event(&mut self, event: &InputEvent) -> Result<bool> {
+        if !self.tui.chrome().question_dialog_is_focused() {
+            return Ok(false);
+        }
+        if let InputEvent::Paste(text) = event {
+            if self
+                .tui
+                .chrome()
+                .question_dialog_state()
+                .is_some_and(|state| state.other_editing)
+            {
+                for character in text.chars() {
+                    self.handle_question_dialog_key(Self::question_key_event(
+                        event::KeyCode::Char(character),
+                    ))
+                    .await?;
+                }
+            }
+            return Ok(true);
+        }
+        if let InputEvent::Action(action) = event {
+            return self.handle_question_keybinding_action(*action).await;
+        }
+        let Some(key) = Self::question_key_for_input_event(event) else {
+            return Ok(false);
+        };
+        self.handle_question_dialog_key(key).await?;
+        Ok(true)
+    }
+
+    async fn handle_question_keybinding_action(
+        &mut self,
+        action: KeybindingAction,
+    ) -> Result<bool> {
+        let Some(key) = Self::question_key_for_action(action) else {
+            return Ok(Self::question_consumes_action(action));
+        };
+        self.handle_question_dialog_key(key).await?;
+        Ok(true)
+    }
+
+    async fn handle_question_dialog_key(&mut self, key: event::KeyEvent) -> Result<()> {
+        let cancel_id = self
+            .tui
+            .chrome()
+            .question_dialog_state()
+            .map(|state| state.id.clone());
+        let Some(action) = self.tui.chrome_mut().handle_question_dialog_key(key) else {
+            return Ok(());
+        };
+        match action {
+            neo_tui::widgets::QuestionDialogAction::Submit(result) => {
+                self.resolve_question(&result.id, result.answers).await?;
+            }
+            neo_tui::widgets::QuestionDialogAction::Cancel => {
+                if let Some(id) = cancel_id {
+                    self.pending_questions.remove(&id);
+                    self.pending_question_prompts.remove(&id);
+                }
+            }
+            neo_tui::widgets::QuestionDialogAction::None => {}
+        }
+        Ok(())
+    }
+
+    fn question_key_for_input_event(event: &InputEvent) -> Option<event::KeyEvent> {
+        let code = match event {
+            InputEvent::Insert(character) => event::KeyCode::Char(*character),
+            InputEvent::Backspace => event::KeyCode::Backspace,
+            InputEvent::Delete => event::KeyCode::Delete,
+            InputEvent::MoveLeft => event::KeyCode::Left,
+            InputEvent::MoveRight => event::KeyCode::Right,
+            InputEvent::MoveHome => event::KeyCode::Home,
+            InputEvent::MoveEnd => event::KeyCode::End,
+            InputEvent::NewLine | InputEvent::Submit => event::KeyCode::Enter,
+            InputEvent::Cancel => event::KeyCode::Esc,
+            InputEvent::Key(_)
+            | InputEvent::Action(_)
+            | InputEvent::Paste(_)
+            | InputEvent::ScrollUp(_)
+            | InputEvent::ScrollDown(_)
+            | InputEvent::Resize { .. }
+            | InputEvent::Interrupt => return None,
+        };
+        Some(Self::question_key_event(code))
+    }
+
+    fn question_key_for_action(action: KeybindingAction) -> Option<event::KeyEvent> {
+        let code = match action {
+            KeybindingAction::SelectUp | KeybindingAction::EditorCursorUp => event::KeyCode::Up,
+            KeybindingAction::SelectDown | KeybindingAction::EditorCursorDown => {
+                event::KeyCode::Down
+            }
+            KeybindingAction::SelectConfirm
+            | KeybindingAction::InputSubmit
+            | KeybindingAction::InputNewLine => event::KeyCode::Enter,
+            KeybindingAction::SelectCancel => event::KeyCode::Esc,
+            KeybindingAction::InputTab => event::KeyCode::Tab,
+            KeybindingAction::EditorCursorLeft | KeybindingAction::EditorCursorWordLeft => {
+                event::KeyCode::Left
+            }
+            KeybindingAction::EditorCursorRight | KeybindingAction::EditorCursorWordRight => {
+                event::KeyCode::Right
+            }
+            KeybindingAction::EditorCursorLineStart => event::KeyCode::Home,
+            KeybindingAction::EditorCursorLineEnd => event::KeyCode::End,
+            KeybindingAction::EditorDeleteCharBackward
+            | KeybindingAction::EditorDeleteWordBackward
+            | KeybindingAction::EditorDeleteToLineStart => event::KeyCode::Backspace,
+            KeybindingAction::EditorDeleteCharForward
+            | KeybindingAction::EditorDeleteWordForward
+            | KeybindingAction::EditorDeleteToLineEnd => event::KeyCode::Delete,
+            KeybindingAction::AppClear
+            | KeybindingAction::AppExit
+            | KeybindingAction::AppSuspend
+            | KeybindingAction::CommandPaletteOpen
+            | KeybindingAction::InputCopy
+            | KeybindingAction::ModelPickerOpen
+            | KeybindingAction::SessionFork
+            | KeybindingAction::SessionPickerOpen
+            | KeybindingAction::SessionPickerToggleScope
+            | KeybindingAction::SelectPageUp
+            | KeybindingAction::SelectPageDown
+            | KeybindingAction::TogglePlanMode
+            | KeybindingAction::ToolOutputToggle
+            | KeybindingAction::TranscriptCopySelection
+            | KeybindingAction::TranscriptSelectionClear
+            | KeybindingAction::TranscriptSelectionExtendDown
+            | KeybindingAction::TranscriptSelectionExtendPageDown
+            | KeybindingAction::TranscriptSelectionExtendPageUp
+            | KeybindingAction::TranscriptSelectionExtendUp
+            | KeybindingAction::TranscriptSelectionStart
+            | KeybindingAction::EditorPageUp
+            | KeybindingAction::EditorPageDown
+            | KeybindingAction::EditorYank
+            | KeybindingAction::EditorUndo => return None,
+        };
+        Some(Self::question_key_event(code))
+    }
+
+    const fn question_consumes_action(action: KeybindingAction) -> bool {
+        matches!(
+            action,
+            KeybindingAction::EditorYank
+                | KeybindingAction::EditorUndo
+                | KeybindingAction::InputCopy
+                | KeybindingAction::SelectPageUp
+                | KeybindingAction::SelectPageDown
+        )
+    }
+
+    fn question_key_event(code: event::KeyCode) -> event::KeyEvent {
+        event::KeyEvent::new(code, event::KeyModifiers::NONE)
+    }
+
     async fn handle_keybinding_key(&mut self, key: &KeyId) -> Result<bool> {
         let actions = self.keybindings.matching_actions(key);
-        let priority = if self
+        let priority = if self.tui.chrome().question_dialog_is_focused() {
+            QUESTION_ACTION_PRIORITY
+        } else if self
             .tui
             .chrome_mut()
             .focused_overlay()
@@ -802,7 +999,13 @@ impl InteractiveController {
         Ok(false)
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn handle_keybinding_action(&mut self, action: KeybindingAction) -> Result<bool> {
+        if self.tui.chrome().question_dialog_is_focused()
+            && self.handle_question_keybinding_action(action).await?
+        {
+            return Ok(false);
+        }
         if self.handle_prompt_keybinding_action(action) {
             return Ok(false);
         }
@@ -820,7 +1023,12 @@ impl InteractiveController {
             }
             KeybindingAction::InputTab => self.complete_prompt_or_insert_tab(),
             KeybindingAction::InputCopy => self.copy_prompt_to_clipboard(),
-            KeybindingAction::AppClear => return Ok(self.handle_app_clear()),
+            KeybindingAction::AppClear => {
+                if self.interrupt_active_or_stale_turn().await? {
+                    return Ok(false);
+                }
+                return Ok(self.handle_app_clear());
+            }
             KeybindingAction::AppExit => return Ok(self.handle_app_exit()),
             KeybindingAction::AppSuspend => {
                 self.suspend_requested = true;
@@ -830,7 +1038,7 @@ impl InteractiveController {
                 self.open_session_picker();
             }
             KeybindingAction::SessionPickerToggleScope => {
-                self.toggle_session_picker_scope()?;
+                self.toggle_session_picker_scope();
             }
             KeybindingAction::SessionFork => {
                 if self.tui.chrome_mut().selected_session().is_some() {
@@ -846,10 +1054,10 @@ impl InteractiveController {
             KeybindingAction::TogglePlanMode => {
                 let currently_active = self.tui.chrome_mut().is_plan_mode();
                 self.tui.chrome_mut().set_plan_mode(!currently_active);
-                self.push_status(if !currently_active {
-                    " Entered plan mode — read-only until you exit"
-                } else {
+                self.push_status(if currently_active {
                     "Exited plan mode"
+                } else {
+                    " Entered plan mode — read-only until you exit"
                 });
             }
             KeybindingAction::InputSubmit => {
@@ -865,10 +1073,10 @@ impl InteractiveController {
                 self.sync_inline_approval_selection();
             }
             KeybindingAction::SelectPageUp => {
-                self.tui.chrome_mut().move_overlay_selection_page_up()
+                self.tui.chrome_mut().move_overlay_selection_page_up();
             }
             KeybindingAction::SelectPageDown => {
-                self.tui.chrome_mut().move_overlay_selection_page_down()
+                self.tui.chrome_mut().move_overlay_selection_page_down();
             }
             KeybindingAction::SelectConfirm => {
                 if self.tui.chrome_mut().selected_command().is_some() {
@@ -877,14 +1085,10 @@ impl InteractiveController {
                     if let Some(result) = self.tui.chrome_mut().confirm_approval() {
                         self.resolve_approval(&result);
                     }
-                } else if self.tui.chrome_mut().question_dialog_state().is_some() {
-                    if let Some(result) = self.tui.chrome_mut().confirm_question() {
-                        self.resolve_question(&result.id, result.answers);
-                    }
                 } else if self.tui.chrome_mut().selected_session().is_some() {
                     self.load_selected_session().await?;
                 } else if self.tui.chrome_mut().selected_model().is_some() {
-                    self.apply_selected_model()?;
+                    self.apply_selected_model();
                 } else if self.tui.chrome_mut().selected_prompt_completion().is_some() {
                     let _ = self.tui.chrome_mut().confirm_prompt_completion();
                 } else if self.tui.chrome_mut().focused_overlay_id().is_none() {
@@ -898,10 +1102,7 @@ impl InteractiveController {
                 if self.cancel_focused_overlay() {
                     return Ok(false);
                 }
-                if self.active_turn.is_some() {
-                    self.cancel_active_turn().await?;
-                    self.show_notice("Interrupted");
-                }
+                let _ = self.interrupt_active_or_stale_turn().await?;
                 // When idle, ESC is a no-op (never exits the app).
             }
             KeybindingAction::EditorCursorUp | KeybindingAction::EditorCursorDown => {
@@ -943,6 +1144,7 @@ impl InteractiveController {
         if self.tui.chrome_mut().question_dialog_is_focused() {
             if let Some(id) = self.tui.chrome_mut().cancel_question() {
                 self.pending_questions.remove(&id);
+                self.pending_question_prompts.remove(&id);
             }
             return true;
         }
@@ -983,6 +1185,38 @@ impl InteractiveController {
             .transcript_mut()
             .resolve_unresolved_approvals("Rejected");
         had_pending
+    }
+
+    async fn interrupt_active_or_stale_turn(&mut self) -> Result<bool> {
+        if self.active_turn.is_some() {
+            self.cancel_active_turn().await?;
+            self.show_notice("Interrupted");
+            return Ok(true);
+        }
+        if self.clear_stale_streaming_turn() {
+            self.show_notice("Interrupted");
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn clear_stale_streaming_turn(&mut self) -> bool {
+        if self.tui.chrome().mode() != neo_tui::chrome::ChromeMode::Streaming {
+            return false;
+        }
+        self.clear_interrupted_turn_state();
+        true
+    }
+
+    fn clear_interrupted_turn_state(&mut self) {
+        self.clear_pending_exit_confirmation();
+        for id in self.tui.chrome_mut().clear_interrupted_turn_state() {
+            self.pending_questions.remove(&id);
+            self.pending_question_prompts.remove(&id);
+        }
+        self.pending_questions.clear();
+        self.pending_question_prompts.clear();
+        self.pending_background_question_followups.clear();
     }
 
     fn complete_prompt_or_insert_tab(&mut self) {
@@ -1230,7 +1464,6 @@ impl InteractiveController {
             ExitGesture::CtrlC => "Press Ctrl-C again to exit",
             ExitGesture::CtrlD => "Press Ctrl-D again to exit",
         };
-        self.show_notice(message);
         self.tui
             .chrome_mut()
             .set_exit_confirmation_label(Some(message.to_owned()));
@@ -1283,10 +1516,10 @@ impl InteractiveController {
                 // This path is for bare command invocation via picker.
                 let currently_active = self.tui.chrome_mut().is_plan_mode();
                 self.tui.chrome_mut().set_plan_mode(!currently_active);
-                self.push_status(if !currently_active {
-                    " Entered plan mode — read-only until you exit"
-                } else {
+                self.push_status(if currently_active {
                     "Exited plan mode"
+                } else {
+                    " Entered plan mode — read-only until you exit"
                 });
             }
             "submit" => self.submit_current_prompt().await?,
@@ -1318,7 +1551,7 @@ impl InteractiveController {
 
     /// Handle slash commands. Returns `true` if the prompt was consumed and should
     /// not be submitted as a chat turn.
-    fn handle_slash_command(&mut self, prompt: &str) -> bool {
+    async fn handle_slash_command(&mut self, prompt: &str) -> bool {
         match prompt.trim() {
             "/resume" => {
                 self.tui.chrome_mut().prompt_mut().clear_after_submit();
@@ -1396,7 +1629,135 @@ impl InteractiveController {
             }
             return true;
         }
+        if let Some(rest) = prompt.trim().strip_prefix("/goal") {
+            self.tui.chrome_mut().prompt_mut().clear_after_submit();
+            return self.handle_goal_command(rest.trim()).await;
+        }
         false
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn handle_goal_command(&mut self, arg: &str) -> bool {
+        if self.goal_manager.is_none()
+            && let Some(home) = neo_home()
+        {
+            match GoalManager::load(home).await {
+                Ok(manager) => self.goal_manager = Some(Arc::new(manager)),
+                Err(err) => {
+                    self.push_status(format!("Failed to load goal manager: {err}"));
+                    return true;
+                }
+            }
+        }
+        let Some(manager) = self.goal_manager.clone() else {
+            self.push_status("Goal mode is not available");
+            return true;
+        };
+        match arg {
+            "" | "status" => {
+                match manager.active() {
+                    Some(goal) => self.push_status(format!(
+                        "Goal: {} | status: {:?} | turns: {}",
+                        goal.objective, goal.status, goal.turn_count
+                    )),
+                    None => self.push_status("No active goal."),
+                }
+                true
+            }
+            "pause" => {
+                match manager.pause().await {
+                    Ok(Some(goal)) => {
+                        self.transcript_mut().push_transcript(
+                            neo_tui::transcript::TranscriptEntry::status(format!(
+                                "⏸ Goal paused: {}",
+                                goal.objective
+                            )),
+                        );
+                    }
+                    Ok(None) => self.push_status("No active goal to pause"),
+                    Err(err) => self.push_status(format!("Failed to pause goal: {err}")),
+                }
+                true
+            }
+            "resume" => {
+                match manager.resume().await {
+                    Ok(Some(goal)) => {
+                        self.transcript_mut().push_transcript(
+                            neo_tui::transcript::TranscriptEntry::status(format!(
+                                "▶ Goal resumed: {}",
+                                goal.objective
+                            )),
+                        );
+                    }
+                    Ok(None) => self.push_status("No active goal to resume"),
+                    Err(err) => self.push_status(format!("Failed to resume goal: {err}")),
+                }
+                true
+            }
+            "cancel" => {
+                match manager.cancel().await {
+                    Ok(Some(goal)) => {
+                        self.transcript_mut().push_transcript(
+                            neo_tui::transcript::TranscriptEntry::status(format!(
+                                "⏹ Goal cancelled: {}",
+                                goal.objective
+                            )),
+                        );
+                    }
+                    Ok(None) => self.push_status("No active goal to cancel"),
+                    Err(err) => self.push_status(format!("Failed to cancel goal: {err}")),
+                }
+                true
+            }
+            _ => {
+                let trimmed = arg.trim();
+                if let Some(objective) = trimmed.strip_prefix("replace ") {
+                    let goal = neo_agent_core::goal::Goal::new(objective.trim());
+                    match manager.replace(goal).await {
+                        Ok(Some(_previous)) => {
+                            self.push_status(format!("Replaced goal with: {objective}"));
+                        }
+                        Ok(None) => self.push_status(format!("Started goal: {objective}")),
+                        Err(err) => {
+                            self.push_status(format!("Failed to replace goal: {err}"));
+                            return true;
+                        }
+                    }
+                    false
+                } else if let Some(objective) = trimmed.strip_prefix("next ") {
+                    let goal = neo_agent_core::goal::Goal::new(objective.trim());
+                    match manager.queue_next(goal).await {
+                        Ok(()) => self.push_status(format!("Queued goal: {objective}")),
+                        Err(err) => {
+                            self.push_status(format!("Failed to queue goal: {err}"));
+                            return true;
+                        }
+                    }
+                    true
+                } else {
+                    let goal = neo_agent_core::goal::Goal::new(trimmed);
+                    let objective = goal.objective.clone();
+                    match manager.start(goal).await {
+                        Ok(Some(_previous)) => {
+                            self.push_status(format!(
+                                "Started goal: {objective} (previous goal superseded)"
+                            ));
+                        }
+                        Ok(None) => self.push_status(format!("Started goal: {objective}")),
+                        Err(err) => {
+                            self.push_status(format!("Failed to start goal: {err}"));
+                            return true;
+                        }
+                    }
+                    self.transcript_mut().push_transcript(
+                        neo_tui::transcript::TranscriptEntry::status(format!(
+                            "▶ Goal started: {objective}"
+                        )),
+                    );
+                    false
+                }
+            }
+        }
     }
 
     fn handle_skill_invocation(&mut self, arg: &str) -> Result<()> {
@@ -1418,8 +1779,9 @@ impl InteractiveController {
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         self.transcript_mut()
             .push_transcript(neo_tui::transcript::TranscriptEntry::skill_activated(name));
+        self.pending_skill_context = Some(expanded);
         let prompt = self.tui.chrome_mut().prompt_mut();
-        prompt.text = expanded;
+        args_str.clone_into(&mut prompt.text);
         prompt.cursor = prompt.text.chars().count();
         Ok(())
     }
@@ -1439,7 +1801,7 @@ impl InteractiveController {
         self.close_inline_prompt_completion();
 
         // Slash commands: handle without submitting a turn or entering streaming mode.
-        if self.handle_slash_command(&prompt) {
+        if self.handle_slash_command(&prompt).await {
             return Ok(());
         }
 
@@ -1455,7 +1817,24 @@ impl InteractiveController {
             self.local_config.as_ref(),
             &self.completion_root,
         )?;
-        self.tui.transcript_mut().push_user_message(prompt.clone());
+        self.start_turn_with_prompt(prompt, model_override, true);
+        self.drain_active_turn().await?;
+        self.start_pending_background_question_followups().await
+    }
+
+    fn start_turn_with_prompt(
+        &mut self,
+        prompt: String,
+        model_override: Option<SelectedModel>,
+        show_user_message: bool,
+    ) {
+        if self.active_turn.is_some() {
+            self.push_status("A turn is already running");
+            return;
+        }
+        if show_user_message {
+            self.tui.transcript_mut().push_user_message(prompt.clone());
+        }
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (approval_tx, approval_rx) = mpsc::unbounded_channel();
         let (session_id_tx, session_id_rx) = mpsc::unbounded_channel();
@@ -1468,19 +1847,22 @@ impl InteractiveController {
             cancel_token: cancel_token.clone(),
             questions: question_tx,
         };
-        let future = (self.run_turn)(
-            TurnRequest::new(
-                vec![prompt],
-                self.active_session_id.clone(),
-                model_override.or_else(|| self.active_model.clone()),
-                if self.current_thinking {
-                    Some(neo_ai::ReasoningEffort::High)
-                } else {
-                    None
-                },
-            ),
-            channels,
+        let request = TurnRequest::new(
+            vec![prompt],
+            self.active_session_id.clone(),
+            model_override.or_else(|| self.active_model.clone()),
+            if self.current_thinking {
+                Some(neo_ai::ReasoningEffort::High)
+            } else {
+                None
+            },
         );
+        let request = if let Some(skill_context) = self.pending_skill_context.take() {
+            request.with_skill_context(skill_context)
+        } else {
+            request
+        };
+        let future = (self.run_turn)(request, channels);
         let task = tokio::spawn(async move {
             let result = future.await;
             if let Err(error) = &result {
@@ -1496,7 +1878,6 @@ impl InteractiveController {
             cancel_token,
             questions: question_rx,
         });
-        self.drain_active_turn().await
     }
 
     async fn wait_for_active_turn(&mut self) -> Result<()> {
@@ -1514,14 +1895,18 @@ impl InteractiveController {
         self.pending_approvals.clear();
         self.resolved_approvals.clear();
         self.pending_questions.clear();
-        if let Ok(result) =
+        self.pending_question_prompts.clear();
+        self.pending_background_question_followups.clear();
+        let result = if let Ok(result) =
             tokio::time::timeout(Duration::from_secs(2), self.wait_for_active_turn()).await
         {
             result
         } else {
             self.abort_active_turn();
             Ok(())
-        }
+        };
+        self.clear_interrupted_turn_state();
+        result
     }
 
     async fn drain_active_turn(&mut self) -> Result<()> {
@@ -1596,9 +1981,24 @@ impl InteractiveController {
         self.tui.chrome_mut().set_session_label(session_id);
     }
 
+    fn active_session_id(&self) -> Option<&str> {
+        self.active_session_id.as_deref()
+    }
+
     fn apply_turn_event(&mut self, event: AgentEvent) {
         if self.always_approve && matches!(event, AgentEvent::ApprovalRequested { .. }) {
             return;
+        }
+        if let AgentEvent::ToolExecutionFinished { name, result, .. } = &event
+            && name == "TaskStop"
+            && let Some(details) = &result.details
+            && details.get("kind").and_then(serde_json::Value::as_str) == Some("question")
+            && details.get("status").and_then(serde_json::Value::as_str) == Some("stopped")
+            && let Some(task_id) = details.get("task_id").and_then(serde_json::Value::as_str)
+        {
+            let _ = self.tui.chrome_mut().close_question_overlay(task_id);
+            self.pending_questions.remove(task_id);
+            self.pending_question_prompts.remove(task_id);
         }
         self.tui.transcript_mut().apply_agent_event(event.clone());
         self.tui.chrome_mut().apply_agent_event(event);
@@ -1636,22 +2036,19 @@ impl InteractiveController {
                 self.always_approve = true;
                 PermissionDecision::Allow
             }
-            ApprovalChoice::Deny => PermissionDecision::Deny,
-            // Revise is treated as Deny, but the feedback is stored so the
-            // transcript can include it in the tool result sent back to the model.
-            ApprovalChoice::Revise => PermissionDecision::Deny,
+            ApprovalChoice::Deny | ApprovalChoice::Revise => PermissionDecision::Deny,
         };
         // Store revise feedback for the transcript to pick up when building the
         // exit_plan_mode tool result.
-        if result.choice == ApprovalChoice::Revise {
-            if let Some(feedback) = &result.feedback {
-                // Feedback is communicated via the approval subject side-channel:
-                // we can't reach the runtime's plan_review_feedback map from here,
-                // so we encode it in the resolved_approvals as a special marker.
-                // The transcript will check plan_review_feedback; for now, the feedback
-                // is passed through the TUI notice system.
-                self.push_status(format!("Revision feedback: {feedback}"));
-            }
+        if result.choice == ApprovalChoice::Revise
+            && let Some(feedback) = &result.feedback
+        {
+            // Feedback is communicated via the approval subject side-channel:
+            // we can't reach the runtime's plan_review_feedback map from here,
+            // so we encode it in the resolved_approvals as a special marker.
+            // The transcript will check plan_review_feedback; for now, the feedback
+            // is passed through the TUI notice system.
+            self.push_status(format!("Revision feedback: {feedback}"));
         }
         if let Some(tx) = self.pending_approvals.remove(&result.request_id) {
             let _ = tx.send(decision);
@@ -1675,17 +2072,42 @@ impl InteractiveController {
             .apply_agent_event(AgentEvent::QuestionRequested {
                 turn: 0,
                 id: id.clone(),
-                questions,
+                questions: questions.clone(),
             });
-        self.pending_questions.insert(id, pending.response_tx);
+        self.pending_questions
+            .insert(id.clone(), pending.response_tx);
+        self.pending_question_prompts.insert(id, questions);
     }
 
     /// Resolve a pending question by sending the user's answers through the
     /// stored oneshot channel.
-    fn resolve_question(&mut self, id: &str, answers: Vec<String>) {
+    async fn resolve_question(&mut self, id: &str, answers: Vec<String>) -> Result<()> {
+        if let Some(questions) = self.pending_question_prompts.remove(id) {
+            self.transcript_mut()
+                .push_transcript(neo_tui::transcript::TranscriptEntry::status(
+                    format_collected_answers(&questions, &answers),
+                ));
+        }
         if let Some(tx) = self.pending_questions.remove(id) {
             let _ = tx.send(QuestionResponse { answers });
         }
+        if id.starts_with("question-") {
+            self.pending_background_question_followups
+                .push_back(background_question_followup_prompt(id));
+            self.start_pending_background_question_followups().await?;
+        }
+        Ok(())
+    }
+
+    async fn start_pending_background_question_followups(&mut self) -> Result<()> {
+        while self.active_turn.is_none() {
+            let Some(prompt) = self.pending_background_question_followups.pop_front() else {
+                break;
+            };
+            self.start_turn_with_prompt(prompt, None, false);
+            self.drain_active_turn().await?;
+        }
+        Ok(())
     }
 
     fn abort_active_turn(&mut self) {
@@ -1696,6 +2118,9 @@ impl InteractiveController {
         self.pending_approvals.clear();
         self.resolved_approvals.clear();
         self.pending_questions.clear();
+        self.pending_question_prompts.clear();
+        self.pending_background_question_followups.clear();
+        self.clear_interrupted_turn_state();
     }
 
     fn open_session_picker(&mut self) {
@@ -1824,7 +2249,7 @@ impl InteractiveController {
         let theme = self.tui.chrome().theme();
         self.tui
             .chrome_mut()
-            .open_provider_manager(neo_tui::dialogs::ProviderManagerOptions {
+            .open_provider_manager(&neo_tui::dialogs::ProviderManagerOptions {
                 sources,
                 active_provider_id,
                 theme,
@@ -1860,13 +2285,13 @@ impl InteractiveController {
         Ok(())
     }
 
-    fn toggle_session_picker_scope(&mut self) -> Result<()> {
+    fn toggle_session_picker_scope(&mut self) {
         let current_scope = {
             let Some(overlay) = self.tui.chrome_mut().focused_overlay() else {
-                return Ok(());
+                return;
             };
             let OverlayKind::SessionPicker(picker) = &overlay.kind else {
-                return Ok(());
+                return;
             };
             picker.scope()
         };
@@ -1875,7 +2300,7 @@ impl InteractiveController {
             SessionPickerScope::All => SessionDataScope::Workspace,
         };
         let Some(config) = self.local_config.as_ref() else {
-            return Ok(());
+            return;
         };
         match session_summaries(config, new_scope) {
             Ok(summaries) => {
@@ -1887,7 +2312,6 @@ impl InteractiveController {
                 self.push_status(format!("Error loading sessions: {error}"));
             }
         }
-        Ok(())
     }
 
     async fn fork_selected_session(&mut self) -> Result<()> {
@@ -1939,30 +2363,26 @@ impl InteractiveController {
         *self.tui.transcript_mut() = transcript;
     }
 
-    fn apply_selected_model(&mut self) -> Result<()> {
+    fn apply_selected_model(&mut self) {
         let Some(item) = self.tui.chrome_mut().confirm_model_picker() else {
-            return Ok(());
+            return;
         };
-        match SelectedModel::from_picker_item(&item) {
-            Ok(selected) => {
-                self.tui.chrome_mut().set_model_label(item.label);
-                self.tui
-                    .chrome_mut()
-                    .set_context_window(selected.max_context_tokens.map(ContextWindow::new));
-                self.active_model = Some(selected);
-            }
-            Err(_) => {
-                // Not a model item (e.g. a provider from /provider) — show info.
-                let detail = item
-                    .description
-                    .as_deref()
-                    .filter(|d| !d.is_empty())
-                    .map(|d| format!(" — {d}"))
-                    .unwrap_or_default();
-                self.push_status(format!("Provider: {}{detail}", item.label));
-            }
+        if let Ok(selected) = SelectedModel::from_picker_item(&item) {
+            self.tui.chrome_mut().set_model_label(item.label);
+            self.tui
+                .chrome_mut()
+                .set_context_window(selected.max_context_tokens.map(ContextWindow::new));
+            self.active_model = Some(selected);
+        } else {
+            // Not a model item (e.g. a provider from /provider) — show info.
+            let detail = item
+                .description
+                .as_deref()
+                .filter(|d| !d.is_empty())
+                .map(|d| format!(" — {d}"))
+                .unwrap_or_default();
+            self.push_status(format!("Provider: {}{detail}", item.label));
         }
-        Ok(())
     }
 
     /// Dispatch a rich dialog result after an input event was forwarded.
@@ -1981,13 +2401,13 @@ impl InteractiveController {
             .tabbed_model_selector_result()
             .is_some()
         {
-            self.apply_tabbed_model_selection()?;
+            self.apply_tabbed_model_selection();
         } else if self.tui.chrome_mut().model_selector_result().is_some() {
-            self.apply_model_selector_result()?;
+            self.apply_model_selector_result();
         } else if self.tui.chrome_mut().provider_manager_action().is_some() {
-            self.handle_provider_manager_action()?;
+            self.handle_provider_manager_action();
         } else if self.tui.chrome_mut().choice_picker_result().is_some() {
-            self.handle_choice_picker_result().await;
+            self.handle_choice_picker_result();
         } else if self.tui.chrome_mut().api_key_input_result().is_some() {
             self.handle_api_key_input_result().await;
         } else if self
@@ -1996,7 +2416,7 @@ impl InteractiveController {
             .custom_registry_import_result()
             .is_some()
         {
-            self.handle_custom_registry_import_result().await;
+            self.handle_custom_registry_import_result();
         }
         Ok(())
     }
@@ -2044,43 +2464,38 @@ impl InteractiveController {
     }
 
     /// Apply the selection from the rich `TabbedModelSelector` dialog.
-    fn apply_tabbed_model_selection(&mut self) -> Result<()> {
+    fn apply_tabbed_model_selection(&mut self) {
         let result = self
             .tui
             .chrome_mut()
             .tabbed_model_selector_result()
             .cloned();
-        let result = match result {
-            Some(r) => r,
-            None => return Ok(()),
+        let Some(result) = result else {
+            return;
         };
         self.tui.chrome_mut().close_focused_overlay();
         if let neo_tui::dialogs::ModelSelectorResult::Selected(selection) = result {
             self.apply_model_selection(&selection);
         }
-        Ok(())
     }
 
     /// Apply the selection from the flat `ModelSelector` dialog.
-    fn apply_model_selector_result(&mut self) -> Result<()> {
+    fn apply_model_selector_result(&mut self) {
         let result = self.tui.chrome_mut().model_selector_result().cloned();
-        let result = match result {
-            Some(r) => r,
-            None => return Ok(()),
+        let Some(result) = result else {
+            return;
         };
         self.tui.chrome_mut().close_focused_overlay();
         if let neo_tui::dialogs::ModelSelectorResult::Selected(selection) = result {
             self.apply_model_selection(&selection);
         }
-        Ok(())
     }
 
     /// Handle a `ProviderManager` action (Add / `DeleteSource` / Close).
-    fn handle_provider_manager_action(&mut self) -> Result<()> {
+    fn handle_provider_manager_action(&mut self) {
         let action = self.tui.chrome_mut().provider_manager_action();
-        let action = match action {
-            Some(a) => a,
-            None => return Ok(()),
+        let Some(action) = action else {
+            return;
         };
         match action {
             neo_tui::dialogs::ProviderManagerAction::Close => {
@@ -2124,11 +2539,10 @@ impl InteractiveController {
                 }
             }
         }
-        Ok(())
     }
 
     /// Handle a `ChoicePicker` result.
-    async fn handle_choice_picker_result(&mut self) {
+    fn handle_choice_picker_result(&mut self) {
         let Some(result) = self.tui.chrome_mut().choice_picker_result().cloned() else {
             return;
         };
@@ -2250,7 +2664,7 @@ impl InteractiveController {
     }
 
     /// Handle a custom registry import result.
-    async fn handle_custom_registry_import_result(&mut self) {
+    fn handle_custom_registry_import_result(&mut self) {
         let Some(result) = self
             .tui
             .chrome_mut()
@@ -2356,8 +2770,8 @@ impl InteractiveController {
 
     #[cfg(test)]
     #[must_use]
-    fn transcript(&self) -> Option<&TranscriptPane> {
-        Some(self.tui.transcript())
+    fn transcript(&self) -> &TranscriptPane {
+        self.tui.transcript()
     }
 
     #[must_use]
@@ -3205,6 +3619,30 @@ const OVERLAY_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::SelectPageDown,
 ];
 
+const QUESTION_ACTION_PRIORITY: &[KeybindingAction] = &[
+    KeybindingAction::SelectConfirm,
+    KeybindingAction::SelectCancel,
+    KeybindingAction::SelectUp,
+    KeybindingAction::SelectDown,
+    KeybindingAction::EditorCursorUp,
+    KeybindingAction::EditorCursorDown,
+    KeybindingAction::EditorCursorLeft,
+    KeybindingAction::EditorCursorRight,
+    KeybindingAction::EditorCursorWordLeft,
+    KeybindingAction::EditorCursorWordRight,
+    KeybindingAction::EditorCursorLineStart,
+    KeybindingAction::EditorCursorLineEnd,
+    KeybindingAction::EditorDeleteCharBackward,
+    KeybindingAction::EditorDeleteCharForward,
+    KeybindingAction::EditorDeleteWordBackward,
+    KeybindingAction::EditorDeleteWordForward,
+    KeybindingAction::EditorDeleteToLineStart,
+    KeybindingAction::EditorDeleteToLineEnd,
+    KeybindingAction::InputSubmit,
+    KeybindingAction::InputNewLine,
+    KeybindingAction::InputTab,
+];
+
 const PROMPT_COMPLETION_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::SelectConfirm,
     KeybindingAction::SelectCancel,
@@ -3306,6 +3744,7 @@ impl NeoTerminal {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     let catalogs = picker_catalogs_for_config(config);
     let selected_model = crate::modes::run::model_registry_for_config(config)
@@ -3335,6 +3774,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     Some(channels.session_ids),
                     channels.cancel_token,
                     Some(channels.questions),
+                    request.skill_context.clone(),
                 )
                 .await?;
                 Ok(TurnOutcome::session(turn.session_id))
@@ -3347,6 +3787,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     Some(channels.session_ids),
                     channels.cancel_token,
                     Some(channels.questions),
+                    request.skill_context.clone(),
                 )
                 .await?;
                 Ok(TurnOutcome::session(turn.session_id))
@@ -3410,6 +3851,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         &config.project_dir,
         neo_home().as_deref(),
         &config.extra_skill_dirs,
+        &config.skill_path,
     )
     .ok();
     controller
@@ -3492,7 +3934,7 @@ fn model_to_picker_item(model: &neo_ai::ModelSpec) -> PickerItem {
     PickerItem::new(value.clone(), value, Some(description))
 }
 
-/// Build ModelEntry list directly from `[models.*]` in config.
+/// Build `ModelEntry` list directly from `[models.*]` in config.
 fn model_entries_from_config(config: &AppConfig) -> Vec<neo_tui::dialogs::ModelEntry> {
     if !config.models.is_empty() {
         return config
@@ -3594,22 +4036,23 @@ fn same_work_dir(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// Parse a timestamp string (epoch millis, epoch secs, or RFC3339) into SystemTime.
+/// Parse a timestamp string (epoch millis, epoch secs, or RFC3339) into `SystemTime`.
 fn parse_timestamp(ts: &str) -> std::time::SystemTime {
     // Try epoch millis first
     if let Ok(millis) = ts.parse::<u64>() {
         let secs = millis / 1000;
-        let nanos = ((millis % 1000) * 1_000_000) as u32;
+        let nanos = u32::try_from((millis % 1000) * 1_000_000)
+            .expect("millisecond remainder fits in nanoseconds");
         if let Some(t) = std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(secs, nanos)) {
             return t;
         }
     }
     // Try epoch seconds
     let seconds_str = ts.split_once('.').map_or(ts, |(s, _)| s);
-    if let Ok(secs) = seconds_str.parse::<u64>() {
-        if let Some(t) = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs)) {
-            return t;
-        }
+    if let Ok(secs) = seconds_str.parse::<u64>()
+        && let Some(t) = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))
+    {
+        return t;
     }
     std::time::UNIX_EPOCH
 }
@@ -3626,7 +4069,7 @@ async fn load_session_transcript(
     if let Some(summary) = context.compaction_summary() {
         notices.push(format!("compaction: {}", summary.summary));
     }
-    if let Some(summary) = SessionMetadataStore::new(&workspace_sessions_dir(config))
+    if let Some(summary) = SessionMetadataStore::new(workspace_sessions_dir(config))
         .list()
         .ok()
         .and_then(|sessions| {
@@ -3661,7 +4104,7 @@ async fn fork_session_transcript(
     parent_id: String,
     config: &AppConfig,
 ) -> Result<ForkedSessionTranscript> {
-    let session = SessionMetadataStore::new(&workspace_sessions_dir(config))
+    let session = SessionMetadataStore::new(workspace_sessions_dir(config))
         .fork(&parent_id, None)
         .with_context(|| format!("failed to create local fork for session {parent_id}"))?;
     let child_id = session.id;
@@ -3703,10 +4146,9 @@ fn render_overlay_snapshot(app: &NeoChromeState, width: usize) -> Vec<String> {
         Some(OverlayKind::CommandPalette(_)) => vec!["Commands".to_owned()],
         Some(OverlayKind::PromptCompletion(_)) => vec![],
         Some(OverlayKind::Message(message)) => vec![message.clone()],
-        Some(OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_)) => Vec::new(),
+        Some(OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_)) | None => Vec::new(),
         // Rich dialogs — use their own render_lines.
         Some(_) => app.focused_overlay_lines(content_width),
-        None => Vec::new(),
     };
     lines.extend(
         neo_tui::transcript::render_chrome_lines(app, width)
@@ -3746,6 +4188,11 @@ mod tests {
     use super::*;
     use crate::config::{Defaults, McpConfig, ModelConfig, RuntimeConfig, TuiConfig};
 
+    const SESSION_A: &str = "session_00000000-0000-4000-8000-000000000601";
+    const SESSION_B: &str = "session_00000000-0000-4000-8000-000000000602";
+    const SESSION_CHILD: &str = "session_00000000-0000-4000-8000-000000000603";
+    const SESSION_NEW: &str = "session_00000000-0000-4000-8000-000000000604";
+
     fn test_workspace_root() -> PathBuf {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     }
@@ -3767,11 +4214,7 @@ mod tests {
     }
 
     fn transcript_entries(controller: &InteractiveController) -> &[TranscriptEntry] {
-        controller
-            .transcript()
-            .expect("transcript should be initialized")
-            .transcript()
-            .entries()
+        controller.transcript().transcript().entries()
     }
 
     fn transcript_has_status(controller: &InteractiveController, expected: &str) -> bool {
@@ -3781,12 +4224,7 @@ mod tests {
     }
 
     fn transcript_scrollback(controller: &InteractiveController) -> usize {
-        controller
-            .transcript()
-            .expect("transcript should be initialized")
-            .transcript()
-            .viewport()
-            .scrollback()
+        controller.transcript().transcript().viewport().scrollback()
     }
 
     fn render_tui_snapshot(tui: &neo_tui::NeoTui) -> String {
@@ -3795,8 +4233,17 @@ mod tests {
     }
 
     #[test]
+    fn exit_message_prints_resume_command_when_session_exists() {
+        assert_eq!(exit_message(None), "Bye\n");
+        assert_eq!(
+            exit_message(Some("session_550e8400-e29b-41d4-a716-446655440000")),
+            "Bye\nneo resume session_550e8400-e29b-41d4-a716-446655440000\n"
+        );
+    }
+
+    #[test]
     fn transcript_pane_exposes_live_rows_for_neo_tui_draw() {
-        let mut app = NeoChromeState::new(
+        let app = NeoChromeState::new(
             "neo",
             "test-session",
             "openai/gpt-4.1",
@@ -3811,14 +4258,176 @@ mod tests {
         });
 
         let lines =
-            compose_tui_frame(&mut app, &mut transcript, 80, 12).expect("non-zero terminal size");
+            compose_tui_frame(&app, &mut transcript, 80, 12).expect("non-zero terminal size");
 
         let plain: Vec<String> = lines
             .iter()
             .map(|line| neo_tui::ansi::strip_ansi(line))
             .collect();
         assert!(plain.iter().any(|line| line.contains("Using Bash")));
-        assert_eq!(compose_tui_frame(&mut app, &mut transcript, 0, 12), None);
+        assert_eq!(compose_tui_frame(&app, &mut transcript, 0, 12), None);
+    }
+
+    #[tokio::test]
+    async fn resolving_question_records_collected_answers_in_transcript() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "session",
+            "model",
+            test_workspace_root(),
+            |_| async { Ok(Vec::new()) },
+        );
+        let (response_tx, mut response_rx) = oneshot::channel();
+        controller.register_pending_question(PendingQuestion {
+            id: "question-1".to_owned(),
+            questions: vec![neo_agent_core::QuestionEventData {
+                question: "Pick a side?".to_owned(),
+                header: Some("Choice".to_owned()),
+                body: None,
+                options: vec![
+                    neo_agent_core::QuestionOptionData {
+                        label: "Left".to_owned(),
+                        description: None,
+                    },
+                    neo_agent_core::QuestionOptionData {
+                        label: "Right".to_owned(),
+                        description: None,
+                    },
+                ],
+                multi_select: false,
+            }],
+            response_tx,
+        });
+
+        controller
+            .resolve_question("question-1", vec!["Left".to_owned()])
+            .await
+            .expect("question resolves");
+
+        assert_eq!(
+            response_rx
+                .try_recv()
+                .expect("response should be sent")
+                .answers,
+            vec!["Left"]
+        );
+        assert!(transcript_has_status(&controller, "Collected your answers"));
+        assert!(transcript_has_status(&controller, "Pick a side?"));
+        assert!(transcript_has_status(&controller, "Left"));
+    }
+
+    #[tokio::test]
+    async fn background_question_answer_starts_followup_turn() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "session",
+            "model",
+            test_workspace_root(),
+            move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests.lock().expect("requests").push(request);
+                    Ok(Vec::new())
+                }
+            },
+        );
+        let (response_tx, mut response_rx) = oneshot::channel();
+        controller.register_pending_question(PendingQuestion {
+            id: "question-1".to_owned(),
+            questions: vec![neo_agent_core::QuestionEventData {
+                question: "Pick a side?".to_owned(),
+                header: Some("Choice".to_owned()),
+                body: None,
+                options: vec![
+                    neo_agent_core::QuestionOptionData {
+                        label: "Left".to_owned(),
+                        description: None,
+                    },
+                    neo_agent_core::QuestionOptionData {
+                        label: "Right".to_owned(),
+                        description: None,
+                    },
+                ],
+                multi_select: false,
+            }],
+            response_tx,
+        });
+
+        controller
+            .resolve_question("question-1", vec!["Left".to_owned()])
+            .await
+            .expect("question resolves");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("followup completes");
+
+        assert_eq!(
+            response_rx
+                .try_recv()
+                .expect("response should be sent")
+                .answers,
+            vec!["Left"]
+        );
+        let requests = requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].session_id.as_deref(), None);
+        assert!(requests[0].prompt[0].contains("Background question `question-1`"));
+        assert!(requests[0].prompt[0].contains("TaskOutput"));
+    }
+
+    #[test]
+    fn task_stop_for_question_closes_pending_question_overlay() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "session",
+            "model",
+            test_workspace_root(),
+            |_| async { Ok(Vec::new()) },
+        );
+        let (response_tx, _response_rx) = oneshot::channel();
+        controller.register_pending_question(PendingQuestion {
+            id: "question-1".to_owned(),
+            questions: vec![neo_agent_core::QuestionEventData {
+                question: "Continue?".to_owned(),
+                header: None,
+                body: None,
+                options: vec![
+                    neo_agent_core::QuestionOptionData {
+                        label: "Yes".to_owned(),
+                        description: None,
+                    },
+                    neo_agent_core::QuestionOptionData {
+                        label: "No".to_owned(),
+                        description: None,
+                    },
+                ],
+                multi_select: false,
+            }],
+            response_tx,
+        });
+        assert!(controller.chrome().question_dialog_is_focused());
+
+        controller.apply_turn_event(AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            name: "TaskStop".to_owned(),
+            result: neo_agent_core::ToolResult::ok("stopped").with_details(serde_json::json!({
+                "task_id": "question-1",
+                "kind": "question",
+                "status": "stopped"
+            })),
+        });
+
+        assert!(!controller.chrome().question_dialog_is_focused());
+        assert!(!controller.pending_questions.contains_key("question-1"));
+        assert!(
+            !controller
+                .pending_question_prompts
+                .contains_key("question-1")
+        );
     }
 
     #[test]
@@ -3840,7 +4449,7 @@ mod tests {
             arguments: serde_json::json!({ "command": "cargo test" }),
         });
 
-        let lines = compose_tui_frame(&mut app, &mut transcript, 80, 12)
+        let lines = compose_tui_frame(&app, &mut transcript, 80, 12)
             .expect("transcript frame composes body + chrome");
 
         let joined = lines
@@ -3895,7 +4504,7 @@ mod tests {
         transcript.push_banner("Welcome to neo");
         replay_session_into_transcript(&mut transcript, &loaded);
 
-        let lines = compose_tui_frame(&mut app, &mut transcript, 80, 12)
+        let lines = compose_tui_frame(&app, &mut transcript, 80, 12)
             .expect("transcript frame composes replay");
 
         // Tool header spans are individually ANSI-colored, so strip codes
@@ -4049,6 +4658,7 @@ mod tests {
                         InputEvent::Submit,
                         InputEvent::Interrupt,
                         InputEvent::Interrupt,
+                        InputEvent::Interrupt,
                     ]
                     .into_iter(),
                 },
@@ -4089,11 +4699,15 @@ mod tests {
             test_workspace_root(),
             |_request| async move { anyhow::bail!("provider stream error: http status 400") },
         );
+        let mut prompt_snapshots = Vec::new();
 
         controller.type_text("trigger error");
         controller
             .run_terminal_loop(
-                |_app| Ok(()),
+                |app| {
+                    prompt_snapshots.push(app.prompt().text.clone());
+                    Ok(())
+                },
                 ScriptedEvents {
                     events: VecDeque::from([
                         InputEvent::Submit,
@@ -4110,7 +4724,7 @@ mod tests {
 
         let snapshot = controller.render_snapshot();
         assert!(snapshot.contains("Error: provider stream error: http status 400"));
-        assert!(snapshot.contains("> ok"));
+        assert!(prompt_snapshots.iter().any(|prompt| prompt == "ok"));
         assert_eq!(controller.chrome().mode(), ChromeMode::Editing);
     }
 
@@ -4154,6 +4768,7 @@ mod tests {
                     events: vec![
                         InputEvent::Paste("alpha\nbeta".to_owned()),
                         InputEvent::Submit,
+                        InputEvent::Interrupt,
                         InputEvent::Interrupt,
                         InputEvent::Interrupt,
                     ]
@@ -4533,7 +5148,11 @@ mod tests {
 
         assert!(!should_exit);
         assert_eq!(controller.chrome().prompt().text, "");
-        assert!(transcript_has_status(
+        assert_eq!(
+            controller.chrome().exit_confirmation_label(),
+            Some("Press Ctrl-C again to exit")
+        );
+        assert!(!transcript_has_status(
             &controller,
             "Press Ctrl-C again to exit"
         ));
@@ -4560,6 +5179,99 @@ mod tests {
 
         assert!(!first);
         assert!(second);
+    }
+
+    #[tokio::test]
+    async fn event_loop_ctrl_c_key_cancels_active_turn_instead_of_confirming_exit() {
+        let captured_token = Arc::new(std::sync::Mutex::new(None));
+        let observed_token = Arc::clone(&captured_token);
+        let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+            let observed_token = Arc::clone(&observed_token);
+            *observed_token.lock().expect("token lock") = Some(channels.cancel_token.clone());
+            Box::pin(async move {
+                channels.send_event(AgentEvent::TextDelta {
+                    turn: 1,
+                    text: "started".to_owned(),
+                });
+                channels.cancel_token.cancelled().await;
+                Ok(TurnOutcome::default())
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            run_turn,
+            PickerCatalogs::default(),
+            Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        );
+
+        controller.type_text("cancel me");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("prompt submits");
+
+        assert!(controller.active_turn.is_some());
+
+        let should_exit = controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
+            .await
+            .expect("ctrl-c cancels active turn");
+
+        let token = captured_token
+            .lock()
+            .expect("token lock")
+            .clone()
+            .expect("turn token captured");
+        assert!(!should_exit);
+        assert!(token.is_cancelled());
+        assert_eq!(controller.chrome().exit_confirmation_label(), None);
+        assert_eq!(controller.chrome().mode(), ChromeMode::Editing);
+        assert!(controller.active_turn.is_none());
+    }
+
+    #[tokio::test]
+    async fn event_loop_ctrl_c_clears_stale_working_state_before_exit_confirmation() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+
+        controller
+            .tui
+            .chrome_mut()
+            .apply_agent_event(AgentEvent::ToolExecutionStarted {
+                turn: 1,
+                id: "ask".to_owned(),
+                name: "AskUserQuestion".to_owned(),
+                arguments: serde_json::json!({ "questions": [] }),
+            });
+        assert!(controller.chrome().working_label().is_some());
+
+        let should_exit = controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+c").expect("valid key")))
+            .await
+            .expect("ctrl-c clears stale working state");
+
+        assert!(!should_exit);
+        assert!(controller.chrome().working_label().is_none());
+        assert_eq!(controller.chrome().exit_confirmation_label(), None);
+
+        controller
+            .handle_input_event(InputEvent::Insert('o'))
+            .await
+            .expect("typing after stale interrupt succeeds");
+        controller
+            .handle_input_event(InputEvent::Insert('k'))
+            .await
+            .expect("typing after stale interrupt succeeds");
+        assert_eq!(controller.chrome().prompt().text, "ok");
     }
 
     #[tokio::test]
@@ -4598,7 +5310,8 @@ mod tests {
         assert_eq!(controller.chrome().prompt().text, "");
         assert!(!first_exit);
         assert!(second_exit);
-        assert!(transcript_has_status(
+        assert_eq!(controller.chrome().exit_confirmation_label(), None);
+        assert!(!transcript_has_status(
             &controller,
             "Press Ctrl-D again to exit"
         ));
@@ -5691,12 +6404,7 @@ command = "python3"
             .expect("ctrl-o key toggles tool detail");
 
         assert!(controller.chrome().focused_overlay().is_none());
-        assert!(
-            controller
-                .transcript()
-                .expect("transcript should be initialized")
-                .tool_output_expanded()
-        );
+        assert!(controller.transcript().tool_output_expanded());
     }
 
     #[tokio::test]
@@ -6011,7 +6719,7 @@ command = "python3"
         let bucket_dir = workspace_sessions_dir(&config);
         fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
         fs::write(
-            bucket_dir.join("alpha.jsonl"),
+            bucket_dir.join(format!("{SESSION_A}.jsonl")),
             concat!(
                 "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello <script>alert(1)</script>\"}}]}}}}\n",
                 "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"use **bold** safely\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
@@ -6060,9 +6768,9 @@ command = "python3"
             .await
             .expect("export command runs");
 
-        let export_path = bucket_dir.join("alpha.html");
+        let export_path = bucket_dir.join(format!("{SESSION_A}.html"));
         let html = fs::read_to_string(&export_path).expect("read exported html");
-        assert!(html.contains("<title>neo session alpha</title>"));
+        assert!(html.contains(&format!("<title>neo session {SESSION_A}</title>")));
         assert!(html.contains("<strong>bold</strong>"));
         assert!(html.contains("&lt;script&gt;"));
         assert!(!html.contains("<script>"));
@@ -6070,7 +6778,7 @@ command = "python3"
             matches!(
                 entry,
                 TranscriptEntry::Status { text, .. }
-                    if text.contains("Exported session alpha to")
+                    if text.contains(&format!("Exported session {SESSION_A} to"))
                         && text.contains(&export_path.display().to_string())
             )
         }));
@@ -6209,6 +6917,131 @@ command = "python3"
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn event_loop_shows_and_resolves_pending_question_from_running_turn() {
+        use std::collections::VecDeque;
+
+        struct ScriptedEvents {
+            events: VecDeque<Option<InputEvent>>,
+        }
+
+        impl TerminalEvents for ScriptedEvents {
+            fn next_input_event(&mut self) -> Result<InputEvent> {
+                self.poll_input_event(Duration::from_millis(0))?
+                    .ok_or_else(|| anyhow::anyhow!("expected scripted input"))
+            }
+
+            fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
+                Ok(self
+                    .events
+                    .pop_front()
+                    .unwrap_or(Some(InputEvent::Interrupt)))
+            }
+        }
+
+        let answers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_answers = std::sync::Arc::clone(&answers);
+        let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_frames = std::sync::Arc::clone(&frames);
+        let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+            let captured_answers = std::sync::Arc::clone(&captured_answers);
+            Box::pin(async move {
+                let (response_tx, response_rx) = oneshot::channel();
+                channels
+                    .questions
+                    .send(PendingQuestion {
+                        id: "question-1".to_owned(),
+                        questions: vec![neo_agent_core::QuestionEventData {
+                            question: "1 + 1 = ?".to_owned(),
+                            header: Some("Math".to_owned()),
+                            body: None,
+                            options: vec![
+                                neo_agent_core::QuestionOptionData {
+                                    label: "2".to_owned(),
+                                    description: Some("Correct".to_owned()),
+                                },
+                                neo_agent_core::QuestionOptionData {
+                                    label: "3".to_owned(),
+                                    description: Some("Too high".to_owned()),
+                                },
+                            ],
+                            multi_select: false,
+                        }],
+                        response_tx,
+                    })
+                    .expect("question sent");
+                let response = response_rx.await.expect("question response");
+                captured_answers
+                    .lock()
+                    .expect("answers lock")
+                    .extend(response.answers);
+                channels.send_event(AgentEvent::TextDelta {
+                    turn: 1,
+                    text: "answered".to_owned(),
+                });
+                channels.send_event(AgentEvent::TurnFinished {
+                    turn: 1,
+                    stop_reason: StopReason::EndTurn,
+                });
+                Ok(TurnOutcome::default())
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            run_turn,
+            PickerCatalogs::default(),
+            Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        );
+
+        controller.type_text("ask me");
+        controller
+            .run_terminal_loop(
+                move |app| {
+                    captured_frames
+                        .lock()
+                        .expect("frames lock")
+                        .push(render_overlay_snapshot(app, 80).join("\n"));
+                    Ok(())
+                },
+                ScriptedEvents {
+                    events: VecDeque::from([
+                        Some(InputEvent::Submit),
+                        None,
+                        Some(InputEvent::Action(KeybindingAction::SelectConfirm)),
+                        Some(InputEvent::Action(KeybindingAction::InputTab)),
+                        Some(InputEvent::Action(KeybindingAction::SelectConfirm)),
+                        None,
+                        Some(InputEvent::Interrupt),
+                        Some(InputEvent::Interrupt),
+                    ]),
+                },
+            )
+            .await
+            .expect("question loop completes");
+
+        assert_eq!(*answers.lock().expect("answers lock"), vec!["2"]);
+        assert!(
+            frames
+                .lock()
+                .expect("frames lock")
+                .iter()
+                .any(|frame| frame.contains("1 + 1 = ?") && frame.contains("[1] 2")),
+            "pending question should be visible before it is answered"
+        );
+        assert!(controller.chrome().focused_overlay().is_none());
+        assert!(
+            controller
+                .render_snapshot()
+                .contains("Collected your answers")
+        );
+        assert!(controller.render_snapshot().contains("answered"));
+    }
+
+    #[tokio::test]
     async fn approval_number_shortcut_confirms_session_approval() {
         let mut controller = InteractiveController::new_for_test(
             "neo",
@@ -6244,6 +7077,217 @@ command = "python3"
             controller
                 .render_snapshot()
                 .contains("Approved for this session")
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn question_dialog_consumes_keyboard_before_prompt_editing() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.type_text("draft");
+        let (response_tx, _response_rx) = oneshot::channel();
+        controller.register_pending_question(PendingQuestion {
+            id: "question-1".to_owned(),
+            questions: vec![
+                neo_agent_core::QuestionEventData {
+                    question: "2 + 2 = ?".to_owned(),
+                    header: Some("Single".to_owned()),
+                    body: None,
+                    options: vec![
+                        neo_agent_core::QuestionOptionData {
+                            label: "3".to_owned(),
+                            description: None,
+                        },
+                        neo_agent_core::QuestionOptionData {
+                            label: "4".to_owned(),
+                            description: None,
+                        },
+                    ],
+                    multi_select: false,
+                },
+                neo_agent_core::QuestionEventData {
+                    question: "Pick primes".to_owned(),
+                    header: Some("Multi".to_owned()),
+                    body: None,
+                    options: vec![
+                        neo_agent_core::QuestionOptionData {
+                            label: "2".to_owned(),
+                            description: None,
+                        },
+                        neo_agent_core::QuestionOptionData {
+                            label: "4".to_owned(),
+                            description: None,
+                        },
+                    ],
+                    multi_select: true,
+                },
+            ],
+            response_tx,
+        });
+
+        controller
+            .handle_input_event(InputEvent::Insert('2'))
+            .await
+            .expect("number shortcut selects a question option");
+        assert_eq!(controller.chrome().prompt().text, "draft");
+        {
+            let state = controller
+                .chrome()
+                .question_dialog_state()
+                .expect("question stays focused");
+            assert_eq!(state.active_tab, 1);
+            assert!(state.questions[0].selected[1]);
+        }
+
+        controller
+            .handle_input_event(InputEvent::Insert('a'))
+            .await
+            .expect("letters are consumed by the question dialog");
+        assert_eq!(controller.chrome().prompt().text, "draft");
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::EditorCursorRight))
+            .await
+            .expect("right arrow action switches to submit");
+        assert_eq!(controller.chrome().prompt().text, "draft");
+        assert!(
+            controller
+                .chrome()
+                .question_dialog_state()
+                .expect("question stays focused")
+                .on_submit_tab()
+        );
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::EditorCursorLeft))
+            .await
+            .expect("left arrow action switches back to the question");
+        assert_eq!(controller.chrome().prompt().text, "draft");
+        assert_eq!(
+            controller
+                .chrome()
+                .question_dialog_state()
+                .expect("question stays focused")
+                .active_tab,
+            1
+        );
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+            .await
+            .expect("tab switches to submit instead of editing the prompt");
+        assert_eq!(controller.chrome().prompt().text, "draft");
+        assert!(
+            controller
+                .chrome()
+                .question_dialog_state()
+                .expect("question stays focused")
+                .on_submit_tab()
+        );
+    }
+
+    #[tokio::test]
+    async fn question_dialog_prioritizes_real_keybindings_before_prompt_editing() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.type_text("draft");
+        let (response_tx, _response_rx) = oneshot::channel();
+        controller.register_pending_question(PendingQuestion {
+            id: "question-1".to_owned(),
+            questions: vec![neo_agent_core::QuestionEventData {
+                question: "Pick one".to_owned(),
+                header: Some("Single".to_owned()),
+                body: None,
+                options: vec![
+                    neo_agent_core::QuestionOptionData {
+                        label: "First".to_owned(),
+                        description: None,
+                    },
+                    neo_agent_core::QuestionOptionData {
+                        label: "Second".to_owned(),
+                        description: None,
+                    },
+                ],
+                multi_select: false,
+            }],
+            response_tx,
+        });
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+            .await
+            .expect("down selects Other");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+            .await
+            .expect("down selects Other");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+            .await
+            .expect("enter starts Other editing");
+        controller
+            .handle_input_event(InputEvent::Insert('x'))
+            .await
+            .expect("typed text goes to Other");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("backspace").expect("valid key")))
+            .await
+            .expect("backspace edits Other text");
+        {
+            let state = controller
+                .chrome()
+                .question_dialog_state()
+                .expect("question stays focused");
+            assert_eq!(state.questions[0].other_text, "");
+        }
+        assert_eq!(controller.chrome().prompt().text, "draft");
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("right").expect("valid key")))
+            .await
+            .expect("right switches to submit");
+        assert!(
+            controller
+                .chrome()
+                .question_dialog_state()
+                .expect("question stays focused")
+                .on_submit_tab()
+        );
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("left").expect("valid key")))
+            .await
+            .expect("left switches back to question");
+        assert_eq!(
+            controller
+                .chrome()
+                .question_dialog_state()
+                .expect("question stays focused")
+                .active_tab,
+            0
+        );
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("tab").expect("valid key")))
+            .await
+            .expect("tab switches to submit");
+        assert!(
+            controller
+                .chrome()
+                .question_dialog_state()
+                .expect("question stays focused")
+                .on_submit_tab()
         );
     }
 
@@ -6400,7 +7444,7 @@ command = "python3"
         let snapshot = controller.render_snapshot();
         assert!(snapshot.contains("printf one"));
         assert!(!snapshot.contains("printf two"));
-        assert!(snapshot.contains("queued: 1 bash approval waiting"));
+        assert!(snapshot.contains("queued: 1 approval waiting"));
     }
 
     #[tokio::test]
@@ -6780,7 +7824,7 @@ command = "python3"
             },
             PickerCatalogs {
                 session_items: vec![test_session_summary(
-                    "alpha",
+                    SESSION_A,
                     "Alpha session",
                     test_workspace_root(),
                     "branch summary",
@@ -6789,9 +7833,9 @@ command = "python3"
                 model_items: Vec::new(),
             },
             |session_id| async move {
-                assert_eq!(session_id, "alpha");
+                assert_eq!(session_id, SESSION_A);
                 Ok(LoadedSessionTranscript::new(
-                    "alpha",
+                    SESSION_A,
                     ["branch summary: Local branch summary".to_owned()],
                     [
                         AgentMessage::user_text("hello"),
@@ -6822,7 +7866,7 @@ command = "python3"
             .await
             .expect("session loads");
 
-        assert_eq!(controller.chrome().session_label(), "alpha");
+        assert_eq!(controller.chrome().session_label(), SESSION_A);
         assert!(controller.chrome().focused_overlay().is_none());
         assert!(transcript_has_status(
             &controller,
@@ -6847,7 +7891,7 @@ command = "python3"
         let requests = requests.lock().expect("recorded requests");
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].prompt, vec!["continue".to_owned()]);
-        assert_eq!(requests[0].session_id.as_deref(), Some("alpha"));
+        assert_eq!(requests[0].session_id.as_deref(), Some(SESSION_A));
         assert_eq!(requests[0].model, None);
         assert!(transcript_entries(&controller).iter().any(|entry| {
             matches!(entry, TranscriptEntry::AssistantMessage { content } if content == "continued")
@@ -6882,7 +7926,7 @@ command = "python3"
                     turn: 1,
                     stop_reason: StopReason::EndTurn,
                 });
-                Ok(TurnOutcome::session("session-1"))
+                Ok(TurnOutcome::session(SESSION_NEW))
             })
         });
         let mut controller = InteractiveController::new(
@@ -6921,8 +7965,8 @@ command = "python3"
         assert_eq!(requests[0].prompt, vec!["read project".to_owned()]);
         assert_eq!(requests[0].session_id, None);
         assert_eq!(requests[1].prompt, vec!["continue".to_owned()]);
-        assert_eq!(requests[1].session_id.as_deref(), Some("session-1"));
-        assert_eq!(controller.chrome().session_label(), "session-1");
+        assert_eq!(requests[1].session_id.as_deref(), Some(SESSION_NEW));
+        assert_eq!(controller.chrome().session_label(), SESSION_NEW);
     }
 
     #[tokio::test]
@@ -6940,7 +7984,7 @@ command = "python3"
                 if request_index == 1 {
                     channels
                         .session_ids
-                        .send("session-1".to_owned())
+                        .send(SESSION_NEW.to_owned())
                         .expect("session id sent");
                     channels.send_event(AgentEvent::TextDelta {
                         turn: 1,
@@ -6965,7 +8009,7 @@ command = "python3"
                     turn: 2,
                     stop_reason: StopReason::EndTurn,
                 });
-                Ok(TurnOutcome::session("session-1"))
+                Ok(TurnOutcome::session(SESSION_NEW))
             })
         });
         let mut controller = InteractiveController::new(
@@ -6989,7 +8033,7 @@ command = "python3"
             .await
             .expect("failed first turn is drained");
 
-        assert_eq!(controller.chrome().session_label(), "session-1");
+        assert_eq!(controller.chrome().session_label(), SESSION_NEW);
         assert!(
             controller
                 .render_snapshot()
@@ -7011,7 +8055,7 @@ command = "python3"
         assert_eq!(requests[0].prompt, vec!["read project".to_owned()]);
         assert_eq!(requests[0].session_id, None);
         assert_eq!(requests[1].prompt, vec!["continue".to_owned()]);
-        assert_eq!(requests[1].session_id.as_deref(), Some("session-1"));
+        assert_eq!(requests[1].session_id.as_deref(), Some(SESSION_NEW));
     }
 
     #[tokio::test]
@@ -7048,7 +8092,7 @@ command = "python3"
             },
             PickerCatalogs {
                 session_items: vec![test_session_summary(
-                    "alpha",
+                    SESSION_A,
                     "Alpha session",
                     test_workspace_root(),
                     "branch summary",
@@ -7062,12 +8106,12 @@ command = "python3"
                 Ok(LoadedSessionTranscript::new("", Vec::new(), Vec::new()))
             },
             |parent_id| async move {
-                assert_eq!(parent_id, "alpha");
+                assert_eq!(parent_id, SESSION_A);
                 Ok(ForkedSessionTranscript::new(
-                    "alpha-fork-1",
+                    SESSION_CHILD,
                     LoadedSessionTranscript::new(
-                        "alpha-fork-1",
-                        ["forked from alpha".to_owned()],
+                        SESSION_CHILD,
+                        [format!("forked from {SESSION_A}")],
                         [
                             AgentMessage::user_text("hello"),
                             AgentMessage::assistant(
@@ -7090,9 +8134,12 @@ command = "python3"
             .await
             .expect("session fork loads child transcript");
 
-        assert_eq!(controller.chrome().session_label(), "alpha-fork-1");
+        assert_eq!(controller.chrome().session_label(), SESSION_CHILD);
         assert!(controller.chrome().focused_overlay().is_none());
-        assert!(transcript_has_status(&controller, "forked from alpha"));
+        assert!(transcript_has_status(
+            &controller,
+            &format!("forked from {SESSION_A}")
+        ));
         assert!(transcript_entries(&controller).iter().any(|entry| {
             matches!(entry, TranscriptEntry::UserMessage(content) if content == "hello")
         }));
@@ -7109,11 +8156,12 @@ command = "python3"
         let requests = requests.lock().expect("recorded requests");
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].prompt, vec!["continue fork".to_owned()]);
-        assert_eq!(requests[0].session_id.as_deref(), Some("alpha-fork-1"));
+        assert_eq!(requests[0].session_id.as_deref(), Some(SESSION_CHILD));
         assert_eq!(requests[0].model, None);
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn event_loop_opens_model_picker_and_submits_with_selected_model() {
         let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured_requests = std::sync::Arc::clone(&requests);
@@ -7261,6 +8309,31 @@ command = "python3"
     }
 
     #[test]
+    fn controller_for_config_loads_builtin_skills() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = test_config(temp.path(), temp.path().join(".neo/sessions"));
+
+        let controller = controller_for_config(&config);
+
+        let skill_store = controller
+            .skill_store
+            .as_ref()
+            .expect("skill store should load");
+        assert!(
+            skill_store.get("define-goal").is_some(),
+            "builtin define-goal skill should be loaded"
+        );
+        assert!(
+            skill_store.get("sub-skill").is_some(),
+            "builtin sub-skill skill should be loaded"
+        );
+        assert!(
+            skill_store.get("self-evo").is_some(),
+            "builtin self-evo skill should be loaded"
+        );
+    }
+
+    #[test]
     fn model_picker_items_include_parseable_context_window() {
         let item = model_to_picker_item(&neo_ai::ModelSpec {
             provider: neo_ai::ProviderId("test".to_owned()),
@@ -7285,7 +8358,7 @@ command = "python3"
         let bucket_dir = workspace_sessions_dir(&test_config(temp.path(), sessions_dir.clone()));
         fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
         fs::write(
-            bucket_dir.join("alpha.jsonl"),
+            bucket_dir.join(format!("{SESSION_A}.jsonl")),
             concat!(
                 "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
                 "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi back\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
@@ -7295,22 +8368,22 @@ command = "python3"
 
         let store = SessionMetadataStore::new(&bucket_dir);
         store
-            .rename("alpha", "Alpha Session".to_owned())
+            .rename(SESSION_A, "Alpha Session".to_owned())
             .expect("rename session");
         store
-            .summarize("alpha", "Local branch summary".to_owned())
+            .summarize(SESSION_A, "Local branch summary".to_owned())
             .expect("summarize session");
         let child = store
-            .fork("alpha", Some("Parser branch".to_owned()))
+            .fork(SESSION_A, Some("Parser branch".to_owned()))
             .expect("fork session");
         store
             .record_activity(
-                "alpha",
+                SESSION_A,
                 Some(temp.path().display().to_string()),
                 Some("hello".to_owned()),
                 "100".to_owned(),
             )
-            .expect("record alpha activity");
+            .expect("record session activity");
         store
             .record_activity(
                 &child.id,
@@ -7332,7 +8405,7 @@ command = "python3"
                 .as_deref()
                 .is_some_and(|prompt| prompt.contains("child prompt"))
         );
-        assert_eq!(catalog.items[1].id, "alpha");
+        assert_eq!(catalog.items[1].id, SESSION_A);
         assert_eq!(catalog.items[1].title.as_deref(), Some("Alpha Session"));
         assert!(
             catalog.items[1]
@@ -7341,10 +8414,10 @@ command = "python3"
                 .is_some_and(|prompt| prompt.contains("hello"))
         );
 
-        let loaded = load_session_transcript("alpha".to_owned(), &config)
+        let loaded = load_session_transcript(SESSION_A.to_owned(), &config)
             .await
             .expect("load session transcript");
-        assert_eq!(loaded.label, "alpha");
+        assert_eq!(loaded.label, SESSION_A);
         assert_eq!(
             loaded.notices,
             vec!["branch summary: Local branch summary".to_owned()]
@@ -7368,7 +8441,7 @@ command = "python3"
         let bucket_dir = workspace_sessions_dir(&config);
         fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
         fs::write(
-            bucket_dir.join("alpha.jsonl"),
+            bucket_dir.join(format!("{SESSION_A}.jsonl")),
             concat!(
                 "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
                 "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi back\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
@@ -7376,15 +8449,15 @@ command = "python3"
         )
         .expect("write session jsonl");
 
-        let forked = fork_session_transcript("alpha".to_owned(), &config)
+        let forked = fork_session_transcript(SESSION_A.to_owned(), &config)
             .await
             .expect("fork session");
 
-        assert!(forked.session_id.starts_with("alpha-fork-"));
+        assert!(forked.session_id.starts_with("session_"));
         assert_eq!(forked.transcript.label, forked.session_id);
         assert_eq!(
             forked.transcript.notices.first().map(String::as_str),
-            Some("forked from alpha")
+            Some(format!("forked from {SESSION_A}").as_str())
         );
         assert_eq!(forked.transcript.messages.len(), 2);
         assert!(
@@ -7398,17 +8471,18 @@ command = "python3"
             .expect("list sessions");
         let parent = sessions
             .iter()
-            .find(|session| session.id == "alpha")
+            .find(|session| session.id == SESSION_A)
             .expect("parent listed");
         assert!(parent.children.contains(&forked.session_id));
         let child = sessions
             .iter()
             .find(|session| session.id == forked.session_id)
             .expect("child listed");
-        assert_eq!(child.parent_id.as_deref(), Some("alpha"));
+        assert_eq!(child.parent_id.as_deref(), Some(SESSION_A));
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn session_picker_ctrl_a_toggles_scope() {
         let temp = tempfile::tempdir().expect("tempdir");
         let sessions_dir = temp.path().join(".neo/sessions");
@@ -7421,14 +8495,14 @@ command = "python3"
         let bucket_a = workspace_sessions_dir(&config_a);
         fs::create_dir_all(&bucket_a).expect("create bucket_a");
         fs::write(
-            bucket_a.join("alpha.jsonl"),
+            bucket_a.join(format!("{SESSION_A}.jsonl")),
             r#"{"MessageAppended":{"message":{"User":{"content":[{"Text":{"text":"hello"}}]}}}}"#,
         )
         .expect("write alpha jsonl");
         let store_a = SessionMetadataStore::new(&bucket_a);
         store_a
             .record_activity(
-                "alpha",
+                SESSION_A,
                 Some(project_a.display().to_string()),
                 Some("alpha prompt".to_owned()),
                 "200".to_owned(),
@@ -7441,14 +8515,14 @@ command = "python3"
         let bucket_b = workspace_sessions_dir(&config_b);
         fs::create_dir_all(&bucket_b).expect("create bucket_b");
         fs::write(
-            bucket_b.join("beta.jsonl"),
+            bucket_b.join(format!("{SESSION_B}.jsonl")),
             r#"{"MessageAppended":{"message":{"User":{"content":[{"Text":{"text":"hello"}}]}}}}"#,
         )
         .expect("write beta jsonl");
         let store_b = SessionMetadataStore::new(&bucket_b);
         store_b
             .record_activity(
-                "beta",
+                SESSION_B,
                 Some(project_b.display().to_string()),
                 Some("beta prompt".to_owned()),
                 "100".to_owned(),
@@ -7458,14 +8532,14 @@ command = "python3"
         let index = neo_agent_core::session::SessionIndex::new(neo_home);
         index
             .append(&neo_agent_core::session::SessionIndexEntry {
-                session_id: "alpha".to_owned(),
+                session_id: SESSION_A.to_owned(),
                 session_dir: bucket_a.clone(),
                 workdir: project_a.clone(),
             })
             .expect("index alpha");
         index
             .append(&neo_agent_core::session::SessionIndexEntry {
-                session_id: "beta".to_owned(),
+                session_id: SESSION_B.to_owned(),
                 session_dir: bucket_b.clone(),
                 workdir: project_b.clone(),
             })
@@ -7534,7 +8608,7 @@ command = "python3"
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
             PickerCatalogs {
                 session_items: vec![SessionSummary {
-                    id: "alpha".to_owned(),
+                    id: SESSION_A.to_owned(),
                     title: Some("Alpha session".to_owned()),
                     last_prompt: Some("hello".to_owned()),
                     work_dir: other_dir.path().to_path_buf(),
@@ -7562,8 +8636,8 @@ command = "python3"
             .expect("select cross-cwd session");
 
         let expected = format!(
-            "cd '{}' && neo --resume 'alpha'",
-            other_dir.path().display()
+            "cd '{}' && neo --resume '{SESSION_A}'",
+            other_dir.path().display(),
         );
         assert!(controller.chrome().focused_overlay().is_none());
         assert!(transcript_has_status(&controller, &expected));
@@ -7604,6 +8678,7 @@ command = "python3"
             mcp: McpConfig::default(),
             prompt_templates: Vec::new(),
             extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
             project_trusted: true,
             project_dir: project_dir.to_path_buf(),
             config_path: project_dir.join(".neo/config.toml"),

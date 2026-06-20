@@ -2,29 +2,34 @@ use neo_agent_core::session::{
     SessionMetadataStore, SessionRecord, SessionSummaryRecord, SessionSummarySource,
 };
 
+const SESSION_A: &str = "session_00000000-0000-4000-8000-000000000101";
+const SESSION_B: &str = "session_00000000-0000-4000-8000-000000000102";
+const SESSION_C: &str = "session_00000000-0000-4000-8000-000000000103";
+
 #[test]
 fn session_metadata_lists_existing_jsonl_sessions_with_names_and_children() {
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join("alpha.jsonl"), "{}\n").expect("write alpha");
+    std::fs::write(dir.path().join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session");
 
     let store = SessionMetadataStore::new(dir.path());
     let child = store
-        .fork("alpha", Some("Investigate parser".to_owned()))
-        .expect("fork alpha");
+        .fork(SESSION_A, Some("Investigate parser".to_owned()))
+        .expect("fork session");
     store
-        .rename("alpha", "Main thread".to_owned())
-        .expect("rename alpha");
+        .rename(SESSION_A, "Main thread".to_owned())
+        .expect("rename session");
     store
-        .summarize("alpha", "Investigating parser branch".to_owned())
-        .expect("summarize alpha");
+        .summarize(SESSION_A, "Investigating parser branch".to_owned())
+        .expect("summarize session");
 
     let sessions = store.list().expect("list sessions");
+    assert!(child.id.starts_with("session_"));
 
     assert_eq!(
         sessions,
         vec![
             SessionRecord {
-                id: "alpha".to_owned(),
+                id: SESSION_A.to_owned(),
                 name: Some("Main thread".to_owned()),
                 summary: Some("Investigating parser branch".to_owned()),
                 parent_id: None,
@@ -46,7 +51,7 @@ fn session_metadata_lists_existing_jsonl_sessions_with_names_and_children() {
                 id: child.id,
                 name: Some("Investigate parser".to_owned()),
                 summary: None,
-                parent_id: Some("alpha".to_owned()),
+                parent_id: Some(SESSION_A.to_owned()),
                 summary_record: None,
                 title: Some("Investigate parser".to_owned()),
                 title_model: None,
@@ -63,12 +68,12 @@ fn session_metadata_lists_existing_jsonl_sessions_with_names_and_children() {
 #[test]
 fn session_metadata_stores_branch_summary_records() {
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join("alpha.jsonl"), "{}\n").expect("write alpha");
+    std::fs::write(dir.path().join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session");
 
     let store = SessionMetadataStore::new(dir.path());
     let summarized = store
         .record_summary(
-            "alpha",
+            SESSION_A,
             SessionSummaryRecord {
                 text: "Investigating parser branch".to_owned(),
                 source: SessionSummarySource::ModelGenerated,
@@ -76,7 +81,7 @@ fn session_metadata_stores_branch_summary_records() {
                 updated_at: Some("125.0Z".to_owned()),
             },
         )
-        .expect("summarize alpha");
+        .expect("summarize session");
 
     assert_eq!(
         summarized.summary.as_deref(),
@@ -103,38 +108,38 @@ fn session_metadata_stores_branch_summary_records() {
 #[test]
 fn session_metadata_records_activity_title_and_orders_recent_first() {
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join("alpha.jsonl"), "{}\n").expect("write alpha");
-    std::fs::write(dir.path().join("beta.jsonl"), "{}\n").expect("write beta");
+    std::fs::write(dir.path().join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session a");
+    std::fs::write(dir.path().join(format!("{SESSION_B}.jsonl")), "{}\n").expect("write session b");
 
     let store = SessionMetadataStore::new(dir.path());
     store
         .record_activity(
-            "alpha",
+            SESSION_A,
             Some("/workspace/old".to_owned()),
             Some("older prompt".to_owned()),
             "100".to_owned(),
         )
-        .expect("record alpha activity");
+        .expect("record session a activity");
     store
         .record_activity(
-            "beta",
+            SESSION_B,
             Some("/workspace/new".to_owned()),
             Some("newer prompt".to_owned()),
             "200".to_owned(),
         )
-        .expect("record beta activity");
+        .expect("record session b activity");
     store
         .record_title(
-            "beta",
+            SESSION_B,
             "Generated resume title".to_owned(),
             Some("test/model".to_owned()),
             "201".to_owned(),
         )
-        .expect("record beta title");
+        .expect("record session b title");
 
     let sessions = store.list_recent().expect("list recent sessions");
 
-    assert_eq!(sessions[0].id, "beta");
+    assert_eq!(sessions[0].id, SESSION_B);
     assert_eq!(sessions[0].title.as_deref(), Some("Generated resume title"));
     assert_eq!(sessions[0].title_model.as_deref(), Some("test/model"));
     assert_eq!(sessions[0].title_updated_at.as_deref(), Some("201"));
@@ -144,32 +149,53 @@ fn session_metadata_records_activity_title_and_orders_recent_first() {
         Some("newer prompt")
     );
     assert_eq!(sessions[0].updated_at.as_deref(), Some("200"));
-    assert_eq!(sessions[1].id, "alpha");
+    assert_eq!(sessions[1].id, SESSION_A);
 }
 
 #[test]
 fn session_metadata_title_falls_back_to_name_then_last_prompt_then_id() {
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join("alpha.jsonl"), "{}\n").expect("write alpha");
-    std::fs::write(dir.path().join("beta.jsonl"), "{}\n").expect("write beta");
-    std::fs::write(dir.path().join("gamma.jsonl"), "{}\n").expect("write gamma");
+    std::fs::write(dir.path().join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session a");
+    std::fs::write(dir.path().join(format!("{SESSION_B}.jsonl")), "{}\n").expect("write session b");
+    std::fs::write(dir.path().join(format!("{SESSION_C}.jsonl")), "{}\n").expect("write session c");
 
     let store = SessionMetadataStore::new(dir.path());
     store
-        .rename("alpha", "Named session".to_owned())
-        .expect("rename alpha");
+        .rename(SESSION_A, "Named session".to_owned())
+        .expect("rename session a");
     store
         .record_activity(
-            "beta",
+            SESSION_B,
             None,
             Some("Prompt title".to_owned()),
             "100".to_owned(),
         )
-        .expect("record beta activity");
+        .expect("record session b activity");
 
     let sessions = store.list().expect("list sessions");
 
     assert_eq!(sessions[0].title.as_deref(), Some("Named session"));
     assert_eq!(sessions[1].title.as_deref(), Some("Prompt title"));
-    assert_eq!(sessions[2].title.as_deref(), Some("gamma"));
+    assert_eq!(sessions[2].title.as_deref(), Some(SESSION_C));
+}
+
+#[test]
+fn session_metadata_ignores_legacy_numeric_session_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("1781719048514.jsonl"), "{}\n").expect("write legacy session");
+    std::fs::write(dir.path().join(format!("{SESSION_A}.jsonl")), "{}\n")
+        .expect("write new session");
+
+    let store = SessionMetadataStore::new(dir.path());
+    let sessions = store.list().expect("list sessions");
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].id, SESSION_A);
+    assert!(store.rename("1781719048514", "Legacy".to_owned()).is_err());
+    assert!(
+        store
+            .record_activity("1781719048514", None, None, "100".to_owned())
+            .is_err()
+    );
+    assert!(store.fork("1781719048514", None).is_err());
 }

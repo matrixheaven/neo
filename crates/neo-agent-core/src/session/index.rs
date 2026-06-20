@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncBufReadExt;
 
-use super::{SessionError, SessionMetadataFile, SessionSummary};
+use super::{SessionError, SessionMetadataFile, SessionSummary, validate_session_id};
 
 const INDEX_FILENAME: &str = "session_index.jsonl";
 
@@ -31,6 +31,8 @@ pub enum SessionIndexError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("invalid session id {0:?}")]
+    InvalidId(String),
 }
 
 /// Append-only JSONL index at `<neo_home>/session_index.jsonl`.
@@ -56,6 +58,8 @@ impl SessionIndex {
     /// Append a single entry to the index. Creates the file if it does not exist.
     pub fn append(&self, entry: &SessionIndexEntry) -> Result<(), SessionIndexError> {
         use std::io::Write;
+        validate_session_id(&entry.session_id)
+            .map_err(|_| SessionIndexError::InvalidId(entry.session_id.clone()))?;
         if let Some(parent) = self.index_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -72,6 +76,8 @@ impl SessionIndex {
     /// Find the most recent entry for the given session ID.
     /// Scans from the end of the file so that the latest appended entry wins.
     pub fn find(&self, session_id: &str) -> Result<Option<SessionIndexEntry>, SessionIndexError> {
+        validate_session_id(session_id)
+            .map_err(|_| SessionIndexError::InvalidId(session_id.to_owned()))?;
         let entries = self.list_all()?;
         Ok(entries
             .into_iter()
@@ -94,7 +100,9 @@ impl SessionIndex {
             if line.trim().is_empty() {
                 continue;
             }
-            if let Ok(entry) = serde_json::from_str::<SessionIndexEntry>(line) {
+            if let Ok(entry) = serde_json::from_str::<SessionIndexEntry>(line)
+                && validate_session_id(&entry.session_id).is_ok()
+            {
                 entries.push(entry);
             }
         }
@@ -190,7 +198,9 @@ pub async fn list_all_async(index_path: &Path) -> Result<Vec<SessionIndexEntry>,
         if trimmed.is_empty() {
             continue;
         }
-        if let Ok(entry) = serde_json::from_str::<SessionIndexEntry>(trimmed) {
+        if let Ok(entry) = serde_json::from_str::<SessionIndexEntry>(trimmed)
+            && validate_session_id(&entry.session_id).is_ok()
+        {
             entries.push(entry);
         }
     }
@@ -207,16 +217,17 @@ mod tests {
     fn append_and_find() {
         let tmp = TempDir::new().unwrap();
         let index = SessionIndex::new(tmp.path());
+        let session_id = "session_00000000-0000-4000-8000-000000000001";
 
         let entry = SessionIndexEntry {
-            session_id: "1234567890".to_owned(),
-            session_dir: tmp.path().join("wd_neo_abc123/1234567890.jsonl"),
+            session_id: session_id.to_owned(),
+            session_dir: tmp.path().join(format!("wd_neo_abc123/{session_id}.jsonl")),
             workdir: PathBuf::from("/home/user/neo"),
         };
         index.append(&entry).unwrap();
 
-        let found = index.find("1234567890").unwrap();
-        assert_eq!(found.as_ref().unwrap().session_id, "1234567890");
+        let found = index.find(session_id).unwrap();
+        assert_eq!(found.as_ref().unwrap().session_id, session_id);
         assert_eq!(
             found.as_ref().unwrap().workdir,
             PathBuf::from("/home/user/neo")
@@ -224,36 +235,67 @@ mod tests {
     }
 
     #[test]
+    fn append_rejects_legacy_numeric_session_ids() {
+        let tmp = TempDir::new().unwrap();
+        let index = SessionIndex::new(tmp.path());
+
+        let entry = SessionIndexEntry {
+            session_id: "1234567890".to_owned(),
+            session_dir: tmp.path().join("wd_neo_abc123/1234567890.jsonl"),
+            workdir: PathBuf::from("/home/user/neo"),
+        };
+
+        assert!(matches!(
+            index.append(&entry),
+            Err(SessionIndexError::InvalidId(id)) if id == "1234567890"
+        ));
+    }
+
+    #[test]
     fn find_missing_returns_none() {
         let tmp = TempDir::new().unwrap();
         let index = SessionIndex::new(tmp.path());
 
-        let found = index.find("nonexistent").unwrap();
+        let found = index
+            .find("session_00000000-0000-4000-8000-000000000002")
+            .unwrap();
         assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_rejects_legacy_numeric_session_ids() {
+        let tmp = TempDir::new().unwrap();
+        let index = SessionIndex::new(tmp.path());
+
+        assert!(matches!(
+            index.find("1234567890"),
+            Err(SessionIndexError::InvalidId(id)) if id == "1234567890"
+        ));
     }
 
     #[test]
     fn find_latest_wins() {
         let tmp = TempDir::new().unwrap();
         let index = SessionIndex::new(tmp.path());
+        let session_id = "session_00000000-0000-4000-8000-000000000003";
 
         index
             .append(&SessionIndexEntry {
-                session_id: "s1".to_owned(),
-                session_dir: tmp.path().join("old.jsonl"),
+                session_id: session_id.to_owned(),
+                session_dir: tmp.path().join(format!("{session_id}.jsonl")),
                 workdir: PathBuf::from("/old"),
             })
             .unwrap();
 
         index
             .append(&SessionIndexEntry {
-                session_id: "s1".to_owned(),
-                session_dir: tmp.path().join("new.jsonl"),
+                session_id: session_id.to_owned(),
+                session_dir: tmp.path().join(format!("{session_id}.jsonl")),
                 workdir: PathBuf::from("/new"),
             })
             .unwrap();
 
-        let found = index.find("s1").unwrap().unwrap();
+        let found = index.find(session_id).unwrap().unwrap();
         assert_eq!(found.workdir, PathBuf::from("/new"));
     }
 
@@ -265,14 +307,18 @@ mod tests {
         std::fs::write(
             &index_path,
             "{invalid json\n\
-             {\"session_id\":\"s1\",\"session_dir\":\"/a.jsonl\",\"workdir\":\"/a\"}\n",
+             {\"session_id\":\"session_00000000-0000-4000-8000-000000000004\",\"session_dir\":\"/a.jsonl\",\"workdir\":\"/a\"}\n\
+             {\"session_id\":\"1234567890\",\"session_dir\":\"/old.jsonl\",\"workdir\":\"/old\"}\n",
         )
         .unwrap();
 
         let index = SessionIndex::from_path(index_path);
         let entries = index.list_all().unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].session_id, "s1");
+        assert_eq!(
+            entries[0].session_id,
+            "session_00000000-0000-4000-8000-000000000004"
+        );
     }
 
     #[test]

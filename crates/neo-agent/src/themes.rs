@@ -61,7 +61,6 @@ struct ThemeColors {
     footer_context_ok: Option<String>,
     footer_context_warn: Option<String>,
     footer_context_critical: Option<String>,
-    footer_hint: Option<String>,
 }
 
 pub fn resolve_theme(project_dir: &Path) -> anyhow::Result<ResolvedTheme> {
@@ -331,12 +330,6 @@ fn apply_colors(theme: &mut TuiTheme, colors: &ThemeColors, path: &Path) -> anyh
         &mut theme.footer_context_critical,
         "footer_context_critical",
         colors.footer_context_critical.as_deref(),
-        path,
-    )?;
-    apply_color(
-        &mut theme.footer_hint,
-        "footer_hint",
-        colors.footer_hint.as_deref(),
         path,
     )?;
     Ok(())

@@ -11,6 +11,10 @@ use std::{
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+const SESSION_A: &str = "session_00000000-0000-4000-8000-000000000301";
+const SESSION_CHILD: &str = "session_00000000-0000-4000-8000-000000000303";
+const SESSION_EMPTY: &str = "session_00000000-0000-4000-8000-000000000304";
+
 #[derive(Debug, Clone)]
 struct RecordedRequest {
     method: String,
@@ -62,7 +66,7 @@ fn neo() -> Command {
 
 fn isolated_home() -> std::path::PathBuf {
     thread_local! {
-        static HOME: std::cell::OnceCell<(TempDir, std::path::PathBuf)> = std::cell::OnceCell::new();
+        static HOME: std::cell::OnceCell<(TempDir, std::path::PathBuf)> = const { std::cell::OnceCell::new() };
     }
     HOME.with(|cell| {
         let (_, path) = cell.get_or_init(|| {
@@ -72,6 +76,14 @@ fn isolated_home() -> std::path::PathBuf {
         });
         path.clone()
     })
+}
+
+fn sessions_metadata_json(entries: &[(&str, Value)]) -> String {
+    let mut sessions = serde_json::Map::new();
+    for (id, value) in entries {
+        sessions.insert((*id).to_owned(), value.clone());
+    }
+    json!({ "sessions": sessions }).to_string()
 }
 
 fn session_bucket(project_dir: &Path) -> PathBuf {
@@ -108,7 +120,7 @@ fn rpc_get_state_reports_project_runtime_state() {
     std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::write(sessions.join("alpha.jsonl"), "{}\n").expect("write session");
+    std::fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session");
     std::fs::write(
         temp.path().join(".neo/config.toml"),
         r#"
@@ -146,7 +158,7 @@ fn config_mode_rpc_uses_the_real_rpc_loop_without_subcommand() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::write(sessions.join("alpha.jsonl"), "{}\n").expect("write session");
+    std::fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session");
     std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
     std::fs::write(
         temp.path().join(".neo/config.toml"),
@@ -178,7 +190,7 @@ fn rpc_get_messages_replays_session_jsonl_messages() {
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
     std::fs::write(
-        sessions.join("alpha.jsonl"),
+        sessions.join(format!("{SESSION_A}.jsonl")),
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello rpc history\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi from jsonl\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
@@ -190,14 +202,16 @@ fn rpc_get_messages_replays_session_jsonl_messages() {
     command.current_dir(temp.path()).arg("rpc");
     let stdout = run_with_stdin(
         command,
-        r#"{"type":"request","id":"messages-1","method":"get_messages","params":{"session_id":"alpha"}}"#,
+        &format!(
+            r#"{{"type":"request","id":"messages-1","method":"get_messages","params":{{"session_id":"{SESSION_A}"}}}}"#
+        ),
     );
 
     let messages = parse_jsonl(&stdout);
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["type"], "response");
     assert_eq!(messages[0]["id"], "messages-1");
-    assert_eq!(messages[0]["result"]["session_id"], "alpha");
+    assert_eq!(messages[0]["result"]["session_id"], SESSION_A);
     assert_eq!(
         messages[0]["result"]["messages"].as_array().unwrap().len(),
         2
@@ -217,20 +231,23 @@ fn rpc_get_messages_returns_empty_replay_for_empty_session() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::write(sessions.join("empty.jsonl"), "").expect("write empty session");
+    std::fs::write(sessions.join(format!("{SESSION_EMPTY}.jsonl")), "")
+        .expect("write empty session");
 
     let mut command = neo();
     command.current_dir(temp.path()).arg("rpc");
     let stdout = run_with_stdin(
         command,
-        r#"{"type":"request","id":"messages-empty","method":"get_messages","params":{"session_id":"empty"}}"#,
+        &format!(
+            r#"{{"type":"request","id":"messages-empty","method":"get_messages","params":{{"session_id":"{SESSION_EMPTY}"}}}}"#
+        ),
     );
 
     let messages = parse_jsonl(&stdout);
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["type"], "response");
     assert_eq!(messages[0]["id"], "messages-empty");
-    assert_eq!(messages[0]["result"]["session_id"], "empty");
+    assert_eq!(messages[0]["result"]["session_id"], SESSION_EMPTY);
     assert_eq!(
         messages[0]["result"]["messages"].as_array().unwrap().len(),
         0
@@ -238,27 +255,29 @@ fn rpc_get_messages_returns_empty_replay_for_empty_session() {
 }
 
 #[test]
-fn rpc_get_messages_resolves_unique_session_prefix() {
+fn rpc_get_messages_rejects_incomplete_session_id() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::write(sessions.join("alpha-main.jsonl"), "").expect("write session");
+    std::fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "").expect("write session");
 
     let mut command = neo();
     command.current_dir(temp.path()).arg("rpc");
     let stdout = run_with_stdin(
         command,
-        r#"{"type":"request","id":"messages-prefix","method":"get_messages","params":{"session_id":"alpha"}}"#,
+        r#"{"type":"request","id":"messages-invalid","method":"get_messages","params":{"session_id":"session_"}}"#,
     );
 
     let messages = parse_jsonl(&stdout);
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["type"], "response");
-    assert_eq!(messages[0]["id"], "messages-prefix");
-    assert_eq!(messages[0]["result"]["session_id"], "alpha-main");
-    assert_eq!(
-        messages[0]["result"]["messages"].as_array().unwrap().len(),
-        0
+    assert_eq!(messages[0]["id"], "messages-invalid");
+    assert_eq!(messages[0]["error"]["code"], "invalid_params");
+    assert!(
+        messages[0]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("invalid session id")
     );
 }
 
@@ -267,7 +286,7 @@ fn rpc_get_messages_accepts_in_directory_jsonl_path() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    let session_path = sessions.join("alpha-main.jsonl");
+    let session_path = sessions.join(format!("{SESSION_A}.jsonl"));
     std::fs::write(&session_path, "").expect("write session");
 
     let mut command = neo();
@@ -284,7 +303,7 @@ fn rpc_get_messages_accepts_in_directory_jsonl_path() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["type"], "response");
     assert_eq!(messages[0]["id"], "messages-path");
-    assert_eq!(messages[0]["result"]["session_id"], "alpha-main");
+    assert_eq!(messages[0]["result"]["session_id"], SESSION_A);
     assert_eq!(
         messages[0]["result"]["messages"].as_array().unwrap().len(),
         0
@@ -320,23 +339,28 @@ fn rpc_sessions_list_returns_local_session_metadata() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::write(sessions.join("alpha.jsonl"), "{}\n").expect("write parent session");
-    std::fs::write(sessions.join("alpha-fork-1.jsonl"), "{}\n").expect("write child session");
+    std::fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "{}\n")
+        .expect("write parent session");
+    std::fs::write(sessions.join(format!("{SESSION_CHILD}.jsonl")), "{}\n")
+        .expect("write child session");
     std::fs::write(
         sessions.join("sessions.metadata.json"),
-        json!({
-            "sessions": {
-                "alpha": {
+        sessions_metadata_json(&[
+            (
+                SESSION_A,
+                json!({
                     "name": "Main thread",
                     "summary": "Local branch summary"
-                },
-                "alpha-fork-1": {
+                }),
+            ),
+            (
+                SESSION_CHILD,
+                json!({
                     "name": "Parser branch",
-                    "parent_id": "alpha"
-                }
-            }
-        })
-        .to_string(),
+                    "parent_id": SESSION_A
+                }),
+            ),
+        ]),
     )
     .expect("write metadata");
 
@@ -357,20 +381,20 @@ fn rpc_sessions_list_returns_local_session_metadata() {
     assert_eq!(sessions.len(), 2);
     let alpha = sessions
         .iter()
-        .find(|session| session["id"] == "alpha")
+        .find(|session| session["id"] == SESSION_A)
         .expect("alpha session");
     let child = sessions
         .iter()
-        .find(|session| session["id"] == "alpha-fork-1")
+        .find(|session| session["id"] == SESSION_CHILD)
         .expect("child session");
     assert_eq!(alpha["name"], "Main thread");
     assert_eq!(alpha["title"], "Main thread");
     assert_eq!(alpha["summary"], "Local branch summary");
     assert!(alpha["parent_id"].is_null());
-    assert_eq!(alpha["children"], json!(["alpha-fork-1"]));
+    assert_eq!(alpha["children"], json!([SESSION_CHILD]));
     assert_eq!(child["name"], "Parser branch");
     assert_eq!(child["title"], "Parser branch");
-    assert_eq!(child["parent_id"], "alpha");
+    assert_eq!(child["parent_id"], SESSION_A);
 }
 
 #[test]
@@ -378,7 +402,7 @@ fn rpc_sessions_tree_method_is_not_exposed() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::write(sessions.join("alpha.jsonl"), "{}\n").expect("write session");
+    std::fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session");
 
     let mut command = neo();
     command.current_dir(temp.path()).arg("rpc");
@@ -400,28 +424,32 @@ fn rpc_sessions_get_returns_local_session_metadata_and_messages() {
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
     std::fs::write(
-        sessions.join("alpha-main.jsonl"),
+        sessions.join(format!("{SESSION_A}.jsonl")),
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello session get\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"session get reply\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
         ),
     )
     .expect("write session");
-    std::fs::write(sessions.join("alpha-main-fork-1.jsonl"), "{}\n").expect("write child session");
+    std::fs::write(sessions.join(format!("{SESSION_CHILD}.jsonl")), "{}\n")
+        .expect("write child session");
     std::fs::write(
         sessions.join("sessions.metadata.json"),
-        json!({
-            "sessions": {
-                "alpha-main": {
+        sessions_metadata_json(&[
+            (
+                SESSION_A,
+                json!({
                     "name": "Main thread",
                     "summary": "Resolved local branch summary"
-                },
-                "alpha-main-fork-1": {
-                    "parent_id": "alpha-main"
-                }
-            }
-        })
-        .to_string(),
+                }),
+            ),
+            (
+                SESSION_CHILD,
+                json!({
+                    "parent_id": SESSION_A
+                }),
+            ),
+        ]),
     )
     .expect("write metadata");
 
@@ -429,29 +457,28 @@ fn rpc_sessions_get_returns_local_session_metadata_and_messages() {
     command.current_dir(temp.path()).arg("rpc");
     let stdout = run_with_stdin(
         command,
-        r#"{"type":"request","id":"sessions-get","method":"sessions.get","params":{"session_id":"alpha-main"}}"#,
+        &format!(
+            r#"{{"type":"request","id":"sessions-get","method":"sessions.get","params":{{"session_id":"{SESSION_A}"}}}}"#
+        ),
     );
 
     let messages = parse_jsonl(&stdout);
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["type"], "response");
     assert_eq!(messages[0]["id"], "sessions-get");
-    assert_eq!(messages[0]["result"]["id"], "alpha-main");
+    assert_eq!(messages[0]["result"]["id"], SESSION_A);
     assert_eq!(messages[0]["result"]["name"], "Main thread");
     assert_eq!(
         messages[0]["result"]["summary"],
         "Resolved local branch summary"
     );
     assert!(messages[0]["result"]["parent_id"].is_null());
-    assert_eq!(
-        messages[0]["result"]["children"],
-        json!(["alpha-main-fork-1"])
-    );
+    assert_eq!(messages[0]["result"]["children"], json!([SESSION_CHILD]));
     assert!(
         messages[0]["result"]["path"]
             .as_str()
             .expect("session path")
-            .ends_with("alpha-main.jsonl")
+            .ends_with(&format!("{SESSION_A}.jsonl"))
     );
     assert_eq!(
         messages[0]["result"]["messages"].as_array().unwrap().len(),
@@ -468,27 +495,29 @@ fn rpc_sessions_get_returns_local_session_metadata_and_messages() {
 }
 
 #[test]
-fn rpc_sessions_get_resolves_unique_session_prefix() {
+fn rpc_sessions_get_rejects_incomplete_session_id() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::write(sessions.join("alpha-main.jsonl"), "").expect("write session");
+    std::fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "").expect("write session");
 
     let mut command = neo();
     command.current_dir(temp.path()).arg("rpc");
     let stdout = run_with_stdin(
         command,
-        r#"{"type":"request","id":"sessions-get-prefix","method":"sessions.get","params":{"session_id":"alpha"}}"#,
+        r#"{"type":"request","id":"sessions-get-invalid","method":"sessions.get","params":{"session_id":"session_"}}"#,
     );
 
     let messages = parse_jsonl(&stdout);
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["type"], "response");
-    assert_eq!(messages[0]["id"], "sessions-get-prefix");
-    assert_eq!(messages[0]["result"]["id"], "alpha-main");
-    assert_eq!(
-        messages[0]["result"]["messages"].as_array().unwrap().len(),
-        0
+    assert_eq!(messages[0]["id"], "sessions-get-invalid");
+    assert_eq!(messages[0]["error"]["code"], "invalid_params");
+    assert!(
+        messages[0]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("invalid session id")
     );
 }
 
@@ -522,7 +551,7 @@ fn rpc_sessions_export_html_returns_rendered_local_session() {
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
     std::fs::write(
-        sessions.join("alpha.jsonl"),
+        sessions.join(format!("{SESSION_A}.jsonl")),
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello html export\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"rendered **bold** local reply <script>alert(1)</script>\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
@@ -534,19 +563,21 @@ fn rpc_sessions_export_html_returns_rendered_local_session() {
     command.current_dir(temp.path()).arg("rpc");
     let stdout = run_with_stdin(
         command,
-        r#"{"type":"request","id":"export-1","method":"sessions.export_html","params":{"session_id":"alpha"}}"#,
+        &format!(
+            r#"{{"type":"request","id":"export-1","method":"sessions.export_html","params":{{"session_id":"{SESSION_A}"}}}}"#
+        ),
     );
 
     let messages = parse_jsonl(&stdout);
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["type"], "response");
     assert_eq!(messages[0]["id"], "export-1");
-    assert_eq!(messages[0]["result"]["session_id"], "alpha");
+    assert_eq!(messages[0]["result"]["session_id"], SESSION_A);
     let html = messages[0]["result"]["html"]
         .as_str()
         .expect("rendered html");
     assert!(html.contains("<!doctype html>"));
-    assert!(html.contains("<title>neo session alpha</title>"));
+    assert!(html.contains(&format!("<title>neo session {SESSION_A}</title>")));
     assert!(html.contains("hello html export"));
     assert!(html.contains("rendered <strong>bold</strong> local reply"));
     assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
@@ -559,28 +590,32 @@ fn rpc_sessions_export_json_returns_sanitized_replayed_session_artifact() {
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
     std::fs::write(
-        sessions.join("alpha-main.jsonl"),
+        sessions.join(format!("{SESSION_A}.jsonl")),
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello rpc json export\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"rpc portable reply\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
         ),
     )
     .expect("write session");
-    std::fs::write(sessions.join("alpha-main-fork-1.jsonl"), "{}\n").expect("write child session");
+    std::fs::write(sessions.join(format!("{SESSION_CHILD}.jsonl")), "{}\n")
+        .expect("write child session");
     std::fs::write(
         sessions.join("sessions.metadata.json"),
-        json!({
-            "sessions": {
-                "alpha-main": {
+        sessions_metadata_json(&[
+            (
+                SESSION_A,
+                json!({
                     "name": "Main thread",
                     "summary": "Resolved local branch summary"
-                },
-                "alpha-main-fork-1": {
-                    "parent_id": "alpha-main"
-                }
-            }
-        })
-        .to_string(),
+                }),
+            ),
+            (
+                SESSION_CHILD,
+                json!({
+                    "parent_id": SESSION_A
+                }),
+            ),
+        ]),
     )
     .expect("write metadata");
 
@@ -588,7 +623,9 @@ fn rpc_sessions_export_json_returns_sanitized_replayed_session_artifact() {
     command.current_dir(temp.path()).arg("rpc");
     let stdout = run_with_stdin(
         command,
-        r#"{"type":"request","id":"export-json-1","method":"sessions.export_json","params":{"session_id":"alpha-main"}}"#,
+        &format!(
+            r#"{{"type":"request","id":"export-json-1","method":"sessions.export_json","params":{{"session_id":"{SESSION_A}"}}}}"#
+        ),
     );
 
     assert!(
@@ -605,17 +642,14 @@ fn rpc_sessions_export_json_returns_sanitized_replayed_session_artifact() {
     let artifact = &messages[0]["result"];
     assert_eq!(artifact["format"], "neo.session.export_json");
     assert_eq!(artifact["schema_version"], 1);
-    assert_eq!(artifact["metadata"]["id"], "alpha-main");
+    assert_eq!(artifact["metadata"]["id"], SESSION_A);
     assert_eq!(artifact["metadata"]["name"], "Main thread");
     assert_eq!(
         artifact["metadata"]["summary"],
         "Resolved local branch summary"
     );
     assert!(artifact["metadata"]["parent_id"].is_null());
-    assert_eq!(
-        artifact["metadata"]["children"],
-        json!(["alpha-main-fork-1"])
-    );
+    assert_eq!(artifact["metadata"]["children"], json!([SESSION_CHILD]));
     assert_eq!(artifact["metadata"]["message_count"], 2);
     assert_eq!(
         artifact["messages"][0]["User"]["content"][0]["Text"]["text"],
@@ -632,20 +666,22 @@ fn rpc_set_session_name_updates_local_session_metadata() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     std::fs::create_dir_all(&sessions).expect("create sessions");
-    std::fs::write(sessions.join("alpha-main.jsonl"), "{}\n").expect("write session");
+    std::fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session");
 
     let mut command = neo();
     command.current_dir(temp.path()).arg("rpc");
     let stdout = run_with_stdin(
         command,
-        r#"{"type":"request","id":"rename-1","method":"set_session_name","params":{"session_id":"alpha","name":"Feature branch"}}"#,
+        &format!(
+            r#"{{"type":"request","id":"rename-1","method":"set_session_name","params":{{"session_id":"{SESSION_A}","name":"Feature branch"}}}}"#
+        ),
     );
 
     let messages = parse_jsonl(&stdout);
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["type"], "response");
     assert_eq!(messages[0]["id"], "rename-1");
-    assert_eq!(messages[0]["result"]["session_id"], "alpha-main");
+    assert_eq!(messages[0]["result"]["session_id"], SESSION_A);
     assert_eq!(messages[0]["result"]["name"], "Feature branch");
 
     let mut command = neo();
@@ -655,7 +691,7 @@ fn rpc_set_session_name_updates_local_session_metadata() {
         r#"{"type":"request","id":"sessions-list","method":"sessions.list","params":{}}"#,
     );
     let messages = parse_jsonl(&stdout);
-    assert_eq!(messages[0]["result"]["sessions"][0]["id"], "alpha-main");
+    assert_eq!(messages[0]["result"]["sessions"][0]["id"], SESSION_A);
     assert_eq!(
         messages[0]["result"]["sessions"][0]["name"],
         "Feature branch"

@@ -25,6 +25,7 @@ pub use workspace::{
 const SESSION_FORMAT_NAME: &str = "neo.session.jsonl";
 const SESSION_SCHEMA_VERSION: u32 = 1;
 const SESSION_METADATA_KIND: &str = "session_metadata";
+const SESSION_ID_PREFIX: &str = "session_";
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -503,7 +504,7 @@ impl SessionMetadataStore {
         self.ensure_session_exists(parent_id)?;
         std::fs::create_dir_all(&self.sessions_dir)?;
 
-        let child_id = self.next_child_id(parent_id)?;
+        let child_id = self.next_child_id()?;
         std::fs::copy(self.session_path(parent_id), self.session_path(&child_id))?;
 
         let mut metadata = self.read_metadata()?;
@@ -542,10 +543,9 @@ impl SessionMetadataStore {
         }
     }
 
-    fn next_child_id(&self, parent_id: &str) -> Result<String, SessionError> {
+    fn next_child_id(&self) -> Result<String, SessionError> {
         loop {
-            let uuid = Uuid::new_v4().simple().to_string();
-            let child_id = format!("{parent_id}-fork-{}", &uuid[..8]);
+            let child_id = format!("{SESSION_ID_PREFIX}{}", Uuid::new_v4());
             if !self.session_path(&child_id).exists() {
                 return Ok(child_id);
             }
@@ -652,11 +652,10 @@ fn summary_record_from_stored(stored: &StoredSessionMetadata) -> Option<SessionS
 }
 
 pub fn validate_session_id(session_id: &str) -> Result<(), SessionError> {
-    if !session_id.is_empty()
-        && session_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
+    let Some(uuid) = session_id.strip_prefix(SESSION_ID_PREFIX) else {
+        return Err(SessionError::InvalidId(session_id.to_owned()));
+    };
+    if Uuid::parse_str(uuid).is_ok_and(|parsed| parsed.to_string() == uuid) {
         Ok(())
     } else {
         Err(SessionError::InvalidId(session_id.to_owned()))

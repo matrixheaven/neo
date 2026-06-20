@@ -100,7 +100,7 @@ fn run_with_stdin(mut command: Command, stdin: &str) -> String {
 /// multiple `neo()` calls within the same test share the same sessions root.
 fn isolated_home_path() -> std::path::PathBuf {
     thread_local! {
-        static HOME: std::cell::OnceCell<std::path::PathBuf> = std::cell::OnceCell::new();
+        static HOME: std::cell::OnceCell<std::path::PathBuf> = const { std::cell::OnceCell::new() };
     }
     HOME.with(|cell| {
         cell.get_or_init(|| {
@@ -187,6 +187,14 @@ fn model_tool_names(body: &Value) -> Vec<&str> {
         .collect::<Vec<_>>();
     names.sort_unstable();
     names
+}
+
+fn assert_model_function_name_safe(name: &str) {
+    assert!(
+        name.chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'),
+        "tool name `{name}` must be safe for production model function-name APIs"
+    );
 }
 
 fn input_messages(request: &RecordedRequest) -> &[Value] {
@@ -409,6 +417,12 @@ fn run_text_uses_production_openai_responses_adapter_against_mock_provider() {
 
     let sessions = session_files(temp.path());
     assert_eq!(sessions.len(), 1);
+    let session_id = sessions[0]
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .expect("session id");
+    assert!(session_id.starts_with("session_"));
+    assert_eq!(session_id.len(), "session_".len() + 36);
     let content = std::fs::read_to_string(&sessions[0]).expect("read session");
     assert!(content.contains("\"User\""));
     assert!(content.contains("\"Assistant\""));
@@ -954,7 +968,14 @@ fn run_text_registers_enabled_extension_tool_in_model_request() {
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
     let tool_names = model_tool_names(&requests[0].body);
+    for name in &tool_names {
+        assert_model_function_name_safe(name);
+    }
     assert!(tool_names.contains(&"extension__echo__echo"));
+    assert!(tool_names.contains(&"CreateSkill"));
+    assert!(tool_names.contains(&"ListSkills"));
+    assert!(tool_names.contains(&"MoveSkill"));
+    assert!(tool_names.contains(&"SummarizeSessions"));
 }
 
 #[test]

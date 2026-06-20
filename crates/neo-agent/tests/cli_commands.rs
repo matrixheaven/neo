@@ -14,6 +14,10 @@ use tempfile::TempDir;
 
 static ISOLATED_HOME: OnceLock<PathBuf> = OnceLock::new();
 
+const SESSION_A: &str = "session_00000000-0000-4000-8000-000000000201";
+const SESSION_B: &str = "session_00000000-0000-4000-8000-000000000202";
+const SESSION_CHILD: &str = "session_00000000-0000-4000-8000-000000000203";
+
 fn neo() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_neo"));
     command.env("HOME", isolated_home());
@@ -98,6 +102,14 @@ fn find_jsonl_files_recursive(dir: &Path, results: &mut Vec<PathBuf>) {
     }
 }
 
+fn sessions_metadata_json(entries: &[(&str, Value)]) -> String {
+    let mut sessions = serde_json::Map::new();
+    for (id, value) in entries {
+        sessions.insert((*id).to_owned(), value.clone());
+    }
+    json!({ "sessions": sessions }).to_string()
+}
+
 fn session_bucket(project_dir: &Path) -> PathBuf {
     let sessions_root = isolated_home().join(".neo").join("sessions");
     neo_agent_core::session::workspace_sessions_dir(&sessions_root, project_dir)
@@ -112,7 +124,7 @@ fn root_command_reports_interactive_entrypoint_without_placeholders() {
     assert!(stdout.contains("Welcome to neo"));
     assert!(stdout.contains("openai/gpt-4.1"));
     assert!(stdout.contains("ctx --/1m"));
-    assert!(stdout.contains("enter send"));
+    assert!(!stdout.contains("enter send"));
     assert!(!stdout.contains("placeholder"));
     assert!(!stdout.contains("fake"));
     assert!(!stdout.contains("commands: print, run"));
@@ -209,7 +221,7 @@ fn root_resume_flag_opens_real_local_session_picker() {
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(
-        sessions.join("alpha.jsonl"),
+        sessions.join(format!("{SESSION_A}.jsonl")),
         "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
     )
     .expect("write session");
@@ -220,7 +232,7 @@ fn root_resume_flag_opens_real_local_session_picker() {
     let stdout = run(command);
 
     assert!(stdout.contains("Sessions"));
-    assert!(stdout.contains("alpha"));
+    assert!(stdout.contains(SESSION_A));
     assert!(!stdout.contains("placeholder"));
     assert!(!stdout.contains("fake"));
 }
@@ -304,14 +316,14 @@ fn sessions_list_uses_workspace_session_bucket() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
-    fs::write(sessions.join("alpha.jsonl"), "{}\n").expect("write session");
+    fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session");
 
     let mut command = neo();
     command.current_dir(temp.path()).args(["sessions", "list"]);
 
     let stdout = run(command);
 
-    assert!(stdout.contains("alpha"));
+    assert!(stdout.contains(SESSION_A));
 }
 
 #[test]
@@ -319,39 +331,41 @@ fn sessions_rename_and_fork_surface_flat_metadata_without_tree_command() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
-    fs::write(sessions.join("alpha.jsonl"), "{}\n").expect("write session");
+    fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session");
 
     let mut rename = neo();
     rename
         .current_dir(temp.path())
-        .args(["sessions", "rename", "alpha", "Main thread"]);
+        .args(["sessions", "rename", SESSION_A, "Main thread"]);
     let rename_stdout = run(rename);
-    assert!(rename_stdout.contains("renamed alpha"));
+    assert!(rename_stdout.contains(&format!("renamed {SESSION_A}")));
     assert!(rename_stdout.contains("Main thread"));
 
     let mut fork = neo();
     fork.current_dir(temp.path())
-        .args(["sessions", "fork", "alpha", "--name", "Parser branch"]);
+        .args(["sessions", "fork", SESSION_A, "--name", "Parser branch"]);
     let fork_stdout = run(fork);
-    assert!(fork_stdout.contains("forked alpha -> "));
+    let fork_prefix = format!("forked {SESSION_A} -> ");
+    assert!(fork_stdout.contains(&fork_prefix));
     assert!(fork_stdout.contains("Parser branch"));
 
     let child_id = fork_stdout
         .lines()
-        .find_map(|line| line.strip_prefix("forked alpha -> "))
+        .find_map(|line| line.strip_prefix(&fork_prefix))
         .and_then(|line| line.split_whitespace().next())
         .expect("fork output includes child id")
         .to_owned();
+    assert!(child_id.starts_with("session_"));
 
     let mut list = neo();
     list.current_dir(temp.path()).args(["sessions", "list"]);
     let list_stdout = run(list);
 
-    assert!(list_stdout.contains("alpha"));
+    assert!(list_stdout.contains(SESSION_A));
     assert!(list_stdout.contains("Main thread"));
     assert!(list_stdout.contains(&child_id));
     assert!(list_stdout.contains("Parser branch"));
-    assert!(list_stdout.contains("parent=alpha"));
+    assert!(list_stdout.contains(&format!("parent={SESSION_A}")));
 
     let mut tree = neo();
     tree.current_dir(temp.path()).args(["sessions", "tree"]);
@@ -392,7 +406,7 @@ fn sessions_show_and_resume_read_jsonl_transcripts() {
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(
-        sessions.join("alpha.jsonl"),
+        sessions.join(format!("{SESSION_A}.jsonl")),
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi back\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
@@ -402,71 +416,68 @@ fn sessions_show_and_resume_read_jsonl_transcripts() {
 
     let mut show = neo();
     show.current_dir(temp.path())
-        .args(["sessions", "show", "alpha"]);
+        .args(["sessions", "show", SESSION_A]);
     let show_stdout = run(show);
     assert!(show_stdout.contains("\"User\""));
     assert!(show_stdout.contains("hi back"));
 
     let mut resume = neo();
-    resume.current_dir(temp.path()).args(["resume", "alpha"]);
+    resume.current_dir(temp.path()).args(["resume", SESSION_A]);
     let resume_stdout = run(resume);
-    assert!(resume_stdout.contains("session alpha"));
+    assert!(resume_stdout.contains(&format!("session {SESSION_A}")));
     assert!(resume_stdout.contains("user: hello"));
     assert!(resume_stdout.contains("assistant: hi back"));
     assert!(!resume_stdout.contains("placeholder"));
 }
 
 #[test]
-fn sessions_accept_unique_prefixes_and_workspace_bucket_ids() {
+fn sessions_accept_exact_workspace_bucket_ids() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(
-        sessions.join("alpha-main.jsonl"),
+        sessions.join(format!("{SESSION_A}.jsonl")),
         "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"alpha prompt\"}}]}}}}\n",
     )
     .expect("write alpha session");
     fs::write(
-        sessions.join("beta-main.jsonl"),
+        sessions.join(format!("{SESSION_B}.jsonl")),
         "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"beta prompt\"}}]}}}}\n",
     )
     .expect("write beta session");
 
-    let mut show_prefix = neo();
-    show_prefix
-        .current_dir(temp.path())
-        .args(["sessions", "show", "alp"]);
-    let prefix_stdout = run(show_prefix);
-    assert!(prefix_stdout.contains("alpha prompt"));
+    let mut show = neo();
+    show.current_dir(temp.path())
+        .args(["sessions", "show", SESSION_A]);
+    let show_stdout = run(show);
+    assert!(show_stdout.contains("alpha prompt"));
 
     let mut resume_path = neo();
     resume_path
         .current_dir(temp.path())
-        .args(["resume", "alpha-main"]);
+        .args(["resume", SESSION_A]);
     let path_stdout = run(resume_path);
-    assert!(path_stdout.contains("session alpha-main"));
+    assert!(path_stdout.contains(&format!("session {SESSION_A}")));
     assert!(path_stdout.contains("user: alpha prompt"));
 }
 
 #[test]
-fn sessions_reject_ambiguous_prefixes_without_guessing() {
+fn sessions_reject_incomplete_session_ids_without_guessing() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
-    fs::write(sessions.join("alpha-main.jsonl"), "{}\n").expect("write alpha");
-    fs::write(sessions.join("alpha-side.jsonl"), "{}\n").expect("write alpha side");
+    fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write alpha");
+    fs::write(sessions.join(format!("{SESSION_B}.jsonl")), "{}\n").expect("write alpha side");
 
     let output = neo()
         .current_dir(temp.path())
-        .args(["sessions", "show", "alp"])
+        .args(["sessions", "show", "session_"])
         .output()
         .expect("neo command should run");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("ambiguous session id"));
-    assert!(stderr.contains("alpha-main"));
-    assert!(stderr.contains("alpha-side"));
+    assert!(stderr.contains("invalid session id"));
 }
 
 #[test]
@@ -475,7 +486,7 @@ fn sessions_compact_stores_algorithmic_summary_and_resume_replays_kept_context()
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(
-        sessions.join("alpha.jsonl"),
+        sessions.join(format!("{SESSION_A}.jsonl")),
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"first task\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"first answer\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n",
@@ -487,10 +498,10 @@ fn sessions_compact_stores_algorithmic_summary_and_resume_replays_kept_context()
     let mut compact = neo();
     compact
         .current_dir(temp.path())
-        .args(["sessions", "compact", "alpha", "--keep-recent", "1"]);
+        .args(["sessions", "compact", SESSION_A, "--keep-recent", "1"]);
     let compact_stdout = run(compact);
 
-    assert!(compact_stdout.contains("compacted alpha"));
+    assert!(compact_stdout.contains(&format!("compacted {SESSION_A}")));
     assert!(compact_stdout.contains("kept 1"));
     assert!(compact_stdout.contains("Algorithmic transcript summary"));
     assert!(!compact_stdout.contains("fake"));
@@ -498,15 +509,15 @@ fn sessions_compact_stores_algorithmic_summary_and_resume_replays_kept_context()
     // Verify compaction through the public session reader.
     let mut show = neo();
     show.current_dir(temp.path())
-        .args(["sessions", "show", "alpha"]);
+        .args(["sessions", "show", SESSION_A]);
     let show_stdout = run(show);
     assert!(show_stdout.contains("CompactionApplied"));
     assert!(show_stdout.contains("Algorithmic transcript summary"));
 
     let mut resume = neo();
-    resume.current_dir(temp.path()).args(["resume", "alpha"]);
+    resume.current_dir(temp.path()).args(["resume", SESSION_A]);
     let resume_stdout = run(resume);
-    assert!(resume_stdout.contains("session alpha"));
+    assert!(resume_stdout.contains(&format!("session {SESSION_A}")));
     assert!(resume_stdout.contains("compaction: Algorithmic transcript summary"));
     assert!(resume_stdout.contains("user: latest task"));
     assert!(
@@ -522,7 +533,7 @@ fn sessions_export_html_renders_replayed_messages() {
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(
-        sessions.join("alpha.jsonl"),
+        sessions.join(format!("{SESSION_A}.jsonl")),
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello <neo>\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"use **bold**\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
@@ -533,7 +544,7 @@ fn sessions_export_html_renders_replayed_messages() {
     let mut export = neo();
     export
         .current_dir(temp.path())
-        .args(["sessions", "export-html", "alpha"]);
+        .args(["sessions", "export-html", SESSION_A]);
     let html = run(export);
 
     assert!(html.contains("<!doctype html>"));
@@ -548,35 +559,39 @@ fn sessions_export_json_returns_sanitized_replayed_session_artifact() {
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
     fs::write(
-        sessions.join("alpha-main.jsonl"),
+        sessions.join(format!("{SESSION_A}.jsonl")),
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello json export\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"portable local reply\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
         ),
     )
     .expect("write session");
-    fs::write(sessions.join("alpha-main-fork-1.jsonl"), "{}\n").expect("write child session");
+    fs::write(sessions.join(format!("{SESSION_CHILD}.jsonl")), "{}\n")
+        .expect("write child session");
     fs::write(
         sessions.join("sessions.metadata.json"),
-        json!({
-            "sessions": {
-                "alpha-main": {
+        sessions_metadata_json(&[
+            (
+                SESSION_A,
+                json!({
                     "name": "Main thread",
                     "summary": "Local branch summary"
-                },
-                "alpha-main-fork-1": {
-                    "parent_id": "alpha-main"
-                }
-            }
-        })
-        .to_string(),
+                }),
+            ),
+            (
+                SESSION_CHILD,
+                json!({
+                    "parent_id": SESSION_A
+                }),
+            ),
+        ]),
     )
     .expect("write metadata");
 
     let mut export = neo();
     export
         .current_dir(temp.path())
-        .args(["sessions", "export-json", "alpha-main"]);
+        .args(["sessions", "export-json", SESSION_A]);
     let stdout = run(export);
 
     assert!(
@@ -589,14 +604,11 @@ fn sessions_export_json_returns_sanitized_replayed_session_artifact() {
     let artifact: Value = serde_json::from_str(&stdout).expect("export artifact JSON");
     assert_eq!(artifact["format"], "neo.session.export_json");
     assert_eq!(artifact["schema_version"], 1);
-    assert_eq!(artifact["metadata"]["id"], "alpha-main");
+    assert_eq!(artifact["metadata"]["id"], SESSION_A);
     assert_eq!(artifact["metadata"]["name"], "Main thread");
     assert_eq!(artifact["metadata"]["summary"], "Local branch summary");
     assert!(artifact["metadata"]["parent_id"].is_null());
-    assert_eq!(
-        artifact["metadata"]["children"],
-        json!(["alpha-main-fork-1"])
-    );
+    assert_eq!(artifact["metadata"]["children"], json!([SESSION_CHILD]));
     assert_eq!(artifact["metadata"]["message_count"], 2);
     assert_eq!(
         artifact["messages"][0]["User"]["content"][0]["Text"]["text"],

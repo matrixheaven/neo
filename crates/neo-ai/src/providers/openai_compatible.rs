@@ -399,7 +399,7 @@ impl IncrementalSse {
         }
 
         self.done = true;
-        if !self.saw_done {
+        if !self.saw_done && !self.parser.saw_finish_reason() {
             return vec![Err(AiError::Stream("missing SSE done marker".to_owned()))];
         }
 
@@ -468,7 +468,7 @@ fn parse_sse_events(body: &str) -> Result<Vec<AiStreamEvent>, ProviderError> {
             .map_err(|err| ProviderError::Stream(format!("invalid SSE JSON: {err}")))?;
         state.ingest(&value);
     }
-    if !saw_done {
+    if !saw_done && !state.saw_finish_reason() {
         return Err(ProviderError::Stream("missing SSE done marker".to_owned()));
     }
     state.finish_events()
@@ -493,6 +493,7 @@ struct ParseState {
     tool_index_ids: BTreeMap<u64, String>,
     last_stop_reason: StopReason,
     usage: Option<TokenUsage>,
+    saw_finish_reason: bool,
     finished: bool,
 }
 
@@ -505,6 +506,7 @@ impl Default for ParseState {
             tool_index_ids: BTreeMap::new(),
             last_stop_reason: StopReason::EndTurn,
             usage: None,
+            saw_finish_reason: false,
             finished: false,
         }
     }
@@ -527,6 +529,7 @@ impl ParseState {
 
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             self.last_stop_reason = stop_reason(reason);
+            self.saw_finish_reason = true;
         }
         if let Some(delta) = choice.get("delta") {
             self.ingest_delta(delta);
@@ -539,6 +542,10 @@ impl ParseState {
 
     const fn is_finished(&self) -> bool {
         self.finished
+    }
+
+    const fn saw_finish_reason(&self) -> bool {
+        self.saw_finish_reason
     }
 
     fn ensure_started(&mut self, value: &Value) {
@@ -594,14 +601,13 @@ impl ParseState {
             });
         }
         if let Some(fragment) = function.get("arguments").and_then(Value::as_str) {
-            self.tool_args
-                .entry(id.clone())
-                .or_default()
-                .push_str(fragment);
-            self.events.push(AiStreamEvent::ToolCallArgsDelta {
-                id,
-                json_fragment: fragment.to_owned(),
-            });
+            let arguments = self.tool_args.entry(id.clone()).or_default();
+            if let Some(delta) = merge_tool_argument_fragment(arguments, fragment) {
+                self.events.push(AiStreamEvent::ToolCallArgsDelta {
+                    id,
+                    json_fragment: delta,
+                });
+            }
         }
     }
 
@@ -629,6 +635,27 @@ impl ParseState {
 
         Ok(self.drain_events())
     }
+}
+
+fn merge_tool_argument_fragment(arguments: &mut String, fragment: &str) -> Option<String> {
+    if fragment.is_empty() {
+        return None;
+    }
+    if arguments.is_empty() {
+        arguments.push_str(fragment);
+        return Some(fragment.to_owned());
+    }
+    if fragment.starts_with(arguments.as_str()) {
+        let delta = fragment[arguments.len()..].to_owned();
+        arguments.clear();
+        arguments.push_str(fragment);
+        return (!delta.is_empty()).then_some(delta);
+    }
+    if arguments.starts_with(fragment) {
+        return None;
+    }
+    arguments.push_str(fragment);
+    Some(fragment.to_owned())
 }
 
 fn token_usage(value: &Value) -> Option<TokenUsage> {

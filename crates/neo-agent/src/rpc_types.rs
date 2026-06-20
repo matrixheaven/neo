@@ -79,10 +79,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const SESSION_A: &str = "session_00000000-0000-4000-8000-000000000401";
+    const SESSION_CHILD: &str = "session_00000000-0000-4000-8000-000000000402";
+
     #[test]
     fn session_rpc_records_have_stable_json_shape() {
         let record = RpcSessionRecord {
-            id: "alpha".to_owned(),
+            id: SESSION_A.to_owned(),
             title: Some("Generated title".to_owned()),
             title_model: Some("openai/gpt-4.1".to_owned()),
             title_updated_at: Some("126.0Z".to_owned()),
@@ -95,12 +98,12 @@ mod tests {
             summary_model: None,
             summary_updated_at: Some("125.0Z".to_owned()),
             parent_id: None,
-            children: vec!["alpha-fork-1".to_owned()],
+            children: vec![SESSION_CHILD.to_owned()],
         };
 
         let value = serde_json::to_value(&record).expect("serialize session record");
 
-        assert_eq!(value["id"], "alpha");
+        assert_eq!(value["id"], SESSION_A);
         assert_eq!(value["title"], "Generated title");
         assert_eq!(value["title_model"], "openai/gpt-4.1");
         assert_eq!(value["title_updated_at"], "126.0Z");
@@ -112,7 +115,7 @@ mod tests {
         assert_eq!(value["summary_source"], "local_extractive");
         assert_eq!(value["summary_updated_at"], "125.0Z");
         assert!(value["parent_id"].is_null());
-        assert_eq!(value["children"], json!(["alpha-fork-1"]));
+        assert_eq!(value["children"], json!([SESSION_CHILD]));
         assert!(value.get("cloud_id").is_none());
         assert!(value.get("synced_at").is_none());
         assert!(value.get("remote_parent_id").is_none());
@@ -128,7 +131,7 @@ mod tests {
     fn session_get_result_has_stable_json_shape() {
         let result = RpcSessionGetResult {
             record: RpcSessionRecord {
-                id: "alpha".to_owned(),
+                id: SESSION_A.to_owned(),
                 title: Some("Main thread".to_owned()),
                 title_model: None,
                 title_updated_at: None,
@@ -141,9 +144,9 @@ mod tests {
                 summary_model: None,
                 summary_updated_at: None,
                 parent_id: None,
-                children: vec!["alpha-fork-1".to_owned()],
+                children: vec![SESSION_CHILD.to_owned()],
             },
-            path: "/tmp/neo/.neo/sessions/alpha.jsonl".to_owned(),
+            path: format!("/tmp/neo/.neo/sessions/{SESSION_A}.jsonl"),
             messages: vec![json!({
                 "User": {
                     "content": [
@@ -159,12 +162,15 @@ mod tests {
 
         let value = serde_json::to_value(&result).expect("serialize session get result");
 
-        assert_eq!(value["id"], "alpha");
+        assert_eq!(value["id"], SESSION_A);
         assert_eq!(value["name"], "Main thread");
         assert_eq!(value["summary"], "Local branch summary");
         assert!(value["parent_id"].is_null());
-        assert_eq!(value["children"], json!(["alpha-fork-1"]));
-        assert_eq!(value["path"], "/tmp/neo/.neo/sessions/alpha.jsonl");
+        assert_eq!(value["children"], json!([SESSION_CHILD]));
+        assert_eq!(
+            value["path"],
+            format!("/tmp/neo/.neo/sessions/{SESSION_A}.jsonl")
+        );
         assert_eq!(
             value["messages"][0]["User"]["content"][0]["Text"]["text"],
             "hello"
@@ -179,16 +185,16 @@ mod tests {
     #[test]
     fn session_export_html_result_has_stable_json_shape() {
         let result = RpcSessionExportHtmlResult {
-            session_id: "alpha".to_owned(),
-            html: "<!doctype html><title>neo session alpha</title>".to_owned(),
+            session_id: SESSION_A.to_owned(),
+            html: format!("<!doctype html><title>neo session {SESSION_A}</title>"),
         };
 
         let value = serde_json::to_value(&result).expect("serialize session export html result");
 
-        assert_eq!(value["session_id"], "alpha");
+        assert_eq!(value["session_id"], SESSION_A);
         assert_eq!(
             value["html"],
-            "<!doctype html><title>neo session alpha</title>"
+            format!("<!doctype html><title>neo session {SESSION_A}</title>")
         );
         assert_eq!(
             serde_json::from_value::<RpcSessionExportHtmlResult>(value)

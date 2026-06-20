@@ -26,6 +26,38 @@ const DEFAULT_MODEL: &str = "gpt-4.1";
 const DEFAULT_PROVIDER: &str = "openai";
 const DEFAULT_MODE: &str = "interactive";
 
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{Deserialize, SeqAccess, Visitor};
+    struct StringOrVec;
+
+    impl<'de> Visitor<'de> for StringOrVec {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string or a list of strings")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(vec![value.to_owned()])
+        }
+
+        fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            Vec::<String>::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+        }
+    }
+
+    deserializer.deserialize_any(StringOrVec)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ConfigOverrides {
     pub config_path: Option<PathBuf>,
@@ -157,6 +189,8 @@ pub struct AppConfig {
     pub prompt_templates: Vec<String>,
     #[serde(skip)]
     pub extra_skill_dirs: Vec<String>,
+    #[serde(skip)]
+    pub skill_path: Vec<String>,
     #[serde(skip)]
     pub project_trusted: bool,
     pub project_dir: PathBuf,
@@ -319,6 +353,8 @@ pub(crate) struct FileConfig {
     pub(crate) model_scope: Option<Vec<String>>,
     pub(crate) prompt_templates: Option<Vec<String>>,
     pub(crate) extra_skill_dirs: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    pub(crate) skill_path: Vec<String>,
     pub(crate) sessions_dir: Option<PathBuf>,
     pub(crate) permissions: Option<PermissionPolicy>,
     pub(crate) defaults: Option<FileDefaults>,
@@ -403,15 +439,16 @@ impl AppConfig {
         let model_scope = file_config.model_scope.unwrap_or_default();
         let prompt_templates = file_config.prompt_templates.unwrap_or_default();
         let extra_skill_dirs = file_config.extra_skill_dirs.unwrap_or_default();
-        let sessions_dir = file_config
-            .sessions_dir
-            .map(expand_user_path)
-            .unwrap_or_else(|| {
+        let skill_path = file_config.skill_path;
+        let sessions_dir = file_config.sessions_dir.map_or_else(
+            || {
                 neo_home().map_or_else(
                     || project_dir.join(CONFIG_DIR).join("sessions"),
                     |home| home.join("sessions"),
                 )
-            });
+            },
+            expand_user_path,
+        );
         let permissions = file_config.permissions.unwrap_or_default();
         let runtime = runtime_from_file(file_config.runtime);
         validate_runtime_config(&runtime)?;
@@ -440,6 +477,7 @@ impl AppConfig {
             mcp,
             prompt_templates,
             extra_skill_dirs,
+            skill_path,
             project_trusted,
             project_dir,
             config_path,
@@ -520,6 +558,7 @@ fn merge_file_configs(base: FileConfig, layer: FileConfig) -> FileConfig {
         model_scope: merge_string_lists(base.model_scope, layer.model_scope),
         prompt_templates: merge_string_lists(base.prompt_templates, layer.prompt_templates),
         extra_skill_dirs: merge_string_lists(base.extra_skill_dirs, layer.extra_skill_dirs),
+        skill_path: [base.skill_path, layer.skill_path].concat(),
         sessions_dir: layer.sessions_dir.or(base.sessions_dir),
         permissions: layer.permissions.or(base.permissions),
         defaults: merge_defaults(base.defaults, layer.defaults),

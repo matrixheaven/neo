@@ -12,7 +12,8 @@ use neo_ai::{
     StopReason, ToolCall, ToolSpec,
     providers::{
         anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
-        openai_images::OpenAiImagesClient, openai_responses::OpenAiResponsesClient,
+        openai_compatible::OpenAiCompatibleClient, openai_images::OpenAiImagesClient,
+        openai_responses::OpenAiResponsesClient,
     },
 };
 use serde_json::{Value, json};
@@ -445,6 +446,63 @@ async fn openai_responses_client_posts_responses_payload_and_streams_events() {
     assert_eq!(sent.body["max_output_tokens"], 64);
     assert_eq!(sent.body["tools"][0]["name"], "read_file");
     assert_eq!(sent.body["input"][0]["role"], "user");
+}
+
+#[tokio::test]
+async fn openai_compatible_client_finishes_tool_call_on_tool_calls_finish_reason_without_done() {
+    let body = [
+        "data: {\"id\":\"chatcmpl-tool\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tool\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"Cargo.toml\\\"}\"}}]}}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tool\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":4}}\n\n",
+    ]
+    .concat();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let server = MockServer::start(vec![response]);
+    let client = OpenAiCompatibleClient::new(server.url.clone(), "test-key");
+
+    let events = client
+        .stream_chat(request(ApiKind::OpenAiCompatible))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "chatcmpl-tool".to_owned()
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "call-1".to_owned(),
+                name: "read_file".to_owned()
+            },
+            AiStreamEvent::ToolCallArgsDelta {
+                id: "call-1".to_owned(),
+                json_fragment: "{\"path\":".to_owned()
+            },
+            AiStreamEvent::ToolCallArgsDelta {
+                id: "call-1".to_owned(),
+                json_fragment: "\"Cargo.toml\"}".to_owned()
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "call-1".to_owned(),
+                arguments: json!({ "path": "Cargo.toml" })
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+                usage: Some(neo_ai::TokenUsage {
+                    input_tokens: 9,
+                    output_tokens: 4,
+                }),
+            },
+        ]
+    );
 }
 
 #[tokio::test]

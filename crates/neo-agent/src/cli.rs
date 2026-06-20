@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "neo", version, about = "Rust-native 本地 AI 编程代理")]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Cli {
     #[arg(
         short = 'r',

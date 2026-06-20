@@ -8,13 +8,14 @@ use std::{
 
 use anyhow::Context;
 use futures::StreamExt;
+use neo_agent_core::goal::GoalManager;
 use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionMetadataStore};
 use neo_agent_core::skills::SkillStore;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool,
-    CompactionSettings, Content, McpHttpConfig, McpHttpToolAdapter, McpStdioConfig,
-    McpStdioToolAdapter, McpToolAdapter, McpToolProvider, PendingQuestion, PermissionDecision,
-    ToolRegistry,
+    CompactionSettings, Content, CreateSkillTool, ListSkillsTool, McpHttpConfig,
+    McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter, McpToolProvider,
+    MoveSkillTool, PendingQuestion, PermissionDecision, SummarizeSessionsTool, ToolRegistry,
 };
 use neo_ai::{
     ChatMessage, ContentPart, CredentialResolver, ModelClient, ModelRegistry, ModelSpec,
@@ -23,6 +24,7 @@ use neo_ai::{
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::{
     cli::RunOutput,
@@ -997,6 +999,7 @@ pub async fn run_prompt_in_session(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_prompt_streaming(
     prompt: &[String],
     config: &AppConfig,
@@ -1005,6 +1008,7 @@ pub async fn run_prompt_streaming(
     session_id_tx: Option<mpsc::UnboundedSender<String>>,
     cancel_token: CancellationToken,
     question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
+    skill_context: Option<String>,
 ) -> anyhow::Result<PromptTurn> {
     let prompt = prompt.join(" ");
     let session_path = create_session_path(config).await?;
@@ -1018,6 +1022,10 @@ pub async fn run_prompt_streaming(
     let (user_message, events) = append_user_event_jsonl(prompt.clone(), &mut writer).await?;
     record_session_activity(config, &session_id, &prompt);
     let runtime = runtime_for_config(config, Some(approval_tx), question_tx).await?;
+    let mut context = AgentContext::new();
+    if let Some(skill_context) = skill_context {
+        context.set_skill_context(AgentMessage::system_text(skill_context));
+    }
     let streaming = StreamingTurnIo {
         event_tx,
         session_id,
@@ -1025,7 +1033,7 @@ pub async fn run_prompt_streaming(
     };
     let turn = finish_prompt_turn_streaming(
         user_message,
-        AgentContext::new(),
+        context,
         &mut writer,
         runtime,
         events,
@@ -1036,6 +1044,7 @@ pub async fn run_prompt_streaming(
     Ok(turn)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_prompt_in_session_streaming(
     session_id: &str,
     prompt: &[String],
@@ -1045,12 +1054,16 @@ pub async fn run_prompt_in_session_streaming(
     session_id_tx: Option<mpsc::UnboundedSender<String>>,
     cancel_token: CancellationToken,
     question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
+    skill_context: Option<String>,
 ) -> anyhow::Result<PromptTurn> {
     let prompt = prompt.join(" ");
     let session_path = sessions::session_path(session_id, config)?;
-    let context = JsonlSessionReader::replay_context(&session_path)
+    let mut context = JsonlSessionReader::replay_context(&session_path)
         .await
         .with_context(|| format!("failed to replay session {}", session_path.display()))?;
+    if let Some(skill_context) = skill_context {
+        context.set_skill_context(AgentMessage::system_text(skill_context));
+    }
     let mut writer = JsonlSessionWriter::open_append(&session_path)
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
@@ -1084,21 +1097,41 @@ async fn runtime_for_config(
 ) -> anyhow::Result<AgentRuntime> {
     let model = resolve_model(config)?;
     let client = resolve_model_client(config, &model)?;
-    let mut tools = tool_registry_for_config(config).await?;
-    if let Some(question_tx) = question_tx {
-        tools.register(AskUserTool::new(question_tx));
-    }
     let skill_store = resources::load_skill_store(
         &config.project_dir,
         neo_home().as_deref(),
         &config.extra_skill_dirs,
+        &config.skill_path,
     )?;
-    Ok(AgentRuntime::with_tools_and_skills(
-        agent_config_for_app(model, config, approval_tx, &skill_store)?,
-        client,
-        tools,
-        skill_store,
-    ))
+    let agent_config = agent_config_for_app(model, config, approval_tx, &skill_store)?;
+    let mut tools =
+        tool_registry_for_config(config, std::sync::Arc::clone(&agent_config.todos)).await?;
+    if let Some(question_tx) = question_tx {
+        tools.register(AskUserTool::new(question_tx));
+    }
+    let extra_skill_paths: Vec<PathBuf> =
+        config.extra_skill_dirs.iter().map(PathBuf::from).collect();
+    tools.register(ListSkillsTool::new(
+        &config.project_dir,
+        neo_home().map(|home| home.join("skills")),
+        extra_skill_paths,
+    ));
+    if let Some(home) = neo_home() {
+        tools.register(MoveSkillTool::new(home.clone()));
+        tools.register(CreateSkillTool::new(home.clone()));
+        tools.register(SummarizeSessionsTool::new(home));
+    }
+    let mut runtime = AgentRuntime::with_tools_and_skills(agent_config, client, tools, skill_store);
+    if let Some(home) = neo_home() {
+        let goal_manager = Arc::new(GoalManager::load(home).await?);
+        if let Some(tools) = runtime.tools_mut() {
+            Arc::get_mut(tools)
+                .expect("tools arc not yet shared")
+                .register_goal_tools(Arc::clone(&goal_manager));
+        }
+        runtime = runtime.with_goal_manager(&goal_manager);
+    }
+    Ok(runtime)
 }
 
 #[cfg(test)]
@@ -1346,8 +1379,11 @@ fn effective_compaction_max_estimated_tokens(
     configured_max_estimated_tokens.max(model_threshold)
 }
 
-async fn tool_registry_for_config(config: &AppConfig) -> anyhow::Result<ToolRegistry> {
-    let mut registry = ToolRegistry::with_builtin_tools();
+async fn tool_registry_for_config(
+    config: &AppConfig,
+    todos: std::sync::Arc<std::sync::Mutex<Vec<neo_agent_core::TodoEventData>>>,
+) -> anyhow::Result<ToolRegistry> {
+    let mut registry = ToolRegistry::with_builtin_tools_and_todos(todos);
     neo_agent_core::tools::extensions::register_enabled_extension_tools(
         &mut registry,
         &neo_agent_core::tools::extensions::default_extension_root(&config.project_dir),
@@ -1427,23 +1463,11 @@ async fn create_session_path(config: &AppConfig) -> anyhow::Result<std::path::Pa
             )
         })?;
 
-    let mut counter = 0_u32;
     loop {
-        let suffix = if counter == 0 {
-            String::new()
-        } else {
-            format!("-{counter}")
-        };
-        let path = bucket_dir.join(format!(
-            "{}{suffix}.jsonl",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_millis()
-        ));
+        let path = bucket_dir.join(format!("session_{}.jsonl", Uuid::new_v4()));
         if tokio::fs::metadata(&path).await.is_err() {
             return Ok(path);
         }
-        counter = counter.saturating_add(1);
     }
 }
 
@@ -1761,7 +1785,8 @@ mod tests {
     };
 
     use super::{
-        PromptApprovalRequest, StableJsonState, agent_config_for_app, run_prompt_with_runtime,
+        PromptApprovalRequest, StableJsonState, agent_config_for_app, create_session_path,
+        run_prompt_with_runtime,
     };
     use crate::config::{
         AppConfig, Defaults, McpConfig, RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
@@ -1801,6 +1826,7 @@ mod tests {
             mcp: McpConfig::default(),
             prompt_templates: Vec::new(),
             extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
             project_trusted: true,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
@@ -1837,6 +1863,46 @@ mod tests {
             })
         );
         assert!(agent_config.workspace_root.is_some());
+    }
+
+    #[tokio::test]
+    async fn create_session_path_uses_named_uuid_session_ids() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            default_model: "test-model".to_owned(),
+            default_provider: "openai".to_owned(),
+            api_key_env: None,
+            providers: BTreeMap::new(),
+            models: BTreeMap::new(),
+            model_scope: Vec::new(),
+            sessions_dir: temp.path().join(".neo/sessions"),
+            permissions: PermissionPolicy::default(),
+            defaults: Defaults {
+                mode: "events".to_owned(),
+            },
+            runtime: RuntimeConfig::default(),
+            tui: TuiConfig::default(),
+            theme: crate::themes::ResolvedTheme::default(),
+            mcp: McpConfig::default(),
+            prompt_templates: Vec::new(),
+            extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
+            project_trusted: true,
+            project_dir: temp.path().to_path_buf(),
+            config_path: temp.path().join(".neo/config.toml"),
+        };
+
+        let path = create_session_path(&config)
+            .await
+            .expect("session path is created");
+        let session_id = path
+            .file_stem()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("session id");
+
+        assert!(session_id.starts_with("session_"));
+        assert_eq!(session_id.len(), "session_".len() + 36);
+        assert!(neo_agent_core::session::validate_session_id(session_id).is_ok());
     }
 
     #[test]
@@ -1923,6 +1989,7 @@ mod tests {
             mcp: McpConfig::default(),
             prompt_templates: Vec::new(),
             extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
             project_trusted: true,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
@@ -1982,6 +2049,7 @@ mod tests {
             mcp: McpConfig::default(),
             prompt_templates: Vec::new(),
             extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
             project_trusted: true,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
@@ -2028,6 +2096,7 @@ mod tests {
             mcp: McpConfig::default(),
             prompt_templates: Vec::new(),
             extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
             project_trusted: true,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
@@ -2069,7 +2138,9 @@ mod tests {
     #[tokio::test]
     async fn run_prompt_with_runtime_appends_continuation_to_existing_session_context() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let session_path = temp.path().join("alpha.jsonl");
+        let session_path = temp
+            .path()
+            .join("session_00000000-0000-4000-8000-000000000501.jsonl");
         let mut seed = JsonlSessionWriter::create(&session_path)
             .await
             .expect("create session");
