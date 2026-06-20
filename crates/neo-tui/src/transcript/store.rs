@@ -232,6 +232,23 @@ impl TranscriptStore {
         })
     }
 
+    pub fn insert_approval_after_tool_or_push(&mut self, data: ApprovalPromptData) {
+        let insert_at = self
+            .entries
+            .iter()
+            .rposition(
+                |entry| matches!(entry, TranscriptEntry::ToolRun { component } if component.id() == data.id),
+            )
+            .map(|index| index + 1);
+        if let Some(index) = insert_at {
+            self.entries
+                .insert(index, TranscriptEntry::ApprovalPrompt(data));
+            self.viewport.follow_bottom();
+        } else {
+            self.push(TranscriptEntry::ApprovalPrompt(data));
+        }
+    }
+
     #[must_use]
     pub fn has_tool(&self, id: &str) -> bool {
         self.entries.iter().any(

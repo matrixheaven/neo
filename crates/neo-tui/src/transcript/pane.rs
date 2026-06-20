@@ -829,7 +829,7 @@ impl TranscriptPane {
         }
 
         self.finish_active_text_blocks();
-        self.transcript.push(TranscriptEntry::ApprovalPrompt(data));
+        self.transcript.insert_approval_after_tool_or_push(data);
     }
 
     fn active_approval_mut(&mut self) -> Option<&mut ApprovalPromptData> {
@@ -860,7 +860,7 @@ impl TranscriptPane {
             return;
         };
         next.queued_count = self.queued_approvals.len();
-        self.transcript.push(TranscriptEntry::ApprovalPrompt(next));
+        self.transcript.insert_approval_after_tool_or_push(next);
     }
 
     fn upsert_compaction(

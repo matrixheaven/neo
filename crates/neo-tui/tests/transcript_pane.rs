@@ -277,6 +277,65 @@ fn transcript_pane_advances_next_queued_approval_after_resolution() {
 }
 
 #[test]
+fn transcript_pane_places_approval_after_matching_tool_and_renders_resolution_lightly() {
+    let mut transcript_pane = TranscriptPane::new(100, 24);
+
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: serde_json::json!({ "command": "printf 1" }),
+    });
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "tool-2".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: serde_json::json!({ "command": "printf 2" }),
+    });
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::Shell,
+        subject: "printf 1".to_owned(),
+        arguments: serde_json::json!({ "command": "printf 1" }),
+    });
+
+    let frame = plain_frame(&mut transcript_pane, 100, 24);
+    let tool_1 = frame
+        .iter()
+        .position(|line| line.contains("Using Bash (printf 1)"))
+        .expect("first tool");
+    let approval = frame
+        .iter()
+        .position(|line| line.contains("Run this command?"))
+        .expect("approval");
+    let tool_2 = frame
+        .iter()
+        .position(|line| line.contains("Using Bash (printf 2)"))
+        .expect("second tool");
+    assert!(tool_1 < approval);
+    assert!(
+        approval < tool_2,
+        "approval should stay near matching tool: {frame:?}"
+    );
+
+    transcript_pane.resolve_approval("tool-1", "Approved");
+    let resolved = plain_frame(&mut transcript_pane, 100, 24);
+    assert!(
+        resolved
+            .iter()
+            .any(|line| line.trim() == "approval: Approved"),
+        "resolved approval should be lightweight: {resolved:?}"
+    );
+    assert!(
+        !resolved
+            .iter()
+            .any(|line| line.chars().all(|ch| ch == '\u{2500}') && line.len() > 20),
+        "resolved approval should not keep yellow divider bars: {resolved:?}"
+    );
+}
+
+#[test]
 fn transcript_pane_maps_user_and_assistant_events_to_transcript_entries() {
     let mut transcript_pane = TranscriptPane::new(80, 12);
 

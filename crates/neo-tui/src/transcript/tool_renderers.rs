@@ -2,6 +2,7 @@ use crate::ansi::{Color, Style};
 use crate::chrome::ToolStatusKind;
 use crate::chrome::TuiTheme;
 use crate::core::{Line, Span, Text};
+use crate::tool_diff::{DiffModel, DiffRenderLine, DiffRenderLineKind, DiffRenderState};
 
 use super::tool_call::ToolCallState;
 
@@ -98,9 +99,21 @@ pub fn render_tool_body(state: &ToolCallState, expanded: bool, width: usize) -> 
         return Vec::new();
     }
 
+    if is_file_write_tool(&state.name)
+        && let Some(model) = state
+            .details
+            .as_ref()
+            .and_then(DiffModel::from_tool_details)
+    {
+        return render_diff_model_lines(&model, expanded, width, None);
+    }
+
     if state.name == "Write"
         && let Some((path, content)) = parse_write_arguments(state.arguments.as_deref())
     {
+        if state.status == ToolStatusKind::Pending || state.status == ToolStatusKind::Running {
+            return vec![Line::raw(format!("  {path}"))];
+        }
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
         let limit = if expanded {
@@ -124,6 +137,9 @@ pub fn render_tool_body(state: &ToolCallState, expanded: bool, width: usize) -> 
     if state.name == "Edit"
         && let Some(arguments) = state.arguments.as_deref().and_then(parse_edit_arguments)
     {
+        if state.status == ToolStatusKind::Pending || state.status == ToolStatusKind::Running {
+            return vec![Line::raw(format!("  {}", arguments.path))];
+        }
         let max = if expanded {
             None
         } else {
@@ -191,9 +207,21 @@ pub fn render_tool_body_themed(
     let weak = Style::default().fg(theme.text_muted);
     let body_style = Style::default().fg(theme.text_primary);
 
+    if is_file_write_tool(&state.name)
+        && let Some(model) = state
+            .details
+            .as_ref()
+            .and_then(DiffModel::from_tool_details)
+    {
+        return render_diff_model_lines(&model, expanded, width, Some(theme));
+    }
+
     if state.name == "Write"
         && let Some((path, content)) = parse_write_arguments(state.arguments.as_deref())
     {
+        if state.status == ToolStatusKind::Pending || state.status == ToolStatusKind::Running {
+            return vec![Line::styled(format!("  {path}"), weak)];
+        }
         let lines: Vec<&str> = content.lines().collect();
         let total = lines.len();
         let limit = if expanded {
@@ -223,6 +251,9 @@ pub fn render_tool_body_themed(
     if state.name == "Edit"
         && let Some(arguments) = state.arguments.as_deref().and_then(parse_edit_arguments)
     {
+        if state.status == ToolStatusKind::Pending || state.status == ToolStatusKind::Running {
+            return vec![Line::styled(format!("  {}", arguments.path), weak)];
+        }
         let max = if expanded {
             None
         } else {
@@ -274,6 +305,57 @@ pub fn render_tool_body_themed(
 
 fn hides_successful_todo_list_body(state: &ToolCallState) -> bool {
     state.name == "TodoList" && state.status == ToolStatusKind::Succeeded
+}
+
+fn is_file_write_tool(name: &str) -> bool {
+    matches!(name, "Write" | "Edit")
+}
+
+fn render_diff_model_lines(
+    model: &DiffModel,
+    expanded: bool,
+    width: usize,
+    theme: Option<&TuiTheme>,
+) -> Vec<Line> {
+    let render_width = width.saturating_sub(2).max(1);
+    let state = DiffRenderState::new(model.clone());
+    let lines = state.render_display_lines(render_width);
+    let total = lines.len();
+    let limit = if expanded {
+        total
+    } else {
+        COMMAND_PREVIEW_LINES.min(total)
+    };
+    let mut rows = lines
+        .into_iter()
+        .take(limit)
+        .map(|line| render_diff_line(line, theme))
+        .collect::<Vec<_>>();
+    if limit < total {
+        let message = format!(
+            "  ... ({} more diff lines, {total} total, ctrl+o to expand)",
+            total - limit
+        );
+        rows.push(match theme {
+            Some(theme) => Line::styled(message, Style::default().fg(theme.text_muted)),
+            None => Line::raw(message),
+        });
+    }
+    rows
+}
+
+fn render_diff_line(line: DiffRenderLine, theme: Option<&TuiTheme>) -> Line {
+    let text = format!("  {}", line.text);
+    let Some(theme) = theme else {
+        return Line::raw(text);
+    };
+    let color = match line.kind {
+        DiffRenderLineKind::Summary | DiffRenderLineKind::Separator => theme.diff_hunk,
+        DiffRenderLineKind::Added => theme.diff_added,
+        DiffRenderLineKind::Removed => theme.diff_removed,
+        DiffRenderLineKind::Context => theme.diff_context,
+    };
+    Line::styled(text, Style::default().fg(color))
 }
 
 /// Render one diff body line with add/remove coloring. Indented 2 spaces,
@@ -357,10 +439,18 @@ pub fn key_argument(arguments: Option<&str>) -> String {
 }
 
 fn result_chip(state: &ToolCallState) -> String {
+    if is_file_write_tool(&state.name)
+        && let Some(model) = state
+            .details
+            .as_ref()
+            .and_then(DiffModel::from_tool_details)
+    {
+        return format!(" · +{} -{}", model.stats().added, model.stats().removed);
+    }
     let Some(result) = state.result.as_deref().filter(|value| !value.is_empty()) else {
         return String::new();
     };
-    if state.name == "Read" || state.name == "Write" {
+    if state.name == "Read" {
         return format!(" · {} lines", result.lines().count());
     }
     String::new()

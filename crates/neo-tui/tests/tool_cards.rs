@@ -180,7 +180,7 @@ fn ctrl_o_expansion_switches_preview_limit() {
 }
 
 #[test]
-fn write_tool_card_caps_finalized_content_preview() {
+fn write_tool_card_renders_finalized_diff_from_details() {
     let content = (1..=20)
         .map(|n| format!("line {n}"))
         .collect::<Vec<_>>()
@@ -196,7 +196,19 @@ fn write_tool_card_caps_finalized_content_preview() {
             .to_string(),
         ),
         result: Some("wrote src/generated.rs".to_owned()),
-        details: None,
+        details: Some(serde_json::json!({
+            "path": "src/generated.rs",
+            "operation": "created",
+            "added": 20,
+            "removed": 0,
+            "line_count": 20,
+            "diff": format!(
+                "--- src/generated.rs\n+++ src/generated.rs\n@@ -0,0 +1,20 @@\n{}",
+                (1..=20)
+                    .map(|n| format!("+line {n}\n"))
+                    .collect::<String>()
+            )
+        })),
         status: ToolStatusKind::Succeeded,
         exit_code: None,
     });
@@ -204,14 +216,15 @@ fn write_tool_card_caps_finalized_content_preview() {
     let rows = plain(card.render(80));
     assert!(
         rows.iter()
-            .any(|line| line.contains("src/generated.rs · 20 lines"))
+            .any(|line| line.contains("Used Write (src/generated.rs) · +20 -0"))
     );
     assert!(rows.iter().any(|line| line.contains("ctrl+o to expand")));
-    assert!(!rows.iter().any(|line| line.contains("line 20")));
+    assert!(rows.iter().any(|line| line.contains(" 1 + line 1")));
+    assert!(!rows.iter().any(|line| line.contains("20 + line 20")));
 
     card.set_expanded(true);
     let expanded = plain(card.render(80));
-    assert!(expanded.iter().any(|line| line.contains("line 20")));
+    assert!(expanded.iter().any(|line| line.contains("20 + line 20")));
 }
 
 #[test]
@@ -259,28 +272,43 @@ fn edit_diff_preview_clusters_changes_with_context_and_hidden_footer() {
 }
 
 #[test]
-fn edit_tool_card_renders_finalized_clustered_diff_from_args() {
+fn edit_tool_card_renders_finalized_real_line_diff_from_details() {
     let mut card = ToolCallComponent::new(ToolCallState {
         id: "tool-1".to_owned(),
         name: "Edit".to_owned(),
         arguments: Some(
             serde_json::json!({
                 "path": "src/lib.rs",
-                "old_string": "old\nline\n",
-                "new_string": "new\nline\nextra\n"
+                "old_string": "old",
+                "new_string": "new"
             })
             .to_string(),
         ),
         result: Some("edited src/lib.rs".to_owned()),
-        details: None,
+        details: Some(serde_json::json!({
+            "path": "src/lib.rs",
+            "old": "old",
+            "new": "new",
+            "replace_all": false,
+            "diff": "--- src/lib.rs\n+++ src/lib.rs\n@@ -40,3 +40,3 @@\n context\n-old\n+new\n tail\n"
+        })),
         status: ToolStatusKind::Succeeded,
         exit_code: None,
     });
 
     let rows = plain(card.render(80));
-    assert!(rows.iter().any(|line| line.contains("+2 -1 src/lib.rs")));
-    assert!(rows.iter().any(|line| line.contains("- old")));
-    assert!(rows.iter().any(|line| line.contains("+ new")));
+    assert!(
+        rows.iter()
+            .any(|line| line.contains("Used Edit (src/lib.rs) · +1 -1"))
+    );
+    assert!(rows.iter().any(|line| line.contains("41 - old")));
+    assert!(rows.iter().any(|line| line.contains("41 + new")));
+    assert!(
+        !rows
+            .iter()
+            .any(|line| line.contains(" 1 - old") || line.contains(" 1 + new")),
+        "finalized Edit must not use args-local line numbers: {rows:?}"
+    );
 }
 
 #[test]

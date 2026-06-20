@@ -517,15 +517,12 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
     let body = Style::default().fg(theme.text_primary);
     let muted = Style::default().fg(theme.text_muted);
     let selected = Style::default().fg(theme.status_ok).bold();
-    let line = "\u{2500}".repeat(width.max(1));
-    let mut rows = vec![Line::styled(line.clone(), border)];
-
     if let Some(resolved) = &data.resolved {
-        rows.push(Line::styled(format!("  {resolved}"), muted));
-        rows.push(Line::styled(line, border));
-        return rows;
+        return vec![Line::styled(format!("approval: {resolved}"), muted)];
     }
 
+    let line = "\u{2500}".repeat(width.max(1));
+    let mut rows = vec![Line::styled(line.clone(), border)];
     rows.extend(styled_wrap_with_indent(
         &format!("▶ {}", data.title),
         width,
