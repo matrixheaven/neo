@@ -39,6 +39,7 @@ pub enum TranscriptEntry {
     ThinkingBlock {
         content: String,
         phase: ThinkingPhase,
+        expanded: bool,
     },
     ToolRun {
         component: ToolCallComponent,
@@ -128,6 +129,7 @@ impl TranscriptEntry {
         Self::ThinkingBlock {
             content: content.into(),
             phase: ThinkingPhase::Streaming,
+            expanded: false,
         }
     }
 
@@ -136,6 +138,7 @@ impl TranscriptEntry {
         Self::ThinkingBlock {
             content: content.into(),
             phase: ThinkingPhase::Complete,
+            expanded: false,
         }
     }
 
@@ -246,11 +249,15 @@ impl TranscriptEntry {
                 }
                 crate::markdown::render_markdown(content, inner_width, theme, "● ", "  ")
             }
-            Self::ThinkingBlock { content, phase } => {
+            Self::ThinkingBlock {
+                content,
+                phase,
+                expanded,
+            } => {
                 if content.is_empty() {
                     Vec::new()
                 } else {
-                    render_thinking(content, inner_width, *phase, theme)
+                    render_thinking(content, inner_width, *phase, *expanded, theme)
                 }
             }
             Self::ToolRun { component } => {
@@ -447,6 +454,7 @@ fn render_thinking(
     thinking: &str,
     width: usize,
     phase: ThinkingPhase,
+    expanded: bool,
     theme: &TuiTheme,
 ) -> Vec<Line> {
     let style = thinking_style(theme);
@@ -455,12 +463,23 @@ fn render_thinking(
     let total = wrapped.len();
     let mut rows = Vec::new();
 
-    if phase == ThinkingPhase::Streaming {
+    if phase == ThinkingPhase::Streaming && !expanded {
         // Streaming: spinner + tail window.
         rows.push(Line::styled("⠋ thinking...", style));
         let start = total.saturating_sub(THINKING_PREVIEW_LINES);
         for line in &wrapped[start..] {
             rows.push(Line::styled(format!("  {line}"), style));
+        }
+        return rows;
+    }
+
+    if expanded {
+        for (i, line) in wrapped.iter().enumerate() {
+            if i == 0 {
+                rows.push(Line::styled(format!("● {line}"), style));
+            } else {
+                rows.push(Line::styled(format!("  {line}"), style));
+            }
         }
         return rows;
     }
@@ -822,5 +841,40 @@ mod tests {
         for logo_line in [&lines[2], &lines[3]] {
             assert!(!logo_line.text().contains('┐'));
         }
+    }
+
+    #[test]
+    fn thinking_block_expands_full_text() {
+        let content = "one two three four five six seven eight nine ten eleven twelve";
+        let collapsed = TranscriptEntry::ThinkingBlock {
+            content: content.to_owned(),
+            phase: ThinkingPhase::Complete,
+            expanded: false,
+        }
+        .render(14, &TuiTheme::default())
+        .into_iter()
+        .map(|line| line.text().to_owned())
+        .collect::<Vec<_>>();
+        let expanded = TranscriptEntry::ThinkingBlock {
+            content: content.to_owned(),
+            phase: ThinkingPhase::Complete,
+            expanded: true,
+        }
+        .render(14, &TuiTheme::default())
+        .into_iter()
+        .map(|line| line.text().to_owned())
+        .collect::<Vec<_>>();
+
+        assert!(
+            collapsed
+                .iter()
+                .any(|line| line.contains("ctrl+o to expand"))
+        );
+        assert!(
+            !expanded
+                .iter()
+                .any(|line| line.contains("ctrl+o to expand"))
+        );
+        assert!(expanded.len() > collapsed.len());
     }
 }

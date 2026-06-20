@@ -84,3 +84,22 @@ fn completed_short_thinking_shows_all_without_hint() {
         "no collapse hint for short thinking: {joined}"
     );
 }
+
+#[test]
+fn ctrl_o_toggle_expands_completed_thinking() {
+    let mut runtime = TranscriptPane::new(40, 12);
+    runtime.push_transcript(TranscriptEntry::thinking_complete(
+        "alpha\nbeta\ngamma\ndelta\nepsilon",
+    ));
+
+    assert!(runtime.toggle_tool_output_expanded());
+    let frame = plain_frame(&mut runtime, 40, 12);
+    let joined = frame.join("\n");
+
+    assert!(joined.contains("● alpha"), "expanded head: {joined}");
+    assert!(joined.contains("epsilon"), "expanded tail: {joined}");
+    assert!(
+        !joined.contains("ctrl+o to expand"),
+        "expanded thinking should not show collapse hint: {joined}"
+    );
+}

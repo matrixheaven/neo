@@ -97,7 +97,8 @@ impl TranscriptPane {
     }
 
     pub fn push_transcript(&mut self, entry: TranscriptEntry) {
-        self.transcript.push(entry);
+        self.transcript
+            .push(self.apply_expand_state_to_entry(entry));
         self.mark_dirty();
     }
 
@@ -369,20 +370,25 @@ impl TranscriptPane {
     pub fn set_tool_output_expanded(&mut self, expanded: bool) {
         self.tool_output_expanded = expanded;
         for entry in self.transcript.entries_mut() {
-            if let TranscriptEntry::ToolRun { component } = entry {
-                component.set_expanded(expanded);
+            match entry {
+                TranscriptEntry::ToolRun { component } => component.set_expanded(expanded),
+                TranscriptEntry::ThinkingBlock {
+                    expanded: thinking_expanded,
+                    ..
+                } => *thinking_expanded = expanded,
+                _ => {}
             }
         }
         self.mark_dirty();
     }
 
     pub fn toggle_tool_output_expanded(&mut self) -> bool {
-        if !self
-            .transcript
-            .entries()
-            .iter()
-            .any(|entry| matches!(entry, TranscriptEntry::ToolRun { .. }))
-        {
+        if !self.transcript.entries().iter().any(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::ToolRun { .. } | TranscriptEntry::ThinkingBlock { .. }
+            )
+        }) {
             return false;
         }
         self.set_tool_output_expanded(!self.tool_output_expanded);
@@ -417,6 +423,7 @@ impl TranscriptPane {
             AgentEvent::ThinkingStarted { .. } => {
                 self.finish_assistant_message();
                 self.transcript.start_thinking();
+                self.apply_expand_state_to_active_thinking();
                 self.mark_dirty();
             }
             AgentEvent::ThinkingDelta { text, .. } => {
@@ -765,6 +772,22 @@ impl TranscriptPane {
         });
         component.set_expanded(self.tool_output_expanded);
         self.transcript.push(TranscriptEntry::tool_run(component));
+    }
+
+    fn apply_expand_state_to_entry(&self, mut entry: TranscriptEntry) -> TranscriptEntry {
+        if let TranscriptEntry::ThinkingBlock { expanded, .. } = &mut entry {
+            *expanded = self.tool_output_expanded;
+        }
+        entry
+    }
+
+    fn apply_expand_state_to_active_thinking(&mut self) {
+        for entry in self.transcript.entries_mut().iter_mut().rev() {
+            if let TranscriptEntry::ThinkingBlock { expanded, .. } = entry {
+                *expanded = self.tool_output_expanded;
+                break;
+            }
+        }
     }
 
     fn finish_active_text_blocks(&mut self) {
