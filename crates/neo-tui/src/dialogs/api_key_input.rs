@@ -52,14 +52,14 @@ impl ApiKeyInputState {
         let remaining = inner_w.saturating_sub(visible_width(&title_str));
         lines.push(format!(
             "\x1b[38;2;{}m╭{title_str}{}\x1b[0m",
-            rgb(&self.theme.overlay_border),
+            rgb(self.theme.overlay_border),
             "─".repeat(remaining),
         ));
 
         // Provider name hint
         lines.push(format!(
             "\x1b[38;2;{}m Provider: {}\x1b[0m",
-            rgb(&self.theme.text_muted),
+            rgb(self.theme.text_muted),
             self.provider_name
         ));
         lines.push(String::new());
@@ -68,32 +68,32 @@ impl ApiKeyInputState {
         let masked = self.masked_display();
         lines.push(format!(
             "\x1b[38;2;{}m API Key: \x1b[0m{masked}▏",
-            rgb(&self.theme.text_primary)
+            rgb(self.theme.text_primary)
         ));
 
         // Hint
         lines.push(format!(
             "\x1b[38;2;{}m Enter submit · Esc cancel\x1b[0m",
-            rgb(&self.theme.text_muted)
+            rgb(self.theme.text_muted)
         ));
 
         // Bottom border
         lines.push(format!(
             "\x1b[38;2;{}m╰{}\x1b[0m",
-            rgb(&self.theme.overlay_border),
+            rgb(self.theme.overlay_border),
             "─".repeat(inner_w),
         ));
 
         lines
     }
 
-    pub fn handle_input(&mut self, input: InputEvent) -> InputResult {
+    pub fn handle_input(&mut self, input: &InputEvent) -> InputResult {
         if self.result.is_some() {
             return InputResult::Ignored;
         }
         match input {
-            InputEvent::Insert(ch) if ch.is_ascii_graphic() || ch == ' ' => {
-                self.value.push(ch);
+            InputEvent::Insert(ch) if ch.is_ascii_graphic() || *ch == ' ' => {
+                self.value.push(*ch);
                 InputResult::Handled
             }
             InputEvent::Backspace => {
@@ -101,11 +101,11 @@ impl ApiKeyInputState {
                 InputResult::Handled
             }
             InputEvent::Submit => {
-                if !self.value.is_empty() {
+                if self.value.is_empty() {
+                    InputResult::Ignored
+                } else {
                     self.result = Some(ApiKeyInputResult::Submitted(self.value.clone()));
                     InputResult::Submitted
-                } else {
-                    InputResult::Ignored
                 }
             }
             InputEvent::Cancel => {
@@ -127,7 +127,7 @@ impl ApiKeyInputState {
     }
 }
 
-fn rgb(c: &Color) -> String {
+fn rgb(c: Color) -> String {
     match c {
         Color::Rgb(r, g, b) => format!("{r};{g};{b}"),
         _ => "255;255;255".into(),
@@ -151,8 +151,8 @@ mod tests {
             },
             theme(),
         );
-        state.handle_input(InputEvent::Insert('s'));
-        state.handle_input(InputEvent::Insert('k'));
+        state.handle_input(&InputEvent::Insert('s'));
+        state.handle_input(&InputEvent::Insert('k'));
         let lines = state.render_lines(40);
         let combined: String = lines.join("\n");
         assert!(combined.contains("••")); // masked
@@ -168,9 +168,9 @@ mod tests {
             },
             theme(),
         );
-        state.handle_input(InputEvent::Insert('a'));
-        state.handle_input(InputEvent::Insert('b'));
-        state.handle_input(InputEvent::Backspace);
+        state.handle_input(&InputEvent::Insert('a'));
+        state.handle_input(&InputEvent::Insert('b'));
+        state.handle_input(&InputEvent::Backspace);
         let lines = state.render_lines(40);
         let combined: String = lines.join("\n");
         assert!(combined.contains("•") && !combined.contains("••"));
@@ -185,8 +185,8 @@ mod tests {
             },
             theme(),
         );
-        state.handle_input(InputEvent::Insert('k'));
-        state.handle_input(InputEvent::Submit);
+        state.handle_input(&InputEvent::Insert('k'));
+        state.handle_input(&InputEvent::Submit);
         match state.take_result().unwrap() {
             ApiKeyInputResult::Submitted(v) => assert_eq!(v, "k"),
             ApiKeyInputResult::Cancelled => panic!("expected Submitted"),
@@ -202,7 +202,7 @@ mod tests {
             },
             theme(),
         );
-        state.handle_input(InputEvent::Cancel);
+        state.handle_input(&InputEvent::Cancel);
         assert!(matches!(
             state.take_result(),
             Some(ApiKeyInputResult::Cancelled)
@@ -218,7 +218,7 @@ mod tests {
             },
             theme(),
         );
-        state.handle_input(InputEvent::Submit);
+        state.handle_input(&InputEvent::Submit);
         assert!(state.result.is_none());
     }
 }

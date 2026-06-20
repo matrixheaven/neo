@@ -54,7 +54,6 @@ pub struct TuiTheme {
     pub footer_context_ok: Color,
     pub footer_context_warn: Color,
     pub footer_context_critical: Color,
-    pub footer_hint: Color,
 }
 
 impl Default for TuiTheme {
@@ -95,7 +94,6 @@ impl Default for TuiTheme {
             footer_context_ok: Color::Rgb(139, 148, 158),
             footer_context_warn: Color::Rgb(232, 168, 56),
             footer_context_critical: Color::Rgb(232, 84, 84),
-            footer_hint: Color::Rgb(139, 148, 158),
         }
     }
 }
@@ -220,12 +218,6 @@ impl TuiTheme {
         self.footer_context_critical = color;
         self
     }
-
-    #[must_use]
-    pub const fn with_footer_hint(mut self, color: Color) -> Self {
-        self.footer_hint = color;
-        self
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,7 +289,7 @@ pub struct NeoChromeState {
     permission_decision: PermissionDecision,
     /// Current agent mode indicator (for footer display)
     plan_mode_active: bool,
-    /// Current todo list for the TodoPanel.
+    /// Current todo list for the `TodoPanel`.
     todo_items: Vec<TodoDisplayItem>,
     /// Optional custom label shown in the footer as a working indicator.
     custom_working_label: Option<String>,
@@ -599,35 +591,27 @@ impl NeoChromeState {
             | StreamUpdate::ThinkingDelta { .. } => {
                 self.mode = ChromeMode::Streaming;
             }
-            StreamUpdate::ThinkingFinished => {}
             StreamUpdate::Error { text } => {
                 let _ = text;
                 self.mode = self.overlay_mode();
             }
-            StreamUpdate::TurnFinished => {
-                self.mode = self.overlay_mode();
-            }
-            StreamUpdate::RunFinished { .. } => {
+            StreamUpdate::TurnFinished | StreamUpdate::RunFinished { .. } => {
                 self.mode = self.overlay_mode();
             }
             StreamUpdate::PlanModeChanged { active } => {
                 self.plan_mode_active = active;
             }
             StreamUpdate::TodoUpdated { todos } => {
-                // Auto-clear when all done.
-                if !todos.is_empty() && todos.iter().all(|t| t.status == TodoDisplayStatus::Done) {
-                    self.todo_items.clear();
-                } else {
-                    self.todo_items = todos;
-                }
+                self.todo_items = todos;
             }
             StreamUpdate::QuestionRequested { id, questions } => {
                 self.push_question_overlay(id, questions);
             }
-            StreamUpdate::SkillActivated { .. } => {}
+            StreamUpdate::ThinkingFinished | StreamUpdate::SkillActivated { .. } => {}
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn apply_agent_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::MessageStarted { .. }
@@ -672,13 +656,6 @@ impl NeoChromeState {
                         context_window.with_used_tokens(usage.input_tokens + usage.output_tokens);
                 }
             }
-            AgentEvent::SteeringQueued { .. }
-            | AgentEvent::FollowUpQueued { .. }
-            | AgentEvent::QueueDrained { .. }
-            | AgentEvent::CompactionStarted { .. }
-            | AgentEvent::CompactionProgress { .. }
-            | AgentEvent::CompactionApplied { .. }
-            | AgentEvent::MessageAppended { .. } => {}
             AgentEvent::TurnFinished { .. } => {
                 self.apply_stream_update(StreamUpdate::TurnFinished);
             }
@@ -688,13 +665,25 @@ impl NeoChromeState {
             AgentEvent::RunFinished { turn, stop_reason } => {
                 self.apply_stream_update(StreamUpdate::RunFinished { turn, stop_reason });
             }
-            AgentEvent::RunStarted { .. }
+            AgentEvent::SteeringQueued { .. }
+            | AgentEvent::FollowUpQueued { .. }
+            | AgentEvent::QueueDrained { .. }
+            | AgentEvent::CompactionStarted { .. }
+            | AgentEvent::CompactionProgress { .. }
+            | AgentEvent::CompactionApplied { .. }
+            | AgentEvent::MessageAppended { .. }
+            | AgentEvent::RunStarted { .. }
             | AgentEvent::TurnStarted { .. }
             | AgentEvent::MessageFinished { .. }
             | AgentEvent::TerminalSessionStarted { .. }
             | AgentEvent::TerminalSessionOutput { .. }
             | AgentEvent::TerminalSessionFinished { .. }
-            | AgentEvent::SkillActivated { .. } => {}
+            | AgentEvent::SkillActivated { .. }
+            | AgentEvent::GoalStarted { .. }
+            | AgentEvent::GoalPaused { .. }
+            | AgentEvent::GoalResumed { .. }
+            | AgentEvent::GoalBlocked { .. }
+            | AgentEvent::GoalFinished { .. } => {}
             AgentEvent::PlanModeEntered { .. } => {
                 self.plan_mode_active = true;
             }
@@ -716,14 +705,7 @@ impl NeoChromeState {
                         },
                     })
                     .collect();
-                // Auto-clear when all done (Neo behavior).
-                if !display.is_empty()
-                    && display.iter().all(|t| t.status == TodoDisplayStatus::Done)
-                {
-                    self.todo_items.clear();
-                } else {
-                    self.todo_items = display;
-                }
+                self.todo_items = display;
             }
             AgentEvent::QuestionRequested { id, questions, .. } => {
                 let display: Vec<QuestionDisplayData> = questions
@@ -780,6 +762,35 @@ impl NeoChromeState {
 
     pub fn close_focused_overlay(&mut self) -> Option<Overlay> {
         self.focused_overlay.and_then(|id| self.close_overlay(id))
+    }
+
+    pub fn close_question_overlay(&mut self, question_id: &str) -> Option<Overlay> {
+        let id = self.overlays.iter().find_map(|overlay| {
+            let OverlayKind::QuestionDialog(state) = &overlay.kind else {
+                return None;
+            };
+            (state.id == question_id).then_some(overlay.id)
+        })?;
+        self.close_overlay(id)
+    }
+
+    pub fn clear_interrupted_turn_state(&mut self) -> Vec<String> {
+        let mut question_ids = Vec::new();
+        self.overlays.retain(|overlay| {
+            let OverlayKind::QuestionDialog(state) = &overlay.kind else {
+                return true;
+            };
+            question_ids.push(state.id.clone());
+            false
+        });
+        if self
+            .focused_overlay
+            .is_some_and(|id| !self.overlays.iter().any(|overlay| overlay.id == id))
+        {
+            self.focused_overlay = self.overlays.last().map(|overlay| overlay.id);
+        }
+        self.mode = self.overlay_mode();
+        question_ids
     }
 
     pub fn request_approval(
@@ -951,7 +962,7 @@ impl NeoChromeState {
 
     pub fn open_provider_manager(
         &mut self,
-        opts: crate::dialogs::ProviderManagerOptions,
+        opts: &crate::dialogs::ProviderManagerOptions,
     ) -> OverlayId {
         let state = crate::dialogs::ProviderManagerState::new(opts);
         self.push_overlay(Overlay::new(
@@ -1013,14 +1024,13 @@ impl NeoChromeState {
             return 0;
         };
         match &overlay.kind {
-            OverlayKind::SessionPicker(_) => 16,
-            OverlayKind::ModelPicker(_) => 16,
             OverlayKind::CommandPalette(_) => 12,
-            OverlayKind::PromptCompletion(_) => 8,
-            OverlayKind::Approval(_) => 8,
-            OverlayKind::QuestionDialog(_) => 16,
+            OverlayKind::PromptCompletion(_) | OverlayKind::Approval(_) => 8,
             OverlayKind::Message(_) => 3,
-            OverlayKind::ModelSelector(_)
+            OverlayKind::SessionPicker(_)
+            | OverlayKind::ModelPicker(_)
+            | OverlayKind::QuestionDialog(_)
+            | OverlayKind::ModelSelector(_)
             | OverlayKind::TabbedModelSelector(_)
             | OverlayKind::ProviderManager(_)
             | OverlayKind::ChoicePicker(_) => 16,
@@ -1054,11 +1064,11 @@ impl NeoChromeState {
         let input = Self::translate_key_event_for_dialog(input);
         if let Some(overlay) = self.overlays.iter_mut().find(|o| o.id == id) {
             match &mut overlay.kind {
-                OverlayKind::ModelSelector(state) => return state.handle_input(input),
-                OverlayKind::TabbedModelSelector(state) => return state.handle_input(input),
-                OverlayKind::ProviderManager(state) => return state.handle_input(input),
-                OverlayKind::ChoicePicker(state) => return state.handle_input(input),
-                OverlayKind::ApiKeyInput(state) => return state.handle_input(input),
+                OverlayKind::ModelSelector(state) => return state.handle_input(&input),
+                OverlayKind::TabbedModelSelector(state) => return state.handle_input(&input),
+                OverlayKind::ProviderManager(state) => return state.handle_input(&input),
+                OverlayKind::ChoicePicker(state) => return state.handle_input(&input),
+                OverlayKind::ApiKeyInput(state) => return state.handle_input(&input),
                 OverlayKind::CustomRegistryImport(state) => return state.handle_input(input),
                 _ => {}
             }
@@ -1067,7 +1077,6 @@ impl NeoChromeState {
     }
 
     /// Convenience result accessors for rich dialogs
-
     fn translate_key_event_for_dialog(input: InputEvent) -> InputEvent {
         match &input {
             InputEvent::Key(key) => match key.as_str() {
@@ -1475,19 +1484,19 @@ impl Overlay {
             OverlayKind::QuestionDialog(state) => state.move_cursor_down(),
             OverlayKind::Message(_) => {}
             OverlayKind::ModelSelector(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
             }
             OverlayKind::TabbedModelSelector(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
             }
             OverlayKind::ProviderManager(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
             }
             OverlayKind::ChoicePicker(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
             }
             OverlayKind::ApiKeyInput(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
             }
             OverlayKind::CustomRegistryImport(state) => {
                 state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
@@ -1507,19 +1516,19 @@ impl Overlay {
             OverlayKind::QuestionDialog(state) => state.move_cursor_up(),
             OverlayKind::Message(_) => {}
             OverlayKind::ModelSelector(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectUp));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectUp));
             }
             OverlayKind::TabbedModelSelector(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectUp));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectUp));
             }
             OverlayKind::ProviderManager(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectUp));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectUp));
             }
             OverlayKind::ChoicePicker(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectUp));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectUp));
             }
             OverlayKind::ApiKeyInput(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectUp));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectUp));
             }
             OverlayKind::CustomRegistryImport(state) => {
                 state.handle_input(InputEvent::Action(KeybindingAction::SelectUp));
@@ -1538,19 +1547,19 @@ impl Overlay {
             OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_) | OverlayKind::Message(_) => {
             }
             OverlayKind::ModelSelector(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageDown));
             }
             OverlayKind::TabbedModelSelector(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageDown));
             }
             OverlayKind::ProviderManager(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageDown));
             }
             OverlayKind::ChoicePicker(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageDown));
             }
             OverlayKind::ApiKeyInput(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageDown));
             }
             OverlayKind::CustomRegistryImport(state) => {
                 state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
@@ -1569,19 +1578,19 @@ impl Overlay {
             OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_) | OverlayKind::Message(_) => {
             }
             OverlayKind::ModelSelector(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageUp));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageUp));
             }
             OverlayKind::TabbedModelSelector(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageUp));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageUp));
             }
             OverlayKind::ProviderManager(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageUp));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageUp));
             }
             OverlayKind::ChoicePicker(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageUp));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageUp));
             }
             OverlayKind::ApiKeyInput(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageUp));
+                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageUp));
             }
             OverlayKind::CustomRegistryImport(state) => {
                 state.handle_input(InputEvent::Action(KeybindingAction::SelectPageUp));
@@ -1591,6 +1600,7 @@ impl Overlay {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum OverlayKind {
     CommandPalette(CommandPaletteState),
     SessionPicker(SessionPickerState),
@@ -1696,7 +1706,7 @@ impl SessionPickerState {
     }
 
     pub fn set_filter(&mut self, filter: &str) {
-        self.filter = filter.to_owned();
+        filter.clone_into(&mut self.filter);
         self.selected = 0;
     }
 
@@ -1762,15 +1772,14 @@ impl SessionPickerState {
 
     /// Render the picker as ANSI-styled lines matching the Neo card layout.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn render_lines(&self, width: usize, theme: &TuiTheme) -> Vec<String> {
         let brand = theme.brand;
         let text_muted = theme.text_muted;
         let status_ok = theme.status_ok;
         let text_color = theme.text_primary;
-        let border = format!(
-            "{}",
-            crate::ansi::paint(&"─".repeat(width), crate::ansi::Style::default().fg(brand))
-        );
+        let border =
+            crate::ansi::paint(&"─".repeat(width), crate::ansi::Style::default().fg(brand)).clone();
 
         let mut lines = vec![border.clone()];
 
@@ -1848,10 +1857,14 @@ impl SessionPickerState {
 
         let visible_start = (self.selected / self.max_visible) * self.max_visible;
         let visible_end = (visible_start + self.max_visible).min(filtered.len());
-        for vi in visible_start..visible_end {
-            let item = &filtered[vi];
+        for (vi, item) in filtered
+            .iter()
+            .enumerate()
+            .take(visible_end)
+            .skip(visible_start)
+        {
             let is_selected = vi == self.selected;
-            for card_line in self.render_card(
+            for card_line in Self::render_card(
                 item,
                 is_selected,
                 width,
@@ -1870,10 +1883,10 @@ impl SessionPickerState {
         // Footer
         if filtered.len() > self.max_visible || !self.filter.is_empty() {
             lines.push(String::new());
-            let total_suffix = if !self.filter.is_empty() {
-                format!("{} matches", filtered.len())
-            } else {
+            let total_suffix = if self.filter.is_empty() {
                 format!("{} sessions", filtered.len())
+            } else {
+                format!("{} matches", filtered.len())
             };
             let footer = format!(
                 "Showing {}-{} of {}",
@@ -1893,7 +1906,6 @@ impl SessionPickerState {
 
     #[allow(clippy::too_many_arguments)]
     fn render_card(
-        &self,
         item: &SessionPickerItem,
         is_selected: bool,
         width: usize,
@@ -2396,7 +2408,7 @@ impl ApprovalRequestModal {
 pub struct ApprovalResult {
     pub request_id: String,
     pub choice: ApprovalChoice,
-    /// Feedback text when the user picks Revise (ExitPlanMode plan review).
+    /// Feedback text when the user picks Revise (`ExitPlanMode` plan review).
     pub feedback: Option<String>,
 }
 
@@ -2886,7 +2898,7 @@ pub enum ApprovalChoice {
     Deny,
     AlwaysApprove,
     /// Revise — like Deny but the user provides feedback that gets sent to the model.
-    /// Used for ExitPlanMode plan review.
+    /// Used for `ExitPlanMode` plan review.
     Revise,
 }
 

@@ -173,9 +173,85 @@ fn transcript_pane_only_renders_active_approval_and_queued_count() {
     assert!(
         frame
             .iter()
-            .any(|line| line.contains("queued: 2 bash approvals waiting")),
+            .any(|line| line.contains("queued: 2 approvals waiting")),
         "frame: {frame:?}"
     );
+}
+
+#[test]
+fn transcript_pane_renders_terminal_approval_prompt() {
+    let mut transcript_pane = TranscriptPane::new(100, 18);
+
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "terminal-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::Shell,
+        subject: "bash --noprofile --norc".to_owned(),
+        arguments: serde_json::json!({
+            "mode": "start",
+            "command": "bash --noprofile --norc",
+            "cols": 80,
+            "rows": 24
+        }),
+    });
+
+    let frame = plain_frame(&mut transcript_pane, 100, 18);
+    assert!(frame.iter().any(|line| line.contains("Start terminal?")));
+    assert!(frame.iter().any(|line| line.contains("mode: start")));
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("$ bash --noprofile --norc"))
+    );
+}
+
+#[test]
+fn transcript_pane_renders_task_stop_approval_prompt() {
+    let mut transcript_pane = TranscriptPane::new(100, 18);
+
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "stop-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::Shell,
+        subject: "bash-1234".to_owned(),
+        arguments: serde_json::json!({
+            "task_id": "bash-1234",
+            "reason": "no longer needed"
+        }),
+    });
+
+    let frame = plain_frame(&mut transcript_pane, 100, 18);
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("Stop background task?"))
+    );
+    assert!(frame.iter().any(|line| line.contains("task_id: bash-1234")));
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("reason: no longer needed"))
+    );
+}
+
+#[test]
+fn transcript_pane_renders_write_approval_prompt() {
+    let mut transcript_pane = TranscriptPane::new(100, 18);
+
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "write-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::FileWrite,
+        subject: "src/lib.rs".to_owned(),
+        arguments: serde_json::json!({
+            "path": "src/lib.rs",
+            "content": "pub fn demo() {}"
+        }),
+    });
+
+    let frame = plain_frame(&mut transcript_pane, 100, 18);
+    assert!(frame.iter().any(|line| line.contains("Write file?")));
+    assert!(frame.iter().any(|line| line.contains("path: src/lib.rs")));
 }
 
 #[test]

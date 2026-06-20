@@ -108,9 +108,7 @@ fn code_block_has_backtick_borders_and_indent() {
 #[test]
 fn fenced_bash_block_does_not_leak_thinking_or_prompt_chrome() {
     let thinking = "I now have a comprehensive understanding of this project.";
-    let md = format!(
-        "快速上手\n\n```bash\n# 查看可用模型\ncargo run -p neo-agent -- models list\n```\n\n安全与约束"
-    );
+    let md = "快速上手\n\n```bash\n# 查看可用模型\ncargo run -p neo-agent -- models list\n```\n\n安全与约束".to_string();
     let lines = plain(&md, 80);
     let joined = lines.join("\n");
 
@@ -199,8 +197,7 @@ fn finalized_bullet_prefix_keeps_first_line_inline_and_indents_continuation() {
     for line in &plain[1..] {
         assert!(
             line.starts_with("  "),
-            "continuation line indented with two spaces: {:?}",
-            line
+            "continuation line indented with two spaces: {line:?}"
         );
     }
 }
@@ -244,4 +241,42 @@ fn table_handles_cjk_full_width_cells() {
             assert!(*w == w0, "row {i} width {w} != {w0}: {}", lines[i]);
         }
     }
+}
+
+#[test]
+fn table_aligns_borders_with_emoji_grapheme_clusters() {
+    let md = "| 题目 | 结果 | 评价 |\n\
+              |---|---|---|\n\
+              | 1 + 1 = ? | ✅ 2 | 正确 |\n\
+              | 哪些是质数? | ⚠️ 7, 13 | 漏了一个 |\n\
+              | 三角形内角和? | ✅ 180° | 满分 🎉 |";
+    let lines = plain(md, 80);
+    let joined = lines.join("\n");
+    assert!(joined.contains("⚠️"), "emoji row present: {joined}");
+
+    let table_lines: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
+        .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
+        .collect();
+    let expected = border_columns(table_lines[0]);
+    for (i, line) in table_lines.iter().enumerate() {
+        assert_eq!(
+            border_columns(line),
+            expected,
+            "table border columns drift on row {i}: {line:?}\n{joined}"
+        );
+    }
+}
+
+fn border_columns(line: &str) -> Vec<usize> {
+    line.char_indices()
+        .filter_map(|(idx, ch)| {
+            matches!(
+                ch,
+                '│' | '┌' | '┬' | '┐' | '├' | '┼' | '┤' | '└' | '┴' | '┘'
+            )
+            .then(|| unicode_width::UnicodeWidthStr::width(&line[..idx]))
+        })
+        .collect()
 }

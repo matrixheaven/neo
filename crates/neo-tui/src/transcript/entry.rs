@@ -22,8 +22,8 @@ pub struct BannerData {
 pub struct ApprovalPromptData {
     pub id: String,
     pub title: String,
-    pub cwd: Option<String>,
-    pub command: String,
+    pub details: Vec<String>,
+    pub queued_label: String,
     pub queued_count: usize,
     pub selected: usize,
     pub resolved: Option<String>,
@@ -66,6 +66,21 @@ pub enum TranscriptEntry {
         /// line with no prefix.
         severity: Option<StatusSeverity>,
     },
+    GoalCard {
+        kind: GoalCardKind,
+        objective: String,
+        detail: Option<String>,
+        turns: Option<u32>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalCardKind {
+    Started,
+    Paused,
+    Resumed,
+    Blocked,
+    Finished,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +200,21 @@ impl TranscriptEntry {
     }
 
     #[must_use]
+    pub fn goal_card(
+        kind: GoalCardKind,
+        objective: impl Into<String>,
+        detail: Option<impl Into<String>>,
+        turns: Option<u32>,
+    ) -> Self {
+        Self::GoalCard {
+            kind,
+            objective: objective.into(),
+            detail: detail.map(Into::into),
+            turns,
+        }
+    }
+
+    #[must_use]
     pub fn render(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
         // Every `Line` returned here MUST map to exactly one terminal row:
         // content is split on `\n` and soft-wrapped to `width` so no line ever
@@ -241,6 +271,19 @@ impl TranscriptEntry {
                 inner_width,
                 status_style(theme),
             ),
+            Self::GoalCard {
+                kind,
+                objective,
+                detail,
+                turns,
+            } => render_goal_card(
+                *kind,
+                objective,
+                detail.as_deref(),
+                *turns,
+                inner_width,
+                theme,
+            ),
         }
     }
 
@@ -290,6 +333,20 @@ impl TranscriptEntry {
                 ),
             ),
             Self::Status { text, .. } => ("Status", text.clone()),
+            Self::GoalCard {
+                kind,
+                objective,
+                detail,
+                turns,
+            } => (
+                "Goal",
+                format!(
+                    "{:?} goal: {objective}\n{}\n{}",
+                    kind,
+                    detail.as_deref().unwrap_or(""),
+                    turns.map_or_else(String::new, |t| format!("Turns: {t}"))
+                ),
+            ),
         }
     }
 
@@ -458,22 +515,9 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         title,
     ));
     rows.push(Line::raw(""));
-    if let Some(cwd) = &data.cwd {
-        rows.extend(styled_wrap_with_indent(
-            &format!("cwd: {cwd}"),
-            width,
-            2,
-            7,
-            muted,
-        ));
+    for detail in &data.details {
+        rows.extend(styled_wrap_with_indent(detail, width, 2, 4, body));
     }
-    rows.extend(styled_wrap_with_indent(
-        &format!("$ {}", data.command),
-        width,
-        2,
-        4,
-        body,
-    ));
     rows.push(Line::raw(""));
     for (index, label) in [
         "Approve once",
@@ -509,8 +553,14 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         } else {
             "approvals"
         };
+        let queued_label = data.queued_label.trim();
+        let label = if queued_label.is_empty() {
+            suffix.to_owned()
+        } else {
+            format!("{queued_label} {suffix}")
+        };
         rows.extend(styled_wrap_with_indent(
-            &format!("queued: {} bash {suffix} waiting", data.queued_count),
+            &format!("queued: {} {label} waiting", data.queued_count),
             width,
             2,
             2,
@@ -670,6 +720,64 @@ fn render_welcome_banner(data: &BannerData, width: usize, theme: &TuiTheme) -> V
             width,
             border_style,
         )));
+    }
+    rows.push(Line::raw(box_draw::bottom_border(width, border_style)));
+    rows.push(Line::raw(""));
+    rows
+}
+
+fn render_goal_card(
+    kind: GoalCardKind,
+    objective: &str,
+    detail: Option<&str>,
+    turns: Option<u32>,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    let (icon, label, color) = match kind {
+        GoalCardKind::Started => ("▶", "GOAL STARTED", theme.brand),
+        GoalCardKind::Paused => ("⏸", "GOAL PAUSED", theme.status_warn),
+        GoalCardKind::Resumed => ("▶", "GOAL RESUMED", theme.brand),
+        GoalCardKind::Blocked => ("⏹", "GOAL BLOCKED", theme.status_error),
+        GoalCardKind::Finished => ("✓", "GOAL COMPLETE", theme.status_ok),
+    };
+
+    let mut content: Vec<String> = Vec::new();
+    content.push(format!("{icon} {label}"));
+    content.push(String::new());
+    content.push(objective.to_owned());
+    if let Some(detail) = detail {
+        content.push(String::new());
+        content.push(detail.to_owned());
+    }
+    if let Some(turns) = turns {
+        content.push(String::new());
+        content.push(format!("Turns used: {turns}"));
+    }
+
+    let border_style = Style::default().fg(color);
+    let header_style = Style::default().fg(color).bold();
+    let body_style = Style::default().fg(theme.text_primary);
+
+    let inner_width = width.saturating_sub(4).max(1);
+    let mut rows: Vec<Line> = Vec::new();
+    rows.push(Line::raw(box_draw::top_border(width, border_style)));
+    for (idx, line) in content.iter().enumerate() {
+        let wrapped = wrap_width(line, inner_width);
+        let style = if idx == 0 { header_style } else { body_style };
+        if wrapped.is_empty() {
+            rows.push(Line::raw(paint(
+                &box_draw::content_line("", width, border_style),
+                style,
+            )));
+        } else {
+            for part in wrapped {
+                rows.push(Line::raw(paint(
+                    &box_draw::content_line(&format!(" {part} "), width, border_style),
+                    style,
+                )));
+            }
+        }
     }
     rows.push(Line::raw(box_draw::bottom_border(width, border_style)));
     rows.push(Line::raw(""));

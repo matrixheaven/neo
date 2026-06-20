@@ -77,6 +77,89 @@ fn tool_call_updates_in_place_to_finished_state() {
 }
 
 #[test]
+fn long_tool_header_truncates_to_content_width() {
+    use neo_tui::ansi::visible_width;
+    use neo_tui::transcript::frame_content_width;
+
+    const WIDTH: usize = 80;
+    let args = serde_json::json!({
+        "questions": [{
+            "question": "1 + 2 × 3 = ?",
+            "header": "单选题",
+            "options": [
+                {"label": "7", "description": "先乘除后加减：2×3=6，1+6=7"},
+                {"label": "9", "description": "从左到右：(1+2)×3=9"},
+                {"label": "6", "description": "1+2+3=6"},
+                {"label": "Other"}
+            ],
+            "multi_select": false
+        }]
+    });
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "question-1".to_owned(),
+        name: "AskUserQuestion".to_owned(),
+        arguments: Some(args.to_string()),
+        result: None,
+        details: None,
+        status: ToolStatusKind::Running,
+        exit_code: None,
+    });
+
+    let rows = plain(card.render(WIDTH));
+    let content_width = frame_content_width(WIDTH);
+
+    assert!(
+        rows.iter()
+            .any(|line| line.contains("Using AskUserQuestion"))
+    );
+    assert_eq!(rows.len(), 1, "long header should stay compact: {rows:?}");
+    assert!(
+        rows[0].contains('…'),
+        "long header should be truncated: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|line| visible_width(line) <= content_width),
+        "all rows must fit content width {content_width}: {rows:?}"
+    );
+}
+
+#[test]
+fn successful_todo_list_tool_card_hides_redundant_result_body() {
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "todo-1".to_owned(),
+        name: "TodoList".to_owned(),
+        arguments: Some(r#"{"todos":[{"title":"ship","status":"in_progress"}]}"#.to_owned()),
+        result: Some("Current todo list:\n  [in_progress] ship".to_owned()),
+        details: None,
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    });
+
+    let rows = plain(card.render(80));
+
+    assert!(rows.iter().any(|line| line.contains("Used TodoList")));
+    assert!(!rows.iter().any(|line| line.contains("[in_progress] ship")));
+}
+
+#[test]
+fn failed_todo_list_tool_card_keeps_error_body() {
+    let mut card = ToolCallComponent::new(ToolCallState {
+        id: "todo-1".to_owned(),
+        name: "TodoList".to_owned(),
+        arguments: Some(r#"{"todos":[{"title":"ship","status":"wip"}]}"#.to_owned()),
+        result: Some("invalid status".to_owned()),
+        details: None,
+        status: ToolStatusKind::Failed,
+        exit_code: None,
+    });
+
+    let rows = plain(card.render(80));
+
+    assert!(rows.iter().any(|line| line.contains("TodoList")));
+    assert!(rows.iter().any(|line| line.contains("invalid status")));
+}
+
+#[test]
 fn ctrl_o_expansion_switches_preview_limit() {
     let mut card = ToolCallComponent::new(ToolCallState {
         id: "tool-1".to_owned(),
@@ -238,7 +321,7 @@ fn transcript_pane_expansion_reaches_rendered_bash_tool_body() {
         .render_frame(80, 20)
         .expect("collapsed frame")
         .iter()
-        .map(|line| strip_ansi(line).to_owned())
+        .map(|line| strip_ansi(line).clone())
         .collect::<Vec<_>>();
     assert!(
         collapsed
@@ -256,7 +339,7 @@ fn transcript_pane_expansion_reaches_rendered_bash_tool_body() {
         .render_frame(80, 20)
         .expect("expanded frame")
         .iter()
-        .map(|line| strip_ansi(line).to_owned())
+        .map(|line| strip_ansi(line).clone())
         .collect::<Vec<_>>();
     assert!(
         expanded.iter().any(|line| line.trim() == "8"),
@@ -306,7 +389,7 @@ fn tool_card_lines_do_not_exceed_terminal_width_after_gutter() {
         .render_frame(WIDTH, 20)
         .expect("frame renders")
         .iter()
-        .map(|line| strip_ansi(line).to_owned())
+        .map(|line| strip_ansi(line).clone())
         .collect::<Vec<_>>();
 
     // Sanity-check the invariant that makes the gutter safe: the body was
@@ -347,6 +430,62 @@ fn tool_card_lines_do_not_exceed_terminal_width_after_gutter() {
 }
 
 #[test]
+fn ask_user_question_header_does_not_exceed_terminal_width_after_gutter() {
+    use neo_agent_core::AgentEvent;
+    use neo_tui::ansi::{strip_ansi, visible_width};
+    use neo_tui::transcript::apply_gutter;
+
+    const WIDTH: usize = 80;
+    let args = serde_json::json!({
+        "questions": [{
+            "question": "1 + 2 × 3 = ?",
+            "header": "单选题",
+            "options": [
+                {"label": "7", "description": "先乘除后加减：2×3=6，1+6=7"},
+                {"label": "9", "description": "从左到右：(1+2)×3=9"},
+                {"label": "6", "description": "1+2+3=6"},
+                {"label": "Other"}
+            ],
+            "multi_select": false
+        }]
+    });
+    let mut runtime = TranscriptPane::new(WIDTH, 20);
+
+    runtime.apply_agent_event(AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "question-1".to_owned(),
+        name: "AskUserQuestion".to_owned(),
+    });
+    runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
+        turn: 1,
+        id: "question-1".to_owned(),
+        json_fragment: args.to_string(),
+    });
+
+    let mut frame = runtime
+        .render_frame(WIDTH, 20)
+        .expect("frame renders")
+        .iter()
+        .map(|line| strip_ansi(line).clone())
+        .collect::<Vec<_>>();
+    apply_gutter(&mut frame);
+
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("Using AskUserQuestion")),
+        "tool header present: {frame:?}"
+    );
+    for line in &frame {
+        let width = visible_width(line);
+        assert!(
+            width < WIDTH,
+            "line reaches terminal autowrap column ({width} >= {WIDTH}): {line:?}"
+        );
+    }
+}
+
+#[test]
 fn grouped_read_lines_do_not_exceed_terminal_width_after_gutter() {
     use neo_agent_core::AgentEvent;
     use neo_tui::ansi::{strip_ansi, visible_width};
@@ -382,7 +521,7 @@ fn grouped_read_lines_do_not_exceed_terminal_width_after_gutter() {
         .render_frame(WIDTH, 20)
         .expect("frame renders")
         .iter()
-        .map(|line| strip_ansi(line).to_owned())
+        .map(|line| strip_ansi(line).clone())
         .collect::<Vec<_>>();
 
     // Grouped rows should be truncated to content_width, not full width.

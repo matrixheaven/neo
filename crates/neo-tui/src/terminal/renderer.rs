@@ -16,6 +16,7 @@
 
 use std::collections::BTreeSet;
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{Write, stdout};
 use std::path::PathBuf;
@@ -52,6 +53,13 @@ fn debug_log_enabled() -> bool {
 
 fn is_termux_session() -> bool {
     env::var("TERMUX_VERSION").is_ok()
+}
+
+fn hardware_cursor_enabled_from_env_value(value: Option<&str>) -> bool {
+    !matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("0" | "false" | "off")
+    )
 }
 
 const fn height_change_requires_clear(height_changed: bool, is_termux: bool) -> bool {
@@ -206,17 +214,27 @@ impl TuiRenderer {
             max_lines_rendered: 0,
             cursor_row: 0,
             clear_on_shrink: false,
-            show_hardware_cursor: env::var("PI_HARDWARE_CURSOR").is_ok_and(|value| value == "1"),
+            show_hardware_cursor: hardware_cursor_enabled_from_env_value(
+                env::var("NEO_HARDWARE_CURSOR").ok().as_deref(),
+            ),
         })
     }
 
     /// Restore terminal state.
     pub fn leave(&mut self) {
         let mut output = stdout();
+        self.write_leave_output(&mut output);
+        let _ = output.flush();
+
+        let _ = execute!(output, PopKeyboardEnhancementFlags, DisableBracketedPaste,);
+        let _ = disable_raw_mode();
+    }
+
+    fn write_leave_output(&mut self, output: &mut dyn Write) {
         // Move cursor to the end of the content to prevent overwriting on exit.
         if !self.previous_lines.is_empty() {
             let target_row = self.previous_lines.len(); // Line after the last content
-            let line_diff = target_row as isize - self.hardware_cursor_row as isize;
+            let line_diff = target_row.cast_signed() - self.hardware_cursor_row.cast_signed();
             if line_diff > 0 {
                 let _ = write!(output, "\x1b[{line_diff}B");
             } else if line_diff < 0 {
@@ -224,10 +242,7 @@ impl TuiRenderer {
             }
             let _ = write!(output, "\r\n");
         }
-        let _ = output.flush();
-
-        let _ = execute!(output, PopKeyboardEnhancementFlags, DisableBracketedPaste,);
-        let _ = disable_raw_mode();
+        let _ = write!(output, "\x1b[?25h");
     }
 
     /// Suspend (Ctrl+Z): leave terminal, then re-enter.
@@ -295,6 +310,7 @@ impl TuiRenderer {
         self.render_to_with_size(&mut output, width, height_u16, new_lines, cursor)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render_to_with_size(
         &mut self,
         output: &mut dyn Write,
@@ -351,8 +367,8 @@ impl TuiRenderer {
         // mutate the viewport state.
         let compute_line_diff =
             |target_row: usize, hwc: usize, prev_vt: usize, vt: usize| -> isize {
-                let current_screen_row = hwc as isize - prev_vt as isize;
-                let target_screen_row = target_row as isize - vt as isize;
+                let current_screen_row = hwc.cast_signed() - prev_vt.cast_signed();
+                let target_screen_row = target_row.cast_signed() - vt.cast_signed();
                 target_screen_row - current_screen_row
             };
 
@@ -371,7 +387,7 @@ impl TuiRenderer {
                 height_u16,
                 width,
                 cursor_pos,
-            )?;
+            );
             self.first_render = false;
             return Ok(());
         }
@@ -386,7 +402,7 @@ impl TuiRenderer {
                 height_u16,
                 width,
                 cursor_pos,
-            )?;
+            );
             self.first_render = false;
             return Ok(());
         }
@@ -401,7 +417,7 @@ impl TuiRenderer {
                 height_u16,
                 width,
                 cursor_pos,
-            )?;
+            );
             return Ok(());
         }
 
@@ -417,7 +433,7 @@ impl TuiRenderer {
                 height_u16,
                 width,
                 cursor_pos,
-            )?;
+            );
             return Ok(());
         }
 
@@ -432,55 +448,52 @@ impl TuiRenderer {
                 height_u16,
                 width,
                 cursor_pos,
-            )?;
+            );
             return Ok(());
         }
 
         // Find first and last changed lines
-        let mut first_changed: i64 = -1;
-        let mut last_changed: i64 = -1;
+        let mut first_changed: Option<usize> = None;
+        let mut last_changed: Option<usize> = None;
         let max_lines = new_lines.len().max(self.previous_lines.len());
         for i in 0..max_lines {
-            let old_line = self.previous_lines.get(i).map(String::as_str).unwrap_or("");
-            let new_line = new_lines.get(i).map(String::as_str).unwrap_or("");
+            let old_line = self.previous_lines.get(i).map_or("", String::as_str);
+            let new_line = new_lines.get(i).map_or("", String::as_str);
             if old_line != new_line {
-                if first_changed == -1 {
-                    first_changed = i as i64;
+                if first_changed.is_none() {
+                    first_changed = Some(i);
                 }
-                last_changed = i as i64;
+                last_changed = Some(i);
             }
         }
         let appended_lines = new_lines.len() > self.previous_lines.len();
         if appended_lines {
-            if first_changed == -1 {
-                first_changed = self.previous_lines.len() as i64;
+            if first_changed.is_none() {
+                first_changed = Some(self.previous_lines.len());
             }
-            last_changed = (new_lines.len() - 1) as i64;
+            last_changed = Some(new_lines.len().saturating_sub(1));
         }
-        if first_changed != -1 {
-            let (expanded_first, expanded_last) = self.expand_changed_range_for_kitty_images(
-                first_changed as usize,
-                last_changed as usize,
-                &new_lines,
-            );
-            first_changed = expanded_first as i64;
-            last_changed = expanded_last as i64;
+        if let (Some(first), Some(last)) = (first_changed, last_changed) {
+            let (expanded_first, expanded_last) =
+                self.expand_changed_range_for_kitty_images(first, last, &new_lines);
+            first_changed = Some(expanded_first);
+            last_changed = Some(expanded_last);
         }
         let append_start = appended_lines
-            && first_changed == self.previous_lines.len() as i64
-            && first_changed > 0;
+            && first_changed == Some(self.previous_lines.len())
+            && first_changed.is_some_and(|f| f > 0);
 
         // No changes - but still need to update hardware cursor position if it moved
-        if first_changed == -1 {
-            self.position_hardware_cursor(output, cursor_pos, new_lines.len())?;
+        if first_changed.is_none() {
+            self.position_hardware_cursor(output, cursor_pos, new_lines.len());
             self.previous_viewport_top = prev_viewport_top;
             self.previous_height = height_u16;
             self.previous_lines = new_lines;
             return Ok(());
         }
 
-        let first_changed_u = first_changed as usize;
-        let last_changed_u = last_changed as usize;
+        let first_changed_u = first_changed.unwrap();
+        let last_changed_u = last_changed.unwrap();
         // All changes are in deleted lines (nothing to render, just clear)
         if first_changed_u >= new_lines.len() {
             if self.previous_lines.len() > new_lines.len() {
@@ -498,7 +511,7 @@ impl TuiRenderer {
                         height_u16,
                         width,
                         cursor_pos,
-                    )?;
+                    );
                     return Ok(());
                 }
                 let line_diff = compute_line_diff(
@@ -508,9 +521,9 @@ impl TuiRenderer {
                     viewport_top,
                 );
                 if line_diff > 0 {
-                    buffer.push_str(&format!("\x1b[{line_diff}B"));
+                    let _ = write!(buffer, "\x1b[{line_diff}B");
                 } else if line_diff < 0 {
-                    buffer.push_str(&format!("\x1b[{}A", (-line_diff)));
+                    let _ = write!(buffer, "\x1b[{}A", -line_diff);
                 }
                 buffer.push('\r');
                 // Clear extra lines without scrolling
@@ -524,12 +537,12 @@ impl TuiRenderer {
                         height_u16,
                         width,
                         cursor_pos,
-                    )?;
+                    );
                     return Ok(());
                 }
-                let clear_start_offset = if new_lines.is_empty() { 0 } else { 1 };
+                let clear_start_offset = usize::from(!new_lines.is_empty());
                 if extra_lines > 0 && clear_start_offset > 0 {
-                    buffer.push_str(&format!("\x1b[{clear_start_offset}B"));
+                    let _ = write!(buffer, "\x1b[{clear_start_offset}B");
                 }
                 for i in 0..extra_lines {
                     buffer.push_str("\r\x1b[2K");
@@ -539,7 +552,7 @@ impl TuiRenderer {
                 }
                 let move_back = extra_lines.saturating_sub(1) + clear_start_offset;
                 if move_back > 0 {
-                    buffer.push_str(&format!("\x1b[{move_back}A"));
+                    let _ = write!(buffer, "\x1b[{move_back}A");
                 }
                 buffer.push_str("\x1b[?2026l");
                 if debug_log_enabled() {
@@ -550,7 +563,7 @@ impl TuiRenderer {
                 self.cursor_row = target_row;
                 self.hardware_cursor_row = target_row;
             }
-            self.position_hardware_cursor(output, cursor_pos, new_lines.len())?;
+            self.position_hardware_cursor(output, cursor_pos, new_lines.len());
             self.previous_lines = new_lines;
             self.previous_kitty_image_ids = collect_kitty_image_ids(&self.previous_lines);
             self.previous_width = width;
@@ -571,7 +584,7 @@ impl TuiRenderer {
                 height_u16,
                 width,
                 cursor_pos,
-            )?;
+            );
             return Ok(());
         }
 
@@ -586,11 +599,13 @@ impl TuiRenderer {
             first_changed_u
         };
         if move_target_row > prev_viewport_bottom {
-            let current_screen_row = (hardware_cursor_row as isize - prev_viewport_top as isize)
-                .clamp(0, (height - 1) as isize) as usize;
+            let current_screen_row = (hardware_cursor_row.cast_signed()
+                - prev_viewport_top.cast_signed())
+            .clamp(0, (height - 1).cast_signed())
+            .cast_unsigned();
             let move_to_bottom = height - 1 - current_screen_row;
             if move_to_bottom > 0 {
-                buffer.push_str(&format!("\x1b[{move_to_bottom}B"));
+                let _ = write!(buffer, "\x1b[{move_to_bottom}B");
             }
             let scroll = move_target_row - prev_viewport_bottom;
             for _ in 0..scroll {
@@ -609,9 +624,9 @@ impl TuiRenderer {
             viewport_top,
         );
         if line_diff > 0 {
-            buffer.push_str(&format!("\x1b[{line_diff}B")); // Move down
+            let _ = write!(buffer, "\x1b[{line_diff}B"); // Move down
         } else if line_diff < 0 {
-            buffer.push_str(&format!("\x1b[{}A", (-line_diff))); // Move up
+            let _ = write!(buffer, "\x1b[{}A", -line_diff); // Move up
         }
 
         if append_start {
@@ -633,9 +648,9 @@ impl TuiRenderer {
                 1
             };
             if image_reserved_rows > 1 {
-                let image_start_screen_row = i as isize - viewport_top as isize;
+                let image_start_screen_row = i.cast_signed() - viewport_top.cast_signed();
                 if image_start_screen_row < 0
-                    || image_start_screen_row as usize + image_reserved_rows > height
+                    || image_start_screen_row.cast_unsigned() + image_reserved_rows > height
                 {
                     self.full_render(
                         output,
@@ -645,16 +660,16 @@ impl TuiRenderer {
                         height_u16,
                         width,
                         cursor_pos,
-                    )?;
+                    );
                     return Ok(());
                 }
                 buffer.push_str("\x1b[2K");
                 for _ in 1..image_reserved_rows {
                     buffer.push_str("\r\n\x1b[2K");
                 }
-                buffer.push_str(&format!("\x1b[{}A", image_reserved_rows - 1));
+                let _ = write!(buffer, "\x1b[{}A", image_reserved_rows - 1);
                 buffer.push_str(line);
-                buffer.push_str(&format!("\x1b[{}B", image_reserved_rows - 1));
+                let _ = write!(buffer, "\x1b[{}B", image_reserved_rows - 1);
                 i += image_reserved_rows;
                 continue;
             }
@@ -671,7 +686,7 @@ impl TuiRenderer {
             // Move to end of new content first if we stopped before it
             if render_end + 1 < new_lines.len() {
                 let move_down = new_lines.len() - 1 - render_end;
-                buffer.push_str(&format!("\x1b[{move_down}B"));
+                let _ = write!(buffer, "\x1b[{move_down}B");
                 final_cursor_row = new_lines.len() - 1;
             }
             let extra_lines = self.previous_lines.len() - new_lines.len();
@@ -679,7 +694,7 @@ impl TuiRenderer {
                 buffer.push_str("\r\n\x1b[2K");
             }
             // Move cursor back to end of new content
-            buffer.push_str(&format!("\x1b[{extra_lines}A"));
+            let _ = write!(buffer, "\x1b[{extra_lines}A");
         }
 
         buffer.push_str("\x1b[?2026l"); // End synchronized output
@@ -713,7 +728,7 @@ impl TuiRenderer {
             prev_viewport_top.max(final_cursor_row.saturating_sub(height - 1));
 
         // Position hardware cursor for IME
-        self.position_hardware_cursor(output, cursor_pos, new_lines.len())?;
+        self.position_hardware_cursor(output, cursor_pos, new_lines.len());
 
         self.previous_lines = new_lines;
         self.previous_kitty_image_ids = collect_kitty_image_ids(&self.previous_lines);
@@ -724,6 +739,7 @@ impl TuiRenderer {
 
     /// Full render: optionally clear screen/scrollback, then write the full
     /// rendered frame.
+    #[allow(clippy::too_many_arguments)]
     fn full_render(
         &mut self,
         output: &mut dyn Write,
@@ -733,7 +749,7 @@ impl TuiRenderer {
         height_u16: u16,
         width: u16,
         cursor_pos: Option<CursorPos>,
-    ) -> std::io::Result<()> {
+    ) {
         if debug_log_enabled() {
             let _ = write_debug_log(
                 &format!("full-render-{clear}"),
@@ -765,9 +781,9 @@ impl TuiRenderer {
                 for _ in 1..image_reserved_rows {
                     buffer.push_str("\r\n");
                 }
-                buffer.push_str(&format!("\x1b[{}A", image_reserved_rows - 1));
+                let _ = write!(buffer, "\x1b[{}A", image_reserved_rows - 1);
                 buffer.push_str(line);
-                buffer.push_str(&format!("\x1b[{}B", image_reserved_rows - 1));
+                let _ = write!(buffer, "\x1b[{}B", image_reserved_rows - 1);
                 i += image_reserved_rows;
                 continue;
             }
@@ -790,12 +806,11 @@ impl TuiRenderer {
         }
         let buffer_length = height.max(new_lines.len());
         self.previous_viewport_top = buffer_length.saturating_sub(height);
-        self.position_hardware_cursor(output, cursor_pos, new_lines.len())?;
+        self.position_hardware_cursor(output, cursor_pos, new_lines.len());
         self.previous_lines = new_lines.to_vec();
         self.previous_kitty_image_ids = collect_kitty_image_ids(&self.previous_lines);
         self.previous_width = width;
         self.previous_height = height_u16;
-        Ok(())
     }
 
     /// Position the hardware cursor for IME candidate windows.
@@ -804,11 +819,11 @@ impl TuiRenderer {
         output: &mut dyn Write,
         cursor_pos: Option<CursorPos>,
         total_lines: usize,
-    ) -> std::io::Result<()> {
+    ) {
         if cursor_pos.is_none() || total_lines == 0 {
             let _ = write!(output, "\x1b[?25l"); // Hide cursor
             let _ = output.flush();
-            return Ok(());
+            return;
         }
         let cursor_pos = cursor_pos.unwrap();
 
@@ -817,15 +832,15 @@ impl TuiRenderer {
         let target_col = cursor_pos.col;
 
         // Move cursor from current position to target
-        let row_delta = target_row as isize - self.hardware_cursor_row as isize;
+        let row_delta = target_row.cast_signed() - self.hardware_cursor_row.cast_signed();
         let mut buffer = String::new();
         if row_delta > 0 {
-            buffer.push_str(&format!("\x1b[{row_delta}B")); // Move down
+            let _ = write!(buffer, "\x1b[{row_delta}B"); // Move down
         } else if row_delta < 0 {
-            buffer.push_str(&format!("\x1b[{}A", (-row_delta))); // Move up
+            let _ = write!(buffer, "\x1b[{}A", -row_delta); // Move up
         }
         // Move to absolute column (1-indexed)
-        buffer.push_str(&format!("\x1b[{}G", target_col + 1));
+        let _ = write!(buffer, "\x1b[{}G", target_col + 1);
         if self.show_hardware_cursor {
             buffer.push_str("\x1b[?25h");
         } else {
@@ -838,7 +853,6 @@ impl TuiRenderer {
         }
 
         self.hardware_cursor_row = target_row;
-        Ok(())
     }
 }
 
@@ -953,7 +967,7 @@ fn get_kitty_image_reserved_rows(lines: &[String], index: usize, max_index: usiz
 fn delete_kitty_images(ids: &BTreeSet<u32>) -> String {
     let mut buffer = String::new();
     for id in ids {
-        buffer.push_str(&format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\"));
+        let _ = write!(buffer, "\x1b_Ga=d,d=I,i={id},q=2\x1b\\");
     }
     buffer
 }
@@ -1026,7 +1040,7 @@ mod tests {
             max_lines_rendered: line_count,
             cursor_row: line_count.saturating_sub(1),
             clear_on_shrink: false,
-            show_hardware_cursor: false,
+            show_hardware_cursor: true,
         }
     }
 
@@ -1228,8 +1242,8 @@ mod tests {
     fn diff_render_skips_reserved_kitty_image_rows() {
         let mut renderer = test_renderer(vec![
             "\x1b_Gi=7,r=3;payload\x1b\\".to_owned(),
-            "".to_owned(),
-            "".to_owned(),
+            String::new(),
+            String::new(),
         ]);
         renderer.previous_kitty_image_ids = collect_kitty_image_ids(&renderer.previous_lines);
         let mut buf = Vec::new();
@@ -1240,8 +1254,8 @@ mod tests {
                 24,
                 vec![
                     "\x1b_Gi=8,r=3;payload\x1b\\".to_owned(),
-                    "".to_owned(),
-                    "".to_owned(),
+                    String::new(),
+                    String::new(),
                 ],
                 None,
             )
@@ -1264,19 +1278,54 @@ mod tests {
     }
 
     #[test]
-    fn cursor_position_hides_hardware_cursor_by_default() {
+    fn hardware_cursor_visibility_defaults_to_visible_and_can_be_disabled() {
+        assert!(hardware_cursor_enabled_from_env_value(None));
+        assert!(hardware_cursor_enabled_from_env_value(Some("1")));
+        assert!(hardware_cursor_enabled_from_env_value(Some("true")));
+        assert!(!hardware_cursor_enabled_from_env_value(Some("0")));
+        assert!(!hardware_cursor_enabled_from_env_value(Some("false")));
+        assert!(!hardware_cursor_enabled_from_env_value(Some("off")));
+    }
+
+    #[test]
+    fn cursor_position_shows_hardware_cursor_by_default() {
         let mut renderer = test_renderer(vec!["hello".to_owned()]);
         renderer.hardware_cursor_row = 0;
         let mut buf = Vec::new();
 
-        renderer
-            .position_hardware_cursor(&mut buf, Some(CursorPos { row: 0, col: 3 }), 1)
-            .unwrap();
+        renderer.position_hardware_cursor(&mut buf, Some(CursorPos { row: 0, col: 3 }), 1);
+        let output = String::from_utf8_lossy(&buf);
+
+        assert!(output.contains("\x1b[4G"));
+        assert!(output.contains("\x1b[?25h"));
+        assert!(!output.contains("\x1b[?25l"));
+    }
+
+    #[test]
+    fn cursor_position_hides_hardware_cursor_when_disabled() {
+        let mut renderer = test_renderer(vec!["hello".to_owned()]);
+        renderer.show_hardware_cursor = false;
+        renderer.hardware_cursor_row = 0;
+        let mut buf = Vec::new();
+
+        renderer.position_hardware_cursor(&mut buf, Some(CursorPos { row: 0, col: 3 }), 1);
         let output = String::from_utf8_lossy(&buf);
 
         assert!(output.contains("\x1b[4G"));
         assert!(output.contains("\x1b[?25l"));
         assert!(!output.contains("\x1b[?25h"));
+    }
+
+    #[test]
+    fn leave_output_restores_hardware_cursor_visibility() {
+        let mut renderer = test_renderer(vec!["hello".to_owned()]);
+        renderer.show_hardware_cursor = false;
+        let mut buf = Vec::new();
+
+        renderer.write_leave_output(&mut buf);
+        let output = String::from_utf8_lossy(&buf);
+
+        assert!(output.contains("\x1b[?25h"));
     }
 
     #[test]

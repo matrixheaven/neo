@@ -73,17 +73,18 @@ fn app_shell_context_color_changes_by_threshold() {
 }
 
 #[test]
-fn app_shell_footer_has_two_lines_when_tall() {
+fn app_shell_footer_omits_keyboard_hint_line() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
 
     let lines = render_app(100, &app);
     let last = lines.len().saturating_sub(1);
-    let second_last = last.saturating_sub(1);
 
-    assert!(lines[second_last].contains("[ask]"));
-    assert!(lines[last].contains("enter send"));
-    assert!(lines[second_last].contains("ctx 12k/200k"));
+    assert!(lines[last].contains("[ask]"));
+    assert!(lines[last].contains("ctx 12k/200k"));
+    assert!(!lines.iter().any(|line| line.contains("enter send")));
+    assert!(!lines.iter().any(|line| line.contains("shift+enter")));
+    assert!(!lines.iter().any(|line| line.contains("/ commands")));
 }
 
 #[test]
@@ -166,24 +167,64 @@ fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
         .iter()
         .rposition(|line| line.contains("[ask]"))
         .expect("footer status line renders");
-    let hint_row = lines
-        .iter()
-        .rposition(|line| line.contains("enter send"))
-        .expect("footer hint line renders");
 
-    assert!(lines.iter().any(|line| line.contains("shift+enter")));
+    assert!(!lines.iter().any(|line| line.contains("enter send")));
+    assert!(!lines.iter().any(|line| line.contains("shift+enter")));
     assert!(lines.iter().any(|line| line.contains("ctx 12k/200k")));
-    let footer_lines = &lines[status_row.min(hint_row)..=status_row.max(hint_row)];
-    assert!(!footer_lines.iter().any(|line| line.contains("neo  ")));
-    assert!(!footer_lines.iter().any(|line| line.contains(" new ")));
+    assert!(!lines[status_row].contains("neo  "));
+    assert!(!lines[status_row].contains(" new "));
     assert!(lines[composer_row.saturating_sub(1)].contains('╭'));
     assert!(status_row > composer_row);
 }
 
 #[test]
+fn app_shell_uses_brand_border_for_non_empty_prompt() {
+    let mut app = NeoChromeState::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
+    app.prompt_mut().apply_edit(PromptEdit::Insert("aaaa"));
+
+    let render = render_chrome_lines(&app, 92);
+    let top_border = render
+        .lines
+        .first()
+        .expect("composer top border should render");
+
+    assert!(
+        top_border.contains("\x1b[38;2;198;120;221m"),
+        "non-empty prompt should use Neo brand border: {top_border:?}"
+    );
+    assert!(
+        !top_border.contains("\x1b[38;2;139;148;158m"),
+        "non-empty prompt should not stay muted: {top_border:?}"
+    );
+}
+
+#[test]
+fn app_shell_prompt_renders_tabs_without_terminal_tab_controls() {
+    let mut app = NeoChromeState::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
+    app.prompt_mut()
+        .apply_edit(PromptEdit::Insert("\t\t\t\t\t"));
+
+    let width = 80;
+    let render = render_chrome_lines(&app, width);
+    let content_width = neo_tui::transcript::frame_content_width(width);
+    let prompt_box_lines = &render.lines[render.prompt_start_row..render.lines.len() - 1];
+
+    assert!(
+        prompt_box_lines.iter().all(|line| !line.contains('\t')),
+        "prompt render must not emit raw tab controls: {prompt_box_lines:?}"
+    );
+    assert!(
+        prompt_box_lines
+            .iter()
+            .all(|line| neo_tui::ansi::visible_width(line) <= content_width),
+        "prompt lines must stay inside composer width: {prompt_box_lines:?}"
+    );
+}
+
+#[test]
 fn transcript_pane_frame_keeps_latest_live_row_visible() {
     let mut runtime = TranscriptPane::new(80, 12);
-    runtime.set_live_chrome_height(5);
+    runtime.set_live_chrome_height(4);
     for index in 0..36 {
         runtime.start_assistant_message();
         runtime.append_assistant_delta(&format!("history line {index}"));
@@ -465,6 +506,68 @@ fn plan_mode_and_todo_events_remain_app_ui_state() {
         }],
     });
     assert!(app.has_todos());
+}
+
+#[test]
+fn todo_events_with_all_done_remain_visible_until_cleared() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::TodoUpdated {
+        turn: 1,
+        todos: vec![neo_agent_core::TodoEventData {
+            title: "ship".to_owned(),
+            status: "done".to_owned(),
+        }],
+    });
+    assert!(app.has_todos());
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::TodoUpdated {
+        turn: 2,
+        todos: vec![],
+    });
+    assert!(!app.has_todos());
+}
+
+#[test]
+fn todo_panel_renders_before_prompt() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_todo_items(vec![neo_tui::widgets::TodoDisplayItem::new(
+        "ship todo panel",
+        neo_tui::widgets::TodoDisplayStatus::InProgress,
+    )]);
+    app.prompt_mut()
+        .apply_edit(PromptEdit::Insert("next prompt"));
+
+    let lines = render_app(80, &app);
+    let todo = lines
+        .iter()
+        .position(|line| line.contains("ship todo panel"))
+        .expect("todo row");
+    let prompt = lines
+        .iter()
+        .position(|line| line.contains("next prompt"))
+        .expect("prompt row");
+
+    assert!(todo < prompt, "lines: {lines:?}");
+}
+
+#[test]
+fn todo_panel_offsets_prompt_start_row() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_todo_items(vec![neo_tui::widgets::TodoDisplayItem::new(
+        "ship todo panel",
+        neo_tui::widgets::TodoDisplayStatus::InProgress,
+    )]);
+
+    let chrome = render_chrome_lines(&app, 80);
+
+    assert_eq!(chrome.prompt_start_row, 3);
+    assert!(
+        chrome.lines[chrome.prompt_start_row].contains("╭")
+            || chrome.lines[chrome.prompt_start_row].contains("┌"),
+        "lines: {:?}",
+        chrome.lines
+    );
 }
 
 #[test]

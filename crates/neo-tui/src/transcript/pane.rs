@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt::Write as _;
 
 use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, PermissionOperation};
 
@@ -8,13 +9,14 @@ use crate::components::wrap_width;
 use crate::core::{Expandable, Line};
 use crate::image::{ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities};
 use crate::terminal::{CURSOR_MARKER, CursorPos};
+use crate::transcript::entry::GoalCardKind;
 use crate::transcript::{
     ApprovalPromptData, InlineImageRender, ToolCallComponent, ToolCallState, ToolGroup,
     TranscriptEntry, TranscriptStore, render_tool_group,
 };
-use crate::widgets::box_draw;
+use crate::widgets::{TodoPanel, box_draw};
 
-const DEFAULT_LIVE_CHROME_HEIGHT: usize = 5;
+const DEFAULT_LIVE_CHROME_HEIGHT: usize = 4;
 
 /// Uniform 1-column left/right gutter applied to ALL chrome (body, banner,
 /// prompt box, footer). Matches Neo's `CHROME_GUTTER = 1`. Applied once
@@ -402,6 +404,7 @@ impl TranscriptPane {
         self.live_chrome_height
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn apply_agent_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::MessageStarted { .. } => {
@@ -425,7 +428,7 @@ impl TranscriptPane {
                 self.mark_dirty();
             }
             AgentEvent::ToolCallStarted { id, name, .. } => {
-                self.upsert_tool(id, name, None, ToolStatusKind::Running);
+                self.upsert_tool(&id, name, None, ToolStatusKind::Running);
                 self.mark_dirty();
             }
             AgentEvent::ToolCallArgumentsDelta {
@@ -443,7 +446,7 @@ impl TranscriptPane {
                 self.streaming_tool_args
                     .insert(tool_call.id.clone(), arguments.clone());
                 self.upsert_tool(
-                    tool_call.id,
+                    &tool_call.id,
                     tool_call.name,
                     Some(arguments),
                     ToolStatusKind::Running,
@@ -461,7 +464,7 @@ impl TranscriptPane {
                     .get(&id)
                     .cloned()
                     .unwrap_or_else(|| arguments.to_string());
-                self.upsert_tool(id, name, Some(arguments), ToolStatusKind::Running);
+                self.upsert_tool(&id, name, Some(arguments), ToolStatusKind::Running);
                 self.mark_dirty();
             }
             AgentEvent::ApprovalRequested {
@@ -471,7 +474,7 @@ impl TranscriptPane {
                 arguments,
                 ..
             } => {
-                self.upsert_approval(id, operation, subject, arguments);
+                self.upsert_approval(id, operation, &subject, &arguments);
                 self.mark_dirty();
             }
             AgentEvent::ToolExecutionUpdate {
@@ -480,7 +483,7 @@ impl TranscriptPane {
                 partial_result,
                 ..
             } => {
-                self.upsert_tool(id.clone(), name, None, ToolStatusKind::Running);
+                self.upsert_tool(&id, name, None, ToolStatusKind::Running);
                 if let Some(tool) = self.transcript.tool_mut(&id) {
                     tool.append_live_output(partial_result.content);
                 }
@@ -489,7 +492,7 @@ impl TranscriptPane {
             AgentEvent::ToolExecutionFinished {
                 id, name, result, ..
             } => {
-                self.upsert_tool(id.clone(), name, None, ToolStatusKind::Running);
+                self.upsert_tool(&id, name, None, ToolStatusKind::Running);
                 self.streaming_tool_args.remove(&id);
                 if let Some(tool) = self.transcript.tool_mut(&id) {
                     let details = result.details;
@@ -507,7 +510,7 @@ impl TranscriptPane {
                 id, command, cwd, ..
             } => {
                 self.upsert_tool(
-                    id,
+                    &id,
                     "Bash".to_owned(),
                     Some(format!("{command} ({})", cwd.display())),
                     ToolStatusKind::Running,
@@ -523,7 +526,7 @@ impl TranscriptPane {
                 ..
             } => {
                 let detail = shell_finished_detail(exit_code, &stdout, &stderr, truncated);
-                self.upsert_tool(id.clone(), "Bash".to_owned(), None, ToolStatusKind::Running);
+                self.upsert_tool(&id, "Bash".to_owned(), None, ToolStatusKind::Running);
                 if let Some(tool) = self.transcript.tool_mut(&id) {
                     tool.set_result(Some(detail), None, exit_code != Some(0), exit_code);
                 }
@@ -558,7 +561,6 @@ impl TranscriptPane {
                 summary.first_kept_message_index,
                 summary.tokens_before,
             ),
-            AgentEvent::MessageAppended { .. } => {}
             AgentEvent::Error { message, .. } => {
                 self.push_status(format!("Error: {message}"));
             }
@@ -569,6 +571,53 @@ impl TranscriptPane {
             }
             AgentEvent::SkillActivated { name, .. } => {
                 self.push_transcript(TranscriptEntry::skill_activated(name));
+            }
+            AgentEvent::GoalStarted { objective, .. } => {
+                self.push_transcript(TranscriptEntry::goal_card(
+                    GoalCardKind::Started,
+                    objective,
+                    None::<String>,
+                    None,
+                ));
+            }
+            AgentEvent::GoalPaused { objective, .. } => {
+                self.push_transcript(TranscriptEntry::goal_card(
+                    GoalCardKind::Paused,
+                    objective,
+                    None::<String>,
+                    None,
+                ));
+            }
+            AgentEvent::GoalResumed { objective, .. } => {
+                self.push_transcript(TranscriptEntry::goal_card(
+                    GoalCardKind::Resumed,
+                    objective,
+                    None::<String>,
+                    None,
+                ));
+            }
+            AgentEvent::GoalBlocked {
+                objective, reason, ..
+            } => {
+                self.push_transcript(TranscriptEntry::goal_card(
+                    GoalCardKind::Blocked,
+                    objective,
+                    Some(reason),
+                    None,
+                ));
+            }
+            AgentEvent::GoalFinished {
+                objective,
+                outcome,
+                turn,
+                ..
+            } => {
+                self.push_transcript(TranscriptEntry::goal_card(
+                    GoalCardKind::Finished,
+                    objective,
+                    Some(outcome),
+                    Some(turn),
+                ));
             }
             _ => {}
         }
@@ -690,14 +739,14 @@ impl TranscriptPane {
 
     fn upsert_tool(
         &mut self,
-        id: String,
+        id: &str,
         name: String,
         arguments: Option<String>,
         status: ToolStatusKind,
     ) {
         use crate::core::Expandable as _;
 
-        if let Some(tool) = self.transcript.tool_mut(&id) {
+        if let Some(tool) = self.transcript.tool_mut(id) {
             if arguments.is_some() {
                 tool.update_call(arguments);
             }
@@ -706,7 +755,7 @@ impl TranscriptPane {
 
         self.finish_active_text_blocks();
         let mut component = ToolCallComponent::new(ToolCallState {
-            id: id.clone(),
+            id: id.to_owned(),
             name,
             arguments,
             result: None,
@@ -727,30 +776,15 @@ impl TranscriptPane {
         &mut self,
         id: String,
         operation: PermissionOperation,
-        subject: String,
-        arguments: serde_json::Value,
+        subject: &str,
+        arguments: &serde_json::Value,
     ) {
-        let title = match operation {
-            PermissionOperation::Shell => "Run this command?".to_owned(),
-            PermissionOperation::FileRead
-            | PermissionOperation::FileWrite
-            | PermissionOperation::Tool => "Approve this action?".to_owned(),
-        };
-        let command = arguments
-            .get("command")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(&subject)
-            .to_owned();
-        let cwd = arguments
-            .get("cwd")
-            .or_else(|| arguments.get("workdir"))
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned);
+        let prompt = approval_prompt(operation, subject, arguments);
 
         if let Some(approval) = self.transcript.approval_mut(&id) {
-            approval.title = title;
-            approval.cwd = cwd;
-            approval.command = command;
+            approval.title = prompt.title;
+            approval.details = prompt.details;
+            approval.queued_label = prompt.queued_label;
             approval.queued_count = self.queued_approvals.len();
             approval.resolved = None;
             return;
@@ -758,9 +792,9 @@ impl TranscriptPane {
 
         let data = ApprovalPromptData {
             id,
-            title,
-            cwd,
-            command,
+            title: prompt.title,
+            details: prompt.details,
+            queued_label: prompt.queued_label,
             queued_count: 0,
             selected: 0,
             resolved: None,
@@ -885,6 +919,152 @@ impl TranscriptPane {
         }
         let mut ordered = std::mem::take(tool_run);
         render_ordered_tools(&mut ordered, width, &self.theme)
+    }
+}
+
+struct ApprovalPromptSummary {
+    title: String,
+    details: Vec<String>,
+    queued_label: String,
+}
+
+fn approval_prompt(
+    operation: PermissionOperation,
+    subject: &str,
+    arguments: &serde_json::Value,
+) -> ApprovalPromptSummary {
+    let is_task_stop =
+        operation == PermissionOperation::Shell && arguments.get("task_id").is_some();
+    let is_terminal = operation == PermissionOperation::Shell && arguments.get("mode").is_some();
+    let is_edit = operation == PermissionOperation::FileWrite
+        && (arguments.get("old").is_some()
+            || arguments.get("new").is_some()
+            || arguments.get("replace_all").is_some());
+
+    if is_task_stop {
+        ApprovalPromptSummary {
+            title: "Stop background task?".to_owned(),
+            details: compact_details([
+                labeled_argument(arguments, "task_id"),
+                labeled_argument(arguments, "reason"),
+            ]),
+            queued_label: String::new(),
+        }
+    } else if is_terminal {
+        ApprovalPromptSummary {
+            title: terminal_approval_title(arguments),
+            details: terminal_approval_details(arguments, subject),
+            queued_label: String::new(),
+        }
+    } else if is_edit {
+        ApprovalPromptSummary {
+            title: "Edit file?".to_owned(),
+            details: compact_details([
+                labeled_argument(arguments, "path"),
+                labeled_argument(arguments, "replace_all"),
+            ]),
+            queued_label: String::new(),
+        }
+    } else {
+        match operation {
+            PermissionOperation::Shell => ApprovalPromptSummary {
+                title: "Run this command?".to_owned(),
+                details: shell_approval_details(arguments, subject),
+                queued_label: String::new(),
+            },
+            PermissionOperation::FileWrite => ApprovalPromptSummary {
+                title: "Write file?".to_owned(),
+                details: compact_details([labeled_argument(arguments, "path")]),
+                queued_label: String::new(),
+            },
+            PermissionOperation::FileRead => ApprovalPromptSummary {
+                title: "Read workspace data?".to_owned(),
+                details: non_empty_details(
+                    compact_details([
+                        labeled_argument(arguments, "path"),
+                        labeled_argument(arguments, "pattern"),
+                    ]),
+                    || vec![format!("target: {subject}")],
+                ),
+                queued_label: String::new(),
+            },
+            PermissionOperation::Tool => ApprovalPromptSummary {
+                title: "Run tool?".to_owned(),
+                details: compact_details([Some(format!("tool: {subject}"))]),
+                queued_label: String::new(),
+            },
+        }
+    }
+}
+
+fn shell_approval_details(arguments: &serde_json::Value, subject: &str) -> Vec<String> {
+    let mut details = Vec::new();
+    if let Some(cwd) = arguments
+        .get("cwd")
+        .or_else(|| arguments.get("workdir"))
+        .and_then(serde_json::Value::as_str)
+    {
+        details.push(format!("cwd: {cwd}"));
+    }
+    let command = arguments
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(subject);
+    details.push(format!("$ {command}"));
+    details
+}
+
+fn terminal_approval_title(arguments: &serde_json::Value) -> String {
+    match arguments
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+    {
+        "start" => "Start terminal?".to_owned(),
+        "write" => "Write to terminal?".to_owned(),
+        "resize" => "Resize terminal?".to_owned(),
+        "stop" => "Stop terminal?".to_owned(),
+        _ => "Use terminal?".to_owned(),
+    }
+}
+
+fn terminal_approval_details(arguments: &serde_json::Value, subject: &str) -> Vec<String> {
+    let mut details = compact_details([
+        labeled_argument(arguments, "mode"),
+        labeled_argument(arguments, "handle"),
+    ]);
+    if let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str) {
+        details.push(format!("$ {command}"));
+    } else if !subject.is_empty() && details.is_empty() {
+        details.push(format!("target: {subject}"));
+    }
+    details.extend(compact_details([
+        labeled_argument(arguments, "input"),
+        labeled_argument(arguments, "cols"),
+        labeled_argument(arguments, "rows"),
+    ]));
+    details
+}
+
+fn labeled_argument(arguments: &serde_json::Value, key: &str) -> Option<String> {
+    let value = arguments.get(key)?;
+    match value {
+        serde_json::Value::String(value) if !value.is_empty() => Some(format!("{key}: {value}")),
+        serde_json::Value::Bool(value) => Some(format!("{key}: {value}")),
+        serde_json::Value::Number(value) => Some(format!("{key}: {value}")),
+        _ => None,
+    }
+}
+
+fn compact_details(lines: impl IntoIterator<Item = Option<String>>) -> Vec<String> {
+    lines.into_iter().flatten().collect()
+}
+
+fn non_empty_details(details: Vec<String>, fallback: impl FnOnce() -> Vec<String>) -> Vec<String> {
+    if details.is_empty() {
+        fallback()
+    } else {
+        details
     }
 }
 
@@ -1047,7 +1227,7 @@ fn shell_finished_detail(
         if !detail.ends_with('\n') && !detail.is_empty() {
             detail.push('\n');
         }
-        detail.push_str(&format!("Command failed with exit code: {exit_label}."));
+        let _ = write!(detail, "Command failed with exit code: {exit_label}.");
     }
     if truncated {
         if !detail.ends_with('\n') && !detail.is_empty() {
@@ -1097,6 +1277,16 @@ pub struct ChromeRender {
 pub fn render_chrome_lines(app: &NeoChromeState, width: usize) -> ChromeRender {
     let content_width = frame_content_width(width);
     let mut lines = Vec::new();
+    if app.has_todos() {
+        lines.extend(
+            TodoPanel::new(app.todo_items())
+                .with_theme(app.theme())
+                .render(content_width),
+        );
+    }
+    if let Some(question) = app.question_dialog_state() {
+        lines.extend(question.render_lines(content_width));
+    }
     let prompt_start_row = lines.len();
     let (prompt_lines, prompt_cursor) = render_prompt_lines(app, content_width);
     lines.extend(prompt_lines);
@@ -1111,8 +1301,8 @@ pub fn render_chrome_lines(app: &NeoChromeState, width: usize) -> ChromeRender {
     }
 }
 
-/// Render only the footer lines (status bar + hint line), without the prompt
-/// box. Used when a session picker overlay replaces the prompt/editor area.
+/// Render only the footer status line, without the prompt box. Used when a
+/// session picker overlay replaces the prompt/editor area.
 #[must_use]
 pub fn render_footer_only_lines(app: &NeoChromeState, width: usize) -> Vec<String> {
     let content_width = frame_content_width(width);
@@ -1149,11 +1339,11 @@ fn render_prompt_completion_dropdown(app: &NeoChromeState, width: usize) -> Opti
 /// `> ` prompt symbol; continuation lines use a 4-space hanging indent so
 /// wrapped/explicit-newline text aligns under the body (matching Neo's
 /// `paddingX: 4` editor). Border color is weak by default and switches to
-/// the brand color when the input starts with `/` or plan mode is active.
+/// the brand color when text is present or plan mode is active.
 fn render_prompt_lines(app: &NeoChromeState, width: usize) -> (Vec<String>, Option<CursorPos>) {
     let theme = app.theme();
     let prompt = app.prompt();
-    let highlighted = app.is_plan_mode() || prompt.text.trim_start().starts_with('/');
+    let highlighted = app.is_plan_mode() || !prompt.text.is_empty();
     let border_color = if highlighted {
         theme.brand
     } else {
@@ -1192,7 +1382,7 @@ fn build_prompt_logical_lines(prompt: &PromptState, body_width: usize) -> Vec<St
     let cursor = prompt.cursor.min(chars.len());
     let before: String = chars[..cursor].iter().collect();
     let after: String = chars[cursor..].iter().collect();
-    let marked = format!("{before}{CURSOR_MARKER}{after}");
+    let marked = expand_prompt_tabs(&format!("{before}{CURSOR_MARKER}{after}"));
     let mut out = Vec::new();
     for logical in marked.split('\n') {
         let wrapped = wrap_width(logical, body_width);
@@ -1206,6 +1396,13 @@ fn build_prompt_logical_lines(prompt: &PromptState, body_width: usize) -> Vec<St
         out.truncate(6);
     }
     out
+}
+
+fn expand_prompt_tabs(text: &str) -> String {
+    if !text.contains('\t') {
+        return text.to_owned();
+    }
+    text.replace('\t', "    ")
 }
 
 fn find_cursor(lines: &[String]) -> Option<CursorPos> {
@@ -1275,12 +1472,7 @@ fn render_footer_lines(app: &NeoChromeState, width: usize) -> Vec<String> {
         truncate_to_width(&left_text, width)
     };
 
-    let hints = if width < 50 {
-        "enter send · esc interrupt"
-    } else {
-        "enter send · shift+enter/ctrl+j newline · / commands"
-    };
-    vec![row, paint(hints, Style::default().fg(theme.footer_hint))]
+    vec![row]
 }
 
 #[cfg(test)]

@@ -72,7 +72,7 @@ impl CustomRegistryImportState {
         let remaining = inner_w.saturating_sub(visible_width(&title_str));
         lines.push(format!(
             "\x1b[38;2;{}m╭{title_str}{}\x1b[0m",
-            rgb(&self.theme.overlay_border),
+            rgb(self.theme.overlay_border),
             "─".repeat(remaining),
         ));
 
@@ -89,7 +89,7 @@ impl CustomRegistryImportState {
         };
         lines.push(format!(
             "\x1b[38;2;{}m{url_marker} Registry URL:\x1b[0m",
-            rgb(&url_color),
+            rgb(url_color),
         ));
         lines.push(format!(
             "  {}▏",
@@ -115,7 +115,7 @@ impl CustomRegistryImportState {
         };
         lines.push(format!(
             "\x1b[38;2;{}m{token_marker} Bearer Token:\x1b[0m",
-            rgb(&token_color),
+            rgb(token_color),
         ));
         let masked = self.masked_token();
         lines.push(format!(
@@ -130,13 +130,13 @@ impl CustomRegistryImportState {
         // Hint
         lines.push(format!(
             "\x1b[38;2;{}m Tab switch · Enter submit · Esc cancel\x1b[0m",
-            rgb(&self.theme.text_muted)
+            rgb(self.theme.text_muted)
         ));
 
         // Bottom border
         lines.push(format!(
             "\x1b[38;2;{}m╰{}\x1b[0m",
-            rgb(&self.theme.overlay_border),
+            rgb(self.theme.overlay_border),
             "─".repeat(inner_w),
         ));
 
@@ -148,7 +148,8 @@ impl CustomRegistryImportState {
             return InputResult::Ignored;
         }
         match input {
-            InputEvent::Insert('\t') => {
+            InputEvent::Insert('\t')
+            | InputEvent::Action(KeybindingAction::SelectDown | KeybindingAction::SelectUp) => {
                 self.switch_field(true);
                 InputResult::Handled
             }
@@ -186,13 +187,10 @@ impl CustomRegistryImportState {
                 }
                 InputResult::Handled
             }
-            InputEvent::Action(KeybindingAction::SelectDown)
-            | InputEvent::Action(KeybindingAction::SelectUp) => {
-                self.switch_field(true);
-                InputResult::Handled
-            }
             InputEvent::Submit => {
-                if !self.url.is_empty() {
+                if self.url.is_empty() {
+                    InputResult::Ignored
+                } else {
                     self.result = Some(CustomRegistryImportResult::Submitted(
                         CustomRegistrySource {
                             url: self.url.clone(),
@@ -200,8 +198,6 @@ impl CustomRegistryImportState {
                         },
                     ));
                     InputResult::Submitted
-                } else {
-                    InputResult::Ignored
                 }
             }
             InputEvent::Cancel => {
@@ -223,7 +219,7 @@ impl CustomRegistryImportState {
     }
 }
 
-fn rgb(c: &Color) -> String {
+fn rgb(c: Color) -> String {
     match c {
         Color::Rgb(r, g, b) => format!("{r};{g};{b}"),
         _ => "255;255;255".into(),

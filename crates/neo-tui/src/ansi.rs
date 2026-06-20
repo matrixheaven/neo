@@ -1,7 +1,8 @@
 //! ANSI escape code helpers for the custom diff renderer.
 //! Self-contained ANSI utilities.
 
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// Reset all attributes to terminal default.
 pub const RESET: &str = "\x1b[0m";
@@ -72,6 +73,7 @@ impl Rect {
 
 /// A text style for rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Style {
     pub fg: Option<Color>,
     pub bg: Option<Color>,
@@ -121,6 +123,12 @@ impl Style {
         self
     }
 
+    #[must_use]
+    pub fn crossed_out(mut self) -> Self {
+        self.crossed_out = true;
+        self
+    }
+
     /// Is this the default (empty) style?
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -140,8 +148,7 @@ pub fn fg_to_ansi(color: Color) -> String {
         Color::Blue => "\x1b[34m".to_owned(),
         Color::Magenta => "\x1b[35m".to_owned(),
         Color::Cyan => "\x1b[36m".to_owned(),
-        Color::Gray => "\x1b[90m".to_owned(),
-        Color::DarkGray => "\x1b[90m".to_owned(),
+        Color::Gray | Color::DarkGray => "\x1b[90m".to_owned(),
         Color::LightRed => "\x1b[91m".to_owned(),
         Color::LightGreen => "\x1b[92m".to_owned(),
         Color::LightYellow => "\x1b[93m".to_owned(),
@@ -166,8 +173,7 @@ pub fn bg_to_ansi(color: Color) -> String {
         Color::Blue => "\x1b[44m".to_owned(),
         Color::Magenta => "\x1b[45m".to_owned(),
         Color::Cyan => "\x1b[46m".to_owned(),
-        Color::Gray => "\x1b[100m".to_owned(),
-        Color::DarkGray => "\x1b[100m".to_owned(),
+        Color::Gray | Color::DarkGray => "\x1b[100m".to_owned(),
         Color::LightRed => "\x1b[101m".to_owned(),
         Color::LightGreen => "\x1b[102m".to_owned(),
         Color::LightYellow => "\x1b[103m".to_owned(),
@@ -187,15 +193,15 @@ pub fn style_to_ansi(style: Style) -> String {
         return String::new();
     }
     let mut buf = String::new();
-    if let Some(color) = style.fg {
-        if color != Color::Reset {
-            buf.push_str(&fg_to_ansi(color));
-        }
+    if let Some(color) = style.fg
+        && color != Color::Reset
+    {
+        buf.push_str(&fg_to_ansi(color));
     }
-    if let Some(color) = style.bg {
-        if color != Color::Reset {
-            buf.push_str(&bg_to_ansi(color));
-        }
+    if let Some(color) = style.bg
+        && color != Color::Reset
+    {
+        buf.push_str(&bg_to_ansi(color));
     }
     if style.bold {
         buf.push_str("\x1b[1m");
@@ -275,6 +281,16 @@ pub(crate) fn next_sequence(s: &str, start: usize) -> Option<&str> {
                 }
             }
         }
+        Some('(' | ')' | '*' | '+' | '-' | '.' | '/') => {
+            chars.next();
+            match chars.next() {
+                None => Some(tail),
+                Some(c) => {
+                    let consumed = 2 + c.len_utf8();
+                    Some(&tail[..consumed])
+                }
+            }
+        }
         _ => match chars.next() {
             None => Some(tail),
             Some(c) => {
@@ -305,7 +321,53 @@ pub fn strip_ansi(s: &str) -> String {
 /// Visible width of a string (ANSI escapes stripped, unicode-width aware).
 #[must_use]
 pub fn visible_width(s: &str) -> usize {
-    strip_ansi(s).chars().map(|c| c.width().unwrap_or(0)).sum()
+    display_width(&strip_ansi(s))
+}
+
+#[must_use]
+pub(crate) fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+#[must_use]
+pub(crate) fn clip_plain_to_width(text: &str, max_width: usize) -> String {
+    let mut clipped = String::new();
+    let mut width = 0;
+    for grapheme in text.graphemes(true) {
+        let grapheme_width = display_width(grapheme);
+        if width + grapheme_width > max_width {
+            break;
+        }
+        clipped.push_str(grapheme);
+        width += grapheme_width;
+    }
+    clipped
+}
+
+#[must_use]
+pub(crate) fn clip_visible_to_width(text: &str, max_width: usize) -> String {
+    let mut clipped = String::new();
+    let mut width = 0;
+    let mut index = 0;
+    while index < text.len() {
+        if let Some(sequence) = next_sequence(text, index) {
+            clipped.push_str(sequence);
+            index += sequence.len();
+            continue;
+        }
+
+        let Some(grapheme) = text[index..].graphemes(true).next() else {
+            break;
+        };
+        let grapheme_width = display_width(grapheme);
+        if width + grapheme_width > max_width {
+            break;
+        }
+        clipped.push_str(grapheme);
+        width += grapheme_width;
+        index += grapheme.len();
+    }
+    clipped
 }
 
 /// Wrap plain text (no ANSI) to a maximum visible width.
@@ -324,7 +386,7 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
         let mut current = String::new();
         let mut current_width = 0usize;
         for word in paragraph.split(' ') {
-            let word_width: usize = word.chars().map(|c| c.width().unwrap_or(0)).sum();
+            let word_width = display_width(word);
 
             // Hard-wrap words that are wider than the available width
             if word_width > width {
@@ -336,14 +398,14 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
                 // Hard-wrap the long word
                 let mut line = String::new();
                 let mut line_w = 0usize;
-                for c in word.chars() {
-                    let cw = c.width().unwrap_or(0);
-                    if line_w + cw > width && !line.is_empty() {
+                for grapheme in word.graphemes(true) {
+                    let grapheme_width = display_width(grapheme);
+                    if line_w + grapheme_width > width && !line.is_empty() {
                         result.push(std::mem::take(&mut line));
                         line_w = 0;
                     }
-                    line.push(c);
-                    line_w += cw;
+                    line.push_str(grapheme);
+                    line_w += grapheme_width;
                 }
                 if !line.is_empty() {
                     current = line;
@@ -353,7 +415,7 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
             }
 
             if current_width == 0 {
-                current = word.to_owned();
+                word.clone_into(&mut current);
                 current_width = word_width;
             } else if current_width + 1 + word_width <= width {
                 current.push(' ');
@@ -361,7 +423,7 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
                 current_width += 1 + word_width;
             } else {
                 result.push(std::mem::take(&mut current));
-                current = word.to_owned();
+                word.clone_into(&mut current);
                 current_width = word_width;
             }
         }
@@ -387,20 +449,11 @@ pub fn pad_to_width(text: &str, width: usize) -> String {
 #[must_use]
 pub fn truncate_to_width(text: &str, width: usize) -> String {
     let stripped = strip_ansi(text);
-    let w: usize = stripped.chars().map(|c| c.width().unwrap_or(0)).sum();
+    let w = display_width(&stripped);
     if w <= width {
         return text.to_owned();
     }
-    let mut result = String::new();
-    let mut current = 0usize;
-    for c in stripped.chars() {
-        let cw = c.width().unwrap_or(0);
-        if current + cw > width.saturating_sub(1) {
-            break;
-        }
-        result.push(c);
-        current += cw;
-    }
+    let mut result = clip_plain_to_width(&stripped, width.saturating_sub(1));
     if width > 0 {
         result.push('…');
     }
@@ -468,6 +521,14 @@ mod tests {
     #[test]
     fn visible_width_strips_ansi() {
         assert_eq!(visible_width("\x1b[31mhello\x1b[0m"), 5);
+    }
+
+    #[test]
+    fn visible_width_treats_emoji_presentation_as_one_display_unit() {
+        assert_eq!(visible_width("⚠️"), 2);
+        assert_eq!(visible_width("a⚠️b"), 4);
+        assert_eq!(clip_plain_to_width("a⚠️b", 3), "a⚠️");
+        assert_eq!(clip_plain_to_width("a⚠️b", 2), "a");
     }
 
     #[test]

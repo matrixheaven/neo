@@ -178,11 +178,11 @@ impl InputParser {
     /// `Cancel` even when no subsequent key arrives.
     #[must_use]
     pub fn flush_timeout(&mut self) -> Vec<InputEvent> {
-        if let Some((esc_time, _)) = self.pending_esc {
-            if esc_time.elapsed() > ESC_ENTER_NEWLINE_WINDOW {
-                self.pending_esc = None;
-                return vec![InputEvent::Cancel];
-            }
+        if let Some((esc_time, _)) = self.pending_esc
+            && esc_time.elapsed() > ESC_ENTER_NEWLINE_WINDOW
+        {
+            self.pending_esc = None;
+            return vec![InputEvent::Cancel];
         }
         Vec::new()
     }

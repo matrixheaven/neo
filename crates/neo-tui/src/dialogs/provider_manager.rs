@@ -74,9 +74,9 @@ const HEADER_HINT: &str = "↑↓ navigate · D delete · Enter add · Esc close
 impl ProviderManagerState {
     /// Create a new provider manager with the given options.
     #[must_use]
-    pub fn new(opts: ProviderManagerOptions) -> Self {
-        let rows = build_rows(&opts);
-        let selected_index = initial_selection(&rows, &opts.active_provider_id);
+    pub fn new(opts: &ProviderManagerOptions) -> Self {
+        let rows = build_rows(opts);
+        let selected_index = initial_selection(&rows, opts.active_provider_id.as_ref());
         Self {
             rows,
             selected_index,
@@ -91,12 +91,12 @@ impl ProviderManagerState {
     /// Selection is preserved by row id/label or first provider id; if no match
     /// is found the old index is clamped to the new row count. Any in-flight
     /// delete confirmation is cleared.
-    pub fn set_options(&mut self, opts: ProviderManagerOptions) {
+    pub fn set_options(&mut self, opts: &ProviderManagerOptions) {
         let previous_row = self.rows.get(self.selected_index);
         let previous_label = previous_row.map(Row::label);
         let previous_first_id = previous_row.and_then(Row::first_provider_id);
 
-        self.rows = build_rows(&opts);
+        self.rows = build_rows(opts);
         self.theme = opts.theme;
         self.confirm = None;
         self.action = None;
@@ -105,13 +105,13 @@ impl ProviderManagerState {
         if let Some(label) = previous_label {
             new_index = self.rows.iter().position(|row| row.label() == label);
         }
-        if new_index.is_none() {
-            if let Some(id) = previous_first_id {
-                new_index = self
-                    .rows
-                    .iter()
-                    .position(|row| row.provider_ids().contains(&id));
-            }
+        if new_index.is_none()
+            && let Some(id) = previous_first_id
+        {
+            new_index = self
+                .rows
+                .iter()
+                .position(|row| row.provider_ids().contains(&id));
         }
 
         self.selected_index =
@@ -193,7 +193,7 @@ impl ProviderManagerState {
     /// [`InputResult::Submitted`] and sets [`ProviderManagerAction::Add`]. Esc
     /// otherwise returns [`InputResult::Cancelled`] and sets
     /// [`ProviderManagerAction::Close`].
-    pub fn handle_input(&mut self, input: InputEvent) -> InputResult {
+    pub fn handle_input(&mut self, input: &InputEvent) -> InputResult {
         if self.action.is_some() {
             return InputResult::Handled;
         }
@@ -302,7 +302,7 @@ impl ProviderManagerState {
         });
     }
 
-    fn handle_confirm_input(&mut self, input: InputEvent) -> InputResult {
+    fn handle_confirm_input(&mut self, input: &InputEvent) -> InputResult {
         match input {
             InputEvent::Insert('y' | 'Y') => {
                 if let Some(confirm) = self.confirm.take() {
@@ -342,14 +342,14 @@ fn build_rows(opts: &ProviderManagerOptions) -> Vec<Row> {
     rows
 }
 
-fn initial_selection(rows: &[Row], active_provider_id: &Option<String>) -> usize {
-    if let Some(active) = active_provider_id {
-        if let Some(index) = rows.iter().position(|row| match row {
+fn initial_selection(rows: &[Row], active_provider_id: Option<&String>) -> usize {
+    if let Some(active) = active_provider_id
+        && let Some(index) = rows.iter().position(|row| match row {
             Row::Source { provider_ids, .. } => provider_ids.contains(active),
             Row::Add => false,
-        }) {
-            return index;
-        }
+        })
+    {
+        return index;
     }
     0
 }
@@ -455,7 +455,7 @@ mod tests {
     }
 
     fn manager(sources: Vec<ProviderSource>, active: Option<&str>) -> ProviderManagerState {
-        ProviderManagerState::new(ProviderManagerOptions {
+        ProviderManagerState::new(&ProviderManagerOptions {
             sources,
             active_provider_id: active.map(std::borrow::ToOwned::to_owned),
             theme: theme(),
@@ -522,7 +522,7 @@ mod tests {
     #[test]
     fn d_arms_delete_confirmation() {
         let mut state = manager(vec![source("OpenAI", &["openai"])], None);
-        let result = state.handle_input(InputEvent::Insert('D'));
+        let result = state.handle_input(&InputEvent::Insert('D'));
         assert_eq!(result, InputResult::Handled);
 
         let visible = visible_lines(&state, 60);
@@ -537,8 +537,8 @@ mod tests {
     #[test]
     fn y_confirms_delete_source() {
         let mut state = manager(vec![source("OpenAI", &["openai"])], None);
-        state.handle_input(InputEvent::Insert('D'));
-        let result = state.handle_input(InputEvent::Insert('Y'));
+        state.handle_input(&InputEvent::Insert('D'));
+        let result = state.handle_input(&InputEvent::Insert('Y'));
         assert_eq!(result, InputResult::Submitted);
         assert_eq!(
             state.action(),
@@ -552,8 +552,8 @@ mod tests {
     #[test]
     fn n_cancels_delete_confirmation() {
         let mut state = manager(vec![source("OpenAI", &["openai"])], None);
-        state.handle_input(InputEvent::Insert('D'));
-        let result = state.handle_input(InputEvent::Insert('n'));
+        state.handle_input(&InputEvent::Insert('D'));
+        let result = state.handle_input(&InputEvent::Insert('n'));
         assert_eq!(result, InputResult::Handled);
         assert!(state.action().is_none());
         assert!(state.confirm.is_none());
@@ -576,9 +576,9 @@ mod tests {
             None,
         );
         // Move selection to the synthetic add row.
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
-        let result = state.handle_input(InputEvent::Submit);
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
+        let result = state.handle_input(&InputEvent::Submit);
         assert_eq!(result, InputResult::Submitted);
         assert_eq!(state.action(), Some(ProviderManagerAction::Add));
     }
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn enter_on_source_row_does_not_submit() {
         let mut state = manager(vec![source("OpenAI", &["openai"])], None);
-        let result = state.handle_input(InputEvent::Submit);
+        let result = state.handle_input(&InputEvent::Submit);
         assert_eq!(result, InputResult::Handled);
         assert!(state.action().is_none());
     }
@@ -594,7 +594,7 @@ mod tests {
     #[test]
     fn esc_returns_close() {
         let mut state = manager(vec![source("OpenAI", &["openai"])], None);
-        let result = state.handle_input(InputEvent::Cancel);
+        let result = state.handle_input(&InputEvent::Cancel);
         assert_eq!(result, InputResult::Cancelled);
         assert_eq!(state.action(), Some(ProviderManagerAction::Close));
     }
@@ -602,8 +602,8 @@ mod tests {
     #[test]
     fn esc_cancels_delete_confirmation() {
         let mut state = manager(vec![source("OpenAI", &["openai"])], None);
-        state.handle_input(InputEvent::Insert('D'));
-        let result = state.handle_input(InputEvent::Cancel);
+        state.handle_input(&InputEvent::Insert('D'));
+        let result = state.handle_input(&InputEvent::Cancel);
         assert_eq!(result, InputResult::Handled);
         assert!(state.confirm.is_none());
         assert!(state.action().is_none());
@@ -618,10 +618,10 @@ mod tests {
             ],
             None,
         );
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
         assert_eq!(state.selected_index, 1);
 
-        state.set_options(ProviderManagerOptions {
+        state.set_options(&ProviderManagerOptions {
             sources: vec![
                 source("OpenAI", &["openai"]),
                 source("Anthropic", &["anthropic"]),
@@ -643,10 +643,10 @@ mod tests {
             ],
             None,
         );
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
         assert_eq!(state.selected_index, 1);
 
-        state.set_options(ProviderManagerOptions {
+        state.set_options(&ProviderManagerOptions {
             sources: vec![source("Anthropic Renamed", &["anthropic"])],
             active_provider_id: None,
             theme: theme(),
@@ -664,12 +664,12 @@ mod tests {
             ],
             None,
         );
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
         // add row at index 2
         assert_eq!(state.selected_index, 2);
 
-        state.set_options(ProviderManagerOptions {
+        state.set_options(&ProviderManagerOptions {
             sources: vec![source("OpenAI", &["openai"])],
             active_provider_id: None,
             theme: theme(),
@@ -700,9 +700,9 @@ mod tests {
             None,
         );
         assert_eq!(state.selected_index, 0);
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
         assert_eq!(state.selected_index, 1);
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectUp));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectUp));
         assert_eq!(state.selected_index, 0);
     }
 
@@ -715,14 +715,14 @@ mod tests {
             ],
             None,
         );
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
         assert!(matches!(
             state.rows.get(state.selected_index),
             Some(Row::Add)
         ));
 
-        let result = state.handle_input(InputEvent::Insert('D'));
+        let result = state.handle_input(&InputEvent::Insert('D'));
         assert_eq!(result, InputResult::Handled);
         assert!(state.confirm.is_none());
     }

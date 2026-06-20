@@ -1,5 +1,4 @@
-use crate::ansi::{RESET, Style, paint, visible_width};
-use unicode_width::UnicodeWidthChar;
+use crate::ansi::{RESET, Style, clip_visible_to_width, paint, visible_width};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BoxSpec {
@@ -25,27 +24,7 @@ fn repeat_char(ch: char, n: usize) -> String {
 }
 
 fn clip_to_width(text: &str, max_width: usize) -> String {
-    let mut clipped = String::new();
-    let mut width = 0;
-    let mut index = 0;
-    while index < text.len() {
-        if let Some(seq) = crate::ansi::next_sequence(text, index) {
-            clipped.push_str(seq);
-            index += seq.len();
-            continue;
-        }
-        let Some(ch) = text[index..].chars().next() else {
-            break;
-        };
-        let cw = ch.width().unwrap_or(0);
-        if width + cw > max_width {
-            break;
-        }
-        clipped.push(ch);
-        width += cw;
-        index += ch.len_utf8();
-    }
-    clipped
+    clip_visible_to_width(text, max_width)
 }
 
 #[must_use]
@@ -151,7 +130,7 @@ mod tests {
         let line = content_line("", w, style);
         assert_eq!(visible_width(&line), w);
         // Reset is always appended after the (empty) clipped content.
-        assert_eq!(line, format!("│{}          │", RESET));
+        assert_eq!(line, format!("│{RESET}          │"));
     }
 
     #[test]

@@ -139,7 +139,7 @@ impl ModelSelectorState {
         // Top border
         lines.push(border_line(
             width,
-            BorderKind::Top,
+            &BorderKind::Top,
             TITLE,
             self.theme.overlay_border,
         ));
@@ -153,15 +153,15 @@ impl ModelSelectorState {
         ));
 
         let query = self.list.query();
-        if !query.is_empty() {
+        if query.is_empty() {
+            lines.push(String::new());
+        } else {
             lines.push(style_line(
                 &format!(" /{query}"),
                 inner_w,
                 self.theme.brand,
                 Color::Reset,
             ));
-        } else {
-            lines.push(String::new());
         }
 
         // Model rows
@@ -211,7 +211,7 @@ impl ModelSelectorState {
         // Bottom border
         lines.push(border_line(
             width,
-            BorderKind::Bottom,
+            &BorderKind::Bottom,
             "",
             self.theme.overlay_border,
         ));
@@ -248,12 +248,12 @@ impl ModelSelectorState {
         styled
     }
 
-    pub fn handle_input(&mut self, input: InputEvent) -> InputResult {
+    pub fn handle_input(&mut self, input: &InputEvent) -> InputResult {
         if self.result.is_some() {
             return InputResult::Ignored;
         }
         match input {
-            InputEvent::Submit => {
+            InputEvent::Submit | InputEvent::Action(KeybindingAction::SelectConfirm) => {
                 if let Some(entry) = self.selected_entry().cloned() {
                     let thinking = self.effective_thinking(&entry);
                     self.result = Some(ModelSelectorResult::Selected(ModelSelection {
@@ -265,7 +265,7 @@ impl ModelSelectorState {
                     InputResult::Ignored
                 }
             }
-            InputEvent::Cancel => {
+            InputEvent::Cancel | InputEvent::Action(KeybindingAction::SelectCancel) => {
                 if self.list.clear_query() {
                     InputResult::Handled
                 } else {
@@ -281,11 +281,10 @@ impl ModelSelectorState {
                 self.list.handle_key(&ch.to_string());
                 InputResult::Handled
             }
-            InputEvent::ScrollUp(1) | InputEvent::MoveLeft => {
-                self.toggle_thinking();
-                InputResult::Handled
-            }
-            InputEvent::ScrollDown(1) | InputEvent::MoveRight => {
+            InputEvent::ScrollUp(1)
+            | InputEvent::MoveLeft
+            | InputEvent::ScrollDown(1)
+            | InputEvent::MoveRight => {
                 self.toggle_thinking();
                 InputResult::Handled
             }
@@ -305,26 +304,6 @@ impl ModelSelectorState {
             InputEvent::Action(KeybindingAction::SelectPageDown) => {
                 self.list.page_down();
                 InputResult::Handled
-            }
-            InputEvent::Action(KeybindingAction::SelectConfirm) => {
-                if let Some(entry) = self.selected_entry().cloned() {
-                    let thinking = self.effective_thinking(&entry);
-                    self.result = Some(ModelSelectorResult::Selected(ModelSelection {
-                        alias: entry.alias.clone(),
-                        thinking,
-                    }));
-                    InputResult::Submitted
-                } else {
-                    InputResult::Ignored
-                }
-            }
-            InputEvent::Action(KeybindingAction::SelectCancel) => {
-                if self.list.clear_query() {
-                    InputResult::Handled
-                } else {
-                    self.result = Some(ModelSelectorResult::Cancelled);
-                    InputResult::Cancelled
-                }
             }
             _ => InputResult::Ignored,
         }
@@ -346,7 +325,7 @@ enum BorderKind {
     Bottom,
 }
 
-fn border_line(width: usize, kind: BorderKind, title: &str, color: Color) -> String {
+fn border_line(width: usize, kind: &BorderKind, title: &str, color: Color) -> String {
     let left = match kind {
         BorderKind::Top => "╭",
         BorderKind::Bottom => "╰",
@@ -388,8 +367,7 @@ impl ColorSgr for Color {
             Color::Magenta => "35".into(),
             Color::Cyan => "36".into(),
             Color::White => "37".into(),
-            Color::Gray => "90".into(),
-            Color::DarkGray => "90".into(),
+            Color::Gray | Color::DarkGray => "90".into(),
             Color::LightRed => "91".into(),
             Color::LightGreen => "92".into(),
             Color::LightYellow => "93".into(),
@@ -411,8 +389,7 @@ impl ColorSgr for Color {
             Color::Magenta => "45".into(),
             Color::Cyan => "46".into(),
             Color::White => "47".into(),
-            Color::Gray => "100".into(),
-            Color::DarkGray => "100".into(),
+            Color::Gray | Color::DarkGray => "100".into(),
             Color::LightRed => "101".into(),
             Color::LightGreen => "102".into(),
             Color::LightYellow => "103".into(),
@@ -511,8 +488,8 @@ mod tests {
             current_thinking: false,
             theme: theme(),
         });
-        state.handle_input(InputEvent::Insert('c'));
-        state.handle_input(InputEvent::Insert('l'));
+        state.handle_input(&InputEvent::Insert('c'));
+        state.handle_input(&InputEvent::Insert('l'));
         // Should match "Claude Sonnet"
         assert_eq!(state.list.total_filtered(), 1);
     }
@@ -531,18 +508,18 @@ mod tests {
         let entry = state.selected_entry().cloned().unwrap();
         assert_eq!(entry.alias, "openai/gpt-4o");
         assert!(!state.effective_thinking(&entry)); // default off
-        state.handle_input(InputEvent::MoveRight); // toggle
+        state.handle_input(&InputEvent::MoveRight); // toggle
         let entry2 = state.selected_entry().cloned().unwrap();
         assert!(state.effective_thinking(&entry2)); // now on
 
         // Second model (claude) always_thinking → stays on regardless
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
         let entry3 = state.selected_entry().cloned().unwrap();
         assert_eq!(entry3.alias, "anthropic/claude-sonnet");
         assert!(state.effective_thinking(&entry3));
 
         // Third model (gemini) no thinking → stays off
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
         let entry4 = state.selected_entry().cloned().unwrap();
         assert_eq!(entry4.alias, "google/gemini-flash");
         assert!(!state.effective_thinking(&entry4));
@@ -557,14 +534,14 @@ mod tests {
             current_thinking: false,
             theme: theme(),
         });
-        state.handle_input(InputEvent::Submit);
+        state.handle_input(&InputEvent::Submit);
         let result = state.take_result().unwrap();
         match result {
             ModelSelectorResult::Selected(sel) => {
                 assert_eq!(sel.alias, "openai/gpt-4o");
                 assert!(!sel.thinking);
             }
-            _ => panic!("expected Selected"),
+            ModelSelectorResult::Cancelled => panic!("expected Selected"),
         }
     }
 
@@ -577,14 +554,14 @@ mod tests {
             current_thinking: false,
             theme: theme(),
         });
-        state.handle_input(InputEvent::Insert('a'));
+        state.handle_input(&InputEvent::Insert('a'));
         assert!(!state.list.query().is_empty());
 
-        state.handle_input(InputEvent::Cancel);
+        state.handle_input(&InputEvent::Cancel);
         assert!(state.list.query().is_empty());
         assert!(state.result.is_none()); // first Esc just cleared
 
-        state.handle_input(InputEvent::Cancel);
+        state.handle_input(&InputEvent::Cancel);
         assert!(matches!(
             state.take_result(),
             Some(ModelSelectorResult::Cancelled)

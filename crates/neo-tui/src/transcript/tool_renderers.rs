@@ -86,8 +86,7 @@ fn tool_verb(status: ToolStatusKind) -> &'static str {
 fn tool_status_color(status: ToolStatusKind, theme: &TuiTheme) -> Color {
     match status {
         ToolStatusKind::Pending => theme.status_pending,
-        ToolStatusKind::Running => theme.status_ok,
-        ToolStatusKind::Succeeded => theme.status_ok,
+        ToolStatusKind::Running | ToolStatusKind::Succeeded => theme.status_ok,
         ToolStatusKind::Failed => theme.status_error,
         ToolStatusKind::Cancelled => theme.status_cancelled,
     }
@@ -95,47 +94,51 @@ fn tool_status_color(status: ToolStatusKind, theme: &TuiTheme) -> Color {
 
 #[must_use]
 pub fn render_tool_body(state: &ToolCallState, expanded: bool, width: usize) -> Vec<Line> {
-    if state.name == "Write" {
-        if let Some((path, content)) = parse_write_arguments(state.arguments.as_deref()) {
-            let lines: Vec<&str> = content.lines().collect();
-            let total = lines.len();
-            let limit = if expanded {
-                total
-            } else {
-                COMMAND_PREVIEW_LINES.min(total)
-            };
-            let mut rows = vec![Line::raw(format!("  {path} · {total} lines"))];
-            for (index, line) in lines.iter().take(limit).enumerate() {
-                rows.push(Line::raw(format!("  {:>4} {line}", index + 1)));
-            }
-            if limit < total {
-                rows.push(Line::raw(format!(
-                    "  ... ({} more lines, {total} total, ctrl+o to expand)",
-                    total - limit
-                )));
-            }
-            return rows;
-        }
+    if hides_successful_todo_list_body(state) {
+        return Vec::new();
     }
 
-    if state.name == "Edit" {
-        if let Some(arguments) = state.arguments.as_deref().and_then(parse_edit_arguments) {
-            let max = if expanded {
-                None
-            } else {
-                Some(COMMAND_PREVIEW_LINES)
-            };
-            return crate::transcript::diff_preview::render_diff_lines_clustered(
-                &arguments.old,
-                &arguments.new,
-                &arguments.path,
-                3,
-                max,
-            )
-            .into_iter()
-            .map(|line| Line::raw(format!("  {}", crate::ansi::strip_ansi(&line.to_ansi()))))
-            .collect();
+    if state.name == "Write"
+        && let Some((path, content)) = parse_write_arguments(state.arguments.as_deref())
+    {
+        let lines: Vec<&str> = content.lines().collect();
+        let total = lines.len();
+        let limit = if expanded {
+            total
+        } else {
+            COMMAND_PREVIEW_LINES.min(total)
+        };
+        let mut rows = vec![Line::raw(format!("  {path} · {total} lines"))];
+        for (index, line) in lines.iter().take(limit).enumerate() {
+            rows.push(Line::raw(format!("  {:>4} {line}", index + 1)));
         }
+        if limit < total {
+            rows.push(Line::raw(format!(
+                "  ... ({} more lines, {total} total, ctrl+o to expand)",
+                total - limit
+            )));
+        }
+        return rows;
+    }
+
+    if state.name == "Edit"
+        && let Some(arguments) = state.arguments.as_deref().and_then(parse_edit_arguments)
+    {
+        let max = if expanded {
+            None
+        } else {
+            Some(COMMAND_PREVIEW_LINES)
+        };
+        return crate::transcript::diff_preview::render_diff_lines_clustered(
+            &arguments.old,
+            &arguments.new,
+            &arguments.path,
+            3,
+            max,
+        )
+        .into_iter()
+        .map(|line| Line::raw(format!("  {}", crate::ansi::strip_ansi(&line.to_ansi()))))
+        .collect();
     }
 
     let Some(result) = state.result.as_deref().filter(|value| !value.is_empty()) else {
@@ -181,56 +184,60 @@ pub fn render_tool_body_themed(
     width: usize,
     theme: &TuiTheme,
 ) -> Vec<Line> {
+    if hides_successful_todo_list_body(state) {
+        return Vec::new();
+    }
+
     let weak = Style::default().fg(theme.text_muted);
     let body_style = Style::default().fg(theme.text_primary);
 
-    if state.name == "Write" {
-        if let Some((path, content)) = parse_write_arguments(state.arguments.as_deref()) {
-            let lines: Vec<&str> = content.lines().collect();
-            let total = lines.len();
-            let limit = if expanded {
-                total
-            } else {
-                COMMAND_PREVIEW_LINES.min(total)
-            };
-            let mut rows = vec![Line::styled(format!("  {path} · {total} lines"), weak)];
-            for (index, line) in lines.iter().take(limit).enumerate() {
-                rows.push(Line::styled(
-                    format!("  {:>4} {line}", index + 1),
-                    body_style,
-                ));
-            }
-            if limit < total {
-                rows.push(Line::styled(
-                    format!(
-                        "  ... ({} more lines, {total} total, ctrl+o to expand)",
-                        total - limit
-                    ),
-                    weak,
-                ));
-            }
-            return rows;
+    if state.name == "Write"
+        && let Some((path, content)) = parse_write_arguments(state.arguments.as_deref())
+    {
+        let lines: Vec<&str> = content.lines().collect();
+        let total = lines.len();
+        let limit = if expanded {
+            total
+        } else {
+            COMMAND_PREVIEW_LINES.min(total)
+        };
+        let mut rows = vec![Line::styled(format!("  {path} · {total} lines"), weak)];
+        for (index, line) in lines.iter().take(limit).enumerate() {
+            rows.push(Line::styled(
+                format!("  {:>4} {line}", index + 1),
+                body_style,
+            ));
         }
+        if limit < total {
+            rows.push(Line::styled(
+                format!(
+                    "  ... ({} more lines, {total} total, ctrl+o to expand)",
+                    total - limit
+                ),
+                weak,
+            ));
+        }
+        return rows;
     }
 
-    if state.name == "Edit" {
-        if let Some(arguments) = state.arguments.as_deref().and_then(parse_edit_arguments) {
-            let max = if expanded {
-                None
-            } else {
-                Some(COMMAND_PREVIEW_LINES)
-            };
-            return crate::transcript::diff_preview::render_diff_lines_clustered(
-                &arguments.old,
-                &arguments.new,
-                &arguments.path,
-                3,
-                max,
-            )
-            .into_iter()
-            .map(|line| diff_body_line(&line.to_ansi(), theme))
-            .collect();
-        }
+    if state.name == "Edit"
+        && let Some(arguments) = state.arguments.as_deref().and_then(parse_edit_arguments)
+    {
+        let max = if expanded {
+            None
+        } else {
+            Some(COMMAND_PREVIEW_LINES)
+        };
+        return crate::transcript::diff_preview::render_diff_lines_clustered(
+            &arguments.old,
+            &arguments.new,
+            &arguments.path,
+            3,
+            max,
+        )
+        .into_iter()
+        .map(|line| diff_body_line(&line.to_ansi(), theme))
+        .collect();
     }
 
     let Some(result) = state.result.as_deref().filter(|value| !value.is_empty()) else {
@@ -263,6 +270,10 @@ pub fn render_tool_body_themed(
         }
     }
     rows
+}
+
+fn hides_successful_todo_list_body(state: &ToolCallState) -> bool {
+    state.name == "TodoList" && state.status == ToolStatusKind::Succeeded
 }
 
 /// Render one diff body line with add/remove coloring. Indented 2 spaces,

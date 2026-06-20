@@ -58,11 +58,10 @@ pub fn render_diff_lines_clustered(
                 emitted += 1;
             }
         }
-        for index in cluster.0..=cluster.1 {
+        for line in diff.iter().take(cluster.1 + 1).skip(cluster.0) {
             if emitted >= cap {
                 break;
             }
-            let line = &diff[index];
             rows.push(format_diff_row(line));
             emitted += 1;
             if line.kind != DiffKind::Context {

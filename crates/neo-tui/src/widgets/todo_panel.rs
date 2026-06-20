@@ -1,5 +1,9 @@
 use crate::chrome::TuiTheme;
 use crate::components::wrap_width;
+use crate::{
+    ansi::{Style, paint},
+    components::truncate_width,
+};
 
 /// Maximum number of todo items visible without truncation.
 pub const MAX_VISIBLE_TODOS: usize = 5;
@@ -29,7 +33,7 @@ impl TodoDisplayItem {
 
 /// Smart truncation algorithm matching Neo's `todo-panel.ts`.
 ///
-/// 1. Include ALL in_progress items (capped at `max_visible`).
+/// 1. Include ALL `in_progress` items (capped at `max_visible`).
 /// 2. If slots remain: include 1 latest done item.
 /// 3. Fill remaining with earliest pending items.
 /// 4. Re-sort to original order.
@@ -57,18 +61,16 @@ pub fn select_visible_todos(todos: &[TodoDisplayItem], max_visible: usize) -> Ve
     }
 
     // 2. One latest done.
-    if selected.len() < max_visible {
-        if let Some(done_idx) = todos
+    if selected.len() < max_visible
+        && let Some(done_idx) = todos
             .iter()
             .enumerate()
             .rev()
             .find(|(_, t)| t.status == TodoDisplayStatus::Done)
             .map(|(i, _)| i)
-        {
-            if !selected.contains(&done_idx) {
-                selected.push(done_idx);
-            }
-        }
+        && !selected.contains(&done_idx)
+    {
+        selected.push(done_idx);
     }
 
     // 3. Earliest pending to fill.
@@ -123,6 +125,77 @@ impl<'a> TodoPanel<'a> {
         let total = 2 + 1 + item_lines + usize::from(hidden);
         u16::try_from(total).unwrap_or(u16::MAX)
     }
+
+    #[must_use]
+    pub fn render(&self, width: usize) -> Vec<String> {
+        if self.todos.is_empty() {
+            return Vec::new();
+        }
+
+        let visible = select_visible_todos(self.todos, MAX_VISIBLE_TODOS);
+        let inner_width = width.saturating_sub(6).max(1);
+        let mut lines = vec![
+            paint(
+                &"\u{2500}".repeat(width),
+                Style::default().fg(self.theme.text_muted),
+            ),
+            paint("  Todo", Style::default().fg(self.theme.brand).bold()),
+        ];
+
+        for &index in &visible {
+            lines.extend(render_item(&self.todos[index], inner_width, self.theme));
+        }
+
+        let hidden = self.todos.len().saturating_sub(visible.len());
+        if hidden > 0 {
+            lines.push(paint(
+                &format!("  \u{2026} +{hidden} more"),
+                Style::default().fg(self.theme.text_muted),
+            ));
+        }
+
+        lines
+            .into_iter()
+            .map(|line| truncate_width(&line, width, "", false))
+            .collect()
+    }
+}
+
+fn render_item(item: &TodoDisplayItem, inner_width: usize, theme: TuiTheme) -> Vec<String> {
+    let marker = match item.status {
+        TodoDisplayStatus::Pending => "\u{25CB}",
+        TodoDisplayStatus::InProgress => "\u{25CF}",
+        TodoDisplayStatus::Done => "\u{2713}",
+    };
+    let marker_style = match item.status {
+        TodoDisplayStatus::Pending => Style::default().fg(theme.text_muted),
+        TodoDisplayStatus::InProgress => Style::default().fg(theme.brand).bold(),
+        TodoDisplayStatus::Done => Style::default().fg(theme.status_ok),
+    };
+    let title_style = match item.status {
+        TodoDisplayStatus::Pending => Style::default().fg(theme.text_primary),
+        TodoDisplayStatus::InProgress => Style::default().fg(theme.text_primary).bold(),
+        TodoDisplayStatus::Done => Style::default().fg(theme.text_muted).crossed_out(),
+    };
+
+    let wrapped = wrap_width(&item.title, inner_width);
+    if wrapped.is_empty() {
+        return vec![format!("  {} ", paint(marker, marker_style))];
+    }
+
+    let mut rows = Vec::with_capacity(wrapped.len());
+    for (line_index, line) in wrapped.into_iter().enumerate() {
+        if line_index == 0 {
+            rows.push(format!(
+                "  {} {}",
+                paint(marker, marker_style),
+                paint(&line, title_style)
+            ));
+        } else {
+            rows.push(format!("    {}", paint(&line, title_style)));
+        }
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -205,5 +278,30 @@ mod tests {
         let visible = select_visible_todos(&todos, 5);
         assert_eq!(visible.len(), 5);
         assert_eq!(visible, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn render_outputs_header_status_rows_and_hidden_count() {
+        let todos = vec![
+            item("old done task", TodoDisplayStatus::Done),
+            item("active task", TodoDisplayStatus::InProgress),
+            item("pending one", TodoDisplayStatus::Pending),
+            item("pending two", TodoDisplayStatus::Pending),
+            item("pending three", TodoDisplayStatus::Pending),
+            item("latest done task", TodoDisplayStatus::Done),
+        ];
+
+        let lines = TodoPanel::new(&todos).render(40);
+        let plain = lines
+            .iter()
+            .map(|line| crate::ansi::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("Todo"));
+        assert!(plain.contains("\u{2713} latest done task"));
+        assert!(plain.contains("\u{25CF} active task"));
+        assert!(plain.contains("\u{25CB} pending one"));
+        assert!(plain.contains("\u{2026} +1 more"));
     }
 }

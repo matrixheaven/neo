@@ -1,6 +1,6 @@
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
 
-use crate::ansi::Style;
+use crate::ansi::{Style, display_width};
 
 use super::{Component, Finalization, Line, Span};
 
@@ -97,21 +97,21 @@ fn hard_wrap_word(
 ) {
     let mut line = String::new();
     let mut line_width = 0usize;
-    for ch in word.chars() {
-        let char_width = ch.width().unwrap_or(0);
-        if line_width + char_width > width && !line.is_empty() {
+    for grapheme in word.graphemes(true) {
+        let grapheme_width = display_width(grapheme);
+        if line_width + grapheme_width > width && !line.is_empty() {
             rows.push(styled_line(std::mem::take(&mut line), style));
             line_width = 0;
         }
-        line.push(ch);
-        line_width += char_width;
+        line.push_str(grapheme);
+        line_width += grapheme_width;
     }
     *current = line;
     *current_width = line_width;
 }
 
 fn visible_width(text: &str) -> usize {
-    text.chars().map(|ch| ch.width().unwrap_or(0)).sum()
+    display_width(text)
 }
 
 fn styled_line(text: String, style: Style) -> Line {

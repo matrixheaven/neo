@@ -67,8 +67,9 @@ impl From<&TodoItem> for TodoEventData {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TodoInput {
-    /// The complete set of todos. Replace the entire list each call.
-    pub todos: Vec<TodoItem>,
+    /// The complete set of todos. Omit to read the current list, pass an empty
+    /// array to clear it, or pass a non-empty array to replace it entirely.
+    pub todos: Option<Vec<TodoItem>>,
 }
 
 /// Format a slice of todos into the human-readable display string.
@@ -80,12 +81,14 @@ pub struct TodoInput {
 /// ```
 fn format_todos(todos: &[TodoItem]) -> String {
     if todos.is_empty() {
-        return "(todo list cleared)".to_owned();
+        return "Todo list is empty.".to_owned();
     }
     let mut out = String::new();
+    out.push_str("Current todo list:\n");
     for item in todos {
-        out.push_str(item.status.glyph());
-        out.push(' ');
+        out.push_str("  [");
+        out.push_str(item.status.as_str());
+        out.push_str("] ");
         out.push_str(&item.title);
         out.push('\n');
     }
@@ -95,10 +98,9 @@ fn format_todos(todos: &[TodoItem]) -> String {
 
 /// Tool that manages a structured todo list.
 ///
-/// Holds shared state (`Arc<Mutex<Vec<TodoEventData>>>`) so that the runtime
-/// can read the latest todos after execution and emit `AgentEvent::TodoUpdated`
-/// for persistence. The structured data is also returned in
-/// [`ToolResult::details`] as a JSON bridge.
+/// Holds shared state (`Arc<Mutex<Vec<TodoEventData>>>`) so read-mode calls can
+/// return the latest list. Write-mode calls return the updated list in
+/// [`ToolResult::details`], which the runtime turns into `AgentEvent::TodoUpdated`.
 pub struct TodoTool {
     state: Arc<Mutex<Vec<TodoEventData>>>,
 }
@@ -142,11 +144,11 @@ impl Tool for TodoTool {
     }
 
     fn description(&self) -> &'static str {
-        "Manage your task list for multi-step work. Provide the full list of \
-         todos every time you call this tool — the list is replaced entirely. \
-         Use an empty array to clear all todos. Statuses: `pending` (\u{25CB}), \
-         `in_progress` (\u{25CF}), `done` (\u{2713}). Call this whenever you \
-         start or complete a task so the user can see your progress."
+        "Manage your task list for multi-step work. Omit `todos` to read the \
+         current list without changing it. Provide the full list of todos to \
+         replace it entirely. Use an empty array to clear all todos. Statuses: \
+         `pending`, `in_progress`, `done`. Call this whenever you start or \
+         complete a task so the user can see your progress."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -160,11 +162,21 @@ impl Tool for TodoTool {
     ) -> super::ToolFuture<'a> {
         Box::pin(async move {
             let input: TodoInput = parse_input(self.name(), input)?;
-            let formatted = format_todos(&input.todos);
+            let Some(todos) = input.todos else {
+                let current = self
+                    .state
+                    .lock()
+                    .map_or_else(|_| Vec::new(), |guard| guard.clone());
+                return Ok(ToolResult::ok(format_event_todos(&current)));
+            };
+            let formatted = if todos.is_empty() {
+                "Todo list cleared.".to_owned()
+            } else {
+                format_todos(&todos)
+            };
 
             // Convert to event data for persistence.
-            let event_todos: Vec<TodoEventData> =
-                input.todos.iter().map(TodoEventData::from).collect();
+            let event_todos: Vec<TodoEventData> = todos.iter().map(TodoEventData::from).collect();
 
             // Update shared state.
             if let Ok(mut state) = self.state.lock() {
@@ -181,6 +193,22 @@ impl Tool for TodoTool {
             })))
         })
     }
+}
+
+fn format_event_todos(todos: &[TodoEventData]) -> String {
+    if todos.is_empty() {
+        return "Todo list is empty.".to_owned();
+    }
+
+    let mut out = String::from("Current todo list:\n");
+    for item in todos {
+        out.push_str("  [");
+        out.push_str(&item.status);
+        out.push_str("] ");
+        out.push_str(&item.title);
+        out.push('\n');
+    }
+    out.trim_end_matches('\n').to_owned()
 }
 
 #[cfg(test)]
@@ -206,7 +234,7 @@ mod tests {
 
     #[test]
     fn format_empty_clears() {
-        assert_eq!(format_todos(&[]), "(todo list cleared)");
+        assert_eq!(format_todos(&[]), "Todo list is empty.");
     }
 
     #[test]
@@ -215,7 +243,10 @@ mod tests {
             title: "Read files".into(),
             status: TodoStatus::Pending,
         }];
-        assert_eq!(format_todos(&todos), "\u{25CB} Read files");
+        assert_eq!(
+            format_todos(&todos),
+            "Current todo list:\n  [pending] Read files"
+        );
     }
 
     #[test]
@@ -224,7 +255,10 @@ mod tests {
             title: "Write code".into(),
             status: TodoStatus::InProgress,
         }];
-        assert_eq!(format_todos(&todos), "\u{25CF} Write code");
+        assert_eq!(
+            format_todos(&todos),
+            "Current todo list:\n  [in_progress] Write code"
+        );
     }
 
     #[test]
@@ -233,7 +267,10 @@ mod tests {
             title: "Run tests".into(),
             status: TodoStatus::Done,
         }];
-        assert_eq!(format_todos(&todos), "\u{2713} Run tests");
+        assert_eq!(
+            format_todos(&todos),
+            "Current todo list:\n  [done] Run tests"
+        );
     }
 
     #[test]
@@ -255,7 +292,7 @@ mod tests {
         let result = format_todos(&todos);
         assert_eq!(
             result,
-            "\u{2713} Plan\n\u{25CF} Implement\n\u{25CB} Document"
+            "Current todo list:\n  [done] Plan\n  [in_progress] Implement\n  [pending] Document"
         );
     }
 
@@ -269,10 +306,17 @@ mod tests {
             ]
         });
         let input: TodoInput = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(input.todos.len(), 3);
-        assert_eq!(input.todos[0].status, TodoStatus::Pending);
-        assert_eq!(input.todos[1].status, TodoStatus::InProgress);
-        assert_eq!(input.todos[2].status, TodoStatus::Done);
+        let todos = input.todos.expect("todos");
+        assert_eq!(todos.len(), 3);
+        assert_eq!(todos[0].status, TodoStatus::Pending);
+        assert_eq!(todos[1].status, TodoStatus::InProgress);
+        assert_eq!(todos[2].status, TodoStatus::Done);
+    }
+
+    #[test]
+    fn deserialize_allows_read_mode_without_todos() {
+        let input: TodoInput = serde_json::from_value(json!({})).expect("deserialize");
+        assert!(input.todos.is_none());
     }
 
     #[test]
@@ -306,8 +350,8 @@ mod tests {
         });
         let result = tool.execute(&ctx, input).await.expect("execute");
         assert!(!result.is_error);
-        assert!(result.content.contains("\u{2713} Step one"));
-        assert!(result.content.contains("\u{25CF} Step two"));
+        assert!(result.content.contains("[done] Step one"));
+        assert!(result.content.contains("[in_progress] Step two"));
     }
 
     #[tokio::test]
@@ -320,7 +364,9 @@ mod tests {
             .execute(&ctx, json!({ "todos": [] }))
             .await
             .expect("execute");
-        assert_eq!(result.content, "(todo list cleared)");
+        assert_eq!(result.content, "Todo list cleared.");
+        let details = result.details.expect("clear details");
+        assert_eq!(details.get("todos"), Some(&json!([])));
     }
 
     #[tokio::test]
@@ -344,22 +390,45 @@ mod tests {
 
         let updates = captured.lock().unwrap();
         assert_eq!(updates.len(), 1);
-        assert!(updates[0].contains("\u{25CB} Task"));
+        assert!(updates[0].contains("[pending] Task"));
     }
 
     #[tokio::test]
-    async fn execute_invalid_input_is_error() {
-        let tool = TodoTool::new();
+    async fn execute_read_mode_returns_current_list_without_details_or_update() {
+        let shared: Arc<Mutex<Vec<TodoEventData>>> = Arc::new(Mutex::new(vec![
+            TodoEventData {
+                title: "Read code".to_owned(),
+                status: "in_progress".to_owned(),
+            },
+            TodoEventData {
+                title: "Write tests".to_owned(),
+                status: "pending".to_owned(),
+            },
+        ]));
+        let tool = TodoTool::with_state(Arc::clone(&shared));
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        let callback: super::super::ToolUpdateCallback = Arc::new(move |partial: &str| {
+            captured_clone.lock().unwrap().push(partial.to_owned());
+        });
         let ctx = ToolContext::new(std::env::current_dir().unwrap())
             .unwrap()
-            .with_permission_policy(PermissionPolicy::allow_all());
-        // Missing `todos` field.
-        let result = tool.execute(&ctx, json!({})).await;
-        assert!(result.is_err());
+            .with_permission_policy(PermissionPolicy::allow_all())
+            .with_tool_update(callback);
+
+        let result = tool.execute(&ctx, json!({})).await.expect("execute");
+
+        assert_eq!(
+            result.content,
+            "Current todo list:\n  [in_progress] Read code\n  [pending] Write tests"
+        );
+        assert!(result.details.is_none());
+        assert!(captured.lock().unwrap().is_empty());
+        assert_eq!(shared.lock().unwrap().len(), 2);
     }
 
     #[test]
-    fn schema_has_todos_array() {
+    fn schema_has_optional_todos_array() {
         let tool = TodoTool::new();
         let schema = tool.input_schema();
         let props = schema
@@ -368,9 +437,8 @@ mod tests {
             .as_object()
             .unwrap();
         assert!(props.contains_key("todos"));
-        // The top-level schema should declare `todos` as required.
         let required = schema.get("required").and_then(|v| v.as_array());
-        assert!(required.is_some_and(|arr| { arr.iter().any(|v| v.as_str() == Some("todos")) }));
+        assert!(!required.is_some_and(|arr| { arr.iter().any(|v| v.as_str() == Some("todos")) }));
     }
 
     #[tokio::test]

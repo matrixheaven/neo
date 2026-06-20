@@ -59,14 +59,17 @@ impl NeoTui {
         width: usize,
         height: usize,
     ) -> (Vec<String>, Option<CursorPos>) {
-        let chrome = &self.chrome;
-        self.transcript.set_theme(chrome.theme());
+        let chrome_render = render_chrome(&self.chrome, width);
+        let chrome_height = chrome_render.lines.len();
+        if self.transcript.live_chrome_height() != chrome_height {
+            self.transcript.set_live_chrome_height(chrome_height);
+        }
+        self.transcript.set_theme(self.chrome.theme());
         self.transcript.resize(width, height);
         let mut lines = self
             .transcript
             .render_frame(width, height)
             .unwrap_or_else(|| self.transcript.frame_ansi_lines());
-        let chrome_render = render_chrome(chrome, width);
         let cursor = append_chrome(&mut lines, chrome_render);
         (lines, cursor)
     }

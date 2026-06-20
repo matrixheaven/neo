@@ -1,5 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::ansi::{Color, Style, paint, truncate_to_width, visible_width, wrap_text};
+
 /// Maximum number of option lines shown per question page.
 pub const MAX_OPTIONS_VISIBLE: usize = 6;
 
@@ -189,6 +191,220 @@ impl QuestionStateMachine {
             return 0;
         }
         self.questions[self.active_tab].total_options()
+    }
+
+    /// Render the focused question dialog into live chrome rows.
+    #[must_use]
+    pub fn render_lines(&self, width: usize) -> Vec<String> {
+        let styles = QuestionRenderStyles {
+            border: Style::default().fg(Color::LightBlue),
+            title: Style::default().fg(Color::LightBlue).bold(),
+            body: Style::default().fg(Color::White),
+            muted: Style::default().fg(Color::Gray),
+            selected: Style::default().fg(Color::LightGreen).bold(),
+        };
+        let mut lines = vec![paint(&"─".repeat(width.max(1)), styles.border)];
+        lines.push(paint("  question", styles.title));
+        lines.push(String::new());
+        lines.push(self.render_tabs(width, styles.title, styles.muted));
+        lines.push(String::new());
+
+        if self.on_submit_tab() {
+            self.render_submit_page(width, &mut lines, styles);
+        } else if let Some(question) = self.questions.get(self.active_tab) {
+            self.render_question_page(width, question, &mut lines, styles);
+        }
+
+        lines.push(String::new());
+        lines.push(paint(
+            &truncate_to_width(&self.hint_text(), width),
+            styles.muted,
+        ));
+        lines.push(paint(&"─".repeat(width.max(1)), styles.border));
+        lines
+    }
+
+    fn render_tabs(&self, width: usize, active_style: Style, muted_style: Style) -> String {
+        let mut tabs = Vec::with_capacity(self.tab_count());
+        for (index, question) in self.questions.iter().enumerate() {
+            let label = question
+                .header
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map_or_else(|| format!("Question {}", index + 1), ToOwned::to_owned);
+            let prefix = if question.is_answered() {
+                "(✓) "
+            } else {
+                "   "
+            };
+            let style = if self.active_tab == index {
+                active_style
+            } else {
+                muted_style
+            };
+            tabs.push(paint(&format!("{prefix}{label}"), style));
+        }
+        let submit_style = if self.on_submit_tab() {
+            active_style
+        } else {
+            muted_style
+        };
+        tabs.push(paint("Submit", submit_style));
+        let rendered = format!("  {}", tabs.join("   "));
+        truncate_to_width(&rendered, width)
+    }
+
+    fn render_question_page(
+        &self,
+        width: usize,
+        question: &QuestionState,
+        lines: &mut Vec<String>,
+        styles: QuestionRenderStyles,
+    ) {
+        push_wrapped(
+            lines,
+            &format!("? {}", question.question),
+            width,
+            "  ",
+            "  ",
+            Style::default().fg(Color::LightBlue),
+        );
+        if let Some(text) = question
+            .body
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            lines.push(String::new());
+            push_wrapped(lines, text, width, "  ", "    ", styles.body);
+        }
+        lines.push(String::new());
+
+        let total = question.total_options();
+        let end = (self.scroll + MAX_OPTIONS_VISIBLE).min(total);
+        for index in self.scroll..end {
+            self.render_option(width, question, index, lines, styles);
+        }
+        if end < total {
+            let remaining = total - end;
+            push_wrapped(
+                lines,
+                &format!("… {remaining} more"),
+                width,
+                "    ",
+                "    ",
+                styles.muted,
+            );
+        }
+    }
+
+    fn render_option(
+        &self,
+        width: usize,
+        question: &QuestionState,
+        index: usize,
+        lines: &mut Vec<String>,
+        styles: QuestionRenderStyles,
+    ) {
+        let is_cursor = index == self.cursor;
+        let is_other = index >= question.options.len();
+        let is_selected = if is_other {
+            question.other_selected
+        } else {
+            question.selected.get(index).copied().unwrap_or(false)
+        };
+        let cursor = if is_cursor { "→ " } else { "  " };
+        let style = if is_cursor || is_selected {
+            styles.selected
+        } else {
+            styles.body
+        };
+        let label = if is_other {
+            if question.other_text.is_empty() {
+                "Other".to_owned()
+            } else {
+                format!("Other: {}", question.other_text)
+            }
+        } else {
+            question.options[index].label.clone()
+        };
+
+        let primary = if question.multi_select {
+            let checkbox = if is_selected { "[✓]" } else { "[ ]" };
+            format!("{checkbox} {label}")
+        } else {
+            format!("[{}] {label}", index + 1)
+        };
+        push_wrapped(lines, &primary, width, cursor, "    ", style);
+
+        if !is_other
+            && let Some(description) = question.options[index]
+                .description
+                .as_deref()
+                .filter(|description| !description.trim().is_empty())
+        {
+            push_wrapped(lines, description, width, "      ", "      ", styles.muted);
+        }
+    }
+
+    fn render_submit_page(
+        &self,
+        width: usize,
+        lines: &mut Vec<String>,
+        styles: QuestionRenderStyles,
+    ) {
+        push_wrapped(
+            lines,
+            "Review your answer before submit",
+            width,
+            "  ",
+            "  ",
+            styles.body,
+        );
+        lines.push(String::new());
+        for question in &self.questions {
+            push_wrapped(
+                lines,
+                &question.question,
+                width,
+                "  Q  ",
+                "     ",
+                styles.body,
+            );
+            let answer = question.answer();
+            let answer = if answer.is_empty() {
+                "(no answer yet)"
+            } else {
+                answer.as_str()
+            };
+            push_wrapped(lines, answer, width, "  →  ", "     ", styles.selected);
+            lines.push(String::new());
+        }
+        push_wrapped(
+            lines,
+            "Ready to submit your answers?",
+            width,
+            "  ",
+            "  ",
+            styles.body,
+        );
+        lines.push(String::new());
+        push_wrapped(lines, "[1] Submit", width, "  → ", "    ", styles.selected);
+        push_wrapped(lines, "[2] Cancel", width, "    ", "    ", styles.muted);
+    }
+
+    fn hint_text(&self) -> String {
+        if self.on_submit_tab() {
+            "↑↓ select  1/2 choose  ↵ confirm  ←/→/tab switch  esc cancel".to_owned()
+        } else {
+            let count = self.active_option_count();
+            let action = if self.questions[self.active_tab].multi_select {
+                "↵ toggle"
+            } else {
+                "↵ choose"
+            };
+            format!("↑↓ select  1-{count} / {action}  ←/→/tab switch  esc cancel")
+        }
     }
 
     // -- Cursor / tab movement ------------------------------------------------
@@ -454,12 +670,51 @@ impl QuestionStateMachine {
                 if c.is_ascii_digit() && !event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 if let Some(n) = c.to_digit(10) {
+                    if self.on_submit_tab() {
+                        return match n {
+                            1 => self.handle_enter(),
+                            2 => QuestionDialogAction::Cancel,
+                            _ => QuestionDialogAction::None,
+                        };
+                    }
                     self.select_by_number(n as usize);
                 }
                 QuestionDialogAction::None
             }
             _ => QuestionDialogAction::None,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct QuestionRenderStyles {
+    border: Style,
+    title: Style,
+    body: Style,
+    muted: Style,
+    selected: Style,
+}
+
+fn push_wrapped(
+    lines: &mut Vec<String>,
+    text: &str,
+    width: usize,
+    first_prefix: &str,
+    continuation_prefix: &str,
+    style: Style,
+) {
+    let first_width = width.saturating_sub(visible_width(first_prefix)).max(1);
+    let continuation_width = width
+        .saturating_sub(visible_width(continuation_prefix))
+        .max(1);
+    let wrap_width = first_width.min(continuation_width).max(1);
+    for (index, line) in wrap_text(text, wrap_width).into_iter().enumerate() {
+        let prefix = if index == 0 {
+            first_prefix
+        } else {
+            continuation_prefix
+        };
+        lines.push(paint(&format!("{prefix}{line}"), style));
     }
 }
 

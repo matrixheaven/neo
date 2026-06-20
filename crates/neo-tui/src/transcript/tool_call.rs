@@ -185,28 +185,28 @@ impl ToolCallComponent {
     #[must_use]
     pub fn render_with_theme(&mut self, width: usize, theme: &TuiTheme) -> Vec<Line> {
         let header_spans = tool_header_spans(&self.state, theme);
-        let mut rows = vec![Line::from_spans(header_spans)];
+        let header_width = width.saturating_sub(2).max(1);
+        let mut rows = vec![Line::from_spans(header_spans).truncate_to_width(header_width)];
 
         // For ExitPlanMode, render a PlanBox from the tool result details.
-        if self.state.name == "ExitPlanMode" {
-            if let Some(details) = &self.state.details
-                && let Some(plan_content) = details.get("plan_content").and_then(|v| v.as_str())
-            {
-                let plan_path = details
-                    .get("plan_path")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let status = if self.state.status == ToolStatusKind::Failed {
-                    Some("Rejected".to_string())
-                } else {
-                    None
-                };
-                let mut plan_box = PlanBoxComponent::new(plan_content, plan_path);
-                if let Some(status) = status {
-                    plan_box = plan_box.with_status(status);
-                }
-                rows.extend(plan_box.render(width, theme));
+        if self.state.name == "ExitPlanMode"
+            && let Some(details) = &self.state.details
+            && let Some(plan_content) = details.get("plan_content").and_then(|v| v.as_str())
+        {
+            let plan_path = details
+                .get("plan_path")
+                .and_then(|v| v.as_str())
+                .map(std::string::ToString::to_string);
+            let status = if self.state.status == ToolStatusKind::Failed {
+                Some("Rejected".to_string())
+            } else {
+                None
+            };
+            let mut plan_box = PlanBoxComponent::new(plan_content, plan_path);
+            if let Some(status) = status {
+                plan_box = plan_box.with_status(status);
             }
+            rows.extend(plan_box.render(width, theme));
         }
 
         rows.extend(render_tool_body_themed(

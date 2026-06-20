@@ -1,5 +1,7 @@
 //! Choice picker dialog — simple single-select list.
 
+use std::fmt::Write as _;
+
 use crate::ansi::Color;
 use crate::chrome::TuiTheme;
 use crate::components::visible_width;
@@ -116,7 +118,7 @@ impl ChoicePickerState {
         let remaining = inner_w.saturating_sub(title_len);
         lines.push(format!(
             "\x1b[38;2;{}m╭{title_str}{}\x1b[0m",
-            rgb(&self.theme.overlay_border),
+            rgb(self.theme.overlay_border),
             "─".repeat(remaining),
         ));
 
@@ -150,28 +152,29 @@ impl ChoicePickerState {
         // Hint
         let mut hint = "↑↓ navigate · Enter select · Esc cancel".to_owned();
         if self.items.len() > self.page_size {
-            hint.push_str(&format!(
+            let _ = write!(
+                hint,
                 " · page {}/{} · ←/→ · PgUp/PgDn",
                 self.current_page(),
                 self.total_pages()
-            ));
+            );
         }
         lines.push(format!(
             "\x1b[38;2;{}m {hint}\x1b[0m",
-            rgb(&self.theme.text_muted)
+            rgb(self.theme.text_muted)
         ));
 
         // Bottom border
         lines.push(format!(
             "\x1b[38;2;{}m╰{}\x1b[0m",
-            rgb(&self.theme.overlay_border),
+            rgb(self.theme.overlay_border),
             "─".repeat(inner_w),
         ));
 
         lines
     }
 
-    pub fn handle_input(&mut self, input: InputEvent) -> InputResult {
+    pub fn handle_input(&mut self, input: &InputEvent) -> InputResult {
         if self.result.is_some() {
             return InputResult::Ignored;
         }
@@ -249,8 +252,7 @@ impl ColorSgr for Color {
             Color::Magenta => "35".into(),
             Color::Cyan => "36".into(),
             Color::White => "37".into(),
-            Color::Gray => "90".into(),
-            Color::DarkGray => "90".into(),
+            Color::Gray | Color::DarkGray => "90".into(),
             Color::LightRed => "91".into(),
             Color::LightGreen => "92".into(),
             Color::LightYellow => "93".into(),
@@ -272,8 +274,7 @@ impl ColorSgr for Color {
             Color::Magenta => "45".into(),
             Color::Cyan => "46".into(),
             Color::White => "47".into(),
-            Color::Gray => "100".into(),
-            Color::DarkGray => "100".into(),
+            Color::Gray | Color::DarkGray => "100".into(),
             Color::LightRed => "101".into(),
             Color::LightGreen => "102".into(),
             Color::LightYellow => "103".into(),
@@ -287,7 +288,7 @@ impl ColorSgr for Color {
     }
 }
 
-fn rgb(c: &Color) -> String {
+fn rgb(c: Color) -> String {
     match c {
         Color::Rgb(r, g, b) => format!("{r};{g};{b}"),
         _ => "255;255;255".into(),
@@ -343,9 +344,9 @@ mod tests {
             theme: theme(),
         });
         assert_eq!(state.selected, 0);
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
         assert_eq!(state.selected, 1);
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
         assert_eq!(state.selected, 0); // wraps
     }
 
@@ -358,7 +359,7 @@ mod tests {
             page_size: 0,
             theme: theme(),
         });
-        state.handle_input(InputEvent::Submit);
+        state.handle_input(&InputEvent::Submit);
         match state.take_result().unwrap() {
             ChoiceResult::Selected(item) => assert_eq!(item.id, "a"),
             ChoiceResult::Cancelled => panic!("expected Selected"),
@@ -374,7 +375,7 @@ mod tests {
             page_size: 0,
             theme: theme(),
         });
-        state.handle_input(InputEvent::Cancel);
+        state.handle_input(&InputEvent::Cancel);
         assert!(matches!(state.take_result(), Some(ChoiceResult::Cancelled)));
     }
 
@@ -393,32 +394,32 @@ mod tests {
         assert_eq!(state.current_page(), 1);
         assert_eq!(state.total_pages(), 3);
 
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageDown));
         assert_eq!(state.selected, 10);
         assert_eq!(state.scroll_offset, 10);
         assert_eq!(state.current_page(), 2);
 
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageDown));
         assert_eq!(state.selected, 20);
         assert_eq!(state.scroll_offset, 20);
         assert_eq!(state.current_page(), 3);
 
-        state.handle_input(InputEvent::Action(KeybindingAction::SelectPageUp));
+        state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageUp));
         assert_eq!(state.selected, 10);
         assert_eq!(state.scroll_offset, 10);
         assert_eq!(state.current_page(), 2);
 
-        state.handle_input(InputEvent::MoveRight);
+        state.handle_input(&InputEvent::MoveRight);
         assert_eq!(state.selected, 20);
         assert_eq!(state.current_page(), 3);
 
-        state.handle_input(InputEvent::MoveLeft);
+        state.handle_input(&InputEvent::MoveLeft);
         assert_eq!(state.selected, 10);
         assert_eq!(state.current_page(), 2);
 
         // Page indicator follows selected item even when scroll offset is unaligned.
         for _ in 0..12 {
-            state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
+            state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
         }
         assert_eq!(state.selected, 22);
         assert_eq!(state.current_page(), 3);

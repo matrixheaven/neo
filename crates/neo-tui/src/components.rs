@@ -1,5 +1,5 @@
-use crate::ansi::Rect;
-use unicode_width::UnicodeWidthChar;
+use crate::ansi::{Rect, clip_visible_to_width, display_width, next_sequence};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     chrome::{ApprovalModal, NeoChromeState, OverlayKind, PromptState},
@@ -21,11 +21,7 @@ pub struct ChromeLayout {
 #[must_use]
 pub fn chrome_layout(app: &NeoChromeState, area: Rect) -> ChromeLayout {
     let prompt_height = prompt_height(app.prompt(), area.width);
-    let footer_bar_height = if area.height >= 12 {
-        2
-    } else {
-        u16::from(area.height >= 8)
-    };
+    let footer_bar_height = u16::from(area.height >= 8);
     let session_picker_height = match app.focused_overlay().map(|overlay| &overlay.kind) {
         Some(OverlayKind::SessionPicker(_)) => 16,
         _ => 0,
@@ -128,16 +124,16 @@ pub fn visible_width(text: &str) -> usize {
     let mut width = 0;
     let mut index = 0;
     while index < text.len() {
-        if let Some(sequence) = ansi_escape_sequence(text, index) {
+        if let Some(sequence) = next_sequence(text, index) {
             index += sequence.len();
             continue;
         }
 
-        let Some(character) = text[index..].chars().next() else {
+        let Some(grapheme) = text[index..].graphemes(true).next() else {
             break;
         };
-        width += character.width().unwrap_or(0);
-        index += character.len_utf8();
+        width += display_width(grapheme);
+        index += grapheme.len();
     }
     width
 }
@@ -206,27 +202,27 @@ fn wrap_single_line(text: &str, max_width: usize, lines: &mut Vec<String>) {
     let mut index = 0;
 
     while index < text.len() {
-        if let Some(sequence) = ansi_escape_sequence(text, index) {
+        if let Some(sequence) = next_sequence(text, index) {
             current.push_str(sequence);
             update_active_sgr(sequence, &mut active_sgr);
             index += sequence.len();
             continue;
         }
 
-        let Some(character) = text[index..].chars().next() else {
+        let Some(grapheme) = text[index..].graphemes(true).next() else {
             break;
         };
 
-        let character_width = character.width().unwrap_or(0);
-        if current_width > 0 && current_width + character_width > max_width {
+        let grapheme_width = display_width(grapheme);
+        if current_width > 0 && current_width + grapheme_width > max_width {
             lines.push(std::mem::take(&mut current));
             current.push_str(&active_sgr);
             current_width = 0;
         }
 
-        current.push(character);
-        current_width += character_width;
-        index += character.len_utf8();
+        current.push_str(grapheme);
+        current_width += grapheme_width;
+        index += grapheme.len();
     }
 
     if !current.is_empty() {
@@ -301,75 +297,5 @@ fn prompt_height(prompt: &PromptState, width: u16) -> u16 {
 }
 
 fn clip_width(text: &str, max_width: usize) -> String {
-    let mut clipped = String::new();
-    let mut width = 0;
-    let mut index = 0;
-
-    while index < text.len() {
-        if let Some(sequence) = ansi_escape_sequence(text, index) {
-            clipped.push_str(sequence);
-            index += sequence.len();
-            continue;
-        }
-
-        let Some(character) = text[index..].chars().next() else {
-            break;
-        };
-
-        let character_width = character.width().unwrap_or(0);
-        if width + character_width > max_width {
-            break;
-        }
-        clipped.push(character);
-        width += character_width;
-        index += character.len_utf8();
-    }
-
-    clipped
-}
-
-fn ansi_escape_sequence(text: &str, start: usize) -> Option<&str> {
-    let bytes = text.as_bytes();
-    if bytes.get(start).copied()? != 0x1b {
-        return None;
-    }
-    let introducer = *bytes.get(start + 1)?;
-    match introducer {
-        b'[' => csi_sequence(text, start),
-        b']' | b'P' | b'_' | b'^' | b'X' => string_escape_sequence(text, start),
-        b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => fixed_escape_sequence(text, start, 3),
-        0x40..=0x5f => fixed_escape_sequence(text, start, 2),
-        _ => None,
-    }
-}
-
-fn csi_sequence(text: &str, start: usize) -> Option<&str> {
-    let bytes = text.as_bytes();
-    let mut index = start + 2;
-    while index < bytes.len() {
-        if (0x40..=0x7e).contains(&bytes[index]) {
-            return text.get(start..index + 1);
-        }
-        index += 1;
-    }
-    None
-}
-
-fn string_escape_sequence(text: &str, start: usize) -> Option<&str> {
-    let bytes = text.as_bytes();
-    let mut index = start + 2;
-    while index < bytes.len() {
-        match bytes[index] {
-            0x07 => return text.get(start..index + 1),
-            0x1b if bytes.get(index + 1).copied() == Some(b'\\') => {
-                return text.get(start..index + 2);
-            }
-            _ => index += 1,
-        }
-    }
-    None
-}
-
-fn fixed_escape_sequence(text: &str, start: usize, byte_len: usize) -> Option<&str> {
-    text.get(start..start + byte_len)
+    clip_visible_to_width(text, max_width)
 }

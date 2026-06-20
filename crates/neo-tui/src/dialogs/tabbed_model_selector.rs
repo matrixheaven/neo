@@ -1,4 +1,6 @@
-//! Tabbed model selector — wraps ModelSelectorState with provider tabs.
+//! Tabbed model selector — wraps `ModelSelectorState` with provider tabs.
+
+use std::fmt::Write as _;
 
 use crate::chrome::TuiTheme;
 use crate::core::InputResult;
@@ -115,12 +117,12 @@ impl TabbedModelSelectorState {
         // Top border with title
         lines.push(format!(
             "\x1b[38;2;{}m╭ Models {}\x1b[0m",
-            rgb(&self.theme.overlay_border),
+            rgb(self.theme.overlay_border),
             "─".repeat(width.saturating_sub(10)),
         ));
         lines.push(format!(
             "\x1b[38;2;{}m╰─── Tab: {} ───╯\x1b[0m",
-            rgb(&self.theme.overlay_border),
+            rgb(self.theme.overlay_border),
             self.tabs[self.active_tab],
         ));
 
@@ -131,15 +133,17 @@ impl TabbedModelSelectorState {
                 tab_str.push_str(" │ ");
             }
             if i == self.active_tab {
-                tab_str.push_str(&format!(
+                let _ = write!(
+                    tab_str,
                     "\x1b[48;2;{}m\x1b[30m {tab} \x1b[0m",
-                    rgb(&self.theme.selected_bg)
-                ));
+                    rgb(self.theme.selected_bg)
+                );
             } else {
-                tab_str.push_str(&format!(
+                let _ = write!(
+                    tab_str,
                     "\x1b[38;2;{}m {tab} \x1b[0m",
-                    rgb(&self.theme.text_muted)
-                ));
+                    rgb(self.theme.text_muted)
+                );
             }
         }
         lines.push(format!(" {tab_str}"));
@@ -159,18 +163,15 @@ impl TabbedModelSelectorState {
         lines
     }
 
-    pub fn handle_input(&mut self, input: InputEvent) -> InputResult {
+    pub fn handle_input(&mut self, input: &InputEvent) -> InputResult {
         if self.result.is_some() {
             return InputResult::Ignored;
         }
 
         // Tab switching on Tab key
-        match &input {
-            InputEvent::Insert('\t') => {
-                self.switch_tab(true);
-                return InputResult::Handled;
-            }
-            _ => {}
+        if let InputEvent::Insert('\t') = input {
+            self.switch_tab(true);
+            return InputResult::Handled;
         }
 
         // Forward to inner
@@ -227,7 +228,7 @@ fn filter_models_for_tab(all: &[ModelEntry], tab_idx: usize, tabs: &[String]) ->
         .collect()
 }
 
-fn rgb(c: &crate::ansi::Color) -> String {
+fn rgb(c: crate::ansi::Color) -> String {
     match c {
         crate::ansi::Color::Rgb(r, g, b) => format!("{r};{g};{b}"),
         _ => "255;255;255".into(),
@@ -300,15 +301,15 @@ mod tests {
         assert_eq!(state.active_tab(), "All");
 
         // Tab forward to "openai"
-        state.handle_input(InputEvent::Insert('\t'));
+        state.handle_input(&InputEvent::Insert('\t'));
         assert_eq!(state.active_tab(), "openai");
 
         // Tab forward to "anthropic"
-        state.handle_input(InputEvent::Insert('\t'));
+        state.handle_input(&InputEvent::Insert('\t'));
         assert_eq!(state.active_tab(), "anthropic");
 
         // Tab forward wraps back to "All"
-        state.handle_input(InputEvent::Insert('\t'));
+        state.handle_input(&InputEvent::Insert('\t'));
         assert_eq!(state.active_tab(), "All");
     }
 
@@ -338,13 +339,13 @@ mod tests {
             initial_tab_id: None,
             theme: theme(),
         });
-        state.handle_input(InputEvent::Submit);
+        state.handle_input(&InputEvent::Submit);
         let result = state.take_result().unwrap();
         match result {
             ModelSelectorResult::Selected(sel) => {
                 assert_eq!(sel.alias, "openai/gpt-4o");
             }
-            _ => panic!("expected Selected"),
+            ModelSelectorResult::Cancelled => panic!("expected Selected"),
         }
     }
 

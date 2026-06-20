@@ -1,18 +1,16 @@
 //! Markdown rendering for the live transcript.
 //!
-//! Parses assistant content with [`pulldown_cmark`] (CommonMark + GFM) and
+//! Parses assistant content with [`pulldown_cmark`] (`CommonMark` + GFM) and
 //! emits styled [`Line`]s. Code blocks are syntax-highlighted with
 //! [`syntect`]. Styling mirrors the Neo markdown theme.
 
 use std::sync::OnceLock;
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
-use unicode_width::UnicodeWidthChar;
-
-use crate::ansi::{Color, Style, visible_width};
+use crate::ansi::{Color, Style, clip_plain_to_width, visible_width};
 use crate::chrome::TuiTheme;
 use crate::components::wrap_width;
 use crate::core::{Line, Span};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 /// Render markdown `text` into styled lines, wrapped to `width`.
 ///
@@ -56,6 +54,7 @@ fn theme_set() -> &'static syntect::highlighting::ThemeSet {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Default)]
+#[allow(clippy::struct_excessive_bools)]
 struct InlineStyle {
     bold: bool,
     italic: bool,
@@ -85,9 +84,9 @@ struct MdRenderer<'a> {
     out: Vec<Line>,
     inline: Vec<Span>,
     inline_style: InlineStyle,
-    /// List nesting: each entry is (indent_spaces, marker) e.g. ("  ", "• ").
+    /// List nesting: each entry is (`indent_spaces`, marker) e.g. ("  ", "• ").
     list_stack: Vec<(usize, String)>,
-    /// Ordered-list start counters, parallel to list_stack for ordered lists.
+    /// Ordered-list start counters, parallel to `list_stack` for ordered lists.
     ordered_counters: Vec<u64>,
     quote_depth: usize,
     // code block buffer
@@ -195,7 +194,6 @@ impl<'a> MdRenderer<'a> {
 
     fn start_tag(&mut self, tag: Tag<'_>) {
         match tag {
-            Tag::Paragraph => {}
             Tag::Heading { level, .. } => {
                 let (bold, underline) = match level {
                     pulldown_cmark::HeadingLevel::H1 => (true, true),
@@ -246,7 +244,6 @@ impl<'a> MdRenderer<'a> {
             Tag::TableRow => {
                 self.current_row.clear();
             }
-            Tag::TableCell => {}
             _ => {}
         }
     }
@@ -344,7 +341,7 @@ impl<'a> MdRenderer<'a> {
         }
         let spans = std::mem::take(&mut self.inline);
         let prefix = self.current_prefix();
-        self.emit_wrapped_spans(spans, &prefix);
+        self.emit_wrapped_spans(&spans, &prefix);
     }
 
     fn current_prefix(&self) -> String {
@@ -359,9 +356,9 @@ impl<'a> MdRenderer<'a> {
         prefix
     }
 
-    fn emit_wrapped_spans(&mut self, spans: Vec<Span>, prefix: &str) {
+    fn emit_wrapped_spans(&mut self, spans: &[Span], prefix: &str) {
         let body_width = self.width.saturating_sub(visible_width(prefix)).max(1);
-        let single = spans_to_ansi(&spans);
+        let single = spans_to_ansi(spans);
         let wrapped = wrap_width(&single, body_width);
         let indent = " ".repeat(visible_width(prefix));
         for (i, line) in wrapped.into_iter().enumerate() {
@@ -512,26 +509,19 @@ fn syntect_to_ansi(ranges: &[(syntect::highlighting::Style, &str)], theme: &TuiT
     ranges
         .iter()
         .map(|(st, text)| {
-            let mut style = Style::default();
-            style.fg = Some(syntect_color(st.foreground).unwrap_or(theme.text_primary));
-            if st
-                .font_style
-                .contains(syntect::highlighting::FontStyle::BOLD)
-            {
-                style.bold = true;
-            }
-            if st
-                .font_style
-                .contains(syntect::highlighting::FontStyle::ITALIC)
-            {
-                style.italic = true;
-            }
-            if st
-                .font_style
-                .contains(syntect::highlighting::FontStyle::UNDERLINE)
-            {
-                style.underline = true;
-            }
+            let style = Style {
+                fg: Some(syntect_color(st.foreground).unwrap_or(theme.text_primary)),
+                bold: st
+                    .font_style
+                    .contains(syntect::highlighting::FontStyle::BOLD),
+                italic: st
+                    .font_style
+                    .contains(syntect::highlighting::FontStyle::ITALIC),
+                underline: st
+                    .font_style
+                    .contains(syntect::highlighting::FontStyle::UNDERLINE),
+                ..Style::default()
+            };
             crate::ansi::paint(text, style)
         })
         .collect()
@@ -581,9 +571,18 @@ fn render_table(
     let available = width.saturating_sub(overhead);
     let total: usize = col_widths.iter().sum();
     if total > available && available > 0 {
-        let scale = available as f64 / total as f64;
-        for w in &mut col_widths {
-            *w = ((*w as f64) * scale).round() as usize;
+        // Column widths are bounded by the terminal width, so precision loss
+        // and truncation here only affect display proportions.
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
+        {
+            let scale = available as f64 / total as f64;
+            for w in &mut col_widths {
+                *w = ((*w as f64) * scale).round() as usize;
+            }
         }
         for w in &mut col_widths {
             if *w == 0 {
@@ -604,7 +603,6 @@ fn render_table(
                 joiners[1]
             } else {
                 match joiners[0] {
-                    '┌' => '┬',
                     '├' => '┼',
                     '└' => '┴',
                     _ => '┬',
@@ -643,13 +641,12 @@ fn make_table_row(
     border_style: Style,
 ) -> Line {
     let mut spans = vec![Span::styled("│", border_style)];
-    for i in 0..ncols {
-        let content = cells.get(i).map(String::as_str).unwrap_or("");
-        let w = widths[i];
+    for (i, w) in widths.iter().enumerate().take(ncols) {
+        let content = cells.get(i).map_or("", String::as_str);
         // Truncate the cell to the column width (visible-width aware), adding
         // an ellipsis when it overflows. This keeps CJK + long content from
         // blowing out the table grid.
-        let displayed = truncate_visible(content, w);
+        let displayed = truncate_visible(content, *w);
         let vw = visible_width(&displayed);
         let pad = w.saturating_sub(vw);
         spans.push(Span::raw(" "));
@@ -662,24 +659,13 @@ fn make_table_row(
 }
 
 /// Truncate `s` to at most `width` visible columns. If it overflows, the last
-/// column is replaced with `…`. Width is computed with Unicode East-Asian
-/// width so CJK characters (width 2) are counted correctly.
+/// column is replaced with `…`.
 fn truncate_visible(s: &str, width: usize) -> String {
     if visible_width(s) <= width {
         return s.to_owned();
     }
     // Reserve one column for the ellipsis so the result fits in `width`.
-    let target = width.saturating_sub(1);
-    let mut out = String::new();
-    let mut w = 0usize;
-    for c in s.chars() {
-        let cw = c.width().unwrap_or(0);
-        if w + cw > target {
-            break;
-        }
-        out.push(c);
-        w += cw;
-    }
+    let mut out = clip_plain_to_width(s, width.saturating_sub(1));
     out.push('…');
     out
 }

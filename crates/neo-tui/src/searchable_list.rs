@@ -1,7 +1,6 @@
 /// Reusable searchable list with fuzzy filtering and pagination.
 ///
 /// Ported from Neo `SearchableList<T>`.
-
 /// Options for constructing a [`SearchableList`].
 #[derive(Debug, Clone)]
 pub struct SearchableListOptions<T> {
@@ -232,7 +231,7 @@ impl<T: Clone + PartialEq> SearchableList<T> {
         let page_count = if total == 0 {
             0
         } else {
-            (total + self.page_size - 1) / self.page_size
+            total.div_ceil(self.page_size)
         };
         let current_page = if total == 0 {
             0
@@ -262,7 +261,7 @@ fn fuzzy_score(text: &str, terms: &[&str]) -> i64 {
             Some(pos) => {
                 // Earlier matches score higher; exact substring bonus
                 let bonus: i64 = if text.contains(*term) { 1000 } else { 0 };
-                total_score += bonus.saturating_sub(pos as i64);
+                total_score += bonus.saturating_sub(i64::try_from(pos).unwrap_or(i64::MAX));
             }
             None => return -1,
         }

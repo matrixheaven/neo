@@ -1,6 +1,4 @@
-use unicode_width::UnicodeWidthChar;
-
-use crate::ansi::{Style, paint, strip_ansi, visible_width};
+use crate::ansi::{Style, clip_plain_to_width, paint, strip_ansi, visible_width};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
@@ -125,16 +123,7 @@ impl Line {
             } else {
                 let remaining = target.saturating_sub(used);
                 if remaining > 0 {
-                    let mut prefix = String::new();
-                    let mut prefix_width = 0usize;
-                    for ch in span.text().chars() {
-                        let cw = ch.width().unwrap_or(0);
-                        if prefix_width + cw > remaining {
-                            break;
-                        }
-                        prefix.push(ch);
-                        prefix_width += cw;
-                    }
+                    let prefix = clip_plain_to_width(span.text(), remaining);
                     if !prefix.is_empty() {
                         out.push(Span::styled(prefix, span.style));
                     }

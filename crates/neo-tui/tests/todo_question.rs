@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use neo_tui::chrome::NeoChromeState;
+use neo_tui::transcript::TranscriptPane;
 use neo_tui::widgets::{
     QuestionDialogAction, QuestionDisplayData, QuestionDisplayOption, QuestionStateMachine,
     TodoDisplayItem, TodoDisplayStatus, select_visible_todos,
@@ -69,6 +70,82 @@ fn app_pushes_question_overlay() {
 }
 
 #[test]
+fn question_overlay_renders_in_live_tui_frame() {
+    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay("q-123", make_single_question());
+    let transcript = TranscriptPane::new(80, 24);
+    let mut tui = neo_tui::NeoTui::new(app, transcript);
+
+    let (lines, _) = tui.render_frame(80, 24);
+    let frame = lines
+        .iter()
+        .map(|line| neo_tui::ansi::strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(frame.contains("question"));
+    assert!(frame.contains("Choice"));
+    assert!(frame.contains("Which option?"));
+    assert!(frame.contains("[1] Yes"));
+    assert!(frame.contains("[2] No"));
+    assert!(frame.contains("[3] Other"));
+}
+
+#[test]
+fn question_overlay_lines_fit_terminal_width() {
+    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay(
+        "q-123",
+        vec![QuestionDisplayData {
+            question: "This is a deliberately long question that needs wrapping".into(),
+            header: Some("Extremely long header text that must not overflow".into()),
+            body: None,
+            options: vec![
+                QuestionDisplayOption {
+                    label: "A long option label that also needs wrapping".into(),
+                    description: Some(
+                        "A description with enough words to wrap in a narrow terminal".into(),
+                    ),
+                },
+                QuestionDisplayOption {
+                    label: "Second option".into(),
+                    description: None,
+                },
+            ],
+            multi_select: false,
+        }],
+    );
+    let transcript = TranscriptPane::new(40, 24);
+    let mut tui = neo_tui::NeoTui::new(app, transcript);
+
+    let (lines, _) = tui.render_frame(40, 24);
+
+    for line in lines {
+        let plain = neo_tui::ansi::strip_ansi(&line);
+        assert!(
+            neo_tui::ansi::visible_width(&plain) <= 40,
+            "line exceeded width: {plain:?}"
+        );
+    }
+}
+
+#[test]
+fn question_submit_page_number_two_cancels() {
+    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay("q-1", make_single_question());
+
+    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.question_dialog_state().unwrap().on_submit_tab());
+
+    let action = app
+        .handle_question_dialog_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE))
+        .unwrap();
+
+    assert_eq!(action, QuestionDialogAction::Cancel);
+    assert!(!app.question_dialog_is_focused());
+}
+
+#[test]
 fn app_confirm_question_returns_answers() {
     let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
     app.push_question_overlay("q-1", make_single_question());
@@ -91,6 +168,15 @@ fn app_cancel_question_returns_id() {
 
     let id = app.cancel_question();
     assert_eq!(id, Some("q-456".to_owned()));
+    assert!(!app.question_dialog_is_focused());
+}
+
+#[test]
+fn app_closes_question_overlay_by_question_id() {
+    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay("question-1", make_single_question());
+
+    assert!(app.close_question_overlay("question-1").is_some());
     assert!(!app.question_dialog_is_focused());
 }
 
@@ -131,6 +217,17 @@ fn question_dialog_number_key_selection() {
     let state = app.question_dialog_state().unwrap();
     assert!(state.questions[0].selected[1]);
     assert!(!state.questions[0].selected[0]);
+}
+
+#[test]
+fn question_dialog_down_moves_one_option_at_a_time() {
+    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay("q-1", make_single_question());
+
+    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+    let state = app.question_dialog_state().unwrap();
+    assert_eq!(state.cursor, 1);
 }
 
 #[test]

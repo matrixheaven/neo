@@ -22,6 +22,7 @@ impl PlanBoxComponent {
     }
 
     /// Set a status suffix (e.g. "Rejected") shown in the title bar.
+    #[must_use]
     pub fn with_status(mut self, status: impl Into<String>) -> Self {
         self.status = Some(status.into());
         self

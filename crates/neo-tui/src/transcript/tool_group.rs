@@ -149,7 +149,6 @@ fn group_unit(lower: &str) -> &'static str {
 /// Capitalized so the header reads `● Read 3 files`, not `● read 3 files`.
 fn group_verb_past(lower: &str) -> &'static str {
     match lower {
-        "Read" => "Read",
         "Grep" => "Grep",
         "Glob" => "Glob",
         "Find" => "Find",
@@ -162,7 +161,6 @@ fn group_verb_past(lower: &str) -> &'static str {
 /// "Grepping", ...).
 fn group_verb_progressive(lower: &str) -> &'static str {
     match lower {
-        "Read" => "Reading",
         "Grep" => "Grepping",
         "Glob" => "Globbing",
         "Find" => "Finding",
