@@ -1,6 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::ansi::{Color, Style, paint, truncate_to_width, visible_width, wrap_text};
+use crate::core::InputResult;
+use crate::input::{InputEvent, KeybindingAction};
 
 /// Maximum number of option lines shown per question page.
 pub const MAX_OPTIONS_VISIBLE: usize = 6;
@@ -683,6 +685,115 @@ impl QuestionStateMachine {
             }
             _ => QuestionDialogAction::None,
         }
+    }
+
+    pub fn handle_input(&mut self, input: &InputEvent) -> InputResult {
+        match input {
+            InputEvent::Paste(text) if self.other_editing => {
+                for character in text.chars() {
+                    if matches!(
+                        self.handle_key(KeyEvent::new(
+                            KeyCode::Char(character),
+                            KeyModifiers::NONE,
+                        )),
+                        QuestionDialogAction::Submit(_) | QuestionDialogAction::Cancel
+                    ) {
+                        break;
+                    }
+                }
+                InputResult::Handled
+            }
+            InputEvent::Action(action) => question_key_for_action(*action)
+                .map(|key| question_action_result(self.handle_key(key)))
+                .unwrap_or(InputResult::Ignored),
+            _ => {
+                let Some(key) = question_key_for_input(input) else {
+                    return InputResult::Ignored;
+                };
+                question_action_result(self.handle_key(key))
+            }
+        }
+    }
+}
+
+fn question_key_for_action(action: KeybindingAction) -> Option<KeyEvent> {
+    let code = match action {
+        KeybindingAction::InputSubmit
+        | KeybindingAction::InputNewLine
+        | KeybindingAction::SelectConfirm => KeyCode::Enter,
+        KeybindingAction::InputTab => KeyCode::Tab,
+        KeybindingAction::SelectCancel => KeyCode::Esc,
+        KeybindingAction::SelectUp | KeybindingAction::EditorCursorUp => KeyCode::Up,
+        KeybindingAction::SelectDown | KeybindingAction::EditorCursorDown => KeyCode::Down,
+        KeybindingAction::EditorCursorLeft | KeybindingAction::EditorCursorWordLeft => {
+            KeyCode::Left
+        }
+        KeybindingAction::EditorCursorRight | KeybindingAction::EditorCursorWordRight => {
+            KeyCode::Right
+        }
+        KeybindingAction::EditorCursorLineStart => KeyCode::Home,
+        KeybindingAction::EditorCursorLineEnd => KeyCode::End,
+        KeybindingAction::EditorDeleteCharBackward
+        | KeybindingAction::EditorDeleteWordBackward
+        | KeybindingAction::EditorDeleteToLineStart => KeyCode::Backspace,
+        KeybindingAction::EditorDeleteCharForward
+        | KeybindingAction::EditorDeleteWordForward
+        | KeybindingAction::EditorDeleteToLineEnd => KeyCode::Delete,
+        KeybindingAction::SelectPageUp
+        | KeybindingAction::SelectPageDown
+        | KeybindingAction::InputCopy
+        | KeybindingAction::AppClear
+        | KeybindingAction::AppExit
+        | KeybindingAction::AppSuspend
+        | KeybindingAction::CommandPaletteOpen
+        | KeybindingAction::SessionPickerOpen
+        | KeybindingAction::SessionPickerToggleScope
+        | KeybindingAction::SessionFork
+        | KeybindingAction::ToolOutputToggle
+        | KeybindingAction::ModelPickerOpen
+        | KeybindingAction::TogglePlanMode
+        | KeybindingAction::EditorPageUp
+        | KeybindingAction::EditorPageDown
+        | KeybindingAction::EditorYank
+        | KeybindingAction::EditorUndo
+        | KeybindingAction::TranscriptSelectionStart
+        | KeybindingAction::TranscriptSelectionClear
+        | KeybindingAction::TranscriptSelectionExtendUp
+        | KeybindingAction::TranscriptSelectionExtendDown
+        | KeybindingAction::TranscriptSelectionExtendPageUp
+        | KeybindingAction::TranscriptSelectionExtendPageDown
+        | KeybindingAction::TranscriptCopySelection => return None,
+    };
+    Some(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+fn question_key_for_input(input: &InputEvent) -> Option<KeyEvent> {
+    let code = match input {
+        InputEvent::Insert(character) => KeyCode::Char(*character),
+        InputEvent::Backspace => KeyCode::Backspace,
+        InputEvent::Delete => KeyCode::Delete,
+        InputEvent::MoveLeft => KeyCode::Left,
+        InputEvent::MoveRight => KeyCode::Right,
+        InputEvent::MoveHome => KeyCode::Home,
+        InputEvent::MoveEnd => KeyCode::End,
+        InputEvent::NewLine | InputEvent::Submit => KeyCode::Enter,
+        InputEvent::Cancel => KeyCode::Esc,
+        InputEvent::Key(_)
+        | InputEvent::Action(_)
+        | InputEvent::Paste(_)
+        | InputEvent::ScrollUp(_)
+        | InputEvent::ScrollDown(_)
+        | InputEvent::Resize { .. }
+        | InputEvent::Interrupt => return None,
+    };
+    Some(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+fn question_action_result(action: QuestionDialogAction) -> InputResult {
+    match action {
+        QuestionDialogAction::None => InputResult::Handled,
+        QuestionDialogAction::Submit(_) => InputResult::Submitted,
+        QuestionDialogAction::Cancel => InputResult::Cancelled,
     }
 }
 

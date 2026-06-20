@@ -1,5 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use neo_tui::chrome::NeoChromeState;
+use neo_tui::core::InputResult;
+use neo_tui::input::{InputEvent, KeybindingAction};
 use neo_tui::transcript::TranscriptPane;
 use neo_tui::widgets::{
     QuestionDialogAction, QuestionDisplayData, QuestionDisplayOption, QuestionStateMachine,
@@ -217,6 +219,34 @@ fn question_dialog_number_key_selection() {
     let state = app.question_dialog_state().unwrap();
     assert!(state.questions[0].selected[1]);
     assert!(!state.questions[0].selected[0]);
+}
+
+#[test]
+fn focused_dialog_input_drives_question_dialog_other_text() {
+    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay("q-1", make_single_question());
+
+    assert!(app.focused_overlay_is_rich_dialog());
+    assert_eq!(
+        app.handle_focused_dialog_input(InputEvent::Action(KeybindingAction::SelectDown)),
+        InputResult::Handled
+    );
+    assert_eq!(
+        app.handle_focused_dialog_input(InputEvent::Action(KeybindingAction::SelectDown)),
+        InputResult::Handled
+    );
+    assert_eq!(
+        app.handle_focused_dialog_input(InputEvent::Submit),
+        InputResult::Handled
+    );
+    assert_eq!(
+        app.handle_focused_dialog_input(InputEvent::Paste("custom answer".into())),
+        InputResult::Handled
+    );
+
+    let state = app.question_dialog_state().unwrap();
+    assert!(state.questions[0].other_selected);
+    assert_eq!(state.questions[0].other_text, "custom answer");
 }
 
 #[test]

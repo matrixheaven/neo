@@ -283,6 +283,7 @@ pub struct NeoChromeState {
     next_overlay_id: OverlayId,
     focused_overlay: Option<OverlayId>,
     pending_approvals: VecDeque<ApprovalRequestModal>,
+    pending_question_result: Option<QuestionResult>,
     image_render_policy: ImageRenderPolicy,
     image_capabilities: TerminalImageCapabilities,
     theme: TuiTheme,
@@ -321,6 +322,7 @@ impl NeoChromeState {
             next_overlay_id: OverlayId::default(),
             focused_overlay: None,
             pending_approvals: VecDeque::new(),
+            pending_question_result: None,
             image_render_policy: ImageRenderPolicy::default(),
             image_capabilities: TerminalImageCapabilities::default(),
             theme: TuiTheme::default(),
@@ -1053,6 +1055,7 @@ impl NeoChromeState {
                 | OverlayKind::ChoicePicker(_)
                 | OverlayKind::ApiKeyInput(_)
                 | OverlayKind::CustomRegistryImport(_)
+                | OverlayKind::QuestionDialog(_)
         )
     }
 
@@ -1062,18 +1065,36 @@ impl NeoChromeState {
             return InputResult::Ignored;
         };
         let input = Self::translate_key_event_for_dialog(input);
-        if let Some(overlay) = self.overlays.iter_mut().find(|o| o.id == id) {
-            match &mut overlay.kind {
-                OverlayKind::ModelSelector(state) => return state.handle_input(&input),
-                OverlayKind::TabbedModelSelector(state) => return state.handle_input(&input),
-                OverlayKind::ProviderManager(state) => return state.handle_input(&input),
-                OverlayKind::ChoicePicker(state) => return state.handle_input(&input),
-                OverlayKind::ApiKeyInput(state) => return state.handle_input(&input),
-                OverlayKind::CustomRegistryImport(state) => return state.handle_input(input),
-                _ => {}
+        let Some(overlay) = self.overlays.iter_mut().find(|o| o.id == id) else {
+            return InputResult::Ignored;
+        };
+        let mut close_overlay = false;
+        let result = match &mut overlay.kind {
+            OverlayKind::ModelSelector(state) => state.handle_input(&input),
+            OverlayKind::TabbedModelSelector(state) => state.handle_input(&input),
+            OverlayKind::ProviderManager(state) => state.handle_input(&input),
+            OverlayKind::ChoicePicker(state) => state.handle_input(&input),
+            OverlayKind::ApiKeyInput(state) => state.handle_input(&input),
+            OverlayKind::CustomRegistryImport(state) => state.handle_input(input),
+            OverlayKind::QuestionDialog(state) => {
+                let result = state.handle_input(&input);
+                if matches!(result, InputResult::Submitted | InputResult::Cancelled) {
+                    if result == InputResult::Submitted {
+                        self.pending_question_result = Some(QuestionResult {
+                            id: state.id.clone(),
+                            answers: state.compile_answers(),
+                        });
+                    }
+                    close_overlay = true;
+                }
+                result
             }
+            _ => InputResult::Ignored,
+        };
+        if close_overlay {
+            let _ = self.close_overlay(id);
         }
-        InputResult::Ignored
+        result
     }
 
     /// Convenience result accessors for rich dialogs
@@ -1147,6 +1168,10 @@ impl NeoChromeState {
             return None;
         };
         state.result()
+    }
+
+    pub fn take_question_result(&mut self) -> Option<QuestionResult> {
+        self.pending_question_result.take()
     }
 
     #[must_use]

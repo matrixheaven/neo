@@ -679,13 +679,20 @@ impl InteractiveController {
         // If a rich dialog overlay is focused, forward ALL input events to it
         // first. Rich dialogs consume keys, actions, submit, cancel, etc.
         if self.tui.chrome_mut().focused_overlay_is_rich_dialog() {
+            let cancelled_question = self
+                .tui
+                .chrome()
+                .question_dialog_state()
+                .map(|state| state.id.clone());
+            let event = self.dialog_input_event(event);
             let result = self.tui.chrome_mut().handle_focused_dialog_input(event);
+            if result == InputResult::Cancelled
+                && let Some(id) = cancelled_question
+            {
+                self.pending_questions.remove(&id);
+                self.pending_question_prompts.remove(&id);
+            }
             self.process_rich_dialog_result(result).await?;
-            return Ok(false);
-        }
-        if self.tui.chrome().question_dialog_is_focused()
-            && self.handle_question_input_event(&event).await?
-        {
             return Ok(false);
         }
         match event {
@@ -811,181 +818,9 @@ impl InteractiveController {
         Ok(false)
     }
 
-    async fn handle_question_input_event(&mut self, event: &InputEvent) -> Result<bool> {
-        if !self.tui.chrome().question_dialog_is_focused() {
-            return Ok(false);
-        }
-        if let InputEvent::Paste(text) = event {
-            if self
-                .tui
-                .chrome()
-                .question_dialog_state()
-                .is_some_and(|state| state.other_editing)
-            {
-                for character in text.chars() {
-                    self.handle_question_dialog_key(Self::question_key_event(
-                        event::KeyCode::Char(character),
-                    ))
-                    .await?;
-                }
-            }
-            return Ok(true);
-        }
-        if let InputEvent::Action(action) = event {
-            return self.handle_question_keybinding_action(*action).await;
-        }
-        let Some(key) = Self::question_key_for_input_event(event) else {
-            return Ok(false);
-        };
-        self.handle_question_dialog_key(key).await?;
-        Ok(true)
-    }
-
-    async fn handle_question_keybinding_action(
-        &mut self,
-        action: KeybindingAction,
-    ) -> Result<bool> {
-        let Some(key) = Self::question_key_for_action(action) else {
-            return Ok(Self::question_consumes_action(action));
-        };
-        self.handle_question_dialog_key(key).await?;
-        Ok(true)
-    }
-
-    async fn handle_question_dialog_key(&mut self, key: event::KeyEvent) -> Result<()> {
-        let cancel_id = self
-            .tui
-            .chrome()
-            .question_dialog_state()
-            .map(|state| state.id.clone());
-        let Some(action) = self.tui.chrome_mut().handle_question_dialog_key(key) else {
-            return Ok(());
-        };
-        match action {
-            neo_tui::widgets::QuestionDialogAction::Submit(result) => {
-                self.resolve_question(&result.id, result.answers).await?;
-            }
-            neo_tui::widgets::QuestionDialogAction::Cancel => {
-                if let Some(id) = cancel_id {
-                    self.pending_questions.remove(&id);
-                    self.pending_question_prompts.remove(&id);
-                }
-            }
-            neo_tui::widgets::QuestionDialogAction::None => {}
-        }
-        Ok(())
-    }
-
-    fn question_key_for_input_event(event: &InputEvent) -> Option<event::KeyEvent> {
-        let code = match event {
-            InputEvent::Insert(character) => event::KeyCode::Char(*character),
-            InputEvent::Backspace => event::KeyCode::Backspace,
-            InputEvent::Delete => event::KeyCode::Delete,
-            InputEvent::MoveLeft => event::KeyCode::Left,
-            InputEvent::MoveRight => event::KeyCode::Right,
-            InputEvent::MoveHome => event::KeyCode::Home,
-            InputEvent::MoveEnd => event::KeyCode::End,
-            InputEvent::NewLine | InputEvent::Submit => event::KeyCode::Enter,
-            InputEvent::Cancel => event::KeyCode::Esc,
-            InputEvent::Key(_)
-            | InputEvent::Action(_)
-            | InputEvent::Paste(_)
-            | InputEvent::ScrollUp(_)
-            | InputEvent::ScrollDown(_)
-            | InputEvent::Resize { .. }
-            | InputEvent::Interrupt => return None,
-        };
-        Some(Self::question_key_event(code))
-    }
-
-    fn question_key_for_action(action: KeybindingAction) -> Option<event::KeyEvent> {
-        let code = match action {
-            KeybindingAction::SelectUp | KeybindingAction::EditorCursorUp => event::KeyCode::Up,
-            KeybindingAction::SelectDown | KeybindingAction::EditorCursorDown => {
-                event::KeyCode::Down
-            }
-            KeybindingAction::SelectConfirm
-            | KeybindingAction::InputSubmit
-            | KeybindingAction::InputNewLine => event::KeyCode::Enter,
-            KeybindingAction::SelectCancel => event::KeyCode::Esc,
-            KeybindingAction::InputTab => event::KeyCode::Tab,
-            KeybindingAction::EditorCursorLeft | KeybindingAction::EditorCursorWordLeft => {
-                event::KeyCode::Left
-            }
-            KeybindingAction::EditorCursorRight | KeybindingAction::EditorCursorWordRight => {
-                event::KeyCode::Right
-            }
-            KeybindingAction::EditorCursorLineStart => event::KeyCode::Home,
-            KeybindingAction::EditorCursorLineEnd => event::KeyCode::End,
-            KeybindingAction::EditorDeleteCharBackward
-            | KeybindingAction::EditorDeleteWordBackward
-            | KeybindingAction::EditorDeleteToLineStart => event::KeyCode::Backspace,
-            KeybindingAction::EditorDeleteCharForward
-            | KeybindingAction::EditorDeleteWordForward
-            | KeybindingAction::EditorDeleteToLineEnd => event::KeyCode::Delete,
-            KeybindingAction::AppClear
-            | KeybindingAction::AppExit
-            | KeybindingAction::AppSuspend
-            | KeybindingAction::CommandPaletteOpen
-            | KeybindingAction::InputCopy
-            | KeybindingAction::ModelPickerOpen
-            | KeybindingAction::SessionFork
-            | KeybindingAction::SessionPickerOpen
-            | KeybindingAction::SessionPickerToggleScope
-            | KeybindingAction::SelectPageUp
-            | KeybindingAction::SelectPageDown
-            | KeybindingAction::TogglePlanMode
-            | KeybindingAction::ToolOutputToggle
-            | KeybindingAction::TranscriptCopySelection
-            | KeybindingAction::TranscriptSelectionClear
-            | KeybindingAction::TranscriptSelectionExtendDown
-            | KeybindingAction::TranscriptSelectionExtendPageDown
-            | KeybindingAction::TranscriptSelectionExtendPageUp
-            | KeybindingAction::TranscriptSelectionExtendUp
-            | KeybindingAction::TranscriptSelectionStart
-            | KeybindingAction::EditorPageUp
-            | KeybindingAction::EditorPageDown
-            | KeybindingAction::EditorYank
-            | KeybindingAction::EditorUndo => return None,
-        };
-        Some(Self::question_key_event(code))
-    }
-
-    const fn question_consumes_action(action: KeybindingAction) -> bool {
-        matches!(
-            action,
-            KeybindingAction::EditorYank
-                | KeybindingAction::EditorUndo
-                | KeybindingAction::InputCopy
-                | KeybindingAction::SelectPageUp
-                | KeybindingAction::SelectPageDown
-        )
-    }
-
-    fn question_key_event(code: event::KeyCode) -> event::KeyEvent {
-        event::KeyEvent::new(code, event::KeyModifiers::NONE)
-    }
-
     async fn handle_keybinding_key(&mut self, key: &KeyId) -> Result<bool> {
         let actions = self.keybindings.matching_actions(key);
-        let priority = if self.tui.chrome().question_dialog_is_focused() {
-            QUESTION_ACTION_PRIORITY
-        } else if self
-            .tui
-            .chrome_mut()
-            .focused_overlay()
-            .is_some_and(|overlay| matches!(overlay.kind, OverlayKind::PromptCompletion(_)))
-        {
-            PROMPT_COMPLETION_ACTION_PRIORITY
-        } else if self.tui.chrome().approval_is_pending()
-            || self.tui.chrome_mut().focused_overlay_id().is_some()
-        {
-            OVERLAY_ACTION_PRIORITY
-        } else {
-            EDITING_ACTION_PRIORITY
-        };
-
-        for action in priority {
+        for action in self.keybinding_priority() {
             if *action == KeybindingAction::TranscriptCopySelection
                 && !self.tui.transcript().has_transcript_selection()
             {
@@ -999,13 +834,39 @@ impl InteractiveController {
         Ok(false)
     }
 
+    fn dialog_input_event(&self, event: InputEvent) -> InputEvent {
+        let InputEvent::Key(key) = event else {
+            return event;
+        };
+        let actions = self.keybindings.matching_actions(&key);
+        self.keybinding_priority()
+            .iter()
+            .copied()
+            .find(|action| actions.contains(action))
+            .map_or(InputEvent::Key(key), InputEvent::Action)
+    }
+
+    fn keybinding_priority(&self) -> &'static [KeybindingAction] {
+        if self.tui.chrome().question_dialog_is_focused() {
+            QUESTION_ACTION_PRIORITY
+        } else if self
+            .tui
+            .chrome()
+            .focused_overlay()
+            .is_some_and(|overlay| matches!(overlay.kind, OverlayKind::PromptCompletion(_)))
+        {
+            PROMPT_COMPLETION_ACTION_PRIORITY
+        } else if self.tui.chrome().approval_is_pending()
+            || self.tui.chrome().focused_overlay_id().is_some()
+        {
+            OVERLAY_ACTION_PRIORITY
+        } else {
+            EDITING_ACTION_PRIORITY
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn handle_keybinding_action(&mut self, action: KeybindingAction) -> Result<bool> {
-        if self.tui.chrome().question_dialog_is_focused()
-            && self.handle_question_keybinding_action(action).await?
-        {
-            return Ok(false);
-        }
         if self.handle_prompt_keybinding_action(action) {
             return Ok(false);
         }
@@ -2417,6 +2278,8 @@ impl InteractiveController {
             .is_some()
         {
             self.handle_custom_registry_import_result();
+        } else if let Some(result) = self.tui.chrome_mut().take_question_result() {
+            self.resolve_question(&result.id, result.answers).await?;
         }
         Ok(())
     }
