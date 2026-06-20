@@ -198,10 +198,13 @@ crate.
    into plain assistant text.
 8. Skills are loaded from project, user, extra, and built-in tiers; an
    `<available_skills>` block is injected into the system prompt, and the
-   internal `invoke_skill` tool is offered to the model. Skill expansion is
-   intercepted by the runtime and nested invocations within a single turn are
-   rejected.
-9. Session events are appended to local JSONL so `resume` can reconstruct
+   internal `Skill` tool is offered to the model. When activated, the skill body
+   is injected as a context message before the user's message; nested skill
+   invocations within a single turn are rejected.
+9. Goals, when active, continue autonomously across turns using
+   `get_goal_status` / `update_goal_status` until complete, blocked, paused, or
+   the turn budget is reached.
+10. Session events are appended to local JSONL so `resume` can reconstruct
    conversation and tool state.
 
 ### Session storage and workspace scoping
@@ -291,19 +294,32 @@ neo --prompt-template review print src/lib.rs
 
 Skills are reusable prompt fragments with YAML frontmatter. They are discovered
 from four tiers: project `.neo/skills/**/SKILL.md`, user `~/.neo/skills/**/SKILL.md`,
-`extra_skill_dirs` in config, and built-in skills shipped with Neo. The model
-sees an `<available_skills>` block in the system prompt and can call the
-internal `invoke_skill` tool; users can also trigger skills manually in the TUI
-with `/skill:<name>`.
+`extra_skill_dirs` in config, and built-in skills shipped with Neo. When a skill
+is activated manually via `/skill:<name>` or automatically by the `Skill` tool,
+its expanded body is injected into the conversation as a context message before
+the user's original message.
 
 Key manifest fields: `name`, `description`, `type` (`prompt`/`inline`/`flow`),
 `whenToUse`, `disableModelInvocation`, `arguments`, `slashCommands`. Placeholders
 `$<name>`, `$0`, `$ARGUMENTS`, and `${NEO_SKILL_DIR}` are expanded at invocation
 time.
 
-Built-in skills: `write-goal`, `update-config`, `mcp-config`, `custom-theme`.
+Built-in skills: `define-goal`, `sub-skill`, `self-evo`. They are extracted
+into `~/.neo/skills/.builtin/` on startup so users can inspect and override
+them.
 
 See `docs/skills.md` for the full skill specification.
+
+### Goals
+
+Goals let Neo work autonomously across turns. The TUI supports `/goal
+<objective>`, `/goal pause`, `/goal resume`, `/goal cancel`, `/goal replace
+<objective>`, and `/goal next <objective>`. Active goals are stored in
+`~/.neo/goals/`. The runtime continues turns automatically while the goal is
+active; the model uses `update_goal_status` to mark completion or blockers. A
+default turn budget of 30 prevents runaway work.
+
+See `docs/goals.md` for details.
 
 ### Trust management
 
@@ -372,7 +388,7 @@ CLI provider/model management: `neo provider add/remove/list`,
 
 TUI slash commands: `/model` (model picker), `/provider` (provider list),
 `/resume` (session picker), `/skill:<name>` (activate a skill and expand it
-into the prompt).
+into the prompt), `/goal` (start, pause, resume, cancel, or replace a goal).
 
 CLI session management: `neo sessions list/show/rename/fork/summarize/compact/export-html/export-json`.
 
@@ -486,18 +502,20 @@ subagent / background task / hook 中也不行：
 
 ## Current workspace health (as of last exploration)
 
-The workspace compiles. The skill-system refactor is in place: skills are
-loaded from project/user/extra/built-in tiers, the runtime exposes an internal
-`invoke_skill` tool with nested-guard, and the TUI supports `/skill:<name>`.
+The workspace compiles. Skills, goals, and the `sub-skill` meta-skill are in
+place.
 
 - `neo-ai` clippy warnings (missing backticks, collapsible `if`) are fixed.
 - `neo-agent-core` clippy passes.
-- `neo-agent-core`, `neo-agent`, and `neo-tui` tests pass after the
-  `neo-sdk` / `neo-extensions` consolidation, the PascalCase tool rename
-  (incl. `Bash` schema reshape with `TaskOutput` / `TaskStop`), the
-  skills runtime, and the TUI pending-approval queue.
+- Skill tests (`skills.rs`, `goals.rs`) and `neo-agent` `mock_provider_e2e`
+  tests pass.
+- Two unrelated test regressions remain:
+  - `tool_permissions::bash_requires_permission_and_honors_timeout` sends an
+    old `mode` field to the bash tool schema.
+  - `tools::todo` unit tests fail because `TodoInput::todos` appears to have
+    been changed to `Option<Vec<TodoItem>>` without updating the tests.
 - `neo-tui` and the rest of `neo-agent` still carry pre-existing clippy
-  warnings unrelated to the skill work.
+  warnings unrelated to this work.
 
 <!-- icm:start -->
 

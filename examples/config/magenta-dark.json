@@ -16,7 +16,6 @@
     "diff_removed": "#E85454",
     "diff_hunk": "#E8A838",
     "diff_context": "#8B949A",
-    "footer_hint": "#8B949A",
     "footer_permission_ask": "#C678DD",
     "footer_working": "#C678DD"
   }

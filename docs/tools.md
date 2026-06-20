@@ -35,10 +35,11 @@ Use `neo_ai::tool_schema::schema_for<T>()` to generate JSON Schema from small se
 | `Write` | `{ "path": "tmp.txt", "content": "hello" }` | file write |
 | `Edit` | `{ "path": "tmp.txt", "old": "hello", "new": "hi", "replace_all": false }` | file write |
 | `Bash` | `{ "command": "cargo test -p xtask", "cwd": ".", "timeout": 300, "max_output_bytes": 65536 }` or `{ "command": "cargo test -p xtask", "run_in_background": true, "description": "test xtask" }` | shell |
-| `TaskOutput` | `{ "task_id": "bash-...", "block": false, "timeout": 30 }` | tool |
-| `TaskStop` | `{ "task_id": "bash-...", "reason": "no longer needed" }` | shell |
+| `TaskList` | `{ "active_only": true, "limit": 20 }` | tool |
+| `TaskOutput` | `{ "task_id": "bash-...", "block": false, "timeout": 30 }` or `{ "task_id": "question-..." }` | tool |
+| `TaskStop` | `{ "task_id": "bash-...", "reason": "no longer needed" }` or `{ "task_id": "question-..." }` | tool |
 | `Terminal` | `{ "mode": "start", "command": "bash" }` then `{ "mode": "write", "handle": "...", "input": "ls\n" }` / `{ "mode": "read", "handle": "..." }` / `{ "mode": "resize", "handle": "...", "cols": 120, "rows": 40 }` / `{ "mode": "stop", "handle": "..." }` | shell |
-| `TodoList` | `{ "todos": [{ "title": "Fix bug", "status": "in_progress" }] }` | tool |
+| `TodoList` | `{}` to read, `{ "todos": [{ "title": "Fix bug", "status": "in_progress" }] }` to replace, `{ "todos": [] }` to clear | tool |
 | `EnterPlanMode` | `{}` | tool |
 | `ExitPlanMode` | `{ "plan_summary": "..." }` | tool |
 
@@ -49,13 +50,19 @@ All file paths are resolved inside `ToolContext::workspace_root()`. Attempts to
 escape the workspace fail before execution.
 
 `Bash` runs foreground commands by default. Set `run_in_background=true` with a
-short `description` to start a background task and receive a `task_id`.
-`TaskOutput` returns the current status, exit code when finished, and captured
-stdout/stderr. `TaskStop` terminates the background shell process group and
-returns the captured output. Foreground timeout/cancellation and background stop
-clean up the shell process group on Unix, but commands that daemonize into a new
-session or process group are outside this compact cleanup contract. It is not a
-PTY and does not support interactive stdin.
+short `description` to start a background task and receive a `bash-*` task id.
+`AskUserQuestion` may also set `background=true`, which returns a `question-*`
+task id while the TUI keeps the question visible for the user.
+
+Background tasks are managed by the shared Background Task System. `TaskList`
+lists active or historical tasks, `TaskOutput` returns the current status and
+captured output/answers, and `TaskStop` terminates a background shell process
+group or cancels a pending question. Status values are `running`,
+`waiting_for_user`, `completed`, `failed`, `stopped`, and `timed_out`.
+Foreground timeout/cancellation and background stop clean up the shell process
+group on Unix, but commands that daemonize into a new session or process group
+are outside this compact cleanup contract. It is not a PTY and does not support
+interactive stdin.
 
 Foreground `Bash` content is raw terminal text: stdout followed by stderr. The
 structured `details` still carry `exit_code`, capped stdout/stderr, and
@@ -65,6 +72,13 @@ the transcript body.
 `Edit` returns concise text content for the model and structured `details` for
 consumers that need inspection metadata: the relative path, old/new strings,
 `replace_all`, and a stable unified diff.
+
+`TodoList` maintains the model-visible task list for multi-step work. Successful
+writes return structured `details.todos`, which the runtime persists as
+`TodoUpdated` and the TUI renders in the dedicated Todo panel above the prompt.
+Successful `TodoList` result text is still returned to the model, but the TUI
+tool transcript hides that duplicate body; failed `TodoList` results remain
+visible in the tool card.
 
 ## Runtime Boundary
 

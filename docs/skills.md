@@ -85,10 +85,35 @@ For example:
 The following skills ship with Neo and can be overridden by project/user
 skills:
 
-- `write-goal`: help the user craft a well-specified `/goal` objective.
-- `update-config`: inspect or edit Kimi Code configuration files.
-- `mcp-config`: add, remove, enable, or disable MCP servers.
-- `custom-theme`: create or edit a TUI color theme.
+- `define-goal`: help the user craft a well-specified `/goal` objective and
+  start it automatically with the `StartGoal` tool.
+- `sub-skill`: review and consolidate skills into hierarchical bundles.
+- `self-evo`: turn recent session work into reusable skills.
+
+Built-in skills are embedded in the binary, but on startup they are released to
+`~/.neo/skills/.builtin/` so you can read and override them. Files in
+`.builtin/` are skipped when scanning user skills, so a regular skill under
+`~/.neo/skills/<name>/` takes precedence over the built-in copy.
+
+## Self-evolution (`self-evo`)
+
+`self-evo` turns recent session work into reusable skills:
+
+```text
+/skill:self-evo              # current session
+/skill:self-evo 7            # last 7 days of sessions
+/skill:self-evo session_abc  # specific session id
+```
+
+It uses `SummarizeSessions` to extract patterns and `CreateSkill` to save
+each new skill under `~/.neo/skills/<name>/`.
+
+## Skill bundles (sub-skills)
+
+The `sub-skill` skill is a user-triggered librarian that reviews your skill
+inventory and can consolidate related skills into hierarchical bundles. It uses
+the `ListSkills` and `MoveSkill` tools; every move creates a timestamped
+backup under `~/.neo/backups/skills/<timestamp>/`.
 
 ## Automatic invocation
 

@@ -208,6 +208,21 @@ neo provider catalog add deepseek --api-key sk-...
 This fetches the catalog, infers the wire type, and writes the provider +
 all its models to `config.toml` automatically.
 
+## Skill search paths
+
+Use `skill_path` to add extra directories where Neo looks for skills. It can be
+a single string or a list of strings. `~/.neo/skills/` and the built-in
+`.builtin/` release are always searched; `skill_path` entries are searched
+after them and before project skills.
+
+```toml
+# single path
+skill_path = "~/.agents/skills"
+
+# multiple paths
+skill_path = ["~/.agents/skills", "~/.claude/skills"]
+```
+
 ## Environment Variables
 
 | Variable | Description |
