@@ -1,6 +1,7 @@
 mod ask_user;
 mod background_tasks;
 mod bash;
+mod diff;
 mod edit;
 pub mod extensions;
 mod find;
