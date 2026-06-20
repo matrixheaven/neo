@@ -3728,13 +3728,13 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         &config.skill_path,
     )
     .ok();
-    controller.skill_store = skill_store.clone();
     if let Some(ref store) = skill_store {
         controller
             .tui
             .transcript_mut()
             .set_skill_store(store.clone());
     }
+    controller.skill_store = skill_store;
     controller
 }
 
