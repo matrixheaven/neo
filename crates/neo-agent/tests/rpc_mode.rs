@@ -261,6 +261,7 @@ fn rpc_session_methods_reject_invalid_or_missing_ids() {
         method: &'static str,
         session_id: &'static str,
         expected: &'static str,
+        create_existing_session: bool,
     }
 
     let cases = [
@@ -268,26 +269,35 @@ fn rpc_session_methods_reject_invalid_or_missing_ids() {
             method: "get_messages",
             session_id: "session_",
             expected: "invalid session id",
+            create_existing_session: true,
         },
         Case {
             method: "get_messages",
             session_id: "missing",
             expected: "missing",
+            create_existing_session: false,
         },
         Case {
             method: "sessions.get",
             session_id: "session_",
             expected: "invalid session id",
+            create_existing_session: true,
         },
         Case {
             method: "sessions.get",
             session_id: "missing",
             expected: "missing",
+            create_existing_session: false,
         },
     ];
 
     for (i, case) in cases.iter().enumerate() {
         let temp = TempDir::new().expect("tempdir");
+        if case.create_existing_session {
+            let sessions = session_bucket(temp.path());
+            std::fs::create_dir_all(&sessions).expect("create sessions");
+            std::fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "").expect("write session");
+        }
         let mut command = neo();
         command.current_dir(temp.path()).arg("rpc");
         let request = format!(

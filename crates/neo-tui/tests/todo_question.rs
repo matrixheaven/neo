@@ -248,6 +248,21 @@ fn question_dialog_key_behaviors() {
 }
 
 #[test]
+fn question_dialog_tab_navigation_through_multiple_questions() {
+    let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
+    app.push_question_overlay("q-1", make_two_questions());
+
+    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.question_dialog_state().unwrap().active_tab, 1);
+
+    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert!(app.question_dialog_state().unwrap().on_submit_tab());
+
+    let _ = app.handle_question_dialog_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert!(!app.question_dialog_state().unwrap().on_submit_tab());
+}
+
+#[test]
 fn focused_dialog_input_drives_question_dialog_other_text() {
     let mut app = NeoChromeState::new("neo", "s1", "m1", "/tmp/ws");
     app.push_question_overlay("q-1", make_single_question());

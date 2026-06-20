@@ -480,19 +480,39 @@ fn sessions_reject_invalid_session_ids() {
         );
     }
 
-    let cases: &[(&[&str], &str)] = &[
-        (&["sessions", "show", "session_"], "invalid session id"),
-        (&["sessions", "show", "../escape"], "invalid session id"),
-        (&["sessions", "fork", "../escape"], "invalid session id"),
+    struct Case {
+        args: &'static [&'static str],
+        expected: &'static str,
+        existing_sessions: &'static [&'static str],
+    }
+
+    let cases = [
+        Case {
+            args: &["sessions", "show", "session_"],
+            expected: "invalid session id",
+            existing_sessions: &[SESSION_A, SESSION_B],
+        },
+        Case {
+            args: &["sessions", "show", "../escape"],
+            expected: "invalid session id",
+            existing_sessions: &[SESSION_A],
+        },
+        Case {
+            args: &["sessions", "fork", "../escape"],
+            expected: "invalid session id",
+            existing_sessions: &[SESSION_A],
+        },
     ];
 
-    for (args, expected) in cases {
+    for case in cases {
         let temp = TempDir::new().expect("tempdir");
         let sessions = session_bucket(temp.path());
         fs::create_dir_all(&sessions).expect("create sessions");
-        fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write alpha");
+        for session_id in case.existing_sessions {
+            fs::write(sessions.join(format!("{session_id}.jsonl")), "{}\n").expect("write session");
+        }
         fs::write(temp.path().join("escape.jsonl"), "{}\n").expect("write escape target");
-        assert_session_command_rejects(&temp, args, expected);
+        assert_session_command_rejects(&temp, case.args, case.expected);
     }
 }
 
