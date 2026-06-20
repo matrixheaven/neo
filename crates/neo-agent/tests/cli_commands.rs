@@ -462,22 +462,38 @@ fn sessions_accept_exact_workspace_bucket_ids() {
 }
 
 #[test]
-fn sessions_reject_incomplete_session_ids_without_guessing() {
-    let temp = TempDir::new().expect("tempdir");
-    let sessions = session_bucket(temp.path());
-    fs::create_dir_all(&sessions).expect("create sessions");
-    fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write alpha");
-    fs::write(sessions.join(format!("{SESSION_B}.jsonl")), "{}\n").expect("write alpha side");
+fn sessions_reject_invalid_session_ids() {
+    fn assert_session_command_rejects(temp: &TempDir, args: &[&str], expected: &str) {
+        let output = neo()
+            .current_dir(temp.path())
+            .args(args)
+            .output()
+            .expect("neo command should run");
+        assert!(
+            !output.status.success(),
+            "command unexpectedly succeeded: {args:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(expected),
+            "expected {expected:?} in stderr for {args:?}, got {stderr}"
+        );
+    }
 
-    let output = neo()
-        .current_dir(temp.path())
-        .args(["sessions", "show", "session_"])
-        .output()
-        .expect("neo command should run");
+    let cases: &[(&[&str], &str)] = &[
+        (&["sessions", "show", "session_"], "invalid session id"),
+        (&["sessions", "show", "../escape"], "invalid session id"),
+        (&["sessions", "fork", "../escape"], "invalid session id"),
+    ];
 
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("invalid session id"));
+    for (args, expected) in cases {
+        let temp = TempDir::new().expect("tempdir");
+        let sessions = session_bucket(temp.path());
+        fs::create_dir_all(&sessions).expect("create sessions");
+        fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write alpha");
+        fs::write(temp.path().join("escape.jsonl"), "{}\n").expect("write escape target");
+        assert_session_command_rejects(&temp, args, expected);
+    }
 }
 
 #[test]
@@ -618,24 +634,6 @@ fn sessions_export_json_returns_sanitized_replayed_session_artifact() {
         artifact["messages"][1]["Assistant"]["content"][0]["Text"]["text"],
         "portable local reply"
     );
-}
-
-#[test]
-fn sessions_reject_path_traversal_ids() {
-    let temp = TempDir::new().expect("tempdir");
-    let sessions = session_bucket(temp.path());
-    fs::create_dir_all(&sessions).expect("create sessions");
-    fs::write(temp.path().join("escape.jsonl"), "{}\n").expect("write escape target");
-
-    let output = neo()
-        .current_dir(temp.path())
-        .args(["sessions", "show", "../escape"])
-        .output()
-        .expect("neo command should run");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("invalid session id"));
 }
 
 #[test]
