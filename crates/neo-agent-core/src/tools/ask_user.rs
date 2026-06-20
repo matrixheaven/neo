@@ -17,9 +17,13 @@ use crate::{QuestionEventData, QuestionOptionData};
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct AskUserInput {
     /// 1–4 questions to ask the user.
+    #[schemars(description = "The questions to ask the user (1-4 questions).")]
     pub questions: Vec<AskUserQuestionInput>,
     /// If true, ask the question as a background task and return immediately.
     #[serde(default)]
+    #[schemars(
+        description = "Set true to ask in the background and return immediately with a background task_id. Use TaskOutput to read the answer later."
+    )]
     pub background: bool,
 }
 
@@ -27,17 +31,24 @@ pub struct AskUserInput {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct AskUserQuestionInput {
     /// The question text. Must end with `?`.
+    #[schemars(description = "A specific, actionable question. End with '?'.")]
     pub question: String,
     /// Optional short header (max ~12 chars).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Optional short category tag (max ~12 chars, e.g. 'Auth', 'Style').")]
     pub header: Option<String>,
     /// Optional longer body / context.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Optional longer body or context for the question.")]
     pub body: Option<String>,
     /// 2–4 options the user can choose from.
+    #[schemars(
+        description = "2-4 meaningful, distinct options. Do NOT include an 'Other' option - the system adds one automatically."
+    )]
     pub options: Vec<AskUserOptionInput>,
     /// Whether the user may select multiple options.
     #[serde(default)]
+    #[schemars(description = "Whether the user can select multiple options. Defaults to false.")]
     pub multi_select: bool,
 }
 
@@ -45,9 +56,13 @@ pub struct AskUserQuestionInput {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct AskUserOptionInput {
     /// Short label shown as the choice.
+    #[schemars(
+        description = "Concise display text (1-5 words). If recommended, append '(Recommended)'."
+    )]
     pub label: String,
     /// Optional description explaining the option.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Optional brief explanation of trade-offs or implications.")]
     pub description: Option<String>,
 }
 
@@ -109,15 +124,66 @@ impl AskUserTool {
     }
 }
 
+/// Validates the input against the model-facing contract: 1-4 questions,
+/// 2-4 options per question, non-empty labels.
+fn validate_ask_user_input(input: &AskUserInput) -> Result<(), super::ToolError> {
+    const MAX_QUESTIONS: usize = 4;
+    const MIN_OPTIONS: usize = 2;
+    const MAX_OPTIONS: usize = 4;
+
+    if input.questions.is_empty() || input.questions.len() > MAX_QUESTIONS {
+        return Err(super::ToolError::InvalidInput {
+            tool: "AskUserQuestion".to_owned(),
+            message: format!(
+                "questions must contain 1 to {MAX_QUESTIONS} items, got {}",
+                input.questions.len()
+            ),
+        });
+    }
+    for question in &input.questions {
+        if question.options.len() < MIN_OPTIONS || question.options.len() > MAX_OPTIONS {
+            return Err(super::ToolError::InvalidInput {
+                tool: "AskUserQuestion".to_owned(),
+                message: format!(
+                    "each question must have {MIN_OPTIONS} to {MAX_OPTIONS} options, got {}",
+                    question.options.len()
+                ),
+            });
+        }
+        for option in &question.options {
+            if option.label.trim().is_empty() {
+                return Err(super::ToolError::InvalidInput {
+                    tool: "AskUserQuestion".to_owned(),
+                    message: "option labels must not be empty".to_owned(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Tool for AskUserTool {
     fn name(&self) -> &'static str {
         "AskUserQuestion"
     }
 
     fn description(&self) -> &'static str {
-        "Ask the user questions with structured options. Use when you need \
-         clarification or user preferences. Provide 1-4 questions, each with \
-         2-4 options. The user can also type a custom answer."
+        "Use this tool when you need to ask the user questions with structured options during execution. This allows you to:\n\
+         1. Collect user preferences or requirements before proceeding.\n\
+         2. Resolve ambiguous or underspecified instructions.\n\
+         3. Let the user decide between implementation approaches as you work.\n\
+         4. Present concrete options when multiple valid directions exist.\n\n\
+         When NOT to use:\n\
+         - When you can infer the answer from context — be decisive and proceed.\n\
+         - Trivial decisions that do not materially affect the outcome.\n\n\
+         Usage notes:\n\
+         - Users always have an \"Other\" option for custom input — do not create one yourself.\n\
+         - Use `multi_select` to allow multiple answers to be selected for a question.\n\
+         - Keep option labels concise (1-5 words), use descriptions for trade-offs and details.\n\
+         - Each question should have 2-4 meaningful, distinct options.\n\
+         - You can ask 1-4 questions at a time; group related questions to minimize interruptions.\n\
+         - If you recommend a specific option, list it first and append \"(Recommended)\" to its label.\n\
+         - Set `background=true` when you can keep working without the answer. This starts a background question task and returns a task_id immediately."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -131,6 +197,7 @@ impl Tool for AskUserTool {
     ) -> super::ToolFuture<'a> {
         Box::pin(async move {
             let input: AskUserInput = super::parse_input(self.name(), input)?;
+            validate_ask_user_input(&input)?;
 
             // Convert model-facing input to event data.
             let questions: Vec<QuestionEventData> = input
@@ -384,6 +451,64 @@ mod tests {
         let ctx = make_ctx();
 
         let result = tool.execute(&ctx, json!({})).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn ask_user_rejects_too_many_questions() {
+        let (tx, _rx) = mpsc::unbounded_channel::<PendingQuestion>();
+        let tool = AskUserTool::new(tx);
+        let ctx = make_ctx();
+
+        let questions: Vec<_> = (0..5)
+            .map(|i| {
+                json!({
+                    "question": format!("Question {i}?"),
+                    "options": [{"label": "A"}, {"label": "B"}]
+                })
+            })
+            .collect();
+        let result = tool.execute(&ctx, json!({"questions": questions})).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn ask_user_rejects_too_few_options() {
+        let (tx, _rx) = mpsc::unbounded_channel::<PendingQuestion>();
+        let tool = AskUserTool::new(tx);
+        let ctx = make_ctx();
+
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "questions": [{
+                        "question": "Only one option?",
+                        "options": [{"label": "A"}]
+                    }]
+                }),
+            )
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn ask_user_rejects_empty_option_label() {
+        let (tx, _rx) = mpsc::unbounded_channel::<PendingQuestion>();
+        let tool = AskUserTool::new(tx);
+        let ctx = make_ctx();
+
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "questions": [{
+                        "question": "Bad option?",
+                        "options": [{"label": ""}, {"label": "B"}]
+                    }]
+                }),
+            )
+            .await;
         assert!(result.is_err());
     }
 

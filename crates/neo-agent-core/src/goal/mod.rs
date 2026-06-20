@@ -297,7 +297,8 @@ impl GoalManager {
             goal.blocked_reason = reason;
             goal.touch();
             if matches!(status, GoalStatus::Complete) {
-                store.cancel()
+                let _ = store.cancel();
+                Some(goal)
             } else if let Some(active) = store.active_mut() {
                 *active = goal.clone();
                 Some(goal)

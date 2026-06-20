@@ -10,10 +10,12 @@ use crate::TodoEventData;
 /// A single todo item tracked by the model.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct TodoItem {
-    /// Short, human-readable description of the task.
+    /// Short, actionable title for the todo (e.g. "Read session-control.ts").
+    #[schemars(description = "Short, actionable title for the todo.")]
     pub title: String,
     /// Current status of the task.
     #[serde(rename = "status")]
+    #[schemars(description = "Current status of the todo: pending, in_progress, or done.")]
     pub status: TodoStatus,
 }
 
@@ -63,12 +65,16 @@ impl From<&TodoItem> for TodoEventData {
 /// Input payload for [`TodoTool`].
 ///
 /// The model always sends the **full** todo list. An empty array clears the
-/// list; a non-empty array replaces it entirely.
+/// list; a non-empty array replaces it entirely. Omit the field to query the
+/// current list without changing it.
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TodoInput {
     /// The complete set of todos. Omit to read the current list, pass an empty
     /// array to clear it, or pass a non-empty array to replace it entirely.
+    #[schemars(
+        description = "The updated todo list. Omit to read the current list without making changes. Pass an empty array to clear the list."
+    )]
     pub todos: Option<Vec<TodoItem>>,
 }
 
@@ -144,11 +150,30 @@ impl Tool for TodoTool {
     }
 
     fn description(&self) -> &'static str {
-        "Manage your task list for multi-step work. Omit `todos` to read the \
-         current list without changing it. Provide the full list of todos to \
-         replace it entirely. Use an empty array to clear all todos. Statuses: \
-         `pending`, `in_progress`, `done`. Call this whenever you start or \
-         complete a task so the user can see your progress."
+        "Maintain a structured TODO list as you work through a multi-step task. \
+         Use it proactively and often when progress tracking helps the current work, \
+         especially in plan mode, long-running investigations, and implementation \
+         tasks with several tool calls.\n\n\
+         When to use:\n\
+         - Multi-step tasks that span several tool calls.\n\
+         - Tracking investigation progress across a large codebase search.\n\
+         - Planning a sequence of edits before making them.\n\
+         - After receiving new multi-step instructions, capture the requirements as todos.\n\
+         - Before starting a tracked task, mark exactly one item as `in_progress`.\n\
+         - Immediately after finishing a tracked task, mark it `done`; do not batch completions at the end.\n\n\
+         When NOT to use:\n\
+         - Single-shot answers that complete in one or two tool calls.\n\
+         - Trivial requests where tracking adds no clarity.\n\
+         - Purely conversational or informational replies.\n\n\
+         How to use:\n\
+         - Call with `todos: [...]` to replace the full list. Statuses: `pending`, `in_progress`, `done`.\n\
+         - Call with no arguments to retrieve the current list without changing it.\n\
+         - Call with `todos: []` to clear the list.\n\
+         - Keep titles short and actionable (e.g. \"Read session-control.ts\", \"Add planMode flag to TurnManager\").\n\
+         - When work is underway, keep exactly one task `in_progress`.\n\
+         - Only mark a task `done` when it is fully accomplished.\n\
+         - Never mark a task `done` if tests are failing, implementation is partial, unresolved errors remain, or required files/dependencies could not be found.\n\
+         - If you encounter a blocker, keep the blocked task `in_progress` or add a new pending task describing what must be resolved."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -160,6 +185,8 @@ impl Tool for TodoTool {
         ctx: &'a ToolContext,
         input: serde_json::Value,
     ) -> super::ToolFuture<'a> {
+        const WRITE_REMINDER: &str = "Ensure that you continue to use the todo list to track progress. Mark tasks done immediately after finishing them, and keep exactly one task in_progress when work is underway.";
+
         Box::pin(async move {
             let input: TodoInput = parse_input(self.name(), input)?;
             let Some(todos) = input.todos else {
@@ -186,9 +213,18 @@ impl Tool for TodoTool {
             // Stream the formatted list for live TUI display.
             ctx.emit_update(&formatted);
 
+            // Build the final content, mirroring the kimi-code reference output:
+            // cleared state gets a short confirmation; updates include the list
+            // plus a reminder to keep using the list.
+            let content = if todos.is_empty() {
+                formatted.clone()
+            } else {
+                format!("Todo list updated.\n{formatted}\n\n{WRITE_REMINDER}")
+            };
+
             // Return structured data in details so the runtime can emit
             // AgentEvent::TodoUpdated.
-            Ok(ToolResult::ok(formatted).with_details(json!({
+            Ok(ToolResult::ok(content).with_details(json!({
                 "todos": event_todos,
             })))
         })
@@ -350,8 +386,10 @@ mod tests {
         });
         let result = tool.execute(&ctx, input).await.expect("execute");
         assert!(!result.is_error);
+        assert!(result.content.contains("Todo list updated."));
         assert!(result.content.contains("[done] Step one"));
         assert!(result.content.contains("[in_progress] Step two"));
+        assert!(result.content.contains("keep exactly one task in_progress"));
     }
 
     #[tokio::test]
@@ -439,6 +477,49 @@ mod tests {
         assert!(props.contains_key("todos"));
         let required = schema.get("required").and_then(|v| v.as_array());
         assert!(!required.is_some_and(|arr| { arr.iter().any(|v| v.as_str() == Some("todos")) }));
+    }
+
+    #[test]
+    fn description_contains_usage_guidance() {
+        let tool = TodoTool::new();
+        let description = tool.description();
+        assert!(description.contains("When to use"));
+        assert!(description.contains("When NOT to use"));
+        assert!(description.contains("How to use"));
+        assert!(description.contains("`in_progress`"));
+    }
+
+    #[test]
+    fn schema_descriptions_are_present() {
+        let tool = TodoTool::new();
+        let schema = tool.input_schema();
+        let props = schema
+            .get("properties")
+            .expect("properties")
+            .as_object()
+            .unwrap();
+        let todos = props.get("todos").expect("todos schema");
+        assert!(
+            todos.get("description").is_some(),
+            "todos field should have a description"
+        );
+        // The item schema is either inline or referenced via $ref in schemars.
+        let items = todos.get("items").expect("todos items");
+        let item_schema = if let Some(reference) = items.get("$ref").and_then(|v| v.as_str()) {
+            let definitions = schema
+                .get("$defs")
+                .or_else(|| schema.get("definitions"))
+                .expect("schema definitions");
+            definitions
+                .get(reference.split('/').next_back().expect("ref name"))
+                .expect("resolved item schema")
+        } else {
+            items
+        };
+        assert!(
+            item_schema.get("properties").is_some(),
+            "item schema should expose properties"
+        );
     }
 
     #[tokio::test]

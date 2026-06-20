@@ -133,6 +133,7 @@ impl BackgroundTaskManager {
         max_output_bytes: usize,
     ) -> Result<ToolResult, ToolError> {
         let task_id = format!("bash-{}", Uuid::new_v4());
+        let description_trimmed = description.trim().to_owned();
         self.inner.lock().await.insert(
             task_id.clone(),
             BackgroundTaskRecord {
@@ -141,20 +142,34 @@ impl BackgroundTaskManager {
                 state: BackgroundTaskState::BashRunning(command),
             },
         );
-
-        Ok(
-            ToolResult::ok(format!("started background task: {task_id}")).with_details(json!({
-                "task_id": task_id,
-                "kind": "bash",
-                "status": "running",
-                "stdout": "",
-                "stderr": "",
-                "stdout_truncated": false,
-                "stderr_truncated": false,
-                "truncated": false,
-                "max_output_bytes": max_output_bytes,
-            })),
-        )
+        Ok(ToolResult::ok(format!(
+            "task_id: {task_id}\n\
+             kind: bash\n\
+             status: running\n\
+             description: {description_trimmed}\n\
+             automatic_notification: true\n\
+             next_step: You will be automatically notified when it completes.\n\
+             next_step: Use TaskOutput with this task_id for a non-blocking status/output snapshot.\n\
+             next_step: Use TaskStop only if the task must be cancelled."
+        ))
+        .with_details(json!({
+            "task_id": task_id,
+            "kind": "bash",
+            "status": "running",
+            "description": description_trimmed,
+            "automatic_notification": true,
+            "next_steps": [
+                "You will be automatically notified when it completes.",
+                "Use TaskOutput with this task_id for a non-blocking status/output snapshot.",
+                "Use TaskStop only if the task must be cancelled."
+            ],
+            "stdout": "",
+            "stderr": "",
+            "stdout_truncated": false,
+            "stderr_truncated": false,
+            "truncated": false,
+            "max_output_bytes": max_output_bytes,
+        })))
     }
 
     pub async fn start_question(&self, task_id: String, description: String) -> ToolResult {
@@ -510,24 +525,54 @@ impl BackgroundTaskManager {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TaskListInput {
+    /// Whether to list only non-terminal background tasks.
+    #[schemars(
+        description = "Whether to list only non-terminal background tasks. Defaults to true."
+    )]
     active_only: Option<bool>,
+    /// Maximum number of tasks to return (1-100).
+    #[schemars(
+        description = "Maximum number of tasks to return. Accepts a value between 1 and 100 and defaults to 20 when omitted."
+    )]
     limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TaskOutputInput {
+    /// The background task ID to inspect.
+    #[schemars(description = "The background task ID to inspect.")]
     task_id: String,
+    /// Whether to wait for the task to finish before returning.
+    #[schemars(
+        description = "Whether to wait for the task to finish before returning. Defaults to false."
+    )]
     block: Option<bool>,
+    /// Maximum number of seconds to wait when block=true.
+    #[schemars(description = "Maximum number of seconds to wait when block=true. Defaults to 30.")]
     timeout: Option<u64>,
+    /// Maximum bytes of output to include in the preview.
+    #[schemars(
+        description = "Maximum bytes of output to include in the preview. Defaults to the runtime limit when omitted."
+    )]
     max_output_bytes: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct TaskStopInput {
+    /// The background task ID to stop.
+    #[schemars(description = "The background task ID to stop.")]
     task_id: String,
+    /// Short reason recorded when the task is stopped.
+    #[schemars(
+        description = "Short reason recorded when the task is stopped. Defaults to 'Stopped by TaskStop'."
+    )]
     reason: Option<String>,
+    /// Maximum bytes of output to include in the result.
+    #[schemars(
+        description = "Maximum bytes of output to include in the result. Defaults to the runtime limit when omitted."
+    )]
     max_output_bytes: Option<usize>,
 }
 
@@ -539,7 +584,14 @@ impl Tool for TaskListTool {
     }
 
     fn description(&self) -> &'static str {
-        "List background tasks started by Bash or AskUserQuestion."
+        "List background tasks and their current status.\n\n\
+         Use this tool to discover which background tasks exist and where each one stands. It is the entry point for inspecting background work: it returns a task ID, status, kind, description, and elapsed time for every task it reports.\n\n\
+         Guidelines:\n\
+         - After a context compaction, or whenever you are unsure which background tasks are running or what their task IDs are, call this tool to re-enumerate them instead of guessing a task ID.\n\
+         - Prefer the default `active_only=true`, which lists only non-terminal tasks. Pass `active_only=false` only when you specifically need to see tasks that have already finished.\n\
+         - `limit` caps how many tasks are returned. It accepts a value between 1 and 100 and defaults to 20 when omitted.\n\
+         - This tool only lists tasks; it does not return their output. Use it first to locate the task ID you need, then call `TaskOutput` with that ID to read the task's output and details.\n\
+         - This tool is read-only and does not change any state, so it is always safe to call, including in plan mode."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -565,7 +617,15 @@ impl Tool for TaskOutputTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read status and output from a background task."
+        "Retrieve output from a running or completed background task.\n\n\
+         Use this after `Bash` with background mode or `AskUserQuestion` with `background=true` when you need to inspect progress or explicitly wait for completion.\n\n\
+         Guidelines:\n\
+         - Prefer relying on automatic completion notifications. Use this tool only when you need task output before the automatic notification arrives.\n\
+         - By default this tool is non-blocking and returns a current status/output snapshot.\n\
+         - Use `block=true` only when you intentionally want to wait for completion or timeout.\n\
+         - This tool returns structured task metadata and an output preview.\n\
+         - For a terminal task, check `status` and `exit_code` to understand why it ended.\n\
+         - This tool works with the generic background task system and should remain the primary read path for future task types."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -596,7 +656,13 @@ impl Tool for TaskStopTool {
     }
 
     fn description(&self) -> &'static str {
-        "Stop or cancel a background task."
+        "Stop a running background task.\n\n\
+         Only use this when a task must genuinely be cancelled — for a task that is finishing normally, wait for its completion notification or inspect it with `TaskOutput` instead of stopping it.\n\n\
+         Guidelines:\n\
+         - This is a general-purpose stop capability for any background task. It is not a bash-specific kill.\n\
+         - Stopping a task is destructive: it may leave partial side effects behind. Use it with care.\n\
+         - If the task has already finished, this tool simply returns its current status.\n\
+         - Provide a short `reason` so the task history records why it was stopped."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -625,10 +691,14 @@ pub fn task_list_result(tasks: &[BackgroundTaskSnapshot], active_only: bool) -> 
     } else {
         format!("background_tasks: {}", tasks.len())
     };
-    let mut content = header.clone();
-    for task in tasks {
-        content.push_str("\n\n");
-        content.push_str(&format_snapshot_header(task));
+    let mut content = header;
+    if tasks.is_empty() {
+        content.push_str("\nNo background tasks found.");
+    } else {
+        for task in tasks {
+            content.push_str("\n\n");
+            content.push_str(&format_snapshot_header(task));
+        }
     }
     let count_key = if active_only {
         "active_background_tasks"
@@ -903,5 +973,124 @@ mod tests {
         assert_eq!(details["stdout"], "abc");
         assert_eq!(details["stderr"], "std");
         assert_eq!(details["truncated"], true);
+    }
+
+    #[test]
+    fn task_list_result_shows_empty_notice() {
+        let result = task_list_result(&[], true);
+        assert!(result.content.contains("active_background_tasks: 0"));
+        assert!(result.content.contains("No background tasks found."));
+    }
+
+    #[test]
+    fn task_list_result_lists_tasks() {
+        let snapshot = BackgroundTaskSnapshot {
+            task_id: "bash-abc".to_owned(),
+            kind: BackgroundTaskKind::Bash,
+            status: BackgroundTaskStatus::Running,
+            description: "long command".to_owned(),
+            elapsed: Duration::from_secs(5),
+            output: None,
+            answers: None,
+        };
+        let result = task_list_result(&[snapshot], true);
+        assert!(result.content.contains("active_background_tasks: 1"));
+        assert!(result.content.contains("task_id: bash-abc"));
+        assert!(result.content.contains("status: running"));
+    }
+
+    #[tokio::test]
+    async fn task_list_tool_lists_active_tasks() {
+        let manager = BackgroundTaskManager::new();
+        manager
+            .start_question("q-1".to_owned(), "Pick one".to_owned())
+            .await;
+        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+            .unwrap()
+            .with_background_tasks(manager);
+        let tool = TaskListTool;
+        let result = tool.execute(&ctx, json!({})).await.expect("execute");
+        assert!(!result.is_error);
+        assert!(result.content.contains("active_background_tasks: 1"));
+        assert!(result.content.contains("task_id: q-1"));
+    }
+
+    #[tokio::test]
+    async fn task_output_tool_reads_task() {
+        let manager = BackgroundTaskManager::new();
+        let started = manager
+            .start_bash(
+                "run fake command".to_owned(),
+                fake_command(Some(0), "hello", ""),
+                1024,
+            )
+            .await
+            .expect("bash task should start");
+        let task_id = result_task_id(&started);
+        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+            .unwrap()
+            .with_background_tasks(manager);
+        let tool = TaskOutputTool;
+        let result = tool
+            .execute(&ctx, json!({"task_id": task_id}))
+            .await
+            .expect("execute");
+        assert!(!result.is_error);
+        assert!(result.content.contains("task_id:"));
+        assert!(result.content.contains("status:"));
+    }
+
+    #[tokio::test]
+    async fn task_stop_tool_stops_running_bash() {
+        let manager = BackgroundTaskManager::new();
+        let started = manager
+            .start_bash(
+                "run fake command".to_owned(),
+                fake_command(Some(0), "hello", ""),
+                1024,
+            )
+            .await
+            .expect("bash task should start");
+        let task_id = result_task_id(&started);
+        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+            .unwrap()
+            .with_permission_policy(crate::PermissionPolicy::allow_all())
+            .with_background_tasks(manager);
+        let tool = TaskStopTool;
+        let result = tool
+            .execute(&ctx, json!({"task_id": task_id, "reason": "test done"}))
+            .await
+            .expect("execute");
+        assert!(!result.is_error);
+        assert!(result.content.contains("task_id:"));
+        assert!(result.content.contains("status: stopped"));
+    }
+
+    #[tokio::test]
+    async fn task_stop_tool_requires_shell_permission() {
+        let manager = BackgroundTaskManager::new();
+        let started = manager
+            .start_bash(
+                "run fake command".to_owned(),
+                fake_command(Some(0), "hello", ""),
+                1024,
+            )
+            .await
+            .expect("bash task should start");
+        let task_id = result_task_id(&started);
+        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+            .unwrap()
+            .with_permission_policy(crate::PermissionPolicy::default())
+            .with_background_tasks(manager);
+        let tool = TaskStopTool;
+        let result = tool.execute(&ctx, json!({"task_id": task_id})).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tool_descriptions_are_non_empty() {
+        assert!(!TaskListTool.description().is_empty());
+        assert!(!TaskOutputTool.description().is_empty());
+        assert!(!TaskStopTool.description().is_empty());
     }
 }

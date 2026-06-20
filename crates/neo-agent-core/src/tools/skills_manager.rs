@@ -12,22 +12,48 @@ use crate::{Tool, ToolContext, ToolError, ToolFuture, ToolResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ListSkillsArgs {
+    /// Whether to include built-in skills shipped with Neo in the listing.
     #[serde(default)]
+    #[schemars(
+        description = "Whether to include built-in skills shipped with Neo in the listing. Defaults to false."
+    )]
     pub include_builtin: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MoveSkillArgs {
+    /// Absolute path to the skill directory to move. Must contain a SKILL.md file.
+    #[schemars(
+        description = "Absolute path to the skill directory to move. Must contain a SKILL.md file."
+    )]
     pub source: String,
+    /// Absolute path to the parent directory where the skill directory should be moved.
+    #[schemars(
+        description = "Absolute path to the parent directory where the skill directory should be moved."
+    )]
     pub destination_parent: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CreateSkillArgs {
+    /// Name for the new skill. Used as the directory name under ~/.neo/skills/.
+    #[schemars(
+        description = "Name for the new skill. Used as the directory name under ~/.neo/skills/."
+    )]
     pub name: String,
+    /// Short description of what the skill does. Stored in the skill frontmatter.
+    #[schemars(
+        description = "Short description of what the skill does. Stored in the skill frontmatter."
+    )]
     pub description: String,
+    /// Skill type: prompt, inline, or flow. Defaults to prompt.
     #[serde(default)]
+    #[schemars(description = "Skill type: prompt, inline, or flow. Defaults to 'prompt'.")]
     pub skill_type: String,
+    /// Markdown body of the skill. Must include valid YAML frontmatter followed by Markdown content.
+    #[schemars(
+        description = "Markdown body of the skill. Must include valid YAML frontmatter followed by Markdown content."
+    )]
     pub body: String,
 }
 
@@ -58,7 +84,13 @@ impl Tool for ListSkillsTool {
     }
 
     fn description(&self) -> &'static str {
-        "List all discoverable skills by tier (project, user, extra, builtin) with their names and filesystem paths."
+        "List all discoverable skills by tier (project, user, extra, builtin) with their names and filesystem paths.\n\n\
+         Use this tool to inspect which skills are available in the current environment before invoking one with the Skill tool or a slash command. Skills are discovered from:\n\
+         - project: .neo/skills/\n\
+         - user: ~/.neo/skills/\n\
+         - extra: directories listed in config\n\
+         - builtin: skills shipped with Neo (only when include_builtin=true)\n\n\
+         The output groups skills by tier and shows each skill's name and absolute path."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -126,7 +158,10 @@ impl Tool for CreateSkillTool {
     }
 
     fn description(&self) -> &'static str {
-        "Create a new skill under ~/.neo/skills/<name>/SKILL.md. The body must include valid YAML frontmatter followed by Markdown content."
+        "Create a new skill under ~/.neo/skills/<name>/SKILL.md.\n\n\
+         The `body` must include valid YAML frontmatter followed by Markdown content. The frontmatter must at minimum declare `name`, `description`, and `type` (prompt, inline, or flow).\n\n\
+         If a skill with the same name already exists, the existing file is backed up under ~/.neo/backups/skills/<timestamp>/<name>/SKILL.md before being overwritten.\n\n\
+         After creation, the skill can be activated via the Skill tool or the /skill:<name> slash command."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -218,7 +253,9 @@ impl Tool for MoveSkillTool {
     }
 
     fn description(&self) -> &'static str {
-        "Move a skill directory into a parent bundle, creating timestamped backups of every modified directory. The source path must be an absolute skill directory containing a SKILL.md file."
+        "Move a skill directory into a parent bundle, creating timestamped backups of every modified directory.\n\n\
+         The `source` path must be an absolute skill directory containing a SKILL.md file. The skill directory is moved under `destination_parent`, preserving its directory name.\n\n\
+         Before the move, a timestamped backup of the source directory is created under ~/.neo/backups/skills/<timestamp>/. If the destination already exists, the move is rejected and no changes are made."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -345,4 +382,126 @@ async fn copy_dir(source: &Path, destination: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ToolContext;
+    use serde_json::json;
+
+    fn make_ctx() -> ToolContext {
+        ToolContext::new(std::env::current_dir().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn list_skills_discovers_project_skills() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = temp.path().join(".neo").join("skills").join("my-skill");
+        fs::create_dir_all(&skills_dir).await.expect("mkdir");
+        fs::write(
+            skills_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: test\ntype: prompt\n---\n\nbody",
+        )
+        .await
+        .expect("write");
+
+        let tool = ListSkillsTool::new(temp.path(), None, Vec::new());
+        let result = tool.execute(&make_ctx(), json!({})).await.expect("execute");
+        assert!(!result.is_error);
+        assert!(result.content.contains("[project]"));
+        assert!(result.content.contains("my-skill"));
+    }
+
+    #[tokio::test]
+    async fn create_skill_writes_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = CreateSkillTool::new(temp.path());
+        let result = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "test-skill",
+                    "description": "A test skill",
+                    "body": "# Body\n\nInstructions."
+                }),
+            )
+            .await
+            .expect("execute");
+        assert!(!result.is_error);
+        assert!(result.content.contains("Created skill at"));
+
+        let path = temp
+            .path()
+            .join("skills")
+            .join("test-skill")
+            .join("SKILL.md");
+        let content = fs::read_to_string(&path).await.expect("read");
+        assert!(content.contains("name: test-skill"));
+        assert!(content.contains("type: prompt"));
+    }
+
+    #[tokio::test]
+    async fn create_skill_supports_custom_type() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = CreateSkillTool::new(temp.path());
+        let result = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "name": "inline-skill",
+                    "description": "An inline skill",
+                    "skill_type": "inline",
+                    "body": "# Body"
+                }),
+            )
+            .await
+            .expect("execute");
+        assert!(!result.is_error);
+
+        let path = temp
+            .path()
+            .join("skills")
+            .join("inline-skill")
+            .join("SKILL.md");
+        let content = fs::read_to_string(&path).await.expect("read");
+        assert!(content.contains("type: inline"));
+    }
+
+    #[tokio::test]
+    async fn move_skill_moves_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("skills").join("to-move");
+        fs::create_dir_all(&source).await.expect("mkdir");
+        fs::write(source.join("SKILL.md"), "skill content")
+            .await
+            .expect("write");
+
+        let dest_parent = temp.path().join("bundles");
+        let tool = MoveSkillTool::new(temp.path());
+        let result = tool
+            .execute(
+                &make_ctx(),
+                json!({
+                    "source": source.to_str().unwrap(),
+                    "destination_parent": dest_parent.to_str().unwrap()
+                }),
+            )
+            .await
+            .expect("execute");
+        assert!(!result.is_error);
+        assert!(result.content.contains("Moved"));
+        assert!(dest_parent.join("to-move").join("SKILL.md").exists());
+    }
+
+    #[test]
+    fn tool_descriptions_are_non_empty() {
+        assert!(
+            !ListSkillsTool::new(".", None, Vec::new())
+                .description()
+                .is_empty()
+        );
+        assert!(!CreateSkillTool::new(".").description().is_empty());
+        assert!(!MoveSkillTool::new(".").description().is_empty());
+    }
 }

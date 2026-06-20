@@ -10,12 +10,23 @@ use crate::{Tool, ToolContext, ToolError, ToolFuture, ToolResult};
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum SummarizeScope {
-    SessionId { session_id: String },
-    Days { days: u32 },
+    /// Summarize a single session by its ID.
+    SessionId {
+        /// The session ID to summarize.
+        #[schemars(description = "The session ID to summarize.")]
+        session_id: String,
+    },
+    /// Summarize sessions from the last N days.
+    Days {
+        /// Number of days to look back from now.
+        #[schemars(description = "Number of days to look back from now.")]
+        days: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SummarizeSessionsArgs {
+    /// Scope of the summarization: either a specific `session_id` or a number of days.
     #[serde(flatten)]
     pub scope: SummarizeScope,
 }
@@ -39,7 +50,16 @@ impl Tool for SummarizeSessionsTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read one or more local session transcripts and return a compact, human-readable summary suitable for turning the work into a reusable skill."
+        "Read one or more local session transcripts and return a compact, human-readable summary suitable for turning the work into a reusable skill.\n\n\
+         Use this tool when you need to review past work, extract patterns, or create a skill from a completed conversation.\n\n\
+         Parameters:\n\
+         - `session_id`: summarize a single specific session.\n\
+         - `days`: summarize all sessions from the last N days.\n\n\
+         Output format:\n\
+         - Each summarized session is prefixed with `Session: <id>`.\n\
+         - User and assistant messages are grouped by turn.\n\
+         - Tool executions are listed under the turn in which they occurred.\n\
+         - A `<system>...</system>` status block is appended with the number of sessions summarized and any errors."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -74,7 +94,12 @@ impl Tool for SummarizeSessionsTool {
                     }
                 }
             }
-            Ok(ToolResult::ok(summaries.join("\n\n---\n\n")))
+            let count = summaries.len();
+            let body = summaries.join("\n\n---\n\n");
+            let message = format!("Summarized {count} session(s).");
+            Ok(ToolResult::ok(format!(
+                "{body}\n\n<system>{message}</system>"
+            )))
         })
     }
 }
@@ -192,4 +217,88 @@ async fn summarize_session(path: &Path) -> Result<String, ToolError> {
         }
     }
     Ok(lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ToolContext;
+    use serde_json::json;
+
+    fn make_ctx() -> ToolContext {
+        ToolContext::new(std::env::current_dir().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn summarize_sessions_by_id_returns_summary_and_status() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_id = "session_550e8400-e29b-41d4-a716-446655440000";
+        let session_dir = temp.path().join("wd_test_1234567890ab");
+        fs::create_dir_all(&session_dir).await.expect("mkdir");
+        fs::write(
+            session_dir.join(format!("{session_id}.jsonl")),
+            json!({
+                "type": "user",
+                "content": {"text": "hello"}
+            })
+            .to_string()
+                + "\n"
+                + &json!({
+                    "type": "assistant",
+                    "content": {"text": "hi there"}
+                })
+                .to_string(),
+        )
+        .await
+        .expect("write session");
+
+        fs::write(
+            temp.path().join("session_index.jsonl"),
+            json!({
+                "session_id": session_id,
+                "session_dir": session_dir.to_str().unwrap(),
+                "timestamp_ms": 1_704_067_200_000_u64
+            })
+            .to_string()
+                + "\n",
+        )
+        .await
+        .expect("write index");
+
+        let tool = SummarizeSessionsTool::new(temp.path());
+        let result = tool
+            .execute(&make_ctx(), json!({"session_id": session_id}))
+            .await
+            .expect("execute");
+        assert!(!result.is_error);
+        assert!(result.content.contains("Session:"));
+        assert!(result.content.contains("Turn 1 user: hello"));
+        assert!(result.content.contains("Turn 1 assistant: hi there"));
+        assert!(
+            result
+                .content
+                .contains("<system>Summarized 1 session(s).</system>")
+        );
+    }
+
+    #[tokio::test]
+    async fn summarize_sessions_by_days_returns_empty_when_no_index() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = SummarizeSessionsTool::new(temp.path());
+        let result = tool
+            .execute(&make_ctx(), json!({"days": 7}))
+            .await
+            .expect("execute");
+        assert!(!result.is_error);
+        assert!(
+            result
+                .content
+                .contains("No sessions found in the requested time range.")
+        );
+    }
+
+    #[test]
+    fn tool_description_is_non_empty() {
+        assert!(!SummarizeSessionsTool::new(".").description().is_empty());
+    }
 }

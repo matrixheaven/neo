@@ -41,6 +41,7 @@ fn bash_model_schema_matches_kimi_style_shape() {
         "run_in_background",
         "description",
         "disable_timeout",
+        "max_output_bytes",
     ] {
         assert!(
             properties
@@ -140,7 +141,10 @@ async fn task_list_defaults_to_active_background_tasks() {
         .run("TaskList", &context, json!({}))
         .await
         .expect("TaskList should run");
-    assert_eq!(empty.content, "active_background_tasks: 0");
+    assert_eq!(
+        empty.content,
+        "active_background_tasks: 0\nNo background tasks found."
+    );
 
     let started = registry
         .run(
@@ -760,6 +764,66 @@ async fn terminate_process(pid: &str) {
             .status();
         let _ = wait_for_process_exit(pid).await;
     }
+}
+
+#[tokio::test]
+async fn bash_description_contains_usage_guidelines() {
+    let registry = ToolRegistry::with_builtin_tools();
+    let bash = registry
+        .specs()
+        .into_iter()
+        .find(|spec| spec.name == "Bash")
+        .expect("Bash tool spec");
+
+    assert!(
+        bash.description
+            .contains("Translate these to a dedicated tool")
+    );
+    assert!(bash.description.contains("Output:"));
+    assert!(bash.description.contains("run_in_background=true"));
+    assert!(bash.description.contains("TaskOutput"));
+    assert!(bash.description.contains("TaskStop"));
+}
+
+#[tokio::test]
+async fn bash_background_start_includes_task_id_and_next_steps() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_permission_policy(PermissionPolicy::allow_all());
+
+    let started = registry
+        .run(
+            "Bash",
+            &context,
+            json!({
+                "command": "sleep 1",
+                "run_in_background": true,
+                "description": "next-step test"
+            }),
+        )
+        .await
+        .expect("background bash should start");
+
+    assert!(started.content.contains("task_id:"));
+    assert!(started.content.contains("next_step:"));
+    assert!(started.content.contains("TaskOutput"));
+    assert!(started.content.contains("TaskStop"));
+    assert!(started.content.contains("automatic_notification: true"));
+
+    let details = started.details.expect("start details");
+    assert_eq!(details["status"], "running");
+    assert_eq!(details["description"], "next-step test");
+    assert!(details["next_steps"].is_array());
+
+    let _ = registry
+        .run(
+            "TaskStop",
+            &context,
+            json!({ "task_id": details["task_id"] }),
+        )
+        .await;
 }
 
 fn process_exists(pid: &str) -> bool {

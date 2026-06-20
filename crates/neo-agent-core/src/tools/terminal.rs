@@ -27,24 +27,68 @@ const TERMINAL_READ_SETTLE_INTERVAL: Duration = Duration::from_millis(10);
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TerminalInput {
+    /// The operation to perform: `start`, `write`, `read`, `resize`, or `stop`.
     mode: TerminalMode,
+    /// The shell command to launch in the PTY. Required when `mode` is `start`.
     command: Option<String>,
+    /// The session handle returned by a previous `start` call.
+    /// Required for `write`, `read`, `resize`, and `stop`.
     handle: Option<String>,
+    /// Text to send to the PTY. Required when `mode` is `write`.
+    /// Newlines are translated to carriage returns as needed.
     input: Option<String>,
+    /// Terminal width in columns.
+    /// Required when `mode` is `resize`; optional when `mode` is `start` (default 80).
     cols: Option<u16>,
+    /// Terminal height in rows.
+    /// Required when `mode` is `resize`; optional when `mode` is `start` (default 24).
     rows: Option<u16>,
+    /// Maximum number of bytes of output to return for `read` and `stop`.
+    /// Defaults to the runtime output limit when omitted.
     max_output_bytes: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum TerminalMode {
+    /// Launch a new PTY session running `command`.
     Start,
+    /// Send `input` to the PTY session identified by `handle`.
     Write,
+    /// Read buffered output from the PTY session identified by `handle`.
     Read,
+    /// Resize the PTY session identified by `handle` to `cols` x `rows`.
     Resize,
+    /// Stop the PTY session identified by `handle` and collect remaining output.
     Stop,
 }
+
+const DESCRIPTION: &str = r"Operate a real PTY (pseudo-terminal) session with start/write/read/resize/stop modes.
+
+Use `Terminal` for interactive or long-running programs that need a persistent terminal (e.g. REPLs, `htop`, `less`, interactive `ssh`, `npm` prompts, or a persistent shell). For one-shot commands, prefer `Bash`.
+
+**Modes:**
+- `start`: Launch a new PTY running the given `command`. Returns a `handle` that must be used for subsequent operations. Optional `cols` and `rows` set the terminal size (default 80x24).
+- `write`: Send input to the PTY. Requires `handle` and `input`. Newlines in `input` are translated to carriage returns as needed.
+- `read`: Read buffered output from the PTY. Requires `handle`. Returns the output produced since the last read, the current status (`running` or `exited`), and the exit code if the process has finished. Waits briefly for new output if the process is still running.
+- `resize`: Change the PTY dimensions. Requires `handle`, `cols`, and `rows`.
+- `stop`: Shut down the PTY, collect any remaining output, and release the handle. Requires `handle`.
+
+**Parameters:**
+- `mode` (required): One of `start`, `write`, `read`, `resize`, `stop`.
+- `command`: The shell command to launch. Required when `mode=start`.
+- `handle`: The session handle returned by a previous `start`. Required for `write`, `read`, `resize`, and `stop`.
+- `input`: Text to send to the PTY. Required when `mode=write`.
+- `cols`: Terminal width in columns. Required when `mode=resize`; optional when `mode=start` (default 80).
+- `rows`: Terminal height in rows. Required when `mode=resize`; optional when `mode=start` (default 24).
+- `max_output_bytes`: Maximum bytes of output to return for `read` and `stop`. Defaults to the runtime limit.
+
+**Output:**
+The tool returns a status block with `handle`, `status`, and mode-specific fields (e.g. `exit_code`, `output`, `cols`, `rows`). Output may be truncated; a `truncated: true` marker is appended when this happens.
+
+**Security:**
+- Avoid sending secrets to the terminal.
+- Do not use the terminal to modify files outside the workspace unless explicitly instructed.";
 
 pub struct TerminalTool;
 
@@ -54,7 +98,7 @@ impl Tool for TerminalTool {
     }
 
     fn description(&self) -> &'static str {
-        "Operate a real PTY terminal session with start/write/read/resize/stop modes."
+        DESCRIPTION
     }
 
     fn input_schema(&self) -> serde_json::Value {

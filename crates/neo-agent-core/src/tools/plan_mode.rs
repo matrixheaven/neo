@@ -1,6 +1,8 @@
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{Tool, ToolContext, ToolFuture, ToolResult};
+use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input};
 
 /// Tool that requests entering plan mode.
 ///
@@ -15,9 +17,32 @@ impl Tool for EnterPlanModeTool {
     }
 
     fn description(&self) -> &'static str {
-        "Enter plan mode. In plan mode you can read and explore code but cannot make edits \
-         except to the plan file. Use this when you need to investigate and plan before \
-         making changes."
+        "Use this tool proactively when you are about to start a non-trivial implementation task. \
+         Getting user sign-off on your approach via ExitPlanMode before writing code prevents wasted effort.\n\n\
+         Use it when ANY of these conditions apply:\n\
+         1. New Feature Implementation - e.g. \"Add a caching layer to the API\".\n\
+         2. Multiple Valid Approaches - e.g. \"Optimize database queries\" (indexing vs rewrite vs caching).\n\
+         3. Code Modifications - e.g. \"Refactor auth module to support OAuth\".\n\
+         4. Architectural Decisions - e.g. \"Add WebSocket support\".\n\
+         5. Multi-File Changes - involves more than 2-3 files.\n\
+         6. Unclear Requirements - need exploration to understand scope.\n\
+         7. User Preferences Matter - if user input would materially change the implementation approach.\n\n\
+         Permission mode notes:\n\
+         - EnterPlanMode enters plan mode automatically without an approval prompt in all permission modes.\n\
+         - In yolo and manual modes, ExitPlanMode still presents the plan to the user for approval.\n\
+         - In auto permission mode, do not use AskUserQuestion; make the best decision from available context.\n\
+         - In auto permission mode, ExitPlanMode exits plan mode without asking the user.\n\
+         - Use EnterPlanMode only when planning itself adds value.\n\n\
+         When NOT to use:\n\
+         - Single-line or few-line fixes (typos, obvious bugs, small tweaks).\n\
+         - User gave very specific, detailed instructions.\n\
+         - Pure research/exploration tasks.\n\n\
+         What happens in plan mode:\n\
+         1. Identify 2-3 key questions about the codebase that are critical to your plan. If you are not confident about the codebase structure or relevant code paths, use read-only exploration tools first.\n\
+         2. Explore the codebase using Glob, Grep, Read, and other read-only tools. Use Bash only when needed; Bash follows the normal permission mode and rules.\n\
+         3. Design a concrete, step-by-step plan.\n\
+         4. Write your plan to the current plan file with Write or Edit.\n\
+         5. Present your plan to the user via ExitPlanMode for approval."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -40,6 +65,36 @@ impl Tool for EnterPlanModeTool {
     }
 }
 
+/// A single user-selectable option surfaced at plan approval time.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExitPlanModeOption {
+    /// Short name for this option (1-8 words). Append "(Recommended)" if you recommend this option.
+    #[schemars(
+        description = "Short name for this option (1-8 words). Append \"(Recommended)\" if you recommend this option."
+    )]
+    pub label: String,
+    /// Brief summary of this approach and its trade-offs.
+    #[schemars(description = "Brief summary of this approach and its trade-offs.")]
+    pub description: Option<String>,
+}
+
+/// Input payload for [`ExitPlanModeTool`].
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExitPlanModeInput {
+    /// Optional brief summary of the plan for the user to review. The canonical plan content should already be written to the plan file.
+    #[schemars(
+        description = "Optional brief summary of the plan for the user to review. The plan itself should already be written to the plan file."
+    )]
+    pub plan_summary: Option<String>,
+    /// Optional alternative approaches for the user to choose from.
+    #[schemars(
+        description = "When the plan contains multiple alternative approaches, list them here so the user can choose which one to execute. Provide up to 3 options; 2-3 distinct approaches work best when the plan offers a real choice. Passing a single option is allowed and is equivalent to a plain plan approval."
+    )]
+    pub options: Option<Vec<ExitPlanModeOption>>,
+}
+
 /// Tool that requests exiting plan mode.
 ///
 /// When the model calls this tool, the runtime intercepts the `terminate`
@@ -53,52 +108,90 @@ impl Tool for ExitPlanModeTool {
     }
 
     fn description(&self) -> &'static str {
-        "Exit plan mode and present the plan for approval. \
-         The user will review the plan and decide whether to proceed."
+        "Use this tool when you are in plan mode and have finished writing your plan to the plan file and are ready for user approval.\n\n\
+         How this tool works:\n\
+         - You should have already written your plan to the plan file specified in the plan mode reminder.\n\
+         - This tool does NOT take the plan content as a parameter - it reads the plan from the file you wrote.\n\
+         - The user will see the contents of your plan file when they review it. In auto permission mode, the tool reads the file and exits plan mode without asking the user.\n\n\
+         When to use:\n\
+         Only use this tool for tasks that require planning implementation steps. For research tasks (searching files, reading code, understanding the codebase), do NOT use this tool.\n\n\
+         Multiple approaches:\n\
+         - If your plan contains multiple alternative approaches, pass them via the `options` parameter so the user can choose which approach to execute.\n\
+         - Each option should have a concise label and a brief description of trade-offs.\n\
+         - If you recommend one option, list it first and append \"(Recommended)\" to its label.\n\
+         - In yolo and manual modes, the user will see all options alongside Reject and Revise choices.\n\
+         - Provide up to 3 options; the host adds the standard rejection and revision controls.\n\
+         - Passing a single option is allowed and is equivalent to a plain plan approval.\n\
+         - Do NOT use \"Reject\", \"Reject and Exit\", \"Revise\", or \"Approve\" as option labels - these are reserved by the system.\n\n\
+         Before using:\n\
+         - In auto permission mode, do NOT use AskUserQuestion; make the best decision from available context.\n\
+         - In auto permission mode, this tool exits plan mode without asking the user.\n\
+         - In yolo and manual modes, this tool still presents the plan to the user for approval.\n\
+         - If auto permission mode is not active and you have unresolved questions, use AskUserQuestion first.\n\
+         - If auto permission mode is not active and you have multiple approaches and have not narrowed down yet, consider using AskUserQuestion first to let the user choose, then write a plan for the chosen approach only.\n\
+         - Once your plan is finalized, use THIS tool to request approval.\n\
+         - Do NOT use AskUserQuestion to ask \"Is this plan OK?\" or \"Should I proceed?\" - that is exactly what ExitPlanMode does.\n\
+         - If rejected, revise based on feedback and call ExitPlanMode again."
     }
 
     fn input_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "plan_summary": {
-                    "type": "string",
-                    "description": "A brief summary of the plan for the user to review"
-                },
-                "options": {
-                    "type": "array",
-                    "description": "Optional 1-3 custom approval options (e.g. different approaches). Labels must be unique (case-insensitive). Reserved labels (Approve, Reject, Revise, 'Reject and Exit') are not allowed.",
-                    "maxItems": 3,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "label": {
-                                "type": "string",
-                                "maxLength": 80,
-                                "description": "Short label for this option"
-                            },
-                            "description": {
-                                "type": "string",
-                                "description": "Optional description explaining this option"
-                            }
-                        },
-                        "required": ["label"]
-                    }
-                }
-            },
-            "required": ["plan_summary"]
-        })
+        neo_ai::tool_schema::schema_for::<ExitPlanModeInput>()
     }
 
     fn execute<'a>(&'a self, _ctx: &'a ToolContext, input: Value) -> ToolFuture<'a> {
         Box::pin(async move {
+            let input: ExitPlanModeInput = parse_input(self.name(), input)?;
+
+            if let Some(ref options) = input.options {
+                validate_exit_plan_mode_options(options)?;
+            }
+
             let summary = input
-                .get("plan_summary")
-                .and_then(Value::as_str)
+                .plan_summary
+                .as_deref()
+                .filter(|summary| !summary.trim().is_empty())
                 .unwrap_or("No summary provided");
             Ok(ToolResult::ok(format!("Exiting plan mode. Plan summary: {summary}")).terminate())
         })
     }
+}
+
+/// Validates that option labels are unique and do not collide with reserved approval labels.
+fn validate_exit_plan_mode_options(options: &[ExitPlanModeOption]) -> Result<(), ToolError> {
+    if options.len() > 3 {
+        return Err(ToolError::InvalidInput {
+            tool: "ExitPlanMode".to_owned(),
+            message: format!(
+                "options must contain at most 3 items, got {}",
+                options.len()
+            ),
+        });
+    }
+
+    let reserved: &[&str] = &["approve", "reject", "revise", "reject and exit"];
+    let mut seen = std::collections::HashSet::new();
+    for option in options {
+        let normalized = option.label.trim().to_lowercase();
+        if normalized.is_empty() {
+            return Err(ToolError::InvalidInput {
+                tool: "ExitPlanMode".to_owned(),
+                message: "option label must not be empty".to_owned(),
+            });
+        }
+        if reserved.contains(&normalized.as_str()) {
+            return Err(ToolError::InvalidInput {
+                tool: "ExitPlanMode".to_owned(),
+                message: format!("option label `{}` is reserved", option.label),
+            });
+        }
+        if !seen.insert(normalized.clone()) {
+            return Err(ToolError::InvalidInput {
+                tool: "ExitPlanMode".to_owned(),
+                message: format!("duplicate option label `{}`", option.label),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -131,7 +224,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exit_plan_mode_handles_missing_summary() {
+    async fn exit_plan_mode_allows_no_summary() {
         let ctx = ToolContext::new(".").expect("context");
         let result = ExitPlanModeTool
             .execute(&ctx, json!({}))
@@ -139,6 +232,76 @@ mod tests {
             .expect("execute");
         assert!(result.terminate);
         assert!(result.content.contains("No summary provided"));
+    }
+
+    #[tokio::test]
+    async fn exit_plan_mode_accepts_options() {
+        let ctx = ToolContext::new(".").expect("context");
+        let result = ExitPlanModeTool
+            .execute(
+                &ctx,
+                json!({
+                    "plan_summary": "Add feature",
+                    "options": [
+                        {"label": "Approach A", "description": "Simple"},
+                        {"label": "Approach B (Recommended)", "description": "Fast"}
+                    ]
+                }),
+            )
+            .await
+            .expect("execute");
+        assert!(result.terminate);
+        assert!(result.content.contains("Add feature"));
+    }
+
+    #[tokio::test]
+    async fn exit_plan_mode_rejects_reserved_label() {
+        let ctx = ToolContext::new(".").expect("context");
+        let result = ExitPlanModeTool
+            .execute(
+                &ctx,
+                json!({
+                    "options": [{"label": "Approve"}]
+                }),
+            )
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn exit_plan_mode_rejects_duplicate_label() {
+        let ctx = ToolContext::new(".").expect("context");
+        let result = ExitPlanModeTool
+            .execute(
+                &ctx,
+                json!({
+                    "options": [
+                        {"label": "Same"},
+                        {"label": "same"}
+                    ]
+                }),
+            )
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn exit_plan_mode_rejects_too_many_options() {
+        let ctx = ToolContext::new(".").expect("context");
+        let result = ExitPlanModeTool
+            .execute(
+                &ctx,
+                json!({
+                    "options": [
+                        {"label": "A"},
+                        {"label": "B"},
+                        {"label": "C"},
+                        {"label": "D"}
+                    ]
+                }),
+            )
+            .await;
+        assert!(result.is_err());
     }
 
     #[test]
@@ -149,15 +312,48 @@ mod tests {
     }
 
     #[test]
-    fn exit_plan_mode_schema_requires_summary() {
+    fn exit_plan_mode_schema_does_not_require_summary() {
         let schema = ExitPlanModeTool.input_schema();
         assert_eq!(schema["type"], "object");
-        assert!(schema["properties"]["plan_summary"]["type"].is_string());
+        let plan_summary = resolve_schema_ref(&schema, &schema["properties"]["plan_summary"]);
         assert!(
-            schema["required"]
-                .as_array()
-                .is_some_and(|arr| { arr.iter().any(|v| v == "plan_summary") })
+            plan_summary["type"].is_string()
+                || plan_summary["type"].as_array().is_some_and(|types| {
+                    types.iter().any(|t| t == "string") && types.iter().any(|t| t == "null")
+                })
+                || plan_summary.get("anyOf").is_some()
+                || plan_summary.get("oneOf").is_some(),
+            "plan_summary schema should be a string or optional string, got: {plan_summary}"
         );
+        let required = schema["required"].as_array();
+        assert!(!required.is_some_and(|arr| { arr.iter().any(|v| v == "plan_summary") }));
+    }
+
+    #[test]
+    fn exit_plan_mode_schema_has_options() {
+        let schema = ExitPlanModeTool.input_schema();
+        let options = resolve_schema_ref(&schema, &schema["properties"]["options"]);
+        assert!(
+            options["type"] == "array"
+                || options["type"].as_array().is_some_and(|types| {
+                    types.iter().any(|t| t == "array") && types.iter().any(|t| t == "null")
+                })
+                || options.get("anyOf").is_some()
+                || options.get("oneOf").is_some(),
+            "options schema should be an array or optional array, got: {options}"
+        );
+    }
+
+    fn resolve_schema_ref<'schema>(root: &'schema Value, node: &'schema Value) -> &'schema Value {
+        if let Some(reference) = node.get("$ref").and_then(Value::as_str) {
+            let defs = root
+                .get("$defs")
+                .or_else(|| root.get("definitions"))
+                .expect("schema defs");
+            let name = reference.split('/').next_back().expect("ref name");
+            return &defs[name];
+        }
+        node
     }
 
     #[test]
