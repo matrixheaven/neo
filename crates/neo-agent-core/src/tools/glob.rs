@@ -8,15 +8,32 @@ use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, s
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct GlobInput {
+    /// Glob pattern to match files and/or directories.
+    ///
+    /// Supports `*`, `**`, and brace expansion such as `*.{rs,toml}` or
+    /// `{src,tests}/**/*.rs`.
     pattern: String,
+    /// Directory to search in. Relative paths resolve against the working
+    /// directory; paths outside the working directory must be absolute.
+    /// Defaults to the current working directory.
     #[serde(default = "default_path")]
     path: std::path::PathBuf,
+    /// Whether to include directories in results. Defaults to true. Set false
+    /// to return only files.
+    #[serde(default = "default_include_dirs")]
+    include_dirs: bool,
+    /// Maximum number of matching paths to return. Defaults to 100. Lower this
+    /// only when you need a quick peek; refine the pattern when the cap is hit.
     #[serde(default = "default_max_matches")]
     max_matches: usize,
 }
 
 fn default_path() -> std::path::PathBuf {
     ".".into()
+}
+
+const fn default_include_dirs() -> bool {
+    true
 }
 
 const fn default_max_matches() -> usize {
@@ -31,7 +48,31 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &'static str {
-        "Find workspace files matching a glob pattern (supports *, **, and brace expansion)."
+        "Find files and optionally directories by glob pattern, sorted by modification time \
+        (most recent first).\
+        \
+        Good patterns:\
+        - `*.ts` — files in the current directory matching an extension\
+        - `src/**/*.ts` — recursive walk with a subdirectory anchor and extension\
+        - `**/*.py` — recursive walk from the search root for an extension\
+        - `*.{ts,tsx}` — brace expansion is supported; expanded into `*.ts` and `*.tsx` before walking\
+        - `{src,test}/**/*.ts` — cartesian brace expansion is supported too\
+        \
+        Results are capped at the first `max_matches` matching paths (walk order, not global \
+        modification-time order). If a search returns more, a truncation marker is appended with \
+        the count of matches seen so far. Refine the pattern (extension, subdirectory) when the cap \
+        is hit, or call again with a narrower anchor.\
+        \
+        Large-directory caveat — avoid recursing into dependency / build output even with an anchor:\
+        - `node_modules/**/*.js`, `.venv/**/*.py`, `__pycache__/**`, `target/**` all match \
+          technically but typically produce thousands of results that truncate at the match cap and \
+          waste the caller context. Prefer specific subpaths like `node_modules/react/src/**/*.js`.\
+        \
+        Parameters:\
+        - pattern: Glob pattern to match files/directories.\
+        - path: Directory to search in. Defaults to the current working directory.\
+        - include_dirs: Whether to include directories in results. Defaults to true.\
+        - max_matches: Maximum number of matching paths to return. Defaults to 100."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -64,13 +105,16 @@ impl Tool for GlobTool {
             })?;
 
             let max_matches = input.max_matches;
+            let include_dirs = input.include_dirs;
             let result = tokio::task::spawn_blocking(move || {
                 let mut matches: Vec<(String, std::time::SystemTime)> = Vec::new();
+                let mut total_matched: usize = 0;
                 for entry in WalkBuilder::new(&walk_root).standard_filters(true).build() {
                     let Ok(entry) = entry else {
                         continue;
                     };
-                    if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                    let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+                    if is_dir && !include_dirs {
                         continue;
                     }
                     // Match the path relative to the walk root so that the
@@ -82,6 +126,7 @@ impl Tool for GlobTool {
                     if !glob_set.is_match(relative) {
                         continue;
                     }
+                    total_matched += 1;
                     // Display the path relative to the workspace root for
                     // consistency with grep / find.
                     let display = entry
@@ -93,22 +138,36 @@ impl Tool for GlobTool {
                         .ok()
                         .and_then(|m| m.modified().ok())
                         .unwrap_or(std::time::UNIX_EPOCH);
-                    matches.push((display.display().to_string(), mtime));
+                    let suffix = if is_dir { "/" } else { "" };
+                    matches.push((format!("{}{suffix}", display.display()), mtime));
                 }
                 // Sort by modification time, most recent first.
                 matches.sort_by_key(|b| std::cmp::Reverse(b.1));
-                Ok::<_, std::io::Error>(
-                    matches
-                        .into_iter()
-                        .take(max_matches)
-                        .map(|(p, _)| p)
-                        .collect::<Vec<_>>(),
-                )
+                let truncated = matches.len() > max_matches;
+                let paths: Vec<_> = matches
+                    .into_iter()
+                    .take(max_matches)
+                    .map(|(p, _)| p)
+                    .collect();
+                Ok::<_, std::io::Error>((paths, total_matched, truncated))
             })
             .await
             .map_err(std::io::Error::other)??;
 
-            Ok(ToolResult::ok(result.join("\n")))
+            let (paths, total_matched, truncated) = result;
+            let mut lines = paths;
+            if truncated {
+                lines.push(format!(
+                    "[Truncated at {max_matches} matches — {total_matched} matched so far, use a more specific pattern]"
+                ));
+                lines.push(format!(
+                    "Only the first {max_matches} matches are returned."
+                ));
+            } else if !lines.is_empty() {
+                lines.push(format!("Found {} matches", lines.len()));
+            }
+
+            Ok(ToolResult::ok(lines.join("\n")))
         })
     }
 }
@@ -162,11 +221,18 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("sub")).expect("mkdir sub");
         std::fs::write(dir.path().join("sub").join("qux.rs"), "// sub").expect("write qux.rs");
         std::fs::create_dir_all(dir.path().join("sub/deep")).expect("mkdir sub/deep");
-        std::fs::write(dir.path().join("sub/deep/inner.rs"), "// deep").expect("write inner.rs");
+        std::fs::write(dir.path().join("sub/deep").join("inner.rs"), "// deep")
+            .expect("write inner.rs");
         dir
     }
 
-    async fn run_glob(ctx: &ToolContext, pattern: &str, path: &str, max_matches: usize) -> String {
+    async fn run_glob(
+        ctx: &ToolContext,
+        pattern: &str,
+        path: &str,
+        max_matches: usize,
+        include_dirs: bool,
+    ) -> String {
         GlobTool
             .execute(
                 ctx,
@@ -174,6 +240,7 @@ mod tests {
                     "pattern": pattern,
                     "path": path,
                     "max_matches": max_matches,
+                    "include_dirs": include_dirs,
                 }),
             )
             .await
@@ -188,7 +255,7 @@ mod tests {
             .expect("context")
             .with_permission_policy(PermissionPolicy::allow_all());
 
-        let result = run_glob(&ctx, "*.rs", ".", 100).await;
+        let result = run_glob(&ctx, "*.rs", ".", 100, true).await;
         // `*.rs` with literal_separator only matches root-level .rs files.
         assert!(result.contains("foo.rs"));
         assert!(!result.contains("bar.txt"));
@@ -203,7 +270,7 @@ mod tests {
             .expect("context")
             .with_permission_policy(PermissionPolicy::allow_all());
 
-        let result = run_glob(&ctx, "*.{rs,toml}", ".", 100).await;
+        let result = run_glob(&ctx, "*.{rs,toml}", ".", 100, true).await;
         assert!(result.contains("foo.rs"));
         assert!(result.contains("baz.toml"));
         assert!(!result.contains("bar.txt"));
@@ -217,9 +284,19 @@ mod tests {
             .with_permission_policy(PermissionPolicy::allow_all());
 
         // `*.{rs,toml}` matches two files; cap at one.
-        let result = run_glob(&ctx, "*.{rs,toml}", ".", 1).await;
-        let count = result.lines().filter(|l| !l.is_empty()).count();
+        let result = run_glob(&ctx, "*.{rs,toml}", ".", 1, true).await;
+        let count = result
+            .lines()
+            .filter(|l| {
+                !l.starts_with('[')
+                    && !l.starts_with("Only")
+                    && !l.is_empty()
+                    && !l.starts_with("Found")
+            })
+            .count();
         assert_eq!(count, 1);
+        assert!(result.contains("Truncated at 1 matches"));
+        assert!(result.contains("2 matched so far"));
     }
 
     #[tokio::test]
@@ -229,7 +306,7 @@ mod tests {
             .expect("context")
             .with_permission_policy(PermissionPolicy::allow_all());
 
-        let result = run_glob(&ctx, "*.xyz", ".", 100).await;
+        let result = run_glob(&ctx, "*.xyz", ".", 100, true).await;
         assert!(result.is_empty());
     }
 
@@ -242,7 +319,7 @@ mod tests {
 
         // Searching in `sub` with `*.rs` matches `qux.rs` relative to `sub`,
         // displayed as `sub/qux.rs` relative to the workspace.
-        let result = run_glob(&ctx, "*.rs", "sub", 100).await;
+        let result = run_glob(&ctx, "*.rs", "sub", 100, true).await;
         assert!(result.contains("sub/qux.rs"));
         // `deep/inner.rs` should not match `*.rs` (literal separator).
         assert!(!result.contains("deep/inner.rs"));
@@ -256,10 +333,46 @@ mod tests {
             .with_permission_policy(PermissionPolicy::allow_all());
 
         // `sub/**/*.rs` matches all .rs files under `sub/`.
-        let result = run_glob(&ctx, "sub/**/*.rs", ".", 100).await;
+        let result = run_glob(&ctx, "sub/**/*.rs", ".", 100, true).await;
         assert!(result.contains("sub/qux.rs"));
         assert!(result.contains("sub/deep/inner.rs"));
         assert!(!result.contains("foo.rs"));
+    }
+
+    #[tokio::test]
+    async fn include_dirs_true_returns_directories() {
+        let workspace = setup_workspace();
+        let ctx = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_permission_policy(PermissionPolicy::allow_all());
+
+        let result = run_glob(&ctx, "sub", ".", 100, true).await;
+        assert!(result.contains("sub/"));
+    }
+
+    #[tokio::test]
+    async fn include_dirs_false_filters_directories() {
+        let workspace = setup_workspace();
+        let ctx = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_permission_policy(PermissionPolicy::allow_all());
+
+        let result = run_glob(&ctx, "sub", ".", 100, false).await;
+        assert!(!result.contains("sub/"));
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn truncation_message_includes_count() {
+        let workspace = setup_workspace();
+        let ctx = ToolContext::new(workspace.path())
+            .expect("context")
+            .with_permission_policy(PermissionPolicy::allow_all());
+
+        let result = run_glob(&ctx, "**/*.rs", ".", 2, true).await;
+        assert!(result.contains("[Truncated at 2 matches"));
+        assert!(result.contains("matched so far"));
+        assert!(result.contains("Only the first 2 matches are returned."));
     }
 
     #[test]
