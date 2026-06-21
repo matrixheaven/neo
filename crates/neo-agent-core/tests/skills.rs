@@ -2,8 +2,10 @@ use std::{collections::HashMap, fs, path::Path};
 
 use neo_agent_core::skills::{
     LoadedSkill, SkillArgument, SkillInvocation, SkillLoadError, SkillManifest, SkillSource,
-    SkillStore, SkillType, builtin::builtin_skills, discovery::discover_skills, expand_skill_body,
-    load_skill_file, parse_skill_invocation,
+    SkillStore, SkillType,
+    builtin::{builtin_skills, extract_builtin_skills},
+    discovery::discover_skills,
+    expand_skill_body, load_skill_file, parse_skill_invocation,
 };
 use serde_json::json;
 
@@ -236,7 +238,29 @@ fn builtin_skills_load() {
     let skills = builtin_skills().unwrap();
     let names: Vec<_> = skills.iter().map(|skill| skill.name.as_str()).collect();
 
-    assert!(names.contains(&"define-goal"));
+    assert!(!names.contains(&"define-goal"));
+    assert!(names.contains(&"sub-skill"));
+}
+
+#[test]
+fn extracted_builtins_prune_removed_define_goal() {
+    let dir = tempfile::tempdir().unwrap();
+    let stale_dir = dir.path().join(".builtin").join("define-goal");
+    write(
+        stale_dir.join("SKILL.md"),
+        r"---
+name: define-goal
+description: stale built-in
+---
+stale
+",
+    );
+
+    let skills = extract_builtin_skills(dir.path()).unwrap();
+    let names: Vec<_> = skills.iter().map(|skill| skill.name.as_str()).collect();
+
+    assert!(!stale_dir.exists());
+    assert!(!names.contains(&"define-goal"));
     assert!(names.contains(&"sub-skill"));
 }
 

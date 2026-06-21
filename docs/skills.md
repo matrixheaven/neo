@@ -85,8 +85,6 @@ For example:
 The following skills ship with Neo and can be overridden by project/user
 skills:
 
-- `define-goal`: help the user craft a well-specified `/goal` objective and
-  start it automatically with the `StartGoal` tool.
 - `sub-skill`: review and consolidate skills into hierarchical bundles.
 - `self-evo`: turn recent session work into reusable skills.
 
@@ -94,6 +92,8 @@ Built-in skills are embedded in the binary, but on startup they are released to
 `~/.neo/skills/.builtin/` so you can read and override them. Files in
 `.builtin/` are skipped when scanning user skills, so a regular skill under
 `~/.neo/skills/<name>/` takes precedence over the built-in copy.
+The removed built-in `define-goal` is pruned from `.builtin/` on startup; goal
+authoring now lives in Goal mode and the `ExitGoalMode` review flow.
 
 ## Self-evolution (`self-evo`)
 

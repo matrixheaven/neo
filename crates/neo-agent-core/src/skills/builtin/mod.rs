@@ -5,11 +5,11 @@ use std::{
 
 use crate::skills::{LoadedSkill, SkillManifest, SkillSource};
 
-const DEFINE_GOAL: &str = include_str!("define-goal.md");
 const SUB_SKILL: &str = include_str!("sub-skill.md");
 const SELF_EVO: &str = include_str!("self-evo.md");
 
-const BUILTIN_SOURCES: &[&str] = &[DEFINE_GOAL, SUB_SKILL, SELF_EVO];
+const BUILTIN_SOURCES: &[&str] = &[SUB_SKILL, SELF_EVO];
+const REMOVED_BUILTINS: &[&str] = &["define-goal"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuiltinSkillError {
@@ -27,6 +27,7 @@ pub fn extract_builtin_skills(
 ) -> Result<Vec<LoadedSkill>, BuiltinSkillError> {
     let builtin_dir = user_skills_dir.join(".builtin");
     fs::create_dir_all(&builtin_dir)?;
+    prune_removed_builtins(&builtin_dir)?;
 
     for source in BUILTIN_SOURCES {
         let skill = load_builtin_skill(source)?;
@@ -39,8 +40,12 @@ pub fn extract_builtin_skills(
     }
 
     // Discover extracted skills on disk. This is what the runtime will actually use.
-    crate::skills::discovery::discover_skills(&builtin_dir, SkillSource::Builtin)
-        .map_err(BuiltinSkillError::Load)
+    let skills = crate::skills::discovery::discover_skills(&builtin_dir, SkillSource::Builtin)
+        .map_err(BuiltinSkillError::Load)?;
+    Ok(skills
+        .into_iter()
+        .filter(|skill| !REMOVED_BUILTINS.contains(&skill.name.as_str()))
+        .collect())
 }
 
 pub fn builtin_skills() -> Result<Vec<LoadedSkill>, BuiltinSkillError> {
@@ -65,4 +70,14 @@ fn load_builtin_skill(source: &str) -> Result<LoadedSkill, BuiltinSkillError> {
         body: body.trim_start_matches('\n').to_owned(),
         source: SkillSource::Builtin,
     })
+}
+
+fn prune_removed_builtins(builtin_dir: &Path) -> Result<(), BuiltinSkillError> {
+    for name in REMOVED_BUILTINS {
+        let path = builtin_dir.join(name);
+        if path.exists() {
+            fs::remove_dir_all(path)?;
+        }
+    }
+    Ok(())
 }
