@@ -43,6 +43,15 @@ Use `neo_ai::tool_schema::schema_for<T>()` to generate JSON Schema from small se
 | `EnterPlanMode` | `{}` | tool |
 | `ExitPlanMode` | `{ "plan_summary": "..." }` | tool |
 
+When a `GoalManager` is attached, the registry also exposes goal tools:
+
+| Tool | Arguments | Permission |
+| --- | --- | --- |
+| `StartGoal` | `{ "objective": "...", "completion_criterion": "tests pass", "replace": false }` | tool |
+| `ExitGoalMode` | `{ "objective": "...", "completion_criterion": "...", "phases": ["Explore", "Implement", "Audit"] }` | goal review |
+| `UpdateGoalStatus` | `{ "status": "complete" }` or `{ "status": "blocked", "reason": "need input" }` | tool |
+| `GetGoalStatus` | `{}` | tool |
+
 Additionally, `AskUserQuestion` is available for reverse-RPC user questions but is not
 registered by default (requires a channel sender).
 
@@ -86,8 +95,9 @@ The `neo-agent-core` tool layer separates:
 
 - `ToolRegistry`: lists available tools and their schemas.
 - `PermissionMode`: the active `manual`, `auto`, or `yolo` mode that decides
-  whether risky tool calls require user approval. Plan mode adds a hard guard
-  that cannot be bypassed by `auto` or `yolo`.
+  whether risky tool calls require user approval. Development modes are
+  separate: plan mode adds a hard guard that cannot be bypassed by `auto` or
+  `yolo`, while goal mode is a goal-authoring workflow.
 - `Tool`: owns schema generation and execution.
 - `ToolResult`: returns text content, error state, and optional details.
 
@@ -107,11 +117,11 @@ automatically while still allowing explicit `AskUserQuestion` prompts.
 Tool calls that can open focused blocking dialogs are serialized within their
 model response batch, even when parallel tool execution is enabled. This covers
 non-background `AskUserQuestion`, approval-backed operations such as shell or
-write approvals, and plan review via `ExitPlanMode`. Later tools in the same
-batch do not start until the active dialog-producing call resolves, so the TUI
-never has to stack multiple user-choice dialogs at once. `AskUserQuestion` with
-`background=true` is intentionally non-blocking and may return a task id
-immediately.
+write approvals, plan review via `ExitPlanMode`, and goal review via
+`ExitGoalMode`. Later tools in the same batch do not start until the active
+dialog-producing call resolves, so the TUI never has to stack multiple
+user-choice dialogs at once. `AskUserQuestion` with `background=true` is
+intentionally non-blocking and may return a task id immediately.
 
 ## Example
 

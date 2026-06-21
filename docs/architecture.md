@@ -23,9 +23,10 @@ xtask maintenance commands
 - `neo-ai::providers::fake::FakeModelClient` records requests and replays stream events for tests.
 - `neo-agent-core` contains a runtime turn loop, fake harness, permissions,
   built-in tools (Read, List, Grep, Find, Glob, Write, Edit, Bash, Terminal,
-  TodoList, EnterPlanMode, ExitPlanMode), MCP adapters, local extension adapters,
-  skill loading, JSONL RPC primitives, HTML export, reasoning event persistence,
-  and JSONL session helpers.
+  TodoList, EnterPlanMode, ExitPlanMode, and goal tools when a GoalManager is
+  attached), MCP adapters, local extension adapters, skill loading, JSONL RPC
+  primitives, HTML export, reasoning event persistence, and JSONL session
+  helpers.
 - `neo-agent` exposes the local command-line and TUI surface.
 - `neo-tui` owns terminal rendering via a component-tree architecture:
   - `terminal/`: single-buffer terminal rendering, input parsing, and low-level UI
@@ -60,6 +61,8 @@ individual crate docs in `docs/` for module-by-module status.
 - Keep provider-specific code behind `ModelClient`.
 - Keep model-facing tool schemas small and stable.
 - Treat permissions and session persistence as runtime policy, not provider behavior.
+- Keep permission modes (`manual`, `auto`, `yolo`) separate from development
+  modes (`normal`, `plan`, `goal`).
 - Prefer typed Rust interfaces first; add wire protocols such as MCP at the boundary.
 - Keep hosted/cloud distribution, profile sync, and managed collaboration out
   of the supported local-agent surface until the product deliberately reopens

@@ -163,8 +163,10 @@ Allowed values:
   automatically after hard safety policies, but explicit user questions
   are still allowed.
 
-Plan mode adds a hard guard on top of the active mode: `Write`/`Edit` may
-only modify the active plan file, and some disruptive tools are denied.
+Development modes are separate from permissions. Plan mode adds a hard guard on
+top of the active permission mode: `Write`/`Edit` may only modify the active
+plan file, and some disruptive tools are denied. Goal mode is the structured
+goal-authoring workflow and uses a review dialog before starting a durable goal.
 
 ## TUI Slash Commands
 
@@ -175,6 +177,8 @@ In interactive mode:
 - `/yolo` — Switch to yolo permission mode
 - `/permissions` — Open the permission mode selector
 - `/plan` — Toggle plan mode
+- Shift+Tab — Cycle development mode: normal → plan → goal → normal
+- Shift+Enter, Alt+Enter, Ctrl+J — Insert a newline
 - `/model` — Open the model picker
 - `/provider` — Open the provider list
 - `/resume` — Open session picker

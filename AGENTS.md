@@ -313,6 +313,9 @@ Registered by `neo_agent_core::ToolRegistry::with_builtin_tools()`:
 - `todo` — task list management with `pending`/`in_progress`/`done` statuses.
 - `enter_plan_mode`, `exit_plan_mode` — read-only planning mode toggle.
 
+When a `GoalManager` is attached, Neo also registers `StartGoal`,
+`ExitGoalMode`, `UpdateGoalStatus`, and `GetGoalStatus`.
+
 The `ask_user` tool is available but not registered by default (requires a
 channel sender for reverse-RPC user questions).
 
@@ -332,6 +335,10 @@ The interactive TUI mode (`neo-agent` with no subcommand) provides:
 - **Theme support**: customizable color themes via `.neo/themes/*.json` or
   `~/.neo/themes/*.json`.
 - **Keybinding customization**: configurable keybindings via config.
+- **Development modes**: Shift+Tab cycles normal → plan → goal → normal.
+  Development modes are independent from permission modes; Shift+Enter inserts
+  a newline, and permissions are changed through `/permissions`, `/ask`,
+  `/auto`, or `/yolo`.
 - **Approval dialog**: interactive permission approval for tool execution.
 - **Question dialog**: multi-question interactive dialogs via `ask_user` tool.
 
@@ -340,8 +347,8 @@ The interactive TUI mode (`neo-agent` with no subcommand) provides:
 Neo treats focused overlays as blocking dialogs when they require direct user
 choice or text entry outside the main composer. This includes `/resume`,
 `/model`, `/provider`, session/model/provider pickers, API key or registry input,
-approval prompts, non-background `AskUserQuestion`, and plan review dialogs such
-as `ExitPlanMode`.
+approval prompts, non-background `AskUserQuestion`, plan review dialogs such as
+`ExitPlanMode`, and goal review dialogs such as `ExitGoalMode`.
 
 When a blocking dialog is focused:
 
@@ -362,6 +369,27 @@ configured. This prevents a later Bash approval, Ask User question, or other
 blocking prompt from being displayed while an earlier dialog is still waiting.
 `AskUserQuestion` with `background = true` is the exception: it may return
 immediately and should not force the batch into blocking-dialog serialization.
+
+### Development modes
+
+Neo keeps permission modes and development modes separate. Permission modes are
+only `[manual]`, `[auto]`, and `[yolo]`; they control approval policy for risky
+tools. Development modes are mutually exclusive: `normal`, `plan`, and `goal`.
+
+- Shift+Tab cycles development mode only: normal → plan → goal → normal.
+- Do not bind Shift+Tab or Shift+Enter to permission cycling.
+- Shift+Enter, Alt+Enter, and Ctrl+J all insert a newline.
+- Footer badges render permission first, then development state, for example
+  `[manual] [plan] ...`, `[manual] [goal] ...`, `[manual] [goal•] ...`,
+  `[manual] [goal◌] ...`, or `[manual] [goal✗] ...`.
+- Plan mode must synchronize with runtime `PlanMode`; it is not just a footer
+  flag. The model writes the workspace-scoped plan file and exits through
+  `ExitPlanMode`, which opens a blocking review dialog for Accept / Reject /
+  Revise when reviewable.
+- Goal mode is the AI-assisted goal authoring workflow. The model drafts a
+  structured goal, exits through `ExitGoalMode`, and the review dialog decides
+  whether a durable goal starts. `/goal <objective>` remains the direct
+  user-authored goal path and must not require an AI draft.
 
 ### Image generation
 
@@ -399,20 +427,26 @@ Key manifest fields: `name`, `description`, `type` (`prompt`/`inline`/`flow`),
 `$<name>`, `$0`, `$ARGUMENTS`, and `${NEO_SKILL_DIR}` are expanded at invocation
 time.
 
-Built-in skills: `define-goal`, `sub-skill`, `self-evo`. They are extracted
-into `~/.neo/skills/.builtin/` on startup so users can inspect and override
-them.
+Built-in skills: `sub-skill`, `self-evo`. They are extracted into
+`~/.neo/skills/.builtin/` on startup so users can inspect and override them.
+Removed built-ins such as `define-goal` are pruned/ignored so stale extracted
+copies do not keep loading.
 
 See `docs/skills.md` for the full skill specification.
 
 ### Goals
 
-Goals let Neo work autonomously across turns. The TUI supports `/goal
-<objective>`, `/goal pause`, `/goal resume`, `/goal cancel`, `/goal replace
-<objective>`, and `/goal next <objective>`. Active goals are stored in
-`~/.neo/goals/`. The runtime continues turns automatically while the goal is
-active; the model uses `update_goal_status` to mark completion or blockers. A
-default turn budget of 30 prevents runaway work.
+Goals let Neo work autonomously across turns. The TUI supports direct
+user-authored goals with `/goal <objective>`, plus `/goal pause`, `/goal
+resume`, `/goal cancel`, `/goal replace <objective>`, and `/goal next
+<objective>`. Goal mode is separate: it drafts a structured goal and submits it
+through `ExitGoalMode` for blocking review before creating the durable goal.
+Active goals are stored in `~/.neo/goals/`; structured runs also write
+`~/.neo/goals/runs/<goal-id>/GOAL.md`, `ROADMAP.md`, `STATE.md`,
+`THINKING.md`, `PROTOCOL.md`, and `phases/phase-N.md`. The runtime continues
+turns automatically while the goal is active; the model uses
+`update_goal_status` to mark completion or blockers. A default turn budget of
+30 prevents runaway work.
 
 See `docs/goals.md` for details.
 
@@ -486,7 +520,8 @@ mode), `/yolo` (yolo permission mode), `/permissions` (permission mode
 selector), `/plan` (toggle plan mode), `/model` (model picker), `/provider`
 (provider list), `/resume` (session picker), `/skill:<name>` (activate a skill
 and expand it into the prompt), `/goal` (start, pause, resume, cancel, or
-replace a goal).
+replace a goal). Shift+Tab cycles the separate development mode; it must not
+change the permission mode.
 
 CLI session management: `neo sessions list/show/rename/fork/summarize/compact/export-html/export-json`.
 
