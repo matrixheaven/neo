@@ -33,15 +33,32 @@ pub struct Goal {
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_phase: Option<usize>,
+    #[serde(default)]
+    pub failure_strikes: u8,
+    #[serde(default)]
+    pub audit_rounds: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_ref: Option<String>,
 }
 
 impl Goal {
     #[must_use]
     pub fn new(objective: impl Into<String>) -> Self {
         let now = now_millis();
+        let objective = objective.into();
         Self {
             id: Uuid::new_v4().to_string(),
-            objective: objective.into(),
+            objective: objective.clone(),
             completion_criterion: None,
             status: GoalStatus::Active,
             created_at: now,
@@ -49,6 +66,14 @@ impl Goal {
             turn_count: 0,
             session_id: None,
             blocked_reason: None,
+            artifact_dir: None,
+            raw_prompt: Some(objective.clone()),
+            approved_text: Some(objective.clone()),
+            phases: vec![objective],
+            current_phase: Some(0),
+            failure_strikes: 0,
+            audit_rounds: 0,
+            baseline_ref: None,
         }
     }
 
@@ -143,6 +168,70 @@ fn goal_path(home: &Path, id: &str) -> PathBuf {
     goals_dir(home).join(format!("{id}.json"))
 }
 
+fn goal_artifact_dir(home: &Path, id: &str) -> PathBuf {
+    goals_dir(home).join("runs").join(id)
+}
+
+async fn ensure_goal_artifacts(home: &Path, goal: &mut Goal) -> Result<()> {
+    let dir = goal
+        .artifact_dir
+        .clone()
+        .unwrap_or_else(|| goal_artifact_dir(home, &goal.id));
+    let phases_dir = dir.join("phases");
+    fs::create_dir_all(&phases_dir).await?;
+    goal.artifact_dir = Some(dir.clone());
+    if goal.raw_prompt.is_none() {
+        goal.raw_prompt = Some(goal.objective.clone());
+    }
+    if goal.approved_text.is_none() {
+        goal.approved_text = Some(goal.objective.clone());
+    }
+    if goal.phases.is_empty() {
+        goal.phases.push(goal.objective.clone());
+    }
+    if goal.current_phase.is_none() {
+        goal.current_phase = Some(0);
+    }
+
+    let criterion = goal
+        .completion_criterion
+        .as_deref()
+        .unwrap_or("No separate completion criterion was provided.");
+    let goal_md = format!(
+        "# Goal\n\n{}\n\n## Completion Criterion\n\n{}\n",
+        goal.objective, criterion
+    );
+    let roadmap =
+        goal.phases
+            .iter()
+            .enumerate()
+            .fold(String::new(), |mut output, (index, phase)| {
+                use std::fmt::Write as _;
+                let _ = writeln!(output, "{}. {}", index + 1, phase);
+                output
+            });
+    let state = format!(
+        "# State\n\nstatus: {:?}\ncurrent_phase: {}\nfailure_strikes: {}\naudit_rounds: {}\n",
+        goal.status,
+        goal.current_phase.map_or(0, |phase| phase + 1),
+        goal.failure_strikes,
+        goal.audit_rounds
+    );
+    let thinking = "# Thinking\n\nRisks, assumptions, and recon notes go here.\n";
+    let protocol = "# Protocol\n\nProceed phase by phase. Retry once, write a focused fix spec on the second failure, and block with handoff details on the third failure. Run a final audit before completion.\n";
+
+    fs::write(dir.join("GOAL.md"), goal_md).await?;
+    fs::write(dir.join("ROADMAP.md"), roadmap).await?;
+    fs::write(dir.join("STATE.md"), state).await?;
+    fs::write(dir.join("THINKING.md"), thinking).await?;
+    fs::write(dir.join("PROTOCOL.md"), protocol).await?;
+    for (index, phase) in goal.phases.iter().enumerate() {
+        let path = phases_dir.join(format!("phase-{}.md", index + 1));
+        fs::write(path, format!("# Phase {}\n\n{}\n", index + 1, phase)).await?;
+    }
+    Ok(())
+}
+
 pub async fn load_goal_store(home: &Path) -> Result<GoalStore> {
     let dir = goals_dir(home);
     fs::create_dir_all(&dir).await?;
@@ -206,7 +295,8 @@ impl GoalManager {
         self.store.lock().ok()?.active().cloned()
     }
 
-    pub async fn start(&self, goal: Goal) -> Result<Option<Goal>> {
+    pub async fn start(&self, mut goal: Goal) -> Result<Option<Goal>> {
+        ensure_goal_artifacts(&self.home, &mut goal).await?;
         let previous = {
             let mut store = self.store.lock().map_err(|_| GoalError::Lock)?;
             store.start(goal.clone())
@@ -248,7 +338,8 @@ impl GoalManager {
         Ok(goal)
     }
 
-    pub async fn replace(&self, goal: Goal) -> Result<Option<Goal>> {
+    pub async fn replace(&self, mut goal: Goal) -> Result<Option<Goal>> {
+        ensure_goal_artifacts(&self.home, &mut goal).await?;
         let previous = {
             let mut store = self.store.lock().map_err(|_| GoalError::Lock)?;
             store.replace(goal.clone())
@@ -260,7 +351,8 @@ impl GoalManager {
         Ok(previous)
     }
 
-    pub async fn queue_next(&self, goal: Goal) -> Result<()> {
+    pub async fn queue_next(&self, mut goal: Goal) -> Result<()> {
+        ensure_goal_artifacts(&self.home, &mut goal).await?;
         {
             let mut store = self.store.lock().map_err(|_| GoalError::Lock)?;
             store.queue_next(goal.clone());

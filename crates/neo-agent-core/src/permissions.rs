@@ -18,15 +18,6 @@ impl PermissionMode {
             Self::Yolo => "yolo",
         }
     }
-
-    #[must_use]
-    pub const fn next_after_plan(self) -> Self {
-        match self {
-            Self::Manual => Self::Auto,
-            Self::Auto => Self::Yolo,
-            Self::Yolo => Self::Manual,
-        }
-    }
 }
 
 #[allow(clippy::derivable_impls)]
@@ -51,6 +42,7 @@ pub enum PermissionOperation {
     Tool,
     UserQuestion,
     PlanTransition,
+    GoalTransition,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

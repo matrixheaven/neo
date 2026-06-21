@@ -6,7 +6,7 @@ use serde_json::json;
 
 use crate::{
     Tool, ToolContext, ToolError, ToolFuture, ToolResult,
-    goal::{Goal, GoalManager},
+    goal::{Goal, GoalManager, GoalStatus},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -26,6 +26,21 @@ pub struct StartGoalArgs {
         description = "Replace an existing active or paused goal instead of failing. Use only when the user explicitly wants to abandon the current goal and start a new one."
     )]
     pub replace: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExitGoalModeArgs {
+    /// Approved goal objective to start after user review.
+    #[schemars(description = "Approved goal objective to start after user review.")]
+    pub objective: String,
+    /// How to verify the goal is complete.
+    #[serde(default)]
+    #[schemars(description = "How to verify the goal is complete.")]
+    pub completion_criterion: Option<String>,
+    /// Ordered phase plan for the goal run.
+    #[serde(default)]
+    #[schemars(description = "Ordered phase plan for the goal run.")]
+    pub phases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -109,7 +124,8 @@ impl Tool for UpdateGoalStatusTool {
                 Ok(Some(goal)) => Ok(ToolResult::ok(format!(
                     "Goal `{}` status updated to {:?}.",
                     goal.objective, goal.status
-                ))),
+                ))
+                .with_details(goal_details("updated", &goal))),
                 Ok(None) => Ok(ToolResult::error("no active goal to update")),
                 Err(err) => Ok(ToolResult::error(format!("failed to update goal: {err}"))),
             }
@@ -125,6 +141,65 @@ impl StartGoalTool {
     #[must_use]
     pub fn new(manager: Arc<GoalManager>) -> Self {
         Self { manager }
+    }
+}
+
+pub struct ExitGoalModeTool {
+    manager: Arc<GoalManager>,
+}
+
+impl ExitGoalModeTool {
+    #[must_use]
+    pub fn new(manager: Arc<GoalManager>) -> Self {
+        Self { manager }
+    }
+}
+
+impl Tool for ExitGoalModeTool {
+    fn name(&self) -> &'static str {
+        "ExitGoalMode"
+    }
+
+    fn description(&self) -> &'static str {
+        "Use this when goal mode has produced a reviewed goal draft and is ready for user approval. \
+         The user will review the objective, completion criterion, and phases in a blocking dialog. \
+         If approved, this tool starts the durable goal. If rejected or revised, goal mode remains for a corrected draft."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        neo_ai::tool_schema::schema_for::<ExitGoalModeArgs>()
+    }
+
+    fn execute<'a>(&'a self, _ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let args: ExitGoalModeArgs =
+                serde_json::from_value(input).map_err(|err| ToolError::InvalidInput {
+                    tool: "ExitGoalMode".to_owned(),
+                    message: err.to_string(),
+                })?;
+            let mut goal = Goal::new(args.objective);
+            if let Some(criterion) = args.completion_criterion {
+                goal = goal.with_completion_criterion(criterion);
+            }
+            if !args.phases.is_empty() {
+                goal.phases = args.phases;
+                goal.current_phase = Some(0);
+            }
+            let objective = goal.objective.clone();
+            Ok(match self.manager.start(goal).await {
+                Ok(Some(_previous)) => started_goal_result(
+                    &self.manager,
+                    format!("Approved and started goal: {objective} (previous goal superseded)"),
+                    true,
+                ),
+                Ok(None) => started_goal_result(
+                    &self.manager,
+                    format!("Approved and started goal: {objective}"),
+                    true,
+                ),
+                Err(err) => ToolResult::error(format!("failed to start goal: {err}")),
+            })
+        })
     }
 }
 
@@ -168,14 +243,50 @@ impl Tool for StartGoalTool {
                 manager.start(goal).await
             };
 
-            match result {
-                Ok(Some(_previous)) => Ok(ToolResult::ok(format!(
-                    "Started goal: {objective} (previous goal superseded)"
-                ))),
-                Ok(None) => Ok(ToolResult::ok(format!("Started goal: {objective}"))),
-                Err(err) => Ok(ToolResult::error(format!("failed to start goal: {err}"))),
-            }
+            Ok(match result {
+                Ok(Some(_previous)) => started_goal_result(
+                    &manager,
+                    format!("Started goal: {objective} (previous goal superseded)"),
+                    false,
+                ),
+                Ok(None) => {
+                    started_goal_result(&manager, format!("Started goal: {objective}"), false)
+                }
+                Err(err) => ToolResult::error(format!("failed to start goal: {err}")),
+            })
         })
+    }
+}
+
+fn started_goal_result(manager: &GoalManager, content: String, terminate: bool) -> ToolResult {
+    let Some(goal) = manager.active() else {
+        return ToolResult::error("failed to load started goal");
+    };
+    let result = ToolResult::ok(content).with_details(goal_details("started", &goal));
+    if terminate {
+        result.terminate()
+    } else {
+        result
+    }
+}
+
+fn goal_details(event: &str, goal: &Goal) -> serde_json::Value {
+    json!({
+        "kind": "goal",
+        "event": event,
+        "id": goal.id,
+        "objective": goal.objective,
+        "status": goal_status_label(goal.status),
+        "reason": goal.blocked_reason,
+    })
+}
+
+const fn goal_status_label(status: GoalStatus) -> &'static str {
+    match status {
+        GoalStatus::Active => "active",
+        GoalStatus::Paused => "paused",
+        GoalStatus::Blocked => "blocked",
+        GoalStatus::Complete => "complete",
     }
 }
 
@@ -229,19 +340,21 @@ mod tests {
     use super::*;
     use crate::ToolContext;
     use serde_json::json;
+    use tempfile::TempDir;
 
-    async fn make_manager() -> Arc<GoalManager> {
+    async fn make_manager() -> (TempDir, Arc<GoalManager>) {
         let temp = tempfile::tempdir().expect("tempdir");
-        Arc::new(
+        let manager = Arc::new(
             GoalManager::load(temp.path().to_path_buf())
                 .await
                 .expect("load goal manager"),
-        )
+        );
+        (temp, manager)
     }
 
     #[tokio::test]
     async fn start_goal_starts_active_goal() {
-        let manager = make_manager().await;
+        let (_temp, manager) = make_manager().await;
         let tool = StartGoalTool::new(Arc::clone(&manager));
         let ctx = ToolContext::new(".").expect("context");
 
@@ -268,7 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_goal_replace_supersedes_existing() {
-        let manager = make_manager().await;
+        let (_temp, manager) = make_manager().await;
         let tool = StartGoalTool::new(Arc::clone(&manager));
         let ctx = ToolContext::new(".").expect("context");
 
@@ -292,7 +405,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_goal_status_cycles() {
-        let manager = make_manager().await;
+        let (_temp, manager) = make_manager().await;
         let start = StartGoalTool::new(Arc::clone(&manager));
         let update = UpdateGoalStatusTool::new(Arc::clone(&manager));
         let ctx = ToolContext::new(".").expect("context");
@@ -344,7 +457,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_goal_status_returns_json() {
-        let manager = make_manager().await;
+        let (_temp, manager) = make_manager().await;
         let start = StartGoalTool::new(Arc::clone(&manager));
         let get = GetGoalStatusTool::new(Arc::clone(&manager));
         let ctx = ToolContext::new(".").expect("context");
@@ -370,8 +483,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exit_goal_mode_starts_structured_goal() {
+        let (_temp, manager) = make_manager().await;
+        let tool = ExitGoalModeTool::new(Arc::clone(&manager));
+        let ctx = ToolContext::new(".").expect("context");
+
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "objective": "Ship goal mode",
+                    "completion_criterion": "Goal tests pass",
+                    "phases": ["Draft", "Implement", "Audit"]
+                }),
+            )
+            .await
+            .expect("execute");
+
+        assert!(!result.is_error);
+        assert!(result.terminate);
+        let active = manager.active().expect("active goal");
+        assert_eq!(active.objective, "Ship goal mode");
+        assert_eq!(active.phases, ["Draft", "Implement", "Audit"]);
+        assert_eq!(active.current_phase, Some(0));
+        let artifact_dir = active.artifact_dir.expect("artifact dir");
+        assert!(artifact_dir.join("phases/phase-3.md").exists());
+    }
+
+    #[tokio::test]
     async fn descriptions_are_non_empty() {
-        let manager = make_manager().await;
+        let (_temp, manager) = make_manager().await;
         assert!(
             !StartGoalTool::new(Arc::clone(&manager))
                 .description()
@@ -379,6 +520,11 @@ mod tests {
         );
         assert!(
             !UpdateGoalStatusTool::new(Arc::clone(&manager))
+                .description()
+                .is_empty()
+        );
+        assert!(
+            !ExitGoalModeTool::new(Arc::clone(&manager))
                 .description()
                 .is_empty()
         );

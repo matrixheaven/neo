@@ -59,6 +59,36 @@ async fn goal_persists_to_disk() {
 }
 
 #[tokio::test]
+async fn goal_start_creates_supergoal_artifacts() {
+    let temp = tempfile::tempdir().unwrap();
+    let manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();
+
+    manager.start(Goal::new("ship goal mode")).await.unwrap();
+
+    let active = manager.active().unwrap();
+    let artifact_dir = active.artifact_dir.as_ref().expect("artifact dir");
+    assert!(artifact_dir.ends_with(&active.id));
+    for relative in [
+        "GOAL.md",
+        "ROADMAP.md",
+        "STATE.md",
+        "THINKING.md",
+        "PROTOCOL.md",
+        "phases/phase-1.md",
+    ] {
+        assert!(
+            artifact_dir.join(relative).exists(),
+            "missing artifact {relative}"
+        );
+    }
+    assert_eq!(active.raw_prompt.as_deref(), Some("ship goal mode"));
+    assert_eq!(active.approved_text.as_deref(), Some("ship goal mode"));
+    assert_eq!(active.current_phase, Some(0));
+    assert_eq!(active.failure_strikes, 0);
+    assert_eq!(active.audit_rounds, 0);
+}
+
+#[tokio::test]
 async fn goal_manager_queues_goals() {
     let temp = tempfile::tempdir().unwrap();
     let manager = GoalManager::load(temp.path().to_path_buf()).await.unwrap();

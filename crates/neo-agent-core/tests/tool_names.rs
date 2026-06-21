@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use neo_agent_core::{
-    CreateSkillTool, GetGoalStatusTool, ListSkillsTool, MoveSkillTool, StartGoalTool,
-    SummarizeSessionsTool, Tool, ToolRegistry, UpdateGoalStatusTool, goal::GoalManager,
+    CreateSkillTool, ExitGoalModeTool, GetGoalStatusTool, ListSkillsTool, MoveSkillTool,
+    StartGoalTool, SummarizeSessionsTool, Tool, ToolRegistry, UpdateGoalStatusTool,
+    goal::GoalManager,
 };
 
 fn assert_model_function_name_safe(name: &str) {
@@ -46,6 +47,7 @@ async fn optional_tool_names_use_model_facing_kimi_style_casing() {
         Box::new(MoveSkillTool::new(".")),
         Box::new(SummarizeSessionsTool::new(".")),
         Box::new(StartGoalTool::new(Arc::clone(&goal_manager))),
+        Box::new(ExitGoalModeTool::new(Arc::clone(&goal_manager))),
         Box::new(UpdateGoalStatusTool::new(Arc::clone(&goal_manager))),
         Box::new(GetGoalStatusTool::new(goal_manager)),
     ];
@@ -60,6 +62,7 @@ async fn optional_tool_names_use_model_facing_kimi_style_casing() {
         names,
         vec![
             "CreateSkill",
+            "ExitGoalMode",
             "GetGoalStatus",
             "ListSkills",
             "MoveSkill",

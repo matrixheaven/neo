@@ -56,7 +56,7 @@ pub use background_tasks::{
 // Re-export Todo tool types.
 pub use todo::{TodoInput, TodoItem, TodoStatus, TodoTool};
 // Re-export Goal tool types.
-pub use goal::{GetGoalStatusTool, StartGoalTool, UpdateGoalStatusTool};
+pub use goal::{ExitGoalModeTool, GetGoalStatusTool, StartGoalTool, UpdateGoalStatusTool};
 // Re-export session tool types.
 pub use sessions::SummarizeSessionsTool;
 // Re-export skill-manager tool types.
@@ -361,6 +361,7 @@ impl ToolRegistry {
 
     pub fn register_goal_tools(&mut self, manager: Arc<GoalManager>) {
         self.register(goal::StartGoalTool::new(Arc::clone(&manager)));
+        self.register(goal::ExitGoalModeTool::new(Arc::clone(&manager)));
         self.register(goal::UpdateGoalStatusTool::new(Arc::clone(&manager)));
         self.register(goal::GetGoalStatusTool::new(manager));
     }
