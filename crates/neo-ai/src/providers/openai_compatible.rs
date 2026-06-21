@@ -188,13 +188,7 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
 
 fn message_body(message: &ChatMessage) -> Result<Value, ProviderError> {
     match message {
-        ChatMessage::System { content } => {
-            let content = content_text(content, "system")?;
-            Ok(json!({
-                "role": "system",
-                "content": content,
-            }))
-        }
+        ChatMessage::System { content } => message_with_text_content("system", content),
         ChatMessage::User { content } => Ok(json!({
             "role": "user",
             "content": user_content(content),
@@ -202,34 +196,56 @@ fn message_body(message: &ChatMessage) -> Result<Value, ProviderError> {
         ChatMessage::Assistant {
             content,
             tool_calls,
-        } => {
-            let content = content_text(content, "assistant")?;
-            Ok(json!({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": tool_calls.iter().map(|tool_call| json!({
-                    "id": tool_call.id,
-                    "type": "function",
-                    "function": {
-                        "name": tool_call.name,
-                        "arguments": tool_call.arguments.to_string(),
-                    },
-                })).collect::<Vec<_>>(),
-            }))
-        }
+        } => assistant_message_body(content, tool_calls),
         ChatMessage::ToolResult {
             tool_call_id,
             content,
             is_error: _,
-        } => {
-            let content = content_text(content, "tool result")?;
-            Ok(json!({
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": content,
-            }))
-        }
+        } => tool_result_message_body(tool_call_id, content),
     }
+}
+
+fn message_with_text_content(role: &str, content: &[ContentPart]) -> Result<Value, ProviderError> {
+    let content = content_text(content, role)?;
+    Ok(json!({
+        "role": role,
+        "content": content,
+    }))
+}
+
+fn assistant_message_body(
+    content: &[ContentPart],
+    tool_calls: &[crate::ToolCall],
+) -> Result<Value, ProviderError> {
+    let content = content_text(content, "assistant")?;
+    Ok(json!({
+        "role": "assistant",
+        "content": content,
+        "tool_calls": tool_calls.iter().map(tool_call_body).collect::<Vec<_>>(),
+    }))
+}
+
+fn tool_call_body(tool_call: &crate::ToolCall) -> Value {
+    json!({
+        "id": tool_call.id,
+        "type": "function",
+        "function": {
+            "name": tool_call.name,
+            "arguments": tool_call.arguments.to_string(),
+        },
+    })
+}
+
+fn tool_result_message_body(
+    tool_call_id: &str,
+    content: &[ContentPart],
+) -> Result<Value, ProviderError> {
+    let content = content_text(content, "tool result")?;
+    Ok(json!({
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": content,
+    }))
 }
 
 fn content_text(content: &[ContentPart], role: &str) -> Result<String, ProviderError> {
@@ -403,31 +419,41 @@ impl IncrementalSse {
             return vec![Err(AiError::Stream("missing SSE done marker".to_owned()))];
         }
 
-        if let Some(payload) = parse_sse_frame(&self.buffer).transpose() {
-            match payload {
-                Ok(payload) if payload == "[DONE]" => {}
-                Ok(payload) => {
-                    let mut out = Vec::new();
-                    if let Err(err) = self.ingest_payload(&payload, &mut out) {
-                        return vec![Err(err)];
-                    }
-                    if !out.is_empty() {
-                        let mut finished = out;
-                        match self.parser.finish_events() {
-                            Ok(events) => finished.extend(events.into_iter().map(Ok)),
-                            Err(err) => finished.push(Err(err.into_ai_error())),
-                        }
-                        return finished;
-                    }
-                }
-                Err(err) => return vec![Err(err)],
-            }
+        match self.drain_trailing_payload_events() {
+            Ok(events) if !events.is_empty() => return self.finish_after_trailing_events(events),
+            Ok(_) => {}
+            Err(err) => return vec![Err(err)],
         }
 
         self.parser.finish_events().map_or_else(
             |err| vec![Err(err.into_ai_error())],
             |events| events.into_iter().map(Ok).collect(),
         )
+    }
+
+    fn drain_trailing_payload_events(
+        &mut self,
+    ) -> Result<Vec<Result<AiStreamEvent, AiError>>, AiError> {
+        let Some(payload) = parse_sse_frame(&self.buffer)? else {
+            return Ok(Vec::new());
+        };
+        if payload == "[DONE]" {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        self.ingest_payload(&payload, &mut out)?;
+        Ok(out)
+    }
+
+    fn finish_after_trailing_events(
+        &mut self,
+        mut events: Vec<Result<AiStreamEvent, AiError>>,
+    ) -> Vec<Result<AiStreamEvent, AiError>> {
+        match self.parser.finish_events() {
+            Ok(finished) => events.extend(finished.into_iter().map(Ok)),
+            Err(err) => events.push(Err(err.into_ai_error())),
+        }
+        events
     }
 }
 
@@ -675,5 +701,71 @@ fn stop_reason(reason: &str) -> StopReason {
         "length" => StopReason::MaxTokens,
         "content_filter" => StopReason::Error,
         _ => StopReason::EndTurn,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ToolCall;
+
+    #[test]
+    fn message_body_serializes_assistant_tool_calls() {
+        let message = ChatMessage::Assistant {
+            content: vec![ContentPart::Text {
+                text: "calling tool".to_owned(),
+            }],
+            tool_calls: vec![ToolCall {
+                id: "call_1".to_owned(),
+                name: "lookup".to_owned(),
+                arguments: json!({"query": "neo"}),
+            }],
+        };
+
+        let body = message_body(&message).expect("assistant message body");
+
+        assert_eq!(body["role"], "assistant");
+        assert_eq!(body["content"], "calling tool");
+        assert_eq!(body["tool_calls"][0]["id"], "call_1");
+        assert_eq!(body["tool_calls"][0]["function"]["name"], "lookup");
+        assert_eq!(
+            body["tool_calls"][0]["function"]["arguments"],
+            "{\"query\":\"neo\"}"
+        );
+    }
+
+    #[test]
+    fn normalize_openai_chat_sse_accepts_finish_reason_without_done_marker() {
+        let events = normalize_openai_chat_sse(
+            "data: {\"id\":\"chatcmpl_1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+             data: {\"id\":\"chatcmpl_1\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}]}\n\n",
+        )
+        .expect("normalize SSE");
+
+        assert!(matches!(
+            events.first(),
+            Some(AiStreamEvent::MessageStart { .. })
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AiStreamEvent::TextDelta { text } if text == "hi"
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn normalize_openai_chat_sse_rejects_unfinished_stream_without_done_or_finish_reason() {
+        let error = normalize_openai_chat_sse(
+            "data: {\"id\":\"chatcmpl_1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        )
+        .expect_err("unfinished stream should fail");
+
+        assert!(error.to_string().contains("missing SSE done marker"));
     }
 }
