@@ -58,6 +58,9 @@ type TurnDriver = Arc<dyn Fn(TurnRequest, TurnChannels) -> BoxedTurnFuture + Sen
 type SessionLoader = Arc<dyn Fn(String) -> BoxedSessionFuture + Send + Sync>;
 type SessionForker = Arc<dyn Fn(String) -> BoxedForkFuture + Send + Sync>;
 type ClipboardWriter = Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
+type GitStatusProvider = Arc<dyn Fn(&Path) -> Option<String> + Send + Sync>;
+
+const GIT_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 fn approval_number(character: char) -> Option<usize> {
     match character {
@@ -116,6 +119,17 @@ impl GitStatusBadge {
 
 fn git_status_label(workspace_root: &Path) -> Option<String> {
     git_status_label_with_program("git", workspace_root)
+}
+
+fn event_should_refresh_git_status(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::ToolExecutionFinished { .. }
+            | AgentEvent::ShellCommandFinished { .. }
+            | AgentEvent::TerminalSessionFinished { .. }
+            | AgentEvent::TurnFinished { .. }
+            | AgentEvent::RunFinished { .. }
+    )
 }
 
 fn git_status_label_with_program(program: &str, workspace_root: &Path) -> Option<String> {
@@ -383,6 +397,9 @@ pub(crate) struct InteractiveController {
     clipboard_writer: ClipboardWriter,
     completion_root: PathBuf,
     workspace_root: PathBuf,
+    git_status_provider: GitStatusProvider,
+    last_git_status_refresh: Option<Instant>,
+    git_status_refresh_interval: Duration,
     pending_exit_confirmation: Option<ExitConfirmation>,
     suspend_requested: bool,
     pending_custom_registry: Option<PendingCustomRegistry>,
@@ -546,6 +563,7 @@ pub(crate) struct LoadedSessionTranscript {
     label: String,
     notices: Vec<String>,
     messages: Vec<AgentMessage>,
+    estimated_context_tokens: Option<u32>,
 }
 
 impl LoadedSessionTranscript {
@@ -559,7 +577,14 @@ impl LoadedSessionTranscript {
             label: label.into(),
             notices: notices.into_iter().collect(),
             messages: messages.into_iter().collect(),
+            estimated_context_tokens: None,
         }
+    }
+
+    #[must_use]
+    pub(crate) const fn with_estimated_context_tokens(mut self, used_tokens: u32) -> Self {
+        self.estimated_context_tokens = Some(used_tokens);
+        self
     }
 }
 
@@ -592,9 +617,10 @@ impl InteractiveController {
         fork_session: SessionForker,
     ) -> Self {
         let workspace_root = workspace_root.into();
+        let git_status_provider: GitStatusProvider = Arc::new(git_status_label);
         let mut chrome =
             NeoChromeState::new(title, session_label, model_label, workspace_root.clone());
-        chrome.set_git_status_label(git_status_label(&workspace_root));
+        chrome.set_git_status_label(git_status_provider(&workspace_root));
         Self {
             tui: neo_tui::NeoTui::with_welcome_banner(chrome, 80, 24, env!("CARGO_PKG_VERSION")),
             keybindings: KeybindingsManager::default(),
@@ -617,6 +643,9 @@ impl InteractiveController {
             clipboard_writer: Arc::new(write_system_clipboard),
             completion_root: workspace_root.clone(),
             workspace_root,
+            git_status_provider,
+            last_git_status_refresh: Some(Instant::now()),
+            git_status_refresh_interval: GIT_STATUS_REFRESH_INTERVAL,
             pending_exit_confirmation: None,
             suspend_requested: false,
             pending_custom_registry: None,
@@ -743,6 +772,16 @@ impl InteractiveController {
     #[cfg(test)]
     fn set_clipboard_writer(&mut self, writer: ClipboardWriter) {
         self.clipboard_writer = writer;
+    }
+
+    #[cfg(test)]
+    fn set_git_status_provider(&mut self, provider: GitStatusProvider) {
+        self.git_status_provider = provider;
+    }
+
+    #[cfg(test)]
+    fn set_last_git_status_refresh(&mut self, refreshed_at: Option<Instant>) {
+        self.last_git_status_refresh = refreshed_at;
     }
 
     #[cfg(test)]
@@ -953,6 +992,7 @@ impl InteractiveController {
                             self.wait_for_active_turn().await?;
                         }
                         if had_active_turn {
+                            self.refresh_git_status_now();
                             render(&mut self.tui)?;
                         }
                         break;
@@ -965,6 +1005,9 @@ impl InteractiveController {
                 None => tokio::task::yield_now().await,
             }
             self.drain_active_turn().await?;
+            if self.active_turn.is_some() {
+                self.refresh_git_status_if_due();
+            }
             self.poll_pending_catalog_fetch().await;
             self.tui.chrome_mut().advance_activity_frame();
             render(&mut self.tui)?;
@@ -2300,6 +2343,7 @@ impl InteractiveController {
                         });
                 }
             }
+            self.refresh_git_status_now();
         } else {
             self.active_turn = Some(turn);
         }
@@ -2315,7 +2359,23 @@ impl InteractiveController {
         self.active_session_id.as_deref()
     }
 
+    fn refresh_git_status_now(&mut self) {
+        let label = (self.git_status_provider)(&self.workspace_root);
+        self.tui.chrome_mut().set_git_status_label(label);
+        self.last_git_status_refresh = Some(Instant::now());
+    }
+
+    fn refresh_git_status_if_due(&mut self) {
+        let should_refresh = self
+            .last_git_status_refresh
+            .is_none_or(|refreshed_at| refreshed_at.elapsed() >= self.git_status_refresh_interval);
+        if should_refresh {
+            self.refresh_git_status_now();
+        }
+    }
+
     fn apply_turn_event(&mut self, event: AgentEvent) {
+        let should_refresh_git_status = event_should_refresh_git_status(&event);
         if let AgentEvent::ToolExecutionFinished { name, result, .. } = &event
             && name == "TaskStop"
             && let Some(details) = &result.details
@@ -2329,6 +2389,9 @@ impl InteractiveController {
         }
         self.tui.transcript_mut().apply_agent_event(&event);
         self.tui.chrome_mut().apply_agent_event(event);
+        if should_refresh_git_status {
+            self.refresh_git_status_now();
+        }
     }
 
     fn sync_inline_approval_selection(&mut self) {
@@ -2696,6 +2759,14 @@ impl InteractiveController {
     }
 
     fn rebuild_transcript_from_session(&mut self, loaded: &LoadedSessionTranscript) {
+        if let Some(used_tokens) = loaded.estimated_context_tokens
+            && let Some(window) = self.tui.chrome().context_window()
+        {
+            self.tui
+                .chrome_mut()
+                .set_context_window(Some(window.with_used_tokens(used_tokens)));
+        }
+
         let (cols, rows) = size().unwrap_or((80, 24));
         let mut transcript = TranscriptPane::new(usize::from(cols), usize::from(rows));
         transcript.set_theme(self.tui.chrome().theme());
@@ -4705,11 +4776,11 @@ async fn load_session_transcript(
     {
         notices.push(format!("branch summary: {summary}"));
     }
-    Ok(LoadedSessionTranscript::new(
-        session_id,
-        notices,
-        context.messages().to_vec(),
-    ))
+    let estimated_context_tokens = context.estimated_context_tokens();
+    Ok(
+        LoadedSessionTranscript::new(session_id, notices, context.messages().to_vec())
+            .with_estimated_context_tokens(estimated_context_tokens),
+    )
 }
 
 fn replay_session_into_transcript(
@@ -4867,6 +4938,165 @@ mod tests {
         );
 
         assert_eq!(missing, None);
+    }
+
+    #[test]
+    fn refresh_git_status_now_updates_after_write_tool_finished() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.set_git_status_provider(Arc::new(|_| Some("main [+2 -1]".to_owned())));
+        controller
+            .tui
+            .chrome_mut()
+            .set_git_status_label(Some("main [+1 -1]".to_owned()));
+
+        controller.apply_turn_event(AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            name: "Write".to_owned(),
+            result: ToolResult::ok("wrote file"),
+        });
+
+        assert_eq!(controller.chrome().git_status_label(), Some("main [+2 -1]"));
+    }
+
+    #[test]
+    fn refresh_git_status_now_updates_after_edit_tool_finished() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.set_git_status_provider(Arc::new(|_| Some("main [+3 -2]".to_owned())));
+        controller
+            .tui
+            .chrome_mut()
+            .set_git_status_label(Some("main [+1 -1]".to_owned()));
+
+        controller.apply_turn_event(AgentEvent::ToolExecutionFinished {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            name: "Edit".to_owned(),
+            result: ToolResult::ok("edited file"),
+        });
+
+        assert_eq!(controller.chrome().git_status_label(), Some("main [+3 -2]"));
+    }
+
+    #[test]
+    fn refresh_git_status_now_updates_after_shell_and_terminal_finished() {
+        let statuses = Arc::new(std::sync::Mutex::new(VecDeque::from([
+            Some("main [↑1]".to_owned()),
+            Some("main".to_owned()),
+        ])));
+        let provider_statuses = Arc::clone(&statuses);
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.set_git_status_provider(Arc::new(move |_| {
+            provider_statuses
+                .lock()
+                .expect("status queue lock")
+                .pop_front()
+                .flatten()
+        }));
+        controller
+            .tui
+            .chrome_mut()
+            .set_git_status_label(Some("main [+1 -1]".to_owned()));
+
+        controller.apply_turn_event(AgentEvent::ShellCommandFinished {
+            turn: 1,
+            id: "shell-1".to_owned(),
+            exit_code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            truncated: false,
+        });
+        assert_eq!(controller.chrome().git_status_label(), Some("main [↑1]"));
+
+        controller.apply_turn_event(AgentEvent::TerminalSessionFinished {
+            turn: 1,
+            id: "terminal-1".to_owned(),
+            handle: "terminal".to_owned(),
+            status: "exited".to_owned(),
+            exit_code: Some(0),
+        });
+        assert_eq!(controller.chrome().git_status_label(), Some("main"));
+    }
+
+    #[test]
+    fn refresh_git_status_if_due_uses_30s_interval() {
+        let refresh_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider_refresh_count = Arc::clone(&refresh_count);
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.set_git_status_provider(Arc::new(move |_| {
+            let count =
+                provider_refresh_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            Some(format!("main [refresh-{count}]"))
+        }));
+        controller
+            .tui
+            .chrome_mut()
+            .set_git_status_label(Some("main".to_owned()));
+
+        controller.set_last_git_status_refresh(Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(29))
+                .expect("instant before now"),
+        ));
+        controller.refresh_git_status_if_due();
+        assert_eq!(refresh_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(controller.chrome().git_status_label(), Some("main"));
+
+        controller.set_last_git_status_refresh(Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(30))
+                .expect("instant before now"),
+        ));
+        controller.refresh_git_status_if_due();
+        assert_eq!(refresh_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            controller.chrome().git_status_label(),
+            Some("main [refresh-1]")
+        );
+    }
+
+    #[test]
+    fn refresh_git_status_now_clears_badge_when_git_unavailable() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.set_git_status_provider(Arc::new(|_| None));
+        controller
+            .tui
+            .chrome_mut()
+            .set_git_status_label(Some("main [+1 -1]".to_owned()));
+
+        controller.refresh_git_status_now();
+
+        assert_eq!(controller.chrome().git_status_label(), None);
     }
 
     fn test_session_summary(
@@ -8524,6 +8754,58 @@ command = "python3"
         assert!(rendered.contains("Used Read (README.md)"));
         assert!(rendered.contains("README contents"));
         assert!(!rendered.contains("Using Read"));
+    }
+
+    #[test]
+    fn rebuild_transcript_from_session_initializes_context_window_usage() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "new",
+            "deepseek/deepseek-v4-pro",
+            test_workspace_root(),
+            |_| async { Ok(Vec::new()) },
+        );
+        controller
+            .tui
+            .chrome_mut()
+            .set_context_window(Some(ContextWindow::new(1_000_000)));
+
+        let loaded =
+            LoadedSessionTranscript::new("alpha", Vec::new(), [AgentMessage::user_text("hello")])
+                .with_estimated_context_tokens(393);
+
+        controller.rebuild_transcript_from_session(&loaded);
+
+        assert_eq!(
+            controller.chrome().context_window(),
+            Some(ContextWindow::new(1_000_000).with_used_tokens(393))
+        );
+    }
+
+    #[tokio::test]
+    async fn load_session_transcript_estimates_context_usage_for_replayed_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        let config = test_config(temp.path(), sessions_dir);
+        let bucket_dir = workspace_sessions_dir(&config);
+        fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
+        let session_path = bucket_dir.join(format!("{SESSION_A}.jsonl"));
+        let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
+            .await
+            .expect("create session");
+        writer
+            .append(&AgentEvent::MessageAppended {
+                message: AgentMessage::user_text("remember this"),
+            })
+            .await
+            .expect("append user message");
+        writer.flush().await.expect("flush session");
+
+        let loaded = load_session_transcript(SESSION_A.to_owned(), &config)
+            .await
+            .expect("load transcript");
+
+        assert_eq!(loaded.estimated_context_tokens, Some(4));
     }
 
     #[tokio::test]
