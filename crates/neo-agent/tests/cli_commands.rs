@@ -1045,7 +1045,7 @@ fn mcp_list_reads_project_config_servers() {
         r#"
 [[mcp.servers]]
 id = "filesystem"
-enabled = true
+enabled = false
 transport = "stdio"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
@@ -1269,12 +1269,15 @@ fn mcp_add_studio_parses_command_string_and_cwd() {
         "npx -y @modelcontextprotocol/server-filesystem .",
         "--cwd",
         ".",
+        "--disable",
     ]);
     let stdout = run(add);
     assert!(stdout.contains("added MCP server filesystem"));
+    assert!(stdout.contains("filesystem added (disabled)"));
 
     let config_path = temp.path().join(".neo/config.toml");
     let config_content = fs::read_to_string(&config_path).expect("read config");
+    assert!(config_content.contains("enabled = false"));
     assert!(config_content.contains("command = \"npx\""));
     assert!(config_content.contains("args = ["));
     assert!(config_content.contains("\"-y\""));

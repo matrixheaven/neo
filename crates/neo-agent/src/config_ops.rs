@@ -107,7 +107,7 @@ pub fn add_provider_from_catalog_entry(
     replace_provider_from_catalog(
         &mut file_config,
         provider_id,
-        provider_config,
+        &provider_config,
         api_key,
         default_model,
     );
@@ -127,7 +127,7 @@ pub fn add_provider_from_catalog_entry(
 pub fn list_providers(config: &AppConfig, json: bool) -> anyhow::Result<String> {
     if config.providers.is_empty() {
         if json {
-            return providers_json(Vec::new(), &config.default_model);
+            return providers_json(&[], &config.default_model);
         }
         return Ok(
             "no providers configured. Use `neo provider catalog list` to discover providers.\n"
@@ -140,8 +140,8 @@ pub fn list_providers(config: &AppConfig, json: bool) -> anyhow::Result<String> 
             .providers
             .iter()
             .map(|(id, cfg)| provider_entry_json(id, cfg, config))
-            .collect();
-        return providers_json(entries, &config.default_model);
+            .collect::<Vec<_>>();
+        return providers_json(&entries, &config.default_model);
     }
 
     let mut out = String::new();
@@ -191,14 +191,14 @@ fn provider_owns_default(provider_id: &str, default_model: &str) -> bool {
 fn replace_provider_from_catalog(
     file_config: &mut FileConfig,
     provider_id: &str,
-    provider_config: neo_ai::catalog::CatalogProviderConfig,
+    provider_config: &neo_ai::catalog::CatalogProviderConfig,
     api_key: Option<&str>,
     default_model: Option<&str>,
 ) {
     remove_provider_config(file_config, provider_id);
-    insert_catalog_provider(file_config, provider_id, &provider_config, api_key);
-    insert_catalog_models(file_config, provider_id, &provider_config);
-    if let Some(default_alias) = catalog_default_alias(provider_id, &provider_config, default_model)
+    insert_catalog_provider(file_config, provider_id, provider_config, api_key);
+    insert_catalog_models(file_config, provider_id, provider_config);
+    if let Some(default_alias) = catalog_default_alias(provider_id, provider_config, default_model)
     {
         file_config.default_model = Some(default_alias);
     }
@@ -282,7 +282,7 @@ fn catalog_model_alias(provider_id: &str, model_id: &str) -> String {
     format!("{provider_id}/{model_id}")
 }
 
-fn providers_json(entries: Vec<serde_json::Value>, default_model: &str) -> anyhow::Result<String> {
+fn providers_json(entries: &[serde_json::Value], default_model: &str) -> anyhow::Result<String> {
     Ok(serde_json::to_string_pretty(&json!({
         "providers": entries,
         "default_model": default_model,

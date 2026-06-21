@@ -3,7 +3,7 @@ use std::{
     env,
     fmt::Write as _,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use anyhow::Context;
@@ -15,8 +15,8 @@ use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool,
     CompactionSettings, Content, CreateSkillTool, ListSkillsTool, McpHttpConfig,
     McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter, McpToolProvider,
-    MoveSkillTool, PendingQuestion, PermissionApprovalDecision, SummarizeSessionsTool,
-    ToolRegistry,
+    MoveSkillTool, PendingQuestion, PermissionApprovalDecision, PermissionOperation,
+    SummarizeSessionsTool, ToolRegistry, mode::PlanMode,
 };
 use neo_ai::{
     ChatMessage, ContentPart, CredentialResolver, ModelClient, ModelRegistry, ModelSpec,
@@ -961,7 +961,10 @@ pub struct PromptTurn {
 
 pub struct PromptApprovalRequest {
     pub id: String,
+    #[allow(dead_code)]
+    pub operation: PermissionOperation,
     pub decision_tx: oneshot::Sender<PermissionApprovalDecision>,
+    pub feedback_tx: Option<oneshot::Sender<Option<String>>>,
 }
 
 pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result<PromptTurn> {
@@ -974,7 +977,7 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
     let mut writer = SessionEventWriter::jsonl(&mut writer);
     let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
     record_session_activity(config, &session_id, &prompt);
-    let runtime = runtime_for_config(config, None, None, None).await?;
+    let runtime = runtime_for_config(config, None, None, None, None, false).await?;
     let turn = finish_prompt_turn(
         user_message,
         AgentContext::new(),
@@ -995,7 +998,7 @@ pub async fn run_prompt_ephemeral(
     let prompt = prompt.join(" ");
     let mut writer = SessionEventWriter::memory();
     let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
-    let runtime = runtime_for_config(config, None, None, None).await?;
+    let runtime = runtime_for_config(config, None, None, None, None, false).await?;
     finish_prompt_turn(
         user_message,
         AgentContext::new(),
@@ -1023,7 +1026,7 @@ pub async fn run_prompt_in_session(
     let mut writer = SessionEventWriter::jsonl(&mut writer);
     let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
     record_session_activity(config, session_id, &prompt);
-    let runtime = runtime_for_config(config, None, None, None).await?;
+    let runtime = runtime_for_config(config, None, None, None, None, false).await?;
     runtime.restore_plan_mode(&context);
     finish_prompt_turn(
         user_message,
@@ -1047,6 +1050,8 @@ pub async fn run_prompt_streaming(
     question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
     skill_context: Option<String>,
     plan_review_feedback: Option<std::collections::BTreeMap<String, String>>,
+    plan_mode: Option<Arc<RwLock<PlanMode>>>,
+    goal_mode_authoring: bool,
 ) -> anyhow::Result<PromptTurn> {
     let prepared = prepare_new_streaming_turn(prompt, config, session_id_tx, skill_context).await?;
     let prompt = prepared.prompt.clone();
@@ -1055,6 +1060,8 @@ pub async fn run_prompt_streaming(
         Some(approval_tx),
         question_tx,
         plan_review_feedback.clone(),
+        plan_mode.clone(),
+        goal_mode_authoring,
     )
     .await?;
     let turn = run_prepared_streaming_turn(prepared, runtime, event_tx, cancel_token).await?;
@@ -1074,6 +1081,8 @@ pub async fn run_prompt_in_session_streaming(
     question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
     skill_context: Option<String>,
     plan_review_feedback: Option<std::collections::BTreeMap<String, String>>,
+    plan_mode: Option<Arc<RwLock<PlanMode>>>,
+    goal_mode_authoring: bool,
 ) -> anyhow::Result<PromptTurn> {
     let prepared =
         prepare_existing_streaming_turn(session_id, prompt, config, session_id_tx, skill_context)
@@ -1083,6 +1092,8 @@ pub async fn run_prompt_in_session_streaming(
         Some(approval_tx),
         question_tx,
         plan_review_feedback.clone(),
+        plan_mode.clone(),
+        goal_mode_authoring,
     )
     .await?;
     runtime.restore_plan_mode(&prepared.context);
@@ -1201,6 +1212,8 @@ async fn runtime_for_config(
     approval_tx: Option<mpsc::UnboundedSender<PromptApprovalRequest>>,
     question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
     plan_review_feedback: Option<std::collections::BTreeMap<String, String>>,
+    plan_mode: Option<Arc<RwLock<PlanMode>>>,
+    goal_mode_authoring: bool,
 ) -> anyhow::Result<AgentRuntime> {
     let model = resolve_model(config)?;
     let client = resolve_model_client(config, &model)?;
@@ -1211,6 +1224,12 @@ async fn runtime_for_config(
         &config.skill_path,
     )?;
     let mut agent_config = agent_config_for_app(model, config, approval_tx, &skill_store)?;
+    if let Some(plan_mode) = plan_mode {
+        agent_config = agent_config.with_plan_mode(plan_mode);
+    }
+    if goal_mode_authoring {
+        agent_config = agent_config.with_goal_mode_authoring(true);
+    }
     if let Some(feedback) = plan_review_feedback {
         agent_config.plan_review_feedback =
             Arc::new(std::sync::Mutex::new(feedback.into_iter().collect()));
@@ -1500,6 +1519,9 @@ fn agent_config_for_app(
         )
         .with_tool_execution_mode(config.runtime.tool_execution_mode)
         .with_workspace_root(&config.project_dir)?;
+    if let Some(home) = neo_home() {
+        agent_config = agent_config.with_home_dir(home);
+    }
     agent_config.temperature = config.runtime.temperature;
     agent_config.max_tokens = config.runtime.max_tokens;
     agent_config.reasoning_effort = config.runtime.reasoning_effort;
@@ -1521,20 +1543,41 @@ fn agent_config_for_app(
         });
     }
     if let Some(approval_tx) = approval_tx {
+        let plan_review_feedback = Arc::clone(&agent_config.plan_review_feedback);
         agent_config = agent_config.with_async_approval_handler(move |request| {
             let approval_tx = approval_tx.clone();
+            let plan_review_feedback = Arc::clone(&plan_review_feedback);
             async move {
                 let (decision_tx, decision_rx) = oneshot::channel();
+                let (feedback_tx, feedback_rx) = oneshot::channel();
                 let id = request.id.clone();
+                let operation = request.operation;
                 if approval_tx
-                    .send(PromptApprovalRequest { id, decision_tx })
+                    .send(PromptApprovalRequest {
+                        id,
+                        operation,
+                        decision_tx,
+                        feedback_tx: Some(feedback_tx),
+                    })
                     .is_err()
                 {
                     return PermissionApprovalDecision::Reject;
                 }
-                decision_rx
+                let decision = decision_rx
                     .await
-                    .unwrap_or(PermissionApprovalDecision::Reject)
+                    .unwrap_or(PermissionApprovalDecision::Reject);
+                if decision == PermissionApprovalDecision::Reject
+                    && matches!(
+                        operation,
+                        PermissionOperation::PlanTransition | PermissionOperation::GoalTransition
+                    )
+                    && let Ok(Some(feedback)) = feedback_rx.await
+                    && !feedback.trim().is_empty()
+                    && let Ok(mut map) = plan_review_feedback.lock()
+                {
+                    map.insert(request.id, feedback);
+                }
+                decision
             }
         });
     }
@@ -2304,8 +2347,12 @@ mod tests {
             subject: "Write".to_owned(),
             arguments: serde_json::json!({"path": "approved.txt"}),
         }));
-        let PromptApprovalRequest { id, decision_tx } =
-            approval_rx.recv().await.expect("approval waiter");
+        let PromptApprovalRequest {
+            id,
+            operation: _,
+            decision_tx,
+            feedback_tx: _,
+        } = approval_rx.recv().await.expect("approval waiter");
 
         assert_eq!(id, "tool-1");
         decision_tx
