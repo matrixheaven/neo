@@ -22,7 +22,7 @@ impl Tool for EnterPlanModeTool {
          Use it when ANY of these conditions apply:\n\
          1. New Feature Implementation - e.g. \"Add a caching layer to the API\".\n\
          2. Multiple Valid Approaches - e.g. \"Optimize database queries\" (indexing vs rewrite vs caching).\n\
-         3. Code Modifications - e.g. \"Refactor auth module to support OAuth\".\n\
+         3. Code Modifications - e.g. \"Refactor parser module to support streaming\".\n\
          4. Architectural Decisions - e.g. \"Add WebSocket support\".\n\
          5. Multi-File Changes - involves more than 2-3 files.\n\
          6. Unclear Requirements - need exploration to understand scope.\n\

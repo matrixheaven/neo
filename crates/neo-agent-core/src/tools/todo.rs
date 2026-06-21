@@ -150,7 +150,7 @@ impl Tool for TodoTool {
     }
 
     fn description(&self) -> &'static str {
-        "Maintain a structured TODO list as you work through a multi-step task. \
+        "Maintain a structured task list as you work through a multi-step task. \
          Use it proactively and often when progress tracking helps the current work, \
          especially in plan mode, long-running investigations, and implementation \
          tasks with several tool calls.\n\n\
