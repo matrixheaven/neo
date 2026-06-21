@@ -59,6 +59,69 @@ fn transcript_pane_renders_startup_banner() {
 }
 
 #[test]
+fn cwd_label_uses_shell_home_slash_format() {
+    let home = std::env::var("HOME").expect("HOME is set for test");
+    let workspace = PathBuf::from(home).join("Workspace").join("neo");
+    let app = NeoChromeState::new("neo", "test-session", "openai/gpt-4.1", workspace);
+
+    assert_eq!(app.cwd_label(), "~/Workspace/neo");
+}
+
+#[test]
+fn footer_and_banner_include_git_status_after_cwd() {
+    let mut app = NeoChromeState::new(
+        "neo",
+        "test-session",
+        "deepseek/deepseek-v4-pro[1m]",
+        "/tmp/neo-ws",
+    );
+    app.set_git_status_label(Some("main [+12 -3 ↑2↓1]".to_owned()));
+
+    let footer_lines = render_app(140, &app);
+    let footer = footer_lines
+        .iter()
+        .find(|line| line.contains("/tmp/neo-ws"))
+        .expect("footer contains cwd");
+    assert!(footer.contains("/tmp/neo-ws main [+12 -3 ↑2↓1]"));
+
+    let mut runtime = TranscriptPane::new(100, 16);
+    runtime.push_welcome_banner(
+        app.title(),
+        app.session_label(),
+        app.model_label(),
+        &app.cwd_label(),
+        env!("CARGO_PKG_VERSION"),
+        None,
+    );
+    let banner = render_transcript(100, 16, &mut runtime).join("\n");
+    assert!(banner.contains("Directory:"));
+    assert!(banner.contains("/tmp/neo-ws"));
+    assert!(!banner.contains("main [+12 -3 ↑2↓1]"));
+}
+
+#[test]
+fn footer_git_status_uses_github_segment_colors() {
+    let mut app = NeoChromeState::new(
+        "neo",
+        "test-session",
+        "deepseek/deepseek-v4-pro[1m]",
+        "/tmp/neo-ws",
+    );
+    app.set_git_status_label(Some("main [+12 -3 ↑2↓1]".to_owned()));
+
+    let footer = render_chrome_lines(&app, 140)
+        .lines
+        .into_iter()
+        .find(|line| line.contains("main"))
+        .expect("footer contains git status");
+
+    assert!(footer.contains("\x1b[38;2;191;135;0mmain"));
+    assert!(footer.contains("\x1b[38;2;26;127;55m+12"));
+    assert!(footer.contains("\x1b[38;2;207;34;46m-3"));
+    assert!(footer.contains("\x1b[38;2;9;105;218m↑2↓1"));
+}
+
+#[test]
 fn app_shell_context_color_changes_by_threshold() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
 
@@ -73,18 +136,31 @@ fn app_shell_context_color_changes_by_threshold() {
 }
 
 #[test]
-fn app_shell_footer_omits_keyboard_hint_line() {
+fn footer_renders_permission_mode_badge() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.set_context_window(Some(ContextWindow::new(200_000).with_used_tokens(12_345)));
+    app.set_permission_mode(neo_agent_core::PermissionMode::Manual);
+    let lines = render_app(80, &app);
+    assert!(lines.iter().any(|line| line.contains("[manual]")));
 
-    let lines = render_app(100, &app);
-    let last = lines.len().saturating_sub(1);
+    app.set_permission_mode(neo_agent_core::PermissionMode::Auto);
+    let lines = render_app(80, &app);
+    assert!(lines.iter().any(|line| line.contains("[auto]")));
 
-    assert!(lines[last].contains("[ask]"));
-    assert!(lines[last].contains("ctx 12k/200k"));
-    assert!(!lines.iter().any(|line| line.contains("enter send")));
-    assert!(!lines.iter().any(|line| line.contains("shift+enter")));
-    assert!(!lines.iter().any(|line| line.contains("/ commands")));
+    app.set_permission_mode(neo_agent_core::PermissionMode::Yolo);
+    let lines = render_app(80, &app);
+    assert!(lines.iter().any(|line| line.contains("[yolo]")));
+}
+
+#[test]
+fn footer_shows_plan_mode_indicator() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_plan_mode(true);
+    let lines = render_app(80, &app);
+    assert!(lines.iter().any(|line| line.contains("[PLAN MODE]")));
+
+    app.set_plan_mode(false);
+    let lines = render_app(80, &app);
+    assert!(!lines.iter().any(|line| line.contains("[PLAN MODE]")));
 }
 
 #[test]
@@ -214,7 +290,7 @@ fn pending_approval_hides_composer_prompt() {
         "composer should be hidden: {frame}"
     );
     assert!(
-        frame.contains("[ask]"),
+        frame.contains("[manual]"),
         "footer should remain visible: {frame}"
     );
     assert!(
@@ -267,7 +343,7 @@ fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
         .expect("composer prompt renders");
     let status_row = lines
         .iter()
-        .rposition(|line| line.contains("[ask]"))
+        .rposition(|line| line.contains("[manual]"))
         .expect("footer status line renders");
 
     assert!(!lines.iter().any(|line| line.contains("enter send")));
@@ -673,20 +749,6 @@ fn todo_panel_offsets_prompt_start_row() {
 }
 
 #[test]
-fn command_palette_filters_and_confirms_items() {
-    let mut state = CommandPaletteState::new([
-        CommandSpec::new("model", "Switch model", Some("Pick a model")),
-        CommandSpec::new("resume", "Resume session", Some("Open history")),
-    ]);
-    state.set_filter("res");
-
-    assert_eq!(
-        state.selected_command().map(|cmd| cmd.id),
-        Some("resume".to_owned())
-    );
-}
-
-#[test]
 fn session_picker_filters_scope_and_selection() {
     let mut picker = SessionPickerState::new(
         [
@@ -719,6 +781,20 @@ fn session_picker_filters_scope_and_selection() {
     );
     picker.set_scope(SessionPickerScope::All);
     assert_eq!(picker.scope(), SessionPickerScope::All);
+}
+
+#[test]
+fn command_palette_filters_and_confirms_items() {
+    let mut state = CommandPaletteState::new([
+        CommandSpec::new("model", "Switch model", Some("Pick a model")),
+        CommandSpec::new("resume", "Resume session", Some("Open history")),
+    ]);
+    state.set_filter("res");
+
+    assert_eq!(
+        state.selected_command().map(|cmd| cmd.id),
+        Some("resume".to_owned())
+    );
 }
 
 #[test]

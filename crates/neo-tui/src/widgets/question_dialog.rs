@@ -704,13 +704,14 @@ impl QuestionStateMachine {
                 InputResult::Handled
             }
             InputEvent::Action(action) => question_key_for_action(*action)
-                .map(|key| question_action_result(self.handle_key(key)))
-                .unwrap_or(InputResult::Ignored),
+                .map_or(InputResult::Ignored, |key| {
+                    question_action_result(&self.handle_key(key))
+                }),
             _ => {
                 let Some(key) = question_key_for_input(input) else {
                     return InputResult::Ignored;
                 };
-                question_action_result(self.handle_key(key))
+                question_action_result(&self.handle_key(key))
             }
         }
     }
@@ -752,6 +753,7 @@ fn question_key_for_action(action: KeybindingAction) -> Option<KeyEvent> {
         | KeybindingAction::ToolOutputToggle
         | KeybindingAction::ModelPickerOpen
         | KeybindingAction::TogglePlanMode
+        | KeybindingAction::CyclePermissionMode
         | KeybindingAction::EditorPageUp
         | KeybindingAction::EditorPageDown
         | KeybindingAction::EditorYank
@@ -789,8 +791,8 @@ fn question_key_for_input(input: &InputEvent) -> Option<KeyEvent> {
     Some(KeyEvent::new(code, KeyModifiers::NONE))
 }
 
-fn question_action_result(action: QuestionDialogAction) -> InputResult {
-    match action {
+fn question_action_result(action: &QuestionDialogAction) -> InputResult {
+    match *action {
         QuestionDialogAction::None => InputResult::Handled,
         QuestionDialogAction::Submit(_) => InputResult::Submitted,
         QuestionDialogAction::Cancel => InputResult::Cancelled,

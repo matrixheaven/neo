@@ -271,12 +271,12 @@ fn table_aligns_borders_with_emoji_grapheme_clusters() {
 
 fn border_columns(line: &str) -> Vec<usize> {
     line.char_indices()
-        .filter_map(|(idx, ch)| {
+        .filter(|(_, ch)| {
             matches!(
                 ch,
                 '│' | '┌' | '┬' | '┐' | '├' | '┼' | '┤' | '└' | '┴' | '┘'
             )
-            .then(|| unicode_width::UnicodeWidthStr::width(&line[..idx]))
         })
+        .map(|(idx, _)| unicode_width::UnicodeWidthStr::width(&line[..idx]))
         .collect()
 }

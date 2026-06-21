@@ -666,7 +666,7 @@ fn transcript_pane_accumulates_tool_argument_delta_fragments() {
     });
 
     let frame = plain_frame(&mut transcript_pane, 80, 12);
-    assert!(frame.iter().any(|l| l.contains("Using Read (README.md)")));
+    assert!(frame.iter().any(|l| l.contains("Queued Read (README.md)")));
 }
 
 #[test]
@@ -758,6 +758,39 @@ fn transcript_pane_keeps_running_tool_run_live() {
         .expect("tool run exists");
     assert_eq!(state.id, "tool-1");
     assert_eq!(state.status, ToolStatusKind::Running);
+}
+
+#[test]
+fn transcript_pane_marks_declared_tool_call_as_queued_until_execution_starts() {
+    let mut transcript_pane = TranscriptPane::new(80, 12);
+
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "Bash".to_owned(),
+    });
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolCallArgumentsDelta {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        json_fragment: r#"{"command":"cargo test"}"#.to_owned(),
+    });
+
+    let queued = plain_frame(&mut transcript_pane, 80, 12);
+    assert!(queued.iter().any(|line| line.contains("Queued Bash")));
+    assert!(
+        !queued.iter().any(|line| line.contains("Using Bash")),
+        "declared-but-not-started tool calls must not look like running tools: {queued:?}"
+    );
+
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "tool-1".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: serde_json::json!({ "command": "cargo test" }),
+    });
+
+    let running = plain_frame(&mut transcript_pane, 80, 12);
+    assert!(running.iter().any(|line| line.contains("Using Bash")));
 }
 
 #[test]

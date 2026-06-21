@@ -236,45 +236,23 @@ impl TranscriptEntry {
         // each `Vec<String>` entry as one screen row, so an un-split long line
         // would corrupt the coordinate model and garble streaming output.
         let inner_width = width.max(1);
+        self.render_inner(inner_width, theme)
+    }
+
+    fn render_inner(&self, inner_width: usize, theme: &TuiTheme) -> Vec<Line> {
         match self {
             Self::Banner(data) => render_welcome_banner(data, inner_width, theme),
-            // User: no "You" label — a sparkle bullet (roleUser amber) on the
-            // first line, continuation lines indented to align after the
-            // bullet (Neo style).
-            Self::UserMessage(content) => {
-                let style = Style::default().fg(theme.user_message);
-                bulleted_wrap(content, inner_width, "✨ ", style)
-            }
-            // Status: plain dim single-line for routine statuses; a bold
-            // severity-colored title for system/error statuses.
-            Self::Status { text, severity } => match severity {
-                None => styled_wrap(text, inner_width, status_style(theme)),
-                Some(sev) => {
-                    let style = Style::default().fg(severity_color(*sev, theme)).bold();
-                    styled_wrap(text, inner_width, style)
-                }
-            },
+            Self::UserMessage(content) => render_user_message(content, inner_width, theme),
+            Self::Status { text, severity } => render_status(text, *severity, inner_width, theme),
             Self::AssistantMessage { content } => {
-                if content.is_empty() {
-                    return Vec::new();
-                }
-                crate::markdown::render_markdown(content, inner_width, theme, "● ", "  ")
+                render_assistant_message(content, inner_width, theme)
             }
             Self::ThinkingBlock {
                 content,
                 phase,
                 expanded,
-            } => {
-                if content.is_empty() {
-                    Vec::new()
-                } else {
-                    render_thinking(content, inner_width, *phase, *expanded, theme)
-                }
-            }
-            Self::ToolRun { component } => {
-                let mut component = component.clone();
-                component.render_with_theme(inner_width, theme)
-            }
+            } => render_thinking_block(content, *phase, *expanded, inner_width, theme),
+            Self::ToolRun { component } => render_tool_run(component, inner_width, theme),
             Self::ApprovalPrompt(data) => render_approval_prompt(data, inner_width, theme),
             Self::Image { metadata, .. } => styled_wrap(metadata, inner_width, status_style(theme)),
             Self::Compaction {
@@ -319,35 +297,11 @@ impl TranscriptEntry {
     #[must_use]
     pub fn copy_parts(&self) -> (&'static str, String) {
         match self {
-            Self::Banner(data) => (
-                "Banner",
-                format!(
-                    "{}\nSession: {}\nModel: {}\nWorkspace: {}",
-                    data.title, data.session, data.model, data.directory
-                ),
-            ),
+            Self::Banner(data) => ("Banner", copy_banner(data)),
             Self::UserMessage(content) => ("You", content.clone()),
             Self::AssistantMessage { content } => ("Assistant", content.clone()),
             Self::ThinkingBlock { content, .. } => ("Thinking", content.clone()),
-            Self::ToolRun { component } => {
-                let state = component.state();
-                let detail = state
-                    .result
-                    .as_ref()
-                    .filter(|result| !result.is_empty())
-                    .or_else(|| {
-                        state
-                            .arguments
-                            .as_ref()
-                            .filter(|arguments| !arguments.is_empty())
-                    })
-                    .cloned()
-                    .unwrap_or_default();
-                (
-                    "Tool",
-                    format!("{} {} ({detail})", state.status.marker(), state.name),
-                )
-            }
+            Self::ToolRun { component } => ("Tool", copy_tool(component)),
             Self::ApprovalPrompt(data) => ("Approval", data.title.clone()),
             Self::Image { metadata, .. } => ("Image", metadata.clone()),
             Self::Compaction {
@@ -356,10 +310,7 @@ impl TranscriptEntry {
                 ..
             } => (
                 "Compact",
-                format!(
-                    "Compacted {compacted_message_count} messages · {} tokens before",
-                    format_token_count_usize(*tokens_before)
-                ),
+                copy_compaction(*compacted_message_count, *tokens_before),
             ),
             Self::Status { text, .. } => ("Status", text.clone()),
             Self::GoalCard {
@@ -369,36 +320,16 @@ impl TranscriptEntry {
                 turns,
             } => (
                 "Goal",
-                format!(
-                    "{:?} goal: {objective}\n{}\n{}",
-                    kind,
-                    detail.as_deref().unwrap_or(""),
-                    turns.map_or_else(String::new, |t| format!("Turns: {t}"))
-                ),
+                copy_goal(*kind, objective, detail.as_deref(), *turns),
             ),
             Self::SkillActivation {
                 name,
                 description,
                 args,
-            } => {
-                let body = args
-                    .as_deref()
-                    .filter(|s| !s.trim().is_empty())
-                    .map(|a| format!("args: {a}"))
-                    .or_else(|| {
-                        description
-                            .as_deref()
-                            .filter(|s| !s.trim().is_empty())
-                            .map(std::borrow::ToOwned::to_owned)
-                    })
-                    .unwrap_or_default();
-                let text = if body.is_empty() {
-                    format!("Used Skill: {name}")
-                } else {
-                    format!("Used Skill: {name}\n{body}")
-                };
-                ("Skill", text)
-            }
+            } => (
+                "Skill",
+                copy_skill(name, description.as_deref(), args.as_deref()),
+            ),
         }
     }
 
@@ -796,6 +727,104 @@ fn render_welcome_banner(data: &BannerData, width: usize, theme: &TuiTheme) -> V
     rows
 }
 
+fn render_user_message(content: &str, width: usize, theme: &TuiTheme) -> Vec<Line> {
+    let style = Style::default().fg(theme.user_message);
+    bulleted_wrap(content, width, "✨ ", style)
+}
+
+fn render_status(
+    text: &str,
+    severity: Option<StatusSeverity>,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    let Some(severity) = severity else {
+        return styled_wrap(text, width, status_style(theme));
+    };
+    let style = Style::default().fg(severity_color(severity, theme)).bold();
+    styled_wrap(text, width, style)
+}
+
+fn render_assistant_message(content: &str, width: usize, theme: &TuiTheme) -> Vec<Line> {
+    if content.is_empty() {
+        Vec::new()
+    } else {
+        crate::markdown::render_markdown(content, width, theme, "● ", "  ")
+    }
+}
+
+fn render_thinking_block(
+    content: &str,
+    phase: ThinkingPhase,
+    expanded: bool,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    if content.is_empty() {
+        Vec::new()
+    } else {
+        render_thinking(content, width, phase, expanded, theme)
+    }
+}
+
+fn render_tool_run(component: &ToolCallComponent, width: usize, theme: &TuiTheme) -> Vec<Line> {
+    let mut component = component.clone();
+    component.render_with_theme(width, theme)
+}
+
+fn copy_banner(data: &BannerData) -> String {
+    format!(
+        "{}\nSession: {}\nModel: {}\nWorkspace: {}",
+        data.title, data.session, data.model, data.directory
+    )
+}
+
+fn copy_tool(component: &ToolCallComponent) -> String {
+    let state = component.state();
+    let detail = state
+        .result
+        .as_ref()
+        .filter(|result| !result.is_empty())
+        .or_else(|| {
+            state
+                .arguments
+                .as_ref()
+                .filter(|arguments| !arguments.is_empty())
+        })
+        .cloned()
+        .unwrap_or_default();
+    format!("{} {} ({detail})", state.status.marker(), state.name)
+}
+
+fn copy_compaction(compacted_message_count: usize, tokens_before: usize) -> String {
+    format!(
+        "Compacted {compacted_message_count} messages · {} tokens before",
+        format_token_count_usize(tokens_before)
+    )
+}
+
+fn copy_goal(
+    kind: GoalCardKind,
+    objective: &str,
+    detail: Option<&str>,
+    turns: Option<u32>,
+) -> String {
+    format!(
+        "{kind:?} goal: {objective}\n{}\n{}",
+        detail.unwrap_or(""),
+        turns.map_or_else(String::new, |turn| format!("Turns: {turn}"))
+    )
+}
+
+fn copy_skill(name: &str, description: Option<&str>, args: Option<&str>) -> String {
+    let body = skill_body(description, args).unwrap_or_default();
+    if body.is_empty() {
+        format!("Used Skill: {name}")
+    } else {
+        format!("Used Skill: {name}\n{body}")
+    }
+}
+
 fn render_goal_card(
     kind: GoalCardKind,
     objective: &str,
@@ -804,16 +833,61 @@ fn render_goal_card(
     width: usize,
     theme: &TuiTheme,
 ) -> Vec<Line> {
-    let (icon, label, color) = match kind {
-        GoalCardKind::Started => ("▶", "GOAL STARTED", theme.brand),
-        GoalCardKind::Paused => ("⏸", "GOAL PAUSED", theme.status_warn),
-        GoalCardKind::Resumed => ("▶", "GOAL RESUMED", theme.brand),
-        GoalCardKind::Blocked => ("⏹", "GOAL BLOCKED", theme.status_error),
-        GoalCardKind::Finished => ("✓", "GOAL COMPLETE", theme.status_ok),
-    };
+    let chrome = GoalCardChrome::new(kind, theme);
+    let content = goal_card_content(&chrome, objective, detail, turns);
+    render_goal_card_rows(&content, width, &chrome, theme)
+}
 
+struct GoalCardChrome {
+    icon: &'static str,
+    label: &'static str,
+    color: crate::ansi::Color,
+}
+
+impl GoalCardChrome {
+    fn new(kind: GoalCardKind, theme: &TuiTheme) -> Self {
+        match kind {
+            GoalCardKind::Started => Self {
+                icon: "▶",
+                label: "GOAL STARTED",
+                color: theme.brand,
+            },
+            GoalCardKind::Paused => Self {
+                icon: "⏸",
+                label: "GOAL PAUSED",
+                color: theme.status_warn,
+            },
+            GoalCardKind::Resumed => Self {
+                icon: "▶",
+                label: "GOAL RESUMED",
+                color: theme.brand,
+            },
+            GoalCardKind::Blocked => Self {
+                icon: "⏹",
+                label: "GOAL BLOCKED",
+                color: theme.status_error,
+            },
+            GoalCardKind::Finished => Self {
+                icon: "✓",
+                label: "GOAL COMPLETE",
+                color: theme.status_ok,
+            },
+        }
+    }
+
+    fn header(&self) -> String {
+        format!("{} {}", self.icon, self.label)
+    }
+}
+
+fn goal_card_content(
+    chrome: &GoalCardChrome,
+    objective: &str,
+    detail: Option<&str>,
+    turns: Option<u32>,
+) -> Vec<String> {
     let mut content: Vec<String> = Vec::new();
-    content.push(format!("{icon} {label}"));
+    content.push(chrome.header());
     content.push(String::new());
     content.push(objective.to_owned());
     if let Some(detail) = detail {
@@ -824,34 +898,59 @@ fn render_goal_card(
         content.push(String::new());
         content.push(format!("Turns used: {turns}"));
     }
+    content
+}
 
-    let border_style = Style::default().fg(color);
-    let header_style = Style::default().fg(color).bold();
+fn render_goal_card_rows(
+    content: &[String],
+    width: usize,
+    chrome: &GoalCardChrome,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    let border_style = Style::default().fg(chrome.color);
+    let header_style = Style::default().fg(chrome.color).bold();
     let body_style = Style::default().fg(theme.text_primary);
-
     let inner_width = width.saturating_sub(4).max(1);
     let mut rows: Vec<Line> = Vec::new();
     rows.push(Line::raw(box_draw::top_border(width, border_style)));
     for (idx, line) in content.iter().enumerate() {
-        let wrapped = wrap_width(line, inner_width);
         let style = if idx == 0 { header_style } else { body_style };
-        if wrapped.is_empty() {
-            rows.push(Line::raw(paint(
-                &box_draw::content_line("", width, border_style),
-                style,
-            )));
-        } else {
-            for part in wrapped {
-                rows.push(Line::raw(paint(
-                    &box_draw::content_line(&format!(" {part} "), width, border_style),
-                    style,
-                )));
-            }
-        }
+        rows.extend(render_goal_card_content_line(
+            line,
+            inner_width,
+            width,
+            border_style,
+            style,
+        ));
     }
     rows.push(Line::raw(box_draw::bottom_border(width, border_style)));
     rows.push(Line::raw(""));
     rows
+}
+
+fn render_goal_card_content_line(
+    line: &str,
+    inner_width: usize,
+    width: usize,
+    border_style: Style,
+    style: Style,
+) -> Vec<Line> {
+    let wrapped = wrap_width(line, inner_width);
+    if wrapped.is_empty() {
+        return vec![Line::raw(paint(
+            &box_draw::content_line("", width, border_style),
+            style,
+        ))];
+    }
+    wrapped
+        .into_iter()
+        .map(|part| {
+            Line::raw(paint(
+                &box_draw::content_line(&format!(" {part} "), width, border_style),
+                style,
+            ))
+        })
+        .collect()
 }
 
 fn render_skill_used(
@@ -873,16 +972,7 @@ fn render_skill_used(
         brand,
     ));
 
-    let body = args
-        .filter(|s| !s.trim().is_empty())
-        .map(|a| format!("args: {a}"))
-        .or_else(|| {
-            description
-                .filter(|s| !s.trim().is_empty())
-                .map(std::borrow::ToOwned::to_owned)
-        });
-
-    if let Some(body) = body {
+    if let Some(body) = skill_body(description, args) {
         let indent = "   ";
         let body_width = width.saturating_sub(indent.len()).max(1);
         for line in wrap_width(&body, body_width) {
@@ -892,6 +982,16 @@ fn render_skill_used(
 
     rows.push(Line::raw(""));
     rows
+}
+
+fn skill_body(description: Option<&str>, args: Option<&str>) -> Option<String> {
+    args.filter(|s| !s.trim().is_empty())
+        .map(|a| format!("args: {a}"))
+        .or_else(|| {
+            description
+                .filter(|s| !s.trim().is_empty())
+                .map(std::borrow::ToOwned::to_owned)
+        })
 }
 
 fn status_style(theme: &TuiTheme) -> Style {
@@ -944,7 +1044,7 @@ mod tests {
         }
         .render(14, &TuiTheme::default())
         .into_iter()
-        .map(|line| line.text().to_owned())
+        .map(|line| line.text().clone())
         .collect::<Vec<_>>();
         let expanded = TranscriptEntry::ThinkingBlock {
             content: content.to_owned(),
@@ -953,7 +1053,7 @@ mod tests {
         }
         .render(14, &TuiTheme::default())
         .into_iter()
-        .map(|line| line.text().to_owned())
+        .map(|line| line.text().clone())
         .collect::<Vec<_>>();
 
         assert!(
@@ -979,7 +1079,7 @@ mod tests {
         let lines = entry
             .render(60, &TuiTheme::default())
             .into_iter()
-            .map(|l| l.text().to_owned())
+            .map(|l| l.text().clone())
             .collect::<Vec<_>>();
         assert!(
             lines
@@ -1003,7 +1103,7 @@ mod tests {
         let lines = entry
             .render(60, &TuiTheme::default())
             .into_iter()
-            .map(|l| l.text().to_owned())
+            .map(|l| l.text().clone())
             .collect::<Vec<_>>();
         assert!(
             lines
@@ -1027,7 +1127,7 @@ mod tests {
         let lines = entry
             .render(40, &TuiTheme::default())
             .into_iter()
-            .map(|l| l.text().to_owned())
+            .map(|l| l.text().clone())
             .collect::<Vec<_>>();
         assert!(lines.len() >= 3); // header + 2+ wrapped body lines + blank
     }
@@ -1039,7 +1139,7 @@ mod tests {
         let lines = entry
             .render(60, &TuiTheme::default())
             .into_iter()
-            .map(|l| l.text().to_owned())
+            .map(|l| l.text().clone())
             .collect::<Vec<_>>();
         assert!(
             lines
@@ -1060,7 +1160,7 @@ mod tests {
         let lines = entry
             .render(60, &TuiTheme::default())
             .into_iter()
-            .map(|l| l.text().to_owned())
+            .map(|l| l.text().clone())
             .collect::<Vec<_>>();
         assert!(
             lines

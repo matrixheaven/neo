@@ -5,7 +5,7 @@ use std::{
     time::SystemTime,
 };
 
-use neo_agent_core::{AgentEvent, PermissionDecision};
+use neo_agent_core::{AgentEvent, PermissionMode, PermissionOperation};
 
 use crate::{
     ansi::Color,
@@ -287,7 +287,7 @@ pub struct NeoChromeState {
     image_render_policy: ImageRenderPolicy,
     image_capabilities: TerminalImageCapabilities,
     theme: TuiTheme,
-    permission_decision: PermissionDecision,
+    permission_mode: PermissionMode,
     /// Current agent mode indicator (for footer display)
     plan_mode_active: bool,
     /// Current todo list for the `TodoPanel`.
@@ -298,6 +298,8 @@ pub struct NeoChromeState {
     thinking_enabled: bool,
     /// Optional persistent exit-confirmation message shown in the footer.
     exit_confirmation_label: Option<String>,
+    /// Formatted git branch/status badge shown after the workspace path.
+    git_status_label: Option<String>,
 }
 
 impl NeoChromeState {
@@ -326,12 +328,13 @@ impl NeoChromeState {
             image_render_policy: ImageRenderPolicy::default(),
             image_capabilities: TerminalImageCapabilities::default(),
             theme: TuiTheme::default(),
-            permission_decision: PermissionDecision::Ask,
+            permission_mode: PermissionMode::default(),
             plan_mode_active: false,
             todo_items: Vec::new(),
             custom_working_label: None,
             thinking_enabled: false,
             exit_confirmation_label: None,
+            git_status_label: None,
         }
     }
 
@@ -403,20 +406,29 @@ impl NeoChromeState {
     }
 
     #[must_use]
-    pub fn permission_decision(&self) -> PermissionDecision {
-        self.permission_decision
+    pub fn git_status_label(&self) -> Option<&str> {
+        self.git_status_label.as_deref()
     }
 
-    pub fn set_permission_decision(&mut self, decision: PermissionDecision) {
-        self.permission_decision = decision;
+    pub fn set_git_status_label(&mut self, label: Option<String>) {
+        self.git_status_label = label;
+    }
+
+    #[must_use]
+    pub const fn permission_mode(&self) -> PermissionMode {
+        self.permission_mode
+    }
+
+    pub fn set_permission_mode(&mut self, mode: PermissionMode) {
+        self.permission_mode = mode;
     }
 
     #[must_use]
     pub fn permission_badge(&self) -> (&'static str, Color) {
-        match self.permission_decision {
-            PermissionDecision::Allow => ("allow", self.theme().footer_permission_allow),
-            PermissionDecision::Ask => ("ask", self.theme().footer_permission_ask),
-            PermissionDecision::Deny => ("deny", self.theme().footer_permission_deny),
+        match self.permission_mode {
+            PermissionMode::Manual => ("manual", self.theme().footer_permission_ask),
+            PermissionMode::Auto => ("auto", self.theme().footer_permission_allow),
+            PermissionMode::Yolo => ("yolo", self.theme().footer_permission_deny),
         }
     }
 
@@ -425,7 +437,10 @@ impl NeoChromeState {
         if let Some(home) = std::env::var_os("HOME") {
             let home = PathBuf::from(home);
             if let Ok(rest) = self.workspace_root.strip_prefix(&home) {
-                return format!("~{}", rest.display());
+                if rest.as_os_str().is_empty() {
+                    return "~".to_owned();
+                }
+                return format!("~/{}", rest.display());
             }
         }
         self.workspace_root.display().to_string()
@@ -638,7 +653,7 @@ impl NeoChromeState {
                 arguments,
                 ..
             } => {
-                let is_plan_review = subject.starts_with("Exit plan mode");
+                let is_plan_review = operation == PermissionOperation::PlanTransition;
                 let body = if arguments.is_null() {
                     subject
                 } else {
@@ -872,17 +887,8 @@ impl NeoChromeState {
     /// Render the focused overlay as ANSI lines, if any.
     #[must_use]
     pub fn render_focused_overlay(&self, width: usize) -> Option<Vec<String>> {
-        let overlay = self.focused_overlay()?;
-        match &overlay.kind {
-            OverlayKind::SessionPicker(picker) => Some(picker.render_lines(width, &self.theme)),
-            OverlayKind::ModelSelector(state) => Some(state.render_lines(width)),
-            OverlayKind::TabbedModelSelector(state) => Some(state.render_lines(width)),
-            OverlayKind::ProviderManager(state) => Some(state.render_lines(width)),
-            OverlayKind::ChoicePicker(state) => Some(state.render_lines(width)),
-            OverlayKind::ApiKeyInput(state) => Some(state.render_lines(width)),
-            OverlayKind::CustomRegistryImport(state) => Some(state.render_lines(width)),
-            _ => None,
-        }
+        self.focused_overlay()?
+            .render_standalone_lines(width, &self.theme)
     }
 
     pub fn open_model_picker(&mut self, items: impl IntoIterator<Item = PickerItem>) -> OverlayId {
@@ -997,47 +1003,14 @@ impl NeoChromeState {
     /// Render the focused overlay (if any) into ANSI lines at the given width.
     #[must_use]
     pub fn focused_overlay_lines(&self, width: usize) -> Vec<String> {
-        let Some(overlay) = self.focused_overlay() else {
-            return Vec::new();
-        };
-        match &overlay.kind {
-            OverlayKind::SessionPicker(picker) => picker.render_lines(width, &self.theme),
-            OverlayKind::ModelPicker(picker) => picker.render_lines(width),
-            OverlayKind::CommandPalette(palette) => palette.render_lines(width),
-            OverlayKind::PromptCompletion(completions) => completions.render_lines(width),
-            OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_) => {
-                // These are rendered via dedicated panel rendering, not overlay lines.
-                Vec::new()
-            }
-            OverlayKind::Message(text) => vec![text.clone()],
-            OverlayKind::ModelSelector(state) => state.render_lines(width),
-            OverlayKind::TabbedModelSelector(state) => state.render_lines(width),
-            OverlayKind::ProviderManager(state) => state.render_lines(width),
-            OverlayKind::ChoicePicker(state) => state.render_lines(width),
-            OverlayKind::ApiKeyInput(state) => state.render_lines(width),
-            OverlayKind::CustomRegistryImport(state) => state.render_lines(width),
-        }
+        self.focused_overlay()
+            .map_or_else(Vec::new, |overlay| overlay.render_lines(width, &self.theme))
     }
 
     /// Height in terminal lines the focused overlay wants to occupy.
     #[must_use]
     pub fn focused_overlay_height(&self) -> u16 {
-        let Some(overlay) = self.focused_overlay() else {
-            return 0;
-        };
-        match &overlay.kind {
-            OverlayKind::CommandPalette(_) => 12,
-            OverlayKind::PromptCompletion(_) | OverlayKind::Approval(_) => 8,
-            OverlayKind::Message(_) => 3,
-            OverlayKind::SessionPicker(_)
-            | OverlayKind::ModelPicker(_)
-            | OverlayKind::QuestionDialog(_)
-            | OverlayKind::ModelSelector(_)
-            | OverlayKind::TabbedModelSelector(_)
-            | OverlayKind::ProviderManager(_)
-            | OverlayKind::ChoicePicker(_) => 16,
-            OverlayKind::ApiKeyInput(_) | OverlayKind::CustomRegistryImport(_) => 10,
-        }
+        self.focused_overlay().map_or(0, Overlay::height)
     }
 
     /// Check if the focused overlay is one of the rich dialog types that
@@ -1426,8 +1399,13 @@ impl NeoChromeState {
                 self.move_overlay_selection_up();
                 None
             }
-            InputEvent::Submit => self.confirm_approval(),
-            InputEvent::Cancel => self.deny_approval(),
+            InputEvent::Submit
+            | InputEvent::Action(KeybindingAction::SelectConfirm | KeybindingAction::InputSubmit) => {
+                self.confirm_approval()
+            }
+            InputEvent::Cancel | InputEvent::Action(KeybindingAction::SelectCancel) => {
+                self.deny_approval()
+            }
             _ => None,
         }
     }
@@ -1580,129 +1558,67 @@ impl Overlay {
     }
 
     pub fn move_selection_down(&mut self) {
+        if let Some(list) = self.kind.list_selection_mut() {
+            list.select_down();
+            return;
+        }
         match &mut self.kind {
-            OverlayKind::CommandPalette(state) => state.move_down(),
-            OverlayKind::SessionPicker(state) => state.move_down(),
-            OverlayKind::ModelPicker(state) => {
-                state.move_down();
-            }
-            OverlayKind::PromptCompletion(state) => state.move_down(),
             OverlayKind::Approval(request) => request.move_down(),
             OverlayKind::QuestionDialog(state) => state.move_cursor_down(),
-            OverlayKind::Message(_) => {}
-            OverlayKind::ModelSelector(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
-            }
-            OverlayKind::TabbedModelSelector(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
-            }
-            OverlayKind::ProviderManager(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
-            }
-            OverlayKind::ChoicePicker(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
-            }
-            OverlayKind::ApiKeyInput(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectDown));
-            }
-            OverlayKind::CustomRegistryImport(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectDown));
-            }
+            kind => handle_dialog_selection(kind, KeybindingAction::SelectDown),
         }
     }
 
     pub fn move_selection_up(&mut self) {
+        if let Some(list) = self.kind.list_selection_mut() {
+            list.select_up();
+            return;
+        }
         match &mut self.kind {
-            OverlayKind::CommandPalette(state) => state.move_up(),
-            OverlayKind::SessionPicker(state) => state.move_up(),
-            OverlayKind::ModelPicker(state) => {
-                state.move_up();
-            }
-            OverlayKind::PromptCompletion(state) => state.move_up(),
             OverlayKind::Approval(request) => request.move_up(),
             OverlayKind::QuestionDialog(state) => state.move_cursor_up(),
-            OverlayKind::Message(_) => {}
-            OverlayKind::ModelSelector(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectUp));
-            }
-            OverlayKind::TabbedModelSelector(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectUp));
-            }
-            OverlayKind::ProviderManager(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectUp));
-            }
-            OverlayKind::ChoicePicker(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectUp));
-            }
-            OverlayKind::ApiKeyInput(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectUp));
-            }
-            OverlayKind::CustomRegistryImport(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectUp));
-            }
+            kind => handle_dialog_selection(kind, KeybindingAction::SelectUp),
         }
     }
 
     pub fn move_selection_page_down(&mut self) {
-        match &mut self.kind {
-            OverlayKind::CommandPalette(state) => state.page_down(),
-            OverlayKind::SessionPicker(state) => state.page_down(),
-            OverlayKind::ModelPicker(state) => {
-                state.page_down();
-            }
-            OverlayKind::PromptCompletion(state) => state.page_down(),
-            OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_) | OverlayKind::Message(_) => {
-            }
-            OverlayKind::ModelSelector(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageDown));
-            }
-            OverlayKind::TabbedModelSelector(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageDown));
-            }
-            OverlayKind::ProviderManager(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageDown));
-            }
-            OverlayKind::ChoicePicker(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageDown));
-            }
-            OverlayKind::ApiKeyInput(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageDown));
-            }
-            OverlayKind::CustomRegistryImport(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageDown));
-            }
+        if let Some(list) = self.kind.list_selection_mut() {
+            list.select_page_down();
+        } else {
+            handle_dialog_selection(&mut self.kind, KeybindingAction::SelectPageDown);
         }
     }
 
     pub fn move_selection_page_up(&mut self) {
-        match &mut self.kind {
-            OverlayKind::CommandPalette(state) => state.page_up(),
-            OverlayKind::SessionPicker(state) => state.page_up(),
-            OverlayKind::ModelPicker(state) => {
-                state.page_up();
-            }
-            OverlayKind::PromptCompletion(state) => state.page_up(),
-            OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_) | OverlayKind::Message(_) => {
-            }
-            OverlayKind::ModelSelector(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageUp));
-            }
-            OverlayKind::TabbedModelSelector(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageUp));
-            }
-            OverlayKind::ProviderManager(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageUp));
-            }
-            OverlayKind::ChoicePicker(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageUp));
-            }
-            OverlayKind::ApiKeyInput(state) => {
-                state.handle_input(&InputEvent::Action(KeybindingAction::SelectPageUp));
-            }
-            OverlayKind::CustomRegistryImport(state) => {
-                state.handle_input(InputEvent::Action(KeybindingAction::SelectPageUp));
-            }
+        if let Some(list) = self.kind.list_selection_mut() {
+            list.select_page_up();
+        } else {
+            handle_dialog_selection(&mut self.kind, KeybindingAction::SelectPageUp);
         }
+    }
+
+    #[must_use]
+    fn render_standalone_lines(&self, width: usize, theme: &TuiTheme) -> Option<Vec<String>> {
+        self.kind
+            .session_picker_lines(width, theme)
+            .or_else(|| self.kind.rich_dialog_lines(width))
+    }
+
+    #[must_use]
+    fn render_lines(&self, width: usize, theme: &TuiTheme) -> Vec<String> {
+        self.kind
+            .picker_lines(width, theme)
+            .or_else(|| self.kind.rich_dialog_lines(width))
+            .or_else(|| self.kind.message_lines())
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    fn height(&self) -> u16 {
+        self.kind
+            .compact_height()
+            .or_else(|| self.kind.input_dialog_height())
+            .unwrap_or(0)
     }
 }
 
@@ -1723,6 +1639,172 @@ pub enum OverlayKind {
     ChoicePicker(crate::dialogs::ChoicePickerState),
     ApiKeyInput(crate::dialogs::ApiKeyInputState),
     CustomRegistryImport(crate::dialogs::CustomRegistryImportState),
+}
+
+impl OverlayKind {
+    fn list_selection_mut(&mut self) -> Option<OverlayListSelection<'_>> {
+        match self {
+            Self::CommandPalette(state) => Some(OverlayListSelection::CommandPalette(state)),
+            Self::SessionPicker(state) => Some(OverlayListSelection::SessionPicker(state)),
+            _ => self.secondary_list_selection_mut(),
+        }
+    }
+
+    fn secondary_list_selection_mut(&mut self) -> Option<OverlayListSelection<'_>> {
+        match self {
+            Self::ModelPicker(state) => Some(OverlayListSelection::ModelPicker(state)),
+            Self::PromptCompletion(state) => Some(OverlayListSelection::PromptCompletion(state)),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    fn session_picker_lines(&self, width: usize, theme: &TuiTheme) -> Option<Vec<String>> {
+        let Self::SessionPicker(picker) = self else {
+            return None;
+        };
+        Some(picker.render_lines(width, theme))
+    }
+
+    #[must_use]
+    fn picker_lines(&self, width: usize, theme: &TuiTheme) -> Option<Vec<String>> {
+        match self {
+            Self::CommandPalette(palette) => Some(palette.render_lines(width)),
+            Self::SessionPicker(_) => self.session_picker_lines(width, theme),
+            Self::ModelPicker(picker) => Some(picker.render_lines(width)),
+            Self::PromptCompletion(completions) => Some(completions.render_lines(width)),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    fn rich_dialog_lines(&self, width: usize) -> Option<Vec<String>> {
+        match self {
+            Self::ModelSelector(state) => Some(state.render_lines(width)),
+            Self::TabbedModelSelector(state) => Some(state.render_lines(width)),
+            Self::ProviderManager(state) => Some(state.render_lines(width)),
+            _ => self.input_dialog_lines(width),
+        }
+    }
+
+    #[must_use]
+    fn input_dialog_lines(&self, width: usize) -> Option<Vec<String>> {
+        match self {
+            Self::ChoicePicker(state) => Some(state.render_lines(width)),
+            Self::ApiKeyInput(state) => Some(state.render_lines(width)),
+            Self::CustomRegistryImport(state) => Some(state.render_lines(width)),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    fn message_lines(&self) -> Option<Vec<String>> {
+        let Self::Message(text) = self else {
+            return None;
+        };
+        Some(vec![text.clone()])
+    }
+
+    #[must_use]
+    fn compact_height(&self) -> Option<u16> {
+        match self {
+            Self::CommandPalette(_) => Some(12),
+            Self::PromptCompletion(_) | Self::Approval(_) => Some(8),
+            Self::Message(_) => Some(3),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    fn input_dialog_height(&self) -> Option<u16> {
+        match self {
+            Self::ApiKeyInput(_) | Self::CustomRegistryImport(_) => Some(10),
+            Self::SessionPicker(_)
+            | Self::ModelPicker(_)
+            | Self::QuestionDialog(_)
+            | Self::ModelSelector(_)
+            | Self::TabbedModelSelector(_)
+            | Self::ProviderManager(_)
+            | Self::ChoicePicker(_) => Some(16),
+            _ => None,
+        }
+    }
+}
+
+enum OverlayListSelection<'a> {
+    CommandPalette(&'a mut CommandPaletteState),
+    SessionPicker(&'a mut SessionPickerState),
+    ModelPicker(&'a mut ModelPickerState),
+    PromptCompletion(&'a mut PromptCompletionState),
+}
+
+impl OverlayListSelection<'_> {
+    fn select_up(self) {
+        match self {
+            Self::CommandPalette(state) => state.move_up(),
+            Self::SessionPicker(state) => state.move_up(),
+            Self::ModelPicker(state) => state.move_up(),
+            Self::PromptCompletion(state) => state.move_up(),
+        }
+    }
+
+    fn select_down(self) {
+        match self {
+            Self::CommandPalette(state) => state.move_down(),
+            Self::SessionPicker(state) => state.move_down(),
+            Self::ModelPicker(state) => state.move_down(),
+            Self::PromptCompletion(state) => state.move_down(),
+        }
+    }
+
+    fn select_page_up(self) {
+        match self {
+            Self::CommandPalette(state) => state.page_up(),
+            Self::SessionPicker(state) => state.page_up(),
+            Self::ModelPicker(state) => state.page_up(),
+            Self::PromptCompletion(state) => state.page_up(),
+        }
+    }
+
+    fn select_page_down(self) {
+        match self {
+            Self::CommandPalette(state) => state.page_down(),
+            Self::SessionPicker(state) => state.page_down(),
+            Self::ModelPicker(state) => state.page_down(),
+            Self::PromptCompletion(state) => state.page_down(),
+        }
+    }
+}
+
+fn handle_dialog_selection(kind: &mut OverlayKind, action: KeybindingAction) {
+    let input = InputEvent::Action(action);
+    match kind {
+        OverlayKind::ModelSelector(state) => {
+            let _ = state.handle_input(&input);
+        }
+        OverlayKind::TabbedModelSelector(state) => {
+            let _ = state.handle_input(&input);
+        }
+        OverlayKind::ProviderManager(state) => {
+            let _ = state.handle_input(&input);
+        }
+        OverlayKind::ChoicePicker(state) => {
+            let _ = state.handle_input(&input);
+        }
+        OverlayKind::ApiKeyInput(state) => {
+            let _ = state.handle_input(&input);
+        }
+        OverlayKind::CustomRegistryImport(state) => {
+            let _ = state.handle_input(input);
+        }
+        OverlayKind::Approval(_)
+        | OverlayKind::QuestionDialog(_)
+        | OverlayKind::Message(_)
+        | OverlayKind::CommandPalette(_)
+        | OverlayKind::SessionPicker(_)
+        | OverlayKind::ModelPicker(_)
+        | OverlayKind::PromptCompletion(_) => {}
+    }
 }
 
 pub type ModelPickerState = PickerState;

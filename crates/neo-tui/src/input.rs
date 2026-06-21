@@ -76,11 +76,10 @@ impl InputEvent {
             (KeyCode::Right, _) => Some(Self::MoveRight),
             (KeyCode::Home, _) => Some(Self::MoveHome),
             (KeyCode::End, _) => Some(Self::MoveEnd),
-            (KeyCode::Enter, modifiers)
-                if modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
-            {
+            (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::ALT) => {
                 Some(Self::NewLine)
             }
+            (KeyCode::Char('j' | 'J'), KeyModifiers::CONTROL) => Some(Self::NewLine),
             (KeyCode::Enter, _) => Some(Self::Submit),
             (KeyCode::Esc, _) => Some(Self::Cancel),
             _ => None,
@@ -98,11 +97,7 @@ impl InputEvent {
 
         // Explicit intercept for newline keys — works regardless of keybinding
         // configuration and survives crossterm parsing quirks.
-        if event.code == KeyCode::Enter
-            && event
-                .modifiers
-                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
-        {
+        if event.code == KeyCode::Enter && event.modifiers.contains(KeyModifiers::ALT) {
             return Some(Self::NewLine);
         }
         if matches!(event.code, KeyCode::Char('j' | 'J'))
@@ -196,6 +191,12 @@ impl InputParser {
             {
                 return vec![InputEvent::NewLine];
             }
+            if event.code == KeyCode::Char('[')
+                && matches!(event.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+            {
+                self.pending_escape = "\x1b[".to_owned();
+                return Vec::new();
+            }
 
             let mut output = vec![InputEvent::Cancel];
             output.extend(self.feed_key_event(event));
@@ -253,8 +254,14 @@ impl InputParser {
                 self.paste_buffer.take().unwrap_or_default(),
             )]);
         }
+        if self.pending_escape == SHIFT_TAB_SEQUENCE {
+            self.pending_escape.clear();
+            let key = KeyId::new("shift+tab").expect("shift+tab key id is valid");
+            return Some(self.map_key_id(key).into_iter().collect());
+        }
         if BRACKETED_PASTE_START.starts_with(&self.pending_escape)
             || BRACKETED_PASTE_END.starts_with(&self.pending_escape)
+            || SHIFT_TAB_SEQUENCE.starts_with(&self.pending_escape)
         {
             return Some(Vec::new());
         }
@@ -293,10 +300,15 @@ impl InputParser {
             |keybindings| InputEvent::from_key_event_with_keybindings(event, keybindings),
         )
     }
+
+    fn map_key_id(&self, key: KeyId) -> Option<InputEvent> {
+        let keybindings = self.keybindings.as_ref()?;
+        (!keybindings.matching_actions(&key).is_empty()).then_some(InputEvent::Key(key))
+    }
 }
 
 fn raw_sequence_character(event: KeyEvent) -> Option<char> {
-    if event.modifiers != KeyModifiers::NONE {
+    if !matches!(event.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
         return None;
     }
 
@@ -308,6 +320,7 @@ fn raw_sequence_character(event: KeyEvent) -> Option<char> {
 
 const BRACKETED_PASTE_START: &str = "\x1b[200~";
 const BRACKETED_PASTE_END: &str = "\x1b[201~";
+const SHIFT_TAB_SEQUENCE: &str = "\x1b[Z";
 
 /// Max time between an ESC and the following Enter for the pair to be treated
 /// as a single Shift+Enter newline. This covers terminals (e.g. Ghostty with
@@ -448,6 +461,7 @@ pub enum KeybindingAction {
     SessionFork,
     ModelPickerOpen,
     TogglePlanMode,
+    CyclePermissionMode,
     SelectUp,
     SelectDown,
     SelectPageUp,
@@ -456,108 +470,129 @@ pub enum KeybindingAction {
     SelectCancel,
 }
 
+const KEYBINDING_ACTION_IDS: &[(KeybindingAction, &str)] = &[
+    (KeybindingAction::EditorCursorUp, "tui.editor.cursorUp"),
+    (KeybindingAction::EditorCursorDown, "tui.editor.cursorDown"),
+    (KeybindingAction::EditorCursorLeft, "tui.editor.cursorLeft"),
+    (
+        KeybindingAction::EditorCursorRight,
+        "tui.editor.cursorRight",
+    ),
+    (
+        KeybindingAction::EditorCursorWordLeft,
+        "tui.editor.cursorWordLeft",
+    ),
+    (
+        KeybindingAction::EditorCursorWordRight,
+        "tui.editor.cursorWordRight",
+    ),
+    (
+        KeybindingAction::EditorCursorLineStart,
+        "tui.editor.cursorLineStart",
+    ),
+    (
+        KeybindingAction::EditorCursorLineEnd,
+        "tui.editor.cursorLineEnd",
+    ),
+    (KeybindingAction::EditorPageUp, "tui.editor.pageUp"),
+    (KeybindingAction::EditorPageDown, "tui.editor.pageDown"),
+    (
+        KeybindingAction::EditorDeleteCharBackward,
+        "tui.editor.deleteCharBackward",
+    ),
+    (
+        KeybindingAction::EditorDeleteCharForward,
+        "tui.editor.deleteCharForward",
+    ),
+    (
+        KeybindingAction::EditorDeleteWordBackward,
+        "tui.editor.deleteWordBackward",
+    ),
+    (
+        KeybindingAction::EditorDeleteWordForward,
+        "tui.editor.deleteWordForward",
+    ),
+    (
+        KeybindingAction::EditorDeleteToLineStart,
+        "tui.editor.deleteToLineStart",
+    ),
+    (
+        KeybindingAction::EditorDeleteToLineEnd,
+        "tui.editor.deleteToLineEnd",
+    ),
+    (KeybindingAction::EditorYank, "tui.editor.yank"),
+    (KeybindingAction::EditorUndo, "tui.editor.undo"),
+    (KeybindingAction::InputNewLine, "tui.input.newLine"),
+    (KeybindingAction::InputSubmit, "tui.input.submit"),
+    (KeybindingAction::InputTab, "tui.input.tab"),
+    (KeybindingAction::InputCopy, "tui.input.copy"),
+    (
+        KeybindingAction::TranscriptSelectionStart,
+        "tui.transcript.selection.start",
+    ),
+    (
+        KeybindingAction::TranscriptSelectionClear,
+        "tui.transcript.selection.clear",
+    ),
+    (
+        KeybindingAction::TranscriptSelectionExtendUp,
+        "tui.transcript.selection.extendUp",
+    ),
+    (
+        KeybindingAction::TranscriptSelectionExtendDown,
+        "tui.transcript.selection.extendDown",
+    ),
+    (
+        KeybindingAction::TranscriptSelectionExtendPageUp,
+        "tui.transcript.selection.extendPageUp",
+    ),
+    (
+        KeybindingAction::TranscriptSelectionExtendPageDown,
+        "tui.transcript.selection.extendPageDown",
+    ),
+    (
+        KeybindingAction::TranscriptCopySelection,
+        "tui.transcript.copySelection",
+    ),
+    (KeybindingAction::ToolOutputToggle, "tui.tool.toggleOutput"),
+    (KeybindingAction::AppClear, "app.clear"),
+    (KeybindingAction::AppExit, "app.exit"),
+    (KeybindingAction::AppSuspend, "app.suspend"),
+    (KeybindingAction::CommandPaletteOpen, "tui.command.open"),
+    (KeybindingAction::SessionPickerOpen, "tui.session.open"),
+    (
+        KeybindingAction::SessionPickerToggleScope,
+        "tui.session.toggle_scope",
+    ),
+    (KeybindingAction::SessionFork, "tui.session.fork"),
+    (KeybindingAction::ModelPickerOpen, "tui.model.open"),
+    (KeybindingAction::TogglePlanMode, "tui.plan.toggle"),
+    (
+        KeybindingAction::CyclePermissionMode,
+        "tui.permission.cycle",
+    ),
+    (KeybindingAction::SelectUp, "tui.select.up"),
+    (KeybindingAction::SelectDown, "tui.select.down"),
+    (KeybindingAction::SelectPageUp, "tui.select.pageUp"),
+    (KeybindingAction::SelectPageDown, "tui.select.pageDown"),
+    (KeybindingAction::SelectConfirm, "tui.select.confirm"),
+    (KeybindingAction::SelectCancel, "tui.select.cancel"),
+];
+
 impl KeybindingAction {
     #[must_use]
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::EditorCursorUp => "tui.editor.cursorUp",
-            Self::EditorCursorDown => "tui.editor.cursorDown",
-            Self::EditorCursorLeft => "tui.editor.cursorLeft",
-            Self::EditorCursorRight => "tui.editor.cursorRight",
-            Self::EditorCursorWordLeft => "tui.editor.cursorWordLeft",
-            Self::EditorCursorWordRight => "tui.editor.cursorWordRight",
-            Self::EditorCursorLineStart => "tui.editor.cursorLineStart",
-            Self::EditorCursorLineEnd => "tui.editor.cursorLineEnd",
-            Self::EditorPageUp => "tui.editor.pageUp",
-            Self::EditorPageDown => "tui.editor.pageDown",
-            Self::EditorDeleteCharBackward => "tui.editor.deleteCharBackward",
-            Self::EditorDeleteCharForward => "tui.editor.deleteCharForward",
-            Self::EditorDeleteWordBackward => "tui.editor.deleteWordBackward",
-            Self::EditorDeleteWordForward => "tui.editor.deleteWordForward",
-            Self::EditorDeleteToLineStart => "tui.editor.deleteToLineStart",
-            Self::EditorDeleteToLineEnd => "tui.editor.deleteToLineEnd",
-            Self::EditorYank => "tui.editor.yank",
-            Self::EditorUndo => "tui.editor.undo",
-            Self::InputNewLine => "tui.input.newLine",
-            Self::InputSubmit => "tui.input.submit",
-            Self::InputTab => "tui.input.tab",
-            Self::InputCopy => "tui.input.copy",
-            Self::TranscriptSelectionStart => "tui.transcript.selection.start",
-            Self::TranscriptSelectionClear => "tui.transcript.selection.clear",
-            Self::TranscriptSelectionExtendUp => "tui.transcript.selection.extendUp",
-            Self::TranscriptSelectionExtendDown => "tui.transcript.selection.extendDown",
-            Self::TranscriptSelectionExtendPageUp => "tui.transcript.selection.extendPageUp",
-            Self::TranscriptSelectionExtendPageDown => "tui.transcript.selection.extendPageDown",
-            Self::TranscriptCopySelection => "tui.transcript.copySelection",
-            Self::ToolOutputToggle => "tui.tool.toggleOutput",
-            Self::AppClear => "app.clear",
-            Self::AppExit => "app.exit",
-            Self::AppSuspend => "app.suspend",
-            Self::CommandPaletteOpen => "tui.command.open",
-            Self::SessionPickerOpen => "tui.session.open",
-            Self::SessionPickerToggleScope => "tui.session.toggle_scope",
-            Self::SessionFork => "tui.session.fork",
-            Self::ModelPickerOpen => "tui.model.open",
-            Self::TogglePlanMode => "tui.plan.toggle",
-            Self::SelectUp => "tui.select.up",
-            Self::SelectDown => "tui.select.down",
-            Self::SelectPageUp => "tui.select.pageUp",
-            Self::SelectPageDown => "tui.select.pageDown",
-            Self::SelectConfirm => "tui.select.confirm",
-            Self::SelectCancel => "tui.select.cancel",
-        }
+    pub fn id(self) -> &'static str {
+        KEYBINDING_ACTION_IDS
+            .iter()
+            .find_map(|(action, id)| (*action == self).then_some(*id))
+            .expect("keybinding action id table must cover every action")
     }
 
     #[must_use]
     pub fn from_id(id: &str) -> Option<Self> {
-        Some(match id {
-            "tui.editor.cursorUp" => Self::EditorCursorUp,
-            "tui.editor.cursorDown" => Self::EditorCursorDown,
-            "tui.editor.cursorLeft" => Self::EditorCursorLeft,
-            "tui.editor.cursorRight" => Self::EditorCursorRight,
-            "tui.editor.cursorWordLeft" => Self::EditorCursorWordLeft,
-            "tui.editor.cursorWordRight" => Self::EditorCursorWordRight,
-            "tui.editor.cursorLineStart" => Self::EditorCursorLineStart,
-            "tui.editor.cursorLineEnd" => Self::EditorCursorLineEnd,
-            "tui.editor.pageUp" => Self::EditorPageUp,
-            "tui.editor.pageDown" => Self::EditorPageDown,
-            "tui.editor.deleteCharBackward" => Self::EditorDeleteCharBackward,
-            "tui.editor.deleteCharForward" => Self::EditorDeleteCharForward,
-            "tui.editor.deleteWordBackward" => Self::EditorDeleteWordBackward,
-            "tui.editor.deleteWordForward" => Self::EditorDeleteWordForward,
-            "tui.editor.deleteToLineStart" => Self::EditorDeleteToLineStart,
-            "tui.editor.deleteToLineEnd" => Self::EditorDeleteToLineEnd,
-            "tui.editor.yank" => Self::EditorYank,
-            "tui.editor.undo" => Self::EditorUndo,
-            "tui.input.newLine" => Self::InputNewLine,
-            "tui.input.submit" => Self::InputSubmit,
-            "tui.input.tab" => Self::InputTab,
-            "tui.input.copy" => Self::InputCopy,
-            "tui.transcript.selection.start" => Self::TranscriptSelectionStart,
-            "tui.transcript.selection.clear" => Self::TranscriptSelectionClear,
-            "tui.transcript.selection.extendUp" => Self::TranscriptSelectionExtendUp,
-            "tui.transcript.selection.extendDown" => Self::TranscriptSelectionExtendDown,
-            "tui.transcript.selection.extendPageUp" => Self::TranscriptSelectionExtendPageUp,
-            "tui.transcript.selection.extendPageDown" => Self::TranscriptSelectionExtendPageDown,
-            "tui.transcript.copySelection" => Self::TranscriptCopySelection,
-            "tui.tool.toggleOutput" => Self::ToolOutputToggle,
-            "app.clear" => Self::AppClear,
-            "app.exit" => Self::AppExit,
-            "app.suspend" => Self::AppSuspend,
-            "tui.command.open" => Self::CommandPaletteOpen,
-            "tui.session.open" => Self::SessionPickerOpen,
-            "tui.session.toggle_scope" => Self::SessionPickerToggleScope,
-            "tui.session.fork" => Self::SessionFork,
-            "tui.model.open" => Self::ModelPickerOpen,
-            "tui.plan.toggle" => Self::TogglePlanMode,
-            "tui.select.up" => Self::SelectUp,
-            "tui.select.down" => Self::SelectDown,
-            "tui.select.pageUp" => Self::SelectPageUp,
-            "tui.select.pageDown" => Self::SelectPageDown,
-            "tui.select.confirm" => Self::SelectConfirm,
-            "tui.select.cancel" => Self::SelectCancel,
-            _ => return None,
-        })
+        KEYBINDING_ACTION_IDS
+            .iter()
+            .find_map(|(action, action_id)| (*action_id == id).then_some(*action))
     }
 }
 
@@ -772,12 +807,17 @@ fn input_keybinding_definitions() -> Vec<KeybindingDefinition> {
     vec![
         definition(
             Action::InputNewLine,
-            &["shift+enter", "alt+enter", "ctrl+j"],
+            &["alt+enter", "ctrl+j"],
             "Insert newline",
         ),
         definition(Action::InputSubmit, &["enter"], "Submit input"),
         definition(Action::InputTab, &["tab"], "Tab"),
         definition(Action::InputCopy, &["ctrl+c"], "Copy selection"),
+        definition(
+            Action::CyclePermissionMode,
+            &["shift+tab", "shift+enter"],
+            "Cycle plan/manual/auto/yolo mode",
+        ),
     ]
 }
 
@@ -851,7 +891,7 @@ fn picker_keybinding_definitions() -> Vec<KeybindingDefinition> {
         ),
         definition(Action::SessionFork, &["ctrl+n"], "Fork selected session"),
         definition(Action::ModelPickerOpen, &[], "Open models"),
-        definition(Action::TogglePlanMode, &["shift+tab"], "Toggle plan mode"),
+        definition(Action::TogglePlanMode, &[], "Toggle plan mode"),
         definition(Action::SelectUp, &["up"], "Move selection up"),
         definition(Action::SelectDown, &["down"], "Move selection down"),
         definition(Action::SelectPageUp, &["pageup"], "Selection page up"),
@@ -892,22 +932,35 @@ fn unique_keys(keys: &[KeyId]) -> Vec<KeyId> {
 }
 
 fn key_base(code: KeyCode) -> Option<String> {
+    key_base_name(code)
+        .map(str::to_owned)
+        .or_else(|| dynamic_key_base(code))
+}
+
+fn key_base_name(code: KeyCode) -> Option<&'static str> {
     match code {
-        KeyCode::Backspace => Some("backspace".into()),
-        KeyCode::Enter => Some("enter".into()),
-        KeyCode::Left => Some("left".into()),
-        KeyCode::Right => Some("right".into()),
-        KeyCode::Up => Some("up".into()),
-        KeyCode::Down => Some("down".into()),
-        KeyCode::Home => Some("home".into()),
-        KeyCode::End => Some("end".into()),
-        KeyCode::PageUp => Some("pageup".into()),
-        KeyCode::PageDown => Some("pagedown".into()),
-        KeyCode::Tab | KeyCode::BackTab => Some("tab".into()),
-        KeyCode::Delete => Some("delete".into()),
-        KeyCode::Insert => Some("insert".into()),
-        KeyCode::Esc => Some("escape".into()),
-        KeyCode::Char(' ') => Some("space".into()),
+        KeyCode::Backspace => Some("backspace"),
+        KeyCode::Enter => Some("enter"),
+        KeyCode::Left => Some("left"),
+        KeyCode::Right => Some("right"),
+        KeyCode::Up => Some("up"),
+        KeyCode::Down => Some("down"),
+        KeyCode::Home => Some("home"),
+        KeyCode::End => Some("end"),
+        KeyCode::PageUp => Some("pageup"),
+        KeyCode::PageDown => Some("pagedown"),
+        KeyCode::Tab => Some("tab"),
+        KeyCode::BackTab => Some("shift+tab"),
+        KeyCode::Delete => Some("delete"),
+        KeyCode::Insert => Some("insert"),
+        KeyCode::Esc => Some("escape"),
+        KeyCode::Char(' ') => Some("space"),
+        _ => None,
+    }
+}
+
+fn dynamic_key_base(code: KeyCode) -> Option<String> {
+    match code {
         KeyCode::Char(character) => Some(character.to_lowercase().collect()),
         KeyCode::F(number) if (1..=12).contains(&number) => Some(format!("f{number}")),
         _ => None,
@@ -1060,6 +1113,27 @@ mod tests {
     }
 
     #[test]
+    fn esc_bracket_z_becomes_shift_tab_keybinding() {
+        let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
+        assert!(
+            parser
+                .feed_key_event(key(KeyCode::Esc, KeyModifiers::NONE))
+                .is_empty()
+        );
+        assert!(
+            parser
+                .feed_key_event(key(KeyCode::Char('['), KeyModifiers::NONE))
+                .is_empty()
+        );
+        assert_eq!(
+            parser.feed_key_event(key(KeyCode::Char('Z'), KeyModifiers::SHIFT)),
+            vec![InputEvent::Key(
+                KeyId::new("shift+tab").expect("valid key")
+            )]
+        );
+    }
+
+    #[test]
     fn bracketed_paste_still_works() {
         let mut parser = InputParser::new();
         for c in "\x1b[200~".chars() {
@@ -1097,11 +1171,13 @@ mod tests {
     }
 
     #[test]
-    fn shift_enter_csi_u_still_produces_newline() {
-        let mut parser = InputParser::new();
+    fn shift_enter_uses_permission_cycle_binding() {
+        let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
         assert_eq!(
             parser.feed_key_event(key(KeyCode::Enter, KeyModifiers::SHIFT)),
-            vec![InputEvent::NewLine]
+            vec![InputEvent::Key(
+                KeyId::new("shift+enter").expect("valid key")
+            )]
         );
     }
 
@@ -1112,5 +1188,90 @@ mod tests {
             parser.feed_key_event(key(KeyCode::Enter, KeyModifiers::ALT)),
             vec![InputEvent::NewLine]
         );
+    }
+
+    #[test]
+    fn ctrl_j_produces_newline() {
+        let mut parser = InputParser::new();
+        assert_eq!(
+            parser.feed_key_event(key(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+            vec![InputEvent::NewLine]
+        );
+    }
+
+    #[test]
+    fn keybinding_action_ids_round_trip() {
+        let actions = [
+            KeybindingAction::EditorCursorUp,
+            KeybindingAction::EditorCursorDown,
+            KeybindingAction::EditorCursorLeft,
+            KeybindingAction::EditorCursorRight,
+            KeybindingAction::EditorCursorWordLeft,
+            KeybindingAction::EditorCursorWordRight,
+            KeybindingAction::EditorCursorLineStart,
+            KeybindingAction::EditorCursorLineEnd,
+            KeybindingAction::EditorPageUp,
+            KeybindingAction::EditorPageDown,
+            KeybindingAction::EditorDeleteCharBackward,
+            KeybindingAction::EditorDeleteCharForward,
+            KeybindingAction::EditorDeleteWordBackward,
+            KeybindingAction::EditorDeleteWordForward,
+            KeybindingAction::EditorDeleteToLineStart,
+            KeybindingAction::EditorDeleteToLineEnd,
+            KeybindingAction::EditorYank,
+            KeybindingAction::EditorUndo,
+            KeybindingAction::InputNewLine,
+            KeybindingAction::InputSubmit,
+            KeybindingAction::InputTab,
+            KeybindingAction::InputCopy,
+            KeybindingAction::TranscriptSelectionStart,
+            KeybindingAction::TranscriptSelectionClear,
+            KeybindingAction::TranscriptSelectionExtendUp,
+            KeybindingAction::TranscriptSelectionExtendDown,
+            KeybindingAction::TranscriptSelectionExtendPageUp,
+            KeybindingAction::TranscriptSelectionExtendPageDown,
+            KeybindingAction::TranscriptCopySelection,
+            KeybindingAction::ToolOutputToggle,
+            KeybindingAction::AppClear,
+            KeybindingAction::AppExit,
+            KeybindingAction::AppSuspend,
+            KeybindingAction::CommandPaletteOpen,
+            KeybindingAction::SessionPickerOpen,
+            KeybindingAction::SessionPickerToggleScope,
+            KeybindingAction::SessionFork,
+            KeybindingAction::ModelPickerOpen,
+            KeybindingAction::TogglePlanMode,
+            KeybindingAction::CyclePermissionMode,
+            KeybindingAction::SelectUp,
+            KeybindingAction::SelectDown,
+            KeybindingAction::SelectPageUp,
+            KeybindingAction::SelectPageDown,
+            KeybindingAction::SelectConfirm,
+            KeybindingAction::SelectCancel,
+        ];
+
+        for action in actions {
+            assert_eq!(KeybindingAction::from_id(action.id()), Some(action));
+        }
+        assert_eq!(KeybindingAction::from_id("tui.unknown"), None);
+    }
+
+    #[test]
+    fn key_base_names_special_keys_and_characters() {
+        let cases = [
+            (KeyCode::Backspace, Some("backspace")),
+            (KeyCode::Enter, Some("enter")),
+            (KeyCode::Tab, Some("tab")),
+            (KeyCode::BackTab, Some("shift+tab")),
+            (KeyCode::Esc, Some("escape")),
+            (KeyCode::Char(' '), Some("space")),
+            (KeyCode::Char('A'), Some("a")),
+            (KeyCode::F(12), Some("f12")),
+            (KeyCode::F(13), None),
+        ];
+
+        for (code, expected) in cases {
+            assert_eq!(key_base(code), expected.map(str::to_owned));
+        }
     }
 }

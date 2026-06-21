@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 
 use neo_agent_core::{
-    AgentEvent, AgentMessage, Content, ImageRef, PermissionOperation, skills::SkillStore,
+    AgentEvent, AgentMessage, AgentToolCall, Content, ImageRef, PermissionOperation, ToolResult,
+    skills::SkillStore,
 };
 
-use crate::ansi::{Style, paint, truncate_to_width, visible_width};
+use crate::ansi::{Color, Style, paint, truncate_to_width, visible_width};
 use crate::chrome::{NeoChromeState, PromptState, ToolStatusKind, TuiTheme};
 use crate::components::wrap_width;
 use crate::core::{Expandable, Line};
@@ -19,6 +20,10 @@ use crate::transcript::{
 use crate::widgets::{TodoPanel, box_draw};
 
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 4;
+const GITHUB_YELLOW: Color = Color::Rgb(191, 135, 0);
+const GITHUB_GREEN: Color = Color::Rgb(26, 127, 55);
+const GITHUB_RED: Color = Color::Rgb(207, 34, 46);
+const GITHUB_BLUE: Color = Color::Rgb(9, 105, 218);
 
 /// Uniform 1-column left/right gutter applied to ALL chrome (body, banner,
 /// prompt box, footer). Matches Neo's `CHROME_GUTTER = 1`. Applied once
@@ -419,55 +424,76 @@ impl TranscriptPane {
         self.live_chrome_height
     }
 
-    #[allow(clippy::too_many_lines)]
     pub fn apply_agent_event(&mut self, event: AgentEvent) {
+        if self.apply_message_event(&event) {
+            return;
+        }
+        if self.apply_thinking_event(&event) {
+            return;
+        }
+        if self.apply_tool_event(&event) {
+            return;
+        }
+        if self.apply_queue_event(&event) {
+            return;
+        }
+        if self.apply_compaction_event(&event) {
+            return;
+        }
+        self.apply_skill_goal_event(&event);
+    }
+
+    fn apply_message_event(&mut self, event: &AgentEvent) -> bool {
         match event {
             AgentEvent::MessageStarted { .. } => {
                 self.mark_dirty();
+                true
             }
-            AgentEvent::TextDelta { text, .. } => self.append_assistant_delta(&text),
+            AgentEvent::TextDelta { text, .. } => {
+                self.append_assistant_delta(text);
+                true
+            }
             AgentEvent::MessageFinished { .. } | AgentEvent::TurnFinished { .. } => {
                 self.finish_active_text_blocks();
+                true
             }
+            _ => false,
+        }
+    }
+
+    fn apply_thinking_event(&mut self, event: &AgentEvent) -> bool {
+        match event {
             AgentEvent::ThinkingStarted { .. } => {
-                self.finish_assistant_message();
-                self.transcript.start_thinking();
-                self.apply_expand_state_to_active_thinking();
-                self.mark_dirty();
+                self.start_thinking_block();
+                true
             }
             AgentEvent::ThinkingDelta { text, .. } => {
-                self.transcript.append_thinking_delta(&text);
-                self.mark_dirty();
+                self.append_thinking_block(text);
+                true
             }
             AgentEvent::ThinkingFinished { .. } => {
-                self.transcript.finish_thinking();
-                self.mark_dirty();
+                self.finish_thinking_block();
+                true
             }
+            _ => false,
+        }
+    }
+
+    fn apply_tool_event(&mut self, event: &AgentEvent) -> bool {
+        match event {
             AgentEvent::ToolCallStarted { id, name, .. } => {
-                self.upsert_tool(&id, name, None, ToolStatusKind::Running);
-                self.mark_dirty();
+                self.start_tool_call(id, name.clone());
+                true
             }
             AgentEvent::ToolCallArgumentsDelta {
                 id, json_fragment, ..
             } => {
-                let arguments = self.streaming_tool_args.entry(id.clone()).or_default();
-                arguments.push_str(&json_fragment);
-                if let Some(tool) = self.transcript.tool_mut(&id) {
-                    tool.update_call(Some(arguments.clone()));
-                    self.mark_dirty();
-                }
+                self.append_tool_call_arguments(id, json_fragment);
+                true
             }
             AgentEvent::ToolCallFinished { tool_call, .. } => {
-                let arguments = tool_call.arguments.to_string();
-                self.streaming_tool_args
-                    .insert(tool_call.id.clone(), arguments.clone());
-                self.upsert_tool(
-                    &tool_call.id,
-                    tool_call.name,
-                    Some(arguments),
-                    ToolStatusKind::Running,
-                );
-                self.mark_dirty();
+                self.finish_tool_call(tool_call.clone());
+                true
             }
             AgentEvent::ToolExecutionStarted {
                 id,
@@ -475,13 +501,8 @@ impl TranscriptPane {
                 arguments,
                 ..
             } => {
-                let arguments = self
-                    .streaming_tool_args
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_else(|| arguments.to_string());
-                self.upsert_tool(&id, name, Some(arguments), ToolStatusKind::Running);
-                self.mark_dirty();
+                self.start_tool_execution(id, name.clone(), arguments.clone());
+                true
             }
             AgentEvent::ApprovalRequested {
                 id,
@@ -490,8 +511,8 @@ impl TranscriptPane {
                 arguments,
                 ..
             } => {
-                self.upsert_approval(id, operation, &subject, &arguments);
-                self.mark_dirty();
+                self.request_approval(id.clone(), *operation, subject, arguments);
+                true
             }
             AgentEvent::ToolExecutionUpdate {
                 id,
@@ -499,39 +520,20 @@ impl TranscriptPane {
                 partial_result,
                 ..
             } => {
-                self.upsert_tool(&id, name, None, ToolStatusKind::Running);
-                if let Some(tool) = self.transcript.tool_mut(&id) {
-                    tool.append_live_output(partial_result.content);
-                }
-                self.mark_dirty();
+                self.update_tool_execution(id, name.clone(), partial_result.clone());
+                true
             }
             AgentEvent::ToolExecutionFinished {
                 id, name, result, ..
             } => {
-                self.upsert_tool(&id, name, None, ToolStatusKind::Running);
-                self.streaming_tool_args.remove(&id);
-                if let Some(tool) = self.transcript.tool_mut(&id) {
-                    let details = result.details;
-                    let exit_code = details
-                        .as_ref()
-                        .and_then(|details| details.get("exit_code"))
-                        .and_then(serde_json::Value::as_i64)
-                        .and_then(|code| i32::try_from(code).ok());
-                    tool.set_result(Some(result.content), details, result.is_error, exit_code);
-                }
-                self.completed_tool_result_ids.push(id);
-                self.mark_dirty();
+                self.finish_tool_execution(id.clone(), name.clone(), result.clone());
+                true
             }
             AgentEvent::ShellCommandStarted {
                 id, command, cwd, ..
             } => {
-                self.upsert_tool(
-                    &id,
-                    "Bash".to_owned(),
-                    Some(format!("{command} ({})", cwd.display())),
-                    ToolStatusKind::Running,
-                );
-                self.mark_dirty();
+                self.start_shell_command(id, command, cwd);
+                true
             }
             AgentEvent::ShellCommandFinished {
                 id,
@@ -541,95 +543,96 @@ impl TranscriptPane {
                 truncated,
                 ..
             } => {
-                let detail = shell_finished_detail(exit_code, &stdout, &stderr, truncated);
-                self.upsert_tool(&id, "Bash".to_owned(), None, ToolStatusKind::Running);
-                if let Some(tool) = self.transcript.tool_mut(&id) {
-                    tool.set_result(Some(detail), None, exit_code != Some(0), exit_code);
-                }
-                self.completed_tool_result_ids.push(id);
-                self.mark_dirty();
+                self.finish_shell_command(id.clone(), *exit_code, stdout, stderr, *truncated);
+                true
             }
+            _ => false,
+        }
+    }
+
+    fn apply_queue_event(&mut self, event: &AgentEvent) -> bool {
+        match event {
             AgentEvent::SteeringQueued { message } => {
-                self.push_status(format!("Steering queued: {}", message_text(&message)));
+                self.push_status(format!("Steering queued: {}", message_text(message)));
+                true
             }
             AgentEvent::FollowUpQueued { message } => {
-                self.push_status(format!("Follow-up queued: {}", message_text(&message)));
+                self.push_status(format!("Follow-up queued: {}", message_text(message)));
+                true
             }
             AgentEvent::QueueDrained { kind, count } => {
                 self.push_status(format!("{kind:?} queue drained ({count})"));
+                true
             }
+            AgentEvent::Error { message, .. } => {
+                self.push_status(format!("Error: {message}"));
+                true
+            }
+            AgentEvent::RunFinished { turn, stop_reason } => {
+                if let Some(notice) = run_finished_notice(*turn, *stop_reason) {
+                    self.push_status(notice);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn apply_compaction_event(&mut self, event: &AgentEvent) -> bool {
+        match event {
             AgentEvent::CompactionStarted {
                 tokens_before,
                 message_count,
                 ..
-            } => self.upsert_compaction(
-                Some(neo_agent_core::CompactionPhase::Estimating),
-                0,
-                message_count,
-                tokens_before,
-            ),
+            } => {
+                self.upsert_compaction(
+                    Some(neo_agent_core::CompactionPhase::Estimating),
+                    0,
+                    *message_count,
+                    *tokens_before,
+                );
+                true
+            }
             AgentEvent::CompactionProgress { phase, percent } => {
-                self.update_compaction_progress(phase, percent.min(99));
+                self.update_compaction_progress(*phase, (*percent).min(99));
+                true
             }
-            AgentEvent::CompactionApplied { summary } => self.upsert_compaction(
-                Some(neo_agent_core::CompactionPhase::Applying),
-                100,
-                summary.first_kept_message_index,
-                summary.tokens_before,
-            ),
-            AgentEvent::Error { message, .. } => {
-                self.push_status(format!("Error: {message}"));
+            AgentEvent::CompactionApplied { summary } => {
+                self.upsert_compaction(
+                    Some(neo_agent_core::CompactionPhase::Applying),
+                    100,
+                    summary.first_kept_message_index,
+                    summary.tokens_before,
+                );
+                true
             }
-            AgentEvent::RunFinished { turn, stop_reason } => {
-                if let Some(notice) = run_finished_notice(turn, stop_reason) {
-                    self.push_status(notice);
-                }
-            }
+            _ => false,
+        }
+    }
+
+    fn apply_skill_goal_event(&mut self, event: &AgentEvent) {
+        match event {
             AgentEvent::SkillActivated { name, .. } => {
-                let description = self
-                    .skill_store
-                    .as_ref()
-                    .and_then(|store| store.get(&name))
-                    .map(|skill| skill.manifest.description.clone());
-                self.push_transcript(TranscriptEntry::skill_activated(
-                    name,
-                    description,
-                    None::<String>,
-                ));
+                self.push_skill_activation(name.clone());
             }
             AgentEvent::GoalStarted { objective, .. } => {
-                self.push_transcript(TranscriptEntry::goal_card(
-                    GoalCardKind::Started,
-                    objective,
-                    None::<String>,
-                    None,
-                ));
+                self.push_goal_card(GoalCardKind::Started, objective.clone(), None, None);
             }
             AgentEvent::GoalPaused { objective, .. } => {
-                self.push_transcript(TranscriptEntry::goal_card(
-                    GoalCardKind::Paused,
-                    objective,
-                    None::<String>,
-                    None,
-                ));
+                self.push_goal_card(GoalCardKind::Paused, objective.clone(), None, None);
             }
             AgentEvent::GoalResumed { objective, .. } => {
-                self.push_transcript(TranscriptEntry::goal_card(
-                    GoalCardKind::Resumed,
-                    objective,
-                    None::<String>,
-                    None,
-                ));
+                self.push_goal_card(GoalCardKind::Resumed, objective.clone(), None, None);
             }
             AgentEvent::GoalBlocked {
                 objective, reason, ..
             } => {
-                self.push_transcript(TranscriptEntry::goal_card(
+                self.push_goal_card(
                     GoalCardKind::Blocked,
-                    objective,
-                    Some(reason),
+                    objective.clone(),
+                    Some(reason.clone()),
                     None,
-                ));
+                );
             }
             AgentEvent::GoalFinished {
                 objective,
@@ -637,15 +640,154 @@ impl TranscriptPane {
                 turn,
                 ..
             } => {
-                self.push_transcript(TranscriptEntry::goal_card(
+                self.push_goal_card(
                     GoalCardKind::Finished,
-                    objective,
-                    Some(outcome),
-                    Some(turn),
-                ));
+                    objective.clone(),
+                    Some(outcome.clone()),
+                    Some(*turn),
+                );
             }
             _ => {}
         }
+    }
+
+    fn start_thinking_block(&mut self) {
+        self.finish_assistant_message();
+        self.transcript.start_thinking();
+        self.apply_expand_state_to_active_thinking();
+        self.mark_dirty();
+    }
+
+    fn append_thinking_block(&mut self, text: &str) {
+        self.transcript.append_thinking_delta(text);
+        self.mark_dirty();
+    }
+
+    fn finish_thinking_block(&mut self) {
+        self.transcript.finish_thinking();
+        self.mark_dirty();
+    }
+
+    fn start_tool_call(&mut self, id: &str, name: String) {
+        self.upsert_tool(id, name, None, ToolStatusKind::Pending);
+        self.mark_dirty();
+    }
+
+    fn append_tool_call_arguments(&mut self, id: &str, json_fragment: &str) {
+        let arguments = self.streaming_tool_args.entry(id.to_owned()).or_default();
+        arguments.push_str(json_fragment);
+        if let Some(tool) = self.transcript.tool_mut(id) {
+            tool.update_call(Some(arguments.clone()));
+            self.mark_dirty();
+        }
+    }
+
+    fn finish_tool_call(&mut self, tool_call: AgentToolCall) {
+        let arguments = tool_call.arguments.to_string();
+        self.streaming_tool_args
+            .insert(tool_call.id.clone(), arguments.clone());
+        self.upsert_tool(
+            &tool_call.id,
+            tool_call.name,
+            Some(arguments),
+            ToolStatusKind::Pending,
+        );
+        self.mark_dirty();
+    }
+
+    fn start_tool_execution(&mut self, id: &str, name: String, arguments: serde_json::Value) {
+        let arguments = self
+            .streaming_tool_args
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| arguments.to_string());
+        self.upsert_tool(id, name, Some(arguments), ToolStatusKind::Running);
+        self.mark_dirty();
+    }
+
+    fn request_approval(
+        &mut self,
+        id: String,
+        operation: PermissionOperation,
+        subject: &str,
+        arguments: &serde_json::Value,
+    ) {
+        self.upsert_approval(id, operation, subject, arguments);
+        self.mark_dirty();
+    }
+
+    fn update_tool_execution(&mut self, id: &str, name: String, partial_result: ToolResult) {
+        self.upsert_tool(id, name, None, ToolStatusKind::Running);
+        if let Some(tool) = self.transcript.tool_mut(id) {
+            tool.append_live_output(partial_result.content);
+        }
+        self.mark_dirty();
+    }
+
+    fn finish_tool_execution(&mut self, id: String, name: String, result: ToolResult) {
+        self.upsert_tool(&id, name, None, ToolStatusKind::Running);
+        self.streaming_tool_args.remove(&id);
+        if let Some(tool) = self.transcript.tool_mut(&id) {
+            let details = result.details;
+            let exit_code = details
+                .as_ref()
+                .and_then(|details| details.get("exit_code"))
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|code| i32::try_from(code).ok());
+            tool.set_result(Some(result.content), details, result.is_error, exit_code);
+        }
+        self.completed_tool_result_ids.push(id);
+        self.mark_dirty();
+    }
+
+    fn start_shell_command(&mut self, id: &str, command: &str, cwd: &std::path::Path) {
+        self.upsert_tool(
+            id,
+            "Bash".to_owned(),
+            Some(format!("{command} ({})", cwd.display())),
+            ToolStatusKind::Running,
+        );
+        self.mark_dirty();
+    }
+
+    fn finish_shell_command(
+        &mut self,
+        id: String,
+        exit_code: Option<i32>,
+        stdout: &str,
+        stderr: &str,
+        truncated: bool,
+    ) {
+        let detail = shell_finished_detail(exit_code, stdout, stderr, truncated);
+        self.upsert_tool(&id, "Bash".to_owned(), None, ToolStatusKind::Running);
+        if let Some(tool) = self.transcript.tool_mut(&id) {
+            tool.set_result(Some(detail), None, exit_code != Some(0), exit_code);
+        }
+        self.completed_tool_result_ids.push(id);
+        self.mark_dirty();
+    }
+
+    fn push_skill_activation(&mut self, name: String) {
+        let description = self
+            .skill_store
+            .as_ref()
+            .and_then(|store| store.get(&name))
+            .map(|skill| skill.manifest.description.clone());
+        self.push_transcript(TranscriptEntry::skill_activated(
+            name,
+            description,
+            None::<String>,
+        ));
+    }
+
+    fn push_goal_card(
+        &mut self,
+        kind: GoalCardKind,
+        objective: String,
+        detail: Option<String>,
+        turns: Option<u32>,
+    ) {
+        self.push_transcript(TranscriptEntry::goal_card(kind, objective, detail, turns));
     }
 
     pub fn mark_dirty(&mut self) {
@@ -723,7 +865,7 @@ impl TranscriptPane {
     pub fn select_approval(&mut self, id: &str, selected: usize, feedback_input: &str) {
         if let Some(approval) = self.transcript.approval_mut(id) {
             approval.selected = selected;
-            approval.feedback_input = feedback_input.to_owned();
+            feedback_input.clone_into(&mut approval.feedback_input);
             self.mark_dirty();
         }
     }
@@ -773,9 +915,7 @@ impl TranscriptPane {
         use crate::core::Expandable as _;
 
         if let Some(tool) = self.transcript.tool_mut(id) {
-            if arguments.is_some() {
-                tool.update_call(arguments);
-            }
+            tool.update_call_state(name, arguments, status);
             return;
         }
 
@@ -1034,6 +1174,16 @@ fn approval_prompt(
             PermissionOperation::Tool => ApprovalPromptSummary {
                 title: "Run tool?".to_owned(),
                 details: compact_details([Some(format!("tool: {subject}"))]),
+                queued_label: String::new(),
+            },
+            PermissionOperation::UserQuestion => ApprovalPromptSummary {
+                title: "User question".to_owned(),
+                details: compact_details([Some(subject.to_owned())]),
+                queued_label: String::new(),
+            },
+            PermissionOperation::PlanTransition => ApprovalPromptSummary {
+                title: "Plan mode transition".to_owned(),
+                details: compact_details([Some(subject.to_owned())]),
                 queued_label: String::new(),
             },
         }
@@ -1504,6 +1654,9 @@ fn render_footer_lines(app: &NeoChromeState, width: usize) -> Vec<String> {
         &app.cwd_label(),
         Style::default().fg(theme.text_muted),
     ));
+    if let Some(git_status) = app.git_status_label() {
+        left_parts.push(render_git_status_label(git_status, theme));
+    }
 
     let left_text = left_parts.join(" ");
     let row = if let Some(context) = app.context_window_label() {
@@ -1522,6 +1675,39 @@ fn render_footer_lines(app: &NeoChromeState, width: usize) -> Vec<String> {
     };
 
     vec![row]
+}
+
+fn render_git_status_label(label: &str, theme: TuiTheme) -> String {
+    let Some((branch, rest)) = label.rsplit_once(" [") else {
+        return paint(label, Style::default().fg(GITHUB_YELLOW));
+    };
+    let status = rest.strip_suffix(']').unwrap_or(rest);
+    let mut rendered = paint(branch, Style::default().fg(GITHUB_YELLOW));
+    rendered.push_str(&paint(" [", Style::default().fg(theme.text_muted)));
+    let mut first = true;
+    for part in status.split(' ').filter(|part| !part.is_empty()) {
+        if first {
+            first = false;
+        } else {
+            rendered.push_str(&paint(" ", Style::default().fg(theme.text_muted)));
+        }
+        rendered.push_str(&render_git_status_part(part, theme));
+    }
+    rendered.push_str(&paint("]", Style::default().fg(theme.text_muted)));
+    rendered
+}
+
+fn render_git_status_part(part: &str, theme: TuiTheme) -> String {
+    let color = if part.starts_with('+') {
+        GITHUB_GREEN
+    } else if part.starts_with('-') {
+        GITHUB_RED
+    } else if part.starts_with('↑') || part.starts_with('↓') {
+        GITHUB_BLUE
+    } else {
+        theme.text_muted
+    };
+    paint(part, Style::default().fg(color))
 }
 
 #[cfg(test)]

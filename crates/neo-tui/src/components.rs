@@ -20,96 +20,22 @@ pub struct ChromeLayout {
 
 #[must_use]
 pub fn chrome_layout(app: &NeoChromeState, area: Rect) -> ChromeLayout {
-    let prompt_height = if app.focused_overlay_blocks_prompt() {
-        0
-    } else {
-        prompt_height(app.prompt(), area.width)
-    };
-    let footer_bar_height = u16::from(area.height >= 8);
-    let session_picker_height = match app.focused_overlay().map(|overlay| &overlay.kind) {
-        Some(OverlayKind::SessionPicker(_)) => 16,
-        _ => 0,
-    }
-    .min(area.height.saturating_sub(3));
-    let approval_overlay = match app.focused_overlay().map(|overlay| &overlay.kind) {
-        Some(OverlayKind::Approval(request)) => Some(request),
-        _ => None,
-    };
-    let approval_height = approval_overlay
-        .map_or(0, |request| {
-            approval_panel_height(&request.modal, area.width)
-        })
-        .min(area.height.saturating_sub(3));
-    // Rich dialog overlays (model selector, provider manager, choice picker, etc.)
-    let overlay_height = if app.focused_overlay().is_some() {
-        app.focused_overlay_height()
-    } else {
-        0
-    }
-    .min(area.height.saturating_sub(3));
-    let todo_height = if app.has_todos() {
-        TodoPanel::new(app.todo_items())
-            .with_theme(app.theme())
-            .height(area.width)
-    } else {
-        0
-    };
-    let bottom_height = todo_height
-        .saturating_add(prompt_height)
-        .saturating_add(footer_bar_height)
-        .saturating_add(session_picker_height)
-        .saturating_add(approval_height)
-        .saturating_add(overlay_height);
-    let body_y = area.y;
-    let body_height = area.height.saturating_sub(bottom_height);
+    let heights = ChromeLayoutHeights::new(app, area);
+    let body_height = area.height.saturating_sub(heights.bottom_height());
     let body = Rect {
         x: area.x,
-        y: body_y,
+        y: area.y,
         width: area.width,
         height: body_height,
     };
-    let todo = Rect {
-        x: area.x,
-        y: body.y.saturating_add(body.height),
-        width: area.width,
-        height: todo_height,
-    };
-    let status = Rect {
-        x: area.x,
-        y: todo.y.saturating_add(todo.height),
-        width: area.width,
-        height: 0,
-    };
-    let approval = Rect {
-        x: area.x,
-        y: status.y.saturating_add(status.height),
-        width: area.width,
-        height: approval_height,
-    };
-    let session_picker = Rect {
-        x: area.x,
-        y: approval.y.saturating_add(approval.height),
-        width: area.width,
-        height: session_picker_height,
-    };
-    let overlay = Rect {
-        x: area.x,
-        y: session_picker.y.saturating_add(session_picker.height),
-        width: area.width,
-        height: overlay_height,
-    };
-    let prompt = Rect {
-        x: area.x,
-        y: overlay.y.saturating_add(overlay.height),
-        width: area.width,
-        height: prompt_height,
-    };
-    let footer = Rect {
-        x: area.x,
-        y: prompt.y.saturating_add(prompt.height),
-        width: area.width,
-        height: footer_bar_height,
-    };
+    let mut stack = RectStack::new(area, body.y.saturating_add(body.height));
+    let todo = stack.next(heights.todo);
+    let status = stack.next(0);
+    let approval = stack.next(heights.approval);
+    let session_picker = stack.next(heights.session_picker);
+    let overlay = stack.next(heights.overlay);
+    let prompt = stack.next(heights.prompt);
+    let footer = stack.next(heights.footer_bar);
 
     ChromeLayout {
         body,
@@ -120,6 +46,114 @@ pub fn chrome_layout(app: &NeoChromeState, area: Rect) -> ChromeLayout {
         overlay,
         prompt,
         footer,
+    }
+}
+
+struct ChromeLayoutHeights {
+    todo: u16,
+    prompt: u16,
+    footer_bar: u16,
+    session_picker: u16,
+    approval: u16,
+    overlay: u16,
+}
+
+impl ChromeLayoutHeights {
+    fn new(app: &NeoChromeState, area: Rect) -> Self {
+        Self {
+            todo: todo_height(app, area.width),
+            prompt: prompt_panel_height(app, area.width),
+            footer_bar: footer_bar_height(area.height),
+            session_picker: session_picker_height(app, area.height),
+            approval: approval_height(app, area),
+            overlay: overlay_height(app, area.height),
+        }
+    }
+
+    fn bottom_height(&self) -> u16 {
+        self.todo
+            .saturating_add(self.prompt)
+            .saturating_add(self.footer_bar)
+            .saturating_add(self.session_picker)
+            .saturating_add(self.approval)
+            .saturating_add(self.overlay)
+    }
+}
+
+struct RectStack {
+    x: u16,
+    width: u16,
+    y: u16,
+}
+
+impl RectStack {
+    const fn new(area: Rect, y: u16) -> Self {
+        Self {
+            x: area.x,
+            width: area.width,
+            y,
+        }
+    }
+
+    fn next(&mut self, height: u16) -> Rect {
+        let rect = Rect {
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height,
+        };
+        self.y = self.y.saturating_add(height);
+        rect
+    }
+}
+
+fn prompt_panel_height(app: &NeoChromeState, width: u16) -> u16 {
+    if app.focused_overlay_blocks_prompt() {
+        0
+    } else {
+        prompt_height(app.prompt(), width)
+    }
+}
+
+fn footer_bar_height(area_height: u16) -> u16 {
+    if area_height >= 8 { 1 } else { 0 }
+}
+
+fn session_picker_height(app: &NeoChromeState, area_height: u16) -> u16 {
+    let height = match app.focused_overlay().map(|overlay| &overlay.kind) {
+        Some(OverlayKind::SessionPicker(_)) => 16,
+        _ => 0,
+    };
+    height.min(area_height.saturating_sub(3))
+}
+
+fn approval_height(app: &NeoChromeState, area: Rect) -> u16 {
+    focused_approval_modal(app)
+        .map_or(0, |modal| approval_panel_height(modal, area.width))
+        .min(area.height.saturating_sub(3))
+}
+
+fn focused_approval_modal(app: &NeoChromeState) -> Option<&ApprovalModal> {
+    match app.focused_overlay().map(|overlay| &overlay.kind) {
+        Some(OverlayKind::Approval(request)) => Some(&request.modal),
+        _ => None,
+    }
+}
+
+fn overlay_height(app: &NeoChromeState, area_height: u16) -> u16 {
+    let height = app
+        .focused_overlay()
+        .map_or(0, |_| app.focused_overlay_height());
+    height.min(area_height.saturating_sub(3))
+}
+
+fn todo_height(app: &NeoChromeState, width: u16) -> u16 {
+    if app.has_todos() {
+        TodoPanel::new(app.todo_items())
+            .with_theme(app.theme())
+            .height(width)
+    } else {
+        0
     }
 }
 

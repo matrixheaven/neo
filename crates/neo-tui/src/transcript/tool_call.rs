@@ -48,6 +48,19 @@ impl ToolCallComponent {
         self.state.arguments = arguments;
     }
 
+    pub fn update_call_state(
+        &mut self,
+        name: String,
+        arguments: Option<String>,
+        status: ToolStatusKind,
+    ) {
+        self.state.name = name;
+        if arguments.is_some() {
+            self.state.arguments = arguments;
+        }
+        self.state.status = status;
+    }
+
     pub fn append_progress(&mut self, line: impl Into<String>) {
         self.progress_lines.push(line.into());
         if self.progress_lines.len() > MAX_PROGRESS_LINES {

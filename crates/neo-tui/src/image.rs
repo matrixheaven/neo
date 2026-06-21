@@ -353,26 +353,26 @@ pub enum ImageProtocolError {
     InvalidPixelDataLength,
 }
 
+impl ImageProtocolError {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::EmptyImageData => "image data must not be empty",
+            Self::InvalidChunkSize => "kitty chunk size must be greater than zero",
+            Self::InvalidColorIndex => "sixel pixel data contains a palette index out of range",
+            Self::InvalidDimension => "image dimensions must be greater than zero",
+            Self::InvalidPalette => {
+                "sixel palette must not be empty and RGB percentage values must be <= 100"
+            }
+            Self::InvalidPixelDataLength => {
+                "sixel pixel data length must exactly match image width multiplied by height"
+            }
+        }
+    }
+}
+
 impl fmt::Display for ImageProtocolError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyImageData => formatter.write_str("image data must not be empty"),
-            Self::InvalidChunkSize => {
-                formatter.write_str("kitty chunk size must be greater than zero")
-            }
-            Self::InvalidColorIndex => {
-                formatter.write_str("sixel pixel data contains a palette index out of range")
-            }
-            Self::InvalidDimension => {
-                formatter.write_str("image dimensions must be greater than zero")
-            }
-            Self::InvalidPalette => formatter.write_str(
-                "sixel palette must not be empty and RGB percentage values must be <= 100",
-            ),
-            Self::InvalidPixelDataLength => formatter.write_str(
-                "sixel pixel data length must exactly match image width multiplied by height",
-            ),
-        }
+        formatter.write_str(self.message())
     }
 }
 

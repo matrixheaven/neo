@@ -10,7 +10,9 @@ use crate::{
 use std::{
     cell::RefCell,
     collections::{BTreeMap, VecDeque},
-    env, fs,
+    env,
+    fmt::Write as _,
+    fs,
     future::{Future, Ready, ready},
     io::{IsTerminal as _, Write as _, stdout},
     path::{Path, PathBuf},
@@ -23,8 +25,8 @@ use std::{
 use anyhow::{Context, Result};
 use crossterm::{event, terminal::size};
 use neo_agent_core::{
-    AgentEvent, AgentMessage, PendingQuestion, PermissionDecision, QuestionResponse,
-    format_collected_answers,
+    AgentEvent, AgentMessage, PendingQuestion, PermissionApprovalDecision, PermissionMode,
+    QuestionResponse, format_collected_answers,
     goal::GoalManager,
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
     skills::SkillStore,
@@ -71,6 +73,192 @@ fn approval_result_label(choice: ApprovalChoice) -> &'static str {
         ApprovalChoice::AlwaysApprove => "Approved for this session",
         ApprovalChoice::Deny => "Rejected",
         ApprovalChoice::Revise => "Rejected with feedback",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitStatusBadge {
+    branch: String,
+    dirty: bool,
+    ahead: u32,
+    behind: u32,
+    added: u32,
+    deleted: u32,
+}
+
+impl GitStatusBadge {
+    fn format(&self) -> String {
+        let mut parts = Vec::new();
+        if self.added > 0 || self.deleted > 0 {
+            parts.push(format!("+{} -{}", self.added, self.deleted));
+        } else if self.dirty {
+            parts.push("±".to_owned());
+        }
+        let mut sync = String::new();
+        if self.ahead > 0 {
+            let _ = write!(sync, "↑{}", self.ahead);
+        }
+        if self.behind > 0 {
+            let _ = write!(sync, "↓{}", self.behind);
+        }
+        if !sync.is_empty() {
+            parts.push(sync);
+        }
+        if parts.is_empty() {
+            self.branch.clone()
+        } else {
+            format!("{} [{}]", self.branch, parts.join(" "))
+        }
+    }
+}
+
+fn git_status_label(workspace_root: &Path) -> Option<String> {
+    git_status_label_with_program("git", workspace_root)
+}
+
+fn git_status_label_with_program(program: &str, workspace_root: &Path) -> Option<String> {
+    let status_output = Command::new(program)
+        .arg("-C")
+        .arg(workspace_root)
+        .args(["status", "--porcelain=v1", "--branch"])
+        .output()
+        .ok()?;
+    if !status_output.status.success() {
+        return None;
+    }
+    let status = String::from_utf8_lossy(&status_output.stdout);
+    let mut badge = parse_git_status_porcelain(&status)?;
+    if badge.dirty {
+        let numstat_output = Command::new(program)
+            .arg("-C")
+            .arg(workspace_root)
+            .args(["diff", "--numstat", "HEAD", "--"])
+            .output()
+            .ok();
+        if let Some(output) = numstat_output
+            && output.status.success()
+        {
+            let numstat = String::from_utf8_lossy(&output.stdout);
+            let (added, deleted) = parse_git_numstat(&numstat);
+            badge.added = added;
+            badge.deleted = deleted;
+        }
+    }
+    Some(badge.format())
+}
+
+fn parse_git_status_porcelain(stdout: &str) -> Option<GitStatusBadge> {
+    let mut branch = None;
+    let mut ahead = 0;
+    let mut behind = 0;
+    let mut dirty = false;
+
+    for line in stdout.lines() {
+        if let Some(header) = line.strip_prefix("## ") {
+            let parsed = parse_git_branch_header(header);
+            branch = Some(parsed.0);
+            ahead = parsed.1;
+            behind = parsed.2;
+        } else if !line.trim().is_empty() {
+            dirty = true;
+        }
+    }
+
+    branch
+        .filter(|name| !name.is_empty())
+        .map(|branch| GitStatusBadge {
+            branch,
+            dirty,
+            ahead,
+            behind,
+            added: 0,
+            deleted: 0,
+        })
+}
+
+fn parse_git_branch_header(header: &str) -> (String, u32, u32) {
+    let (branch_part, sync_part) = header
+        .split_once(" [")
+        .map_or((header, ""), |(branch, sync)| (branch, sync));
+    let branch = branch_part
+        .strip_prefix("No commits yet on ")
+        .unwrap_or(branch_part)
+        .split_once("...")
+        .map_or(branch_part, |(branch, _)| branch)
+        .trim()
+        .to_owned();
+    let ahead = parse_git_sync_count(sync_part, "ahead ");
+    let behind = parse_git_sync_count(sync_part, "behind ");
+    (branch, ahead, behind)
+}
+
+fn parse_git_sync_count(sync_part: &str, label: &str) -> u32 {
+    sync_part
+        .split(label)
+        .nth(1)
+        .and_then(|rest| {
+            rest.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
+        .unwrap_or(0)
+}
+
+fn parse_git_numstat(stdout: &str) -> (u32, u32) {
+    stdout.lines().fold((0, 0), |(added, deleted), line| {
+        let mut parts = line.split('\t');
+        let line_added = parse_git_numstat_count(parts.next());
+        let line_deleted = parse_git_numstat_count(parts.next());
+        (added + line_added, deleted + line_deleted)
+    })
+}
+
+fn parse_git_numstat_count(value: Option<&str>) -> u32 {
+    value
+        .filter(|value| *value != "-")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+fn permission_mode_items() -> Vec<neo_tui::dialogs::ChoiceItem> {
+    vec![
+        neo_tui::dialogs::ChoiceItem::new(
+            "permission:manual",
+            "Manual",
+        )
+        .with_description("Ask before commands, edits, and other risky actions. Read/search tools run directly; session approval rules are respected."),
+        neo_tui::dialogs::ChoiceItem::new(
+            "permission:auto",
+            "Auto",
+        )
+        .with_description("Run fully non-interactively. Tool actions are approved automatically, and agent questions are skipped so it can decide on its own."),
+        neo_tui::dialogs::ChoiceItem::new(
+            "permission:yolo",
+            "YOLO",
+        )
+        .with_description("Automatically approve tool actions and plan transitions. The agent can still ask you explicit questions when your input is needed."),
+    ]
+}
+
+fn slash_arg<'a>(prompt: &'a str, command: &str) -> Option<&'a str> {
+    let rest = prompt.strip_prefix(command)?;
+    if rest.is_empty() {
+        return Some("");
+    }
+    rest.chars()
+        .next()
+        .filter(|character| character.is_whitespace())
+        .map(|_| rest.trim())
+}
+
+fn slash_permission_mode(prompt: &str) -> Option<PermissionMode> {
+    match prompt {
+        "/ask" => Some(PermissionMode::Manual),
+        "/auto" => Some(PermissionMode::Auto),
+        "/yolo" => Some(PermissionMode::Yolo),
+        _ => None,
     }
 }
 
@@ -143,7 +331,7 @@ pub async fn execute_tty_with_startup(
 fn exit_message(session_id: Option<&str>) -> String {
     let mut message = String::from("Bye\n");
     if let Some(session_id) = session_id {
-        message.push_str(&format!("neo resume {session_id}\n"));
+        let _ = writeln!(message, "neo resume {session_id}");
     }
     message
 }
@@ -180,8 +368,8 @@ pub(crate) struct InteractiveController {
     active_model: Option<SelectedModel>,
     current_thinking: bool,
     active_turn: Option<RunningTurn>,
-    pending_approvals: BTreeMap<String, oneshot::Sender<PermissionDecision>>,
-    resolved_approvals: BTreeMap<String, PermissionDecision>,
+    pending_approvals: BTreeMap<String, oneshot::Sender<PermissionApprovalDecision>>,
+    resolved_approvals: BTreeMap<String, PermissionApprovalDecision>,
     /// Pending `AskUser` question response channels, keyed by question id.
     pending_questions: BTreeMap<String, oneshot::Sender<QuestionResponse>>,
     pending_question_prompts: BTreeMap<String, Vec<neo_agent_core::QuestionEventData>>,
@@ -199,6 +387,11 @@ pub(crate) struct InteractiveController {
     /// Expanded skill body waiting to be injected as context for the next turn.
     pending_skill_context: Option<String>,
     goal_manager: Option<Arc<neo_agent_core::goal::GoalManager>>,
+    /// Current permission mode for the session.
+    permission_mode: PermissionMode,
+    /// Revise/feedback text keyed by approval request id, waiting to be sent to
+    /// the runtime with the next turn.
+    pending_plan_review_feedback: BTreeMap<String, String>,
 }
 
 pub(crate) struct TurnChannels {
@@ -269,6 +462,12 @@ pub(crate) struct TurnRequest {
     pub reasoning_effort: Option<neo_ai::ReasoningEffort>,
     /// Expanded skill body to inject as context before the user prompt.
     pub skill_context: Option<String>,
+    /// Permission mode to use for this turn.
+    pub permission_mode: PermissionMode,
+    /// Revise/feedback text keyed by approval request id, waiting to be sent to
+    /// the runtime. The production driver is responsible for forwarding this to
+    /// the runtime's plan-review side-channel when possible.
+    pub plan_review_feedback: std::collections::BTreeMap<String, String>,
 }
 
 impl TurnRequest {
@@ -285,6 +484,8 @@ impl TurnRequest {
             model,
             reasoning_effort,
             skill_context: None,
+            permission_mode: PermissionMode::default(),
+            plan_review_feedback: BTreeMap::new(),
         }
     }
 
@@ -379,13 +580,11 @@ impl InteractiveController {
         fork_session: SessionForker,
     ) -> Self {
         let workspace_root = workspace_root.into();
+        let mut chrome =
+            NeoChromeState::new(title, session_label, model_label, workspace_root.clone());
+        chrome.set_git_status_label(git_status_label(&workspace_root));
         Self {
-            tui: neo_tui::NeoTui::with_welcome_banner(
-                NeoChromeState::new(title, session_label, model_label, workspace_root.clone()),
-                80,
-                24,
-                env!("CARGO_PKG_VERSION"),
-            ),
+            tui: neo_tui::NeoTui::with_welcome_banner(chrome, 80, 24, env!("CARGO_PKG_VERSION")),
             keybindings: KeybindingsManager::default(),
             run_turn,
             session_items: catalogs.session_items,
@@ -415,6 +614,8 @@ impl InteractiveController {
             skill_store: None,
             pending_skill_context: None,
             goal_manager: None,
+            permission_mode: PermissionMode::default(),
+            pending_plan_review_feedback: BTreeMap::new(),
         }
     }
 
@@ -555,6 +756,7 @@ impl InteractiveController {
         let overrides = crate::config::ConfigOverrides {
             config_path: Some(path),
             yolo: false,
+            auto: false,
         };
         match crate::config::AppConfig::load(overrides) {
             Ok(config) => {
@@ -594,9 +796,10 @@ impl InteractiveController {
 
     pub fn apply_startup_options(&mut self, config: &AppConfig, options: InteractiveOptions) {
         self.tui.chrome_mut().set_theme(config.theme.theme);
+        self.permission_mode = config.permission_mode;
         self.tui
             .chrome_mut()
-            .set_permission_decision(config.permissions.shell);
+            .set_permission_mode(config.permission_mode);
         self.tui
             .chrome_mut()
             .set_image_render_policy(ImageRenderPolicy::new(
@@ -617,6 +820,50 @@ impl InteractiveController {
 
     fn push_status(&mut self, message: impl Into<String>) {
         self.transcript_mut().push_status(message);
+    }
+
+    fn set_permission_mode(&mut self, mode: PermissionMode) {
+        self.permission_mode = mode;
+        self.tui.chrome_mut().set_permission_mode(mode);
+        self.push_status(format!("Permission Mode: {}", mode.label()));
+    }
+
+    fn open_permission_picker(&mut self) {
+        let current_id = format!("permission:{}", self.permission_mode.label());
+        let items = permission_mode_items();
+        let theme = self.tui.chrome().theme();
+        self.tui
+            .chrome_mut()
+            .open_choice_picker(neo_tui::dialogs::ChoicePickerOptions {
+                title: "Select permission mode".to_owned(),
+                items,
+                initial_id: Some(current_id.clone()),
+                theme,
+                page_size: 3,
+                current_id: Some(current_id),
+            });
+    }
+
+    fn set_plan_mode_from_user(&mut self, active: bool) {
+        self.tui.chrome_mut().set_plan_mode(active);
+        self.push_status(if active {
+            "Plan Mode On"
+        } else {
+            "Plan Mode Off"
+        });
+    }
+
+    fn cycle_permission_mode(&mut self) {
+        if self.tui.chrome_mut().is_plan_mode() {
+            self.set_plan_mode_from_user(false);
+            self.set_permission_mode(PermissionMode::Manual);
+            return;
+        }
+        match self.permission_mode {
+            PermissionMode::Manual => self.set_permission_mode(PermissionMode::Auto),
+            PermissionMode::Auto => self.set_permission_mode(PermissionMode::Yolo),
+            PermissionMode::Yolo => self.set_plan_mode_from_user(true),
+        }
     }
 
     #[allow(dead_code)]
@@ -674,33 +921,11 @@ impl InteractiveController {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn handle_input_event(&mut self, event: InputEvent) -> Result<bool> {
-        if self.tui.chrome().approval_is_pending() {
-            if let Some(result) = self.tui.chrome_mut().handle_pending_approval_input(event) {
-                self.resolve_approval(&result);
-            } else {
-                self.sync_inline_approval_selection();
-            }
+        if self.handle_pending_approval_event(&event).await? {
             return Ok(false);
         }
-        // If a rich dialog overlay is focused, forward ALL input events to it
-        // first. Rich dialogs consume keys, actions, submit, cancel, etc.
-        if self.tui.chrome_mut().focused_overlay_is_rich_dialog() {
-            let cancelled_question = self
-                .tui
-                .chrome()
-                .question_dialog_state()
-                .map(|state| state.id.clone());
-            let event = self.dialog_input_event(event);
-            let result = self.tui.chrome_mut().handle_focused_dialog_input(event);
-            if result == InputResult::Cancelled
-                && let Some(id) = cancelled_question
-            {
-                self.pending_questions.remove(&id);
-                self.pending_question_prompts.remove(&id);
-            }
-            self.process_rich_dialog_result(result).await?;
+        if self.handle_rich_dialog_event(event.clone()).await? {
             return Ok(false);
         }
         match event {
@@ -711,79 +936,18 @@ impl InteractiveController {
                     self.resolve_approval(&result);
                     return Ok(false);
                 }
-                self.clear_pending_exit_confirmation();
-                self.tui
-                    .chrome_mut()
-                    .prompt_mut()
-                    .apply_edit(PromptEdit::Insert(&character.to_string()));
-                self.sync_inline_prompt_completion();
+                self.apply_prompt_edit(PromptEdit::Insert(&character.to_string()));
             }
-            InputEvent::Paste(text) => {
-                self.clear_pending_exit_confirmation();
-                self.tui
-                    .chrome_mut()
-                    .prompt_mut()
-                    .apply_edit(PromptEdit::Insert(&text));
-                self.sync_inline_prompt_completion();
-            }
+            InputEvent::Paste(text) => self.apply_prompt_edit(PromptEdit::Insert(&text)),
             InputEvent::Key(key) => return self.handle_keybinding_key(&key).await,
             InputEvent::Action(action) => return self.handle_keybinding_action(action).await,
-            InputEvent::Backspace => {
-                self.clear_pending_exit_confirmation();
-                self.tui
-                    .chrome_mut()
-                    .prompt_mut()
-                    .apply_edit(PromptEdit::Backspace);
-                self.sync_inline_prompt_completion();
-            }
-            InputEvent::Delete => {
-                self.clear_pending_exit_confirmation();
-                self.tui
-                    .chrome_mut()
-                    .prompt_mut()
-                    .apply_edit(PromptEdit::Delete);
-                self.sync_inline_prompt_completion();
-            }
-            InputEvent::MoveLeft => {
-                self.clear_pending_exit_confirmation();
-                self.tui
-                    .chrome_mut()
-                    .prompt_mut()
-                    .apply_edit(PromptEdit::MoveLeft);
-                self.sync_inline_prompt_completion();
-            }
-            InputEvent::MoveRight => {
-                self.clear_pending_exit_confirmation();
-                self.tui
-                    .chrome_mut()
-                    .prompt_mut()
-                    .apply_edit(PromptEdit::MoveRight);
-                self.sync_inline_prompt_completion();
-            }
-            InputEvent::MoveHome => {
-                self.clear_pending_exit_confirmation();
-                self.tui
-                    .chrome_mut()
-                    .prompt_mut()
-                    .apply_edit(PromptEdit::MoveHome);
-                self.sync_inline_prompt_completion();
-            }
-            InputEvent::MoveEnd => {
-                self.clear_pending_exit_confirmation();
-                self.tui
-                    .chrome_mut()
-                    .prompt_mut()
-                    .apply_edit(PromptEdit::MoveEnd);
-                self.sync_inline_prompt_completion();
-            }
-            InputEvent::NewLine => {
-                self.clear_pending_exit_confirmation();
-                self.tui
-                    .chrome_mut()
-                    .prompt_mut()
-                    .apply_edit(PromptEdit::Insert("\n"));
-                self.sync_inline_prompt_completion();
-            }
+            InputEvent::Backspace => self.apply_prompt_edit(PromptEdit::Backspace),
+            InputEvent::Delete => self.apply_prompt_edit(PromptEdit::Delete),
+            InputEvent::MoveLeft => self.apply_prompt_edit(PromptEdit::MoveLeft),
+            InputEvent::MoveRight => self.apply_prompt_edit(PromptEdit::MoveRight),
+            InputEvent::MoveHome => self.apply_prompt_edit(PromptEdit::MoveHome),
+            InputEvent::MoveEnd => self.apply_prompt_edit(PromptEdit::MoveEnd),
+            InputEvent::NewLine => self.apply_prompt_edit(PromptEdit::Insert("\n")),
             InputEvent::Submit => {
                 self.clear_pending_exit_confirmation();
                 self.submit_current_prompt().await?;
@@ -797,33 +961,89 @@ impl InteractiveController {
                 self.transcript_mut().scroll_transcript_down(rows);
             }
             InputEvent::Resize { .. } => {}
-            InputEvent::Cancel => {
-                if self.reject_pending_approval() {
-                    return Ok(false);
-                }
-                if self.cancel_focused_overlay() {
-                    return Ok(false);
-                }
-                let _ = self.interrupt_active_or_stale_turn().await?;
-                // When idle, ESC is a no-op (never exits the app).
-                return Ok(false);
-            }
-            InputEvent::Interrupt => {
-                if self.reject_all_pending_approvals() {
-                    if self.active_turn.is_some() {
-                        self.cancel_active_turn().await?;
-                        self.show_notice("Interrupted");
-                    }
-                    return Ok(false);
-                }
-                if self.interrupt_active_or_stale_turn().await? {
-                    return Ok(false);
-                }
-                return Ok(self.handle_app_clear());
-            }
+            InputEvent::Cancel => return self.handle_cancel_input().await,
+            InputEvent::Interrupt => return self.handle_interrupt_input().await,
         }
 
         Ok(false)
+    }
+
+    async fn handle_pending_approval_event(&mut self, event: &InputEvent) -> Result<bool> {
+        if !self.tui.chrome().approval_is_pending() {
+            return Ok(false);
+        }
+        // Interrupt rejects every visible approval (and any pending runtime
+        // channels) instead of being swallowed by the dialog handler.
+        if matches!(event, InputEvent::Interrupt) {
+            self.reject_all_pending_approvals();
+            if self.active_turn.is_some() {
+                self.cancel_active_turn().await?;
+                self.show_notice("Interrupted");
+            }
+            return Ok(true);
+        }
+        if let Some(result) = self
+            .tui
+            .chrome_mut()
+            .handle_pending_approval_input(event.clone())
+        {
+            self.resolve_approval(&result);
+        } else {
+            self.sync_inline_approval_selection();
+        }
+        Ok(true)
+    }
+
+    async fn handle_rich_dialog_event(&mut self, event: InputEvent) -> Result<bool> {
+        if !self.tui.chrome_mut().focused_overlay_is_rich_dialog() {
+            return Ok(false);
+        }
+        let cancelled_question = self
+            .tui
+            .chrome()
+            .question_dialog_state()
+            .map(|state| state.id.clone());
+        let event = self.dialog_input_event(event);
+        let result = self.tui.chrome_mut().handle_focused_dialog_input(event);
+        if result == InputResult::Cancelled
+            && let Some(id) = cancelled_question
+        {
+            self.pending_questions.remove(&id);
+            self.pending_question_prompts.remove(&id);
+        }
+        self.process_rich_dialog_result(result).await?;
+        Ok(true)
+    }
+
+    fn apply_prompt_edit(&mut self, edit: PromptEdit<'_>) {
+        self.clear_pending_exit_confirmation();
+        self.tui.chrome_mut().prompt_mut().apply_edit(edit);
+        self.sync_inline_prompt_completion();
+    }
+
+    async fn handle_cancel_input(&mut self) -> Result<bool> {
+        if self.reject_pending_approval() {
+            return Ok(false);
+        }
+        if self.cancel_focused_overlay() {
+            return Ok(false);
+        }
+        let _ = self.interrupt_active_or_stale_turn().await?;
+        Ok(false)
+    }
+
+    async fn handle_interrupt_input(&mut self) -> Result<bool> {
+        if self.reject_all_pending_approvals() {
+            if self.active_turn.is_some() {
+                self.cancel_active_turn().await?;
+                self.show_notice("Interrupted");
+            }
+            return Ok(false);
+        }
+        if self.interrupt_active_or_stale_turn().await? {
+            return Ok(false);
+        }
+        Ok(self.handle_app_clear())
     }
 
     async fn handle_keybinding_key(&mut self, key: &KeyId) -> Result<bool> {
@@ -873,7 +1093,6 @@ impl InteractiveController {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn handle_keybinding_action(&mut self, action: KeybindingAction) -> Result<bool> {
         if self.handle_prompt_keybinding_action(action) {
             return Ok(false);
@@ -883,21 +1102,10 @@ impl InteractiveController {
         }
 
         match action {
-            KeybindingAction::InputNewLine => {
-                self.clear_pending_exit_confirmation();
-                self.tui
-                    .chrome_mut()
-                    .prompt_mut()
-                    .apply_edit(PromptEdit::Insert("\n"));
-            }
+            KeybindingAction::InputNewLine => self.apply_prompt_edit(PromptEdit::Insert("\n")),
             KeybindingAction::InputTab => self.complete_prompt_or_insert_tab(),
             KeybindingAction::InputCopy => self.copy_prompt_to_clipboard(),
-            KeybindingAction::AppClear => {
-                if self.interrupt_active_or_stale_turn().await? {
-                    return Ok(false);
-                }
-                return Ok(self.handle_app_clear());
-            }
+            KeybindingAction::AppClear => return self.handle_app_clear_action().await,
             KeybindingAction::AppExit => return Ok(self.handle_app_exit()),
             KeybindingAction::AppSuspend => {
                 self.suspend_requested = true;
@@ -922,13 +1130,9 @@ impl InteractiveController {
             }
             KeybindingAction::TogglePlanMode => {
                 let currently_active = self.tui.chrome_mut().is_plan_mode();
-                self.tui.chrome_mut().set_plan_mode(!currently_active);
-                self.push_status(if currently_active {
-                    "Exited plan mode"
-                } else {
-                    " Entered plan mode — read-only until you exit"
-                });
+                self.set_plan_mode_from_user(!currently_active);
             }
+            KeybindingAction::CyclePermissionMode => self.cycle_permission_mode(),
             KeybindingAction::InputSubmit => {
                 self.clear_pending_exit_confirmation();
                 self.submit_current_prompt().await?;
@@ -947,32 +1151,9 @@ impl InteractiveController {
             KeybindingAction::SelectPageDown => {
                 self.tui.chrome_mut().move_overlay_selection_page_down();
             }
-            KeybindingAction::SelectConfirm => {
-                if self.tui.chrome_mut().selected_command().is_some() {
-                    self.run_selected_command().await?;
-                } else if self.tui.chrome_mut().approval_choice().is_some() {
-                    if let Some(result) = self.tui.chrome_mut().confirm_approval() {
-                        self.resolve_approval(&result);
-                    }
-                } else if self.tui.chrome_mut().selected_session().is_some() {
-                    self.load_selected_session().await?;
-                } else if self.tui.chrome_mut().selected_model().is_some() {
-                    self.apply_selected_model();
-                } else if self.tui.chrome_mut().selected_prompt_completion().is_some() {
-                    let _ = self.tui.chrome_mut().confirm_prompt_completion();
-                } else if self.tui.chrome_mut().focused_overlay_id().is_none() {
-                    self.submit_current_prompt().await?;
-                }
-            }
+            KeybindingAction::SelectConfirm => self.handle_select_confirm_action().await?,
             KeybindingAction::SelectCancel => {
-                if self.reject_pending_approval() {
-                    return Ok(false);
-                }
-                if self.cancel_focused_overlay() {
-                    return Ok(false);
-                }
-                let _ = self.interrupt_active_or_stale_turn().await?;
-                // When idle, ESC is a no-op (never exits the app).
+                let _ = self.handle_cancel_input().await?;
             }
             KeybindingAction::EditorCursorUp | KeybindingAction::EditorCursorDown => {
                 unreachable!("prompt history actions are handled before overlay actions")
@@ -1005,6 +1186,32 @@ impl InteractiveController {
         }
 
         Ok(false)
+    }
+
+    async fn handle_app_clear_action(&mut self) -> Result<bool> {
+        if self.interrupt_active_or_stale_turn().await? {
+            return Ok(false);
+        }
+        Ok(self.handle_app_clear())
+    }
+
+    async fn handle_select_confirm_action(&mut self) -> Result<()> {
+        if self.tui.chrome_mut().selected_command().is_some() {
+            self.run_selected_command().await?;
+        } else if self.tui.chrome_mut().approval_choice().is_some() {
+            if let Some(result) = self.tui.chrome_mut().confirm_approval() {
+                self.resolve_approval(&result);
+            }
+        } else if self.tui.chrome_mut().selected_session().is_some() {
+            self.load_selected_session().await?;
+        } else if self.tui.chrome_mut().selected_model().is_some() {
+            self.apply_selected_model();
+        } else if self.tui.chrome_mut().selected_prompt_completion().is_some() {
+            let _ = self.tui.chrome_mut().confirm_prompt_completion();
+        } else if self.tui.chrome_mut().focused_overlay_id().is_none() {
+            self.submit_current_prompt().await?;
+        }
+        Ok(())
     }
 
     fn cancel_focused_overlay(&mut self) -> bool {
@@ -1048,7 +1255,7 @@ impl InteractiveController {
             self.tui
                 .transcript_mut()
                 .resolve_approval(&request_id, "Rejected");
-            let _ = tx.send(PermissionDecision::Deny);
+            let _ = tx.send(PermissionApprovalDecision::Reject);
         }
         self.tui
             .transcript_mut()
@@ -1384,14 +1591,13 @@ impl InteractiveController {
                 // access to the raw prompt text for /plan on|off|clear parsing.
                 // This path is for bare command invocation via picker.
                 let currently_active = self.tui.chrome_mut().is_plan_mode();
-                self.tui.chrome_mut().set_plan_mode(!currently_active);
-                self.push_status(if currently_active {
-                    "Exited plan mode"
-                } else {
-                    " Entered plan mode — read-only until you exit"
-                });
+                self.set_plan_mode_from_user(!currently_active);
             }
             "submit" => self.submit_current_prompt().await?,
+            "permissions" => self.open_permission_picker(),
+            "permission.manual" => self.set_permission_mode(PermissionMode::Manual),
+            "permission.auto" => self.set_permission_mode(PermissionMode::Auto),
+            "permission.yolo" => self.set_permission_mode(PermissionMode::Yolo),
             unknown => self.push_status(format!("Unknown command: {unknown}")),
         }
         Ok(())
@@ -1421,92 +1627,131 @@ impl InteractiveController {
     /// Handle slash commands. Returns `true` if the prompt was consumed and should
     /// not be submitted as a chat turn.
     async fn handle_slash_command(&mut self, prompt: &str) -> bool {
-        match prompt.trim() {
+        let prompt = prompt.trim();
+        match prompt {
             "/resume" => {
-                self.tui.chrome_mut().prompt_mut().clear_after_submit();
+                self.clear_submitted_prompt();
                 self.open_session_picker();
                 return true;
             }
             "/provider" => {
-                self.tui.chrome_mut().prompt_mut().clear_after_submit();
+                self.clear_submitted_prompt();
                 self.open_provider_picker();
                 return true;
             }
             _ => {}
         }
-        // /model [alias] — opens model picker, optionally pre-selected
-        if prompt.trim() == "/model" || prompt.trim().starts_with("/model ") {
-            self.tui.chrome_mut().prompt_mut().clear_after_submit();
-            let alias = prompt.trim().strip_prefix("/model").unwrap_or("").trim();
-            if alias.is_empty() {
-                self.open_model_picker();
-            } else if self.model_items.iter().any(|item| item.value == alias) {
-                self.open_model_picker_with_alias(alias);
-            } else {
-                self.push_status(format!("Error: Unknown model alias: {alias}"));
-            }
+        if let Some(alias) = slash_arg(prompt, "/model") {
+            self.handle_model_slash_command(alias);
             return true;
         }
-        if let Some(rest) = prompt.trim().strip_prefix("/skill:") {
-            self.tui.chrome_mut().prompt_mut().clear_after_submit();
-            let arg = rest.trim();
-            if arg.is_empty() {
-                self.push_status("Usage: /skill:<name> [args]");
-            } else if let Err(err) = self.handle_skill_invocation(arg) {
-                self.push_status(format!("Skill error: {err}"));
-            }
+        if let Some(arg) = prompt.strip_prefix("/skill:").map(str::trim) {
+            self.handle_skill_slash_command(arg);
             return true;
         }
-        if let Some(rest) = prompt.trim().strip_prefix("/plan") {
-            self.tui.chrome_mut().prompt_mut().clear_after_submit();
-            let arg = rest.trim();
-            match arg {
-                "" | "on" => {
-                    if self.tui.chrome_mut().is_plan_mode() {
-                        self.push_status("Plan mode is already active");
-                    } else {
-                        self.tui.chrome_mut().set_plan_mode(true);
-                        self.push_status(" Entered plan mode — read-only until you exit");
-                    }
-                }
-                "off" => {
-                    if self.tui.chrome_mut().is_plan_mode() {
-                        self.tui.chrome_mut().set_plan_mode(false);
-                        self.push_status("Exited plan mode");
-                    } else {
-                        self.push_status("Plan mode is not active");
-                    }
-                }
-                "clear" => {
-                    let plans_dir = self.workspace_root.join(".neo").join("plans");
-                    let cleared = std::fs::read_dir(&plans_dir)
-                        .ok()
-                        .and_then(|mut entries| entries.next().and_then(std::result::Result::ok))
-                        .and_then(|entry| std::fs::write(entry.path(), "").ok())
-                        .is_some();
-                    self.push_status(if cleared {
-                        "Plan file cleared"
-                    } else {
-                        "No plan file to clear"
-                    });
-                }
-                _ => {
-                    self.push_status(format!(
-                        "Unknown /plan argument: '{arg}'. Usage: /plan [on|off|clear]"
-                    ));
-                }
-            }
+        if let Some(mode) = slash_permission_mode(prompt) {
+            self.clear_submitted_prompt();
+            self.set_permission_mode(mode);
             return true;
         }
-        if let Some(rest) = prompt.trim().strip_prefix("/goal") {
-            self.tui.chrome_mut().prompt_mut().clear_after_submit();
-            return self.handle_goal_command(rest.trim()).await;
+        if matches!(prompt, "/permissions" | "/permission") {
+            self.clear_submitted_prompt();
+            self.open_permission_picker();
+            return true;
+        }
+        if let Some(arg) = slash_arg(prompt, "/plan") {
+            self.handle_plan_slash_command(arg);
+            return true;
+        }
+        if let Some(arg) = slash_arg(prompt, "/goal") {
+            self.clear_submitted_prompt();
+            return self.handle_goal_command(arg).await;
         }
         false
     }
 
-    #[allow(clippy::too_many_lines)]
+    fn clear_submitted_prompt(&mut self) {
+        self.tui.chrome_mut().prompt_mut().clear_after_submit();
+    }
+
+    fn handle_model_slash_command(&mut self, alias: &str) {
+        self.clear_submitted_prompt();
+        if alias.is_empty() {
+            self.open_model_picker();
+        } else if self.model_items.iter().any(|item| item.value == alias) {
+            self.open_model_picker_with_alias(alias);
+        } else {
+            self.push_status(format!("Error: Unknown model alias: {alias}"));
+        }
+    }
+
+    fn handle_skill_slash_command(&mut self, arg: &str) {
+        self.clear_submitted_prompt();
+        if arg.is_empty() {
+            self.push_status("Usage: /skill:<name> [args]");
+        } else if let Err(err) = self.handle_skill_invocation(arg) {
+            self.push_status(format!("Skill error: {err}"));
+        }
+    }
+
+    fn handle_plan_slash_command(&mut self, arg: &str) {
+        self.clear_submitted_prompt();
+        match arg {
+            "" => {
+                let next = !self.tui.chrome_mut().is_plan_mode();
+                self.set_plan_mode_from_user(next);
+            }
+            "on" => self.set_plan_mode_from_user(true),
+            "off" => self.set_plan_mode_from_user(false),
+            "clear" => self.clear_plan_file(),
+            _ => {
+                self.push_status(format!(
+                    "Unknown /plan argument: '{arg}'. Usage: /plan [on|off|clear]"
+                ));
+            }
+        }
+    }
+
+    fn clear_plan_file(&mut self) {
+        let plans_dir = self.workspace_root.join(".neo").join("plans");
+        let cleared = std::fs::read_dir(&plans_dir)
+            .ok()
+            .and_then(|mut entries| entries.next().and_then(std::result::Result::ok))
+            .and_then(|entry| std::fs::write(entry.path(), "").ok())
+            .is_some();
+        self.push_status(if cleared {
+            "Plan file cleared"
+        } else {
+            "No plan file to clear"
+        });
+    }
+
     async fn handle_goal_command(&mut self, arg: &str) -> bool {
+        let Some(manager) = self.goal_manager().await else {
+            return true;
+        };
+        match arg {
+            "" | "status" => self.show_goal_status(&manager),
+            "pause" => {
+                self.pause_goal(&manager).await;
+                true
+            }
+            "resume" => {
+                self.resume_goal(&manager).await;
+                true
+            }
+            "cancel" => {
+                self.cancel_goal(&manager).await;
+                true
+            }
+            _ => {
+                self.handle_goal_objective_command(&manager, arg.trim())
+                    .await
+            }
+        }
+    }
+
+    async fn goal_manager(&mut self) -> Option<Arc<GoalManager>> {
         if self.goal_manager.is_none()
             && let Some(home) = neo_home()
         {
@@ -1514,119 +1759,115 @@ impl InteractiveController {
                 Ok(manager) => self.goal_manager = Some(Arc::new(manager)),
                 Err(err) => {
                     self.push_status(format!("Failed to load goal manager: {err}"));
-                    return true;
+                    return None;
                 }
             }
         }
         let Some(manager) = self.goal_manager.clone() else {
             self.push_status("Goal mode is not available");
-            return true;
+            return None;
         };
-        match arg {
-            "" | "status" => {
-                match manager.active() {
-                    Some(goal) => self.push_status(format!(
-                        "Goal: {} | status: {:?} | turns: {}",
-                        goal.objective, goal.status, goal.turn_count
-                    )),
-                    None => self.push_status("No active goal."),
-                }
-                true
-            }
-            "pause" => {
-                match manager.pause().await {
-                    Ok(Some(goal)) => {
-                        self.transcript_mut().push_transcript(
-                            neo_tui::transcript::TranscriptEntry::status(format!(
-                                "⏸ Goal paused: {}",
-                                goal.objective
-                            )),
-                        );
-                    }
-                    Ok(None) => self.push_status("No active goal to pause"),
-                    Err(err) => self.push_status(format!("Failed to pause goal: {err}")),
-                }
-                true
-            }
-            "resume" => {
-                match manager.resume().await {
-                    Ok(Some(goal)) => {
-                        self.transcript_mut().push_transcript(
-                            neo_tui::transcript::TranscriptEntry::status(format!(
-                                "▶ Goal resumed: {}",
-                                goal.objective
-                            )),
-                        );
-                    }
-                    Ok(None) => self.push_status("No active goal to resume"),
-                    Err(err) => self.push_status(format!("Failed to resume goal: {err}")),
-                }
-                true
-            }
-            "cancel" => {
-                match manager.cancel().await {
-                    Ok(Some(goal)) => {
-                        self.transcript_mut().push_transcript(
-                            neo_tui::transcript::TranscriptEntry::status(format!(
-                                "⏹ Goal cancelled: {}",
-                                goal.objective
-                            )),
-                        );
-                    }
-                    Ok(None) => self.push_status("No active goal to cancel"),
-                    Err(err) => self.push_status(format!("Failed to cancel goal: {err}")),
-                }
-                true
-            }
-            _ => {
-                let trimmed = arg.trim();
-                if let Some(objective) = trimmed.strip_prefix("replace ") {
-                    let goal = neo_agent_core::goal::Goal::new(objective.trim());
-                    match manager.replace(goal).await {
-                        Ok(Some(_previous)) => {
-                            self.push_status(format!("Replaced goal with: {objective}"));
-                        }
-                        Ok(None) => self.push_status(format!("Started goal: {objective}")),
-                        Err(err) => {
-                            self.push_status(format!("Failed to replace goal: {err}"));
-                            return true;
-                        }
-                    }
-                    false
-                } else if let Some(objective) = trimmed.strip_prefix("next ") {
-                    let goal = neo_agent_core::goal::Goal::new(objective.trim());
-                    match manager.queue_next(goal).await {
-                        Ok(()) => self.push_status(format!("Queued goal: {objective}")),
-                        Err(err) => {
-                            self.push_status(format!("Failed to queue goal: {err}"));
-                            return true;
-                        }
-                    }
-                    true
-                } else {
-                    let goal = neo_agent_core::goal::Goal::new(trimmed);
-                    let objective = goal.objective.clone();
-                    match manager.start(goal).await {
-                        Ok(Some(_previous)) => {
-                            self.push_status(format!(
-                                "Started goal: {objective} (previous goal superseded)"
-                            ));
-                        }
-                        Ok(None) => self.push_status(format!("Started goal: {objective}")),
-                        Err(err) => {
-                            self.push_status(format!("Failed to start goal: {err}"));
-                            return true;
-                        }
-                    }
-                    self.transcript_mut().push_transcript(
-                        neo_tui::transcript::TranscriptEntry::status(format!(
-                            "▶ Goal started: {objective}"
-                        )),
-                    );
-                    false
-                }
+        Some(manager)
+    }
+
+    fn show_goal_status(&mut self, manager: &GoalManager) -> bool {
+        match manager.active() {
+            Some(goal) => self.push_status(format!(
+                "Goal: {} | status: {:?} | turns: {}",
+                goal.objective, goal.status, goal.turn_count
+            )),
+            None => self.push_status("No active goal."),
+        }
+        true
+    }
+
+    async fn pause_goal(&mut self, manager: &GoalManager) {
+        match manager.pause().await {
+            Ok(Some(goal)) => self.push_goal_status("⏸ Goal paused", &goal.objective),
+            Ok(None) => self.push_status("No active goal to pause"),
+            Err(err) => self.push_status(format!("Failed to pause goal: {err}")),
+        }
+    }
+
+    async fn resume_goal(&mut self, manager: &GoalManager) {
+        match manager.resume().await {
+            Ok(Some(goal)) => self.push_goal_status("▶ Goal resumed", &goal.objective),
+            Ok(None) => self.push_status("No active goal to resume"),
+            Err(err) => self.push_status(format!("Failed to resume goal: {err}")),
+        }
+    }
+
+    async fn cancel_goal(&mut self, manager: &GoalManager) {
+        match manager.cancel().await {
+            Ok(Some(goal)) => self.push_goal_status("⏹ Goal cancelled", &goal.objective),
+            Ok(None) => self.push_status("No active goal to cancel"),
+            Err(err) => self.push_status(format!("Failed to cancel goal: {err}")),
+        }
+    }
+
+    async fn handle_goal_objective_command(
+        &mut self,
+        manager: &GoalManager,
+        command: &str,
+    ) -> bool {
+        if let Some(objective) = command.strip_prefix("replace ") {
+            return self.replace_goal(manager, objective.trim()).await;
+        }
+        if let Some(objective) = command.strip_prefix("next ") {
+            return self.queue_next_goal(manager, objective.trim()).await;
+        }
+        self.start_goal(manager, command).await
+    }
+
+    async fn replace_goal(&mut self, manager: &GoalManager, objective: &str) -> bool {
+        let goal = neo_agent_core::goal::Goal::new(objective);
+        match manager.replace(goal).await {
+            Ok(Some(_previous)) => self.push_status(format!("Replaced goal with: {objective}")),
+            Ok(None) => self.push_status(format!("Started goal: {objective}")),
+            Err(err) => {
+                self.push_status(format!("Failed to replace goal: {err}"));
+                return true;
             }
         }
+        false
+    }
+
+    async fn queue_next_goal(&mut self, manager: &GoalManager, objective: &str) -> bool {
+        let goal = neo_agent_core::goal::Goal::new(objective);
+        match manager.queue_next(goal).await {
+            Ok(()) => self.push_status(format!("Queued goal: {objective}")),
+            Err(err) => {
+                self.push_status(format!("Failed to queue goal: {err}"));
+                return true;
+            }
+        }
+        true
+    }
+
+    async fn start_goal(&mut self, manager: &GoalManager, objective: &str) -> bool {
+        let goal = neo_agent_core::goal::Goal::new(objective);
+        let objective = goal.objective.clone();
+        match manager.start(goal).await {
+            Ok(Some(_previous)) => {
+                self.push_status(format!(
+                    "Started goal: {objective} (previous goal superseded)"
+                ));
+            }
+            Ok(None) => self.push_status(format!("Started goal: {objective}")),
+            Err(err) => {
+                self.push_status(format!("Failed to start goal: {err}"));
+                return true;
+            }
+        }
+        self.push_goal_status("▶ Goal started", &objective);
+        false
+    }
+
+    fn push_goal_status(&mut self, prefix: &str, objective: &str) {
+        self.transcript_mut()
+            .push_transcript(neo_tui::transcript::TranscriptEntry::status(format!(
+                "{prefix}: {objective}"
+            )));
     }
 
     fn handle_skill_invocation(&mut self, arg: &str) -> Result<()> {
@@ -1723,7 +1964,7 @@ impl InteractiveController {
             cancel_token: cancel_token.clone(),
             questions: question_tx,
         };
-        let request = TurnRequest::new(
+        let mut request = TurnRequest::new(
             vec![prompt],
             self.active_session_id.clone(),
             model_override.or_else(|| self.active_model.clone()),
@@ -1733,6 +1974,8 @@ impl InteractiveController {
                 None
             },
         );
+        request.permission_mode = self.permission_mode;
+        request.plan_review_feedback = std::mem::take(&mut self.pending_plan_review_feedback);
         let request = if let Some(skill_context) = self.pending_skill_context.take() {
             request.with_skill_context(skill_context)
         } else {
@@ -1894,7 +2137,9 @@ impl InteractiveController {
     fn register_pending_approval(&mut self, approval: crate::modes::run::PromptApprovalRequest) {
         if self.always_approve {
             self.resolved_approvals.remove(&approval.id);
-            let _ = approval.decision_tx.send(PermissionDecision::Allow);
+            let _ = approval
+                .decision_tx
+                .send(PermissionApprovalDecision::AllowForSession);
             return;
         }
         if let Some(decision) = self.resolved_approvals.remove(&approval.id) {
@@ -1910,23 +2155,20 @@ impl InteractiveController {
             .transcript_mut()
             .resolve_approval(&result.request_id, approval_result_label(result.choice));
         let decision = match result.choice {
-            ApprovalChoice::Approve => PermissionDecision::Allow,
+            ApprovalChoice::Approve => PermissionApprovalDecision::AllowOnce,
             ApprovalChoice::AlwaysApprove => {
                 self.always_approve = true;
-                PermissionDecision::Allow
+                PermissionApprovalDecision::AllowForSession
             }
-            ApprovalChoice::Deny | ApprovalChoice::Revise => PermissionDecision::Deny,
+            ApprovalChoice::Deny | ApprovalChoice::Revise => PermissionApprovalDecision::Reject,
         };
-        // Store revise feedback for the transcript to pick up when building the
-        // exit_plan_mode tool result.
+        // Store revise/feedback text so it can be forwarded to the runtime's
+        // plan_review_feedback side-channel with the next turn.
         if result.choice == ApprovalChoice::Revise
             && let Some(feedback) = &result.feedback
         {
-            // Feedback is communicated via the approval subject side-channel:
-            // we can't reach the runtime's plan_review_feedback map from here,
-            // so we encode it in the resolved_approvals as a special marker.
-            // The transcript will check plan_review_feedback; for now, the feedback
-            // is passed through the TUI notice system.
+            self.pending_plan_review_feedback
+                .insert(result.request_id.clone(), feedback.clone());
             self.push_status(format!("Revision feedback: {feedback}"));
         }
         if let Some(tx) = self.pending_approvals.remove(&result.request_id) {
@@ -2405,6 +2647,7 @@ impl InteractiveController {
                         initial_id: None,
                         theme,
                         page_size: 0,
+                        current_id: None,
                     });
             }
             neo_tui::dialogs::ProviderManagerAction::DeleteSource(ids) => {
@@ -2459,6 +2702,9 @@ impl InteractiveController {
                         },
                     );
                 }
+                "permission:manual" => self.set_permission_mode(PermissionMode::Manual),
+                "permission:auto" => self.set_permission_mode(PermissionMode::Auto),
+                "permission:yolo" => self.set_permission_mode(PermissionMode::Yolo),
                 id if id.starts_with("custom-catalog:") => {
                     let provider_id = id.strip_prefix("custom-catalog:").unwrap_or(id);
                     if let Some(pending) = self.pending_custom_registry.take() {
@@ -2608,6 +2854,7 @@ impl InteractiveController {
                                 initial_id: None,
                                 theme,
                                 page_size: 0,
+                                current_id: None,
                             },
                         );
                     }
@@ -2629,6 +2876,7 @@ impl InteractiveController {
                                 initial_id: None,
                                 theme,
                                 page_size: 0,
+                                current_id: None,
                             },
                         );
                     }
@@ -2832,6 +3080,42 @@ fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<PickerItem>
             Some(prompt_source_description(
                 Some("Toggle plan mode (on / off / clear)"),
                 Some("plan mode"),
+                Some("local"),
+            )),
+        ),
+        PickerItem::new(
+            "/permissions",
+            "/permissions",
+            Some(prompt_source_description(
+                Some("select permission mode"),
+                Some("permission mode"),
+                Some("local"),
+            )),
+        ),
+        PickerItem::new(
+            "/ask",
+            "/ask",
+            Some(prompt_source_description(
+                Some("manual permission mode"),
+                Some("permission mode"),
+                Some("local"),
+            )),
+        ),
+        PickerItem::new(
+            "/auto",
+            "/auto",
+            Some(prompt_source_description(
+                Some("auto permission mode"),
+                Some("permission mode"),
+                Some("local"),
+            )),
+        ),
+        PickerItem::new(
+            "/yolo",
+            "/yolo",
+            Some(prompt_source_description(
+                Some("yolo permission mode"),
+                Some("permission mode"),
                 Some("local"),
             )),
         ),
@@ -3370,6 +3654,26 @@ fn command_specs(project_dir: &Path) -> (Vec<CommandSpec>, Option<String>) {
         ),
         CommandSpec::new("submit", "Submit prompt", Some("Submit the current prompt")),
         CommandSpec::new(
+            "permissions",
+            "Open permissions",
+            Some("Select permission mode"),
+        ),
+        CommandSpec::new(
+            "permission.manual",
+            "Manual permission mode",
+            Some("Ask before risky actions"),
+        ),
+        CommandSpec::new(
+            "permission.auto",
+            "Auto permission mode",
+            Some("Run non-interactively"),
+        ),
+        CommandSpec::new(
+            "permission.yolo",
+            "YOLO permission mode",
+            Some("Skip confirmations"),
+        ),
+        CommandSpec::new(
             "plan",
             "Toggle plan mode",
             Some("Read-only mode for investigation and planning"),
@@ -3455,6 +3759,7 @@ impl TerminalEvents for CrosstermEvents {
 const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::InputSubmit,
     KeybindingAction::InputNewLine,
+    KeybindingAction::CyclePermissionMode,
     KeybindingAction::TranscriptCopySelection,
     KeybindingAction::AppClear,
     KeybindingAction::AppExit,
@@ -3645,6 +3950,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                 effective_config.default_model = model.model;
             }
             effective_config.runtime.reasoning_effort = request.reasoning_effort;
+            effective_config.permission_mode = request.permission_mode;
             if let Some(session_id) = request.session_id {
                 let turn = crate::modes::run::run_prompt_in_session_streaming(
                     &session_id,
@@ -3656,6 +3962,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     channels.cancel_token,
                     Some(channels.questions),
                     request.skill_context.clone(),
+                    Some(request.plan_review_feedback.clone()),
                 )
                 .await?;
                 Ok(TurnOutcome::session(turn.session_id))
@@ -3669,6 +3976,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     channels.cancel_token,
                     Some(channels.questions),
                     request.skill_context.clone(),
+                    Some(request.plan_review_feedback.clone()),
                 )
                 .await?;
                 Ok(TurnOutcome::session(turn.session_id))
@@ -4066,7 +4374,7 @@ mod tests {
     };
 
     use neo_agent_core::ToolResult;
-    use neo_agent_core::{AgentEvent, AgentMessage, Content, PermissionPolicy, StopReason};
+    use neo_agent_core::{AgentEvent, AgentMessage, Content, PermissionMode, StopReason};
     use neo_tui::{
         chrome::{ApprovalChoice, ChromeMode, CommandPaletteState, Overlay, OverlayKind},
         input::KeybindingAction,
@@ -4083,6 +4391,36 @@ mod tests {
 
     fn test_workspace_root() -> PathBuf {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    }
+
+    #[test]
+    fn git_status_badge_formats_branch_diff_and_sync() {
+        let mut badge = parse_git_status_porcelain(
+            "## main...origin/main [ahead 2, behind 1]\n M src/app.rs\n",
+        )
+        .expect("git badge");
+        let (added, deleted) = parse_git_numstat("12\t3\tsrc/app.rs\n-\t-\tassets/image.png\n");
+        badge.added = added;
+        badge.deleted = deleted;
+
+        assert_eq!(badge.format(), "main [+12 -3 ↑2↓1]");
+    }
+
+    #[test]
+    fn git_status_badge_formats_dirty_without_line_counts() {
+        let badge = parse_git_status_porcelain("## feature\n?? new-file.rs\n").expect("git badge");
+
+        assert_eq!(badge.format(), "feature [±]");
+    }
+
+    #[test]
+    fn git_status_badge_is_absent_when_git_program_is_missing() {
+        let missing = git_status_label_with_program(
+            "definitely-not-a-real-git-binary-for-neo-tests",
+            &test_workspace_root(),
+        );
+
+        assert_eq!(missing, None);
     }
 
     fn test_session_summary(
@@ -6789,7 +7127,7 @@ command = "python3"
 
         assert_eq!(
             *decisions.lock().expect("decisions lock"),
-            vec![PermissionDecision::Allow]
+            vec![PermissionApprovalDecision::AllowOnce]
         );
         assert!(controller.chrome().focused_overlay().is_none());
         assert!(controller.render_snapshot().contains("approved"));
@@ -6948,7 +7286,7 @@ command = "python3"
 
         assert_eq!(
             decision_rx.await.expect("approval decision"),
-            PermissionDecision::Allow
+            PermissionApprovalDecision::AllowForSession
         );
         assert!(controller.always_approve);
         assert!(controller.chrome().focused_overlay().is_none());
@@ -7208,7 +7546,7 @@ command = "python3"
 
         assert_eq!(
             decision_rx.await.expect("approval decision"),
-            PermissionDecision::Allow
+            PermissionApprovalDecision::AllowForSession
         );
         assert_eq!(controller.chrome().prompt().text, "draft");
         assert!(controller.chrome().focused_overlay().is_none());
@@ -7273,7 +7611,7 @@ command = "python3"
         assert_eq!(controller.chrome().prompt().text, "draft");
         assert_eq!(
             decision_rx.await.expect("approval decision"),
-            PermissionDecision::Deny
+            PermissionApprovalDecision::Reject
         );
         let snapshot = controller.render_snapshot();
         assert!(
@@ -7310,7 +7648,7 @@ command = "python3"
 
         assert_eq!(
             decision_rx.await.expect("approval decision"),
-            PermissionDecision::Deny
+            PermissionApprovalDecision::Reject
         );
         assert!(controller.render_snapshot().contains("Rejected"));
     }
@@ -7354,7 +7692,7 @@ command = "python3"
 
         assert_eq!(
             first_rx.await.expect("first decision"),
-            PermissionDecision::Allow
+            PermissionApprovalDecision::AllowOnce
         );
         assert_eq!(
             controller
@@ -7436,7 +7774,7 @@ command = "python3"
 
         assert_eq!(
             first_rx.await.expect("first decision"),
-            PermissionDecision::Deny
+            PermissionApprovalDecision::Reject
         );
         let snapshot = controller.render_snapshot();
         assert!(snapshot.contains("Rejected"));
@@ -7483,11 +7821,11 @@ command = "python3"
 
         assert_eq!(
             first_rx.await.expect("first decision"),
-            PermissionDecision::Deny
+            PermissionApprovalDecision::Reject
         );
         assert_eq!(
             second_rx.await.expect("second decision"),
-            PermissionDecision::Deny
+            PermissionApprovalDecision::Reject
         );
         assert!(controller.pending_approvals.is_empty());
         assert!(!controller.chrome().approval_is_pending());
@@ -7522,7 +7860,7 @@ command = "python3"
 
         assert_eq!(
             decision_rx.await.expect("late approval decision"),
-            PermissionDecision::Deny
+            PermissionApprovalDecision::Reject
         );
         assert!(controller.pending_approvals.is_empty());
     }
@@ -8593,6 +8931,320 @@ command = "python3"
         assert!(transcript_has_status(&controller, &expected));
     }
 
+    #[tokio::test]
+    async fn slash_ask_sets_manual_permission_mode() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.type_text("/ask");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("slash command handled");
+        assert_eq!(
+            controller.chrome().permission_mode(),
+            PermissionMode::Manual
+        );
+        assert!(transcript_has_status(
+            &controller,
+            "Permission Mode: manual"
+        ));
+        assert!(controller.render_snapshot().contains("[manual]"));
+    }
+
+    #[tokio::test]
+    async fn slash_auto_sets_auto_permission_mode() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.type_text("/auto");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("slash command handled");
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Auto);
+        assert!(transcript_has_status(&controller, "Permission Mode: auto"));
+        assert!(controller.render_snapshot().contains("[auto]"));
+    }
+
+    #[tokio::test]
+    async fn slash_yolo_sets_yolo_permission_mode() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.type_text("/yolo");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("slash command handled");
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Yolo);
+        assert!(transcript_has_status(&controller, "Permission Mode: yolo"));
+        assert!(controller.render_snapshot().contains("[yolo]"));
+    }
+
+    #[tokio::test]
+    async fn permissions_picker_selects_auto_mode() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.type_text("/permissions");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("opens permission picker");
+        assert!(controller.chrome().focused_overlay().is_some());
+
+        // Move from Manual (index 0) to Auto (index 1) and confirm.
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+            .await
+            .expect("move selection");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+            .await
+            .expect("confirm selection");
+
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Auto);
+        assert!(transcript_has_status(&controller, "Permission Mode: auto"));
+        assert!(controller.chrome().focused_overlay().is_none());
+    }
+
+    #[test]
+    fn slash_completions_include_permission_commands() {
+        let completions = prompt_completions(&test_workspace_root(), "/", &[], None)
+            .expect("completions resolve");
+        let values: Vec<_> = completions.iter().map(|item| item.value.as_str()).collect();
+        assert!(
+            values.contains(&"/permissions"),
+            "missing /permissions: {values:?}"
+        );
+        assert!(values.contains(&"/ask"), "missing /ask: {values:?}");
+        assert!(values.contains(&"/auto"), "missing /auto: {values:?}");
+        assert!(values.contains(&"/yolo"), "missing /yolo: {values:?}");
+    }
+
+    #[tokio::test]
+    async fn slash_plan_toggles_plan_mode_and_footer() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.type_text("/plan");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("toggles plan mode on");
+        assert!(controller.chrome().is_plan_mode());
+        assert!(transcript_has_status(&controller, "Plan Mode On"));
+        assert!(controller.render_snapshot().contains("[PLAN MODE]"));
+
+        controller.type_text("/plan");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("toggles plan mode off");
+        assert!(!controller.chrome().is_plan_mode());
+        assert!(transcript_has_status(&controller, "Plan Mode Off"));
+    }
+
+    #[tokio::test]
+    async fn shift_enter_cycles_through_permission_modes() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        assert_eq!(
+            controller.chrome().permission_mode(),
+            PermissionMode::Manual
+        );
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::CyclePermissionMode))
+            .await
+            .expect("cycle to auto");
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Auto);
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::CyclePermissionMode))
+            .await
+            .expect("cycle to yolo");
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Yolo);
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::CyclePermissionMode))
+            .await
+            .expect("cycle to plan");
+        assert!(controller.chrome().is_plan_mode());
+        assert!(transcript_has_status(&controller, "Plan Mode On"));
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::CyclePermissionMode))
+            .await
+            .expect("cycle back to manual");
+        assert_eq!(
+            controller.chrome().permission_mode(),
+            PermissionMode::Manual
+        );
+        assert!(!controller.chrome().is_plan_mode());
+    }
+
+    #[tokio::test]
+    async fn shift_tab_cycles_permission_mode_from_manual_to_auto() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Manual);
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("shift+tab").expect("valid key")))
+            .await
+            .expect("shift tab cycles");
+
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Auto);
+        assert!(transcript_has_status(&controller, "Permission Mode: auto"));
+    }
+
+    #[tokio::test]
+    async fn revise_exit_plan_mode_feedback_is_forwarded_in_turn_request() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("lock")
+                        .push(request.clone());
+                    Ok(Vec::<AgentEvent>::new())
+                }
+            },
+        );
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "exit-plan-1".to_owned(),
+            operation: neo_agent_core::PermissionOperation::PlanTransition,
+            subject: "Exit plan mode".to_owned(),
+            arguments: serde_json::json!({}),
+        });
+
+        // Select "Revise" (index 2) and enter feedback, then confirm.
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+            .await
+            .expect("move to revise");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+            .await
+            .expect("move to revise");
+        controller
+            .handle_input_event(InputEvent::Insert('r'))
+            .await
+            .expect("type feedback");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+            .await
+            .expect("confirm revise");
+
+        assert!(transcript_has_status(&controller, "Revision feedback: r"));
+
+        controller.type_text("continue");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("submit turn");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("turn completes");
+
+        let requests = requests.lock().expect("lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].plan_review_feedback.get("exit-plan-1"),
+            Some(&"r".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn approve_for_session_skips_later_manual_prompt() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Shell,
+            subject: "printf one".to_owned(),
+            arguments: serde_json::json!({"command": "printf one"}),
+        });
+        let (first_tx, first_rx) = oneshot::channel();
+        controller
+            .pending_approvals
+            .insert("tool-1".to_owned(), first_tx);
+
+        // Select "Approve for this session" (index 1) and confirm.
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+            .await
+            .expect("move to always-approve");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+            .await
+            .expect("confirm always-approve");
+
+        assert_eq!(
+            first_rx.await.expect("first decision"),
+            PermissionApprovalDecision::AllowForSession
+        );
+        assert!(controller.always_approve);
+
+        // A later approval request should be resolved automatically.
+        let (second_tx, second_rx) = oneshot::channel();
+        controller.register_pending_approval(crate::modes::run::PromptApprovalRequest {
+            id: "tool-2".to_owned(),
+            decision_tx: second_tx,
+        });
+        assert_eq!(
+            second_rx.await.expect("second decision"),
+            PermissionApprovalDecision::AllowForSession
+        );
+    }
+
     #[test]
     fn composed_frame_lines_do_not_exceed_content_width() {
         let app = NeoChromeState::new("neo", "s", "openai/gpt-4.1", "/tmp");
@@ -8618,7 +9270,7 @@ command = "python3"
             models: BTreeMap::new(),
             model_scope: Vec::new(),
             sessions_dir,
-            permissions: PermissionPolicy::default(),
+            permission_mode: PermissionMode::default(),
             defaults: Defaults {
                 mode: "interactive".to_owned(),
             },

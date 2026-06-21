@@ -11,17 +11,8 @@ const COMMAND_PREVIEW_LINES: usize = 10;
 
 #[must_use]
 pub fn tool_header(state: &ToolCallState) -> String {
-    let symbol = match state.status {
-        ToolStatusKind::Pending | ToolStatusKind::Running | ToolStatusKind::Succeeded => "●",
-        ToolStatusKind::Failed => "✗",
-        ToolStatusKind::Cancelled => "⊘",
-    };
-    let verb = match state.status {
-        ToolStatusKind::Pending | ToolStatusKind::Running => "Using",
-        ToolStatusKind::Succeeded => "Used",
-        ToolStatusKind::Failed => "Failed",
-        ToolStatusKind::Cancelled => "Cancelled",
-    };
+    let symbol = tool_symbol(state.status);
+    let verb = tool_verb(state.status);
     let key = key_argument(state.arguments.as_deref());
     let chip = result_chip(state);
     if key.is_empty() {
@@ -77,7 +68,8 @@ fn tool_symbol(status: ToolStatusKind) -> &'static str {
 
 fn tool_verb(status: ToolStatusKind) -> &'static str {
     match status {
-        ToolStatusKind::Pending | ToolStatusKind::Running => "Using",
+        ToolStatusKind::Pending => "Queued",
+        ToolStatusKind::Running => "Using",
         ToolStatusKind::Succeeded => "Used",
         ToolStatusKind::Failed => "Failed",
         ToolStatusKind::Cancelled => "Cancelled",
@@ -95,97 +87,7 @@ fn tool_status_color(status: ToolStatusKind, theme: &TuiTheme) -> Color {
 
 #[must_use]
 pub fn render_tool_body(state: &ToolCallState, expanded: bool, width: usize) -> Vec<Line> {
-    if hides_successful_todo_list_body(state) {
-        return Vec::new();
-    }
-
-    if is_file_write_tool(&state.name)
-        && let Some(model) = state
-            .details
-            .as_ref()
-            .and_then(DiffModel::from_tool_details)
-    {
-        return render_diff_model_lines(&model, expanded, width, None);
-    }
-
-    if state.name == "Write"
-        && let Some((path, content)) = parse_write_arguments(state.arguments.as_deref())
-    {
-        if state.status == ToolStatusKind::Pending || state.status == ToolStatusKind::Running {
-            return vec![Line::raw(format!("  {path}"))];
-        }
-        let lines: Vec<&str> = content.lines().collect();
-        let total = lines.len();
-        let limit = if expanded {
-            total
-        } else {
-            COMMAND_PREVIEW_LINES.min(total)
-        };
-        let mut rows = vec![Line::raw(format!("  {path} · {total} lines"))];
-        for (index, line) in lines.iter().take(limit).enumerate() {
-            rows.push(Line::raw(format!("  {:>4} {line}", index + 1)));
-        }
-        if limit < total {
-            rows.push(Line::raw(format!(
-                "  ... ({} more lines, {total} total, ctrl+o to expand)",
-                total - limit
-            )));
-        }
-        return rows;
-    }
-
-    if state.name == "Edit"
-        && let Some(arguments) = state.arguments.as_deref().and_then(parse_edit_arguments)
-    {
-        if state.status == ToolStatusKind::Pending || state.status == ToolStatusKind::Running {
-            return vec![Line::raw(format!("  {}", arguments.path))];
-        }
-        let max = if expanded {
-            None
-        } else {
-            Some(COMMAND_PREVIEW_LINES)
-        };
-        return crate::transcript::diff_preview::render_diff_lines_clustered(
-            &arguments.old,
-            &arguments.new,
-            &arguments.path,
-            3,
-            max,
-        )
-        .into_iter()
-        .map(|line| Line::raw(format!("  {}", crate::ansi::strip_ansi(&line.to_ansi()))))
-        .collect();
-    }
-
-    let Some(result) = state.result.as_deref().filter(|value| !value.is_empty()) else {
-        return Vec::new();
-    };
-
-    let limit = if expanded {
-        usize::MAX
-    } else {
-        RESULT_PREVIEW_LINES
-    };
-    let result_line_count = result.lines().count();
-    let mut rows = Vec::new();
-    let mut rendered = 0usize;
-    for line in result.lines() {
-        for wrapped in Text::new(line).render_lines(width.saturating_sub(2).max(1)) {
-            if rendered >= limit {
-                let remaining = result_line_count.saturating_sub(rendered);
-                rows.push(Line::raw(format!(
-                    "  ... ({remaining} more lines, ctrl+o to expand)"
-                )));
-                return rows;
-            }
-            rows.push(Line::raw(format!(
-                "  {}",
-                crate::ansi::strip_ansi(&wrapped.to_ansi())
-            )));
-            rendered += 1;
-        }
-    }
-    rows
+    render_tool_body_with_palette(state, expanded, width, ToolBodyPalette::plain())
 }
 
 /// Theme-aware variant of [`render_tool_body`]. Emits styled lines:
@@ -200,81 +102,175 @@ pub fn render_tool_body_themed(
     width: usize,
     theme: &TuiTheme,
 ) -> Vec<Line> {
+    render_tool_body_with_palette(state, expanded, width, ToolBodyPalette::themed(theme))
+}
+
+#[derive(Clone, Copy)]
+struct ToolBodyPalette<'a> {
+    theme: Option<&'a TuiTheme>,
+}
+
+impl<'a> ToolBodyPalette<'a> {
+    const fn plain() -> Self {
+        Self { theme: None }
+    }
+
+    const fn themed(theme: &'a TuiTheme) -> Self {
+        Self { theme: Some(theme) }
+    }
+
+    fn weak_line(self, text: String) -> Line {
+        self.styled_or_raw(text, |theme| Style::default().fg(theme.text_muted))
+    }
+
+    fn body_line(self, text: String) -> Line {
+        self.styled_or_raw(text, |theme| Style::default().fg(theme.text_primary))
+    }
+
+    fn diff_line(self, line: &Line) -> Line {
+        match self.theme {
+            Some(theme) => diff_body_line(&line.to_ansi(), theme),
+            None => Line::raw(format!("  {}", crate::ansi::strip_ansi(&line.to_ansi()))),
+        }
+    }
+
+    fn styled_or_raw(self, text: String, style: impl FnOnce(&TuiTheme) -> Style) -> Line {
+        match self.theme {
+            Some(theme) => Line::styled(text, style(theme)),
+            None => Line::raw(text),
+        }
+    }
+}
+
+fn render_tool_body_with_palette(
+    state: &ToolCallState,
+    expanded: bool,
+    width: usize,
+    palette: ToolBodyPalette<'_>,
+) -> Vec<Line> {
     if hides_successful_todo_list_body(state) {
         return Vec::new();
     }
 
-    let weak = Style::default().fg(theme.text_muted);
-    let body_style = Style::default().fg(theme.text_primary);
+    render_diff_details(state, expanded, width, palette)
+        .or_else(|| render_write_body(state, expanded, palette))
+        .or_else(|| render_edit_body(state, expanded, palette))
+        .or_else(|| render_result_body(state, expanded, width, palette))
+        .unwrap_or_default()
+}
 
+fn render_diff_details(
+    state: &ToolCallState,
+    expanded: bool,
+    width: usize,
+    palette: ToolBodyPalette<'_>,
+) -> Option<Vec<Line>> {
     if is_file_write_tool(&state.name)
         && let Some(model) = state
             .details
             .as_ref()
             .and_then(DiffModel::from_tool_details)
     {
-        return render_diff_model_lines(&model, expanded, width, Some(theme));
+        return Some(render_diff_model_lines(
+            &model,
+            expanded,
+            width,
+            palette.theme,
+        ));
+    }
+    None
+}
+
+fn render_write_body(
+    state: &ToolCallState,
+    expanded: bool,
+    palette: ToolBodyPalette<'_>,
+) -> Option<Vec<Line>> {
+    if state.name != "Write" {
+        return None;
     }
 
-    if state.name == "Write"
-        && let Some((path, content)) = parse_write_arguments(state.arguments.as_deref())
-    {
-        if state.status == ToolStatusKind::Pending || state.status == ToolStatusKind::Running {
-            return vec![Line::styled(format!("  {path}"), weak)];
-        }
-        let lines: Vec<&str> = content.lines().collect();
-        let total = lines.len();
-        let limit = if expanded {
-            total
-        } else {
-            COMMAND_PREVIEW_LINES.min(total)
-        };
-        let mut rows = vec![Line::styled(format!("  {path} · {total} lines"), weak)];
-        for (index, line) in lines.iter().take(limit).enumerate() {
-            rows.push(Line::styled(
-                format!("  {:>4} {line}", index + 1),
-                body_style,
-            ));
-        }
-        if limit < total {
-            rows.push(Line::styled(
-                format!(
-                    "  ... ({} more lines, {total} total, ctrl+o to expand)",
-                    total - limit
-                ),
-                weak,
-            ));
-        }
-        return rows;
+    let (path, content) = parse_write_arguments(state.arguments.as_deref())?;
+    if is_pending_or_running(state.status) {
+        return Some(vec![palette.weak_line(format!("  {path}"))]);
     }
 
-    if state.name == "Edit"
-        && let Some(arguments) = state.arguments.as_deref().and_then(parse_edit_arguments)
-    {
-        if state.status == ToolStatusKind::Pending || state.status == ToolStatusKind::Running {
-            return vec![Line::styled(format!("  {}", arguments.path), weak)];
-        }
-        let max = if expanded {
-            None
-        } else {
-            Some(COMMAND_PREVIEW_LINES)
-        };
-        return crate::transcript::diff_preview::render_diff_lines_clustered(
-            &arguments.old,
-            &arguments.new,
-            &arguments.path,
-            3,
-            max,
-        )
-        .into_iter()
-        .map(|line| diff_body_line(&line.to_ansi(), theme))
-        .collect();
+    Some(render_write_preview(&path, &content, expanded, palette))
+}
+
+fn render_write_preview(
+    path: &str,
+    content: &str,
+    expanded: bool,
+    palette: ToolBodyPalette<'_>,
+) -> Vec<Line> {
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    let limit = preview_limit(total, expanded, COMMAND_PREVIEW_LINES);
+    let mut rows = vec![palette.weak_line(format!("  {path} · {total} lines"))];
+    for (index, line) in lines.iter().take(limit).enumerate() {
+        rows.push(palette.body_line(format!("  {:>4} {line}", index + 1)));
+    }
+    if limit < total {
+        rows.push(palette.weak_line(format!(
+            "  ... ({} more lines, {total} total, ctrl+o to expand)",
+            total - limit
+        )));
+    }
+    rows
+}
+
+fn render_edit_body(
+    state: &ToolCallState,
+    expanded: bool,
+    palette: ToolBodyPalette<'_>,
+) -> Option<Vec<Line>> {
+    if state.name != "Edit" {
+        return None;
     }
 
-    let Some(result) = state.result.as_deref().filter(|value| !value.is_empty()) else {
-        return Vec::new();
-    };
+    let arguments = state.arguments.as_deref().and_then(parse_edit_arguments)?;
+    if is_pending_or_running(state.status) {
+        return Some(vec![palette.weak_line(format!("  {}", arguments.path))]);
+    }
 
+    Some(render_edit_preview(&arguments, expanded, palette))
+}
+
+fn render_edit_preview(
+    arguments: &EditArguments,
+    expanded: bool,
+    palette: ToolBodyPalette<'_>,
+) -> Vec<Line> {
+    let max = (!expanded).then_some(COMMAND_PREVIEW_LINES);
+    crate::transcript::diff_preview::render_diff_lines_clustered(
+        &arguments.old,
+        &arguments.new,
+        &arguments.path,
+        3,
+        max,
+    )
+    .into_iter()
+    .map(|line| palette.diff_line(&line))
+    .collect()
+}
+
+fn render_result_body(
+    state: &ToolCallState,
+    expanded: bool,
+    width: usize,
+    palette: ToolBodyPalette<'_>,
+) -> Option<Vec<Line>> {
+    let result = state.result.as_deref().filter(|value| !value.is_empty())?;
+    Some(render_result_preview(result, expanded, width, palette))
+}
+
+fn render_result_preview(
+    result: &str,
+    expanded: bool,
+    width: usize,
+    palette: ToolBodyPalette<'_>,
+) -> Vec<Line> {
     let limit = if expanded {
         usize::MAX
     } else {
@@ -287,20 +283,30 @@ pub fn render_tool_body_themed(
         for wrapped in Text::new(line).render_lines(width.saturating_sub(2).max(1)) {
             if rendered >= limit {
                 let remaining = result_line_count.saturating_sub(rendered);
-                rows.push(Line::styled(
-                    format!("  ... ({remaining} more lines, ctrl+o to expand)"),
-                    weak,
-                ));
+                rows.push(
+                    palette.weak_line(format!("  ... ({remaining} more lines, ctrl+o to expand)")),
+                );
                 return rows;
             }
-            rows.push(Line::styled(
-                format!("  {}", crate::ansi::strip_ansi(&wrapped.to_ansi())),
-                body_style,
-            ));
+            rows.push(
+                palette.body_line(format!("  {}", crate::ansi::strip_ansi(&wrapped.to_ansi()))),
+            );
             rendered += 1;
         }
     }
     rows
+}
+
+const fn is_pending_or_running(status: ToolStatusKind) -> bool {
+    matches!(status, ToolStatusKind::Pending | ToolStatusKind::Running)
+}
+
+const fn preview_limit(total: usize, expanded: bool, collapsed_limit: usize) -> usize {
+    if expanded || total < collapsed_limit {
+        total
+    } else {
+        collapsed_limit
+    }
 }
 
 fn hides_successful_todo_list_body(state: &ToolCallState) -> bool {
@@ -329,7 +335,7 @@ fn render_diff_model_lines(
     let mut rows = lines
         .into_iter()
         .take(limit)
-        .map(|line| render_diff_line(line, theme))
+        .map(|line| render_diff_line(&line, theme))
         .collect::<Vec<_>>();
     if limit < total {
         let message = format!(
@@ -344,7 +350,7 @@ fn render_diff_model_lines(
     rows
 }
 
-fn render_diff_line(line: DiffRenderLine, theme: Option<&TuiTheme>) -> Line {
+fn render_diff_line(line: &DiffRenderLine, theme: Option<&TuiTheme>) -> Line {
     let text = format!("  {}", line.text);
     let Some(theme) = theme else {
         return Line::raw(text);
@@ -378,35 +384,29 @@ struct EditArguments {
     new: String,
 }
 
+const PATH_KEYS: &[&str] = &["path", "file_path"];
+const OLD_KEYS: &[&str] = &["old_string", "old"];
+const NEW_KEYS: &[&str] = &["new_string", "new"];
+
 fn parse_write_arguments(arguments: Option<&str>) -> Option<(String, String)> {
     let value = serde_json::from_str::<serde_json::Value>(arguments?).ok()?;
-    let path = value
-        .get("path")
-        .or_else(|| value.get("file_path"))?
-        .as_str()?
-        .to_owned();
-    let content = value.get("content")?.as_str()?.to_owned();
+    let path = string_field(&value, PATH_KEYS)?;
+    let content = string_field(&value, &["content"])?;
     Some((path, content))
 }
 
 fn parse_edit_arguments(arguments: &str) -> Option<EditArguments> {
     let value = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
-    let path = value
-        .get("path")
-        .or_else(|| value.get("file_path"))?
-        .as_str()?
-        .to_owned();
-    let old = value
-        .get("old_string")
-        .or_else(|| value.get("old"))?
-        .as_str()?
-        .to_owned();
-    let new = value
-        .get("new_string")
-        .or_else(|| value.get("new"))?
-        .as_str()?
-        .to_owned();
+    let path = string_field(&value, PATH_KEYS)?;
+    let old = string_field(&value, OLD_KEYS)?;
+    let new = string_field(&value, NEW_KEYS)?;
     Some(EditArguments { path, old, new })
+}
+
+fn string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(key).and_then(serde_json::Value::as_str))
+        .map(std::borrow::ToOwned::to_owned)
 }
 
 #[must_use]

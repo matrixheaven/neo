@@ -390,7 +390,7 @@ impl DiffRenderState {
             .files
             .iter()
             .flat_map(|file| &file.hunks)
-            .flat_map(max_hunk_line_number)
+            .filter_map(max_hunk_line_number)
             .max()
             .unwrap_or(1)
             .to_string()

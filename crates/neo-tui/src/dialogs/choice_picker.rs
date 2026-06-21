@@ -39,6 +39,9 @@ pub struct ChoicePickerOptions {
     pub theme: TuiTheme,
     /// Maximum number of items visible at once. `0` means use the default.
     pub page_size: usize,
+    /// Item id that represents the current value, if any. Its label will have
+    /// ` ← current` appended when rendered.
+    pub current_id: Option<String>,
 }
 
 const DEFAULT_PAGE_SIZE: usize = 20;
@@ -58,6 +61,7 @@ pub struct ChoicePickerState {
     theme: TuiTheme,
     title: String,
     result: Option<ChoiceResult>,
+    current_id: Option<String>,
 }
 
 impl ChoicePickerState {
@@ -82,6 +86,7 @@ impl ChoicePickerState {
             theme: opts.theme,
             title: opts.title,
             result: None,
+            current_id: opts.current_id,
         };
         state.ensure_selected_visible();
         state
@@ -118,7 +123,7 @@ impl ChoicePickerState {
         let remaining = inner_w.saturating_sub(title_len);
         lines.push(format!(
             "\x1b[38;2;{}m╭{title_str}{}\x1b[0m",
-            rgb(self.theme.overlay_border),
+            dialog_rgb(self.theme.overlay_border),
             "─".repeat(remaining),
         ));
 
@@ -128,7 +133,12 @@ impl ChoicePickerState {
             let item = &self.items[i];
             let is_selected = i == self.selected;
             let marker = if is_selected { "▸" } else { " " };
-            let label = &item.label;
+            let is_current = self.current_id.as_ref().is_some_and(|id| id == &item.id);
+            let label = if is_current {
+                format!("{} ← current", item.label)
+            } else {
+                item.label.clone()
+            };
 
             let (fg, bg) = if is_selected {
                 (self.theme.selected_fg, self.theme.selected_bg)
@@ -144,8 +154,8 @@ impl ChoicePickerState {
 
             lines.push(format!(
                 "\x1b[{};{}m {marker} {label}{desc_str}\x1b[0m",
-                fg.sgr(),
-                bg.sgr_bg()
+                dialog_sgr_fg(fg),
+                dialog_sgr_bg(bg)
             ));
         }
 
@@ -161,13 +171,13 @@ impl ChoicePickerState {
         }
         lines.push(format!(
             "\x1b[38;2;{}m {hint}\x1b[0m",
-            rgb(self.theme.text_muted)
+            dialog_rgb(self.theme.text_muted)
         ));
 
         // Bottom border
         lines.push(format!(
             "\x1b[38;2;{}m╰{}\x1b[0m",
-            rgb(self.theme.overlay_border),
+            dialog_rgb(self.theme.overlay_border),
             "─".repeat(inner_w),
         ));
 
@@ -236,59 +246,96 @@ impl ChoicePickerState {
     }
 }
 
-trait ColorSgr {
-    fn sgr(&self) -> String;
-    fn sgr_bg(&self) -> String;
+pub(super) fn dialog_sgr_fg(color: Color) -> String {
+    dialog_sgr(color, DialogSgrLayer::Foreground)
 }
 
-impl ColorSgr for Color {
-    fn sgr(&self) -> String {
-        match self {
-            Color::Black => "30".into(),
-            Color::Red => "31".into(),
-            Color::Green => "32".into(),
-            Color::Yellow => "33".into(),
-            Color::Blue => "34".into(),
-            Color::Magenta => "35".into(),
-            Color::Cyan => "36".into(),
-            Color::White => "37".into(),
-            Color::Gray | Color::DarkGray => "90".into(),
-            Color::LightRed => "91".into(),
-            Color::LightGreen => "92".into(),
-            Color::LightYellow => "93".into(),
-            Color::LightBlue => "94".into(),
-            Color::LightMagenta => "95".into(),
-            Color::LightCyan => "96".into(),
-            Color::Reset => "39".into(),
-            Color::Rgb(r, g, b) => format!("38;2;{r};{g};{b}"),
-            Color::Indexed(i) => format!("5;{i}"),
-        }
-    }
-    fn sgr_bg(&self) -> String {
-        match self {
-            Color::Black => "40".into(),
-            Color::Red => "41".into(),
-            Color::Green => "42".into(),
-            Color::Yellow => "43".into(),
-            Color::Blue => "44".into(),
-            Color::Magenta => "45".into(),
-            Color::Cyan => "46".into(),
-            Color::White => "47".into(),
-            Color::Gray | Color::DarkGray => "100".into(),
-            Color::LightRed => "101".into(),
-            Color::LightGreen => "102".into(),
-            Color::LightYellow => "103".into(),
-            Color::LightBlue => "104".into(),
-            Color::LightMagenta => "105".into(),
-            Color::LightCyan => "106".into(),
-            Color::Reset => "49".into(),
-            Color::Rgb(r, g, b) => format!("48;2;{r};{g};{b}"),
-            Color::Indexed(i) => format!("6;{i}"),
-        }
+pub(super) fn dialog_sgr_bg(color: Color) -> String {
+    dialog_sgr(color, DialogSgrLayer::Background)
+}
+
+fn dialog_sgr(color: Color, layer: DialogSgrLayer) -> String {
+    match color {
+        Color::Rgb(r, g, b) => format!("{};2;{r};{g};{b}", layer.rgb_prefix()),
+        Color::Indexed(i) => format!("{};{i}", layer.indexed_prefix()),
+        _ => named_dialog_sgr(color, layer)
+            .unwrap_or_default()
+            .to_owned(),
     }
 }
 
-fn rgb(c: Color) -> String {
+fn named_dialog_sgr(color: Color, layer: DialogSgrLayer) -> Option<&'static str> {
+    const FG: &[(Color, &str)] = &[
+        (Color::Black, "30"),
+        (Color::Red, "31"),
+        (Color::Green, "32"),
+        (Color::Yellow, "33"),
+        (Color::Blue, "34"),
+        (Color::Magenta, "35"),
+        (Color::Cyan, "36"),
+        (Color::White, "37"),
+        (Color::Gray, "90"),
+        (Color::DarkGray, "90"),
+        (Color::LightRed, "91"),
+        (Color::LightGreen, "92"),
+        (Color::LightYellow, "93"),
+        (Color::LightBlue, "94"),
+        (Color::LightMagenta, "95"),
+        (Color::LightCyan, "96"),
+        (Color::Reset, "39"),
+    ];
+    const BG: &[(Color, &str)] = &[
+        (Color::Black, "40"),
+        (Color::Red, "41"),
+        (Color::Green, "42"),
+        (Color::Yellow, "43"),
+        (Color::Blue, "44"),
+        (Color::Magenta, "45"),
+        (Color::Cyan, "46"),
+        (Color::White, "47"),
+        (Color::Gray, "100"),
+        (Color::DarkGray, "100"),
+        (Color::LightRed, "101"),
+        (Color::LightGreen, "102"),
+        (Color::LightYellow, "103"),
+        (Color::LightBlue, "104"),
+        (Color::LightMagenta, "105"),
+        (Color::LightCyan, "106"),
+        (Color::Reset, "49"),
+    ];
+
+    let table = match layer {
+        DialogSgrLayer::Foreground => FG,
+        DialogSgrLayer::Background => BG,
+    };
+    table
+        .iter()
+        .find_map(|(candidate, code)| (*candidate == color).then_some(*code))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DialogSgrLayer {
+    Foreground,
+    Background,
+}
+
+impl DialogSgrLayer {
+    const fn rgb_prefix(self) -> &'static str {
+        match self {
+            Self::Foreground => "38",
+            Self::Background => "48",
+        }
+    }
+
+    const fn indexed_prefix(self) -> &'static str {
+        match self {
+            Self::Foreground => "5",
+            Self::Background => "6",
+        }
+    }
+}
+
+pub(super) fn dialog_rgb(c: Color) -> String {
     match c {
         Color::Rgb(r, g, b) => format!("{r};{g};{b}"),
         _ => "255;255;255".into(),
@@ -313,6 +360,7 @@ mod tests {
             ],
             initial_id: None,
             page_size: 0,
+            current_id: None,
             theme: theme(),
         });
         let lines = state.render_lines(40);
@@ -329,6 +377,7 @@ mod tests {
             items: vec![ChoiceItem::new("a", "A"), ChoiceItem::new("b", "B")],
             initial_id: Some("b".into()),
             page_size: 0,
+            current_id: None,
             theme: theme(),
         });
         assert_eq!(state.selected, 1);
@@ -341,6 +390,7 @@ mod tests {
             items: vec![ChoiceItem::new("a", "A"), ChoiceItem::new("b", "B")],
             initial_id: None,
             page_size: 0,
+            current_id: None,
             theme: theme(),
         });
         assert_eq!(state.selected, 0);
@@ -357,6 +407,7 @@ mod tests {
             items: vec![ChoiceItem::new("a", "A"), ChoiceItem::new("b", "B")],
             initial_id: None,
             page_size: 0,
+            current_id: None,
             theme: theme(),
         });
         state.handle_input(&InputEvent::Submit);
@@ -373,6 +424,7 @@ mod tests {
             items: vec![ChoiceItem::new("a", "A")],
             initial_id: None,
             page_size: 0,
+            current_id: None,
             theme: theme(),
         });
         state.handle_input(&InputEvent::Cancel);
@@ -389,6 +441,7 @@ mod tests {
             items,
             initial_id: None,
             page_size: 10,
+            current_id: None,
             theme: theme(),
         });
         assert_eq!(state.current_page(), 1);

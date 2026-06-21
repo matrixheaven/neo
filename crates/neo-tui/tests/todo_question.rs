@@ -187,7 +187,6 @@ fn question_dialog_cancel_paths_close_overlay() {
 #[test]
 fn question_dialog_key_behaviors() {
     struct Case {
-        name: &'static str,
         keys: &'static [KeyCode],
         assert_state: fn(&NeoChromeState),
     }
@@ -216,22 +215,18 @@ fn question_dialog_key_behaviors() {
 
     let cases = [
         Case {
-            name: "enter selects first option and reaches submit",
             keys: &[KeyCode::Enter],
             assert_state: assert_enter_selects_first_and_advances_to_submit,
         },
         Case {
-            name: "number selects matching option",
             keys: &[KeyCode::Char('2')],
             assert_state: assert_number_selects_matching_option,
         },
         Case {
-            name: "down moves one row",
             keys: &[KeyCode::Down],
             assert_state: assert_down_moves_one_row,
         },
         Case {
-            name: "right reaches submit and left returns",
             keys: &[KeyCode::Enter, KeyCode::Right, KeyCode::Left],
             assert_state: assert_right_reaches_submit_and_left_returns,
         },

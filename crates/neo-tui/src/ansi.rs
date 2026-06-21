@@ -139,51 +139,72 @@ impl Style {
 /// Convert a `Color` to an ANSI foreground escape sequence.
 #[must_use]
 pub fn fg_to_ansi(color: Color) -> String {
-    match color {
-        Color::Reset => "\x1b[39m".to_owned(),
-        Color::Black => "\x1b[30m".to_owned(),
-        Color::Red => "\x1b[31m".to_owned(),
-        Color::Green => "\x1b[32m".to_owned(),
-        Color::Yellow => "\x1b[33m".to_owned(),
-        Color::Blue => "\x1b[34m".to_owned(),
-        Color::Magenta => "\x1b[35m".to_owned(),
-        Color::Cyan => "\x1b[36m".to_owned(),
-        Color::Gray | Color::DarkGray => "\x1b[90m".to_owned(),
-        Color::LightRed => "\x1b[91m".to_owned(),
-        Color::LightGreen => "\x1b[92m".to_owned(),
-        Color::LightYellow => "\x1b[93m".to_owned(),
-        Color::LightBlue => "\x1b[94m".to_owned(),
-        Color::LightMagenta => "\x1b[95m".to_owned(),
-        Color::LightCyan => "\x1b[96m".to_owned(),
-        Color::White => "\x1b[97m".to_owned(),
-        Color::Rgb(r, g, b) => format!("\x1b[38;2;{r};{g};{b}m"),
-        Color::Indexed(n) => format!("\x1b[38;5;{n}m"),
-    }
+    ansi_color_sequence(color, 39, 30, 90, 38)
 }
 
 /// Convert a `Color` to an ANSI background escape sequence.
 #[must_use]
 pub fn bg_to_ansi(color: Color) -> String {
-    match color {
-        Color::Reset => "\x1b[49m".to_owned(),
-        Color::Black => "\x1b[40m".to_owned(),
-        Color::Red => "\x1b[41m".to_owned(),
-        Color::Green => "\x1b[42m".to_owned(),
-        Color::Yellow => "\x1b[43m".to_owned(),
-        Color::Blue => "\x1b[44m".to_owned(),
-        Color::Magenta => "\x1b[45m".to_owned(),
-        Color::Cyan => "\x1b[46m".to_owned(),
-        Color::Gray | Color::DarkGray => "\x1b[100m".to_owned(),
-        Color::LightRed => "\x1b[101m".to_owned(),
-        Color::LightGreen => "\x1b[102m".to_owned(),
-        Color::LightYellow => "\x1b[103m".to_owned(),
-        Color::LightBlue => "\x1b[104m".to_owned(),
-        Color::LightMagenta => "\x1b[105m".to_owned(),
-        Color::LightCyan => "\x1b[106m".to_owned(),
-        Color::White => "\x1b[107m".to_owned(),
-        Color::Rgb(r, g, b) => format!("\x1b[48;2;{r};{g};{b}m"),
-        Color::Indexed(n) => format!("\x1b[48;5;{n}m"),
+    ansi_color_sequence(color, 49, 40, 100, 48)
+}
+
+fn ansi_color_sequence(
+    color: Color,
+    reset: u8,
+    normal_base: u8,
+    bright_base: u8,
+    dynamic: u8,
+) -> String {
+    if let Some((base, offset)) = named_color_slot(color, normal_base, bright_base) {
+        return ansi_indexed_slot(base, offset);
     }
+    match color {
+        Color::Reset => format!("\x1b[{reset}m"),
+        Color::Rgb(r, g, b) => format!("\x1b[{dynamic};2;{r};{g};{b}m"),
+        Color::Indexed(n) => format!("\x1b[{dynamic};5;{n}m"),
+        Color::Black
+        | Color::Red
+        | Color::Green
+        | Color::Yellow
+        | Color::Blue
+        | Color::Magenta
+        | Color::Cyan
+        | Color::Gray
+        | Color::DarkGray
+        | Color::LightRed
+        | Color::LightGreen
+        | Color::LightYellow
+        | Color::LightBlue
+        | Color::LightMagenta
+        | Color::LightCyan
+        | Color::White => unreachable!("named colors are handled before dynamic colors"),
+    }
+}
+
+fn named_color_slot(color: Color, normal_base: u8, bright_base: u8) -> Option<(u8, u8)> {
+    let slot = match color {
+        Color::Black => (normal_base, 0),
+        Color::Red => (normal_base, 1),
+        Color::Green => (normal_base, 2),
+        Color::Yellow => (normal_base, 3),
+        Color::Blue => (normal_base, 4),
+        Color::Magenta => (normal_base, 5),
+        Color::Cyan => (normal_base, 6),
+        Color::Gray | Color::DarkGray => (bright_base, 0),
+        Color::LightRed => (bright_base, 1),
+        Color::LightGreen => (bright_base, 2),
+        Color::LightYellow => (bright_base, 3),
+        Color::LightBlue => (bright_base, 4),
+        Color::LightMagenta => (bright_base, 5),
+        Color::LightCyan => (bright_base, 6),
+        Color::White => (bright_base, 7),
+        Color::Reset | Color::Rgb(_, _, _) | Color::Indexed(_) => return None,
+    };
+    Some(slot)
+}
+
+fn ansi_indexed_slot(base: u8, offset: u8) -> String {
+    format!("\x1b[{}m", base + offset)
 }
 
 /// Convert a `Style` to ANSI escape sequences (fg + bg + modifiers).
@@ -496,6 +517,42 @@ mod tests {
     fn named_colors() {
         assert_eq!(fg_to_ansi(Color::Green), "\x1b[32m");
         assert_eq!(fg_to_ansi(Color::White), "\x1b[97m");
+    }
+
+    #[test]
+    fn foreground_and_background_named_colors_use_matching_ansi_slots() {
+        let cases = [
+            (Color::Reset, "\x1b[39m", "\x1b[49m"),
+            (Color::Black, "\x1b[30m", "\x1b[40m"),
+            (Color::Red, "\x1b[31m", "\x1b[41m"),
+            (Color::Green, "\x1b[32m", "\x1b[42m"),
+            (Color::Yellow, "\x1b[33m", "\x1b[43m"),
+            (Color::Blue, "\x1b[34m", "\x1b[44m"),
+            (Color::Magenta, "\x1b[35m", "\x1b[45m"),
+            (Color::Cyan, "\x1b[36m", "\x1b[46m"),
+            (Color::Gray, "\x1b[90m", "\x1b[100m"),
+            (Color::DarkGray, "\x1b[90m", "\x1b[100m"),
+            (Color::LightRed, "\x1b[91m", "\x1b[101m"),
+            (Color::LightGreen, "\x1b[92m", "\x1b[102m"),
+            (Color::LightYellow, "\x1b[93m", "\x1b[103m"),
+            (Color::LightBlue, "\x1b[94m", "\x1b[104m"),
+            (Color::LightMagenta, "\x1b[95m", "\x1b[105m"),
+            (Color::LightCyan, "\x1b[96m", "\x1b[106m"),
+            (Color::White, "\x1b[97m", "\x1b[107m"),
+        ];
+
+        for (color, expected_fg, expected_bg) in cases {
+            assert_eq!(fg_to_ansi(color), expected_fg);
+            assert_eq!(bg_to_ansi(color), expected_bg);
+        }
+    }
+
+    #[test]
+    fn dynamic_colors_use_foreground_and_background_prefixes() {
+        assert_eq!(fg_to_ansi(Color::Rgb(1, 2, 3)), "\x1b[38;2;1;2;3m");
+        assert_eq!(bg_to_ansi(Color::Rgb(1, 2, 3)), "\x1b[48;2;1;2;3m");
+        assert_eq!(fg_to_ansi(Color::Indexed(42)), "\x1b[38;5;42m");
+        assert_eq!(bg_to_ansi(Color::Indexed(42)), "\x1b[48;5;42m");
     }
 
     #[test]

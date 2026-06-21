@@ -140,6 +140,40 @@ fn image_protocol_encoders_reject_empty_payloads_and_invalid_options() {
 }
 
 #[test]
+fn image_protocol_errors_have_stable_messages() {
+    let messages = [
+        (
+            ImageProtocolError::EmptyImageData,
+            "image data must not be empty",
+        ),
+        (
+            ImageProtocolError::InvalidChunkSize,
+            "kitty chunk size must be greater than zero",
+        ),
+        (
+            ImageProtocolError::InvalidColorIndex,
+            "sixel pixel data contains a palette index out of range",
+        ),
+        (
+            ImageProtocolError::InvalidDimension,
+            "image dimensions must be greater than zero",
+        ),
+        (
+            ImageProtocolError::InvalidPalette,
+            "sixel palette must not be empty and RGB percentage values must be <= 100",
+        ),
+        (
+            ImageProtocolError::InvalidPixelDataLength,
+            "sixel pixel data length must exactly match image width multiplied by height",
+        ),
+    ];
+
+    for (error, message) in messages {
+        assert_eq!(error.to_string(), message);
+    }
+}
+
+#[test]
 fn image_protocol_auto_negotiates_available_terminal_protocol() {
     assert_eq!(
         ImageRenderPolicy::new(ImageProtocolPreference::Auto, false)

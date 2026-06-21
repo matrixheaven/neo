@@ -4,6 +4,7 @@ use crate::ansi::Color;
 use crate::chrome::TuiTheme;
 use crate::components::{truncate_width, visible_width};
 use crate::core::InputResult;
+use crate::dialogs::choice_picker::{dialog_rgb, dialog_sgr_bg, dialog_sgr_fg};
 use crate::input::{InputEvent, KeybindingAction};
 use crate::searchable_list::SearchableList;
 
@@ -244,7 +245,11 @@ impl ModelSelectorState {
             (Color::Reset, Color::Reset)
         };
 
-        let styled = format!("\x1b[{};{}m {row_content}\x1b[0m", fg.sgr_fg(), bg.sgr_bg());
+        let styled = format!(
+            "\x1b[{};{}m {row_content}\x1b[0m",
+            dialog_sgr_fg(fg),
+            dialog_sgr_bg(bg)
+        );
         styled
     }
 
@@ -342,71 +347,11 @@ fn border_line(width: usize, kind: &BorderKind, title: &str, color: Color) -> St
     } else {
         "─".repeat(width.saturating_sub(2))
     };
-    format!("\x1b[38;2;{}m{left}{fill}{right}\x1b[0m", color.sgr_rgb())
+    format!("\x1b[38;2;{}m{left}{fill}{right}\x1b[0m", dialog_rgb(color))
 }
 
 fn style_line(text: &str, _width: usize, fg: Color, _bg: Color) -> String {
-    format!("\x1b[38;2;{}m{text}\x1b[0m", fg.sgr_rgb())
-}
-
-// Extension trait for Color to get SGR codes
-trait ColorSgr {
-    fn sgr_fg(&self) -> String;
-    fn sgr_bg(&self) -> String;
-    fn sgr_rgb(&self) -> String;
-}
-
-impl ColorSgr for Color {
-    fn sgr_fg(&self) -> String {
-        match self {
-            Color::Black => "30".into(),
-            Color::Red => "31".into(),
-            Color::Green => "32".into(),
-            Color::Yellow => "33".into(),
-            Color::Blue => "34".into(),
-            Color::Magenta => "35".into(),
-            Color::Cyan => "36".into(),
-            Color::White => "37".into(),
-            Color::Gray | Color::DarkGray => "90".into(),
-            Color::LightRed => "91".into(),
-            Color::LightGreen => "92".into(),
-            Color::LightYellow => "93".into(),
-            Color::LightBlue => "94".into(),
-            Color::LightMagenta => "95".into(),
-            Color::LightCyan => "96".into(),
-            Color::Reset => "39".into(),
-            Color::Rgb(r, g, b) => format!("38;2;{r};{g};{b}"),
-            Color::Indexed(i) => format!("5;{i}"),
-        }
-    }
-    fn sgr_bg(&self) -> String {
-        match self {
-            Color::Black => "40".into(),
-            Color::Red => "41".into(),
-            Color::Green => "42".into(),
-            Color::Yellow => "43".into(),
-            Color::Blue => "44".into(),
-            Color::Magenta => "45".into(),
-            Color::Cyan => "46".into(),
-            Color::White => "47".into(),
-            Color::Gray | Color::DarkGray => "100".into(),
-            Color::LightRed => "101".into(),
-            Color::LightGreen => "102".into(),
-            Color::LightYellow => "103".into(),
-            Color::LightBlue => "104".into(),
-            Color::LightMagenta => "105".into(),
-            Color::LightCyan => "106".into(),
-            Color::Reset => "49".into(),
-            Color::Rgb(r, g, b) => format!("48;2;{r};{g};{b}"),
-            Color::Indexed(i) => format!("6;{i}"),
-        }
-    }
-    fn sgr_rgb(&self) -> String {
-        match self {
-            Color::Rgb(r, g, b) => format!("{r};{g};{b}"),
-            _ => "255;255;255".into(),
-        }
-    }
+    format!("\x1b[38;2;{}m{text}\x1b[0m", dialog_rgb(fg))
 }
 
 // Re-export SearchableList from crate root for convenience

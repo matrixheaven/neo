@@ -3,6 +3,7 @@ use neo_tui::core::{Component, Expandable, Finalization, Line};
 use neo_tui::transcript::diff_preview::render_diff_lines_clustered;
 use neo_tui::transcript::tool_renderers::tool_header_spans;
 use neo_tui::transcript::{ToolCallComponent, ToolCallState, TranscriptPane};
+use std::fmt::Write as _;
 
 fn plain(rows: Vec<Line>) -> Vec<String> {
     rows.into_iter()
@@ -185,6 +186,10 @@ fn write_tool_card_renders_finalized_diff_from_details() {
         .map(|n| format!("line {n}"))
         .collect::<Vec<_>>()
         .join("\n");
+    let mut diff_body = String::new();
+    for line_number in 1..=20 {
+        writeln!(diff_body, "+line {line_number}").expect("write diff line");
+    }
     let mut card = ToolCallComponent::new(ToolCallState {
         id: "tool-1".to_owned(),
         name: "Write".to_owned(),
@@ -202,12 +207,7 @@ fn write_tool_card_renders_finalized_diff_from_details() {
             "added": 20,
             "removed": 0,
             "line_count": 20,
-            "diff": format!(
-                "--- src/generated.rs\n+++ src/generated.rs\n@@ -0,0 +1,20 @@\n{}",
-                (1..=20)
-                    .map(|n| format!("+line {n}\n"))
-                    .collect::<String>()
-            )
+            "diff": format!("--- src/generated.rs\n+++ src/generated.rs\n@@ -0,0 +1,20 @@\n{diff_body}")
         })),
         status: ToolStatusKind::Succeeded,
         exit_code: None,
@@ -501,7 +501,7 @@ fn ask_user_question_header_does_not_exceed_terminal_width_after_gutter() {
     assert!(
         frame
             .iter()
-            .any(|line| line.contains("Using AskUserQuestion")),
+            .any(|line| line.contains("Queued AskUserQuestion")),
         "tool header present: {frame:?}"
     );
     for line in &frame {

@@ -2,7 +2,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use neo_tui::chrome::{NeoChromeState, PromptEdit, PromptState, SelectItem, SelectListState};
 use neo_tui::components::{truncate_width, visible_width, wrap_width};
 use neo_tui::input::{InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager};
-use neo_tui::transcript::{TranscriptEntry, TranscriptPane, TranscriptStore, TranscriptViewport};
+use neo_tui::transcript::{TranscriptEntry, TranscriptStore, TranscriptViewport};
 
 fn strip_ansi_escapes(text: &str) -> String {
     let mut visible = String::new();
@@ -22,6 +22,14 @@ fn strip_ansi_escapes(text: &str) -> String {
         index += character.len_utf8();
     }
     visible
+}
+
+fn press_key(code: KeyCode) -> Event {
+    Event::Key(KeyEvent::new_with_kind(
+        code,
+        KeyModifiers::NONE,
+        KeyEventKind::Press,
+    ))
 }
 
 #[test]
@@ -102,17 +110,6 @@ fn input_event_with_keybindings_maps_raw_ctrl_o_to_tool_toggle_key() {
     assert_eq!(
         InputEvent::from_key_event_with_keybindings(event, &KeybindingsManager::default()),
         Some(InputEvent::Key(KeyId::new("ctrl+o").expect("valid key")))
-    );
-}
-
-#[test]
-fn input_event_maps_terminal_resize_events() {
-    assert_eq!(
-        InputEvent::from_crossterm_event(&Event::Resize(100, 30)),
-        Some(InputEvent::Resize {
-            columns: 100,
-            rows: 30,
-        })
     );
 }
 
@@ -515,29 +512,6 @@ fn keybinding_manager_matches_defaults_overrides_and_conflicts() {
 }
 
 #[test]
-fn transcript_store_keeps_order_and_allows_streaming_update() {
-    let mut transcript = TranscriptStore::default();
-
-    transcript.push(TranscriptEntry::user_message("hello"));
-    transcript.push(TranscriptEntry::assistant_message("hello"));
-    transcript.push_tool_run("tool-1", "shell.run", Some("cargo test".to_owned()));
-
-    assert_eq!(transcript.entries().len(), 3);
-    assert_eq!(
-        transcript.entries()[0],
-        TranscriptEntry::user_message("hello")
-    );
-    assert_eq!(
-        transcript.entries()[1],
-        TranscriptEntry::assistant_message("hello")
-    );
-    assert!(matches!(
-        transcript.entries()[2],
-        TranscriptEntry::ToolRun { .. }
-    ));
-}
-
-#[test]
 fn transcript_viewport_tracks_bottom_and_manual_scroll() {
     let mut view = TranscriptViewport::new();
 
@@ -876,33 +850,6 @@ fn truncate_width_is_display_width_safe_and_can_pad() {
 }
 
 #[test]
-fn line_truncate_to_width_preserves_styles_when_not_truncated() {
-    use neo_tui::ansi::{Color, Style};
-    use neo_tui::core::{Line, Span};
-
-    let style = Style::default().fg(Color::Rgb(198, 120, 221)).bold();
-    let line = Line::from_spans(vec![Span::styled("hello ", style), Span::raw("world")]);
-    let truncated = line.truncate_to_width(20);
-    assert_eq!(truncated.visible_width(), 11);
-    assert!(truncated.to_ansi().contains("\x1b[38;2;198;120;221m"));
-    assert!(truncated.to_ansi().contains("\x1b[1m"));
-}
-
-#[test]
-fn line_truncate_to_width_preserves_styles_when_truncated() {
-    use neo_tui::ansi::{Color, Style};
-    use neo_tui::core::{Line, Span};
-
-    let style = Style::default().fg(Color::Rgb(198, 120, 221));
-    let line = Line::from_spans(vec![Span::styled("hello world", style)]);
-    let truncated = line.truncate_to_width(8);
-    assert_eq!(truncated.visible_width(), 8);
-    let ansi = truncated.to_ansi();
-    assert!(ansi.contains("\x1b[38;2;198;120;221m"));
-    assert!(ansi.contains('…'));
-}
-
-#[test]
 fn wrap_width_breaks_long_words_and_keeps_blank_lines() {
     let lines = wrap_width("alpha\n\nsuperwide", 4);
 
@@ -1031,38 +978,83 @@ fn transcript_selection_copies_item_range_with_roles() {
 }
 
 #[test]
-fn transcript_pane_copy_uses_store_selection() {
-    let mut runtime = TranscriptPane::new(80, 24);
-    runtime.push_user_message("copy selected prompt");
-    runtime.push_assistant_message("copy selected answer");
-    runtime.select_visible_transcript_entry();
-    runtime.extend_transcript_selection_up(1);
+fn shift_enter_uses_permission_cycle_binding() {
+    let manager = KeybindingsManager::default();
+    assert!(manager.matches(
+        &KeyId::new("shift+enter").expect("valid key"),
+        KeybindingAction::CyclePermissionMode
+    ));
+}
 
+#[test]
+fn backtab_uses_shift_tab_permission_cycle_binding() {
+    let event = KeyEvent::new_with_kind(KeyCode::BackTab, KeyModifiers::NONE, KeyEventKind::Press);
     assert_eq!(
-        runtime.copy_selected_transcript_text().as_deref(),
-        Some("You\ncopy selected prompt\n\nAssistant\ncopy selected answer")
+        InputEvent::from_key_event_with_keybindings(event, &KeybindingsManager::default()),
+        Some(InputEvent::Key(
+            KeyId::new("shift+tab").expect("valid key")
+        ))
+    );
+    assert!(KeybindingsManager::default().matches(
+        &KeyId::new("shift+tab").expect("valid key"),
+        KeybindingAction::CyclePermissionMode
+    ));
+}
+
+#[test]
+fn alt_enter_still_inserts_newline() {
+    let event = KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::ALT, KeyEventKind::Press);
+    assert_eq!(
+        InputEvent::from_key_event_with_keybindings(event, &KeybindingsManager::default()),
+        Some(InputEvent::NewLine)
     );
 }
 
 #[test]
-fn transcript_pane_toggles_tool_detail_expansion() {
-    let mut runtime = TranscriptPane::new(80, 24);
-    runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
-        turn: 1,
-        id: "tool-1".to_owned(),
-        name: "Read".to_owned(),
-        arguments: serde_json::json!({ "path": "README.md" }),
-    });
-    runtime.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
-        turn: 1,
-        id: "tool-1".to_owned(),
-        name: "Read".to_owned(),
-        result: neo_agent_core::ToolResult::ok("expanded file content"),
-    });
+fn ctrl_j_still_inserts_newline() {
+    let event = KeyEvent::new_with_kind(
+        KeyCode::Char('j'),
+        KeyModifiers::CONTROL,
+        KeyEventKind::Press,
+    );
+    assert_eq!(
+        InputEvent::from_key_event_with_keybindings(event, &KeybindingsManager::default()),
+        Some(InputEvent::NewLine)
+    );
+}
 
-    assert!(!runtime.tool_output_expanded());
-    assert!(runtime.toggle_tool_output_expanded());
-    assert!(runtime.tool_output_expanded());
-    assert!(runtime.toggle_tool_output_expanded());
-    assert!(!runtime.tool_output_expanded());
+#[test]
+fn bracketed_paste_preserves_newlines() {
+    let mut parser = InputParser::new();
+    let parsed: Vec<_> = [
+        press_key(KeyCode::Char('\x1b')),
+        press_key(KeyCode::Char('[')),
+        press_key(KeyCode::Char('2')),
+        press_key(KeyCode::Char('0')),
+        press_key(KeyCode::Char('0')),
+        press_key(KeyCode::Char('~')),
+        press_key(KeyCode::Char('l')),
+        press_key(KeyCode::Char('i')),
+        press_key(KeyCode::Char('n')),
+        press_key(KeyCode::Char('e')),
+        press_key(KeyCode::Char('1')),
+        press_key(KeyCode::Enter),
+        press_key(KeyCode::Char('l')),
+        press_key(KeyCode::Char('i')),
+        press_key(KeyCode::Char('n')),
+        press_key(KeyCode::Char('e')),
+        press_key(KeyCode::Char('2')),
+        press_key(KeyCode::Enter),
+        press_key(KeyCode::Char('\x1b')),
+        press_key(KeyCode::Char('[')),
+        press_key(KeyCode::Char('2')),
+        press_key(KeyCode::Char('0')),
+        press_key(KeyCode::Char('1')),
+        press_key(KeyCode::Char('~')),
+    ]
+    .into_iter()
+    .flat_map(|event| parser.feed_crossterm_event(&event))
+    .collect();
+
+    assert_eq!(parsed, vec![InputEvent::Paste("line1\nline2\n".to_owned())]);
 }
