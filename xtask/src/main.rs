@@ -911,8 +911,7 @@ fn validate_docs_parity(root: &Path) -> Result<Vec<String>> {
         let explicit_fixture_path = is_explicit_fixture_path(&relative_file);
         let mut allow_next_line = false;
 
-        for (index, line) in source.lines().enumerate() {
-            let line_number = index + 1;
+        for (line_number, line) in parity_scan_lines(&relative_file, &source) {
             if explicit_fixture_path && parity_allowlist_reason(line).is_some() {
                 allow_next_line = true;
                 continue;
@@ -957,6 +956,54 @@ fn parity_scan_files(root: &Path) -> Result<Vec<PathBuf>> {
     out.sort();
     out.dedup();
     Ok(out)
+}
+
+fn parity_scan_lines<'a>(relative_file: &Path, source: &'a str) -> Vec<(usize, &'a str)> {
+    if relative_file
+        .extension()
+        .and_then(|extension| extension.to_str())
+        != Some("rs")
+    {
+        return source
+            .lines()
+            .enumerate()
+            .map(|(index, line)| (index + 1, line))
+            .collect();
+    }
+
+    let mut lines = Vec::new();
+    let mut pending_cfg_test = false;
+    let mut skipped_brace_depth = 0isize;
+    for (index, line) in source.lines().enumerate() {
+        let line_number = index + 1;
+        if skipped_brace_depth > 0 {
+            skipped_brace_depth += brace_delta(line);
+            continue;
+        }
+
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("#[cfg(test") {
+            pending_cfg_test = true;
+            continue;
+        }
+        if pending_cfg_test && trimmed.starts_with("mod tests") {
+            skipped_brace_depth = brace_delta(line).max(1);
+            pending_cfg_test = false;
+            continue;
+        }
+
+        pending_cfg_test = false;
+        lines.push((line_number, line));
+    }
+    lines
+}
+
+fn brace_delta(line: &str) -> isize {
+    line.chars().fold(0, |depth, character| match character {
+        '{' => depth + 1,
+        '}' => depth - 1,
+        _ => depth,
+    })
 }
 
 fn production_scan_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -2382,12 +2429,28 @@ fn collect_markdown_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
         if path.is_dir() {
+            if is_reference_docs_tree(&path) || is_historical_plan_docs_tree(&path) {
+                continue;
+            }
             collect_markdown_files(&path, out)?;
         } else if path.extension().is_some_and(|extension| extension == "md") {
             out.push(path);
         }
     }
     Ok(())
+}
+
+fn is_reference_docs_tree(path: &Path) -> bool {
+    let normalized = normalize_path(path);
+    let Some(name) = normalized.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    normalized.ends_with(Path::new("docs").join(name))
+        && matches!(name, "codex" | "kimi-code" | "opencode" | "pi")
+}
+
+fn is_historical_plan_docs_tree(path: &Path) -> bool {
+    normalize_path(path).ends_with(Path::new("docs").join("superpowers").join("plans"))
 }
 
 fn local_link_target(target: &str) -> Option<&str> {
