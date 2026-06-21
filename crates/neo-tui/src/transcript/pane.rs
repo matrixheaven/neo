@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 
@@ -7,7 +8,9 @@ use neo_agent_core::{
 };
 
 use crate::ansi::{Color, Style, paint, truncate_to_width, visible_width};
-use crate::chrome::{NeoChromeState, PromptState, ToolStatusKind, TuiTheme};
+use crate::chrome::{
+    DevelopmentMode, GoalModeStatus, NeoChromeState, PromptState, ToolStatusKind, TuiTheme,
+};
 use crate::components::wrap_width;
 use crate::core::{Expandable, Line};
 use crate::image::{ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities};
@@ -179,7 +182,7 @@ impl TranscriptPane {
             } => {
                 self.replay_assistant_content(content);
                 for tool_call in tool_calls {
-                    self.apply_agent_event(AgentEvent::ToolExecutionStarted {
+                    self.apply_agent_event(&AgentEvent::ToolExecutionStarted {
                         turn: 0,
                         id: tool_call.id.clone(),
                         name: tool_call.name.clone(),
@@ -197,7 +200,7 @@ impl TranscriptPane {
                     return;
                 }
                 let text = content_display_text(content);
-                self.apply_agent_event(AgentEvent::ToolExecutionFinished {
+                self.apply_agent_event(&AgentEvent::ToolExecutionFinished {
                     turn: 0,
                     id: tool_call_id.clone(),
                     name: tool_name.clone(),
@@ -225,34 +228,38 @@ impl TranscriptPane {
                 Content::Text { text: part_text } => {
                     text.push_str(part_text);
                 }
-                Content::Thinking {
-                    text: thinking_text,
-                    redacted,
-                    signature: _,
-                } => {
-                    if !text.is_empty() {
-                        self.replay_assistant_message(std::mem::take(&mut text));
-                    }
-                    if !thinking_text.is_empty() {
-                        self.push_transcript(TranscriptEntry::thinking_complete(
-                            thinking_text.clone(),
-                        ));
-                    } else if *redacted {
-                        self.push_transcript(TranscriptEntry::thinking_complete(
-                            "[Reasoning redacted]",
-                        ));
-                    }
-                }
+                Content::Thinking { .. } => self.replay_thinking_content(part, &mut text),
                 Content::Image { mime_type, data } => {
-                    if !text.is_empty() {
-                        self.replay_assistant_message(std::mem::take(&mut text));
-                    }
+                    self.flush_replayed_assistant_text(&mut text);
                     self.push_image(mime_type, data);
                 }
             }
         }
         if !text.is_empty() {
             self.replay_assistant_message(text);
+        }
+    }
+
+    fn replay_thinking_content(&mut self, part: &Content, text: &mut String) {
+        let Content::Thinking {
+            text: thinking_text,
+            redacted,
+            signature: _,
+        } = part
+        else {
+            return;
+        };
+        self.flush_replayed_assistant_text(text);
+        if !thinking_text.is_empty() {
+            self.push_transcript(TranscriptEntry::thinking_complete(thinking_text.clone()));
+        } else if *redacted {
+            self.push_transcript(TranscriptEntry::thinking_complete("[Reasoning redacted]"));
+        }
+    }
+
+    fn flush_replayed_assistant_text(&mut self, text: &mut String) {
+        if !text.is_empty() {
+            self.replay_assistant_message(std::mem::take(text));
         }
     }
 
@@ -424,23 +431,27 @@ impl TranscriptPane {
         self.live_chrome_height
     }
 
-    pub fn apply_agent_event(&mut self, event: AgentEvent) {
-        if self.apply_message_event(&event) {
+    pub fn apply_agent_event<E>(&mut self, event: E)
+    where
+        E: Borrow<AgentEvent>,
+    {
+        let event = event.borrow();
+        if self.apply_message_event(event) {
             return;
         }
-        if self.apply_thinking_event(&event) {
+        if self.apply_thinking_event(event) {
             return;
         }
-        if self.apply_tool_event(&event) {
+        if self.apply_tool_event(event) {
             return;
         }
-        if self.apply_queue_event(&event) {
+        if self.apply_queue_event(event) {
             return;
         }
-        if self.apply_compaction_event(&event) {
+        if self.apply_compaction_event(event) {
             return;
         }
-        self.apply_skill_goal_event(&event);
+        self.apply_skill_goal_event(event);
     }
 
     fn apply_message_event(&mut self, event: &AgentEvent) -> bool {
@@ -501,7 +512,7 @@ impl TranscriptPane {
                 arguments,
                 ..
             } => {
-                self.start_tool_execution(id, name.clone(), arguments.clone());
+                self.start_tool_execution(id, name.clone(), arguments);
                 true
             }
             AgentEvent::ApprovalRequested {
@@ -611,44 +622,79 @@ impl TranscriptPane {
     }
 
     fn apply_skill_goal_event(&mut self, event: &AgentEvent) {
+        if let AgentEvent::SkillActivated { name, .. } = event {
+            self.push_skill_activation(name.clone());
+            return;
+        }
+        self.apply_goal_event(event);
+    }
+
+    fn apply_goal_event(&mut self, event: &AgentEvent) {
+        if self.apply_goal_state_event(event) {
+            return;
+        }
+        self.apply_goal_terminal_event(event);
+    }
+
+    fn apply_goal_state_event(&mut self, event: &AgentEvent) -> bool {
         match event {
-            AgentEvent::SkillActivated { name, .. } => {
-                self.push_skill_activation(name.clone());
-            }
             AgentEvent::GoalStarted { objective, .. } => {
-                self.push_goal_card(GoalCardKind::Started, objective.clone(), None, None);
+                self.push_goal_state_card(GoalCardKind::Started, objective);
             }
             AgentEvent::GoalPaused { objective, .. } => {
-                self.push_goal_card(GoalCardKind::Paused, objective.clone(), None, None);
+                self.push_goal_state_card(GoalCardKind::Paused, objective);
             }
             AgentEvent::GoalResumed { objective, .. } => {
-                self.push_goal_card(GoalCardKind::Resumed, objective.clone(), None, None);
+                self.push_goal_state_card(GoalCardKind::Resumed, objective);
             }
-            AgentEvent::GoalBlocked {
-                objective, reason, ..
-            } => {
-                self.push_goal_card(
-                    GoalCardKind::Blocked,
-                    objective.clone(),
-                    Some(reason.clone()),
-                    None,
-                );
-            }
-            AgentEvent::GoalFinished {
-                objective,
-                outcome,
-                turn,
-                ..
-            } => {
-                self.push_goal_card(
-                    GoalCardKind::Finished,
-                    objective.clone(),
-                    Some(outcome.clone()),
-                    Some(*turn),
-                );
-            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn apply_goal_terminal_event(&mut self, event: &AgentEvent) {
+        match event {
+            AgentEvent::GoalBlocked { .. } => self.push_goal_blocked_card(event),
+            AgentEvent::GoalFinished { .. } => self.push_goal_finished_card(event),
             _ => {}
         }
+    }
+
+    fn push_goal_blocked_card(&mut self, event: &AgentEvent) {
+        let AgentEvent::GoalBlocked {
+            objective, reason, ..
+        } = event
+        else {
+            return;
+        };
+        self.push_goal_card(
+            GoalCardKind::Blocked,
+            objective.clone(),
+            Some(reason.clone()),
+            None,
+        );
+    }
+
+    fn push_goal_finished_card(&mut self, event: &AgentEvent) {
+        let AgentEvent::GoalFinished {
+            objective,
+            outcome,
+            turn,
+            ..
+        } = event
+        else {
+            return;
+        };
+        self.push_goal_card(
+            GoalCardKind::Finished,
+            objective.clone(),
+            Some(outcome.clone()),
+            Some(*turn),
+        );
+    }
+
+    fn push_goal_state_card(&mut self, kind: GoalCardKind, objective: &str) {
+        self.push_goal_card(kind, objective.to_owned(), None, None);
     }
 
     fn start_thinking_block(&mut self) {
@@ -695,7 +741,7 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
-    fn start_tool_execution(&mut self, id: &str, name: String, arguments: serde_json::Value) {
+    fn start_tool_execution(&mut self, id: &str, name: String, arguments: &serde_json::Value) {
         let arguments = self
             .streaming_tool_args
             .get(id)
@@ -1186,6 +1232,11 @@ fn approval_prompt(
                 details: compact_details([Some(subject.to_owned())]),
                 queued_label: String::new(),
             },
+            PermissionOperation::GoalTransition => ApprovalPromptSummary {
+                title: "Goal mode transition".to_owned(),
+                details: compact_details([Some(subject.to_owned())]),
+                queued_label: String::new(),
+            },
         }
     }
 }
@@ -1621,6 +1672,9 @@ fn render_footer_lines(app: &NeoChromeState, width: usize) -> Vec<String> {
         &format!("[{perm_label}]"),
         Style::default().fg(perm_color),
     )];
+    if let Some(label) = development_mode_badge(app.development_mode()) {
+        left_parts.push(paint(label, Style::default().fg(theme.status_warn).bold()));
+    }
     if !app.model_label().is_empty() {
         left_parts.push(paint(
             app.model_label(),
@@ -1635,12 +1689,6 @@ fn render_footer_lines(app: &NeoChromeState, width: usize) -> Vec<String> {
     }
     if let Some(exit) = app.exit_confirmation_label() {
         left_parts.push(paint(exit, Style::default().fg(theme.status_warn).bold()));
-    }
-    if app.is_plan_mode() {
-        left_parts.push(paint(
-            "[PLAN MODE]",
-            Style::default().fg(theme.status_warn).bold(),
-        ));
     }
     if let Some(working) = app.working_label() {
         const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -1675,6 +1723,17 @@ fn render_footer_lines(app: &NeoChromeState, width: usize) -> Vec<String> {
     };
 
     vec![row]
+}
+
+fn development_mode_badge(mode: DevelopmentMode) -> Option<&'static str> {
+    match mode {
+        DevelopmentMode::Normal => None,
+        DevelopmentMode::Plan => Some("[plan]"),
+        DevelopmentMode::Goal(GoalModeStatus::Pending) => Some("[goal]"),
+        DevelopmentMode::Goal(GoalModeStatus::Active) => Some("[goal•]"),
+        DevelopmentMode::Goal(GoalModeStatus::Paused) => Some("[goal◌]"),
+        DevelopmentMode::Goal(GoalModeStatus::Blocked) => Some("[goal✗]"),
+    }
 }
 
 fn render_git_status_label(label: &str, theme: TuiTheme) -> String {

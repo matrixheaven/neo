@@ -619,72 +619,73 @@ impl QuestionStateMachine {
     /// Process a raw crossterm key event.
     #[must_use]
     pub fn handle_key(&mut self, event: KeyEvent) -> QuestionDialogAction {
-        // While editing "Other", most keys go to text input.
-        if self.other_editing {
-            match event.code {
-                KeyCode::Esc => {
-                    self.other_editing = false;
-                    return QuestionDialogAction::None;
-                }
-                KeyCode::Enter => {
-                    self.other_editing = false;
-                    if !self.on_submit_tab() && !self.questions[self.active_tab].multi_select {
-                        self.advance_to_next_unanswered();
-                    }
-                    return QuestionDialogAction::None;
-                }
-                KeyCode::Backspace => {
-                    self.backspace();
-                    return QuestionDialogAction::None;
-                }
-                KeyCode::Char(c) => {
-                    self.insert_char(c);
-                    return QuestionDialogAction::None;
-                }
-                _ => {} // fall through to normal navigation
-            }
+        if self.other_editing && self.handle_other_edit_key(event.code) {
+            return QuestionDialogAction::None;
         }
-
+        if self.handle_navigation_key(event.code) {
+            return QuestionDialogAction::None;
+        }
         match event.code {
-            KeyCode::Up => {
-                self.move_cursor_up();
-                QuestionDialogAction::None
-            }
-            KeyCode::Down => {
-                self.move_cursor_down();
-                QuestionDialogAction::None
-            }
-            KeyCode::Left | KeyCode::BackTab => {
-                self.move_tab_left();
-                QuestionDialogAction::None
-            }
-            KeyCode::Right | KeyCode::Tab => {
-                self.move_tab_right();
-                QuestionDialogAction::None
-            }
             KeyCode::Enter => self.handle_enter(),
             KeyCode::Char(' ') => {
                 self.toggle_current();
                 QuestionDialogAction::None
             }
             KeyCode::Esc => QuestionDialogAction::Cancel,
-            KeyCode::Char(c)
-                if c.is_ascii_digit() && !event.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                if let Some(n) = c.to_digit(10) {
-                    if self.on_submit_tab() {
-                        return match n {
-                            1 => self.handle_enter(),
-                            2 => QuestionDialogAction::Cancel,
-                            _ => QuestionDialogAction::None,
-                        };
-                    }
-                    self.select_by_number(n as usize);
-                }
-                QuestionDialogAction::None
-            }
+            KeyCode::Char(c) => self.handle_char_key(c, event.modifiers),
             _ => QuestionDialogAction::None,
         }
+    }
+
+    fn handle_other_edit_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Esc => self.other_editing = false,
+            KeyCode::Enter => self.finish_other_editing(),
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Char(c) => self.insert_char(c),
+            _ => return false,
+        }
+        true
+    }
+
+    fn finish_other_editing(&mut self) {
+        self.other_editing = false;
+        if !self.on_submit_tab() && !self.questions[self.active_tab].multi_select {
+            self.advance_to_next_unanswered();
+        }
+    }
+
+    fn handle_navigation_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Up => self.move_cursor_up(),
+            KeyCode::Down => self.move_cursor_down(),
+            KeyCode::Left | KeyCode::BackTab => self.move_tab_left(),
+            KeyCode::Right | KeyCode::Tab => self.move_tab_right(),
+            _ => return false,
+        }
+        true
+    }
+
+    fn handle_char_key(&mut self, c: char, modifiers: KeyModifiers) -> QuestionDialogAction {
+        if !c.is_ascii_digit() || modifiers.contains(KeyModifiers::CONTROL) {
+            return QuestionDialogAction::None;
+        }
+        let Some(n) = c.to_digit(10) else {
+            return QuestionDialogAction::None;
+        };
+        self.handle_digit_key(n as usize)
+    }
+
+    fn handle_digit_key(&mut self, n: usize) -> QuestionDialogAction {
+        if self.on_submit_tab() {
+            return match n {
+                1 => self.handle_enter(),
+                2 => QuestionDialogAction::Cancel,
+                _ => QuestionDialogAction::None,
+            };
+        }
+        self.select_by_number(n);
+        QuestionDialogAction::None
     }
 
     pub fn handle_input(&mut self, input: &InputEvent) -> InputResult {
@@ -753,7 +754,7 @@ fn question_key_for_action(action: KeybindingAction) -> Option<KeyEvent> {
         | KeybindingAction::ToolOutputToggle
         | KeybindingAction::ModelPickerOpen
         | KeybindingAction::TogglePlanMode
-        | KeybindingAction::CyclePermissionMode
+        | KeybindingAction::CycleDevelopmentMode
         | KeybindingAction::EditorPageUp
         | KeybindingAction::EditorPageDown
         | KeybindingAction::EditorYank
@@ -770,25 +771,55 @@ fn question_key_for_action(action: KeybindingAction) -> Option<KeyEvent> {
 }
 
 fn question_key_for_input(input: &InputEvent) -> Option<KeyEvent> {
-    let code = match input {
-        InputEvent::Insert(character) => KeyCode::Char(*character),
-        InputEvent::Backspace => KeyCode::Backspace,
-        InputEvent::Delete => KeyCode::Delete,
-        InputEvent::MoveLeft => KeyCode::Left,
-        InputEvent::MoveRight => KeyCode::Right,
-        InputEvent::MoveHome => KeyCode::Home,
-        InputEvent::MoveEnd => KeyCode::End,
-        InputEvent::NewLine | InputEvent::Submit => KeyCode::Enter,
-        InputEvent::Cancel => KeyCode::Esc,
+    question_key_code_for_input(input).map(|code| KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+fn question_key_code_for_input(input: &InputEvent) -> Option<KeyCode> {
+    edit_key_code_for_input(input).or_else(|| control_key_code_for_input(input))
+}
+
+fn edit_key_code_for_input(input: &InputEvent) -> Option<KeyCode> {
+    insert_key_code_for_input(input).or_else(|| edit_navigation_key_code_for_input(input))
+}
+
+fn insert_key_code_for_input(input: &InputEvent) -> Option<KeyCode> {
+    match input {
+        InputEvent::Insert(character) => Some(KeyCode::Char(*character)),
+        InputEvent::Backspace => Some(KeyCode::Backspace),
+        InputEvent::Delete => Some(KeyCode::Delete),
+        _ => None,
+    }
+}
+
+fn edit_navigation_key_code_for_input(input: &InputEvent) -> Option<KeyCode> {
+    match input {
+        InputEvent::MoveLeft => Some(KeyCode::Left),
+        InputEvent::MoveRight => Some(KeyCode::Right),
+        InputEvent::MoveHome => Some(KeyCode::Home),
+        InputEvent::MoveEnd => Some(KeyCode::End),
+        _ => None,
+    }
+}
+
+fn control_key_code_for_input(input: &InputEvent) -> Option<KeyCode> {
+    match input {
+        InputEvent::NewLine | InputEvent::Submit => Some(KeyCode::Enter),
+        InputEvent::Cancel => Some(KeyCode::Esc),
         InputEvent::Key(_)
         | InputEvent::Action(_)
         | InputEvent::Paste(_)
         | InputEvent::ScrollUp(_)
         | InputEvent::ScrollDown(_)
         | InputEvent::Resize { .. }
-        | InputEvent::Interrupt => return None,
-    };
-    Some(KeyEvent::new(code, KeyModifiers::NONE))
+        | InputEvent::Interrupt
+        | InputEvent::Insert(_)
+        | InputEvent::Backspace
+        | InputEvent::Delete
+        | InputEvent::MoveLeft
+        | InputEvent::MoveRight
+        | InputEvent::MoveHome
+        | InputEvent::MoveEnd => None,
+    }
 }
 
 fn question_action_result(action: &QuestionDialogAction) -> InputResult {

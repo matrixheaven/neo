@@ -109,19 +109,43 @@ fn write_debug_log(
     extra: Option<&str>,
 ) -> std::io::Result<()> {
     let mut file = create_debug_log_file(label)?;
+    write_debug_log_header(&mut file, label, width, height, new_lines, previous_lines)?;
+    write_optional_debug_text(&mut file, extra)?;
+    write_debug_log_lines(&mut file, new_lines, previous_lines)?;
+    file.flush()
+}
+
+fn write_debug_log_lines(
+    file: &mut fs::File,
+    new_lines: &[String],
+    previous_lines: &[String],
+) -> std::io::Result<()> {
+    write_rendered_lines(file, "=== new_lines ===", new_lines)?;
+    write_rendered_lines(file, "=== previous_lines ===", previous_lines)
+}
+
+fn write_debug_log_header(
+    file: &mut fs::File,
+    label: &str,
+    width: u16,
+    height: usize,
+    new_lines: &[String],
+    previous_lines: &[String],
+) -> std::io::Result<()> {
     writeln!(file, "[{label}] width={width} height={height}")?;
     writeln!(
         file,
         "new_lines.len()={} previous_lines.len()={}",
         new_lines.len(),
         previous_lines.len()
-    )?;
+    )
+}
+
+fn write_optional_debug_text(file: &mut fs::File, extra: Option<&str>) -> std::io::Result<()> {
     if let Some(text) = extra {
         writeln!(file, "{text}")?;
     }
-    write_rendered_lines(&mut file, "=== new_lines ===", new_lines)?;
-    write_rendered_lines(&mut file, "=== previous_lines ===", previous_lines)?;
-    file.flush()
+    Ok(())
 }
 
 fn write_width_crash_log(
@@ -131,16 +155,34 @@ fn write_width_crash_log(
 ) -> std::io::Result<PathBuf> {
     let path = debug_log_path("width-crash")?;
     let mut file = fs::File::create(&path)?;
+    write_width_crash_body(&mut file, width, new_lines, offender_idx)?;
+    Ok(path)
+}
+
+fn write_width_crash_body(
+    file: &mut fs::File,
+    width: u16,
+    new_lines: &[String],
+    offender_idx: usize,
+) -> std::io::Result<()> {
+    write_width_crash_header(file, width, new_lines, offender_idx)?;
+    write_rendered_lines(file, "=== All rendered lines ===", new_lines)?;
+    file.flush()
+}
+
+fn write_width_crash_header(
+    file: &mut fs::File,
+    width: u16,
+    new_lines: &[String],
+    offender_idx: usize,
+) -> std::io::Result<()> {
     writeln!(file, "Terminal width: {width}")?;
     writeln!(file, "Offending line index: {offender_idx}")?;
     writeln!(
         file,
         "Offending line visible width: {}",
         visible_width(&new_lines[offender_idx])
-    )?;
-    write_rendered_lines(&mut file, "=== All rendered lines ===", new_lines)?;
-    file.flush()?;
-    Ok(path)
+    )
 }
 
 fn check_line_widths(width: u16, new_lines: &[String]) -> std::io::Result<()> {
@@ -195,6 +237,12 @@ impl RenderDimensions {
             height_u16,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct RenderChangeFlags {
+    width_changed: bool,
+    height_changed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -282,11 +330,28 @@ enum ChangedLinesRender {
     NeedsFullRender,
 }
 
+struct DiffRender {
+    buffer: String,
+    change_range: ChangeRange,
+    viewport: ViewportState,
+    move_target_row: usize,
+    render_end: usize,
+    final_cursor_row: usize,
+}
+
 fn push_vertical_move(buffer: &mut String, line_diff: isize) {
     if line_diff > 0 {
         let _ = write!(buffer, "\x1b[{line_diff}B");
     } else if line_diff < 0 {
         let _ = write!(buffer, "\x1b[{}A", -line_diff);
+    }
+}
+
+fn push_diff_start(buffer: &mut String, append_start: bool) {
+    if append_start {
+        buffer.push_str("\r\n");
+    } else {
+        buffer.push('\r');
     }
 }
 
@@ -431,85 +496,30 @@ impl TuiRenderer {
 
         let width_changed = self.previous_width != 0 && self.previous_width != width;
         let height_changed = self.previous_height != 0 && self.previous_height != height_u16;
-        let mut viewport = ViewportState::from_renderer(self, dimensions, height_changed);
+        let viewport = ViewportState::from_renderer(self, dimensions, height_changed);
 
         let marker_cursor_pos = extract_cursor_position(&mut new_lines, dimensions.height);
         let cursor_pos = marker_cursor_pos.or(cursor);
         let new_lines = apply_line_resets(new_lines);
         let new_lines_ref = &new_lines;
 
-        // First render - just output everything without clearing (assumes clean screen)
-        if self.previous_lines.is_empty() && !width_changed && !height_changed {
-            self.full_render(
-                output,
-                false,
-                new_lines_ref,
-                dimensions.height,
-                height_u16,
-                width,
-                cursor_pos,
-            );
-            self.first_render = false;
-            return Ok(());
-        }
-
-        // First render flag (e.g. after suspend_resume) → full redraw without clear.
-        if self.first_render {
-            self.full_render(
-                output,
-                false,
-                new_lines_ref,
-                dimensions.height,
-                height_u16,
-                width,
-                cursor_pos,
-            );
-            self.first_render = false;
-            return Ok(());
-        }
-
-        // Width changes always need a full re-render because wrapping changes.
-        if width_changed {
-            self.full_render(
-                output,
-                true,
-                new_lines_ref,
-                dimensions.height,
-                height_u16,
-                width,
-                cursor_pos,
-            );
-            return Ok(());
-        }
-
-        // Height changes normally need a full re-render to keep the viewport aligned.
-        // Termux changes height when the software keyboard opens/closes, so pi
-        // keeps the diff path there to avoid replaying history on every toggle.
-        if height_change_requires_clear(height_changed, is_termux_session()) {
-            self.full_render(
-                output,
-                true,
-                new_lines_ref,
-                dimensions.height,
-                height_u16,
-                width,
-                cursor_pos,
-            );
+        if self.try_early_full_render(
+            output,
+            new_lines_ref,
+            dimensions,
+            cursor_pos,
+            RenderChangeFlags {
+                width_changed,
+                height_changed,
+            },
+        ) {
             return Ok(());
         }
 
         // Content shrank below the historical high-water mark. We only force a
         // viewport redraw when explicitly opted in (e.g. a closed overlay).
         if self.clear_on_shrink && new_lines.len() < self.max_lines_rendered {
-            self.full_render(
-                output,
-                true,
-                new_lines_ref,
-                dimensions.height,
-                height_u16,
-                width,
-                cursor_pos,
-            );
+            self.full_render_with_dimensions(output, true, new_lines_ref, dimensions, cursor_pos);
             return Ok(());
         }
 
@@ -528,13 +538,11 @@ impl TuiRenderer {
         if change_range.first >= new_lines.len() {
             if !self.render_deleted_tail(output, dimensions, new_lines_ref, change_range, viewport)
             {
-                self.full_render(
+                self.full_render_with_dimensions(
                     output,
                     true,
                     new_lines_ref,
-                    dimensions.height,
-                    height_u16,
-                    width,
+                    dimensions,
                     cursor_pos,
                 );
                 return Ok(());
@@ -553,101 +561,69 @@ impl TuiRenderer {
         // If the first changed line is above the previous viewport, use a full
         // clear render.
         if change_range.first < viewport.previous_top {
-            self.full_render(
-                output,
-                true,
-                new_lines_ref,
-                dimensions.height,
-                height_u16,
-                width,
-                cursor_pos,
-            );
+            self.full_render_with_dimensions(output, true, new_lines_ref, dimensions, cursor_pos);
             return Ok(());
         }
 
-        // Render from first changed line to end
-        let mut buffer = String::with_capacity(4096);
-        buffer.push_str("\x1b[?2026h"); // Begin synchronized output
-        buffer.push_str(&self.delete_changed_kitty_images(change_range.first, change_range.last));
-        let move_target_row = change_range.move_target_row();
-        viewport.scroll_to_row(&mut buffer, move_target_row, dimensions.height);
-
-        // Move cursor to first changed line (use hardware_cursor_row for actual position)
-        push_vertical_move(&mut buffer, viewport.line_diff(move_target_row));
-
-        if change_range.append_start {
-            buffer.push_str("\r\n"); // Move to column 0 on a fresh line
-        } else {
-            buffer.push('\r'); // Move to column 0
-        }
-
-        let ChangedLinesRender::Rendered { render_end } =
-            render_changed_lines(&mut buffer, &new_lines, change_range, viewport, dimensions)
+        let Some(diff_render) =
+            self.build_diff_render(&new_lines, change_range, viewport, dimensions)
         else {
-            self.full_render(
-                output,
-                true,
-                new_lines_ref,
-                dimensions.height,
-                height_u16,
-                width,
-                cursor_pos,
-            );
+            self.full_render_with_dimensions(output, true, new_lines_ref, dimensions, cursor_pos);
             return Ok(());
         };
-
-        // Track where cursor ended up after rendering
-        let mut final_cursor_row = render_end;
-
-        // If we had more lines before, clear them and move cursor back
-        if self.previous_lines.len() > new_lines.len() {
-            // Move to end of new content first if we stopped before it
-            if render_end + 1 < new_lines.len() {
-                let move_down = new_lines.len() - 1 - render_end;
-                let _ = write!(buffer, "\x1b[{move_down}B");
-                final_cursor_row = new_lines.len() - 1;
-            }
-            let extra_lines = self.previous_lines.len() - new_lines.len();
-            for _ in new_lines.len()..self.previous_lines.len() {
-                buffer.push_str("\r\n\x1b[2K");
-            }
-            // Move cursor back to end of new content
-            let _ = write!(buffer, "\x1b[{extra_lines}A");
-        }
-
-        buffer.push_str("\x1b[?2026l"); // End synchronized output
-
-        self.log_diff_render(
-            dimensions,
-            &buffer,
-            &new_lines,
-            change_range,
-            viewport,
-            move_target_row,
-            render_end,
-            final_cursor_row,
-        );
-
-        // Write entire buffer at once
-        let _ = output.write_all(buffer.as_bytes());
-        let _ = output.flush();
-
-        // Track cursor position for next render
-        self.cursor_row = new_lines.len().saturating_sub(1);
-        self.hardware_cursor_row = final_cursor_row;
-        self.max_lines_rendered = self.max_lines_rendered.max(new_lines.len());
-        self.previous_viewport_top = viewport
-            .previous_top
-            .max(final_cursor_row.saturating_sub(dimensions.height - 1));
-
-        // Position hardware cursor for IME
-        self.position_hardware_cursor(output, cursor_pos, new_lines.len());
-
-        self.previous_lines = new_lines;
-        self.previous_kitty_image_ids = collect_kitty_image_ids(&self.previous_lines);
-        self.previous_width = width;
-        self.previous_height = height_u16;
+        self.finish_diff_render(output, new_lines, cursor_pos, dimensions, &diff_render);
         Ok(())
+    }
+
+    fn try_early_full_render(
+        &mut self,
+        output: &mut dyn Write,
+        new_lines: &[String],
+        dimensions: RenderDimensions,
+        cursor_pos: Option<CursorPos>,
+        changes: RenderChangeFlags,
+    ) -> bool {
+        let Some(clear) = self.early_full_render_clear(changes) else {
+            return false;
+        };
+        self.full_render_with_dimensions(output, clear, new_lines, dimensions, cursor_pos);
+        self.first_render = false;
+        true
+    }
+
+    fn full_render_with_dimensions(
+        &mut self,
+        output: &mut dyn Write,
+        clear: bool,
+        new_lines: &[String],
+        dimensions: RenderDimensions,
+        cursor_pos: Option<CursorPos>,
+    ) {
+        self.full_render(
+            output,
+            clear,
+            new_lines,
+            dimensions.height,
+            dimensions.height_u16,
+            dimensions.width,
+            cursor_pos,
+        );
+    }
+
+    fn early_full_render_clear(&self, changes: RenderChangeFlags) -> Option<bool> {
+        if self.previous_lines.is_empty() && !changes.width_changed && !changes.height_changed {
+            return Some(false);
+        }
+        if self.first_render {
+            return Some(false);
+        }
+        if changes.width_changed {
+            return Some(true);
+        }
+        if height_change_requires_clear(changes.height_changed, is_termux_session()) {
+            return Some(true);
+        }
+        None
     }
 
     fn log_render_start(&self, dimensions: RenderDimensions, new_lines: &[String]) {
@@ -677,19 +653,14 @@ impl TuiRenderer {
     fn log_diff_render(
         &self,
         dimensions: RenderDimensions,
-        buffer: &str,
         new_lines: &[String],
-        change_range: ChangeRange,
-        viewport: ViewportState,
-        move_target_row: usize,
-        render_end: usize,
-        final_cursor_row: usize,
+        diff_render: &DiffRender,
     ) {
         if !debug_log_enabled() {
             return;
         }
 
-        let _ = write_output_log("diff-render", buffer);
+        let _ = write_output_log("diff-render", &diff_render.buffer);
         let _ = write_debug_log(
             "diff-render",
             dimensions.width,
@@ -698,14 +669,103 @@ impl TuiRenderer {
             &self.previous_lines,
             Some(&format!(
                 "first_changed={} last_changed={} append_start={} prev_viewport_top={} viewport_top={} hardware_cursor_row={} move_target_row={move_target_row} render_end={render_end} final_cursor_row={final_cursor_row}",
-                change_range.first,
-                change_range.last,
-                change_range.append_start,
-                viewport.previous_top,
-                viewport.top,
-                viewport.hardware_cursor_row
+                diff_render.change_range.first,
+                diff_render.change_range.last,
+                diff_render.change_range.append_start,
+                diff_render.viewport.previous_top,
+                diff_render.viewport.top,
+                diff_render.viewport.hardware_cursor_row,
+                move_target_row = diff_render.move_target_row,
+                render_end = diff_render.render_end,
+                final_cursor_row = diff_render.final_cursor_row
             )),
         );
+    }
+
+    fn build_diff_render(
+        &self,
+        new_lines: &[String],
+        change_range: ChangeRange,
+        mut viewport: ViewportState,
+        dimensions: RenderDimensions,
+    ) -> Option<DiffRender> {
+        let mut buffer = String::with_capacity(4096);
+        buffer.push_str("\x1b[?2026h");
+        buffer.push_str(&self.delete_changed_kitty_images(change_range.first, change_range.last));
+        let move_target_row = change_range.move_target_row();
+        viewport.scroll_to_row(&mut buffer, move_target_row, dimensions.height);
+        push_vertical_move(&mut buffer, viewport.line_diff(move_target_row));
+        push_diff_start(&mut buffer, change_range.append_start);
+
+        let ChangedLinesRender::Rendered { render_end } =
+            render_changed_lines(&mut buffer, new_lines, change_range, viewport, dimensions)
+        else {
+            return None;
+        };
+        let final_cursor_row =
+            self.push_removed_line_clears(&mut buffer, render_end, new_lines.len());
+        buffer.push_str("\x1b[?2026l");
+
+        Some(DiffRender {
+            buffer,
+            change_range,
+            viewport,
+            move_target_row,
+            render_end,
+            final_cursor_row,
+        })
+    }
+
+    fn push_removed_line_clears(
+        &self,
+        buffer: &mut String,
+        render_end: usize,
+        new_len: usize,
+    ) -> usize {
+        if self.previous_lines.len() <= new_len {
+            return render_end;
+        }
+
+        let mut final_cursor_row = render_end;
+        if render_end + 1 < new_len {
+            let move_down = new_len - 1 - render_end;
+            let _ = write!(buffer, "\x1b[{move_down}B");
+            final_cursor_row = new_len - 1;
+        }
+        let extra_lines = self.previous_lines.len() - new_len;
+        for _ in new_len..self.previous_lines.len() {
+            buffer.push_str("\r\n\x1b[2K");
+        }
+        let _ = write!(buffer, "\x1b[{extra_lines}A");
+        final_cursor_row
+    }
+
+    fn finish_diff_render(
+        &mut self,
+        output: &mut dyn Write,
+        new_lines: Vec<String>,
+        cursor_pos: Option<CursorPos>,
+        dimensions: RenderDimensions,
+        diff_render: &DiffRender,
+    ) {
+        self.log_diff_render(dimensions, &new_lines, diff_render);
+        let _ = output.write_all(diff_render.buffer.as_bytes());
+        let _ = output.flush();
+
+        self.cursor_row = new_lines.len().saturating_sub(1);
+        self.hardware_cursor_row = diff_render.final_cursor_row;
+        self.max_lines_rendered = self.max_lines_rendered.max(new_lines.len());
+        self.previous_viewport_top = diff_render.viewport.previous_top.max(
+            diff_render
+                .final_cursor_row
+                .saturating_sub(dimensions.height - 1),
+        );
+        self.position_hardware_cursor(output, cursor_pos, new_lines.len());
+
+        self.previous_lines = new_lines;
+        self.previous_kitty_image_ids = collect_kitty_image_ids(&self.previous_lines);
+        self.previous_width = dimensions.width;
+        self.previous_height = dimensions.height_u16;
     }
 
     fn previous_buffer_length(&self, height: usize) -> usize {
@@ -1046,15 +1106,27 @@ fn raw_changed_range(
 
 fn push_deleted_tail_clears(buffer: &mut String, extra_lines: usize, has_content: bool) {
     let clear_start_offset = usize::from(has_content);
+    push_deleted_tail_down(buffer, extra_lines, clear_start_offset);
+    push_deleted_tail_clear_lines(buffer, extra_lines);
+    push_deleted_tail_up(buffer, extra_lines, clear_start_offset);
+}
+
+fn push_deleted_tail_down(buffer: &mut String, extra_lines: usize, clear_start_offset: usize) {
     if extra_lines > 0 && clear_start_offset > 0 {
         let _ = write!(buffer, "\x1b[{clear_start_offset}B");
     }
+}
+
+fn push_deleted_tail_clear_lines(buffer: &mut String, extra_lines: usize) {
     for index in 0..extra_lines {
         buffer.push_str("\r\x1b[2K");
         if index < extra_lines - 1 {
             buffer.push_str("\x1b[1B");
         }
     }
+}
+
+fn push_deleted_tail_up(buffer: &mut String, extra_lines: usize, clear_start_offset: usize) {
     let move_back = extra_lines.saturating_sub(1) + clear_start_offset;
     if move_back > 0 {
         let _ = write!(buffer, "\x1b[{move_back}A");

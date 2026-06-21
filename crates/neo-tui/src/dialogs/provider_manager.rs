@@ -197,65 +197,100 @@ impl ProviderManagerState {
         if self.action.is_some() {
             return InputResult::Handled;
         }
-
         if self.confirm.is_some() {
             return self.handle_confirm_input(input);
         }
+        self.handle_open_input(input)
+    }
 
+    fn handle_open_input(&mut self, input: &InputEvent) -> InputResult {
         match input {
-            InputEvent::Action(KeybindingAction::SelectUp) => {
-                self.move_up();
-                InputResult::Handled
-            }
-            InputEvent::Action(KeybindingAction::SelectDown) => {
-                self.move_down();
-                InputResult::Handled
-            }
-            InputEvent::Action(KeybindingAction::SelectPageUp) => {
-                self.move_page_up();
-                InputResult::Handled
-            }
-            InputEvent::Action(KeybindingAction::SelectPageDown) => {
-                self.move_page_down();
-                InputResult::Handled
-            }
-            InputEvent::Key(key) => match key.as_str() {
-                "up" => {
-                    self.move_up();
-                    InputResult::Handled
-                }
-                "down" => {
-                    self.move_down();
-                    InputResult::Handled
-                }
-                "pageup" => {
-                    self.move_page_up();
-                    InputResult::Handled
-                }
-                "pagedown" => {
-                    self.move_page_down();
-                    InputResult::Handled
-                }
-                _ => InputResult::Ignored,
-            },
-            InputEvent::Action(KeybindingAction::SelectConfirm) | InputEvent::Submit => {
-                if matches!(self.rows.get(self.selected_index), Some(Row::Add)) {
-                    self.action = Some(ProviderManagerAction::Add);
-                    InputResult::Submitted
-                } else {
-                    InputResult::Handled
-                }
-            }
-            InputEvent::Action(KeybindingAction::SelectCancel) | InputEvent::Cancel => {
-                self.action = Some(ProviderManagerAction::Close);
-                InputResult::Cancelled
-            }
-            InputEvent::Insert('d' | 'D') => {
-                self.arm_delete();
-                InputResult::Handled
-            }
+            InputEvent::Action(action) => self.handle_action_input(*action),
+            InputEvent::Key(key) => self.handle_named_key(key),
+            InputEvent::Submit => self.confirm_add_row(),
+            InputEvent::Cancel => self.close(),
+            InputEvent::Insert(character) => self.handle_insert(*character),
             _ => InputResult::Ignored,
         }
+    }
+
+    fn handle_named_key(&mut self, key: &crate::input::KeyId) -> InputResult {
+        match key.as_str() {
+            "up" | "down" => self.handle_vertical_key(key.as_str()),
+            "pageup" | "pagedown" => self.handle_page_key(key.as_str()),
+            _ => InputResult::Ignored,
+        }
+    }
+
+    fn handle_vertical_key(&mut self, key: &str) -> InputResult {
+        if key == "up" {
+            self.move_selection_up()
+        } else {
+            self.move_selection_down()
+        }
+    }
+
+    fn handle_page_key(&mut self, key: &str) -> InputResult {
+        if key == "pageup" {
+            self.move_selection_page_up()
+        } else {
+            self.move_selection_page_down()
+        }
+    }
+
+    fn handle_insert(&mut self, character: char) -> InputResult {
+        if matches!(character, 'd' | 'D') {
+            self.arm_delete();
+            InputResult::Handled
+        } else {
+            InputResult::Ignored
+        }
+    }
+
+    fn handle_action_input(&mut self, action: KeybindingAction) -> InputResult {
+        match action {
+            KeybindingAction::SelectUp => self.move_selection_up(),
+            KeybindingAction::SelectDown => self.move_selection_down(),
+            KeybindingAction::SelectPageUp => self.move_selection_page_up(),
+            KeybindingAction::SelectPageDown => self.move_selection_page_down(),
+            KeybindingAction::SelectConfirm => self.confirm_add_row(),
+            KeybindingAction::SelectCancel => self.close(),
+            _ => InputResult::Ignored,
+        }
+    }
+
+    fn move_selection_up(&mut self) -> InputResult {
+        self.move_up();
+        InputResult::Handled
+    }
+
+    fn move_selection_down(&mut self) -> InputResult {
+        self.move_down();
+        InputResult::Handled
+    }
+
+    fn move_selection_page_up(&mut self) -> InputResult {
+        self.move_page_up();
+        InputResult::Handled
+    }
+
+    fn move_selection_page_down(&mut self) -> InputResult {
+        self.move_page_down();
+        InputResult::Handled
+    }
+
+    fn confirm_add_row(&mut self) -> InputResult {
+        if matches!(self.rows.get(self.selected_index), Some(Row::Add)) {
+            self.action = Some(ProviderManagerAction::Add);
+            InputResult::Submitted
+        } else {
+            InputResult::Handled
+        }
+    }
+
+    fn close(&mut self) -> InputResult {
+        self.action = Some(ProviderManagerAction::Close);
+        InputResult::Cancelled
     }
 
     /// Return the action selected by the user, if any.

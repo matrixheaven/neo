@@ -66,7 +66,7 @@ impl PlanBoxComponent {
             }
         }
 
-        // Empty placeholder if no content
+        // Empty row if no content
         if self.content.trim().is_empty() {
             let padded = " ".repeat(content_width);
             lines.push(Line::styled(

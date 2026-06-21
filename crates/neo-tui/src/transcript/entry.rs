@@ -82,6 +82,7 @@ pub enum TranscriptEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
 pub enum GoalCardKind {
     Started,
     Paused,
@@ -240,7 +241,14 @@ impl TranscriptEntry {
     }
 
     fn render_inner(&self, inner_width: usize, theme: &TuiTheme) -> Vec<Line> {
-        match self {
+        if let Some(lines) = self.render_message_entry(inner_width, theme) {
+            return lines;
+        }
+        self.render_structured_entry(inner_width, theme)
+    }
+
+    fn render_message_entry(&self, inner_width: usize, theme: &TuiTheme) -> Option<Vec<Line>> {
+        let lines = match self {
             Self::Banner(data) => render_welcome_banner(data, inner_width, theme),
             Self::UserMessage(content) => render_user_message(content, inner_width, theme),
             Self::Status { text, severity } => render_status(text, *severity, inner_width, theme),
@@ -252,6 +260,13 @@ impl TranscriptEntry {
                 phase,
                 expanded,
             } => render_thinking_block(content, *phase, *expanded, inner_width, theme),
+            _ => return None,
+        };
+        Some(lines)
+    }
+
+    fn render_structured_entry(&self, inner_width: usize, theme: &TuiTheme) -> Vec<Line> {
+        match self {
             Self::ToolRun { component } => render_tool_run(component, inner_width, theme),
             Self::ApprovalPrompt(data) => render_approval_prompt(data, inner_width, theme),
             Self::Image { metadata, .. } => styled_wrap(metadata, inner_width, status_style(theme)),
@@ -291,46 +306,20 @@ impl TranscriptEntry {
                 inner_width,
                 theme,
             ),
+            Self::Banner(_)
+            | Self::UserMessage(_)
+            | Self::Status { .. }
+            | Self::AssistantMessage { .. }
+            | Self::ThinkingBlock { .. } => unreachable!("message entries handled above"),
         }
     }
 
     #[must_use]
     pub fn copy_parts(&self) -> (&'static str, String) {
-        match self {
-            Self::Banner(data) => ("Banner", copy_banner(data)),
-            Self::UserMessage(content) => ("You", content.clone()),
-            Self::AssistantMessage { content } => ("Assistant", content.clone()),
-            Self::ThinkingBlock { content, .. } => ("Thinking", content.clone()),
-            Self::ToolRun { component } => ("Tool", copy_tool(component)),
-            Self::ApprovalPrompt(data) => ("Approval", data.title.clone()),
-            Self::Image { metadata, .. } => ("Image", metadata.clone()),
-            Self::Compaction {
-                compacted_message_count,
-                tokens_before,
-                ..
-            } => (
-                "Compact",
-                copy_compaction(*compacted_message_count, *tokens_before),
-            ),
-            Self::Status { text, .. } => ("Status", text.clone()),
-            Self::GoalCard {
-                kind,
-                objective,
-                detail,
-                turns,
-            } => (
-                "Goal",
-                copy_goal(*kind, objective, detail.as_deref(), *turns),
-            ),
-            Self::SkillActivation {
-                name,
-                description,
-                args,
-            } => (
-                "Skill",
-                copy_skill(name, description.as_deref(), args.as_deref()),
-            ),
+        if let Some(parts) = simple_copy_parts(self) {
+            return parts;
         }
+        complex_copy_parts(self)
     }
 
     #[must_use]
@@ -365,6 +354,90 @@ impl TranscriptEntry {
                 id: id.clone(),
                 escape_sequence,
             })
+    }
+}
+
+fn complex_copy_parts(entry: &TranscriptEntry) -> (&'static str, String) {
+    if let Some(parts) = utility_copy_parts(entry) {
+        return parts;
+    }
+    card_copy_parts(entry)
+}
+
+fn utility_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str, String)> {
+    match entry {
+        TranscriptEntry::Banner(data) => Some(("Banner", copy_banner(data))),
+        TranscriptEntry::ToolRun { component } => Some(("Tool", copy_tool(component))),
+        TranscriptEntry::Compaction {
+            compacted_message_count,
+            tokens_before,
+            ..
+        } => Some((
+            "Compact",
+            copy_compaction(*compacted_message_count, *tokens_before),
+        )),
+        _ => None,
+    }
+}
+
+fn card_copy_parts(entry: &TranscriptEntry) -> (&'static str, String) {
+    match entry {
+        TranscriptEntry::GoalCard {
+            kind,
+            objective,
+            detail,
+            turns,
+        } => (
+            "Goal",
+            copy_goal(*kind, objective, detail.as_deref(), *turns),
+        ),
+        TranscriptEntry::SkillActivation {
+            name,
+            description,
+            args,
+        } => (
+            "Skill",
+            copy_skill(name, description.as_deref(), args.as_deref()),
+        ),
+        TranscriptEntry::UserMessage(_)
+        | TranscriptEntry::AssistantMessage { .. }
+        | TranscriptEntry::ThinkingBlock { .. }
+        | TranscriptEntry::ApprovalPrompt(_)
+        | TranscriptEntry::Image { .. }
+        | TranscriptEntry::Status { .. } => unreachable!("simple copy parts handled above"),
+        TranscriptEntry::Banner(_)
+        | TranscriptEntry::ToolRun { .. }
+        | TranscriptEntry::Compaction { .. } => unreachable!("utility copy parts handled above"),
+    }
+}
+
+fn simple_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str, String)> {
+    text_copy_parts(entry)
+        .or_else(|| status_copy_parts(entry))
+        .or_else(|| media_copy_parts(entry))
+}
+
+fn text_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str, String)> {
+    match entry {
+        TranscriptEntry::UserMessage(content) => Some(("You", content.clone())),
+        TranscriptEntry::AssistantMessage { content } => Some(("Assistant", content.clone())),
+        TranscriptEntry::ThinkingBlock { content, .. } => Some(("Thinking", content.clone())),
+        _ => None,
+    }
+}
+
+fn status_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str, String)> {
+    match entry {
+        TranscriptEntry::Status { text, .. } => Some(("Status", text.clone())),
+        TranscriptEntry::ApprovalPrompt(data) => Some(("Approval", data.title.clone())),
+        _ => None,
+    }
+}
+
+fn media_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str, String)> {
+    match entry {
+        TranscriptEntry::Image { metadata, .. } => Some(("Image", metadata.clone())),
+        _ => None,
     }
 }
 
@@ -846,38 +919,43 @@ struct GoalCardChrome {
 
 impl GoalCardChrome {
     fn new(kind: GoalCardKind, theme: &TuiTheme) -> Self {
-        match kind {
-            GoalCardKind::Started => Self {
-                icon: "▶",
-                label: "GOAL STARTED",
-                color: theme.brand,
-            },
-            GoalCardKind::Paused => Self {
-                icon: "⏸",
-                label: "GOAL PAUSED",
-                color: theme.status_warn,
-            },
-            GoalCardKind::Resumed => Self {
-                icon: "▶",
-                label: "GOAL RESUMED",
-                color: theme.brand,
-            },
-            GoalCardKind::Blocked => Self {
-                icon: "⏹",
-                label: "GOAL BLOCKED",
-                color: theme.status_error,
-            },
-            GoalCardKind::Finished => Self {
-                icon: "✓",
-                label: "GOAL COMPLETE",
-                color: theme.status_ok,
-            },
+        Self {
+            icon: goal_card_icon(kind),
+            label: goal_card_label(kind),
+            color: goal_card_color(kind, theme),
         }
     }
 
     fn header(&self) -> String {
         format!("{} {}", self.icon, self.label)
     }
+}
+
+const GOAL_CARD_ICONS: [&str; 5] = ["▶", "⏸", "▶", "⏹", "✓"];
+const GOAL_CARD_LABELS: [&str; 5] = [
+    "GOAL STARTED",
+    "GOAL PAUSED",
+    "GOAL RESUMED",
+    "GOAL BLOCKED",
+    "GOAL COMPLETE",
+];
+
+fn goal_card_icon(kind: GoalCardKind) -> &'static str {
+    GOAL_CARD_ICONS[kind as usize]
+}
+
+fn goal_card_label(kind: GoalCardKind) -> &'static str {
+    GOAL_CARD_LABELS[kind as usize]
+}
+
+fn goal_card_color(kind: GoalCardKind, theme: &TuiTheme) -> crate::ansi::Color {
+    [
+        theme.brand,
+        theme.status_warn,
+        theme.brand,
+        theme.status_error,
+        theme.status_ok,
+    ][kind as usize]
 }
 
 fn goal_card_content(

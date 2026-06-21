@@ -50,9 +50,19 @@ pub struct SearchableList<T> {
 
 impl<T: PartialEq> PartialEq for SearchableList<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.items == other.items
-            && self.filtered_indices == other.filtered_indices
-            && self.query == other.query
+        self.same_items(other) && self.same_view_state(other)
+    }
+}
+
+impl<T: Eq> Eq for SearchableList<T> {}
+
+impl<T: PartialEq> SearchableList<T> {
+    fn same_items(&self, other: &Self) -> bool {
+        self.items == other.items && self.filtered_indices == other.filtered_indices
+    }
+
+    fn same_view_state(&self, other: &Self) -> bool {
+        self.query == other.query
             && self.selected == other.selected
             && self.page_size == other.page_size
             && self.searchable == other.searchable
@@ -60,8 +70,6 @@ impl<T: PartialEq> PartialEq for SearchableList<T> {
         // is unreliable across codegen units.
     }
 }
-
-impl<T: Eq> Eq for SearchableList<T> {}
 
 impl<T: Clone + PartialEq> SearchableList<T> {
     #[must_use]

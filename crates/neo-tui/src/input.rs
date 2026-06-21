@@ -100,6 +100,9 @@ impl InputEvent {
         if event.code == KeyCode::Enter && event.modifiers.contains(KeyModifiers::ALT) {
             return Some(Self::NewLine);
         }
+        if event.code == KeyCode::Enter && event.modifiers.contains(KeyModifiers::SHIFT) {
+            return Some(Self::NewLine);
+        }
         if matches!(event.code, KeyCode::Char('j' | 'J'))
             && event.modifiers.contains(KeyModifiers::CONTROL)
         {
@@ -194,7 +197,7 @@ impl InputParser {
             if event.code == KeyCode::Char('[')
                 && matches!(event.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
             {
-                self.pending_escape = "\x1b[".to_owned();
+                "\x1b[".clone_into(&mut self.pending_escape);
                 return Vec::new();
             }
 
@@ -461,7 +464,7 @@ pub enum KeybindingAction {
     SessionFork,
     ModelPickerOpen,
     TogglePlanMode,
-    CyclePermissionMode,
+    CycleDevelopmentMode,
     SelectUp,
     SelectDown,
     SelectPageUp,
@@ -568,8 +571,8 @@ const KEYBINDING_ACTION_IDS: &[(KeybindingAction, &str)] = &[
     (KeybindingAction::ModelPickerOpen, "tui.model.open"),
     (KeybindingAction::TogglePlanMode, "tui.plan.toggle"),
     (
-        KeybindingAction::CyclePermissionMode,
-        "tui.permission.cycle",
+        KeybindingAction::CycleDevelopmentMode,
+        "tui.developmentMode.cycle",
     ),
     (KeybindingAction::SelectUp, "tui.select.up"),
     (KeybindingAction::SelectDown, "tui.select.down"),
@@ -814,9 +817,9 @@ fn input_keybinding_definitions() -> Vec<KeybindingDefinition> {
         definition(Action::InputTab, &["tab"], "Tab"),
         definition(Action::InputCopy, &["ctrl+c"], "Copy selection"),
         definition(
-            Action::CyclePermissionMode,
-            &["shift+tab", "shift+enter"],
-            "Cycle plan/manual/auto/yolo mode",
+            Action::CycleDevelopmentMode,
+            &["shift+tab"],
+            "Cycle normal/plan/goal mode",
         ),
     ]
 }
@@ -938,22 +941,50 @@ fn key_base(code: KeyCode) -> Option<String> {
 }
 
 fn key_base_name(code: KeyCode) -> Option<&'static str> {
+    navigation_key_base_name(code)
+        .or_else(|| edit_key_base_name(code))
+        .or_else(|| named_char_key_base_name(code))
+}
+
+fn navigation_key_base_name(code: KeyCode) -> Option<&'static str> {
+    arrow_key_base_name(code).or_else(|| page_key_base_name(code))
+}
+
+fn arrow_key_base_name(code: KeyCode) -> Option<&'static str> {
     match code {
-        KeyCode::Backspace => Some("backspace"),
-        KeyCode::Enter => Some("enter"),
         KeyCode::Left => Some("left"),
         KeyCode::Right => Some("right"),
         KeyCode::Up => Some("up"),
         KeyCode::Down => Some("down"),
+        _ => None,
+    }
+}
+
+fn page_key_base_name(code: KeyCode) -> Option<&'static str> {
+    match code {
         KeyCode::Home => Some("home"),
         KeyCode::End => Some("end"),
         KeyCode::PageUp => Some("pageup"),
         KeyCode::PageDown => Some("pagedown"),
+        _ => None,
+    }
+}
+
+fn edit_key_base_name(code: KeyCode) -> Option<&'static str> {
+    match code {
+        KeyCode::Backspace => Some("backspace"),
+        KeyCode::Enter => Some("enter"),
         KeyCode::Tab => Some("tab"),
         KeyCode::BackTab => Some("shift+tab"),
         KeyCode::Delete => Some("delete"),
         KeyCode::Insert => Some("insert"),
         KeyCode::Esc => Some("escape"),
+        _ => None,
+    }
+}
+
+fn named_char_key_base_name(code: KeyCode) -> Option<&'static str> {
+    match code {
         KeyCode::Char(' ') => Some("space"),
         _ => None,
     }
@@ -1127,9 +1158,7 @@ mod tests {
         );
         assert_eq!(
             parser.feed_key_event(key(KeyCode::Char('Z'), KeyModifiers::SHIFT)),
-            vec![InputEvent::Key(
-                KeyId::new("shift+tab").expect("valid key")
-            )]
+            vec![InputEvent::Key(KeyId::new("shift+tab").expect("valid key"))]
         );
     }
 
@@ -1171,13 +1200,11 @@ mod tests {
     }
 
     #[test]
-    fn shift_enter_uses_permission_cycle_binding() {
+    fn shift_enter_produces_newline() {
         let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
         assert_eq!(
             parser.feed_key_event(key(KeyCode::Enter, KeyModifiers::SHIFT)),
-            vec![InputEvent::Key(
-                KeyId::new("shift+enter").expect("valid key")
-            )]
+            vec![InputEvent::NewLine]
         );
     }
 
@@ -1241,7 +1268,7 @@ mod tests {
             KeybindingAction::SessionFork,
             KeybindingAction::ModelPickerOpen,
             KeybindingAction::TogglePlanMode,
-            KeybindingAction::CyclePermissionMode,
+            KeybindingAction::CycleDevelopmentMode,
             KeybindingAction::SelectUp,
             KeybindingAction::SelectDown,
             KeybindingAction::SelectPageUp,

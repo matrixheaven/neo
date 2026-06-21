@@ -153,59 +153,71 @@ impl CustomRegistryImportState {
                 self.switch_field(true);
                 InputResult::Handled
             }
-            InputEvent::Paste(text) => {
-                for ch in text.chars() {
-                    if ch.is_ascii_graphic() || ch == ' ' || ch == '/' || ch == ':' {
-                        match self.active_field {
-                            FIELD_URL => self.url.push(ch),
-                            FIELD_TOKEN => self.token.push(ch),
-                            _ => {}
-                        }
-                    }
-                }
-                InputResult::Handled
-            }
-            InputEvent::Insert(ch)
-                if ch.is_ascii_graphic() || ch == ' ' || ch == '/' || ch == ':' =>
-            {
-                match self.active_field {
-                    FIELD_URL => self.url.push(ch),
-                    FIELD_TOKEN => self.token.push(ch),
-                    _ => {}
-                }
-                InputResult::Handled
-            }
-            InputEvent::Backspace => {
-                match self.active_field {
-                    FIELD_URL => {
-                        self.url.pop();
-                    }
-                    FIELD_TOKEN => {
-                        self.token.pop();
-                    }
-                    _ => {}
-                }
-                InputResult::Handled
-            }
-            InputEvent::Submit => {
-                if self.url.is_empty() {
-                    InputResult::Ignored
-                } else {
-                    self.result = Some(CustomRegistryImportResult::Submitted(
-                        CustomRegistrySource {
-                            url: self.url.clone(),
-                            token: self.token.clone(),
-                        },
-                    ));
-                    InputResult::Submitted
-                }
-            }
-            InputEvent::Cancel => {
-                self.result = Some(CustomRegistryImportResult::Cancelled);
-                InputResult::Cancelled
-            }
+            InputEvent::Paste(text) => self.paste_text(&text),
+            InputEvent::Insert(ch) => self.insert_char(ch),
+            InputEvent::Backspace => self.backspace(),
+            InputEvent::Submit => self.submit(),
+            InputEvent::Cancel => self.cancel(),
             _ => InputResult::Ignored,
         }
+    }
+
+    fn paste_text(&mut self, text: &str) -> InputResult {
+        for ch in text.chars() {
+            self.push_allowed_char(ch);
+        }
+        InputResult::Handled
+    }
+
+    fn insert_char(&mut self, ch: char) -> InputResult {
+        if self.push_allowed_char(ch) {
+            InputResult::Handled
+        } else {
+            InputResult::Ignored
+        }
+    }
+
+    fn push_allowed_char(&mut self, ch: char) -> bool {
+        if !(ch.is_ascii_graphic() || ch == ' ' || ch == '/' || ch == ':') {
+            return false;
+        }
+        match self.active_field {
+            FIELD_URL => self.url.push(ch),
+            FIELD_TOKEN => self.token.push(ch),
+            _ => {}
+        }
+        true
+    }
+
+    fn backspace(&mut self) -> InputResult {
+        match self.active_field {
+            FIELD_URL => {
+                self.url.pop();
+            }
+            FIELD_TOKEN => {
+                self.token.pop();
+            }
+            _ => {}
+        }
+        InputResult::Handled
+    }
+
+    fn submit(&mut self) -> InputResult {
+        if self.url.is_empty() {
+            return InputResult::Ignored;
+        }
+        self.result = Some(CustomRegistryImportResult::Submitted(
+            CustomRegistrySource {
+                url: self.url.clone(),
+                token: self.token.clone(),
+            },
+        ));
+        InputResult::Submitted
+    }
+
+    fn cancel(&mut self) -> InputResult {
+        self.result = Some(CustomRegistryImportResult::Cancelled);
+        InputResult::Cancelled
     }
 
     #[must_use]
