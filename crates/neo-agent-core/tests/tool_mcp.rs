@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use neo_agent_core::{
     McpError, McpHttpConfig, McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter,
     McpToolAdapter, McpToolCall, McpToolDefinition, McpToolProvider, McpToolResponse,
-    PermissionPolicy, ProcessSupervisor, ToolContext, ToolRegistry,
+    ProcessSupervisor, ToolAccess, ToolContext, ToolRegistry,
 };
 use serde_json::{Value, json};
 
@@ -326,7 +326,7 @@ async fn mcp_stdio_adapter_discovers_and_calls_json_rpc_tools() {
     provider.register_into(&mut registry);
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let result = registry
         .run(
@@ -377,7 +377,7 @@ async fn mcp_stdio_adapter_reuses_initialized_session_across_operations() {
     provider.register_into(&mut registry);
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let first = registry
         .run(
@@ -474,7 +474,7 @@ async fn mcp_stdio_adapter_reconnects_after_cached_session_closes() {
     provider.register_into(&mut registry);
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let error = registry
         .run(
@@ -856,7 +856,7 @@ async fn mcp_http_adapter_discovers_and_calls_json_rpc_tools() {
     provider.register_into(&mut registry);
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
     let result = registry
         .run(
             "mcp__remote_docs__docs_search",
@@ -1033,7 +1033,7 @@ async fn mcp_tool_execution_delegates_to_async_adapter() {
     provider.register_into(&mut registry);
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let result = registry
         .run(
@@ -1074,7 +1074,7 @@ async fn mcp_tool_execution_surfaces_adapter_errors() {
     provider.register_into(&mut registry);
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let error = registry
         .run("mcp__remote__broken", &context, json!({}))

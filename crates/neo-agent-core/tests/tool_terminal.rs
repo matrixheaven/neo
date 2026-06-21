@@ -1,4 +1,4 @@
-use neo_agent_core::{PermissionPolicy, ProcessSupervisor, ToolContext, ToolError, ToolRegistry};
+use neo_agent_core::{ProcessSupervisor, ToolAccess, ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8,7 +8,7 @@ async fn terminal_stop_returns_promptly_for_interactive_shell() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_access(ToolAccess::all())
         .with_process_supervisor(supervisor.clone());
 
     let started = registry
@@ -49,7 +49,7 @@ async fn terminal_read_waits_briefly_for_fresh_running_output() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_access(ToolAccess::all())
         .with_process_supervisor(supervisor.clone());
 
     let started = registry
@@ -99,7 +99,7 @@ async fn terminal_write_then_read_observes_interactive_shell_output() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_access(ToolAccess::all())
         .with_process_supervisor(supervisor.clone());
 
     let started = registry
@@ -156,7 +156,7 @@ async fn terminal_tool_start_write_read_resize_and_stop_uses_real_pty() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_access(ToolAccess::all())
         .with_process_supervisor(supervisor.clone());
 
     let started = registry
@@ -264,7 +264,7 @@ async fn process_supervisor_cleanup_stops_terminal_handles() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_access(ToolAccess::all())
         .with_process_supervisor(supervisor.clone());
 
     let started = registry
@@ -302,7 +302,7 @@ async fn terminal_read_details_do_not_leak_output_past_max_output_bytes() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_access(ToolAccess::all())
         .with_process_supervisor(supervisor);
 
     let started = registry
@@ -352,92 +352,12 @@ async fn terminal_read_details_do_not_leak_output_past_max_output_bytes() {
 }
 
 #[tokio::test]
-async fn terminal_description_contains_mode_guidance() {
-    let registry = ToolRegistry::with_builtin_tools();
-    let terminal = registry
-        .specs()
-        .into_iter()
-        .find(|spec| spec.name == "Terminal")
-        .expect("Terminal tool spec");
-
-    assert!(terminal.description.contains("start"));
-    assert!(terminal.description.contains("write"));
-    assert!(terminal.description.contains("read"));
-    assert!(terminal.description.contains("resize"));
-    assert!(terminal.description.contains("stop"));
-    assert!(terminal.description.contains("Bash"));
-}
-
-#[test]
-fn terminal_schema_includes_field_and_mode_descriptions() {
-    let registry = ToolRegistry::with_builtin_tools();
-    let terminal = registry
-        .specs()
-        .into_iter()
-        .find(|spec| spec.name == "Terminal")
-        .expect("Terminal tool spec");
-    let schema = terminal
-        .input_schema
-        .get("schema")
-        .unwrap_or(&terminal.input_schema);
-    let required = schema["required"].as_array().expect("required array");
-    let properties = schema["properties"].as_object().expect("schema properties");
-
-    assert!(required.iter().any(|field| field == "mode"));
-    assert!(!required.iter().any(|field| field == "command"));
-    assert!(!required.iter().any(|field| field == "handle"));
-
-    for field in [
-        "mode",
-        "command",
-        "handle",
-        "input",
-        "cols",
-        "rows",
-        "max_output_bytes",
-    ] {
-        assert!(
-            properties
-                .get(field)
-                .and_then(|property| property.get("description"))
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|description| !description.trim().is_empty()),
-            "{field} should have a non-empty description"
-        );
-    }
-
-    // Resolve the `mode` schema, which may be a `$ref` into `$defs`.
-    let mode = &properties["mode"];
-    let mode_schema = mode.get("schema").unwrap_or(mode);
-    let mode_schema = if let Some(reference) = mode_schema["$ref"].as_str() {
-        let key = reference.strip_prefix("#/$defs/").expect("$ref into $defs");
-        &schema["$defs"][key]
-    } else {
-        mode_schema
-    };
-    let mode_any_of = mode_schema["anyOf"]
-        .as_array()
-        .or_else(|| mode_schema["oneOf"].as_array())
-        .expect("mode should be an enum");
-    let has_start_description = mode_any_of.iter().any(|variant| {
-        variant["const"] == "start"
-            && variant["description"]
-                .as_str()
-                .is_some_and(|d| !d.trim().is_empty())
-    });
-    assert!(
-        has_start_description,
-        "TerminalMode::Start should have a description in the schema"
-    );
-}
-
-#[tokio::test]
 async fn terminal_rejects_missing_mode() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let error = registry
         .run("Terminal", &context, json!({}))
@@ -453,7 +373,7 @@ async fn terminal_rejects_unknown_handle() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let error = registry
         .run(

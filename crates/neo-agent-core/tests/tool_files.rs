@@ -1,4 +1,4 @@
-use neo_agent_core::{PermissionPolicy, ToolContext, ToolRegistry};
+use neo_agent_core::{ToolAccess, ToolContext, ToolRegistry};
 use serde_json::json;
 
 #[tokio::test]
@@ -7,7 +7,7 @@ async fn file_tools_read_search_write_and_edit_inside_workspace() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     registry
         .run(
@@ -79,7 +79,7 @@ async fn write_tool_returns_created_file_diff_details() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let write = registry
         .run(
@@ -109,7 +109,7 @@ async fn write_tool_returns_overwritten_file_diff_details() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     registry
         .run(

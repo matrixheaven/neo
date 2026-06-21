@@ -1,8 +1,6 @@
 use std::time::Duration;
 
-use neo_agent_core::{
-    BackgroundTaskManager, PermissionPolicy, ToolContext, ToolError, ToolRegistry,
-};
+use neo_agent_core::{BackgroundTaskManager, ToolAccess, ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
 
 #[tokio::test]
@@ -11,7 +9,13 @@ async fn write_requires_mutation_permission() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::read_only());
+        .with_access(ToolAccess {
+            file_read: true,
+            file_write: false,
+            shell: false,
+            tool: true,
+            user_question: false,
+        });
 
     let error = registry
         .run(
@@ -34,7 +38,15 @@ async fn read_rejects_paths_outside_workspace() {
     std::fs::write(&outside_file, "secret").expect("write outside file");
 
     let registry = ToolRegistry::with_builtin_tools();
-    let context = ToolContext::new(workspace.path()).expect("context");
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_access(ToolAccess {
+            file_read: true,
+            file_write: false,
+            shell: false,
+            tool: false,
+            user_question: false,
+        });
 
     let error = registry
         .run("Read", &context, json!({ "path": outside_file }))
@@ -54,7 +66,15 @@ async fn read_rejects_symlink_escape_from_workspace() {
     std::os::unix::fs::symlink(&outside_file, &symlink).expect("symlink");
 
     let registry = ToolRegistry::with_builtin_tools();
-    let context = ToolContext::new(workspace.path()).expect("context");
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_access(ToolAccess {
+            file_read: true,
+            file_write: false,
+            shell: false,
+            tool: false,
+            user_question: false,
+        });
 
     let error = registry
         .run("Read", &context, json!({ "path": "secret-link.txt" }))
@@ -70,7 +90,13 @@ async fn bash_requires_permission_and_honors_timeout() {
     let registry = ToolRegistry::with_builtin_tools();
     let denied_context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::read_only());
+        .with_access(ToolAccess {
+            file_read: true,
+            file_write: false,
+            shell: false,
+            tool: true,
+            user_question: false,
+        });
 
     let denied = registry
         .run("Bash", &denied_context, json!({ "command": "echo denied" }))
@@ -80,7 +106,7 @@ async fn bash_requires_permission_and_honors_timeout() {
 
     let allowed_context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_access(ToolAccess::all())
         .with_bash_timeout(Duration::from_secs(5));
 
     let capped = registry
@@ -116,7 +142,13 @@ async fn task_stop_rejects_question_without_shell_permission() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::read_only())
+        .with_access(ToolAccess {
+            file_read: true,
+            file_write: false,
+            shell: false,
+            tool: true,
+            user_question: false,
+        })
         .with_background_tasks(background_tasks);
 
     let error = registry
@@ -145,7 +177,7 @@ async fn task_stop_can_cancel_question_with_shell_permission() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_access(ToolAccess::all())
         .with_background_tasks(background_tasks);
 
     let stopped = registry
@@ -172,7 +204,13 @@ async fn task_stop_requires_shell_permission_by_default() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::default())
+        .with_access(ToolAccess {
+            file_read: true,
+            file_write: false,
+            shell: false,
+            tool: true,
+            user_question: false,
+        })
         .with_background_tasks(background_tasks);
 
     let error = registry

@@ -1,6 +1,4 @@
-use neo_agent_core::{
-    DEFAULT_BASH_TIMEOUT, PermissionPolicy, ToolContext, ToolError, ToolRegistry,
-};
+use neo_agent_core::{DEFAULT_BASH_TIMEOUT, ToolAccess, ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -91,7 +89,7 @@ async fn bash_foreground_output_is_raw_terminal_text_with_structured_details() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let result = registry
         .run(
@@ -135,7 +133,7 @@ async fn task_list_defaults_to_active_background_tasks() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let empty = registry
         .run("TaskList", &context, json!({}))
@@ -193,7 +191,7 @@ async fn bash_background_run_returns_task_id_and_task_output_finishes() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let started = registry
         .run(
@@ -238,7 +236,7 @@ async fn bash_background_requires_description() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let error = registry
         .run(
@@ -253,32 +251,12 @@ async fn bash_background_requires_description() {
 }
 
 #[tokio::test]
-async fn bash_rejects_old_mode_background_api() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let registry = ToolRegistry::with_builtin_tools();
-    let context = ToolContext::new(workspace.path())
-        .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
-
-    let error = registry
-        .run(
-            "Bash",
-            &context,
-            json!({ "mode": "start", "command": "printf old" }),
-        )
-        .await
-        .expect_err("old mode field should be rejected");
-
-    assert!(matches!(error, ToolError::InvalidInput { .. }));
-}
-
-#[tokio::test]
 async fn task_output_block_times_out_while_task_is_running() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let started = registry
         .run(
@@ -319,7 +297,7 @@ async fn task_stop_is_safe_for_finished_task() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let started = registry
         .run(
@@ -356,46 +334,6 @@ async fn task_stop_is_safe_for_finished_task() {
 }
 
 #[tokio::test]
-async fn bash_defaults_to_foreground_when_mode_is_missing() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let registry = ToolRegistry::with_builtin_tools();
-    let context = ToolContext::new(workspace.path())
-        .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
-
-    let result = registry
-        .run("Bash", &context, json!({ "command": "printf foreground" }))
-        .await
-        .expect("bash missing mode should run in foreground");
-
-    assert_eq!(result.details.expect("details")["stdout"], "foreground");
-}
-
-#[tokio::test]
-async fn bash_foreground_accepts_kimi_optional_fields() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let registry = ToolRegistry::with_builtin_tools();
-    let context = ToolContext::new(workspace.path())
-        .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
-
-    let result = registry
-        .run(
-            "Bash",
-            &context,
-            json!({
-                "command": "printf optional",
-                "description": "short foreground command",
-                "disable_timeout": false,
-            }),
-        )
-        .await
-        .expect("foreground bash should accept Kimi optional fields");
-
-    assert_eq!(result.details.expect("details")["stdout"], "optional");
-}
-
-#[tokio::test]
 async fn bash_cwd_runs_command_from_workspace_subdirectory() {
     let workspace = tempfile::tempdir().expect("workspace");
     let subdir = workspace.path().join("sub");
@@ -403,7 +341,7 @@ async fn bash_cwd_runs_command_from_workspace_subdirectory() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let result = registry
         .run("Bash", &context, json!({ "command": "pwd", "cwd": "sub" }))
@@ -425,7 +363,7 @@ async fn bash_cwd_rejects_paths_outside_workspace() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let error = registry
         .run("Bash", &context, json!({ "command": "pwd", "cwd": ".." }))
@@ -441,7 +379,7 @@ async fn bash_foreground_returns_after_shell_exits_with_inherited_background_out
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
@@ -467,7 +405,7 @@ async fn bash_foreground_reports_missing_cd_promptly() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
@@ -500,7 +438,7 @@ async fn bash_foreground_details_do_not_leak_output_past_max_output_bytes() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let result = registry
         .run(
@@ -529,7 +467,7 @@ async fn task_output_details_do_not_leak_output_past_max_output_bytes() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let started = registry
         .run(
@@ -574,7 +512,7 @@ async fn bash_foreground_kills_child_when_context_is_cancelled() {
     let cancel = CancellationToken::new();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_access(ToolAccess::all())
         .with_cancel_token(cancel.clone());
 
     let command = tokio::spawn(async move {
@@ -629,7 +567,7 @@ async fn bash_foreground_cancellation_kills_descendant_process_group() {
     let cancel = CancellationToken::new();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all())
+        .with_access(ToolAccess::all())
         .with_cancel_token(cancel.clone());
 
     let command = tokio::spawn(async move {
@@ -672,7 +610,7 @@ async fn task_stop_kills_descendant_process_group() {
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let started = registry
         .run(
@@ -767,31 +705,12 @@ async fn terminate_process(pid: &str) {
 }
 
 #[tokio::test]
-async fn bash_description_contains_usage_guidelines() {
-    let registry = ToolRegistry::with_builtin_tools();
-    let bash = registry
-        .specs()
-        .into_iter()
-        .find(|spec| spec.name == "Bash")
-        .expect("Bash tool spec");
-
-    assert!(
-        bash.description
-            .contains("Translate these to a dedicated tool")
-    );
-    assert!(bash.description.contains("Output:"));
-    assert!(bash.description.contains("run_in_background=true"));
-    assert!(bash.description.contains("TaskOutput"));
-    assert!(bash.description.contains("TaskStop"));
-}
-
-#[tokio::test]
 async fn bash_background_start_includes_task_id_and_next_steps() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
         .expect("context")
-        .with_permission_policy(PermissionPolicy::allow_all());
+        .with_access(ToolAccess::all());
 
     let started = registry
         .run(
