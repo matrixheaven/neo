@@ -18,6 +18,14 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum XtaskCommand {
     Check(CheckOptions),
+    /// Run repository tests through cargo-nextest.
+    Test(TestOptions),
+    /// Generate LCOV coverage through cargo-llvm-cov and cargo-nextest.
+    Coverage(CoverageOptions),
+    /// Run cargo-crap against the LCOV report.
+    Crap(CrapOptions),
+    /// Run the full local CI workflow.
+    Ci,
     /// Run the docs/examples parity gate without fmt, clippy, or tests.
     Parity,
     /// Run the local-only release smoke gate.
@@ -44,6 +52,104 @@ struct CheckOptions {
     /// Run only the xtask package checks.
     #[arg(long)]
     quick: bool,
+}
+
+#[derive(Debug, Clone, Default, clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
+struct TestOptions {
+    /// List tests instead of running them.
+    #[arg(long)]
+    list: bool,
+    /// Compile test binaries without running tests.
+    #[arg(long)]
+    no_run: bool,
+    /// Run all workspace packages.
+    #[arg(long)]
+    workspace: bool,
+    /// Activate all features.
+    #[arg(long)]
+    all_features: bool,
+    /// Activate named features.
+    #[arg(short = 'F', long = "features", value_name = "FEATURES")]
+    features: Vec<String>,
+    /// Do not activate default features.
+    #[arg(long)]
+    no_default_features: bool,
+    /// Use a named nextest profile.
+    #[arg(short = 'P', long, value_name = "PROFILE")]
+    profile: Option<String>,
+    /// Package(s) to test.
+    #[arg(short = 'p', long = "package", value_name = "PACKAGE")]
+    packages: Vec<String>,
+    /// Run library unit tests.
+    #[arg(long)]
+    lib: bool,
+    /// Binary target(s) to run.
+    #[arg(long = "bin", value_name = "BIN")]
+    bins: Vec<String>,
+    /// Run all binary targets.
+    #[arg(long)]
+    all_bins: bool,
+    /// Example target(s) to run.
+    #[arg(long = "example", value_name = "EXAMPLE")]
+    examples: Vec<String>,
+    /// Run all example targets.
+    #[arg(long)]
+    all_examples: bool,
+    /// Integration test target(s) to run.
+    #[arg(long = "test", value_name = "TEST")]
+    tests: Vec<String>,
+    /// Run all test targets.
+    #[arg(long = "tests")]
+    all_tests: bool,
+    /// Run all targets.
+    #[arg(long)]
+    all_targets: bool,
+    /// Extra nextest filters.
+    #[arg(value_name = "FILTER")]
+    filters: Vec<String>,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct CoverageOptions {
+    /// Output LCOV path.
+    #[arg(long, value_name = "FILE", default_value = "target/llvm-cov/lcov.info")]
+    output_path: PathBuf,
+}
+
+impl Default for CoverageOptions {
+    fn default() -> Self {
+        Self {
+            output_path: PathBuf::from("target/llvm-cov/lcov.info"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct CrapOptions {
+    /// LCOV input path.
+    #[arg(long, value_name = "FILE", default_value = "target/llvm-cov/lcov.info")]
+    lcov: PathBuf,
+    /// Directory for generated CRAP reports.
+    #[arg(long, value_name = "DIR", default_value = "target/crap")]
+    output_dir: PathBuf,
+    /// Report the full workspace instead of enforcing the production crates gate.
+    #[arg(long)]
+    workspace: bool,
+    /// CRAP threshold.
+    #[arg(long, default_value_t = 30)]
+    threshold: u32,
+}
+
+impl Default for CrapOptions {
+    fn default() -> Self {
+        Self {
+            lcov: PathBuf::from("target/llvm-cov/lcov.info"),
+            output_dir: PathBuf::from("target/crap"),
+            workspace: false,
+            threshold: 30,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, clap::Args)]
@@ -88,6 +194,10 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| XtaskCommand::Check(CheckOptions::default()))
     {
         XtaskCommand::Check(options) => check(&options),
+        XtaskCommand::Test(options) => run_test_command(&options),
+        XtaskCommand::Coverage(options) => run_coverage_command(&options),
+        XtaskCommand::Crap(options) => run_crap_command(&options),
+        XtaskCommand::Ci => run_ci_command(),
         XtaskCommand::Parity => run_parity_gate(Path::new(".")),
         XtaskCommand::ReleaseSmoke => run_release_smoke(Path::new(".")),
         XtaskCommand::Catalog(CatalogCommand::Check(options)) => catalog_check(&options),
@@ -184,7 +294,10 @@ fn check_steps(options: &CheckOptions) -> Vec<CommandStep> {
                     "warnings",
                 ],
             ),
-            CommandStep::new("cargo", &["test", "-p", "xtask"]),
+            nextest_step(&TestOptions {
+                packages: vec!["xtask".to_owned()],
+                ..TestOptions::default()
+            }),
             CommandStep::new("cargo", &["run", "-p", "xtask", "--", "catalog", "check"]),
         ]
     } else {
@@ -202,10 +315,234 @@ fn check_steps(options: &CheckOptions) -> Vec<CommandStep> {
                     "warnings",
                 ],
             ),
-            CommandStep::new("cargo", &["test", "--workspace", "--all-features"]),
+            nextest_step(&TestOptions {
+                workspace: true,
+                all_features: true,
+                ..TestOptions::default()
+            }),
             CommandStep::new("cargo", &["run", "-p", "xtask", "--", "catalog", "check"]),
         ]
     }
+}
+
+fn run_test_command(options: &TestOptions) -> Result<()> {
+    run(&nextest_step(options))
+}
+
+fn run_coverage_command(options: &CoverageOptions) -> Result<()> {
+    ensure_parent_dir(&options.output_path)?;
+    run(&coverage_step(options))
+}
+
+fn run_crap_command(options: &CrapOptions) -> Result<()> {
+    fs::create_dir_all(&options.output_dir)?;
+    for step in crap_steps(options) {
+        run(&step)?;
+    }
+    Ok(())
+}
+
+fn run_ci_command() -> Result<()> {
+    for step in ci_steps() {
+        run(&step)?;
+    }
+    Ok(())
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+fn nextest_step(options: &TestOptions) -> CommandStep {
+    let mut args = vec![
+        "nextest".to_owned(),
+        if options.list { "list" } else { "run" }.to_owned(),
+    ];
+
+    if let Some(profile) = &options.profile {
+        args.push("--profile".to_owned());
+        args.push(profile.clone());
+    }
+    if options.no_run && !options.list {
+        args.push("--no-run".to_owned());
+    }
+    if options.workspace {
+        args.push("--workspace".to_owned());
+    }
+    if options.all_features {
+        args.push("--all-features".to_owned());
+    }
+    for features in &options.features {
+        args.push("--features".to_owned());
+        args.push(features.clone());
+    }
+    if options.no_default_features {
+        args.push("--no-default-features".to_owned());
+    }
+    for package in &options.packages {
+        args.push("-p".to_owned());
+        args.push(package.clone());
+    }
+    if options.lib {
+        args.push("--lib".to_owned());
+    }
+    for bin in &options.bins {
+        args.push("--bin".to_owned());
+        args.push(bin.clone());
+    }
+    if options.all_bins {
+        args.push("--bins".to_owned());
+    }
+    for example in &options.examples {
+        args.push("--example".to_owned());
+        args.push(example.clone());
+    }
+    if options.all_examples {
+        args.push("--examples".to_owned());
+    }
+    for test in &options.tests {
+        args.push("--test".to_owned());
+        args.push(test.clone());
+    }
+    if options.all_tests {
+        args.push("--tests".to_owned());
+    }
+    if options.all_targets {
+        args.push("--all-targets".to_owned());
+    }
+    args.extend(options.filters.iter().cloned());
+
+    CommandStep {
+        program: "cargo".to_owned(),
+        args,
+        env: Vec::new(),
+        current_dir: None,
+    }
+}
+
+fn coverage_step(options: &CoverageOptions) -> CommandStep {
+    CommandStep::new(
+        "cargo",
+        &[
+            "llvm-cov",
+            "nextest",
+            "--workspace",
+            "--all-features",
+            "--lcov",
+            "--output-path",
+            &options.output_path.to_string_lossy(),
+        ],
+    )
+}
+
+fn crap_steps(options: &CrapOptions) -> Vec<CommandStep> {
+    let lcov = options.lcov.to_string_lossy();
+    let threshold = options.threshold.to_string();
+    if options.workspace {
+        let output = options
+            .output_dir
+            .join("crap-workspace.md")
+            .to_string_lossy()
+            .into_owned();
+        return vec![CommandStep::new(
+            "cargo",
+            &[
+                "crap",
+                "--workspace",
+                "--lcov",
+                &lcov,
+                "--threshold",
+                &threshold,
+                "--format",
+                "markdown",
+                "--output",
+                &output,
+            ],
+        )];
+    }
+
+    let markdown_output = options
+        .output_dir
+        .join("crap-crates.md")
+        .to_string_lossy()
+        .into_owned();
+    let json_output = options
+        .output_dir
+        .join("crap-crates.json")
+        .to_string_lossy()
+        .into_owned();
+    vec![
+        CommandStep::new(
+            "cargo",
+            &[
+                "crap",
+                "--path",
+                "crates",
+                "--lcov",
+                &lcov,
+                "--exclude",
+                "**/tests/**",
+                "--threshold",
+                &threshold,
+                "--format",
+                "markdown",
+                "--output",
+                &markdown_output,
+            ],
+        ),
+        CommandStep::new(
+            "cargo",
+            &[
+                "crap",
+                "--path",
+                "crates",
+                "--lcov",
+                &lcov,
+                "--exclude",
+                "**/tests/**",
+                "--threshold",
+                &threshold,
+                "--format",
+                "json",
+                "--output",
+                &json_output,
+            ],
+        ),
+        CommandStep::new(
+            "cargo",
+            &[
+                "crap",
+                "--path",
+                "crates",
+                "--lcov",
+                &lcov,
+                "--exclude",
+                "**/tests/**",
+                "--threshold",
+                &threshold,
+                "--summary",
+                "--fail-above",
+            ],
+        ),
+    ]
+}
+
+fn ci_steps() -> Vec<CommandStep> {
+    vec![
+        CommandStep::new(
+            "cargo",
+            &["run", "-p", "xtask", "--", "check", "--workspace"],
+        ),
+        CommandStep::new("cargo", &["run", "-p", "xtask", "--", "coverage"]),
+        CommandStep::new("cargo", &["run", "-p", "xtask", "--", "crap"]),
+        CommandStep::new("cargo", &["run", "-p", "xtask", "--", "parity"]),
+        CommandStep::new("cargo", &["run", "-p", "xtask", "--", "catalog", "check"]),
+    ]
 }
 
 fn run(step: &CommandStep) -> Result<()> {
@@ -1809,7 +2146,7 @@ fn validate_minimal_config(root: &Path, path: &Path) -> Result<Vec<String>> {
         "default_provider",
         "default_model",
         "sessions_dir",
-        "permissions",
+        "permission_mode",
         "defaults",
     ] {
         if !keys.contains(&key) {
@@ -1829,7 +2166,7 @@ fn validate_minimal_config(root: &Path, path: &Path) -> Result<Vec<String>> {
             "default_provider",
             "default_model",
             "sessions_dir",
-            "permissions",
+            "permission_mode",
             "defaults",
         ];
         if !allowed.contains(&key) {
@@ -2115,7 +2452,7 @@ mod tests {
                         "warnings"
                     ]
                 ),
-                CommandStep::new("cargo", &["test", "-p", "xtask"]),
+                CommandStep::new("cargo", &["nextest", "run", "-p", "xtask"]),
                 CommandStep::new("cargo", &["run", "-p", "xtask", "--", "catalog", "check"]),
             ]
         );
@@ -2144,7 +2481,10 @@ mod tests {
                         "warnings"
                     ]
                 ),
-                CommandStep::new("cargo", &["test", "--workspace", "--all-features"]),
+                CommandStep::new(
+                    "cargo",
+                    &["nextest", "run", "--workspace", "--all-features"]
+                ),
                 CommandStep::new("cargo", &["run", "-p", "xtask", "--", "catalog", "check"]),
             ]
         );
@@ -2173,9 +2513,259 @@ mod tests {
                         "warnings"
                     ]
                 ),
-                CommandStep::new("cargo", &["test", "-p", "xtask"]),
+                CommandStep::new("cargo", &["nextest", "run", "-p", "xtask"]),
                 CommandStep::new("cargo", &["run", "-p", "xtask", "--", "catalog", "check"]),
             ]
+        );
+    }
+
+    #[test]
+    fn test_command_parses_nextest_options() {
+        let command = Cli::try_parse_from([
+            "xtask",
+            "test",
+            "--workspace",
+            "--all-features",
+            "--features",
+            "native-tls,json",
+            "--no-default-features",
+            "--no-run",
+            "-P",
+            "slow",
+            "-p",
+            "neo-agent-core",
+            "--lib",
+            "--test",
+            "runtime_turn",
+            "approval",
+        ])
+        .expect("test command should parse")
+        .command
+        .expect("command");
+
+        let XtaskCommand::Test(options) = command else {
+            panic!("expected test command");
+        };
+        assert!(options.workspace);
+        assert!(options.all_features);
+        assert_eq!(options.features, vec!["native-tls,json"]);
+        assert!(options.no_default_features);
+        assert!(options.no_run);
+        assert_eq!(options.profile.as_deref(), Some("slow"));
+        assert_eq!(options.packages, vec!["neo-agent-core"]);
+        assert!(options.lib);
+        assert_eq!(options.tests, vec!["runtime_turn"]);
+        assert_eq!(options.filters, vec!["approval"]);
+    }
+
+    #[test]
+    fn test_command_builds_nextest_run_list_and_no_run_steps() {
+        assert_eq!(
+            nextest_step(&TestOptions {
+                packages: vec!["neo-tui".to_owned()],
+                filters: vec!["tool_cards".to_owned()],
+                ..TestOptions::default()
+            }),
+            CommandStep::new("cargo", &["nextest", "run", "-p", "neo-tui", "tool_cards"])
+        );
+
+        assert_eq!(
+            nextest_step(&TestOptions {
+                list: true,
+                workspace: true,
+                all_features: true,
+                ..TestOptions::default()
+            }),
+            CommandStep::new(
+                "cargo",
+                &["nextest", "list", "--workspace", "--all-features"]
+            )
+        );
+
+        assert_eq!(
+            nextest_step(&TestOptions {
+                no_run: true,
+                packages: vec!["xtask".to_owned()],
+                ..TestOptions::default()
+            }),
+            CommandStep::new("cargo", &["nextest", "run", "--no-run", "-p", "xtask"])
+        );
+
+        assert_eq!(
+            nextest_step(&TestOptions {
+                features: vec!["clipboard".to_owned()],
+                no_default_features: true,
+                packages: vec!["neo-agent-core".to_owned()],
+                lib: true,
+                bins: vec!["neo".to_owned()],
+                all_bins: true,
+                examples: vec!["quickstart".to_owned()],
+                all_examples: true,
+                tests: vec!["runtime_turn".to_owned()],
+                all_tests: true,
+                all_targets: true,
+                ..TestOptions::default()
+            }),
+            CommandStep::new(
+                "cargo",
+                &[
+                    "nextest",
+                    "run",
+                    "--features",
+                    "clipboard",
+                    "--no-default-features",
+                    "-p",
+                    "neo-agent-core",
+                    "--lib",
+                    "--bin",
+                    "neo",
+                    "--bins",
+                    "--example",
+                    "quickstart",
+                    "--examples",
+                    "--test",
+                    "runtime_turn",
+                    "--tests",
+                    "--all-targets",
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn coverage_command_builds_lcov_nextest_step() {
+        assert_eq!(
+            coverage_step(&CoverageOptions::default()),
+            CommandStep::new(
+                "cargo",
+                &[
+                    "llvm-cov",
+                    "nextest",
+                    "--workspace",
+                    "--all-features",
+                    "--lcov",
+                    "--output-path",
+                    "target/llvm-cov/lcov.info",
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn coverage_command_prepares_lcov_parent_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output_path = temp.path().join("nested").join("lcov.info");
+
+        ensure_parent_dir(&output_path).expect("create parent dir");
+
+        assert!(output_path.parent().expect("parent").is_dir());
+    }
+
+    #[test]
+    fn coverage_command_allows_output_in_current_dir() {
+        ensure_parent_dir(Path::new("lcov.info")).expect("path without parent is valid");
+    }
+
+    #[test]
+    fn crap_command_builds_reports_before_fail_above_gate() {
+        assert_eq!(
+            crap_steps(&CrapOptions::default()),
+            vec![
+                CommandStep::new(
+                    "cargo",
+                    &[
+                        "crap",
+                        "--path",
+                        "crates",
+                        "--lcov",
+                        "target/llvm-cov/lcov.info",
+                        "--exclude",
+                        "**/tests/**",
+                        "--threshold",
+                        "30",
+                        "--format",
+                        "markdown",
+                        "--output",
+                        "target/crap/crap-crates.md",
+                    ],
+                ),
+                CommandStep::new(
+                    "cargo",
+                    &[
+                        "crap",
+                        "--path",
+                        "crates",
+                        "--lcov",
+                        "target/llvm-cov/lcov.info",
+                        "--exclude",
+                        "**/tests/**",
+                        "--threshold",
+                        "30",
+                        "--format",
+                        "json",
+                        "--output",
+                        "target/crap/crap-crates.json",
+                    ],
+                ),
+                CommandStep::new(
+                    "cargo",
+                    &[
+                        "crap",
+                        "--path",
+                        "crates",
+                        "--lcov",
+                        "target/llvm-cov/lcov.info",
+                        "--exclude",
+                        "**/tests/**",
+                        "--threshold",
+                        "30",
+                        "--summary",
+                        "--fail-above",
+                    ],
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn crap_workspace_command_builds_non_gating_workspace_report() {
+        assert_eq!(
+            crap_steps(&CrapOptions {
+                workspace: true,
+                ..CrapOptions::default()
+            }),
+            vec![CommandStep::new(
+                "cargo",
+                &[
+                    "crap",
+                    "--workspace",
+                    "--lcov",
+                    "target/llvm-cov/lcov.info",
+                    "--threshold",
+                    "30",
+                    "--format",
+                    "markdown",
+                    "--output",
+                    "target/crap/crap-workspace.md",
+                ],
+            )]
+        );
+    }
+
+    #[test]
+    fn ci_command_runs_workspace_check_coverage_crap_parity_and_catalog() {
+        assert_eq!(
+            ci_steps(),
+            vec![
+                CommandStep::new(
+                    "cargo",
+                    &["run", "-p", "xtask", "--", "check", "--workspace"]
+                ),
+                CommandStep::new("cargo", &["run", "-p", "xtask", "--", "coverage"]),
+                CommandStep::new("cargo", &["run", "-p", "xtask", "--", "crap"]),
+                CommandStep::new("cargo", &["run", "-p", "xtask", "--", "parity"]),
+                CommandStep::new("cargo", &["run", "-p", "xtask", "--", "catalog", "check"]),
+            ],
         );
     }
 
@@ -2643,6 +3233,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn parity_validation_rejects_stale_gap_claims_after_symbols_exist() {
         struct SourceFixture {
             path: &'static str,
