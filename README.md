@@ -19,7 +19,12 @@ cargo run -p xtask -- release-smoke
 The default maintenance gate intentionally checks the stable `xtask` slice while
 other workers are building adjacent crates. Use
 `cargo run -p xtask -- check --workspace` when you want the full workspace fmt,
-clippy, and test gate.
+clippy, and nextest gate.
+Use `cargo run -p xtask -- test ...` for focused unit and integration tests; the
+test entrypoint is backed by cargo-nextest and the repo's `.config/nextest.toml`.
+Use `cargo run -p xtask -- coverage` to generate `target/llvm-cov/lcov.info`,
+then `cargo run -p xtask -- crap` to enforce the production CRAP gate. The full
+local CI entrypoint is `cargo run -p xtask -- ci`.
 `cargo run -p xtask -- check --docs` also runs the docs/examples parity gate,
 including local Markdown link checks, production fake/local/placeholder guidance
 scans, and example TOML/JSON validation.

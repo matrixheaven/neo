@@ -34,7 +34,7 @@ Use `neo_ai::tool_schema::schema_for<T>()` to generate JSON Schema from small se
 | `Glob` | `{ "pattern": "**/*.rs", "path": "crates", "max_matches": 50 }` | file read |
 | `Write` | `{ "path": "tmp.txt", "content": "hello" }` | file write |
 | `Edit` | `{ "path": "tmp.txt", "old": "hello", "new": "hi", "replace_all": false }` | file write |
-| `Bash` | `{ "command": "cargo test -p xtask", "cwd": ".", "timeout": 300, "max_output_bytes": 65536 }` or `{ "command": "cargo test -p xtask", "run_in_background": true, "description": "test xtask" }` | shell |
+| `Bash` | `{ "command": "cargo run -p xtask -- test -p xtask", "cwd": ".", "timeout": 300, "max_output_bytes": 65536 }` or `{ "command": "cargo run -p xtask -- test -p xtask", "run_in_background": true, "description": "test xtask" }` | shell |
 | `TaskList` | `{ "active_only": true, "limit": 20 }` | tool |
 | `TaskOutput` | `{ "task_id": "bash-...", "block": false, "timeout": 30 }` or `{ "task_id": "question-..." }` | tool |
 | `TaskStop` | `{ "task_id": "bash-...", "reason": "no longer needed" }` or `{ "task_id": "question-..." }` | tool |
@@ -85,8 +85,9 @@ visible in the tool card.
 The `neo-agent-core` tool layer separates:
 
 - `ToolRegistry`: lists available tools and their schemas.
-- `PermissionPolicy`: records `Allow`, `Ask`, or `Deny` for file reads, file
-  writes, shell, and general tools.
+- `PermissionMode`: the active `manual`, `auto`, or `yolo` mode that decides
+  whether risky tool calls require user approval. Plan mode adds a hard guard
+  that cannot be bypassed by `auto` or `yolo`.
 - `Tool`: owns schema generation and execution.
 - `ToolResult`: returns text content, error state, and optional details.
 
@@ -95,10 +96,13 @@ are converted into `ToolResult::error` records and appended as model-visible
 tool-result messages. Runtime setup failures, cancellation, and max-turn
 boundaries still remain runtime errors or terminal lifecycle events.
 
-When a policy is `Ask`, the runtime emits `AgentEvent::ApprovalRequested` and
-executes only if the configured approval handler returns `Allow`. Without a
-handler, ask-mode operations return an approval-required tool result instead of
-silently executing.
+In `manual` mode, the runtime emits `AgentEvent::ApprovalRequested` before
+risky operations and executes only if the configured approval handler returns
+allow. Without a handler, the operation returns an approval-required tool
+result instead of executing silently. `auto` mode approves tool actions
+automatically after hard safety policies, but it denies `AskUserQuestion` so
+the model must continue without user input. `yolo` mode approves tool actions
+automatically while still allowing explicit `AskUserQuestion` prompts.
 
 Tool calls that can open focused blocking dialogs are serialized within their
 model response batch, even when parallel tool execution is enabled. This covers

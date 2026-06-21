@@ -144,10 +144,37 @@ neo models remove "my-llm/codellama"
 neo models set "openai/gpt-4.1"
 ```
 
+## Permission Mode
+
+Neo uses a single top-level `permission_mode` setting that controls how
+risky tool actions are approved:
+
+```toml
+permission_mode = "manual"
+```
+
+Allowed values:
+
+- `"manual"` — Ask before commands, edits, and other risky actions.
+  Read/search tools run directly, and session approval rules are respected.
+- `"auto"` — Run fully non-interactively. Tool actions are approved
+  automatically after hard safety policies; agent questions are skipped.
+- `"yolo"` — Skip normal confirmations. Tool actions are approved
+  automatically after hard safety policies, but explicit user questions
+  are still allowed.
+
+Plan mode adds a hard guard on top of the active mode: `Write`/`Edit` may
+only modify the active plan file, and some disruptive tools are denied.
+
 ## TUI Slash Commands
 
 In interactive mode:
 
+- `/ask` — Switch to manual permission mode
+- `/auto` — Switch to auto permission mode
+- `/yolo` — Switch to yolo permission mode
+- `/permissions` — Open the permission mode selector
+- `/plan` — Toggle plan mode
 - `/model` — Open the model picker
 - `/provider` — Open the provider list
 - `/resume` — Open session picker

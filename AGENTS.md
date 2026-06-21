@@ -4,13 +4,38 @@ This file is written for AI coding agents. It assumes you know nothing about the
 project. Use it to orient yourself before editing code, running tests, or writing
 documentation.
 
-Read @ [CX.md](../../.kimi-code/CX.md)  @[RTK.md](../../.kimi-code/RTK.md) ，Use `cx` and `rtk` clito save tokens
+Read [CX.md](../../.kimi-code/CX.md) and [RTK.md](../../.kimi-code/RTK.md). Use the `cx` and `rtk` CLIs to save tokens when they fit the task.
 
-Swarm mode : Parallel at least 3 subagent swarm to finish a job
+Swarm mode: parallelize substantial work across at least three subagents when the task has independent slices.
 
-不接受任何反驳，这个项目将会同时有 N 个 AI Agent 并行开发，禁止一切犯贱行为：动 git 的任何回溯操作来方便你自己的工作，你必须立刻停下
+This repository is developed by many AI agents at the same time. Stay inside your assigned scope. Do not fix unrelated failures, do not clean up other agents' work, and do not run git commands that discard, revert, hide, or rewrite worktree changes for your own convenience.
 
-不接受任何反驳，禁止去做不属于你的工作，别的 AI 整出来的报错，不关你任何事，100%专注于管好你自己的工作！
+Do not preserve the status quo by piling on compatibility branches, fallback paths, or duplicate models. Simplify the model, delete obsolete paths when possible, and avoid code that only appears safe because tests still pass.
+
+## Mandatory work loop: recall → scope → test → LCOV → CRAP → CI
+
+Every task must follow this loop:
+
+1. Recall project memory before work: `icm recall-context "<task>" --limit 5`.
+2. Scope your own work. Do not fix unrelated failures from other agents. FOCUS ON Test Driven Dev.
+3. Run focused verification through `cargo run -p xtask -- test ...`; never use
+   bare `cargo test` as completion evidence.
+4. Before claiming completion, generate LCOV with `cargo run -p xtask -- coverage`.
+5. Score production code with `cargo run -p xtask -- crap`.
+6. For a full local gate, run `cargo run -p xtask -- ci`.
+
+CRAP policy is strict: production code under `crates/` must have no function
+with CRAP > 30 when scored from `target/llvm-cov/lcov.info`. Do not use
+allowlists, fallback branches, or threshold increases to hide high scores. If
+CRAP is high, simplify the function, delete obsolete paths, or add real behavior
+tests and rerun LCOV + CRAP.
+
+Report artifacts:
+
+- LCOV: `target/llvm-cov/lcov.info`
+- Production CRAP Markdown: `target/crap/crap-crates.md`
+- Production CRAP JSON: `target/crap/crap-crates.json`
+- Workspace CRAP observation report: `target/crap/crap-workspace.md`
 
 ## Project overview
 
@@ -80,10 +105,10 @@ Key files at the root:
 | Crate | Package name | Public API role |
 |-------|--------------|-----------------|
 | `crates/neo-ai` | `neo-ai` | Provider-neutral `ChatRequest`, `ModelClient`, `AiStreamEvent`, registries, reasoning options, image generation, `FakeModelClient`. |
-| `crates/neo-agent-core` | `neo-agent-core` | `AgentRuntime`, `AgentContext`, `ToolRegistry`, built-in tools, `PermissionPolicy`, `FakeHarness`, JSONL session helpers, MCP adapters, local extension adapters, skill loading, JSONL RPC primitives, HTML export. |
+| `crates/neo-agent-core` | `neo-agent-core` | `AgentRuntime`, `AgentContext`, `ToolRegistry`, built-in tools, `PermissionMode`, `FakeHarness`, JSONL session helpers, MCP adapters, local extension adapters, skill loading, JSONL RPC primitives, HTML export. |
 | `crates/neo-tui` | `neo-tui` | Reusable terminal UI components, input handling, diff rendering, inline image encoding. |
 | `crates/neo-agent` | `neo-agent` | The `neo` binary. Parses args, loads config, dispatches to `print`/`run`/`resume`/sessions/extensions/MCP/RPC/TUI modes. |
-| `xtask` | `xtask` | Maintenance commands: check, parity, release-smoke, catalog check. |
+| `xtask` | `xtask` | Maintenance commands: check, test, coverage, crap, ci, parity, release-smoke, catalog check. |
 
 ## Build and test commands
 
@@ -110,8 +135,20 @@ cargo run -p xtask -- check
 # Docs/examples parity gate plus the stable gate.
 cargo run -p xtask -- check --docs
 
-# Full workspace fmt/clippy/test gate.
+# Full workspace fmt/clippy/nextest gate.
 cargo run -p xtask -- check --workspace
+
+# Run repository tests through cargo-nextest.
+cargo run -p xtask -- test
+cargo run -p xtask -- test -p neo-agent-core runtime_turn
+cargo run -p xtask -- test --workspace --all-features
+cargo run -p xtask -- test --no-run --workspace --all-features
+cargo run -p xtask -- test --list --workspace --all-features
+
+# Generate LCOV, run the production CRAP gate, or run the full local CI gate.
+cargo run -p xtask -- coverage
+cargo run -p xtask -- crap
+cargo run -p xtask -- ci
 
 # Just the docs/examples parity gate.
 cargo run -p xtask -- parity
@@ -128,14 +165,15 @@ Unit and integration tests:
 
 ```bash
 # All workspace tests
-cargo test --workspace --all-features
+cargo run -p xtask -- test --workspace --all-features
 
-# Individual crate
-cargo test -p neo-ai
-cargo test -p neo-agent-core
-cargo test -p neo-tui
-cargo test -p neo-agent
-cargo test -p xtask
+# Individual crate or target
+cargo run -p xtask -- test -p neo-ai
+cargo run -p xtask -- test -p neo-agent-core --lib todo
+cargo run -p xtask -- test -p neo-agent-core runtime_turn
+cargo run -p xtask -- test -p neo-tui --test tool_cards
+cargo run -p xtask -- test -p neo-agent interactive
+cargo run -p xtask -- test -p xtask
 ```
 
 ## Code style guidelines
@@ -162,6 +200,35 @@ cargo test -p xtask
 
 - Tests live next to source in `src/` (`#[cfg(test)]`) and in `tests/` per
 crate.
+- **Hard rule: use `xtask` as the test entrypoint.** Do not claim verification
+  from direct `cargo test` commands. Use `cargo run -p xtask -- test ...`,
+  which runs `cargo nextest` with the repository configuration.
+- `cargo nextest` is the test runner for unit and integration tests. If
+  `cargo nextest` is not installed, fail closed and install it; do not silently
+  fall back to `cargo test`.
+- Local focused tests should be run through `xtask test`, for example
+  `cargo run -p xtask -- test -p neo-agent-core runtime_turn` or
+  `cargo run -p xtask -- test -p neo-tui --test tool_cards`.
+- Use `cargo run -p xtask -- test --no-run --workspace --all-features` for a
+  workspace compile-only test check, and `cargo run -p xtask -- test --list` for
+  test inventory.
+- Use `cargo run -p xtask -- coverage` to generate
+  `target/llvm-cov/lcov.info` with `cargo-llvm-cov` and `cargo-nextest`.
+- Use `cargo run -p xtask -- crap` to generate
+  `target/crap/crap-crates.md` and `target/crap/crap-crates.json`, then fail if
+  production code in `crates/` has CRAP > 30.
+- Use `cargo run -p xtask -- crap --workspace` only as an observation report for
+  xtask/examples/tests; it is not the first-stage hard gate.
+- Use `cargo run -p xtask -- ci` for the full local CI workflow: workspace check,
+  LCOV, production CRAP gate, parity, and catalog check.
+- New slow, PTY, MCP, provider-wire, real-process, fixed-port, shared-home, or
+  resource-sensitive tests must be classified in `.config/nextest.toml` instead
+  of reducing global parallelism or relying on accidental execution order.
+- Do not add tests that depend on shared current directory, ambient environment,
+  fixed `NEO_HOME`, fixed network ports, or another test's side effects.
+- Doctests are not part of the normal `nextest` path. Add or run doctests only
+  through an explicit xtask entrypoint if one exists; do not reintroduce direct
+  `cargo test` as the routine validation path.
 - Use `neo_ai::providers::fake::FakeModelClient` and
   `neo_agent_core::harness::FakeHarness` for deterministic model-driven tests.
 - Integration tests for CLI surfaces are in `crates/neo-agent/tests/`.
@@ -192,8 +259,8 @@ crate.
 5. Provider-native streams are normalized into `AiStreamEvent` values
    (`MessageStart`, `ThinkingStart/Delta/End`, `TextDelta`, `ToolCallStart`,
    `ToolCallArgsDelta`, `ToolCallEnd`, `MessageEnd`, `Error`).
-6. Tool calls are authorized against `PermissionPolicy`, executed by the
-   `ToolRegistry`, and returned as `ChatMessage::ToolResult`.
+6. Tool calls are authorized against the active `PermissionMode`, executed by
+   the `ToolRegistry`, and returned as `ChatMessage::ToolResult`.
 7. Reasoning events are preserved as `ContentPart::Thinking` blocks, not mixed
    into plain assistant text.
 8. Skills are loaded from project, user, extra, and built-in tiers; an
@@ -399,8 +466,8 @@ merged by provider id; MCP servers are merged by server id. Important sections:
   Users can define arbitrary provider ids.
 - `models.<alias>` — inline model definitions with `provider`, `model`,
   `max_context_tokens`, `capabilities`, `display_name`.
-- `permissions` — `Allow` / `Ask` / `Deny` for `file_read`, `file_write`,
-  `shell`, `tool`.
+- `permission_mode` — `manual` / `auto` / `yolo`. Controls how risky tool
+  actions are approved; defaults to `manual`.
 - `runtime` — `temperature`, `max_tokens`, `reasoning_effort`, queue modes,
   tool execution mode, compaction, `extra_skill_dirs`.
 - `tui` — `image_protocol`, `fetch_remote_images`, `keybindings`.
@@ -414,9 +481,12 @@ CLI provider/model management: `neo provider add/remove/list`,
 `neo provider catalog list/add` (models.dev integration),
 `neo models add/remove/list/set`.
 
-TUI slash commands: `/model` (model picker), `/provider` (provider list),
-`/resume` (session picker), `/skill:<name>` (activate a skill and expand it
-into the prompt), `/goal` (start, pause, resume, cancel, or replace a goal).
+TUI slash commands: `/ask` (manual permission mode), `/auto` (auto permission
+mode), `/yolo` (yolo permission mode), `/permissions` (permission mode
+selector), `/plan` (toggle plan mode), `/model` (model picker), `/provider`
+(provider list), `/resume` (session picker), `/skill:<name>` (activate a skill
+and expand it into the prompt), `/goal` (start, pause, resume, cancel, or
+replace a goal).
 
 CLI session management: `neo sessions list/show/rename/fork/summarize/compact/export-html/export-json`.
 
@@ -444,8 +514,8 @@ project is trusted; trust is stored in `~/.neo/trust.json`.
   `neo config show` redacts `api_key`, MCP `env`, and `headers` values.
 - **Workspace containment**: built-in file tools resolve paths inside the
   workspace and reject parent-dir escapes.
-- **Shell tool**: requires explicit `permissions.shell` and can be set to
-  `Ask` / `Deny`.
+- **Shell tool**: follows the active `permission_mode`. In `manual` mode it
+  asks for approval; in `auto` and `yolo` it runs after hard safety policies.
 - **Trust**: project `AGENTS.md` / `CLAUDE.md` are gated by `neo trust
   approve|deny|status`. User-global context files are always loaded.
 - **Remote images**: fetching remote image URLs is disabled by default
@@ -480,146 +550,77 @@ marketplace fixtures.
 - Example config and tool schemas are in `examples/config/` and
   `examples/tools/`.
 
-## Git policy — STRICT (READ THIS BEFORE ANY git COMMAND)
-
-**Git 修改操作（mutations）一律禁止，除非用户在当前会话中明确逐次授权。**
-
-### 绝对禁止（无论是否"看起来安全"）
-
-以下命令会**不可逆地丢失未提交的工作**，**永远不得执行**，包括在
-subagent / background task / hook 中也不行：
-
-- `git reset`（任何形式：`--hard`、`--soft`、`--mixed`、`HEAD`、`HEAD~N`、`HEAD^`）
-- `git checkout -- <file>` / `git checkout HEAD -- <file>` / `git restore <file>`
-  （还原工作区文件）
-- `git checkout <commit> -- <path>`（把文件回退到历史版本）
-- `git stash` / `git stash drop` / `git stash clear`
-- `git rebase` / `git rebase -i` / `git rebase --abort`
-- `git clean -fd` / `git clean -fdx`（删除未跟踪文件/目录）
-- `git rm`（删除已跟踪文件）
-- `git gc --prune=now` / `git reflog expire`（清理引用日志）
-- `git filter-branch` / `git filter-repo`
-
-### 需要逐次确认（不能假设之前的授权延续）
-
-- `git commit` / `git commit --amend`
-- `git push` / `git push --force`
-- `git merge` / `git cherry-pick`
-- `git branch -d` / `git branch -D`
-- `git tag` / `git tag -d`
-- `git add`（仅当用户明确要求暂存时）
-- `git checkout <branch>` / `git switch <branch>`（切换分支）
-- `git worktree add` / `git worktree remove`
-
-### 允许（只读，不需要确认）
-
-`git status`、`git diff`、`git log`、`git show`、`git branch`（不带 -d）、
-`git stash list`、`git reflog`、`git blame`、`git ls-files` 等只读命令可自由使用。
-
-### 给 subagent 的规则
-
-**subagent（Agent / AgentSwarm / background bash）不得执行任何 git mutation。**
-如果 subagent 认为需要 commit/reset/checkout，它必须返回结果让主 agent
-向用户请求授权，而不是自己执行。subagent 的 prompt 里也应包含此约束。
-
-### 违反后果
-
-执行 `git reset`、`git checkout --`、`git stash`、`git clean` 等命令会
-**静默丢弃用户未提交的代码**，且可能无法通过 `git fsck` 恢复。
-这是最容易发生的灾难性操作，必须零容忍。
-
-## Current workspace health (as of last exploration)
-
-The workspace compiles. Skills, goals, and the `sub-skill` meta-skill are in
-place.
-
-- `neo-ai` clippy warnings (missing backticks, collapsible `if`) are fixed.
-- `neo-agent-core` clippy passes.
-- Skill tests (`skills.rs`, `goals.rs`) and `neo-agent` `mock_provider_e2e`
-  tests pass.
-- Two unrelated test regressions remain:
-  - `tool_permissions::bash_requires_permission_and_honors_timeout` sends an
-    old `mode` field to the bash tool schema.
-  - `tools::todo` unit tests fail because `TodoInput::todos` appears to have
-    been changed to `Option<Vec<TodoItem>>` without updating the tests.
-- `neo-tui` and the rest of `neo-agent` still carry pre-existing clippy
-  warnings unrelated to this work.
-
-<!-- icm:start -->
-
 ## Persistent memory (ICM) — MANDATORY
 
-This project uses [ICM](https://github.com/rtk-ai/icm) for persistent memory across sessions.
-You MUST use it actively. Not optional.
+This project uses [ICM](https://github.com/rtk-ai/icm) for persistent memory across sessions. You MUST use it actively.
 
-### Recall (before starting work)
-
-```bash
-icm recall "query"                        # search memories
-icm recall "query" -t "topic-name"        # filter by topic
-icm recall-context "query" --limit 5      # formatted for prompt injection
-```
-
-### Store — MANDATORY triggers
-
-You MUST call `icm store` when ANY of the following happens:
-
-1. **Error resolved** → `icm store -t errors-resolved -c "description" -i high -k "keyword1,keyword2"`
-2. **Architecture/design decision** → `icm store -t decisions-{project} -c "description" -i high`
-3. **User preference discovered** → `icm store -t preferences -c "description" -i critical`
-4. **Significant task completed** → `icm store -t context-{project} -c "summary of work done" -i high`
-5. **Conversation exceeds ~20 tool calls without a store** → store a progress summary
-
-Do this BEFORE responding to the user. Not after. Not later. Immediately.
-
-Do NOT store: trivial details, info already in CLAUDE.md, ephemeral state (build logs, git status).
-
-### Other commands
+### Recall before starting work
 
 ```bash
-icm update <id> -c "updated content"     # edit memory in-place
-icm health                                # topic hygiene audit
-icm topics                                # list all topics
+icm recall "query"
+icm recall "query" -t "topic-name"
+icm recall-context "query" --limit 5
 ```
 
-<!-- icm:end -->
+### Store when required
+
+Call `icm store` BEFORE responding when any of these happens:
+
+1. Error resolved: `icm store -t errors-resolved -c "description" -i high -k "keyword1,keyword2"`
+2. Architecture or design decision: `icm store -t decisions-neo -c "description" -i high`
+3. User preference discovered: `icm store -t preferences -c "description" -i critical`
+4. Significant task completed: `icm store -t context-neo -c "summary of work done" -i high`
+5. More than about 20 tool calls since the last store: save a progress summary.
+
+Do not store trivial details, existing AGENTS.md facts, ephemeral build logs, or transient git status.
+
+Other useful commands:
+
+```bash
+icm update <id> -c "updated content"
+icm health
+icm topics
+```
 
 ## Git mutation policy — STRICT
 
-**NEVER run any git command that discards, reverts, or rewrites uncommitted
-working-tree changes unless the user gives an explicit, message-level
-instruction to do so.** This applies to all agents and subagents.
+Git mutations are forbidden unless the user gives explicit, message-level authorization for that exact operation. This applies to the main agent, subagents, background tasks, hooks, and scripts.
 
-### Banned commands (never run without explicit user approval)
+### Never run these without explicit approval
 
-| Command | Why banned |
-|---------|------------|
-| `git reset --hard` | Discards all uncommitted work |
-| `git restore <path>` / `git checkout -- <path>` | Reverts tracked files to HEAD |
-| `git checkout .` / `git checkout -- .` | Reverts entire worktree |
-| `git stash` / `git stash drop` / `git stash clear` | Hides or destroys uncommitted changes |
-| `git clean -fd` / `git clean -fdx` | Deletes untracked files and dirs |
-| `git rebase` / `git rebase -i` | Rewrites commit history |
-| `git commit --amend` / `git commit --amend --no-edit` | Rewrites the last commit |
-| `git push --force` / `git push -f` | Overwrites remote history |
+These commands can lose, hide, or rewrite work and are not allowed as convenience operations:
 
-### Allowed git commands
+- `git reset` in any form.
+- `git checkout -- <path>`, `git checkout HEAD -- <path>`, `git restore <path>`, `git checkout .`, or any equivalent worktree revert.
+- `git checkout <commit> -- <path>`.
+- `git stash`, `git stash drop`, or `git stash clear`.
+- `git rebase`, `git rebase -i`, or `git rebase --abort`.
+- `git clean -fd` or `git clean -fdx`.
+- `git rm`.
+- `git gc --prune=now`, `git reflog expire`, `git filter-branch`, or `git filter-repo`.
+- `git commit --amend` or any force push.
 
-`git status`, `git diff`, `git log`, `git branch`, `git show`, `git add`,
-`git stash list` (read-only), `git fsck`, `git reflog` — all fine.
+### Require per-command user authorization
 
-`git commit`, `git push` (non-force), `git merge`, `git checkout -b <new>` are
-allowed **only when the user explicitly asks for them** (this restates the
-global rule in the system prompt).
+- `git add`
+- `git commit`
+- `git push`
+- `git merge` or `git cherry-pick`
+- `git checkout <branch>` or `git switch <branch>`
+- `git checkout -b <branch>` or `git switch -c <branch>`
+- `git branch -d` / `git branch -D`
+- `git tag` / `git tag -d`
+- `git worktree add` / `git worktree remove`
+
+### Allowed read-only git commands
+
+`git status`, `git diff`, `git log`, `git show`, `git branch` without deletion, `git stash list`, `git reflog`, `git blame`, `git ls-files`, and `git fsck` are allowed.
 
 ### If you need to undo your own edit
 
-Use `Edit` / `Write` to revert the specific lines you changed. Never use a
-git command to blow away the file — you will destroy the user's parallel work
-in the same file.
+Use targeted file edits to undo only the lines you changed. Never use a git command to blow away a file, because that can silently destroy another agent's work in the same file.
 
-### Subagent dispatch
+### Subagent rule
 
-When delegating to subagents, include this rule in the prompt. A subagent
-that runs `git restore` or `git stash` can silently destroy hours of the
-user's uncommitted work.<!-- git-mutation-ban -->
+Every subagent prompt must include the git mutation ban. If a subagent thinks a mutation is needed, it must report that need to the main agent instead of running the command.
+<!-- git-mutation-ban -->

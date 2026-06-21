@@ -5,11 +5,7 @@ default_provider = "fake"
 # xtask-parity: allow fake-provider-example - deterministic development fixture, not production guidance.
 default_model = "fake"
 sessions_dir = ".neo/sessions"
-
-[permissions]
-file_read = "Allow"
-file_write = "Ask"
-shell = "Ask"
+permission_mode = "manual"
 
 [defaults]
 mode = "interactive"

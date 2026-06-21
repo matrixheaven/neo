@@ -87,12 +87,8 @@ max_context_tokens = 128000
 capabilities = ["streaming", "tools"]
 display_name = "Llama 3.1 8B (local)"
 
-# ─── Optional: Permissions ───
-[permissions]
-file_read = "Allow"
-file_write = "Ask"
-shell = "Ask"
-tool = "Allow"
+# ─── Optional: Permission Mode ───
+permission_mode = "manual"
 
 # ─── Optional: Runtime ───
 [runtime]
