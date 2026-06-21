@@ -27,6 +27,9 @@ pub struct Cli {
     #[arg(long = "yolo")]
     pub yolo: bool,
 
+    #[arg(long = "auto", conflicts_with = "yolo")]
+    pub auto: bool,
+
     #[arg(long, env = "NEO_CONFIG")]
     pub config: Option<std::path::PathBuf>,
 

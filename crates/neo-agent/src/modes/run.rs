@@ -15,7 +15,8 @@ use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool,
     CompactionSettings, Content, CreateSkillTool, ListSkillsTool, McpHttpConfig,
     McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter, McpToolProvider,
-    MoveSkillTool, PendingQuestion, PermissionDecision, SummarizeSessionsTool, ToolRegistry,
+    MoveSkillTool, PendingQuestion, PermissionApprovalDecision, SummarizeSessionsTool,
+    ToolRegistry,
 };
 use neo_ai::{
     ChatMessage, ContentPart, CredentialResolver, ModelClient, ModelRegistry, ModelSpec,
@@ -28,7 +29,7 @@ use uuid::Uuid;
 
 use crate::{
     cli::RunOutput,
-    config::{self, AppConfig, McpServerConfig, neo_home, workspace_sessions_dir},
+    config::{self, AppConfig, McpServerConfig, ModelConfig, neo_home, workspace_sessions_dir},
     modes::sessions,
     resources,
 };
@@ -566,95 +567,131 @@ fn current_unix_timestamp() -> String {
 /// Unlike `list_models_with_options`, built-in seeded models are excluded so
 /// the output reflects exactly what the user has configured.
 pub fn list_configured_models(config: &AppConfig, json_output: bool) -> anyhow::Result<String> {
-    #[derive(Debug)]
-    struct Entry<'a> {
-        alias: &'a str,
-        provider: &'a str,
-        model: &'a str,
-        provider_type: &'a str,
-        capabilities: &'a [String],
-        max_context_tokens: Option<u32>,
-        display_name: Option<&'a str>,
-        is_default: bool,
-    }
-
     if config.models.is_empty() {
-        if json_output {
-            return Ok(serde_json::to_string_pretty(&json!({
-                "models": [],
-                "default_model": config.default_model,
-            }))? + "\n");
-        }
-        return Ok("no models configured\n".to_owned());
+        return list_empty_configured_models(config, json_output);
     }
 
-    let mut entries = Vec::with_capacity(config.models.len());
-    for (alias, model_cfg) in &config.models {
-        let provider_cfg = config.providers.get(&model_cfg.provider);
-        let provider_type = provider_cfg
-            .and_then(|cfg| cfg.provider_type)
-            .map_or("unknown", |t| t.as_config_str());
-        entries.push(Entry {
-            alias,
-            provider: &model_cfg.provider,
-            model: &model_cfg.model,
-            provider_type,
-            capabilities: &model_cfg.capabilities,
-            max_context_tokens: model_cfg.max_context_tokens,
-            display_name: model_cfg.display_name.as_deref(),
-            is_default: *alias == config.default_model
-                || format!("{}/{}", model_cfg.provider, model_cfg.model) == config.default_model
-                || (model_cfg.provider == config.default_provider
-                    && model_cfg.model == config.default_model),
-        });
-    }
-
+    let entries = configured_model_entries(config);
     if json_output {
-        let models_json: Vec<_> = entries
-            .iter()
-            .map(|e| {
-                json!({
-                    "alias": e.alias,
-                    "provider": e.provider,
-                    "model": e.model,
-                    "type": e.provider_type,
-                    "capabilities": e.capabilities,
-                    "max_context_tokens": e.max_context_tokens,
-                    "display_name": e.display_name,
-                    "default": e.is_default,
-                })
-            })
-            .collect();
+        return configured_models_json(config, &entries);
+    }
+    Ok(configured_models_text(&entries))
+}
+
+#[derive(Debug)]
+struct ConfiguredModelEntry<'a> {
+    alias: &'a str,
+    provider: &'a str,
+    model: &'a str,
+    provider_type: &'a str,
+    capabilities: &'a [String],
+    max_context_tokens: Option<u32>,
+    display_name: Option<&'a str>,
+    is_default: bool,
+}
+
+fn list_empty_configured_models(config: &AppConfig, json_output: bool) -> anyhow::Result<String> {
+    if json_output {
         return Ok(serde_json::to_string_pretty(&json!({
-            "models": models_json,
+            "models": [],
             "default_model": config.default_model,
         }))? + "\n");
     }
+    Ok("no models configured\n".to_owned())
+}
 
-    let mut out = "models:\n".to_owned();
-    for e in &entries {
-        let default_marker = if e.is_default { " default" } else { "" };
-        let display = e
-            .display_name
-            .map(|d| format!(" - {d}"))
-            .unwrap_or_default();
-        let caps = e.capabilities.join(",");
-        let ctx = e
-            .max_context_tokens
-            .map_or("?".to_owned(), |n| n.to_string());
-        let alias_label = if e.alias.contains('/') {
-            e.alias.to_owned()
-        } else {
-            format!("{} -> {}/{}", e.alias, e.provider, e.model)
-        };
-        let _ = writeln!(
-            out,
-            "- {alias_label} ({ptype}{default_marker}) ctx={ctx} [{caps}]{display}",
-            alias_label = alias_label,
-            ptype = e.provider_type,
-        );
+fn configured_model_entries(config: &AppConfig) -> Vec<ConfiguredModelEntry<'_>> {
+    config
+        .models
+        .iter()
+        .map(|(alias, model_cfg)| configured_model_entry(alias, model_cfg, config))
+        .collect()
+}
+
+fn configured_model_entry<'a>(
+    alias: &'a str,
+    model_cfg: &'a ModelConfig,
+    config: &'a AppConfig,
+) -> ConfiguredModelEntry<'a> {
+    let provider_type = config
+        .providers
+        .get(&model_cfg.provider)
+        .and_then(|cfg| cfg.provider_type)
+        .map_or("unknown", |t| t.as_config_str());
+    ConfiguredModelEntry {
+        alias,
+        provider: &model_cfg.provider,
+        model: &model_cfg.model,
+        provider_type,
+        capabilities: &model_cfg.capabilities,
+        max_context_tokens: model_cfg.max_context_tokens,
+        display_name: model_cfg.display_name.as_deref(),
+        is_default: configured_model_is_default(alias, model_cfg, config),
     }
-    Ok(out)
+}
+
+fn configured_model_is_default(alias: &str, model_cfg: &ModelConfig, config: &AppConfig) -> bool {
+    alias == config.default_model
+        || format!("{}/{}", model_cfg.provider, model_cfg.model) == config.default_model
+        || (model_cfg.provider == config.default_provider
+            && model_cfg.model == config.default_model)
+}
+
+fn configured_models_json(
+    config: &AppConfig,
+    entries: &[ConfiguredModelEntry<'_>],
+) -> anyhow::Result<String> {
+    let models_json: Vec<_> = entries.iter().map(configured_model_json).collect();
+    Ok(serde_json::to_string_pretty(&json!({
+        "models": models_json,
+        "default_model": config.default_model,
+    }))? + "\n")
+}
+
+fn configured_model_json(entry: &ConfiguredModelEntry<'_>) -> Value {
+    json!({
+        "alias": entry.alias,
+        "provider": entry.provider,
+        "model": entry.model,
+        "type": entry.provider_type,
+        "capabilities": entry.capabilities,
+        "max_context_tokens": entry.max_context_tokens,
+        "display_name": entry.display_name,
+        "default": entry.is_default,
+    })
+}
+
+fn configured_models_text(entries: &[ConfiguredModelEntry<'_>]) -> String {
+    let mut out = "models:\n".to_owned();
+    for entry in entries {
+        out.push_str(&configured_model_text(entry));
+    }
+    out
+}
+
+fn configured_model_text(entry: &ConfiguredModelEntry<'_>) -> String {
+    let default_marker = if entry.is_default { " default" } else { "" };
+    let display = entry
+        .display_name
+        .map(|display_name| format!(" - {display_name}"))
+        .unwrap_or_default();
+    let caps = entry.capabilities.join(",");
+    let ctx = entry
+        .max_context_tokens
+        .map_or("?".to_owned(), |tokens| tokens.to_string());
+    let alias_label = configured_model_alias_label(entry);
+    format!(
+        "- {alias_label} ({ptype}{default_marker}) ctx={ctx} [{caps}]{display}\n",
+        ptype = entry.provider_type,
+    )
+}
+
+fn configured_model_alias_label(entry: &ConfiguredModelEntry<'_>) -> String {
+    if entry.alias.contains('/') {
+        entry.alias.to_owned()
+    } else {
+        format!("{} -> {}/{}", entry.alias, entry.provider, entry.model)
+    }
 }
 
 fn provider_registry_for_config(config: &AppConfig) -> ProviderRegistry {
@@ -924,7 +961,7 @@ pub struct PromptTurn {
 
 pub struct PromptApprovalRequest {
     pub id: String,
-    pub decision_tx: oneshot::Sender<PermissionDecision>,
+    pub decision_tx: oneshot::Sender<PermissionApprovalDecision>,
 }
 
 pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result<PromptTurn> {
@@ -937,7 +974,7 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
     let mut writer = SessionEventWriter::jsonl(&mut writer);
     let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
     record_session_activity(config, &session_id, &prompt);
-    let runtime = runtime_for_config(config, None, None).await?;
+    let runtime = runtime_for_config(config, None, None, None).await?;
     let turn = finish_prompt_turn(
         user_message,
         AgentContext::new(),
@@ -958,7 +995,7 @@ pub async fn run_prompt_ephemeral(
     let prompt = prompt.join(" ");
     let mut writer = SessionEventWriter::memory();
     let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
-    let runtime = runtime_for_config(config, None, None).await?;
+    let runtime = runtime_for_config(config, None, None, None).await?;
     finish_prompt_turn(
         user_message,
         AgentContext::new(),
@@ -986,7 +1023,7 @@ pub async fn run_prompt_in_session(
     let mut writer = SessionEventWriter::jsonl(&mut writer);
     let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
     record_session_activity(config, session_id, &prompt);
-    let runtime = runtime_for_config(config, None, None).await?;
+    let runtime = runtime_for_config(config, None, None, None).await?;
     runtime.restore_plan_mode(&context);
     finish_prompt_turn(
         user_message,
@@ -1009,37 +1046,18 @@ pub async fn run_prompt_streaming(
     cancel_token: CancellationToken,
     question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
     skill_context: Option<String>,
+    plan_review_feedback: Option<std::collections::BTreeMap<String, String>>,
 ) -> anyhow::Result<PromptTurn> {
-    let prompt = prompt.join(" ");
-    let session_path = create_session_path(config).await?;
-    let session_id = session_id_from_path(&session_path)?;
-    let mut writer = JsonlSessionWriter::create(&session_path)
-        .await
-        .with_context(|| format!("failed to create session {}", session_path.display()))?;
-    if let Some(session_id_tx) = session_id_tx {
-        let _ = session_id_tx.send(session_id.clone());
-    }
-    let (user_message, events) = append_user_event_jsonl(prompt.clone(), &mut writer).await?;
-    record_session_activity(config, &session_id, &prompt);
-    let runtime = runtime_for_config(config, Some(approval_tx), question_tx).await?;
-    let mut context = AgentContext::new();
-    if let Some(skill_context) = skill_context {
-        context.set_skill_context(AgentMessage::system_text(skill_context));
-    }
-    let streaming = StreamingTurnIo {
-        event_tx,
-        session_id,
-        cancel_token,
-    };
-    let turn = finish_prompt_turn_streaming(
-        user_message,
-        context,
-        &mut writer,
-        runtime,
-        events,
-        streaming,
+    let prepared = prepare_new_streaming_turn(prompt, config, session_id_tx, skill_context).await?;
+    let prompt = prepared.prompt.clone();
+    let runtime = runtime_for_config(
+        config,
+        Some(approval_tx),
+        question_tx,
+        plan_review_feedback.clone(),
     )
     .await?;
+    let turn = run_prepared_streaming_turn(prepared, runtime, event_tx, cancel_token).await?;
     record_initial_session_title(config, &turn, &prompt).await;
     Ok(turn)
 }
@@ -1055,28 +1073,116 @@ pub async fn run_prompt_in_session_streaming(
     cancel_token: CancellationToken,
     question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
     skill_context: Option<String>,
+    plan_review_feedback: Option<std::collections::BTreeMap<String, String>>,
 ) -> anyhow::Result<PromptTurn> {
+    let prepared =
+        prepare_existing_streaming_turn(session_id, prompt, config, session_id_tx, skill_context)
+            .await?;
+    let runtime = runtime_for_config(
+        config,
+        Some(approval_tx),
+        question_tx,
+        plan_review_feedback.clone(),
+    )
+    .await?;
+    runtime.restore_plan_mode(&prepared.context);
+    run_prepared_streaming_turn(prepared, runtime, event_tx, cancel_token).await
+}
+
+async fn prepare_new_streaming_turn(
+    prompt: &[String],
+    config: &AppConfig,
+    session_id_tx: Option<mpsc::UnboundedSender<String>>,
+    skill_context: Option<String>,
+) -> anyhow::Result<PreparedStreamingTurn> {
+    let prompt = prompt.join(" ");
+    let session_path = create_session_path(config).await?;
+    let session_id = session_id_from_path(&session_path)?;
+    let mut writer = JsonlSessionWriter::create(&session_path)
+        .await
+        .with_context(|| format!("failed to create session {}", session_path.display()))?;
+    send_streaming_session_id(session_id_tx, &session_id);
+    let (user_message, initial_events) =
+        append_user_event_jsonl(prompt.clone(), &mut writer).await?;
+    record_session_activity(config, &session_id, &prompt);
+    Ok(PreparedStreamingTurn {
+        prompt,
+        session_id,
+        context: streaming_context(skill_context),
+        writer,
+        user_message,
+        initial_events,
+    })
+}
+
+async fn prepare_existing_streaming_turn(
+    session_id: &str,
+    prompt: &[String],
+    config: &AppConfig,
+    session_id_tx: Option<mpsc::UnboundedSender<String>>,
+    skill_context: Option<String>,
+) -> anyhow::Result<PreparedStreamingTurn> {
     let prompt = prompt.join(" ");
     let session_path = sessions::session_path(session_id, config)?;
     let mut context = JsonlSessionReader::replay_context(&session_path)
         .await
         .with_context(|| format!("failed to replay session {}", session_path.display()))?;
-    if let Some(skill_context) = skill_context {
-        context.set_skill_context(AgentMessage::system_text(skill_context));
-    }
+    apply_skill_context(&mut context, skill_context);
     let mut writer = JsonlSessionWriter::open_append(&session_path)
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
+    send_streaming_session_id(session_id_tx, session_id);
+    let (user_message, initial_events) =
+        append_user_event_jsonl(prompt.clone(), &mut writer).await?;
+    record_session_activity(config, session_id, &prompt);
+    Ok(PreparedStreamingTurn {
+        prompt,
+        session_id: session_id.to_owned(),
+        context,
+        writer,
+        user_message,
+        initial_events,
+    })
+}
+
+fn send_streaming_session_id(
+    session_id_tx: Option<mpsc::UnboundedSender<String>>,
+    session_id: &str,
+) {
     if let Some(session_id_tx) = session_id_tx {
         let _ = session_id_tx.send(session_id.to_owned());
     }
-    let (user_message, events) = append_user_event_jsonl(prompt.clone(), &mut writer).await?;
-    record_session_activity(config, session_id, &prompt);
-    let runtime = runtime_for_config(config, Some(approval_tx), question_tx).await?;
-    runtime.restore_plan_mode(&context);
+}
+
+fn streaming_context(skill_context: Option<String>) -> AgentContext {
+    let mut context = AgentContext::new();
+    apply_skill_context(&mut context, skill_context);
+    context
+}
+
+fn apply_skill_context(context: &mut AgentContext, skill_context: Option<String>) {
+    if let Some(skill_context) = skill_context {
+        context.set_skill_context(AgentMessage::system_text(skill_context));
+    }
+}
+
+async fn run_prepared_streaming_turn(
+    prepared: PreparedStreamingTurn,
+    runtime: AgentRuntime,
+    event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
+    cancel_token: CancellationToken,
+) -> anyhow::Result<PromptTurn> {
+    let PreparedStreamingTurn {
+        session_id,
+        context,
+        mut writer,
+        user_message,
+        initial_events,
+        prompt: _,
+    } = prepared;
     let streaming = StreamingTurnIo {
         event_tx,
-        session_id: session_id.to_owned(),
+        session_id,
         cancel_token,
     };
     finish_prompt_turn_streaming(
@@ -1084,7 +1190,7 @@ pub async fn run_prompt_in_session_streaming(
         context,
         &mut writer,
         runtime,
-        events,
+        initial_events,
         streaming,
     )
     .await
@@ -1094,6 +1200,7 @@ async fn runtime_for_config(
     config: &AppConfig,
     approval_tx: Option<mpsc::UnboundedSender<PromptApprovalRequest>>,
     question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
+    plan_review_feedback: Option<std::collections::BTreeMap<String, String>>,
 ) -> anyhow::Result<AgentRuntime> {
     let model = resolve_model(config)?;
     let client = resolve_model_client(config, &model)?;
@@ -1103,7 +1210,11 @@ async fn runtime_for_config(
         &config.extra_skill_dirs,
         &config.skill_path,
     )?;
-    let agent_config = agent_config_for_app(model, config, approval_tx, &skill_store)?;
+    let mut agent_config = agent_config_for_app(model, config, approval_tx, &skill_store)?;
+    if let Some(feedback) = plan_review_feedback {
+        agent_config.plan_review_feedback =
+            Arc::new(std::sync::Mutex::new(feedback.into_iter().collect()));
+    }
     let mut tools =
         tool_registry_for_config(config, std::sync::Arc::clone(&agent_config.todos)).await?;
     if let Some(question_tx) = question_tx {
@@ -1255,6 +1366,21 @@ struct StreamingTurnIo {
     cancel_token: CancellationToken,
 }
 
+struct PreparedStreamingTurn {
+    prompt: String,
+    session_id: String,
+    context: AgentContext,
+    writer: JsonlSessionWriter,
+    user_message: AgentMessage,
+    initial_events: Vec<AgentEvent>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StreamingEventEffect {
+    persist: bool,
+    assistant_text: Option<String>,
+}
+
 async fn finish_prompt_turn_streaming(
     user_message: AgentMessage,
     mut context: AgentContext,
@@ -1263,40 +1389,21 @@ async fn finish_prompt_turn_streaming(
     initial_events: Vec<AgentEvent>,
     streaming: StreamingTurnIo,
 ) -> anyhow::Result<PromptTurn> {
-    let mut events = Vec::new();
-    for event in initial_events {
-        let _ = streaming.event_tx.send(Ok(event.clone()));
-        events.push(event);
-    }
-
+    let mut events = forward_initial_streaming_events(&streaming.event_tx, initial_events);
     let mut assistant_text = String::new();
     let mut stream =
         runtime.run_turn_with_cancel(&mut context, user_message.clone(), streaming.cancel_token);
     while let Some(event) = stream.next().await {
-        let event = match event {
-            Ok(event) => event,
-            Err(error) => {
-                let message = error.to_string();
-                let _ = streaming
-                    .event_tx
-                    .send(Err(anyhow::anyhow!(message.clone())));
-                anyhow::bail!(message);
-            }
-        };
-        let is_duplicate_user_message = matches!(
+        let event = streaming_event_or_bail(event, &streaming.event_tx)?;
+        append_streaming_event(
             &event,
-            AgentEvent::MessageAppended { message } if message == &user_message
-        );
-        if !is_duplicate_user_message {
-            if let AgentEvent::MessageAppended { message } = &event
-                && matches!(message, AgentMessage::Assistant { .. })
-            {
-                assistant_text.push_str(&message_text(message));
-            }
-            writer.append_event(&event).await?;
-        }
-        let _ = streaming.event_tx.send(Ok(event.clone()));
-        events.push(event);
+            &user_message,
+            writer,
+            &mut assistant_text,
+            &streaming.event_tx,
+            &mut events,
+        )
+        .await?;
     }
     writer.flush().await?;
 
@@ -1307,6 +1414,78 @@ async fn finish_prompt_turn_streaming(
     })
 }
 
+fn forward_initial_streaming_events(
+    event_tx: &mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
+    initial_events: Vec<AgentEvent>,
+) -> Vec<AgentEvent> {
+    for event in &initial_events {
+        let _ = event_tx.send(Ok(event.clone()));
+    }
+    initial_events
+}
+
+fn streaming_event_or_bail<E: std::fmt::Display>(
+    event: Result<AgentEvent, E>,
+    event_tx: &mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
+) -> anyhow::Result<AgentEvent> {
+    event.map_err(|error| {
+        let message = error.to_string();
+        let _ = event_tx.send(Err(anyhow::anyhow!(message.clone())));
+        anyhow::anyhow!(message)
+    })
+}
+
+async fn append_streaming_event(
+    event: &AgentEvent,
+    user_message: &AgentMessage,
+    writer: &mut JsonlSessionWriter,
+    assistant_text: &mut String,
+    event_tx: &mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
+    events: &mut Vec<AgentEvent>,
+) -> anyhow::Result<()> {
+    let effect = streaming_event_effect(event, user_message);
+    if let Some(text) = effect.assistant_text {
+        assistant_text.push_str(&text);
+    }
+    if effect.persist {
+        writer.append_event(event).await?;
+    }
+    let _ = event_tx.send(Ok(event.clone()));
+    events.push(event.clone());
+    Ok(())
+}
+
+fn streaming_event_effect(event: &AgentEvent, user_message: &AgentMessage) -> StreamingEventEffect {
+    if is_duplicate_user_message_event(event, user_message) {
+        return StreamingEventEffect {
+            persist: false,
+            assistant_text: None,
+        };
+    }
+    StreamingEventEffect {
+        persist: true,
+        assistant_text: assistant_text_from_event(event),
+    }
+}
+
+fn is_duplicate_user_message_event(event: &AgentEvent, user_message: &AgentMessage) -> bool {
+    matches!(
+        event,
+        AgentEvent::MessageAppended { message } if message == user_message
+    )
+}
+
+fn assistant_text_from_event(event: &AgentEvent) -> Option<String> {
+    let AgentEvent::MessageAppended { message } = event else {
+        return None;
+    };
+    if matches!(message, AgentMessage::Assistant { .. }) {
+        Some(message_text(message))
+    } else {
+        None
+    }
+}
+
 fn agent_config_for_app(
     model: ModelSpec,
     config: &AppConfig,
@@ -1314,7 +1493,7 @@ fn agent_config_for_app(
     skill_store: &SkillStore,
 ) -> anyhow::Result<AgentConfig> {
     let mut agent_config = AgentConfig::for_model(model)
-        .with_tool_permission_policy(config.permissions.clone())
+        .with_permission_mode(config.permission_mode)
         .with_queue_modes(
             config.runtime.steering_queue_mode,
             config.runtime.follow_up_queue_mode,
@@ -1351,9 +1530,11 @@ fn agent_config_for_app(
                     .send(PromptApprovalRequest { id, decision_tx })
                     .is_err()
                 {
-                    return PermissionDecision::Deny;
+                    return PermissionApprovalDecision::Reject;
                 }
-                decision_rx.await.unwrap_or(PermissionDecision::Deny)
+                decision_rx
+                    .await
+                    .unwrap_or(PermissionApprovalDecision::Reject)
             }
         });
     }
@@ -1774,22 +1955,23 @@ mod tests {
 
     use neo_agent_core::{
         AgentConfig, AgentEvent, AgentMessage, ApprovalRequest, CompactionSettings, Content,
-        PermissionDecision, PermissionOperation, PermissionPolicy, QueueMode,
+        PermissionApprovalDecision, PermissionMode, PermissionOperation, QueueMode,
         StopReason as AgentStopReason, ToolExecutionMode,
         session::{JsonlSessionReader, JsonlSessionWriter},
         skills::SkillStore,
     };
     use neo_ai::{
-        AiStreamEvent, ApiKind, ChatMessage, ContentPart, ModelCapabilities, ModelSpec, ProviderId,
-        StopReason, providers::fake::FakeModelClient,
+        AiStreamEvent, ApiKind, ApiType, ChatMessage, ContentPart, ModelCapabilities, ModelSpec,
+        ProviderId, StopReason, providers::fake::FakeModelClient,
     };
 
     use super::{
         PromptApprovalRequest, StableJsonState, agent_config_for_app, create_session_path,
-        run_prompt_with_runtime,
+        list_configured_models, run_prompt_with_runtime,
     };
     use crate::config::{
-        AppConfig, Defaults, McpConfig, RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
+        AppConfig, Defaults, McpConfig, ModelConfig, ProviderConfig, RuntimeCompactionConfig,
+        RuntimeConfig, TuiConfig,
     };
 
     #[test]
@@ -1803,7 +1985,7 @@ mod tests {
             models: BTreeMap::new(),
             model_scope: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
-            permissions: PermissionPolicy::default(),
+            permission_mode: PermissionMode::default(),
             defaults: Defaults {
                 mode: "events".to_owned(),
             },
@@ -1876,7 +2058,7 @@ mod tests {
             models: BTreeMap::new(),
             model_scope: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
-            permissions: PermissionPolicy::default(),
+            permission_mode: PermissionMode::default(),
             defaults: Defaults {
                 mode: "events".to_owned(),
             },
@@ -1966,7 +2148,7 @@ mod tests {
             models: BTreeMap::new(),
             model_scope: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
-            permissions: PermissionPolicy::default(),
+            permission_mode: PermissionMode::default(),
             defaults: Defaults {
                 mode: "interactive".to_owned(),
             },
@@ -2026,7 +2208,7 @@ mod tests {
             models: BTreeMap::new(),
             model_scope: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
-            permissions: PermissionPolicy::default(),
+            permission_mode: PermissionMode::default(),
             defaults: Defaults {
                 mode: "interactive".to_owned(),
             },
@@ -2086,7 +2268,7 @@ mod tests {
             models: BTreeMap::new(),
             model_scope: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
-            permissions: PermissionPolicy::default(),
+            permission_mode: PermissionMode::default(),
             defaults: Defaults {
                 mode: "interactive".to_owned(),
             },
@@ -2127,11 +2309,11 @@ mod tests {
 
         assert_eq!(id, "tool-1");
         decision_tx
-            .send(PermissionDecision::Allow)
+            .send(PermissionApprovalDecision::AllowOnce)
             .expect("send decision");
         assert_eq!(
             decision.await.expect("approval task joins"),
-            PermissionDecision::Allow
+            PermissionApprovalDecision::AllowOnce
         );
     }
 
@@ -2216,6 +2398,139 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn streaming_event_effects_skip_duplicate_user_message() {
+        let user_message = AgentMessage::user_text("hello");
+        let event = AgentEvent::MessageAppended {
+            message: user_message.clone(),
+        };
+
+        let effect = super::streaming_event_effect(&event, &user_message);
+
+        assert!(!effect.persist);
+        assert_eq!(effect.assistant_text.as_deref(), None);
+    }
+
+    #[test]
+    fn streaming_event_effects_persist_assistant_text() {
+        let user_message = AgentMessage::user_text("hello");
+        let event = AgentEvent::MessageAppended {
+            message: AgentMessage::assistant(
+                [Content::text("answer")],
+                Vec::new(),
+                AgentStopReason::EndTurn,
+            ),
+        };
+
+        let effect = super::streaming_event_effect(&event, &user_message);
+
+        assert!(effect.persist);
+        assert_eq!(effect.assistant_text.as_deref(), Some("answer"));
+    }
+
+    #[test]
+    fn streaming_event_effects_persist_non_message_events_without_text() {
+        let user_message = AgentMessage::user_text("hello");
+        let event = AgentEvent::TurnStarted { turn: 1 };
+
+        let effect = super::streaming_event_effect(&event, &user_message);
+
+        assert!(effect.persist);
+        assert_eq!(effect.assistant_text.as_deref(), None);
+    }
+
+    #[test]
+    fn list_configured_models_formats_text_entries() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(temp.path());
+        config.default_provider = "openai".to_owned();
+        config.default_model = "gpt-4.1".to_owned();
+        config.providers.insert(
+            "openai".to_owned(),
+            ProviderConfig {
+                provider_type: Some(ApiType::OpenAiResponses),
+                ..ProviderConfig::default()
+            },
+        );
+        config.models.insert(
+            "fast".to_owned(),
+            ModelConfig {
+                provider: "openai".to_owned(),
+                model: "gpt-4.1".to_owned(),
+                max_context_tokens: Some(1_000_000),
+                capabilities: vec!["streaming".to_owned(), "tools".to_owned()],
+                display_name: Some("GPT 4.1".to_owned()),
+                ..ModelConfig::default()
+            },
+        );
+        config.models.insert(
+            "local/echo".to_owned(),
+            ModelConfig {
+                provider: "missing".to_owned(),
+                model: "echo".to_owned(),
+                capabilities: vec!["streaming".to_owned()],
+                ..ModelConfig::default()
+            },
+        );
+
+        let output = list_configured_models(&config, false).expect("models list");
+
+        assert_eq!(
+            output,
+            concat!(
+                "models:\n",
+                "- fast -> openai/gpt-4.1 (openai-responses default) ctx=1000000 [streaming,tools] - GPT 4.1\n",
+                "- local/echo (unknown) ctx=? [streaming]\n",
+            )
+        );
+    }
+
+    #[test]
+    fn list_configured_models_formats_json_entries() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(temp.path());
+        config.default_provider = "openai".to_owned();
+        config.default_model = "fast".to_owned();
+        config.providers.insert(
+            "openai".to_owned(),
+            ProviderConfig {
+                provider_type: Some(ApiType::OpenAiResponses),
+                ..ProviderConfig::default()
+            },
+        );
+        config.models.insert(
+            "fast".to_owned(),
+            ModelConfig {
+                provider: "openai".to_owned(),
+                model: "gpt-4.1".to_owned(),
+                max_context_tokens: Some(1_000_000),
+                capabilities: vec!["streaming".to_owned(), "tools".to_owned()],
+                display_name: Some("GPT 4.1".to_owned()),
+                ..ModelConfig::default()
+            },
+        );
+
+        let output = list_configured_models(&config, true).expect("models json");
+        let value: serde_json::Value = serde_json::from_str(&output).expect("json output");
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "models": [{
+                    "alias": "fast",
+                    "provider": "openai",
+                    "model": "gpt-4.1",
+                    "type": "openai-responses",
+                    "capabilities": ["streaming", "tools"],
+                    "max_context_tokens": 1_000_000,
+                    "display_name": "GPT 4.1",
+                    "default": true,
+                }],
+                "default_model": "fast",
+            })
+        );
+    }
+
     fn fake_model() -> ModelSpec {
         ModelSpec {
             provider: ProviderId("test-provider".to_owned()),
@@ -2240,5 +2555,31 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    fn test_config(project_dir: &std::path::Path) -> AppConfig {
+        AppConfig {
+            default_model: "test-model".to_owned(),
+            default_provider: "openai".to_owned(),
+            api_key_env: None,
+            providers: BTreeMap::new(),
+            models: BTreeMap::new(),
+            model_scope: Vec::new(),
+            sessions_dir: project_dir.join(".neo/sessions"),
+            permission_mode: PermissionMode::default(),
+            defaults: Defaults {
+                mode: "interactive".to_owned(),
+            },
+            runtime: RuntimeConfig::default(),
+            tui: TuiConfig::default(),
+            theme: crate::themes::ResolvedTheme::default(),
+            mcp: McpConfig::default(),
+            prompt_templates: Vec::new(),
+            extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
+            project_trusted: true,
+            project_dir: project_dir.to_path_buf(),
+            config_path: project_dir.join(".neo/config.toml"),
+        }
     }
 }

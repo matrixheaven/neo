@@ -10,7 +10,9 @@ use std::path::Path;
 use anyhow::Context;
 use serde_json::json;
 
-use crate::config::{AppConfig, ModelConfig, ProviderConfig, read_file_config, write_file_config};
+use crate::config::{
+    AppConfig, FileConfig, ModelConfig, ProviderConfig, read_file_config, write_file_config,
+};
 
 /// Add or replace a provider in config.toml.
 pub fn add_provider(
@@ -28,25 +30,7 @@ pub fn add_provider(
 /// Remove a provider and all its models from config.toml.
 pub fn remove_provider(config_path: &Path, provider_id: &str) -> anyhow::Result<String> {
     let mut file_config = read_file_config(config_path)?;
-
-    // Delete the provider entry
-    if let Some(providers) = &mut file_config.providers {
-        providers.remove(provider_id);
-    }
-
-    // Delete all model aliases that reference this provider
-    if let Some(models) = &mut file_config.models {
-        models.retain(|_, m| m.provider != provider_id);
-    }
-
-    // Clear default_model if it pointed at a deleted model
-    if let Some(default) = &file_config.default_model {
-        let prefix = format!("{provider_id}/");
-        if default.starts_with(&prefix) || default == provider_id {
-            file_config.default_model = None;
-        }
-    }
-
+    remove_provider_config(&mut file_config, provider_id);
     write_file_config(config_path, &file_config)?;
     Ok(format!("removed provider '{provider_id}' and its models\n"))
 }
@@ -117,64 +101,19 @@ pub fn add_provider_from_catalog_entry(
                 "provider '{provider_id}' has an unsupported wire type or no usable models"
             )
         })?;
+    let count = provider_config.models.len();
 
     let mut file_config = read_file_config(config_path)?;
-
-    // Remove existing provider first (full replacement)
-    if let Some(providers) = &mut file_config.providers {
-        providers.remove(provider_id);
-    }
-    if let Some(models) = &mut file_config.models {
-        let pid = provider_id.to_owned();
-        models.retain(|_, m| m.provider != pid);
-    }
-
-    // Write provider
-    let providers = file_config.providers.get_or_insert_with(BTreeMap::new);
-    let pcfg = ProviderConfig {
-        provider_type: Some(provider_config.provider_type),
-        base_url: provider_config.base_url,
-        api_key: api_key.map(str::to_owned),
-        api_key_env: provider_config.api_key_env,
-    };
-    providers.insert(provider_id.to_owned(), pcfg);
-
-    // Write models
-    let models = file_config.models.get_or_insert_with(BTreeMap::new);
-    let mut selected_alias = None;
-    for model_info in &provider_config.models {
-        let alias = format!("{provider_id}/{}", model_info.id);
-        let caps = model_info.capabilities.clone();
-        let mc = ModelConfig {
-            provider: provider_id.to_owned(),
-            model: model_info.id.clone(),
-            max_context_tokens: model_info.max_context_tokens,
-            max_output_tokens: model_info.max_output_tokens,
-            capabilities: caps,
-            display_name: model_info.name.clone(),
-        };
-        if let Some(dm) = default_model
-            && model_info.id == dm
-        {
-            selected_alias = Some(alias.clone());
-        }
-        models.insert(alias, mc);
-    }
-
-    // Set default model
-    let chosen = selected_alias.or_else(|| {
-        provider_config
-            .models
-            .first()
-            .map(|m| format!("{provider_id}/{}", m.id))
-    });
-    if let Some(chosen) = chosen {
-        file_config.default_model = Some(chosen);
-    }
+    replace_provider_from_catalog(
+        &mut file_config,
+        provider_id,
+        provider_config,
+        api_key,
+        default_model,
+    );
 
     write_file_config(config_path, &file_config)?;
 
-    let count = provider_config.models.len();
     Ok(format!(
         "imported provider '{provider_id}' with {count} model{} from models.dev\n",
         if count == 1 { "" } else { "s" }
@@ -186,15 +125,9 @@ pub fn add_provider_from_catalog_entry(
 /// Uses the merged `AppConfig` so providers from both user-global and project
 /// `config.toml` are visible.
 pub fn list_providers(config: &AppConfig, json: bool) -> anyhow::Result<String> {
-    let providers = &config.providers;
-    let models = &config.models;
-
-    if providers.is_empty() {
+    if config.providers.is_empty() {
         if json {
-            return Ok(serde_json::to_string_pretty(&json!({
-                "providers": [],
-                "default_model": config.default_model,
-            }))? + "\n");
+            return providers_json(Vec::new(), &config.default_model);
         }
         return Ok(
             "no providers configured. Use `neo provider catalog list` to discover providers.\n"
@@ -203,55 +136,205 @@ pub fn list_providers(config: &AppConfig, json: bool) -> anyhow::Result<String> 
     }
 
     if json {
-        let entries: Vec<_> = providers
+        let entries = config
+            .providers
             .iter()
-            .map(|(id, cfg)| {
-                let ptype = cfg
-                    .provider_type
-                    .as_ref()
-                    .map_or("unknown", |t| t.as_config_str());
-                let base = cfg.base_url.as_deref().unwrap_or("(none)");
-                let model_count = models.values().filter(|m| m.provider == *id).count();
-                let is_default = config.default_model.starts_with(&format!("{id}/"));
-                json!({
-                    "id": id,
-                    "type": ptype,
-                    "base_url": base,
-                    "credential": provider_credential_label(cfg),
-                    "model_count": model_count,
-                    "default": is_default,
-                })
-            })
+            .map(|(id, cfg)| provider_entry_json(id, cfg, config))
             .collect();
-        return Ok(serde_json::to_string_pretty(&json!({
-            "providers": entries,
-            "default_model": config.default_model,
-        }))? + "\n");
+        return providers_json(entries, &config.default_model);
     }
 
     let mut out = String::new();
-    for (id, cfg) in providers {
-        let ptype = cfg
-            .provider_type
-            .as_ref()
-            .map_or("unknown", |t| t.as_config_str());
-        let base = cfg.base_url.as_deref().unwrap_or("(none)");
-        let model_count = models.values().filter(|m| m.provider == *id).count();
-        let current = if config.default_model.starts_with(&format!("{id}/")) {
-            " ← current"
-        } else {
-            ""
-        };
-        let _ = writeln!(
-            out,
-            "{id:<20} type={ptype:<18} base_url={base:<45} models={model_count:<3} cred={cred}{current}",
-            cred = provider_credential_label(cfg)
-        );
+    for (id, cfg) in &config.providers {
+        let _ = writeln!(out, "{}", provider_entry_text(id, cfg, config));
     }
     if !config.default_model.is_empty() {
         let _ = writeln!(out, "\nDefault model: {}", config.default_model);
     }
     Ok(out)
+}
+
+fn remove_provider_config(file_config: &mut FileConfig, provider_id: &str) {
+    remove_provider_entry(file_config.providers.as_mut(), provider_id);
+    remove_provider_models(file_config.models.as_mut(), provider_id);
+    clear_provider_default(&mut file_config.default_model, provider_id);
+}
+
+fn remove_provider_entry(
+    providers: Option<&mut BTreeMap<String, ProviderConfig>>,
+    provider_id: &str,
+) {
+    if let Some(providers) = providers {
+        providers.remove(provider_id);
+    }
+}
+
+fn remove_provider_models(models: Option<&mut BTreeMap<String, ModelConfig>>, provider_id: &str) {
+    if let Some(models) = models {
+        models.retain(|_, model| model.provider != provider_id);
+    }
+}
+
+fn clear_provider_default(default_model: &mut Option<String>, provider_id: &str) {
+    if default_model
+        .as_deref()
+        .is_some_and(|default| provider_owns_default(provider_id, default))
+    {
+        *default_model = None;
+    }
+}
+
+fn provider_owns_default(provider_id: &str, default_model: &str) -> bool {
+    default_model == provider_id || default_model.starts_with(&format!("{provider_id}/"))
+}
+
+fn replace_provider_from_catalog(
+    file_config: &mut FileConfig,
+    provider_id: &str,
+    provider_config: neo_ai::catalog::CatalogProviderConfig,
+    api_key: Option<&str>,
+    default_model: Option<&str>,
+) {
+    remove_provider_config(file_config, provider_id);
+    insert_catalog_provider(file_config, provider_id, &provider_config, api_key);
+    insert_catalog_models(file_config, provider_id, &provider_config);
+    if let Some(default_alias) = catalog_default_alias(provider_id, &provider_config, default_model)
+    {
+        file_config.default_model = Some(default_alias);
+    }
+}
+
+fn insert_catalog_provider(
+    file_config: &mut FileConfig,
+    provider_id: &str,
+    provider_config: &neo_ai::catalog::CatalogProviderConfig,
+    api_key: Option<&str>,
+) {
+    let providers = file_config.providers.get_or_insert_with(BTreeMap::new);
+    providers.insert(
+        provider_id.to_owned(),
+        ProviderConfig {
+            provider_type: Some(provider_config.provider_type),
+            base_url: provider_config.base_url.clone(),
+            api_key: api_key.map(str::to_owned),
+            api_key_env: provider_config.api_key_env.clone(),
+        },
+    );
+}
+
+fn insert_catalog_models(
+    file_config: &mut FileConfig,
+    provider_id: &str,
+    provider_config: &neo_ai::catalog::CatalogProviderConfig,
+) {
+    let models = file_config.models.get_or_insert_with(BTreeMap::new);
+    for model_info in &provider_config.models {
+        models.insert(
+            catalog_model_alias(provider_id, &model_info.id),
+            catalog_model_config(provider_id, model_info),
+        );
+    }
+}
+
+fn catalog_model_config(
+    provider_id: &str,
+    model_info: &neo_ai::catalog::CatalogModelInfo,
+) -> ModelConfig {
+    ModelConfig {
+        provider: provider_id.to_owned(),
+        model: model_info.id.clone(),
+        max_context_tokens: model_info.max_context_tokens,
+        max_output_tokens: model_info.max_output_tokens,
+        capabilities: model_info.capabilities.clone(),
+        display_name: model_info.name.clone(),
+    }
+}
+
+fn catalog_default_alias(
+    provider_id: &str,
+    provider_config: &neo_ai::catalog::CatalogProviderConfig,
+    default_model: Option<&str>,
+) -> Option<String> {
+    default_model
+        .and_then(|model_id| {
+            catalog_alias_for_model(provider_id, &provider_config.models, model_id)
+        })
+        .or_else(|| {
+            provider_config
+                .models
+                .first()
+                .map(|model| catalog_model_alias(provider_id, &model.id))
+        })
+}
+
+fn catalog_alias_for_model(
+    provider_id: &str,
+    models: &[neo_ai::catalog::CatalogModelInfo],
+    model_id: &str,
+) -> Option<String> {
+    models
+        .iter()
+        .find(|model| model.id == model_id)
+        .map(|model| catalog_model_alias(provider_id, &model.id))
+}
+
+fn catalog_model_alias(provider_id: &str, model_id: &str) -> String {
+    format!("{provider_id}/{model_id}")
+}
+
+fn providers_json(entries: Vec<serde_json::Value>, default_model: &str) -> anyhow::Result<String> {
+    Ok(serde_json::to_string_pretty(&json!({
+        "providers": entries,
+        "default_model": default_model,
+    }))? + "\n")
+}
+
+fn provider_entry_json(id: &str, cfg: &ProviderConfig, config: &AppConfig) -> serde_json::Value {
+    json!({
+        "id": id,
+        "type": provider_type_label(cfg),
+        "base_url": provider_base_url_label(cfg),
+        "credential": provider_credential_label(cfg),
+        "model_count": provider_model_count(config, id),
+        "default": config.default_model.starts_with(&format!("{id}/")),
+    })
+}
+
+fn provider_entry_text(id: &str, cfg: &ProviderConfig, config: &AppConfig) -> String {
+    format!(
+        "{id:<20} type={ptype:<18} base_url={base:<45} models={model_count:<3} cred={cred}{current}",
+        ptype = provider_type_label(cfg),
+        base = provider_base_url_label(cfg),
+        model_count = provider_model_count(config, id),
+        cred = provider_credential_label(cfg),
+        current = provider_current_marker(config, id)
+    )
+}
+
+fn provider_type_label(cfg: &ProviderConfig) -> &str {
+    cfg.provider_type
+        .as_ref()
+        .map_or("unknown", |provider_type| provider_type.as_config_str())
+}
+
+fn provider_base_url_label(cfg: &ProviderConfig) -> &str {
+    cfg.base_url.as_deref().unwrap_or("(none)")
+}
+
+fn provider_model_count(config: &AppConfig, provider_id: &str) -> usize {
+    config
+        .models
+        .values()
+        .filter(|model| model.provider == provider_id)
+        .count()
+}
+
+fn provider_current_marker(config: &AppConfig, provider_id: &str) -> &'static str {
+    if config.default_model.starts_with(&format!("{provider_id}/")) {
+        " ← current"
+    } else {
+        ""
+    }
 }
 
 fn provider_credential_label(cfg: &ProviderConfig) -> &'static str {
@@ -265,5 +348,234 @@ fn provider_credential_label(cfg: &ProviderConfig) -> &'static str {
         }
     } else {
         "(none)"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, fs};
+
+    use neo_ai::{ApiType, catalog};
+    use tempfile::TempDir;
+
+    use super::{add_provider_from_catalog_entry, list_providers, remove_provider};
+    use crate::config::{
+        AppConfig, Defaults, McpConfig, ModelConfig, ProviderConfig, RuntimeConfig, TuiConfig,
+    };
+
+    #[test]
+    fn list_providers_formats_text_and_json_entries() {
+        let temp = TempDir::new().expect("temp dir");
+        let mut config = test_config(temp.path());
+        config.default_model = "openai/gpt-4.1".to_owned();
+        config.providers.insert(
+            "openai".to_owned(),
+            ProviderConfig {
+                provider_type: Some(ApiType::OpenAiResponses),
+                base_url: Some("https://api.openai.test/v1".to_owned()),
+                api_key: Some("secret".to_owned()),
+                api_key_env: None,
+            },
+        );
+        config.models.insert(
+            "openai/gpt-4.1".to_owned(),
+            ModelConfig {
+                provider: "openai".to_owned(),
+                model: "gpt-4.1".to_owned(),
+                ..ModelConfig::default()
+            },
+        );
+
+        let text = list_providers(&config, false).expect("provider text");
+        assert!(text.contains("openai"));
+        assert!(text.contains("type=openai-responses"));
+        assert!(text.contains("models=1"));
+        assert!(text.contains("cred=api_key"));
+        assert!(text.contains("current"));
+        assert!(text.contains("Default model: openai/gpt-4.1"));
+
+        let json_output = list_providers(&config, true).expect("provider json");
+        let value: serde_json::Value = serde_json::from_str(&json_output).expect("json");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "providers": [{
+                    "id": "openai",
+                    "type": "openai-responses",
+                    "base_url": "https://api.openai.test/v1",
+                    "credential": "api_key",
+                    "model_count": 1,
+                    "default": true,
+                }],
+                "default_model": "openai/gpt-4.1",
+            })
+        );
+    }
+
+    #[test]
+    fn remove_provider_drops_models_and_default_for_that_provider_only() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_project_config(
+            temp.path(),
+            r#"
+default_model = "openai/gpt-4.1"
+
+[providers.openai]
+type = "openai-responses"
+base_url = "https://api.openai.test/v1"
+
+[providers.anthropic]
+type = "anthropic"
+base_url = "https://api.anthropic.test"
+
+[models."openai/gpt-4.1"]
+provider = "openai"
+model = "gpt-4.1"
+
+[models."anthropic/sonnet"]
+provider = "anthropic"
+model = "claude-sonnet-4"
+"#,
+        );
+
+        let message = remove_provider(&config_path, "openai").expect("remove provider");
+        assert_eq!(message, "removed provider 'openai' and its models\n");
+
+        let written = fs::read_to_string(config_path).expect("read config");
+        assert!(!written.contains("[providers.openai]"));
+        assert!(written.contains("[providers.anthropic]"));
+        assert!(!written.contains("[models.\"openai/gpt-4.1\"]"));
+        assert!(written.contains("[models.\"anthropic/sonnet\"]"));
+        assert!(!written.contains("default_model"));
+    }
+
+    #[test]
+    fn add_provider_from_catalog_entry_replaces_existing_provider_models() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_project_config(
+            temp.path(),
+            r#"
+default_model = "openai/old"
+
+[providers.openai]
+type = "openai-chat"
+base_url = "https://old.example/v1"
+
+[models."openai/old"]
+provider = "openai"
+model = "old"
+
+[models."other/stays"]
+provider = "other"
+model = "stays"
+"#,
+        );
+        let entry = catalog_entry();
+
+        let message = add_provider_from_catalog_entry(
+            &config_path,
+            "openai",
+            &entry,
+            Some("inline-key"),
+            Some("gpt-large"),
+        )
+        .expect("import provider");
+
+        assert_eq!(
+            message,
+            "imported provider 'openai' with 2 models from models.dev\n"
+        );
+        let written = fs::read_to_string(config_path).expect("read config");
+        assert!(written.contains("default_model = \"openai/gpt-large\""));
+        assert!(written.contains("[providers.openai]"));
+        assert!(written.contains("type = \"openai-responses\""));
+        assert!(written.contains("api_key = \"inline-key\""));
+        assert!(written.contains("[models.\"openai/gpt-small\"]"));
+        assert!(written.contains("[models.\"openai/gpt-large\"]"));
+        assert!(written.contains("[models.\"other/stays\"]"));
+        assert!(!written.contains("[models.\"openai/old\"]"));
+        assert!(!written.contains("OPENAI_API_KEY"));
+    }
+
+    fn write_project_config(project_dir: &std::path::Path, content: &str) -> std::path::PathBuf {
+        let config_dir = project_dir.join(".neo");
+        fs::create_dir_all(&config_dir).expect("create .neo");
+        let config_path = config_dir.join("config.toml");
+        fs::write(&config_path, content).expect("write config");
+        config_path
+    }
+
+    fn catalog_entry() -> catalog::CatalogEntry {
+        catalog::CatalogEntry {
+            id: "openai".to_owned(),
+            name: Some("OpenAI".to_owned()),
+            api: Some("https://api.openai.test/v1".to_owned()),
+            env: vec!["OPENAI_API_KEY".to_owned()],
+            npm: None,
+            explicit_type: Some("openai-responses".to_owned()),
+            models: BTreeMap::from([
+                (
+                    "gpt-small".to_owned(),
+                    catalog::CatalogModel {
+                        id: "gpt-small".to_owned(),
+                        name: Some("GPT Small".to_owned()),
+                        family: None,
+                        limit: Some(catalog::CatalogLimit {
+                            context: Some(128_000),
+                            output: Some(16_000),
+                        }),
+                        tool_call: Some(true),
+                        reasoning: Some(false),
+                        interleaved: None,
+                        modalities: None,
+                    },
+                ),
+                (
+                    "gpt-large".to_owned(),
+                    catalog::CatalogModel {
+                        id: "gpt-large".to_owned(),
+                        name: Some("GPT Large".to_owned()),
+                        family: None,
+                        limit: Some(catalog::CatalogLimit {
+                            context: Some(1_000_000),
+                            output: Some(32_000),
+                        }),
+                        tool_call: Some(true),
+                        reasoning: Some(true),
+                        interleaved: None,
+                        modalities: Some(catalog::CatalogModalities {
+                            input: vec!["text".to_owned(), "image".to_owned()],
+                            output: vec!["text".to_owned()],
+                        }),
+                    },
+                ),
+            ]),
+        }
+    }
+
+    fn test_config(project_dir: &std::path::Path) -> AppConfig {
+        AppConfig {
+            default_model: "test-model".to_owned(),
+            default_provider: "openai".to_owned(),
+            api_key_env: None,
+            providers: BTreeMap::new(),
+            models: BTreeMap::new(),
+            model_scope: Vec::new(),
+            sessions_dir: project_dir.join(".neo/sessions"),
+            permission_mode: neo_agent_core::PermissionMode::default(),
+            defaults: Defaults {
+                mode: "interactive".to_owned(),
+            },
+            runtime: RuntimeConfig::default(),
+            tui: TuiConfig::default(),
+            theme: crate::themes::ResolvedTheme::default(),
+            mcp: McpConfig::default(),
+            prompt_templates: Vec::new(),
+            extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
+            project_trusted: true,
+            project_dir: project_dir.to_path_buf(),
+            config_path: project_dir.join(".neo/config.toml"),
+        }
     }
 }

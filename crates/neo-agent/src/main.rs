@@ -11,6 +11,7 @@ mod themes;
 mod trust;
 
 use std::{
+    collections::BTreeMap,
     fmt::Write as _,
     io::{self, IsTerminal as _, Read as _},
     path::{Component, Path, PathBuf},
@@ -78,7 +79,6 @@ impl RunSessionOptions {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 async fn dispatch_command(
     command: Option<Command>,
     config: &AppConfig,
@@ -88,143 +88,223 @@ async fn dispatch_command(
 ) -> anyhow::Result<String> {
     match command {
         Some(Command::Run { output, prompt }) => {
-            let prompt = prepare_prompt(prompt, config)?;
-            modes::run::execute(
-                &prompt,
-                config,
-                output.unwrap_or_else(|| run_output_for_mode(config)),
-                session_options.continue_latest,
-                session_options.no_session,
-            )
-            .await
+            dispatch_run_command(config, session_options, output, prompt).await
         }
         Some(Command::Resume { session_id }) => {
-            if io::stdout().is_terminal() {
-                let startup = match session_id {
-                    Some(id) => modes::interactive::StartupAction::LoadSession(id),
-                    None => modes::interactive::StartupAction::OpenSessionPicker,
-                };
-                Ok(modes::interactive::execute_tty_with_startup(
-                    config,
-                    startup,
-                    interactive_options,
-                )
-                .await?
-                .unwrap_or_default())
-            } else if let Some(id) = session_id {
-                let transcript = modes::sessions::transcript(&id, config).await?;
-                Ok(format!("session {id}\n{transcript}"))
-            } else {
-                anyhow::bail!(
-                    "`neo resume` requires a terminal; use `neo resume <session-id>` in scripts"
-                )
-            }
+            dispatch_resume_command(config, interactive_options, session_id).await
         }
-        Some(Command::Sessions { command }) => match command {
-            SessionCommand::List => modes::sessions::list(config),
-            SessionCommand::Show { session_id } => modes::sessions::show(&session_id, config),
-            SessionCommand::Rename { session_id, name } => {
-                modes::sessions::rename(&session_id, &name, config)
-            }
-            SessionCommand::Fork { session_id, name } => {
-                modes::sessions::fork(&session_id, name.as_deref(), config)
-            }
-            SessionCommand::Compact {
-                session_id,
-                keep_recent,
-            } => modes::sessions::compact(&session_id, keep_recent, config).await,
-            SessionCommand::ExportHtml { session_id } => {
-                modes::sessions::export_html(&session_id, config).await
-            }
-            SessionCommand::ExportJson { session_id } => {
-                modes::sessions::export_json(&session_id, config).await
-            }
-        },
+        Some(Command::Sessions { command }) => dispatch_session_command(config, command).await,
         Some(Command::Extensions { command }) => dispatch_extensions(config, command).await,
-        Some(Command::Models { command }) => match command {
-            ModelCommand::List { json } => modes::run::list_configured_models(config, json),
-            ModelCommand::Add {
-                alias,
+        Some(Command::Models { command }) => dispatch_model_command(config, command),
+        Some(Command::Provider { command }) => dispatch_provider_command(config, command).await,
+        Some(Command::Mcp { command }) => dispatch_mcp_command(config, command).await,
+        Some(Command::Rpc) => rpc_mode::execute(config).await,
+        None => dispatch_default_command(config, resume_picker, interactive_options).await,
+    }
+}
+
+async fn dispatch_run_command(
+    config: &AppConfig,
+    session_options: RunSessionOptions,
+    output: Option<cli::RunOutput>,
+    prompt: Vec<String>,
+) -> anyhow::Result<String> {
+    let prompt = prepare_prompt(prompt, config)?;
+    modes::run::execute(
+        &prompt,
+        config,
+        output.unwrap_or_else(|| run_output_for_mode(config)),
+        session_options.continue_latest,
+        session_options.no_session,
+    )
+    .await
+}
+
+async fn dispatch_resume_command(
+    config: &AppConfig,
+    interactive_options: modes::interactive::InteractiveOptions,
+    session_id: Option<String>,
+) -> anyhow::Result<String> {
+    if io::stdout().is_terminal() {
+        let startup = session_id.map_or(
+            modes::interactive::StartupAction::OpenSessionPicker,
+            modes::interactive::StartupAction::LoadSession,
+        );
+        return Ok(modes::interactive::execute_tty_with_startup(
+            config,
+            startup,
+            interactive_options,
+        )
+        .await?
+        .unwrap_or_default());
+    }
+    let Some(id) = session_id else {
+        anyhow::bail!("`neo resume` requires a terminal; use `neo resume <session-id>` in scripts");
+    };
+    let transcript = modes::sessions::transcript(&id, config).await?;
+    Ok(format!("session {id}\n{transcript}"))
+}
+
+async fn dispatch_session_command(
+    config: &AppConfig,
+    command: SessionCommand,
+) -> anyhow::Result<String> {
+    match command {
+        SessionCommand::List => modes::sessions::list(config),
+        SessionCommand::Show { session_id } => modes::sessions::show(&session_id, config),
+        SessionCommand::Rename { session_id, name } => {
+            modes::sessions::rename(&session_id, &name, config)
+        }
+        SessionCommand::Fork { session_id, name } => {
+            modes::sessions::fork(&session_id, name.as_deref(), config)
+        }
+        SessionCommand::Compact {
+            session_id,
+            keep_recent,
+        } => modes::sessions::compact(&session_id, keep_recent, config).await,
+        SessionCommand::ExportHtml { session_id } => {
+            modes::sessions::export_html(&session_id, config).await
+        }
+        SessionCommand::ExportJson { session_id } => {
+            modes::sessions::export_json(&session_id, config).await
+        }
+    }
+}
+
+fn dispatch_model_command(config: &AppConfig, command: ModelCommand) -> anyhow::Result<String> {
+    match command {
+        ModelCommand::List { json } => modes::run::list_configured_models(config, json),
+        ModelCommand::Add {
+            alias,
+            provider,
+            model,
+            max_context_tokens,
+            capabilities,
+            display_name,
+        } => config_ops::add_model(
+            &config.config_path,
+            &alias,
+            config::ModelConfig {
                 provider,
                 model,
                 max_context_tokens,
-                capabilities,
+                max_output_tokens: None,
+                capabilities: default_model_capabilities(capabilities),
                 display_name,
-            } => config_ops::add_model(
-                &config.config_path,
-                &alias,
-                config::ModelConfig {
-                    provider,
-                    model,
-                    max_context_tokens,
-                    max_output_tokens: None,
-                    capabilities: if capabilities.is_empty() {
-                        vec!["streaming".to_owned(), "tools".to_owned()]
-                    } else {
-                        capabilities
-                    },
-                    display_name,
-                },
-            ),
-            ModelCommand::Remove { alias } => config_ops::remove_model(&config.config_path, &alias),
-            ModelCommand::Set { alias } => {
-                config_ops::set_default_model(&config.config_path, &alias)
-            }
-        },
-        Some(Command::Provider { command }) => match command {
-            ProviderCommand::List { json } => config_ops::list_providers(config, json),
-            ProviderCommand::Add {
-                provider_id,
-                r#type,
-                base_url,
-                api_key,
-                api_key_env,
-            } => {
-                let provider_type = r#type
-                    .as_deref()
-                    .map(|t| {
-                        neo_ai::ApiType::from_config_str(t)
-                            .ok_or_else(|| anyhow::anyhow!("unsupported provider type: {t}"))
-                    })
-                    .transpose()?;
-                config_ops::add_provider(
-                    &config.config_path,
-                    &provider_id,
-                    config::ProviderConfig {
-                        provider_type,
-                        base_url,
-                        api_key,
-                        api_key_env,
-                    },
-                )
-            }
-            ProviderCommand::Remove { provider_id } => {
-                config_ops::remove_provider(&config.config_path, &provider_id)
-            }
-            ProviderCommand::Catalog { command } => match command {
-                CatalogCommand::List {
-                    provider_id,
-                    filter,
-                    json,
-                } => list_catalog_providers(provider_id.as_deref(), filter.as_deref(), json).await,
-                CatalogCommand::Add {
-                    provider_id,
-                    api_key,
-                    default_model,
-                } => {
-                    config_ops::catalog_add_provider(
-                        &config.config_path,
-                        &provider_id,
-                        api_key.as_deref(),
-                        default_model.as_deref(),
-                    )
-                    .await
-                }
             },
+        ),
+        ModelCommand::Remove { alias } => config_ops::remove_model(&config.config_path, &alias),
+        ModelCommand::Set { alias } => config_ops::set_default_model(&config.config_path, &alias),
+    }
+}
+
+fn default_model_capabilities(capabilities: Vec<String>) -> Vec<String> {
+    if capabilities.is_empty() {
+        vec!["streaming".to_owned(), "tools".to_owned()]
+    } else {
+        capabilities
+    }
+}
+
+async fn dispatch_provider_command(
+    config: &AppConfig,
+    command: ProviderCommand,
+) -> anyhow::Result<String> {
+    match command {
+        ProviderCommand::List { json } => config_ops::list_providers(config, json),
+        ProviderCommand::Add {
+            provider_id,
+            r#type,
+            base_url,
+            api_key,
+            api_key_env,
+        } => add_provider(
+            config,
+            &provider_id,
+            r#type.as_deref(),
+            base_url,
+            api_key,
+            api_key_env,
+        ),
+        ProviderCommand::Remove { provider_id } => {
+            config_ops::remove_provider(&config.config_path, &provider_id)
+        }
+        ProviderCommand::Catalog { command } => dispatch_catalog_command(config, command).await,
+    }
+}
+
+fn add_provider(
+    config: &AppConfig,
+    provider_id: &str,
+    provider_type: Option<&str>,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    api_key_env: Option<String>,
+) -> anyhow::Result<String> {
+    let provider_type = provider_type
+        .map(|value| {
+            neo_ai::ApiType::from_config_str(value)
+                .ok_or_else(|| anyhow::anyhow!("unsupported provider type: {value}"))
+        })
+        .transpose()?;
+    config_ops::add_provider(
+        &config.config_path,
+        provider_id,
+        config::ProviderConfig {
+            provider_type,
+            base_url,
+            api_key,
+            api_key_env,
         },
-        Some(Command::Mcp { command }) => match command {
-            McpCommand::List => Ok(modes::run::list_mcp(config).await),
-            McpCommand::Add {
+    )
+}
+
+async fn dispatch_catalog_command(
+    config: &AppConfig,
+    command: CatalogCommand,
+) -> anyhow::Result<String> {
+    match command {
+        CatalogCommand::List {
+            provider_id,
+            filter,
+            json,
+        } => list_catalog_providers(provider_id.as_deref(), filter.as_deref(), json).await,
+        CatalogCommand::Add {
+            provider_id,
+            api_key,
+            default_model,
+        } => {
+            config_ops::catalog_add_provider(
+                &config.config_path,
+                &provider_id,
+                api_key.as_deref(),
+                default_model.as_deref(),
+            )
+            .await
+        }
+    }
+}
+
+async fn dispatch_mcp_command(config: &AppConfig, command: McpCommand) -> anyhow::Result<String> {
+    match command {
+        McpCommand::List => Ok(modes::run::list_mcp(config).await),
+        McpCommand::Add {
+            mcp_name,
+            r#type,
+            command,
+            url,
+            env,
+            headers,
+            cwd,
+            enabled_tools,
+            disabled_tools,
+            startup_timeout_ms,
+            tool_timeout_ms,
+            enable,
+            disable,
+        } => {
+            let enabled = enable && !disable;
+            Ok(modes::run::add_mcp_server(
                 mcp_name,
                 r#type,
                 command,
@@ -236,50 +316,35 @@ async fn dispatch_command(
                 disabled_tools,
                 startup_timeout_ms,
                 tool_timeout_ms,
-                enable,
-                disable,
-            } => {
-                let enabled = enable && !disable;
-                Ok(modes::run::add_mcp_server(
-                    mcp_name,
-                    r#type,
-                    command,
-                    url,
-                    env,
-                    headers,
-                    cwd,
-                    enabled_tools,
-                    disabled_tools,
-                    startup_timeout_ms,
-                    tool_timeout_ms,
-                    enabled,
-                    config,
-                )
-                .await?)
-            }
-            McpCommand::Del { mcp_name } => Ok(config::remove_mcp_server(&mcp_name)?),
-            McpCommand::Disable { mcp_name } => {
-                Ok(config::set_mcp_server_enabled(&mcp_name, false)?)
-            }
-            McpCommand::Enable { mcp_name } => Ok(config::set_mcp_server_enabled(&mcp_name, true)?),
-        },
-        Some(Command::Rpc) => rpc_mode::execute(config).await,
-        None => {
-            if config.defaults.mode.eq_ignore_ascii_case("rpc") {
-                return rpc_mode::execute(config).await;
-            }
-            let startup = if resume_picker {
-                modes::interactive::StartupAction::OpenSessionPicker
-            } else {
-                modes::interactive::StartupAction::None
-            };
-            Ok(
-                modes::interactive::execute_tty_with_startup(config, startup, interactive_options)
-                    .await?
-                    .unwrap_or_default(),
+                enabled,
+                config,
             )
+            .await?)
         }
+        McpCommand::Del { mcp_name } => Ok(config::remove_mcp_server(&mcp_name)?),
+        McpCommand::Disable { mcp_name } => Ok(config::set_mcp_server_enabled(&mcp_name, false)?),
+        McpCommand::Enable { mcp_name } => Ok(config::set_mcp_server_enabled(&mcp_name, true)?),
     }
+}
+
+async fn dispatch_default_command(
+    config: &AppConfig,
+    resume_picker: bool,
+    interactive_options: modes::interactive::InteractiveOptions,
+) -> anyhow::Result<String> {
+    if config.defaults.mode.eq_ignore_ascii_case("rpc") {
+        return rpc_mode::execute(config).await;
+    }
+    let startup = if resume_picker {
+        modes::interactive::StartupAction::OpenSessionPicker
+    } else {
+        modes::interactive::StartupAction::None
+    };
+    Ok(
+        modes::interactive::execute_tty_with_startup(config, startup, interactive_options)
+            .await?
+            .unwrap_or_default(),
+    )
 }
 
 fn run_output_for_mode(config: &AppConfig) -> cli::RunOutput {
@@ -478,7 +543,6 @@ fn resolve_default_extension_root(config: &AppConfig, root: PathBuf) -> PathBuf 
 }
 
 /// Fetch and display providers from the models.dev catalog.
-#[allow(clippy::too_many_lines)]
 async fn list_catalog_providers(
     provider_id: Option<&str>,
     filter: Option<&str>,
@@ -493,105 +557,212 @@ async fn list_catalog_providers(
         let entry = catalog
             .get(pid)
             .ok_or_else(|| anyhow::anyhow!("provider '{pid}' not found in models.dev catalog"))?;
-        let wire = neo_ai::catalog::infer_api_type(entry);
-        let name = entry.name.as_deref().unwrap_or(pid);
-        let wire_str = wire.as_ref().map_or("unsupported", |t| t.as_config_str());
-
-        let models = neo_ai::catalog::catalog_provider_models(entry);
-        if json {
-            let models_json: Vec<_> = models
-                .iter()
-                .map(|m| {
-                    json!({
-                        "id": m.id,
-                        "name": m.name,
-                        "max_context_tokens": m.max_context_tokens,
-                        "capabilities": m.capabilities,
-                    })
-                })
-                .collect();
-            return Ok(serde_json::to_string_pretty(&json!({
-                "id": pid,
-                "name": name,
-                "wire": wire_str,
-                "models": models_json,
-            }))? + "\n");
-        }
-
-        let mut out = format!("{name} ({pid})  wire={wire_str}  models={}\n", models.len());
-        for m in &models {
-            let ctx = m
-                .max_context_tokens
-                .map_or("?".to_owned(), |n| n.to_string());
-            let caps = m.capabilities.join(",");
-            let display = m.name.as_deref().unwrap_or(&m.id);
-            let _ = writeln!(
-                out,
-                "  {id:<40} {display:<30} ctx={ctx:<10} [{caps}]",
-                id = m.id
-            );
-        }
-        return Ok(out);
+        return format_catalog_provider_detail(pid, entry, json);
     }
 
-    // List all providers
+    format_catalog_provider_list(&catalog, filter, json)
+}
+
+fn format_catalog_provider_detail(
+    provider_id: &str,
+    entry: &neo_ai::catalog::CatalogEntry,
+    json_output: bool,
+) -> anyhow::Result<String> {
+    let wire = neo_ai::catalog::infer_api_type(entry);
+    let name = entry.name.as_deref().unwrap_or(provider_id);
+    let wire_str = wire.as_ref().map_or("unsupported", |t| t.as_config_str());
+    let models = neo_ai::catalog::catalog_provider_models(entry);
+
+    if json_output {
+        return Ok(serde_json::to_string_pretty(&json!({
+            "id": provider_id,
+            "name": name,
+            "wire": wire_str,
+            "models": catalog_models_json(&models),
+        }))? + "\n");
+    }
+
+    let mut out = format!(
+        "{name} ({provider_id})  wire={wire_str}  models={}\n",
+        models.len()
+    );
+    for model in &models {
+        let _ = writeln!(out, "{}", catalog_model_text(model));
+    }
+    Ok(out)
+}
+
+fn format_catalog_provider_list(
+    catalog: &BTreeMap<String, neo_ai::catalog::CatalogEntry>,
+    filter: Option<&str>,
+    json_output: bool,
+) -> anyhow::Result<String> {
     let mut entries: Vec<_> = catalog.values().collect();
     entries.sort_by_key(|e| e.id.clone());
 
-    if json {
-        let providers_json: Vec<_> = entries
+    if json_output {
+        let providers_json = entries
             .iter()
-            .filter_map(|entry| {
-                if let Some(f) = filter {
-                    let f_lower = f.to_ascii_lowercase();
-                    let id_match = entry.id.to_ascii_lowercase().contains(&f_lower);
-                    let name_match = entry
-                        .name
-                        .as_deref()
-                        .is_some_and(|n| n.to_ascii_lowercase().contains(&f_lower));
-                    if !id_match && !name_match {
-                        return None;
-                    }
-                }
-                let wire = neo_ai::catalog::infer_api_type(entry)?;
-                Some(json!({
-                    "id": entry.id,
-                    "name": entry.name,
-                    "wire": wire.as_config_str(),
-                    "model_count": entry.models.len(),
-                }))
-            })
-            .collect();
+            .filter(|entry| catalog_provider_matches_filter(entry, filter))
+            .filter_map(|entry| catalog_provider_list_json(entry))
+            .collect::<Vec<_>>();
         return Ok(serde_json::to_string_pretty(&json!({ "providers": providers_json }))? + "\n");
     }
 
     let mut out = String::new();
     for entry in entries {
-        // Apply filter
-        if let Some(f) = filter {
-            let f_lower = f.to_ascii_lowercase();
-            let id_match = entry.id.to_ascii_lowercase().contains(&f_lower);
-            let name_match = entry
-                .name
-                .as_deref()
-                .is_some_and(|n| n.to_ascii_lowercase().contains(&f_lower));
-            if !id_match && !name_match {
-                continue;
-            }
+        if let Some(line) = catalog_provider_list_text(entry, filter) {
+            out.push_str(&line);
         }
-
-        let wire = neo_ai::catalog::infer_api_type(entry);
-        if wire.is_none() {
-            continue; // Skip unsupported providers
-        }
-        let wire_str = wire.as_ref().map_or("?", |t| t.as_config_str());
-        let name = entry.name.as_deref().unwrap_or(&entry.id);
-        let model_count = entry.models.len();
-        let _ = writeln!(
-            out,
-            "{id:<25} wire={wire_str:<18} models={model_count:<4} {name}",
-            id = entry.id
-        );
     }
     Ok(out)
+}
+
+fn catalog_models_json(models: &[neo_ai::catalog::CatalogModelInfo]) -> Vec<serde_json::Value> {
+    models
+        .iter()
+        .map(|model| {
+            json!({
+                "id": model.id,
+                "name": model.name,
+                "max_context_tokens": model.max_context_tokens,
+                "capabilities": model.capabilities,
+            })
+        })
+        .collect()
+}
+
+fn catalog_model_text(model: &neo_ai::catalog::CatalogModelInfo) -> String {
+    let ctx = model
+        .max_context_tokens
+        .map_or("?".to_owned(), |n| n.to_string());
+    let caps = model.capabilities.join(",");
+    let display = model.name.as_deref().unwrap_or(&model.id);
+    format!(
+        "  {id:<40} {display:<30} ctx={ctx:<10} [{caps}]",
+        id = model.id
+    )
+}
+
+fn catalog_provider_list_json(entry: &neo_ai::catalog::CatalogEntry) -> Option<serde_json::Value> {
+    let wire = neo_ai::catalog::infer_api_type(entry)?;
+    Some(json!({
+        "id": entry.id,
+        "name": entry.name,
+        "wire": wire.as_config_str(),
+        "model_count": entry.models.len(),
+    }))
+}
+
+fn catalog_provider_list_text(
+    entry: &neo_ai::catalog::CatalogEntry,
+    filter: Option<&str>,
+) -> Option<String> {
+    if !catalog_provider_matches_filter(entry, filter) {
+        return None;
+    }
+    let wire = neo_ai::catalog::infer_api_type(entry)?;
+    let name = entry.name.as_deref().unwrap_or(&entry.id);
+    Some(format!(
+        "{id:<25} wire={wire:<18} models={model_count:<4} {name}\n",
+        id = entry.id,
+        wire = wire.as_config_str(),
+        model_count = entry.models.len()
+    ))
+}
+
+fn catalog_provider_matches_filter(
+    entry: &neo_ai::catalog::CatalogEntry,
+    filter: Option<&str>,
+) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    let filter = filter.to_ascii_lowercase();
+    entry.id.to_ascii_lowercase().contains(&filter)
+        || entry
+            .name
+            .as_deref()
+            .is_some_and(|name| name.to_ascii_lowercase().contains(&filter))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use neo_ai::catalog;
+
+    #[test]
+    fn catalog_provider_list_json_filters_and_skips_unsupported_entries() {
+        let catalog = BTreeMap::from([
+            (
+                "openai".to_owned(),
+                catalog_entry("openai", Some("OpenAI"), true),
+            ),
+            (
+                "unknown".to_owned(),
+                catalog_entry("unknown", Some("Unknown"), false),
+            ),
+        ]);
+
+        let output = super::format_catalog_provider_list(&catalog, Some("open"), true)
+            .expect("json catalog providers");
+        let value: serde_json::Value = serde_json::from_str(&output).expect("json");
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "providers": [{
+                    "id": "openai",
+                    "name": "OpenAI",
+                    "wire": "openai-responses",
+                    "model_count": 1,
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn catalog_provider_detail_text_includes_model_metadata() {
+        let entry = catalog_entry("openai", Some("OpenAI"), true);
+
+        let output = super::format_catalog_provider_detail("openai", &entry, false)
+            .expect("text catalog detail");
+
+        assert!(output.contains("OpenAI (openai)  wire=openai-responses  models=1"));
+        assert!(output.contains("gpt-4.1"));
+        assert!(output.contains("GPT 4.1"));
+        assert!(output.contains("ctx=1000000"));
+        assert!(output.contains("[streaming,tools,reasoning,images]"));
+    }
+
+    fn catalog_entry(id: &str, name: Option<&str>, supported: bool) -> catalog::CatalogEntry {
+        catalog::CatalogEntry {
+            id: id.to_owned(),
+            name: name.map(str::to_owned),
+            api: Some(format!("https://api.{id}.test/v1")),
+            env: Vec::new(),
+            npm: None,
+            explicit_type: supported.then(|| "openai-responses".to_owned()),
+            models: BTreeMap::from([(
+                "gpt-4.1".to_owned(),
+                catalog::CatalogModel {
+                    id: "gpt-4.1".to_owned(),
+                    name: Some("GPT 4.1".to_owned()),
+                    family: None,
+                    limit: Some(catalog::CatalogLimit {
+                        context: Some(1_000_000),
+                        output: Some(32_000),
+                    }),
+                    tool_call: Some(true),
+                    reasoning: Some(true),
+                    interleaved: None,
+                    modalities: Some(catalog::CatalogModalities {
+                        input: vec!["text".to_owned(), "image".to_owned()],
+                        output: vec!["text".to_owned()],
+                    }),
+                },
+            )]),
+        }
+    }
 }

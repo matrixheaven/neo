@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::Context;
 use neo_agent_core::session::workspace_sessions_dir as compute_workspace_sessions_dir;
-use neo_agent_core::{PermissionPolicy, QueueMode, ToolExecutionMode};
+use neo_agent_core::{PermissionMode, QueueMode, ToolExecutionMode};
 use neo_ai::{ModelSpec, ReasoningEffort};
 use neo_tui::{
     image::ImageProtocolPreference,
@@ -62,6 +62,7 @@ where
 pub struct ConfigOverrides {
     pub config_path: Option<PathBuf>,
     pub yolo: bool,
+    pub auto: bool,
 }
 
 impl ConfigOverrides {
@@ -69,6 +70,7 @@ impl ConfigOverrides {
         Self {
             config_path: cli.config.clone(),
             yolo: cli.yolo,
+            auto: cli.auto,
         }
     }
 }
@@ -131,28 +133,48 @@ fn has_glob_meta(pattern: &str) -> bool {
 
 fn wildcard_match(pattern: &str, text: &str) -> bool {
     let pattern = pattern.chars().collect::<Vec<_>>();
-    let text = text.chars().collect::<Vec<_>>();
-    let mut matched = vec![vec![false; text.len() + 1]; pattern.len() + 1];
-    matched[0][0] = true;
-    for index in 1..=pattern.len() {
-        if pattern[index - 1] == '*' {
-            matched[index][0] = matched[index - 1][0];
-        }
+    let mut row = wildcard_initial_row(&pattern);
+    for character in text.chars() {
+        row = wildcard_advance_row(&pattern, &row, character);
     }
-    for pattern_index in 1..=pattern.len() {
-        for text_index in 1..=text.len() {
-            matched[pattern_index][text_index] = match pattern[pattern_index - 1] {
-                '*' => {
-                    matched[pattern_index - 1][text_index] || matched[pattern_index][text_index - 1]
-                }
-                '?' => matched[pattern_index - 1][text_index - 1],
-                character => {
-                    character == text[text_index - 1] && matched[pattern_index - 1][text_index - 1]
-                }
-            };
-        }
+    row.last().copied().unwrap_or(false)
+}
+
+fn wildcard_initial_row(pattern: &[char]) -> Vec<bool> {
+    let mut row = vec![false; pattern.len() + 1];
+    row[0] = true;
+    for (index, character) in pattern.iter().enumerate() {
+        row[index + 1] = row[index] && *character == '*';
     }
-    matched[pattern.len()][text.len()]
+    row
+}
+
+fn wildcard_advance_row(pattern: &[char], previous: &[bool], text_character: char) -> Vec<bool> {
+    let mut current = vec![false; pattern.len() + 1];
+    for (index, pattern_character) in pattern.iter().copied().enumerate() {
+        current[index + 1] = wildcard_cell_matches(
+            pattern_character,
+            text_character,
+            previous[index],
+            previous[index + 1],
+            current[index],
+        );
+    }
+    current
+}
+
+fn wildcard_cell_matches(
+    pattern_character: char,
+    text_character: char,
+    diagonal: bool,
+    previous_row: bool,
+    current_row: bool,
+) -> bool {
+    match pattern_character {
+        '*' => previous_row || current_row,
+        '?' => diagonal,
+        literal => diagonal && literal == text_character,
+    }
 }
 
 fn fuzzy_match(haystack: &str, needle: &str) -> bool {
@@ -178,7 +200,7 @@ pub struct AppConfig {
     #[serde(skip)]
     pub model_scope: Vec<String>,
     pub sessions_dir: PathBuf,
-    pub permissions: PermissionPolicy,
+    pub permission_mode: PermissionMode,
     pub defaults: Defaults,
     pub runtime: RuntimeConfig,
     pub tui: TuiConfig,
@@ -356,7 +378,7 @@ pub(crate) struct FileConfig {
     #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     pub(crate) skill_path: Vec<String>,
     pub(crate) sessions_dir: Option<PathBuf>,
-    pub(crate) permissions: Option<PermissionPolicy>,
+    pub(crate) permission_mode: Option<PermissionMode>,
     pub(crate) defaults: Option<FileDefaults>,
     pub(crate) runtime: Option<FileRuntimeConfig>,
     pub(crate) tui: Option<FileTuiConfig>,
@@ -424,6 +446,10 @@ impl AppConfig {
         let project_config = read_file_config(&config_path)?;
         let file_config = merge_file_configs(global_config, project_config);
         let project_trusted = project_trusted_from_yolo(&project_dir, overrides.yolo)?;
+        anyhow::ensure!(
+            !(overrides.yolo && overrides.auto),
+            "--yolo and --auto cannot be used together"
+        );
 
         let default_model = file_config
             .default_model
@@ -449,7 +475,13 @@ impl AppConfig {
             },
             expand_user_path,
         );
-        let permissions = file_config.permissions.unwrap_or_default();
+        let permission_mode = if overrides.yolo {
+            PermissionMode::Yolo
+        } else if overrides.auto {
+            PermissionMode::Auto
+        } else {
+            file_config.permission_mode.unwrap_or_default()
+        };
         let runtime = runtime_from_file(file_config.runtime);
         validate_runtime_config(&runtime)?;
         let tui = tui_from_file(file_config.tui);
@@ -469,7 +501,7 @@ impl AppConfig {
             models,
             model_scope,
             sessions_dir,
-            permissions,
+            permission_mode,
             defaults: Defaults { mode },
             runtime,
             tui,
@@ -560,7 +592,7 @@ fn merge_file_configs(base: FileConfig, layer: FileConfig) -> FileConfig {
         extra_skill_dirs: merge_string_lists(base.extra_skill_dirs, layer.extra_skill_dirs),
         skill_path: [base.skill_path, layer.skill_path].concat(),
         sessions_dir: layer.sessions_dir.or(base.sessions_dir),
-        permissions: layer.permissions.or(base.permissions),
+        permission_mode: layer.permission_mode.or(base.permission_mode),
         defaults: merge_defaults(base.defaults, layer.defaults),
         runtime: merge_runtime_configs(base.runtime, layer.runtime),
         tui: merge_tui_configs(base.tui, layer.tui),
@@ -1009,4 +1041,100 @@ pub(crate) fn write_file_config(path: &Path, config: &FileConfig) -> anyhow::Res
 
     let content = toml::to_string_pretty(config)?;
     fs::write(path, content).with_context(|| format!("failed to write config {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf};
+
+    use neo_ai::{ApiKind, ModelCapabilities, ModelSpec, ProviderId};
+    use tempfile::TempDir;
+
+    use crate::config::{AppConfig, ConfigOverrides, PermissionMode};
+
+    fn temp_project_config(content: &str) -> (TempDir, PathBuf) {
+        let temp = TempDir::new().expect("temp dir");
+        let config_dir = temp.path().join(".neo");
+        fs::create_dir_all(&config_dir).expect("create .neo");
+        let config_path = config_dir.join("config.toml");
+        fs::write(&config_path, content).expect("write config");
+        (temp, config_path)
+    }
+
+    fn load_config(config_path: PathBuf) -> AppConfig {
+        AppConfig::load(ConfigOverrides {
+            config_path: Some(config_path),
+            yolo: false,
+            auto: false,
+        })
+        .expect("load config")
+    }
+
+    #[test]
+    fn config_defaults_to_manual_permission_mode() {
+        let (_temp, config_path) = temp_project_config("");
+        let config = load_config(config_path);
+        assert_eq!(config.permission_mode, PermissionMode::Manual);
+    }
+
+    #[test]
+    fn config_loads_permission_mode_auto() {
+        let (_temp, config_path) = temp_project_config("permission_mode = \"auto\"\n");
+        let config = load_config(config_path);
+        assert_eq!(config.permission_mode, PermissionMode::Auto);
+    }
+
+    #[test]
+    fn cli_yolo_overrides_config_permission_mode() {
+        let (_temp, config_path) = temp_project_config("permission_mode = \"manual\"\n");
+        let config = AppConfig::load(ConfigOverrides {
+            config_path: Some(config_path),
+            yolo: true,
+            auto: false,
+        })
+        .expect("load config");
+        assert_eq!(config.permission_mode, PermissionMode::Yolo);
+    }
+
+    #[test]
+    fn cli_auto_overrides_config_permission_mode() {
+        let (_temp, config_path) = temp_project_config("permission_mode = \"manual\"\n");
+        let config = AppConfig::load(ConfigOverrides {
+            config_path: Some(config_path),
+            yolo: false,
+            auto: true,
+        })
+        .expect("load config");
+        assert_eq!(config.permission_mode, PermissionMode::Auto);
+    }
+
+    #[test]
+    fn scoped_models_matches_globs_against_qualified_and_model_ids() {
+        let openai = ModelSpec {
+            provider: ProviderId("openai".to_owned()),
+            model: "gpt-4.1".to_owned(),
+            api: ApiKind::OpenAiResponses,
+            capabilities: ModelCapabilities::tool_chat(),
+        };
+        let anthropic = ModelSpec {
+            provider: ProviderId("anthropic".to_owned()),
+            model: "claude-sonnet-4".to_owned(),
+            api: ApiKind::AnthropicMessages,
+            capabilities: ModelCapabilities::tool_chat(),
+        };
+
+        let models = [openai, anthropic];
+        let scoped = super::scoped_models(
+            models.iter(),
+            &["openai/gpt-*".to_owned(), "claude-??????-4:high".to_owned()],
+        );
+
+        assert_eq!(
+            scoped
+                .iter()
+                .map(|model| format!("{}/{}", model.provider.0, model.model))
+                .collect::<Vec<_>>(),
+            vec!["openai/gpt-4.1", "anthropic/claude-sonnet-4"]
+        );
+    }
 }
