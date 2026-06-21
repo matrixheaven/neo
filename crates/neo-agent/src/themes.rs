@@ -184,8 +184,18 @@ fn load_theme_file(path: &Path) -> anyhow::Result<ResolvedTheme> {
     })
 }
 
-#[allow(clippy::too_many_lines)]
 fn apply_colors(theme: &mut TuiTheme, colors: &ThemeColors, path: &Path) -> anyhow::Result<()> {
+    apply_core_colors(theme, colors, path)?;
+    apply_diff_and_selection_colors(theme, colors, path)?;
+    apply_footer_colors(theme, colors, path)?;
+    Ok(())
+}
+
+fn apply_core_colors(
+    theme: &mut TuiTheme,
+    colors: &ThemeColors,
+    path: &Path,
+) -> anyhow::Result<()> {
     apply_color(
         &mut theme.text_primary,
         "text_primary",
@@ -223,7 +233,14 @@ fn apply_colors(theme: &mut TuiTheme, colors: &ThemeColors, path: &Path) -> anyh
         "user_message",
         colors.user_message.as_deref(),
         path,
-    )?;
+    )
+}
+
+fn apply_diff_and_selection_colors(
+    theme: &mut TuiTheme,
+    colors: &ThemeColors,
+    path: &Path,
+) -> anyhow::Result<()> {
     apply_color(
         &mut theme.diff_added,
         "diff_added",
@@ -283,7 +300,14 @@ fn apply_colors(theme: &mut TuiTheme, colors: &ThemeColors, path: &Path) -> anyh
         "selected_bg",
         colors.selected_bg.as_deref(),
         path,
-    )?;
+    )
+}
+
+fn apply_footer_colors(
+    theme: &mut TuiTheme,
+    colors: &ThemeColors,
+    path: &Path,
+) -> anyhow::Result<()> {
     apply_color(
         &mut theme.overlay_border,
         "overlay_border",
@@ -368,26 +392,48 @@ fn parse_hex_color(hex: &str) -> anyhow::Result<Color> {
 }
 
 fn named_color(value: &str) -> anyhow::Result<Color> {
-    match value.to_ascii_lowercase().as_str() {
-        "reset" => Ok(Color::Reset),
-        "black" => Ok(Color::Black),
-        "red" => Ok(Color::Red),
-        "green" => Ok(Color::Green),
-        "yellow" => Ok(Color::Yellow),
-        "blue" => Ok(Color::Blue),
-        "magenta" => Ok(Color::Magenta),
-        "cyan" => Ok(Color::Cyan),
-        "gray" | "grey" => Ok(Color::Gray),
-        "darkgray" | "dark_gray" | "dark-grey" => Ok(Color::DarkGray),
-        "lightred" | "light_red" | "light-red" => Ok(Color::LightRed),
-        "lightgreen" | "light_green" | "light-green" => Ok(Color::LightGreen),
-        "lightyellow" | "light_yellow" | "light-yellow" => Ok(Color::LightYellow),
-        "lightblue" | "light_blue" | "light-blue" => Ok(Color::LightBlue),
-        "lightmagenta" | "light_magenta" | "light-magenta" => Ok(Color::LightMagenta),
-        "lightcyan" | "light_cyan" | "light-cyan" => Ok(Color::LightCyan),
-        "white" => Ok(Color::White),
-        _ => bail!("unknown color {value:?}"),
-    }
+    let normalized = value.to_ascii_lowercase();
+    named_color_table()
+        .iter()
+        .find_map(|(name, color)| (*name == normalized).then_some(*color))
+        .ok_or_else(|| anyhow::anyhow!("unknown color {value:?}"))
+}
+
+fn named_color_table() -> &'static [(&'static str, Color)] {
+    &[
+        ("reset", Color::Reset),
+        ("black", Color::Black),
+        ("red", Color::Red),
+        ("green", Color::Green),
+        ("yellow", Color::Yellow),
+        ("blue", Color::Blue),
+        ("magenta", Color::Magenta),
+        ("cyan", Color::Cyan),
+        ("gray", Color::Gray),
+        ("grey", Color::Gray),
+        ("darkgray", Color::DarkGray),
+        ("dark_gray", Color::DarkGray),
+        ("dark-grey", Color::DarkGray),
+        ("lightred", Color::LightRed),
+        ("light_red", Color::LightRed),
+        ("light-red", Color::LightRed),
+        ("lightgreen", Color::LightGreen),
+        ("light_green", Color::LightGreen),
+        ("light-green", Color::LightGreen),
+        ("lightyellow", Color::LightYellow),
+        ("light_yellow", Color::LightYellow),
+        ("light-yellow", Color::LightYellow),
+        ("lightblue", Color::LightBlue),
+        ("light_blue", Color::LightBlue),
+        ("light-blue", Color::LightBlue),
+        ("lightmagenta", Color::LightMagenta),
+        ("light_magenta", Color::LightMagenta),
+        ("light-magenta", Color::LightMagenta),
+        ("lightcyan", Color::LightCyan),
+        ("light_cyan", Color::LightCyan),
+        ("light-cyan", Color::LightCyan),
+        ("white", Color::White),
+    ]
 }
 
 #[cfg(test)]

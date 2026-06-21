@@ -157,39 +157,52 @@ fn format_available_skills(skill_store: &SkillStore) -> Option<String> {
     }
     let mut prompt = String::from("<available_skills>\n");
     for skill in skills {
-        prompt.push_str("<skill name=\"");
-        prompt.push_str(&skill.name);
-        prompt.push_str("\" description=\"");
-        prompt.push_str(&xml_escape(&skill.manifest.description));
-        prompt.push('"');
-        if let Some(when) = &skill.manifest.when_to_use {
-            prompt.push_str(" whenToUse=\"");
-            prompt.push_str(&xml_escape(when));
-            prompt.push('"');
-        }
-        prompt.push_str(">\n");
-        if !skill.manifest.arguments.is_empty() {
-            prompt.push_str("<arguments>\n");
-            for arg in &skill.manifest.arguments {
-                prompt.push_str("<arg name=\"");
-                prompt.push_str(&arg.name);
-                prompt.push('"');
-                if arg.required {
-                    prompt.push_str(" required=\"true\"");
-                }
-                if let Some(default) = &arg.default {
-                    prompt.push_str(" default=\"");
-                    prompt.push_str(&xml_escape(default));
-                    prompt.push('"');
-                }
-                prompt.push_str(" />\n");
-            }
-            prompt.push_str("</arguments>\n");
-        }
-        prompt.push_str("</skill>\n");
+        write_available_skill(&mut prompt, skill);
     }
     prompt.push_str("</available_skills>");
     Some(prompt)
+}
+
+fn write_available_skill(prompt: &mut String, skill: &LoadedSkill) {
+    prompt.push_str("<skill name=\"");
+    prompt.push_str(&skill.name);
+    prompt.push_str("\" description=\"");
+    prompt.push_str(&xml_escape(&skill.manifest.description));
+    prompt.push('"');
+    if let Some(when) = &skill.manifest.when_to_use {
+        prompt.push_str(" whenToUse=\"");
+        prompt.push_str(&xml_escape(when));
+        prompt.push('"');
+    }
+    prompt.push_str(">\n");
+    write_skill_arguments(prompt, skill);
+    prompt.push_str("</skill>\n");
+}
+
+fn write_skill_arguments(prompt: &mut String, skill: &LoadedSkill) {
+    if skill.manifest.arguments.is_empty() {
+        return;
+    }
+    prompt.push_str("<arguments>\n");
+    for arg in &skill.manifest.arguments {
+        write_skill_argument(prompt, arg);
+    }
+    prompt.push_str("</arguments>\n");
+}
+
+fn write_skill_argument(prompt: &mut String, arg: &neo_agent_core::skills::SkillArgument) {
+    prompt.push_str("<arg name=\"");
+    prompt.push_str(&arg.name);
+    prompt.push('"');
+    if arg.required {
+        prompt.push_str(" required=\"true\"");
+    }
+    if let Some(default) = &arg.default {
+        prompt.push_str(" default=\"");
+        prompt.push_str(&xml_escape(default));
+        prompt.push('"');
+    }
+    prompt.push_str(" />\n");
 }
 
 fn xml_escape(value: &str) -> String {
