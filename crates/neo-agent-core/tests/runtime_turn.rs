@@ -7,6 +7,7 @@ use neo_agent_core::{
     ToolResult,
     harness::{FakeHarness, fake_model},
     session::{JsonlSessionWriter, workspace_sessions_dir},
+    skills::SkillStore,
 };
 use neo_ai::{
     AiError, AiStreamEvent, ApiKind, ChatRequest, ModelCapabilities, ModelClient, ModelSpec,
@@ -186,6 +187,45 @@ async fn runtime_emits_provider_token_usage() {
             output_tokens: 45,
         },
     }));
+}
+
+#[tokio::test]
+async fn goal_mode_authoring_injects_exit_goal_mode_guidance() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::MessageStart {
+            id: "msg_1".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model()).with_goal_mode_authoring(true),
+        harness.client(),
+    );
+    let mut context = AgentContext::new();
+
+    runtime
+        .run_turn(&mut context, AgentMessage::user_text("draft goal"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    let request = harness.requests().pop().expect("model request");
+    assert!(request.messages.iter().any(|message| matches!(
+        message,
+        neo_ai::ChatMessage::System { content }
+            if content.iter().any(|part| matches!(
+                part,
+                neo_ai::ContentPart::Text { text }
+                    if text.contains("Goal mode is active")
+                        && text.contains("ExitGoalMode")
+                        && text.contains("Do not start a durable goal directly")
+            ))
+    )));
 }
 
 #[tokio::test]
@@ -3502,6 +3542,157 @@ async fn manual_mode_ask_user_question_dispatches_without_approval() {
 }
 
 #[tokio::test]
+async fn manual_mode_skill_tool_runs_without_approval() {
+    let skills_dir = tempfile::tempdir().expect("skills dir");
+    std::fs::write(
+        skills_dir.path().join("SKILL.md"),
+        r"---
+name: review
+description: Review the current change.
+---
+Review the current change carefully.
+",
+    )
+    .expect("write skill");
+    let skill_store = SkillStore::load(None, &[], &[skills_dir.path().to_path_buf()], Vec::new())
+        .expect("load skill store");
+
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "Skill".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({"skill": "review"}),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let runtime = AgentRuntime::with_tools_and_skills(
+        AgentConfig::for_model(harness.model()).with_permission_mode(PermissionMode::Manual),
+        harness.client(),
+        ToolRegistry::new(),
+        skill_store,
+    );
+    let mut context = AgentContext::new();
+
+    let events = timeout(
+        Duration::from_secs(2),
+        runtime
+            .run_turn(&mut context, AgentMessage::user_text("use review skill"))
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .expect("skill turn should finish")
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .expect("skill tool should run");
+
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, AgentEvent::ApprovalRequested { .. })),
+        "Skill must not be wrapped in the approval dialog"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolExecutionFinished { name, result, .. }
+                if name == "Skill"
+                    && !result.is_error
+                    && result.content.contains("Review the current change carefully.")
+        )),
+        "Skill should execute successfully; events: {events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn enter_plan_mode_continues_model_loop_after_mode_switch() {
+    let home = tempfile::tempdir().expect("home dir");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "EnterPlanMode".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({}),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "continuing plan".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_home_dir(home.path())
+            .with_workspace_root(workspace.path())
+            .expect("workspace root"),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+
+    let events = timeout(
+        Duration::from_secs(2),
+        runtime
+            .run_turn(&mut context, AgentMessage::user_text("make a plan"))
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .expect("plan-mode turn should finish")
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .expect("turn should continue after entering plan mode");
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::PlanModeEntered { .. })),
+        "EnterPlanMode should still emit the plan-mode side effect"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::TextDelta { text, .. } if text == "continuing plan"
+        )),
+        "the model loop should continue after EnterPlanMode"
+    );
+    assert_eq!(
+        harness.requests().len(),
+        2,
+        "EnterPlanMode should not stop the agent loop"
+    );
+}
+
+#[tokio::test]
 async fn runtime_yolo_mode_auto_approves_custom_tool() {
     let harness = echo_tool_harness("yolo approved");
     let mut tools = ToolRegistry::new();
@@ -3807,6 +3998,86 @@ async fn runtime_manual_mode_reviews_exit_plan_mode_with_non_empty_plan() {
         event,
         AgentEvent::PlanModeExited { turn, .. } if *turn == 1
     )));
+}
+
+#[tokio::test]
+async fn runtime_manual_mode_reviews_exit_goal_mode_and_emits_goal_started() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let mut config = AgentConfig::for_model(fake_model());
+    config.home_dir = Some(home.path().to_path_buf());
+    config.workspace_root = Some(
+        workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace"),
+    );
+    config.permission_mode = PermissionMode::Manual;
+
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "ExitGoalMode".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({
+                    "objective": "Ship goal mode",
+                    "completion_criterion": "Goal tests pass",
+                    "phases": ["Draft", "Implement", "Audit"],
+                }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let config = config.with_approval_handler(|request| {
+        assert_eq!(request.operation, PermissionOperation::GoalTransition);
+        PermissionApprovalDecision::AllowOnce
+    });
+    let goal_manager = Arc::new(
+        neo_agent_core::goal::GoalManager::load(home.path().to_path_buf())
+            .await
+            .expect("goal manager"),
+    );
+    let mut registry = ToolRegistry::with_builtin_tools();
+    registry.register_goal_tools(Arc::clone(&goal_manager));
+    let runtime = AgentRuntime::with_tools(config, harness.client(), registry)
+        .with_goal_manager(&goal_manager);
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("approve goal"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert!(events.contains(&AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        operation: PermissionOperation::GoalTransition,
+        subject: "Start reviewed goal".to_owned(),
+        arguments: json!({
+            "objective": "Ship goal mode",
+            "completion_criterion": "Goal tests pass",
+            "phases": ["Draft", "Implement", "Audit"],
+        }),
+    }));
+    assert!(events.contains(&AgentEvent::GoalStarted {
+        turn: 1,
+        objective: "Ship goal mode".to_owned(),
+    }));
+    let active = goal_manager.active().expect("active goal");
+    assert_eq!(active.phases, ["Draft", "Implement", "Audit"]);
 }
 
 #[tokio::test]

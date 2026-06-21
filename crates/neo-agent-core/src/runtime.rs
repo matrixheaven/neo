@@ -139,6 +139,10 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub plan_mode: Arc<RwLock<PlanMode>>,
+    /// True while the TUI is in AI-assisted goal authoring mode.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub goal_mode_authoring: bool,
     /// Side-channel for `ExitPlanMode` Revise feedback, keyed by `tool_call.id`.
     /// Populated by the approval handler when the user picks Revise.
     #[serde(skip)]
@@ -188,6 +192,7 @@ impl AgentConfig {
             approval_handler: None,
             async_approval_handler: None,
             plan_mode: Arc::new(RwLock::new(PlanMode::default())),
+            goal_mode_authoring: false,
             plan_review_feedback: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_approvals: Arc::new(Mutex::new(std::collections::HashSet::new())),
             home_dir: None,
@@ -323,6 +328,12 @@ impl AgentConfig {
     #[must_use]
     pub fn with_plan_mode(mut self, plan_mode: Arc<RwLock<PlanMode>>) -> Self {
         self.plan_mode = plan_mode;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_goal_mode_authoring(mut self, active: bool) -> Self {
+        self.goal_mode_authoring = active;
         self
     }
 
@@ -473,54 +484,79 @@ impl AgentContext {
     pub fn from_replay<'a>(events: impl IntoIterator<Item = &'a AgentEvent>) -> Self {
         let mut context = Self::new();
         for event in events {
-            match event {
-                AgentEvent::MessageAppended { message } => {
-                    context.append_message(message.clone());
-                }
-                AgentEvent::TurnFinished { turn, stop_reason } => {
-                    context.turns = context.turns.max(*turn);
-                    if matches!(stop_reason, StopReason::Cancelled) {
-                        context.cancel();
-                    }
-                }
-                AgentEvent::SteeringQueued { message } => {
-                    context.queue_steering_message(message.clone());
-                }
-                AgentEvent::FollowUpQueued { message } => {
-                    context.queue_follow_up_message(message.clone());
-                }
-                AgentEvent::QueueDrained { kind, count } => match kind {
-                    QueueKind::Steering => {
-                        let drain_count = (*count).min(context.steering_queue.len());
-                        context.steering_queue.drain(0..drain_count);
-                    }
-                    QueueKind::FollowUp => {
-                        let drain_count = (*count).min(context.follow_up_queue.len());
-                        context.follow_up_queue.drain(0..drain_count);
-                    }
-                },
-                AgentEvent::CompactionApplied { summary } => {
-                    context.apply_compaction(summary.clone());
-                }
-                AgentEvent::PlanModeEntered { id, .. } => {
-                    context.plan_mode_active = true;
-                    context.plan_mode_id = Some(id.clone());
-                }
-                AgentEvent::PlanModeExited { .. } | AgentEvent::PlanModeCancelled { .. } => {
-                    context.plan_mode_active = false;
-                }
-                AgentEvent::PlanUpdated { enabled, .. } => {
-                    context.plan_mode_active = *enabled;
-                }
-                AgentEvent::TodoUpdated { todos, .. } => {
-                    context.todos.clone_from(todos);
-                }
-                // QuestionRequested is interactive — not replayed.
-                _ => {}
-            }
+            context.apply_replay_event(event);
         }
         context.messages = drop_incomplete_trailing_tool_turn(context.messages);
         context
+    }
+
+    fn apply_replay_event(&mut self, event: &AgentEvent) {
+        if self.apply_replay_message_event(event) {
+            return;
+        }
+        if self.apply_replay_queue_event(event) {
+            return;
+        }
+        self.apply_replay_state_event(event);
+    }
+
+    fn apply_replay_message_event(&mut self, event: &AgentEvent) -> bool {
+        match event {
+            AgentEvent::MessageAppended { message } => self.append_message(message.clone()),
+            AgentEvent::TurnFinished { turn, stop_reason } => {
+                self.turns = self.turns.max(*turn);
+                if matches!(stop_reason, StopReason::Cancelled) {
+                    self.cancel();
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn apply_replay_queue_event(&mut self, event: &AgentEvent) -> bool {
+        match event {
+            AgentEvent::SteeringQueued { message } => {
+                self.queue_steering_message(message.clone());
+            }
+            AgentEvent::FollowUpQueued { message } => {
+                self.queue_follow_up_message(message.clone());
+            }
+            AgentEvent::QueueDrained { kind, count } => self.drain_replay_queue(*kind, *count),
+            _ => return false,
+        }
+        true
+    }
+
+    fn drain_replay_queue(&mut self, kind: QueueKind, count: usize) {
+        match kind {
+            QueueKind::Steering => {
+                let drain_count = count.min(self.steering_queue.len());
+                self.steering_queue.drain(0..drain_count);
+            }
+            QueueKind::FollowUp => {
+                let drain_count = count.min(self.follow_up_queue.len());
+                self.follow_up_queue.drain(0..drain_count);
+            }
+        }
+    }
+
+    fn apply_replay_state_event(&mut self, event: &AgentEvent) {
+        match event {
+            AgentEvent::CompactionApplied { summary } => self.apply_compaction(summary.clone()),
+            AgentEvent::PlanModeEntered { id, .. } => {
+                self.plan_mode_active = true;
+                self.plan_mode_id = Some(id.clone());
+            }
+            AgentEvent::PlanModeExited { .. } | AgentEvent::PlanModeCancelled { .. } => {
+                self.plan_mode_active = false;
+            }
+            AgentEvent::PlanUpdated { enabled, .. } => {
+                self.plan_mode_active = *enabled;
+            }
+            AgentEvent::TodoUpdated { todos, .. } => self.todos.clone_from(todos),
+            _ => {}
+        }
     }
 }
 
@@ -803,6 +839,9 @@ async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatReque
     if let Some(workspace_context) = workspace_context_message(config) {
         messages.push(workspace_context.to_chat_message());
     }
+    if config.goal_mode_authoring {
+        messages.push(goal_mode_authoring_message().to_chat_message());
+    }
     let context_messages = if let Some(transform) = &config.context_transform {
         transform(context.messages())
     } else {
@@ -831,6 +870,15 @@ async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatReque
             ..RequestOptions::default()
         },
     }
+}
+
+fn goal_mode_authoring_message() -> AgentMessage {
+    AgentMessage::system_text(
+        "Goal mode is active. Do not start a durable goal directly with StartGoal. \
+         First draft a structured goal with objective, acceptance criteria, phase plan, risks/assumptions, and validation commands. \
+         Then call ExitGoalMode with the reviewed objective, completion_criterion, and ordered phases so the user can Accept, Reject, or Revise it in a blocking dialog."
+            .to_owned(),
+    )
 }
 
 fn workspace_context_message(config: &AgentConfig) -> Option<AgentMessage> {
@@ -1068,17 +1116,13 @@ async fn run_agent_turn(
             ..
         }) = assistant.clone()
         else {
-            pending_messages = drain_next_pending_queue(&config, emitter);
-            if pending_messages.is_empty() {
-                if let Some(messages) =
-                    goal_continuation_messages(goal_manager.as_deref(), &config).await
-                {
-                    pending_messages = messages;
-                    continue;
-                }
-                break;
+            if let Some(messages) =
+                next_pending_after_assistant(&config, emitter, goal_manager.as_deref()).await
+            {
+                pending_messages = messages;
+                continue;
             }
-            continue;
+            break;
         };
         let tool_calls = model_tool_calls.clone();
 
@@ -1105,90 +1149,14 @@ async fn run_agent_turn(
             final_stop_reason = StopReason::Cancelled;
             break;
         }
-        for (tool_call, result) in &tool_results {
-            let message = AgentMessage::tool_result(
-                tool_call.id.clone(),
-                tool_call.name.clone(),
-                vec![Content::text(result.content.clone())],
-                result.is_error,
-            );
-            emitter.emit(AgentEvent::MessageAppended { message });
-        }
-        // Inject plan data into ExitPlanMode tool results for TUI PlanBox rendering.
-        {
-            let pm = config.plan_mode.read().unwrap();
-            if pm.is_active()
-                && let Some(plan_data) = pm.data().ok().flatten()
-            {
-                for (tool_call, result) in &mut tool_results {
-                    if tool_call.name == "ExitPlanMode" && result.details.is_none() {
-                        result.details = Some(serde_json::json!({
-                            "plan_content": plan_data.content,
-                            "plan_path": plan_data.path.display().to_string(),
-                        }));
-                    }
-                }
-            }
-        }
-        // Intercept plan-mode tools and TodoList tool to emit structured events.
-        for (tool_call, result) in &tool_results {
-            if result.terminate {
-                match tool_call.name.as_str() {
-                    "EnterPlanMode" => {
-                        let mut pm = config.plan_mode.write().unwrap();
-                        let id = if let Some(plans_dir) = plan_mode_plans_dir(&config) {
-                            if let Ok(data) = pm.enter(&plans_dir, true) {
-                                data.id
-                            } else {
-                                pm.enter_in_memory();
-                                pm.plan_id().unwrap_or("").to_owned()
-                            }
-                        } else {
-                            pm.enter_in_memory();
-                            pm.plan_id().unwrap_or("").to_owned()
-                        };
-                        drop(pm);
-                        emitter.emit(AgentEvent::PlanModeEntered {
-                            turn,
-                            id: id.clone(),
-                        });
-                        emitter.emit(AgentEvent::PlanUpdated {
-                            turn,
-                            enabled: true,
-                        });
-                    }
-                    "ExitPlanMode" => {
-                        // Exit plan mode and emit events. In non-auto permission
-                        // mode, the TUI layer can intercept with an approval
-                        // dialog before this code runs; if we reach here the
-                        // exit has been approved (or auto-approved).
-                        let mut pm = config.plan_mode.write().unwrap();
-                        let id = pm.plan_id().unwrap_or("").to_owned();
-                        pm.exit();
-                        drop(pm);
-                        emitter.emit(AgentEvent::PlanModeExited { turn, id });
-                        emitter.emit(AgentEvent::PlanUpdated {
-                            turn,
-                            enabled: false,
-                        });
-                    }
-                    _ => {}
-                }
-            }
-            if tool_call.name == "TodoList"
-                && !result.is_error
-                && let Some(details) = &result.details
-                && let Some(todos_val) = details.get("todos")
-                && let Ok(todos) = serde_json::from_value::<Vec<TodoEventData>>(todos_val.clone())
-            {
-                // Sync shared todo state.
-                if let Ok(mut shared) = config.todos.lock() {
-                    shared.clone_from(&todos);
-                }
-                emitter.emit(AgentEvent::TodoUpdated { turn, todos });
-            }
-        }
+        append_tool_result_messages(&tool_results, emitter);
+        attach_exit_plan_details(&config, &mut tool_results);
+        emit_tool_side_effect_events(turn, &config, &tool_results, emitter);
         if terminates_tool_batch(&tool_results) {
+            if continues_after_terminating_batch(&tool_results) {
+                pending_messages = drain_steering_queue(&config, emitter);
+                continue;
+            }
             break;
         }
         pending_messages = drain_steering_queue(&config, emitter);
@@ -1197,6 +1165,147 @@ async fn run_agent_turn(
     process_supervisor.cleanup_all().await;
     emit_run_finished(emitter, final_turn, final_stop_reason);
     Ok(())
+}
+
+async fn next_pending_after_assistant(
+    config: &AgentConfig,
+    emitter: &mut EventEmitter,
+    goal_manager: Option<&GoalManager>,
+) -> Option<Vec<AgentMessage>> {
+    let pending_messages = drain_next_pending_queue(config, emitter);
+    if pending_messages.is_empty() {
+        goal_continuation_messages(goal_manager, config).await
+    } else {
+        Some(pending_messages)
+    }
+}
+
+fn append_tool_result_messages(
+    tool_results: &[(AgentToolCall, ToolResult)],
+    emitter: &mut EventEmitter,
+) {
+    for (tool_call, result) in tool_results {
+        let message = AgentMessage::tool_result(
+            tool_call.id.clone(),
+            tool_call.name.clone(),
+            vec![Content::text(result.content.clone())],
+            result.is_error,
+        );
+        emitter.emit(AgentEvent::MessageAppended { message });
+    }
+}
+
+fn attach_exit_plan_details(
+    config: &AgentConfig,
+    tool_results: &mut [(AgentToolCall, ToolResult)],
+) {
+    let pm = config.plan_mode.read().unwrap();
+    if !pm.is_active() {
+        return;
+    }
+    let Some(plan_data) = pm.data().ok().flatten() else {
+        return;
+    };
+    for (tool_call, result) in tool_results {
+        if tool_call.name == "ExitPlanMode" && result.details.is_none() {
+            result.details = Some(serde_json::json!({
+                "plan_content": plan_data.content,
+                "plan_path": plan_data.path.display().to_string(),
+            }));
+        }
+    }
+}
+
+fn emit_tool_side_effect_events(
+    turn: u32,
+    config: &AgentConfig,
+    tool_results: &[(AgentToolCall, ToolResult)],
+    emitter: &mut EventEmitter,
+) {
+    for (tool_call, result) in tool_results {
+        emit_plan_tool_event(turn, config, tool_call.name.as_str(), result, emitter);
+        emit_todo_event(turn, config, tool_call.name.as_str(), result, emitter);
+        emit_goal_event_from_result(turn, tool_call.name.as_str(), result, emitter);
+    }
+}
+
+fn emit_plan_tool_event(
+    turn: u32,
+    config: &AgentConfig,
+    tool_name: &str,
+    result: &ToolResult,
+    emitter: &mut EventEmitter,
+) {
+    if !result.terminate {
+        return;
+    }
+    match tool_name {
+        "EnterPlanMode" => emit_plan_mode_entered(turn, config, emitter),
+        "ExitPlanMode" => emit_plan_mode_exited(turn, config, emitter),
+        _ => {}
+    }
+}
+
+fn emit_plan_mode_entered(turn: u32, config: &AgentConfig, emitter: &mut EventEmitter) {
+    let mut pm = config.plan_mode.write().unwrap();
+    let id = if let Some(plans_dir) = plan_mode_plans_dir(config) {
+        pm.enter(&plans_dir, true).map_or_else(
+            |_| {
+                pm.enter_in_memory();
+                pm.plan_id().unwrap_or("").to_owned()
+            },
+            |data| data.id,
+        )
+    } else {
+        pm.enter_in_memory();
+        pm.plan_id().unwrap_or("").to_owned()
+    };
+    drop(pm);
+    emitter.emit(AgentEvent::PlanModeEntered {
+        turn,
+        id: id.clone(),
+    });
+    emitter.emit(AgentEvent::PlanUpdated {
+        turn,
+        enabled: true,
+    });
+}
+
+fn emit_plan_mode_exited(turn: u32, config: &AgentConfig, emitter: &mut EventEmitter) {
+    let mut pm = config.plan_mode.write().unwrap();
+    let id = pm.plan_id().unwrap_or("").to_owned();
+    pm.exit();
+    drop(pm);
+    emitter.emit(AgentEvent::PlanModeExited { turn, id });
+    emitter.emit(AgentEvent::PlanUpdated {
+        turn,
+        enabled: false,
+    });
+}
+
+fn emit_todo_event(
+    turn: u32,
+    config: &AgentConfig,
+    tool_name: &str,
+    result: &ToolResult,
+    emitter: &mut EventEmitter,
+) {
+    if tool_name != "TodoList" || result.is_error {
+        return;
+    }
+    let Some(details) = &result.details else {
+        return;
+    };
+    let Some(todos_val) = details.get("todos") else {
+        return;
+    };
+    let Ok(todos) = serde_json::from_value::<Vec<TodoEventData>>(todos_val.clone()) else {
+        return;
+    };
+    if let Ok(mut shared) = config.todos.lock() {
+        shared.clone_from(&todos);
+    }
+    emitter.emit(AgentEvent::TodoUpdated { turn, todos });
 }
 
 async fn goal_continuation_messages(
@@ -1217,11 +1326,80 @@ async fn goal_continuation_messages(
     }
     let _ = manager.increment_turn().await;
     let objective = goal.objective;
+    let artifact = goal.artifact_dir.as_ref().map_or_else(
+        || "(no artifact directory)".to_owned(),
+        |path| path.display().to_string(),
+    );
+    let phase = goal
+        .current_phase
+        .and_then(|index| goal.phases.get(index).cloned())
+        .unwrap_or_else(|| "No current phase recorded.".to_owned());
     Some(vec![AgentMessage::system_text(format!(
-        "Goal still active: {objective}. Continue making progress. \
-         Use `UpdateGoalStatus` when the goal is complete or blocked, \
-         or `GetGoalStatus` to check current state."
+        "Goal still active: {objective}. Continue making progress using the goal artifacts.\n\n\
+         Artifact directory: {artifact}\n\
+         Current phase: {phase}\n\n\
+         Work phase by phase. On repeated failures, retry once, write a focused fix spec on the second failure, and report blocked with handoff details on the third. Run a final audit before marking complete. \
+         Use `UpdateGoalStatus` when the goal is complete or blocked, or `GetGoalStatus` to check current state."
     ))])
+}
+
+fn emit_goal_event_from_result(
+    turn: u32,
+    tool_name: &str,
+    result: &ToolResult,
+    emitter: &mut EventEmitter,
+) {
+    if result.is_error {
+        return;
+    }
+    let Some(details) = &result.details else {
+        return;
+    };
+    if details.get("kind").and_then(serde_json::Value::as_str) != Some("goal") {
+        return;
+    }
+    let Some(objective) = details
+        .get("objective")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+    else {
+        return;
+    };
+    match (
+        tool_name,
+        details.get("event").and_then(serde_json::Value::as_str),
+        details.get("status").and_then(serde_json::Value::as_str),
+    ) {
+        ("StartGoal" | "ExitGoalMode", Some("started"), _) => {
+            emitter.emit(AgentEvent::GoalStarted { turn, objective });
+        }
+        ("UpdateGoalStatus", Some("updated"), Some("paused")) => {
+            emitter.emit(AgentEvent::GoalPaused { turn, objective });
+        }
+        ("UpdateGoalStatus", Some("updated"), Some("active")) => {
+            emitter.emit(AgentEvent::GoalResumed { turn, objective });
+        }
+        ("UpdateGoalStatus", Some("updated"), Some("blocked")) => {
+            let reason = details
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("blocked")
+                .to_owned();
+            emitter.emit(AgentEvent::GoalBlocked {
+                turn,
+                objective,
+                reason,
+            });
+        }
+        ("UpdateGoalStatus", Some("updated"), Some("complete")) => {
+            emitter.emit(AgentEvent::GoalFinished {
+                turn,
+                objective,
+                outcome: "complete".to_owned(),
+            });
+        }
+        _ => {}
+    }
 }
 
 fn drain_next_pending_queue(config: &AgentConfig, emitter: &mut EventEmitter) -> Vec<AgentMessage> {
@@ -1345,27 +1523,39 @@ fn compact_keep_boundary(messages: &[AgentMessage], proposed_index: usize) -> us
         .checked_sub(1)
         .and_then(|previous| messages.get(previous))
     {
-        let mut result_count = 0;
-        for message in &messages[index..] {
-            match message {
-                AgentMessage::ToolResult { .. } => result_count += 1,
-                AgentMessage::User { .. } | AgentMessage::Assistant { .. } => break,
-                AgentMessage::System { .. } => {}
-            }
-        }
+        let result_count = count_following_tool_results(messages, index);
         if result_count < tool_calls.len() {
-            while index < messages.len()
-                && !matches!(
-                    messages[index],
-                    AgentMessage::User { .. } | AgentMessage::Assistant { .. }
-                )
-            {
-                index += 1;
-            }
+            index = next_turn_boundary(messages, index);
         }
     }
 
     index
+}
+
+fn count_following_tool_results(messages: &[AgentMessage], index: usize) -> usize {
+    let mut result_count = 0;
+    for message in &messages[index..] {
+        match message {
+            AgentMessage::ToolResult { .. } => result_count += 1,
+            AgentMessage::User { .. } | AgentMessage::Assistant { .. } => break,
+            AgentMessage::System { .. } => {}
+        }
+    }
+    result_count
+}
+
+fn next_turn_boundary(messages: &[AgentMessage], mut index: usize) -> usize {
+    while index < messages.len() && !is_turn_boundary_message(&messages[index]) {
+        index += 1;
+    }
+    index
+}
+
+fn is_turn_boundary_message(message: &AgentMessage) -> bool {
+    matches!(
+        message,
+        AgentMessage::User { .. } | AgentMessage::Assistant { .. }
+    )
 }
 
 fn estimate_messages_tokens(messages: &[AgentMessage]) -> usize {
@@ -1433,6 +1623,12 @@ fn take_messages(queue: &[AgentMessage], mode: QueueMode) -> Vec<AgentMessage> {
 
 fn terminates_tool_batch(tool_results: &[(AgentToolCall, ToolResult)]) -> bool {
     !tool_results.is_empty() && tool_results.iter().all(|(_, result)| result.terminate)
+}
+
+fn continues_after_terminating_batch(tool_results: &[(AgentToolCall, ToolResult)]) -> bool {
+    tool_results
+        .iter()
+        .any(|(call, result)| call.name == "EnterPlanMode" && !result.is_error)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1527,6 +1723,9 @@ fn scheduling_class_for_preparation(
         && config.permission_mode != PermissionMode::Auto
         && exit_plan_mode_has_reviewable_plan(config)
     {
+        return ToolSchedulingClass::BlockingDialog;
+    }
+    if tool_call.name == "ExitGoalMode" && config.permission_mode != PermissionMode::Auto {
         return ToolSchedulingClass::BlockingDialog;
     }
     if matches!(
@@ -2160,6 +2359,16 @@ fn permission_preparation_for_mode(
         return PermissionPreparation::Run(access_for_tool(tool_call, true));
     }
 
+    if tool_call.name == "ExitGoalMode" {
+        if config.permission_mode == PermissionMode::Auto {
+            return PermissionPreparation::Run(access_for_tool(tool_call, true));
+        }
+        return PermissionPreparation::Ask {
+            operation: PermissionOperation::GoalTransition,
+            subject: "Start reviewed goal".to_owned(),
+        };
+    }
+
     // 8. Plan-mode helper approvals (e.g. writing the active plan file).
     if matches!(tool_call.name.as_str(), "Write" | "Edit") {
         let Ok(plan_mode) = config.plan_mode.read() else {
@@ -2200,6 +2409,7 @@ fn is_default_approved_tool(tool_call: &AgentToolCall) -> bool {
             | "TodoList"
             | "TaskList"
             | "TaskOutput"
+            | "Skill"
             | "AskUserQuestion"
     )
 }
@@ -2272,16 +2482,21 @@ async fn resolve_approval(
             None
         }
         PermissionApprovalDecision::Reject => {
-            // ExitPlanMode revise feedback is delivered via the plan_review_feedback side-channel.
-            if tool_call.name == "ExitPlanMode"
+            // Review feedback is delivered via the review-feedback side-channel.
+            if matches!(tool_call.name.as_str(), "ExitPlanMode" | "ExitGoalMode")
                 && let Some(feedback) = config
                     .plan_review_feedback
                     .lock()
                     .ok()
                     .and_then(|mut m| m.remove(&tool_call.id))
             {
+                let target = if tool_call.name == "ExitGoalMode" {
+                    "Goal mode"
+                } else {
+                    "Plan mode"
+                };
                 return Some(ToolResult::ok(format!(
-                    "User requested revisions. Plan mode remains active.\n\nFeedback: {feedback}"
+                    "User requested revisions. {target} remains active.\n\nFeedback: {feedback}"
                 )));
             }
             Some(permission_error(operation, &subject, "approval denied"))
@@ -2301,6 +2516,7 @@ fn permission_error(
         PermissionOperation::Tool => "tool",
         PermissionOperation::UserQuestion => "user question",
         PermissionOperation::PlanTransition => "plan transition",
+        PermissionOperation::GoalTransition => "goal transition",
     };
     ToolResult::error(format!("{prefix} for {noun}: {subject}"))
 }
