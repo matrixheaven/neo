@@ -243,12 +243,9 @@ fn app_shell_updates_context_usage_from_agent_event() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.set_context_window(Some(ContextWindow::new(200_000)));
 
-    app.apply_agent_event(neo_agent_core::AgentEvent::TokenUsage {
+    app.apply_agent_event(neo_agent_core::AgentEvent::ContextWindowUpdated {
         turn: 1,
-        usage: neo_agent_core::AgentTokenUsage {
-            input_tokens: 123,
-            output_tokens: 45,
-        },
+        used_tokens: 168,
     });
 
     assert_eq!(

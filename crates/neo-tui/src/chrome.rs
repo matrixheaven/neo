@@ -715,10 +715,9 @@ impl NeoChromeState {
                 self.focused_overlay = None;
                 self.mode = ChromeMode::Approval;
             }
-            AgentEvent::TokenUsage { usage, .. } => {
+            AgentEvent::ContextWindowUpdated { used_tokens, .. } => {
                 if let Some(context_window) = &mut self.context_window {
-                    *context_window =
-                        context_window.with_used_tokens(usage.input_tokens + usage.output_tokens);
+                    *context_window = context_window.with_used_tokens(used_tokens);
                 }
             }
             AgentEvent::TurnFinished { .. } => {
@@ -740,6 +739,7 @@ impl NeoChromeState {
             | AgentEvent::RunStarted { .. }
             | AgentEvent::TurnStarted { .. }
             | AgentEvent::MessageFinished { .. }
+            | AgentEvent::TokenUsage { .. }
             | AgentEvent::TerminalSessionStarted { .. }
             | AgentEvent::TerminalSessionOutput { .. }
             | AgentEvent::TerminalSessionFinished { .. }
