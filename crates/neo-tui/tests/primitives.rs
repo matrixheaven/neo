@@ -978,26 +978,28 @@ fn transcript_selection_copies_item_range_with_roles() {
 }
 
 #[test]
-fn shift_enter_uses_permission_cycle_binding() {
-    let manager = KeybindingsManager::default();
-    assert!(manager.matches(
-        &KeyId::new("shift+enter").expect("valid key"),
-        KeybindingAction::CyclePermissionMode
-    ));
+fn shift_enter_still_inserts_newline() {
+    let event = KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::SHIFT, KeyEventKind::Press);
+    assert_eq!(
+        InputEvent::from_key_event_with_keybindings(event, &KeybindingsManager::default()),
+        Some(InputEvent::NewLine)
+    );
 }
 
 #[test]
-fn backtab_uses_shift_tab_permission_cycle_binding() {
+fn backtab_uses_shift_tab_development_cycle_binding() {
     let event = KeyEvent::new_with_kind(KeyCode::BackTab, KeyModifiers::NONE, KeyEventKind::Press);
     assert_eq!(
         InputEvent::from_key_event_with_keybindings(event, &KeybindingsManager::default()),
-        Some(InputEvent::Key(
-            KeyId::new("shift+tab").expect("valid key")
-        ))
+        Some(InputEvent::Key(KeyId::new("shift+tab").expect("valid key")))
     );
     assert!(KeybindingsManager::default().matches(
         &KeyId::new("shift+tab").expect("valid key"),
-        KeybindingAction::CyclePermissionMode
+        KeybindingAction::CycleDevelopmentMode
+    ));
+    assert!(!KeybindingsManager::default().matches(
+        &KeyId::new("shift+enter").expect("valid key"),
+        KeybindingAction::CycleDevelopmentMode
     ));
 }
 

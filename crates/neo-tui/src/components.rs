@@ -116,7 +116,7 @@ fn prompt_panel_height(app: &NeoChromeState, width: u16) -> u16 {
 }
 
 fn footer_bar_height(area_height: u16) -> u16 {
-    if area_height >= 8 { 1 } else { 0 }
+    u16::from(area_height >= 8)
 }
 
 fn session_picker_height(app: &NeoChromeState, area_height: u16) -> u16 {

@@ -11,6 +11,10 @@ use crate::{
     ansi::Color,
     components::{truncate_width, visible_width},
     core::InputResult,
+    dialogs::{
+        ApiKeyInputState, ChoicePickerState, CustomRegistryImportState, ModelSelectorState,
+        ProviderManagerState, TabbedModelSelectorState,
+    },
     image::{ImageRenderPolicy, TerminalImageCapabilities},
     input::{InputEvent, KeybindingAction},
     widgets::{
@@ -228,6 +232,23 @@ pub enum ChromeMode {
     Approval,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DevelopmentMode {
+    #[default]
+    Normal,
+    Plan,
+    Goal(GoalModeStatus),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GoalModeStatus {
+    #[default]
+    Pending,
+    Active,
+    Paused,
+    Blocked,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextWindow {
     pub used_tokens: Option<u32>,
@@ -268,6 +289,13 @@ fn format_token_count(tokens: u32) -> String {
     }
 }
 
+fn review_title(operation: PermissionOperation) -> &'static str {
+    match operation {
+        PermissionOperation::GoalTransition => "Goal Review",
+        _ => "Plan Review",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NeoChromeState {
     title: String,
@@ -288,8 +316,9 @@ pub struct NeoChromeState {
     image_capabilities: TerminalImageCapabilities,
     theme: TuiTheme,
     permission_mode: PermissionMode,
-    /// Current agent mode indicator (for footer display)
+    /// Current development mode indicator (for footer display).
     plan_mode_active: bool,
+    development_mode: DevelopmentMode,
     /// Current todo list for the `TodoPanel`.
     todo_items: Vec<TodoDisplayItem>,
     /// Optional custom label shown in the footer as a working indicator.
@@ -330,6 +359,7 @@ impl NeoChromeState {
             theme: TuiTheme::default(),
             permission_mode: PermissionMode::default(),
             plan_mode_active: false,
+            development_mode: DevelopmentMode::Normal,
             todo_items: Vec::new(),
             custom_working_label: None,
             thinking_enabled: false,
@@ -483,11 +513,28 @@ impl NeoChromeState {
 
     pub fn set_plan_mode(&mut self, active: bool) {
         self.plan_mode_active = active;
+        self.development_mode = if active {
+            DevelopmentMode::Plan
+        } else if matches!(self.development_mode, DevelopmentMode::Plan) {
+            DevelopmentMode::Normal
+        } else {
+            self.development_mode
+        };
     }
 
     #[must_use]
     pub const fn is_plan_mode(&self) -> bool {
         self.plan_mode_active
+    }
+
+    #[must_use]
+    pub const fn development_mode(&self) -> DevelopmentMode {
+        self.development_mode
+    }
+
+    pub fn set_development_mode(&mut self, mode: DevelopmentMode) {
+        self.development_mode = mode;
+        self.plan_mode_active = matches!(mode, DevelopmentMode::Plan);
     }
 
     #[must_use]
@@ -615,9 +662,7 @@ impl NeoChromeState {
             StreamUpdate::TurnFinished | StreamUpdate::RunFinished { .. } => {
                 self.mode = self.overlay_mode();
             }
-            StreamUpdate::PlanModeChanged { active } => {
-                self.plan_mode_active = active;
-            }
+            StreamUpdate::PlanModeChanged { active } => self.set_plan_mode(active),
             StreamUpdate::TodoUpdated { todos } => {
                 self.todo_items = todos;
             }
@@ -653,14 +698,17 @@ impl NeoChromeState {
                 arguments,
                 ..
             } => {
-                let is_plan_review = operation == PermissionOperation::PlanTransition;
+                let is_review = matches!(
+                    operation,
+                    PermissionOperation::PlanTransition | PermissionOperation::GoalTransition
+                );
                 let body = if arguments.is_null() {
                     subject
                 } else {
                     format!("{subject}\n{arguments}")
                 };
-                self.pending_approvals.push_back(if is_plan_review {
-                    ApprovalRequestModal::new_plan_review(id, body)
+                self.pending_approvals.push_back(if is_review {
+                    ApprovalRequestModal::new_review(id, review_title(operation), body)
                 } else {
                     ApprovalRequestModal::new(id, format!("{operation:?} approval"), body)
                 });
@@ -695,21 +743,24 @@ impl NeoChromeState {
             | AgentEvent::TerminalSessionStarted { .. }
             | AgentEvent::TerminalSessionOutput { .. }
             | AgentEvent::TerminalSessionFinished { .. }
-            | AgentEvent::SkillActivated { .. }
-            | AgentEvent::GoalStarted { .. }
-            | AgentEvent::GoalPaused { .. }
-            | AgentEvent::GoalResumed { .. }
-            | AgentEvent::GoalBlocked { .. }
-            | AgentEvent::GoalFinished { .. } => {}
-            AgentEvent::PlanModeEntered { .. } => {
-                self.plan_mode_active = true;
+            | AgentEvent::SkillActivated { .. } => {}
+            AgentEvent::GoalStarted { .. } | AgentEvent::GoalResumed { .. } => {
+                self.set_development_mode(DevelopmentMode::Goal(GoalModeStatus::Active));
             }
+            AgentEvent::GoalPaused { .. } => {
+                self.set_development_mode(DevelopmentMode::Goal(GoalModeStatus::Paused));
+            }
+            AgentEvent::GoalBlocked { .. } => {
+                self.set_development_mode(DevelopmentMode::Goal(GoalModeStatus::Blocked));
+            }
+            AgentEvent::GoalFinished { .. } => {
+                self.set_development_mode(DevelopmentMode::Normal);
+            }
+            AgentEvent::PlanModeEntered { .. } => self.set_plan_mode(true),
             AgentEvent::PlanModeExited { .. } | AgentEvent::PlanModeCancelled { .. } => {
-                self.plan_mode_active = false;
+                self.set_plan_mode(false);
             }
-            AgentEvent::PlanUpdated { enabled, .. } => {
-                self.plan_mode_active = enabled;
-            }
+            AgentEvent::PlanUpdated { enabled, .. } => self.set_plan_mode(enabled),
             AgentEvent::TodoUpdated { todos, .. } => {
                 let display: Vec<TodoDisplayItem> = todos
                     .iter()
@@ -1778,32 +1829,94 @@ impl OverlayListSelection<'_> {
 
 fn handle_dialog_selection(kind: &mut OverlayKind, action: KeybindingAction) {
     let input = InputEvent::Action(action);
+    if handle_selector_dialog_selection(kind, &input) {
+        return;
+    }
+    handle_input_dialog_selection(kind, input);
+}
+
+fn handle_selector_dialog_selection(kind: &mut OverlayKind, input: &InputEvent) -> bool {
+    if handle_model_dialog_selection(kind, input) {
+        return true;
+    }
+    handle_provider_choice_dialog_selection(kind, input)
+}
+
+fn handle_model_dialog_selection(kind: &mut OverlayKind, input: &InputEvent) -> bool {
     match kind {
-        OverlayKind::ModelSelector(state) => {
-            let _ = state.handle_input(&input);
-        }
-        OverlayKind::TabbedModelSelector(state) => {
-            let _ = state.handle_input(&input);
-        }
-        OverlayKind::ProviderManager(state) => {
-            let _ = state.handle_input(&input);
-        }
-        OverlayKind::ChoicePicker(state) => {
-            let _ = state.handle_input(&input);
-        }
-        OverlayKind::ApiKeyInput(state) => {
-            let _ = state.handle_input(&input);
-        }
-        OverlayKind::CustomRegistryImport(state) => {
-            let _ = state.handle_input(input);
-        }
-        OverlayKind::Approval(_)
-        | OverlayKind::QuestionDialog(_)
-        | OverlayKind::Message(_)
-        | OverlayKind::CommandPalette(_)
-        | OverlayKind::SessionPicker(_)
-        | OverlayKind::ModelPicker(_)
-        | OverlayKind::PromptCompletion(_) => {}
+        OverlayKind::ModelSelector(state) => handle_input_ref(state, input),
+        OverlayKind::TabbedModelSelector(state) => handle_input_ref(state, input),
+        _ => return false,
+    }
+    true
+}
+
+fn handle_provider_choice_dialog_selection(kind: &mut OverlayKind, input: &InputEvent) -> bool {
+    match kind {
+        OverlayKind::ProviderManager(state) => handle_input_ref(state, input),
+        OverlayKind::ChoicePicker(state) => handle_input_ref(state, input),
+        _ => return false,
+    }
+    true
+}
+
+fn handle_input_dialog_selection(kind: &mut OverlayKind, input: InputEvent) {
+    match kind {
+        OverlayKind::ApiKeyInput(state) => handle_input_ref(state, &input),
+        OverlayKind::CustomRegistryImport(state) => handle_input_owned(state, input),
+        _ => {}
+    }
+}
+
+fn handle_input_ref<T: DialogInputRef>(state: &mut T, input: &InputEvent) {
+    state.handle_dialog_input(input);
+}
+
+fn handle_input_owned<T: DialogInputOwned>(state: &mut T, input: InputEvent) {
+    state.handle_dialog_input(input);
+}
+
+trait DialogInputRef {
+    fn handle_dialog_input(&mut self, input: &InputEvent);
+}
+
+trait DialogInputOwned {
+    fn handle_dialog_input(&mut self, input: InputEvent);
+}
+
+impl DialogInputRef for ModelSelectorState {
+    fn handle_dialog_input(&mut self, input: &InputEvent) {
+        let _ = self.handle_input(input);
+    }
+}
+
+impl DialogInputRef for TabbedModelSelectorState {
+    fn handle_dialog_input(&mut self, input: &InputEvent) {
+        let _ = self.handle_input(input);
+    }
+}
+
+impl DialogInputRef for ProviderManagerState {
+    fn handle_dialog_input(&mut self, input: &InputEvent) {
+        let _ = self.handle_input(input);
+    }
+}
+
+impl DialogInputRef for ChoicePickerState {
+    fn handle_dialog_input(&mut self, input: &InputEvent) {
+        let _ = self.handle_input(input);
+    }
+}
+
+impl DialogInputRef for ApiKeyInputState {
+    fn handle_dialog_input(&mut self, input: &InputEvent) {
+        let _ = self.handle_input(input);
+    }
+}
+
+impl DialogInputOwned for CustomRegistryImportState {
+    fn handle_dialog_input(&mut self, input: InputEvent) {
+        let _ = self.handle_input(input);
     }
 }
 
@@ -2559,14 +2672,18 @@ impl ApprovalRequestModal {
         }
     }
 
-    /// Create a plan-review approval modal with Approve / Reject / Revise options.
+    /// Create a review approval modal with Approve / Reject / Revise options.
     #[must_use]
-    pub fn new_plan_review(request_id: impl Into<String>, body: impl Into<String>) -> Self {
+    pub fn new_review(
+        request_id: impl Into<String>,
+        title: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Self {
         Self {
             request_id: request_id.into(),
             feedback_input: String::new(),
             modal: ApprovalModal::new(
-                "Plan Review".to_string(),
+                title,
                 body,
                 [
                     ApprovalOption::new(ApprovalChoice::Approve, "Approve"),
@@ -2654,6 +2771,7 @@ impl InlineImageRenderCache {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
 pub enum ToolStatusKind {
     Pending,
     Running,
@@ -2664,25 +2782,13 @@ pub enum ToolStatusKind {
 
 impl ToolStatusKind {
     #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Running => "running",
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
+    pub fn label(self) -> &'static str {
+        ["pending", "running", "succeeded", "failed", "cancelled"][self as usize]
     }
 
     #[must_use]
-    pub const fn marker(self) -> &'static str {
-        match self {
-            Self::Pending => "-",
-            Self::Running => "*",
-            Self::Succeeded => "+",
-            Self::Failed => "!",
-            Self::Cancelled => "x",
-        }
+    pub fn marker(self) -> &'static str {
+        ["-", "*", "+", "!", "x"][self as usize]
     }
 }
 

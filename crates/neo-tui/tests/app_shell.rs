@@ -156,11 +156,68 @@ fn footer_shows_plan_mode_indicator() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.set_plan_mode(true);
     let lines = render_app(80, &app);
-    assert!(lines.iter().any(|line| line.contains("[PLAN MODE]")));
+    assert!(lines.iter().any(|line| line.contains("[manual]")));
+    assert!(lines.iter().any(|line| line.contains("[plan]")));
+    assert!(!lines.iter().any(|line| line.contains("[PLAN MODE]")));
 
     app.set_plan_mode(false);
     let lines = render_app(80, &app);
-    assert!(!lines.iter().any(|line| line.contains("[PLAN MODE]")));
+    assert!(!lines.iter().any(|line| line.contains("[plan]")));
+}
+
+#[test]
+fn footer_shows_goal_mode_status_badges() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_development_mode(neo_tui::chrome::DevelopmentMode::Goal(
+        neo_tui::chrome::GoalModeStatus::Pending,
+    ));
+    assert!(
+        render_app(80, &app)
+            .iter()
+            .any(|line| line.contains("[goal]"))
+    );
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::GoalStarted {
+        turn: 1,
+        objective: "ship it".to_owned(),
+    });
+    assert!(
+        render_app(80, &app)
+            .iter()
+            .any(|line| line.contains("[goal•]"))
+    );
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::GoalPaused {
+        turn: 2,
+        objective: "ship it".to_owned(),
+    });
+    assert!(
+        render_app(80, &app)
+            .iter()
+            .any(|line| line.contains("[goal◌]"))
+    );
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::GoalBlocked {
+        turn: 3,
+        objective: "ship it".to_owned(),
+        reason: "needs input".to_owned(),
+    });
+    assert!(
+        render_app(80, &app)
+            .iter()
+            .any(|line| line.contains("[goal✗]"))
+    );
+
+    app.apply_agent_event(neo_agent_core::AgentEvent::GoalFinished {
+        turn: 4,
+        objective: "ship it".to_owned(),
+        outcome: "done".to_owned(),
+    });
+    assert!(
+        !render_app(80, &app)
+            .iter()
+            .any(|line| line.contains("[goal"))
+    );
 }
 
 #[test]
