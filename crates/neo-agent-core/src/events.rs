@@ -181,6 +181,10 @@ pub enum AgentEvent {
         turn: u32,
         usage: AgentTokenUsage,
     },
+    ContextWindowUpdated {
+        turn: u32,
+        used_tokens: u32,
+    },
     SteeringQueued {
         message: AgentMessage,
     },

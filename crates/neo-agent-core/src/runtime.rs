@@ -404,6 +404,11 @@ impl AgentContext {
     }
 
     #[must_use]
+    pub fn estimated_context_tokens(&self) -> u32 {
+        u32::try_from(estimate_messages_tokens(&self.messages)).unwrap_or(u32::MAX)
+    }
+
+    #[must_use]
     pub fn turns(&self) -> u32 {
         self.turns
     }
@@ -963,6 +968,7 @@ fn request_messages_contain_image(messages: &[ChatMessage]) -> bool {
 struct EventEmitter {
     sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
     context: AgentContext,
+    last_context_window_tokens: Option<u32>,
 }
 
 impl EventEmitter {
@@ -970,7 +976,11 @@ impl EventEmitter {
         sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
         context: AgentContext,
     ) -> Self {
-        Self { sender, context }
+        Self {
+            sender,
+            context,
+            last_context_window_tokens: None,
+        }
     }
 
     fn emit(&mut self, event: AgentEvent) {
@@ -1086,7 +1096,7 @@ async fn run_agent_turn(
             append_queued_messages(emitter, pending_messages);
         }
 
-        maybe_compact(&config, emitter);
+        maybe_compact(&config, emitter).await;
 
         if let Some((turn, stop_reason)) = terminal_pre_model_stop(emitter, &cancel_token) {
             final_turn = turn;
@@ -1096,9 +1106,15 @@ async fn run_agent_turn(
 
         let turn = emitter.context.turns.saturating_add(1);
         let request = chat_request(&config, &emitter.context).await;
+        emit_context_window_update(
+            emitter,
+            turn,
+            estimate_chat_messages_tokens(&request.messages),
+        );
         validate_model_capabilities(&request)?;
         let assistant = run_model_turn(
             Arc::clone(&model),
+            &config,
             request,
             turn,
             emitter,
@@ -1150,6 +1166,7 @@ async fn run_agent_turn(
             break;
         }
         append_tool_result_messages(&tool_results, emitter);
+        emit_effective_context_window(&config, emitter, turn).await;
         attach_exit_plan_details(&config, &mut tool_results);
         emit_tool_side_effect_events(turn, &config, &tool_results, emitter);
         if terminates_tool_batch(&tool_results) {
@@ -1163,7 +1180,7 @@ async fn run_agent_turn(
     }
 
     process_supervisor.cleanup_all().await;
-    emit_run_finished(emitter, final_turn, final_stop_reason);
+    emit_run_finished(&config, emitter, final_turn, final_stop_reason).await;
     Ok(())
 }
 
@@ -1432,8 +1449,50 @@ fn emit_queue_drained(emitter: &mut EventEmitter, kind: QueueKind, count: usize)
     }
 }
 
-fn emit_run_finished(emitter: &mut EventEmitter, turn: u32, stop_reason: StopReason) {
+async fn emit_run_finished(
+    config: &AgentConfig,
+    emitter: &mut EventEmitter,
+    turn: u32,
+    stop_reason: StopReason,
+) {
+    emit_effective_context_window(config, emitter, turn).await;
     emitter.emit(AgentEvent::RunFinished { turn, stop_reason });
+}
+
+async fn emit_effective_context_window(
+    config: &AgentConfig,
+    emitter: &mut EventEmitter,
+    turn: u32,
+) {
+    let request = chat_request_for_context_estimate(config, &emitter.context).await;
+    emit_context_window_update(
+        emitter,
+        turn,
+        estimate_chat_messages_tokens(&request.messages),
+    );
+}
+
+async fn chat_request_for_context_estimate(
+    config: &AgentConfig,
+    context: &AgentContext,
+) -> ChatRequest {
+    let mut config = config.clone();
+    let plan_mode = config
+        .plan_mode
+        .read()
+        .expect("plan mode lock poisoned")
+        .clone();
+    config.plan_mode = Arc::new(RwLock::new(plan_mode));
+    chat_request(&config, context).await
+}
+
+fn emit_context_window_update(emitter: &mut EventEmitter, turn: u32, used_tokens: usize) {
+    let used_tokens = u32::try_from(used_tokens).unwrap_or(u32::MAX);
+    if emitter.last_context_window_tokens == Some(used_tokens) {
+        return;
+    }
+    emitter.last_context_window_tokens = Some(used_tokens);
+    emitter.emit(AgentEvent::ContextWindowUpdated { turn, used_tokens });
 }
 
 fn terminal_pre_model_stop(
@@ -1458,7 +1517,7 @@ fn append_queued_messages(emitter: &mut EventEmitter, messages: Vec<AgentMessage
     }
 }
 
-fn maybe_compact(config: &AgentConfig, emitter: &mut EventEmitter) {
+async fn maybe_compact(config: &AgentConfig, emitter: &mut EventEmitter) {
     let Some(settings) = config.compaction else {
         return;
     };
@@ -1507,6 +1566,8 @@ fn maybe_compact(config: &AgentConfig, emitter: &mut EventEmitter) {
         percent: 90,
     });
     emitter.emit(AgentEvent::CompactionApplied { summary });
+    let turn = emitter.context.turns.saturating_add(1);
+    emit_effective_context_window(config, emitter, turn).await;
 }
 
 fn compact_keep_boundary(messages: &[AgentMessage], proposed_index: usize) -> usize {
@@ -1562,6 +1623,30 @@ fn estimate_messages_tokens(messages: &[AgentMessage]) -> usize {
     messages.iter().map(estimate_message_tokens).sum()
 }
 
+fn estimate_chat_messages_tokens(messages: &[ChatMessage]) -> usize {
+    messages.iter().map(estimate_chat_message_tokens).sum()
+}
+
+fn estimate_chat_message_tokens(message: &ChatMessage) -> usize {
+    let chars = match message {
+        ChatMessage::System { content }
+        | ChatMessage::User { content }
+        | ChatMessage::ToolResult { content, .. } => estimate_chat_content_chars(content),
+        ChatMessage::Assistant {
+            content,
+            tool_calls,
+        } => {
+            let content_chars = estimate_chat_content_chars(content);
+            let tool_chars = tool_calls
+                .iter()
+                .map(|call| call.name.len() + call.arguments.to_string().len())
+                .sum::<usize>();
+            content_chars + tool_chars
+        }
+    };
+    chars.div_ceil(4)
+}
+
 fn estimate_message_tokens(message: &AgentMessage) -> usize {
     let chars = match message {
         AgentMessage::System { content }
@@ -1581,6 +1666,17 @@ fn estimate_message_tokens(message: &AgentMessage) -> usize {
         }
     };
     chars.div_ceil(4)
+}
+
+fn estimate_chat_content_chars(content: &[ContentPart]) -> usize {
+    content
+        .iter()
+        .map(|part| match part {
+            ContentPart::Text { text } => text.len(),
+            ContentPart::Thinking { .. } => 0,
+            ContentPart::Image { .. } => 4800,
+        })
+        .sum()
 }
 
 fn estimate_content_chars(content: &[Content]) -> usize {
@@ -1960,6 +2056,7 @@ async fn after_tool_result(
 
 async fn run_model_turn(
     model: Arc<dyn ModelClient>,
+    config: &AgentConfig,
     request: ChatRequest,
     turn: u32,
     emitter: &mut EventEmitter,
@@ -1982,6 +2079,7 @@ async fn run_model_turn(
     emitter.emit(AgentEvent::MessageAppended {
         message: message.clone(),
     });
+    emit_effective_context_window(config, emitter, turn).await;
     emitter.emit(AgentEvent::TurnFinished { turn, stop_reason });
     Ok(Some(message))
 }

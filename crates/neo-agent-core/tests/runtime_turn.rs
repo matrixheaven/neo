@@ -60,6 +60,10 @@ async fn runtime_streams_one_turn_text_and_updates_context() {
             AgentEvent::MessageAppended {
                 message: AgentMessage::user_text("say hello"),
             },
+            AgentEvent::ContextWindowUpdated {
+                turn: 1,
+                used_tokens: 3,
+            },
             AgentEvent::TurnStarted { turn: 1 },
             AgentEvent::MessageStarted {
                 turn: 1,
@@ -84,6 +88,10 @@ async fn runtime_streams_one_turn_text_and_updates_context() {
                     Vec::new(),
                     StopReason::EndTurn,
                 ),
+            },
+            AgentEvent::ContextWindowUpdated {
+                turn: 1,
+                used_tokens: 5,
             },
             AgentEvent::TurnFinished {
                 turn: 1,
@@ -150,6 +158,49 @@ async fn runtime_injects_workspace_context_into_model_request() {
                         && text.contains("Do not prefix shell commands with `cd")
             ))
     ));
+}
+
+#[tokio::test]
+async fn runtime_context_window_estimate_includes_effective_request_messages() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::MessageStart {
+            id: "msg_1".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace_root = temp.path().join("workspace");
+    std::fs::create_dir(&workspace_root).expect("workspace dir");
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model())
+            .with_system_prompt("system prompt that must count toward context")
+            .with_workspace_root(workspace_root)
+            .expect("workspace root"),
+        harness.client(),
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("short"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ContextWindowUpdated {
+                turn: 1,
+                used_tokens
+            } if *used_tokens > 20
+        )),
+        "context estimate should include system/workspace request messages, not only the user buffer"
+    );
 }
 
 #[tokio::test]
@@ -264,6 +315,17 @@ async fn runtime_yields_model_events_before_model_stream_finishes() {
             .expect("prompt append should be ok"),
         AgentEvent::MessageAppended {
             message: AgentMessage::user_text("stream"),
+        }
+    );
+    assert_eq!(
+        timeout(Duration::from_millis(250), stream.next())
+            .await
+            .expect("context tokens should stream before delayed message end")
+            .expect("context tokens event")
+            .expect("context tokens should be ok"),
+        AgentEvent::ContextWindowUpdated {
+            turn: 1,
+            used_tokens: 2,
         }
     );
     assert_eq!(
@@ -1043,6 +1105,9 @@ async fn runtime_emits_compaction_lifecycle_events_before_applying_summary() {
                 "applied:{}:{}",
                 summary.first_kept_message_index, summary.tokens_before
             )),
+            AgentEvent::ContextWindowUpdated { used_tokens, .. } => {
+                Some(format!("context:{used_tokens}"))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1056,6 +1121,8 @@ async fn runtime_emits_compaction_lifecycle_events_before_applying_summary() {
             "progress:Summarizing:70",
             "progress:Applying:90",
             "applied:2:24",
+            "context:11",
+            "context:15",
         ]
     );
 }
@@ -1190,6 +1257,10 @@ async fn runtime_external_cancellation_before_model_emits_cancelled_barriers() {
             AgentEvent::TurnFinished {
                 turn: 1,
                 stop_reason: StopReason::Cancelled,
+            },
+            AgentEvent::ContextWindowUpdated {
+                turn: 1,
+                used_tokens: 5,
             },
             AgentEvent::RunFinished {
                 turn: 1,
