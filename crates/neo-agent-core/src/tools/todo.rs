@@ -250,7 +250,7 @@ fn format_event_todos(todos: &[TodoEventData]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PermissionPolicy, ToolContext};
+    use crate::{ToolAccess, ToolContext};
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
@@ -377,7 +377,7 @@ mod tests {
         let tool = TodoTool::new();
         let ctx = ToolContext::new(std::env::current_dir().unwrap())
             .unwrap()
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
         let input = json!({
             "todos": [
                 { "title": "Step one", "status": "done" },
@@ -397,7 +397,7 @@ mod tests {
         let tool = TodoTool::new();
         let ctx = ToolContext::new(std::env::current_dir().unwrap())
             .unwrap()
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
         let result = tool
             .execute(&ctx, json!({ "todos": [] }))
             .await
@@ -417,7 +417,7 @@ mod tests {
         });
         let ctx = ToolContext::new(std::env::current_dir().unwrap())
             .unwrap()
-            .with_permission_policy(PermissionPolicy::allow_all())
+            .with_access(ToolAccess::all())
             .with_tool_update(callback);
 
         let tool = TodoTool::new();
@@ -451,7 +451,7 @@ mod tests {
         });
         let ctx = ToolContext::new(std::env::current_dir().unwrap())
             .unwrap()
-            .with_permission_policy(PermissionPolicy::allow_all())
+            .with_access(ToolAccess::all())
             .with_tool_update(callback);
 
         let result = tool.execute(&ctx, json!({})).await.expect("execute");
@@ -527,7 +527,7 @@ mod tests {
         let tool = TodoTool::new();
         let ctx = ToolContext::new(std::env::current_dir().unwrap())
             .unwrap()
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
         let input = json!({
             "todos": [
                 { "title": "Task A", "status": "done" },
@@ -552,7 +552,7 @@ mod tests {
         let tool = TodoTool::with_state(Arc::clone(&shared));
         let ctx = ToolContext::new(std::env::current_dir().unwrap())
             .unwrap()
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
         let input = json!({
             "todos": [{ "title": "Shared task", "status": "in_progress" }]
         });

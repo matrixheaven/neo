@@ -591,7 +591,7 @@ fn format_system_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PermissionPolicy, ToolContext};
+    use crate::{ToolAccess, ToolContext};
     use serde_json::json;
 
     fn setup_workspace() -> tempfile::TempDir {
@@ -627,7 +627,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_grep(&ctx, "fn main", json!({ "output_mode": "content" })).await;
         assert!(result.content.contains("foo.rs:1:fn main() {}"));
@@ -640,7 +640,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_grep(&ctx, "fn", json!({})).await;
         assert!(result.content.contains("foo.rs"));
@@ -655,7 +655,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_grep(&ctx, "fn", json!({ "output_mode": "count_matches" })).await;
         assert!(result.content.contains("foo.rs:1"));
@@ -668,7 +668,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_grep(
             &ctx,
@@ -685,7 +685,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_grep(
             &ctx,
@@ -704,7 +704,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_grep(
             &ctx,
@@ -722,7 +722,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_grep(
             &ctx,
@@ -739,7 +739,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let first = run_grep(
             &ctx,
@@ -779,7 +779,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_grep(
             &ctx,
@@ -796,7 +796,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = GrepTool
             .execute(&ctx, json!({ "pattern": "[invalid" }))
@@ -809,7 +809,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_grep(&ctx, "fn", json!({ "output_mode": "count_matches" })).await;
         // foo.rs has 1, baz.rs has 1, sub/qux.rs has 1 => 3 total

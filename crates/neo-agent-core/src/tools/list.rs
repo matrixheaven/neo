@@ -183,7 +183,7 @@ async fn collect_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PermissionPolicy, ToolContext};
+    use crate::{ToolAccess, ToolContext};
     use serde_json::json;
 
     fn setup_workspace() -> tempfile::TempDir {
@@ -217,7 +217,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_list(&ctx, ".", false).await;
         assert!(result.contains("foo.rs"));
@@ -235,7 +235,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let collapsed = run_list(&ctx, ".", true).await;
         assert!(collapsed.contains(".hidden/"));
@@ -250,7 +250,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("tempdir");
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_list(&ctx, ".", false).await;
         assert_eq!(result, "(empty directory)");
@@ -264,7 +264,7 @@ mod tests {
         }
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_list(&ctx, ".", false).await;
         assert!(result.contains("... and 5 more entries"));
@@ -283,7 +283,7 @@ mod tests {
         }
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_list(&ctx, ".", false).await;
         assert!(result.contains("... and 5 more"));
@@ -295,7 +295,7 @@ mod tests {
         std::fs::write(workspace.path().join("not-a-dir.txt"), "x").expect("write file");
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = ListTool
             .execute(

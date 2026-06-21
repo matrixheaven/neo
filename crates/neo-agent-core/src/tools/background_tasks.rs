@@ -1054,7 +1054,7 @@ mod tests {
         let task_id = result_task_id(&started);
         let ctx = ToolContext::new(std::env::current_dir().unwrap())
             .unwrap()
-            .with_permission_policy(crate::PermissionPolicy::allow_all())
+            .with_access(crate::ToolAccess::all())
             .with_background_tasks(manager);
         let tool = TaskStopTool;
         let result = tool
@@ -1080,7 +1080,13 @@ mod tests {
         let task_id = result_task_id(&started);
         let ctx = ToolContext::new(std::env::current_dir().unwrap())
             .unwrap()
-            .with_permission_policy(crate::PermissionPolicy::default())
+            .with_access(crate::ToolAccess {
+                file_read: true,
+                file_write: false,
+                shell: false,
+                tool: true,
+                user_question: false,
+            })
             .with_background_tasks(manager);
         let tool = TaskStopTool;
         let result = tool.execute(&ctx, json!({"task_id": task_id})).await;

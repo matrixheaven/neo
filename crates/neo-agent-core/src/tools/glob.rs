@@ -201,7 +201,7 @@ fn expand_braces(pattern: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PermissionPolicy, ToolContext};
+    use crate::{ToolAccess, ToolContext};
     use serde_json::json;
 
     /// Create a temporary workspace with a known file layout:
@@ -253,7 +253,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_glob(&ctx, "*.rs", ".", 100, true).await;
         // `*.rs` with literal_separator only matches root-level .rs files.
@@ -268,7 +268,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_glob(&ctx, "*.{rs,toml}", ".", 100, true).await;
         assert!(result.contains("foo.rs"));
@@ -281,7 +281,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         // `*.{rs,toml}` matches two files; cap at one.
         let result = run_glob(&ctx, "*.{rs,toml}", ".", 1, true).await;
@@ -304,7 +304,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_glob(&ctx, "*.xyz", ".", 100, true).await;
         assert!(result.is_empty());
@@ -315,7 +315,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         // Searching in `sub` with `*.rs` matches `qux.rs` relative to `sub`,
         // displayed as `sub/qux.rs` relative to the workspace.
@@ -330,7 +330,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         // `sub/**/*.rs` matches all .rs files under `sub/`.
         let result = run_glob(&ctx, "sub/**/*.rs", ".", 100, true).await;
@@ -344,7 +344,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_glob(&ctx, "sub", ".", 100, true).await;
         assert!(result.contains("sub/"));
@@ -355,7 +355,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_glob(&ctx, "sub", ".", 100, false).await;
         assert!(!result.contains("sub/"));
@@ -367,7 +367,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_glob(&ctx, "**/*.rs", ".", 2, true).await;
         assert!(result.contains("[Truncated at 2 matches"));

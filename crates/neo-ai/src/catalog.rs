@@ -197,18 +197,31 @@ pub fn catalog_provider_models(entry: &CatalogEntry) -> Vec<CatalogModelInfo> {
 /// Build capability string list from catalog model fields.
 fn catalog_model_capabilities(model: &CatalogModel) -> Vec<String> {
     let mut caps = vec!["streaming".to_owned()];
-    if model.tool_call.unwrap_or(true) {
+    if catalog_model_supports_tools(model) {
         caps.push("tools".to_owned());
     }
-    if model.reasoning.unwrap_or(false) {
+    if catalog_model_supports_reasoning(model) {
         caps.push("reasoning".to_owned());
     }
-    if let Some(mods) = &model.modalities
-        && mods.input.iter().any(|m| m == "image")
-    {
+    if catalog_model_accepts_images(model) {
         caps.push("images".to_owned());
     }
     caps
+}
+
+fn catalog_model_supports_tools(model: &CatalogModel) -> bool {
+    model.tool_call.unwrap_or(true)
+}
+
+fn catalog_model_supports_reasoning(model: &CatalogModel) -> bool {
+    model.reasoning.unwrap_or(false)
+}
+
+fn catalog_model_accepts_images(model: &CatalogModel) -> bool {
+    model
+        .modalities
+        .as_ref()
+        .is_some_and(|modalities| modalities.input.iter().any(|m| m == "image"))
 }
 
 /// Extract reasoning key from interleaved hint.
@@ -326,5 +339,43 @@ mod tests {
             modalities: None,
         };
         assert!(is_embedding_model(&model));
+    }
+
+    #[test]
+    fn catalog_model_capabilities_defaults_to_streaming_and_tools() {
+        let model = CatalogModel {
+            id: "chat".to_owned(),
+            name: None,
+            family: None,
+            limit: None,
+            tool_call: None,
+            reasoning: None,
+            interleaved: None,
+            modalities: None,
+        };
+
+        assert_eq!(catalog_model_capabilities(&model), ["streaming", "tools"]);
+    }
+
+    #[test]
+    fn catalog_model_capabilities_respects_disabled_tools_and_optional_features() {
+        let model = CatalogModel {
+            id: "vision-reasoning".to_owned(),
+            name: None,
+            family: None,
+            limit: None,
+            tool_call: Some(false),
+            reasoning: Some(true),
+            interleaved: None,
+            modalities: Some(CatalogModalities {
+                input: vec!["text".to_owned(), "image".to_owned()],
+                output: vec!["text".to_owned()],
+            }),
+        };
+
+        assert_eq!(
+            catalog_model_capabilities(&model),
+            ["streaming", "reasoning", "images"]
+        );
     }
 }

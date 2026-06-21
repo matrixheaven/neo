@@ -20,9 +20,10 @@ use crate::skills::SkillStore;
 use crate::tools::BackgroundTaskManager;
 use crate::{
     AgentEvent, AgentMessage, AgentToolCall, CompactionPhase, CompactionReason, CompactionSummary,
-    Content, InjectionManager, PermissionDecision, PermissionOperation, PermissionPolicy, PlanMode,
-    ProcessSupervisor, QueueKind, StopReason, TodoEventData, ToolContext, ToolError, ToolRegistry,
-    ToolResult, ToolUpdateCallback, check_plan_mode_guard,
+    Content, InjectionManager, PermissionApprovalDecision, PermissionMode, PermissionOperation,
+    PlanMode, PlanModeGuard, ProcessSupervisor, QueueKind, StopReason, TodoEventData, ToolAccess,
+    ToolContext, ToolError, ToolRegistry, ToolResult, ToolUpdateCallback, check_plan_mode_guard,
+    is_active_plan_file_path,
 };
 
 pub type ContextTransform = Arc<dyn Fn(&[AgentMessage]) -> Vec<AgentMessage> + Send + Sync>;
@@ -38,9 +39,10 @@ pub type AsyncAfterToolCallHook = Arc<
         + Send
         + Sync,
 >;
-pub type ApprovalHandler = Arc<dyn Fn(&ApprovalRequest) -> PermissionDecision + Send + Sync>;
+pub type ApprovalHandler =
+    Arc<dyn Fn(&ApprovalRequest) -> PermissionApprovalDecision + Send + Sync>;
 pub type AsyncApprovalHandler =
-    Arc<dyn Fn(ApprovalRequest) -> BoxFuture<'static, PermissionDecision> + Send + Sync>;
+    Arc<dyn Fn(ApprovalRequest) -> BoxFuture<'static, PermissionApprovalDecision> + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ApprovalRequest {
@@ -51,8 +53,32 @@ pub struct ApprovalRequest {
     pub arguments: serde_json::Value,
 }
 
-enum ToolPreparation {
-    Run(ToolContext),
+enum PermissionPreparation {
+    Run(ToolAccess),
+    Ask {
+        operation: PermissionOperation,
+        subject: String,
+    },
+    Deny(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolSchedulingClass {
+    ParallelSafe,
+    Exclusive,
+    BlockingDialog,
+}
+
+#[allow(dead_code)]
+struct PreparedToolCall {
+    tool_call: AgentToolCall,
+    result: PreparedToolCallResult,
+    scheduling: ToolSchedulingClass,
+    access: ToolAccess,
+}
+
+enum PreparedToolCallResult {
+    Run,
     Skip(ToolResult),
 }
 
@@ -81,7 +107,7 @@ pub struct AgentConfig {
     pub steering_queue_mode: QueueMode,
     pub follow_up_queue_mode: QueueMode,
     pub tool_execution_mode: ToolExecutionMode,
-    pub tool_permission_policy: PermissionPolicy,
+    pub permission_mode: PermissionMode,
     pub compaction: Option<CompactionSettings>,
     /// Maximum number of autonomous turns a goal may run before blocking.
     #[serde(default)]
@@ -118,6 +144,10 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub plan_review_feedback: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    /// Tool names approved for the current session via "Approve for this session".
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub session_approvals: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Home directory used for plan file creation (e.g. `~/.neo`).
     /// Falls back to `workspace_root` if unset.
     pub home_dir: Option<PathBuf>,
@@ -147,7 +177,7 @@ impl AgentConfig {
             steering_queue_mode: QueueMode::All,
             follow_up_queue_mode: QueueMode::All,
             tool_execution_mode: ToolExecutionMode::Parallel,
-            tool_permission_policy: PermissionPolicy::default(),
+            permission_mode: PermissionMode::default(),
             compaction: None,
             max_goal_turns: None,
             context_transform: None,
@@ -159,6 +189,7 @@ impl AgentConfig {
             async_approval_handler: None,
             plan_mode: Arc::new(RwLock::new(PlanMode::default())),
             plan_review_feedback: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_approvals: Arc::new(Mutex::new(std::collections::HashSet::new())),
             home_dir: None,
             todos: Arc::new(Mutex::new(Vec::new())),
             background_tasks: BackgroundTaskManager::new(),
@@ -191,8 +222,8 @@ impl AgentConfig {
     }
 
     #[must_use]
-    pub const fn with_tool_permission_policy(mut self, policy: PermissionPolicy) -> Self {
-        self.tool_permission_policy = policy;
+    pub const fn with_permission_mode(mut self, mode: PermissionMode) -> Self {
+        self.permission_mode = mode;
         self
     }
 
@@ -264,7 +295,7 @@ impl AgentConfig {
     #[must_use]
     pub fn with_approval_handler(
         mut self,
-        handler: impl Fn(&ApprovalRequest) -> PermissionDecision + Send + Sync + 'static,
+        handler: impl Fn(&ApprovalRequest) -> PermissionApprovalDecision + Send + Sync + 'static,
     ) -> Self {
         self.approval_handler = Some(Arc::new(handler));
         self
@@ -274,7 +305,7 @@ impl AgentConfig {
     pub fn with_async_approval_handler<F, Fut>(mut self, handler: F) -> Self
     where
         F: Fn(ApprovalRequest) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = PermissionDecision> + Send + 'static,
+        Fut: Future<Output = PermissionApprovalDecision> + Send + 'static,
     {
         self.async_approval_handler = Some(Arc::new(move |request| handler(request).boxed()));
         self
@@ -1416,82 +1447,95 @@ async fn execute_tool_calls(
     cancel_token: &CancellationToken,
     process_supervisor: &ProcessSupervisor,
 ) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
-    match config.tool_execution_mode {
-        ToolExecutionMode::Sequential => {
-            execute_tool_calls_sequential(
-                config,
-                registry,
-                skills,
-                skill_invocation_active,
-                turn,
-                tool_calls,
-                emitter,
-                cancel_token,
-                process_supervisor,
-            )
-            .await
-        }
-        ToolExecutionMode::Parallel => {
-            if tool_calls
-                .iter()
-                .any(|tool_call| tool_call_requires_blocking_dialog(config, tool_call))
-            {
-                execute_tool_calls_sequential(
-                    config,
-                    registry,
-                    skills,
-                    skill_invocation_active,
-                    turn,
-                    tool_calls,
-                    emitter,
-                    cancel_token,
-                    process_supervisor,
-                )
-                .await
-            } else {
-                execute_tool_calls_parallel(
-                    config,
-                    registry,
-                    skills,
-                    skill_invocation_active,
-                    turn,
-                    tool_calls,
-                    emitter,
-                    cancel_token,
-                    process_supervisor,
-                )
-                .await
-            }
-        }
+    if matches!(config.tool_execution_mode, ToolExecutionMode::Sequential) {
+        return execute_tool_calls_sequential(
+            config,
+            registry,
+            skills,
+            skill_invocation_active,
+            turn,
+            tool_calls,
+            emitter,
+            cancel_token,
+            process_supervisor,
+        )
+        .await;
     }
+
+    if tool_calls.iter().any(|call| {
+        let prep = permission_preparation_for_mode(config, call);
+        scheduling_class_for_preparation(config, call, &prep) == ToolSchedulingClass::BlockingDialog
+    }) {
+        return execute_tool_calls_sequential(
+            config,
+            registry,
+            skills,
+            skill_invocation_active,
+            turn,
+            tool_calls,
+            emitter,
+            cancel_token,
+            process_supervisor,
+        )
+        .await;
+    }
+
+    if tool_calls.iter().any(|call| {
+        let prep = permission_preparation_for_mode(config, call);
+        scheduling_class_for_preparation(config, call, &prep) == ToolSchedulingClass::Exclusive
+    }) {
+        return execute_tool_calls_sequential(
+            config,
+            registry,
+            skills,
+            skill_invocation_active,
+            turn,
+            tool_calls,
+            emitter,
+            cancel_token,
+            process_supervisor,
+        )
+        .await;
+    }
+
+    execute_tool_calls_parallel(
+        config,
+        registry,
+        skills,
+        skill_invocation_active,
+        turn,
+        tool_calls,
+        emitter,
+        cancel_token,
+        process_supervisor,
+    )
+    .await
 }
 
-fn tool_call_requires_blocking_dialog(config: &AgentConfig, tool_call: &AgentToolCall) -> bool {
+fn scheduling_class_for_preparation(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+    preparation: &PermissionPreparation,
+) -> ToolSchedulingClass {
+    if matches!(preparation, PermissionPreparation::Ask { .. }) {
+        return ToolSchedulingClass::BlockingDialog;
+    }
     if tool_call.name == "AskUserQuestion" && !ask_user_runs_in_background(tool_call) {
-        return true;
+        return ToolSchedulingClass::BlockingDialog;
     }
-    if tool_call.name == "ExitPlanMode" {
-        return true;
-    }
-    if config.tool_permission_policy.tool == PermissionDecision::Ask
-        && config_has_interactive_approval(config)
+    if tool_call.name == "ExitPlanMode"
+        && config.permission_mode != PermissionMode::Auto
+        && exit_plan_mode_has_reviewable_plan(config)
     {
-        return true;
+        return ToolSchedulingClass::BlockingDialog;
     }
-    let Some((operation, _)) = permission_operation_for_tool(tool_call) else {
-        return false;
-    };
-    let decision = match operation {
-        PermissionOperation::FileRead => config.tool_permission_policy.file_read,
-        PermissionOperation::FileWrite => config.tool_permission_policy.file_write,
-        PermissionOperation::Shell => config.tool_permission_policy.shell,
-        PermissionOperation::Tool => config.tool_permission_policy.tool,
-    };
-    decision == PermissionDecision::Ask && config_has_interactive_approval(config)
-}
-
-fn config_has_interactive_approval(config: &AgentConfig) -> bool {
-    config.approval_handler.is_some() || config.async_approval_handler.is_some()
+    if matches!(
+        tool_call.name.as_str(),
+        "Bash" | "Terminal" | "Write" | "Edit"
+    ) {
+        return ToolSchedulingClass::Exclusive;
+    }
+    ToolSchedulingClass::ParallelSafe
 }
 
 fn ask_user_runs_in_background(tool_call: &AgentToolCall) -> bool {
@@ -1500,6 +1544,19 @@ fn ask_user_runs_in_background(tool_call: &AgentToolCall) -> bool {
         .get("background")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
+}
+
+fn exit_plan_mode_has_reviewable_plan(config: &AgentConfig) -> bool {
+    let Ok(pm) = config.plan_mode.read() else {
+        return false;
+    };
+    if !pm.is_active() {
+        return false;
+    }
+    pm.data()
+        .ok()
+        .flatten()
+        .is_some_and(|data| !data.content.trim().is_empty())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1601,24 +1658,28 @@ async fn execute_tool_calls_parallel(
             continue;
         }
 
+        let prepared = prepare_tool_call(config, &tool_call, turn, emitter, cancel_token).await;
+        if let PreparedToolCallResult::Skip(result) = prepared.result {
+            if !cancel_token.is_cancelled() {
+                let result = after_tool_result(config, &tool_call, result, cancel_token).await;
+                emit_shell_finished(turn, &tool_call, &result, emitter);
+                emit_terminal_events(turn, &tool_call, &result, &tool_context, emitter);
+                emitter.emit(AgentEvent::ToolExecutionFinished {
+                    turn,
+                    id: tool_call.id.clone(),
+                    name: tool_call.name.clone(),
+                    result: result.clone(),
+                });
+                completed.push((index, tool_call, result));
+            }
+            continue;
+        }
+
         let config = config.clone();
-        let tool_context = tool_context.clone();
+        let tool_context = tool_context.clone().with_access(prepared.access);
         let cancel_token = cancel_token.clone();
-        let mut sink = emitter.sink();
+        let sink = emitter.sink();
         running.push(async move {
-            let tool_context = tokio::select! {
-                preparation = prepare_tool_context(&config, &tool_context, turn, &tool_call, &mut sink) => {
-                    match preparation {
-                    ToolPreparation::Run(context) => context,
-                    ToolPreparation::Skip(result) => {
-                        return Ok::<_, AgentRuntimeError>((index, tool_call, result));
-                    }
-                    }
-                }
-                () = cancel_token.cancelled() => {
-                    return Ok::<_, AgentRuntimeError>((index, tool_call, cancelled_tool_result()));
-                }
-            };
             let tool_context = tool_context.with_tool_update(make_tool_update_callback(
                 sink.clone(),
                 turn,
@@ -1939,19 +2000,22 @@ async fn prepare_and_run_tool(
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
 ) -> Result<ToolResult, AgentRuntimeError> {
-    let preparation = tokio::select! {
-        biased;
-        preparation = prepare_tool_context(config, tool_context, turn, tool_call, emitter) => preparation,
-        () = cancel_token.cancelled() => return Ok(cancelled_tool_result()),
-    };
-    match preparation {
-        ToolPreparation::Run(context) => {
-            let context = context.with_tool_update(make_tool_update_callback(
-                emitter.sink(),
-                turn,
-                tool_call.id.clone(),
-                tool_call.name.clone(),
-            ));
+    let prepared = prepare_tool_call(config, tool_call, turn, emitter, cancel_token).await;
+    match prepared.result {
+        PreparedToolCallResult::Skip(result) => Ok(result),
+        PreparedToolCallResult::Run => {
+            let context = tool_context
+                .clone()
+                .with_access(prepared.access)
+                .with_tool_update(make_tool_update_callback(
+                    emitter.sink(),
+                    turn,
+                    tool_call.id.clone(),
+                    tool_call.name.clone(),
+                ));
+            if tool_call.name == "Bash" {
+                emit_shell_started(turn, tool_call, &context, emitter);
+            }
             let result = run_tool_with_cancel(
                 skills,
                 skill_invocation_active,
@@ -1974,279 +2038,211 @@ async fn prepare_and_run_tool(
             }
             Ok(result)
         }
-        ToolPreparation::Skip(result) => Ok(result),
     }
 }
 
-/// Creates a `ToolUpdateCallback` that emits `ToolExecutionUpdate` events
-/// through an `EventSink`. This lets tools (e.g. bash) stream intermediate
-/// output that the TUI renders live.
-fn make_tool_update_callback(
-    sink: EventSink,
-    turn: u32,
-    id: String,
-    name: String,
-) -> ToolUpdateCallback {
-    Arc::new(move |partial: &str| {
-        sink.emit_event(AgentEvent::ToolExecutionUpdate {
-            turn,
-            id: id.clone(),
-            name: name.clone(),
-            partial_result: ToolResult {
-                content: partial.to_owned(),
-                is_error: false,
-                details: None,
-                terminate: false,
-            },
-        });
-    })
-}
-
-async fn run_tool_with_cancel(
-    skills: Option<&SkillStore>,
-    skill_invocation_active: &AtomicBool,
-    registry: &ToolRegistry,
-    tool_call: &AgentToolCall,
-    tool_context: &ToolContext,
-    cancel_token: &CancellationToken,
-) -> ToolResult {
-    if tool_call.name == "Skill" {
-        return execute_invoke_skill(skills, skill_invocation_active, tool_call);
-    }
-    tokio::select! {
-        biased;
-        result = registry.run(&tool_call.name, tool_context, tool_call.arguments.clone()) => {
-            result.unwrap_or_else(|err| ToolResult::error(err.to_string()))
-        }
-        () = cancel_token.cancelled() => cancelled_tool_result(),
-    }
-}
-
-fn cancelled_tool_result() -> ToolResult {
-    ToolResult::error(ToolError::Cancelled.to_string())
-}
-
-fn invoke_skill_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: "Skill".to_owned(),
-        description: "Invoke an available skill by name with arguments. Use this when the user's request matches a skill's description or whenToUse.".to_owned(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "skill": {
-                    "type": "string",
-                    "description": "Name of the skill to invoke"
-                },
-                "arguments": {
-                    "type": "object",
-                    "description": "Named arguments for the skill"
-                }
-            },
-            "required": ["skill"]
-        }),
-    }
-}
-
-fn execute_invoke_skill(
-    skills: Option<&SkillStore>,
-    skill_invocation_active: &AtomicBool,
-    tool_call: &AgentToolCall,
-) -> ToolResult {
-    let Some(skills) = skills else {
-        return ToolResult::error("skill system is not enabled");
-    };
-    if skill_invocation_active.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return ToolResult::error("nested skill invocation is not allowed");
-    }
-    let request = match serde_json::from_value::<serde_json::Value>(tool_call.arguments.clone()) {
-        Ok(value) => value,
-        Err(err) => return ToolResult::error(format!("invalid Skill arguments: {err}")),
-    };
-    let Some(skill_name) = request.get("skill").and_then(|value| value.as_str()) else {
-        return ToolResult::error("Skill requires a `skill` string argument");
-    };
-    let Some(skill) = skills.get(skill_name) else {
-        return ToolResult::error(format!("skill `{skill_name}` is not available"));
-    };
-    if matches!(skill.manifest.skill_type, crate::skills::SkillType::Flow) {
-        return ToolResult::error(format!(
-            "skill `{skill_name}` is type `flow` and can only be invoked manually via /skill:{skill_name}"
-        ));
-    }
-
-    let raw_args = request
-        .get("arguments")
-        .and_then(|value| value.as_object())
-        .cloned()
-        .unwrap_or_default();
-    let invocation = crate::skills::SkillInvocation {
-        name: skill_name.to_owned(),
-        raw_arguments: serde_json::to_string(&raw_args).unwrap_or_default(),
-        positional: Vec::new(),
-        named: raw_args
-            .into_iter()
-            .filter_map(|(key, value)| value.as_str().map(|string| (key, string.to_owned())))
-            .collect(),
-    };
-
-    match crate::skills::expand_skill_body(skill, &invocation) {
-        Ok(body) => ToolResult::ok(body),
-        Err(err) => ToolResult::error(format!("failed to expand skill `{skill_name}`: {err}")),
-    }
-}
-
-#[allow(clippy::too_many_lines)]
-async fn prepare_tool_context(
+async fn prepare_tool_call(
     config: &AgentConfig,
-    base_context: &ToolContext,
-    turn: u32,
     tool_call: &AgentToolCall,
+    turn: u32,
     emitter: &mut impl EventPublisher,
-) -> ToolPreparation {
-    // --- Plan-mode guard: check BEFORE normal permission policy ---
-    {
-        let plan_mode = config.plan_mode.read().unwrap();
-        if plan_mode.is_active() {
-            let decision = check_plan_mode_guard(&plan_mode, &tool_call.name, &tool_call.arguments);
-            if decision == PermissionDecision::Deny {
-                return ToolPreparation::Skip(ToolResult::error(format!(
-                    "blocked by plan mode: {} is read-only while planning",
-                    tool_call.name
-                )));
-            }
-        }
-    }
+    cancel_token: &CancellationToken,
+) -> PreparedToolCall {
+    let preparation = permission_preparation_for_mode(config, tool_call);
+    let scheduling = scheduling_class_for_preparation(config, tool_call, &preparation);
 
-    // --- ExitPlanMode approval: ask the user to review the plan ---
-    if tool_call.name == "ExitPlanMode" {
-        // Read plan info under a short-lived guard, then drop it before any .await
-        let (plan_content, plan_path) = {
-            let pm = config.plan_mode.read().unwrap();
-            if pm.is_active() {
-                let content = pm
-                    .data()
-                    .ok()
-                    .flatten()
-                    .map(|d| d.content)
-                    .unwrap_or_default();
-                let path = pm
-                    .plan_file_path()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default();
-                (content, path)
-            } else {
-                (String::new(), String::new())
-            }
-        };
-        // Guard is now dropped — safe to .await
-        if !plan_content.trim().is_empty() {
-            let subject = format!("Exit plan mode\nPlan file: {plan_path}");
-            if let Some(result) = approval_decision(
+    match preparation {
+        PermissionPreparation::Run(access) => PreparedToolCall {
+            tool_call: tool_call.clone(),
+            result: PreparedToolCallResult::Run,
+            scheduling,
+            access,
+        },
+        PermissionPreparation::Deny(message) => PreparedToolCall {
+            tool_call: tool_call.clone(),
+            result: PreparedToolCallResult::Skip(ToolResult::error(message)),
+            scheduling,
+            access: ToolAccess::none(),
+        },
+        PermissionPreparation::Ask { operation, subject } => {
+            match resolve_approval(
                 config,
                 turn,
                 tool_call,
-                PermissionOperation::Tool,
+                operation,
                 subject,
                 emitter,
+                cancel_token,
             )
             .await
             {
-                // Denied — check for revise feedback
-                let feedback = config
-                    .plan_review_feedback
-                    .lock()
-                    .ok()
-                    .and_then(|mut m| m.remove(&tool_call.id));
-                let message = if let Some(feedback) = feedback {
-                    format!(
-                        "User requested revisions. Plan mode remains active.\n\nFeedback: {feedback}"
-                    )
-                } else {
-                    result.content
-                };
-                return ToolPreparation::Skip(ToolResult::ok(message));
+                Some(result) => PreparedToolCall {
+                    tool_call: tool_call.clone(),
+                    result: PreparedToolCallResult::Skip(result),
+                    scheduling,
+                    access: ToolAccess::none(),
+                },
+                None => PreparedToolCall {
+                    tool_call: tool_call.clone(),
+                    result: PreparedToolCallResult::Run,
+                    scheduling,
+                    access: access_for_tool(tool_call, true),
+                },
             }
-            // Approved (None) — let the tool run; terminate handler exits plan mode
         }
     }
-
-    let mut context = base_context.clone();
-    if let Some(result) = permission_result_for_decision(
-        config.tool_permission_policy.tool,
-        config,
-        turn,
-        tool_call,
-        PermissionOperation::Tool,
-        tool_call.name.clone(),
-        emitter,
-    )
-    .await
-    {
-        return ToolPreparation::Skip(result);
-    }
-    context.permissions.tool = PermissionDecision::Allow;
-
-    let Some((operation, subject)) = permission_operation_for_tool(tool_call) else {
-        return ToolPreparation::Run(context);
-    };
-    let decision = match operation {
-        PermissionOperation::FileRead => config.tool_permission_policy.file_read,
-        PermissionOperation::FileWrite => config.tool_permission_policy.file_write,
-        PermissionOperation::Shell => config.tool_permission_policy.shell,
-        PermissionOperation::Tool => config.tool_permission_policy.tool,
-    };
-    if let Some(result) = permission_result_for_decision(
-        decision, config, turn, tool_call, operation, subject, emitter,
-    )
-    .await
-    {
-        return ToolPreparation::Skip(result);
-    }
-    match operation {
-        PermissionOperation::FileRead => context.permissions.file_read = PermissionDecision::Allow,
-        PermissionOperation::FileWrite => {
-            context.permissions.file_write = PermissionDecision::Allow;
-        }
-        PermissionOperation::Shell => context.permissions.shell = PermissionDecision::Allow,
-        PermissionOperation::Tool => context.permissions.tool = PermissionDecision::Allow,
-    }
-    if tool_call.name == "Bash" {
-        emit_shell_started(turn, tool_call, &context, emitter);
-    }
-    ToolPreparation::Run(context)
 }
 
-async fn permission_result_for_decision(
-    decision: PermissionDecision,
+fn permission_preparation_for_mode(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+) -> PermissionPreparation {
+    // 1. Plan-mode hard guard.
+    {
+        let Ok(plan_mode) = config.plan_mode.read() else {
+            return PermissionPreparation::Deny("plan mode state is unavailable".to_owned());
+        };
+        if plan_mode.is_active() {
+            match check_plan_mode_guard(
+                &plan_mode,
+                config.workspace_root.as_deref(),
+                &tool_call.name,
+                &tool_call.arguments,
+            ) {
+                PlanModeGuard::Allow => {}
+                PlanModeGuard::Deny { message } => {
+                    return PermissionPreparation::Deny(message);
+                }
+            }
+        }
+    }
+
+    // 2. Auto mode hard deny for AskUserQuestion.
+    if tool_call.name == "AskUserQuestion" && config.permission_mode == PermissionMode::Auto {
+        return PermissionPreparation::Deny(
+            "AskUserQuestion is disabled while auto permission mode is active".to_owned(),
+        );
+    }
+
+    // 3. Background AskUserQuestion does not need an approval dialog in any mode.
+    if tool_call.name == "AskUserQuestion" && ask_user_runs_in_background(tool_call) {
+        return PermissionPreparation::Run(access_for_tool(tool_call, true));
+    }
+
+    // 4. Auto mode approves everything else.
+    if config.permission_mode == PermissionMode::Auto {
+        return PermissionPreparation::Run(access_for_tool(tool_call, true));
+    }
+
+    // 5. EnterPlanMode is auto-approved in all modes.
+    if tool_call.name == "EnterPlanMode" {
+        return PermissionPreparation::Run(access_for_tool(tool_call, true));
+    }
+
+    // 6. Session approvals.
+    if config
+        .session_approvals
+        .lock()
+        .ok()
+        .is_some_and(|set| set.contains(&tool_call.name))
+    {
+        return PermissionPreparation::Run(access_for_tool(tool_call, true));
+    }
+
+    // 7. ExitPlanMode review in manual/yolo when plan is non-empty.
+    if tool_call.name == "ExitPlanMode" {
+        if exit_plan_mode_has_reviewable_plan(config) {
+            return PermissionPreparation::Ask {
+                operation: PermissionOperation::PlanTransition,
+                subject: "Exit plan mode".to_owned(),
+            };
+        }
+        return PermissionPreparation::Run(access_for_tool(tool_call, true));
+    }
+
+    // 8. Plan-mode helper approvals (e.g. writing the active plan file).
+    if matches!(tool_call.name.as_str(), "Write" | "Edit") {
+        let Ok(plan_mode) = config.plan_mode.read() else {
+            return PermissionPreparation::Deny("plan mode state is unavailable".to_owned());
+        };
+        if let Some(path) = tool_call.arguments.get("path").and_then(|v| v.as_str())
+            && plan_mode.is_active()
+            && is_active_plan_file_path(&plan_mode, config.workspace_root.as_deref(), path)
+        {
+            return PermissionPreparation::Run(access_for_tool(tool_call, true));
+        }
+    }
+
+    // 9. Yolo mode approves all remaining tools.
+    if config.permission_mode == PermissionMode::Yolo {
+        return PermissionPreparation::Run(access_for_tool(tool_call, true));
+    }
+
+    // 10. Default safe tools in manual mode.
+    if is_default_approved_tool(tool_call) {
+        return PermissionPreparation::Run(access_for_tool(tool_call, true));
+    }
+
+    // 11. Manual fallback ask.
+    let (operation, subject) = permission_operation_for_tool(tool_call)
+        .unwrap_or((PermissionOperation::Tool, tool_call.name.clone()));
+    PermissionPreparation::Ask { operation, subject }
+}
+
+fn is_default_approved_tool(tool_call: &AgentToolCall) -> bool {
+    matches!(
+        tool_call.name.as_str(),
+        "Read"
+            | "List"
+            | "Grep"
+            | "Find"
+            | "Glob"
+            | "TodoList"
+            | "TaskList"
+            | "TaskOutput"
+            | "AskUserQuestion"
+    )
+}
+
+fn access_for_tool(tool_call: &AgentToolCall, grant: bool) -> ToolAccess {
+    match tool_call.name.as_str() {
+        "Read" | "List" | "Grep" | "Find" | "Glob" => ToolAccess {
+            file_read: grant,
+            ..ToolAccess::none()
+        },
+        "Write" | "Edit" => ToolAccess {
+            file_write: grant,
+            ..ToolAccess::none()
+        },
+        "Bash" | "Terminal" | "TaskStop" => ToolAccess {
+            shell: grant,
+            ..ToolAccess::none()
+        },
+        "AskUserQuestion" => ToolAccess {
+            user_question: grant,
+            ..ToolAccess::none()
+        },
+        _ => ToolAccess {
+            tool: grant,
+            ..ToolAccess::none()
+        },
+    }
+}
+
+async fn resolve_approval(
     config: &AgentConfig,
     turn: u32,
     tool_call: &AgentToolCall,
     operation: PermissionOperation,
     subject: String,
     emitter: &mut impl EventPublisher,
-) -> Option<ToolResult> {
-    match decision {
-        PermissionDecision::Allow => None,
-        PermissionDecision::Deny => Some(permission_error(operation, &subject, "denied")),
-        PermissionDecision::Ask => {
-            approval_decision(config, turn, tool_call, operation, subject, emitter).await
-        }
-    }
-}
-
-async fn approval_decision(
-    config: &AgentConfig,
-    turn: u32,
-    tool_call: &AgentToolCall,
-    operation: PermissionOperation,
-    subject: String,
-    emitter: &mut impl EventPublisher,
+    cancel_token: &CancellationToken,
 ) -> Option<ToolResult> {
     let request = ApprovalRequest {
         turn,
         id: tool_call.id.clone(),
         operation,
-        subject,
+        subject: subject.clone(),
         arguments: tool_call.arguments.clone(),
     };
     emitter.emit(AgentEvent::ApprovalRequested {
@@ -2259,22 +2255,37 @@ async fn approval_decision(
     let decision = if let Some(handler) = &config.approval_handler {
         handler(&request)
     } else if let Some(handler) = &config.async_approval_handler {
-        handler(request.clone()).await
+        tokio::select! {
+            biased;
+            () = cancel_token.cancelled() => return Some(cancelled_tool_result()),
+            decision = handler(request.clone()) => decision,
+        }
     } else {
-        PermissionDecision::Ask
+        return Some(permission_error(operation, &subject, "approval required"));
     };
     match decision {
-        PermissionDecision::Allow => None,
-        PermissionDecision::Deny => Some(permission_error(
-            request.operation,
-            &request.subject,
-            "approval denied",
-        )),
-        PermissionDecision::Ask => Some(permission_error(
-            request.operation,
-            &request.subject,
-            "approval required",
-        )),
+        PermissionApprovalDecision::AllowOnce => None,
+        PermissionApprovalDecision::AllowForSession => {
+            if let Ok(mut set) = config.session_approvals.lock() {
+                set.insert(tool_call.name.clone());
+            }
+            None
+        }
+        PermissionApprovalDecision::Reject => {
+            // ExitPlanMode revise feedback is delivered via the plan_review_feedback side-channel.
+            if tool_call.name == "ExitPlanMode"
+                && let Some(feedback) = config
+                    .plan_review_feedback
+                    .lock()
+                    .ok()
+                    .and_then(|mut m| m.remove(&tool_call.id))
+            {
+                return Some(ToolResult::ok(format!(
+                    "User requested revisions. Plan mode remains active.\n\nFeedback: {feedback}"
+                )));
+            }
+            Some(permission_error(operation, &subject, "approval denied"))
+        }
     }
 }
 
@@ -2288,6 +2299,8 @@ fn permission_error(
         PermissionOperation::FileWrite => "file write",
         PermissionOperation::Shell => "shell",
         PermissionOperation::Tool => "tool",
+        PermissionOperation::UserQuestion => "user question",
+        PermissionOperation::PlanTransition => "plan transition",
     };
     ToolResult::error(format!("{prefix} for {noun}: {subject}"))
 }
@@ -2323,6 +2336,18 @@ fn permission_operation_for_tool(
                         .and_then(serde_json::Value::as_str)
                 })
                 .unwrap_or(tool_call.name.as_str())
+                .to_owned(),
+        )),
+        "AskUserQuestion" => Some((
+            PermissionOperation::UserQuestion,
+            tool_call
+                .arguments
+                .get("questions")
+                .and_then(|q| q.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|q| q.get("question"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("question")
                 .to_owned(),
         )),
         _ => None,
@@ -2493,6 +2518,156 @@ fn emit_terminal_events(
     }
 }
 
+/// Creates a `ToolUpdateCallback` that emits `ToolExecutionUpdate` events
+/// through an `EventSink`. This lets tools (e.g. bash) stream intermediate
+/// output that the TUI renders live.
+fn make_tool_update_callback(
+    sink: EventSink,
+    turn: u32,
+    id: String,
+    name: String,
+) -> ToolUpdateCallback {
+    Arc::new(move |partial: &str| {
+        sink.emit_event(AgentEvent::ToolExecutionUpdate {
+            turn,
+            id: id.clone(),
+            name: name.clone(),
+            partial_result: ToolResult {
+                content: partial.to_owned(),
+                is_error: false,
+                details: None,
+                terminate: false,
+            },
+        });
+    })
+}
+
+async fn run_tool_with_cancel(
+    skills: Option<&SkillStore>,
+    skill_invocation_active: &AtomicBool,
+    registry: &ToolRegistry,
+    tool_call: &AgentToolCall,
+    tool_context: &ToolContext,
+    cancel_token: &CancellationToken,
+) -> ToolResult {
+    if tool_call.name == "Skill" {
+        return execute_invoke_skill(skills, skill_invocation_active, tool_call);
+    }
+    tokio::select! {
+        biased;
+        result = registry.run(&tool_call.name, tool_context, tool_call.arguments.clone()) => {
+            result.unwrap_or_else(|err| ToolResult::error(err.to_string()))
+        }
+        () = cancel_token.cancelled() => cancelled_tool_result(),
+    }
+}
+
+fn cancelled_tool_result() -> ToolResult {
+    ToolResult::error(ToolError::Cancelled.to_string())
+}
+
+fn invoke_skill_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: "Skill".to_owned(),
+        description: "Invoke an available skill by name with arguments. Use this when the user's request matches a skill's description or whenToUse.".to_owned(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "skill": {
+                    "type": "string",
+                    "description": "Name of the skill to invoke"
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "Named arguments for the skill"
+                }
+            },
+            "required": ["skill"]
+        }),
+    }
+}
+
+fn execute_invoke_skill(
+    skills: Option<&SkillStore>,
+    skill_invocation_active: &AtomicBool,
+    tool_call: &AgentToolCall,
+) -> ToolResult {
+    let Some(skills) = skills else {
+        return ToolResult::error("skill system is not enabled");
+    };
+    if skill_invocation_active.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return ToolResult::error("nested skill invocation is not allowed");
+    }
+    let request = match skill_tool_request(&tool_call.arguments) {
+        Ok(request) => request,
+        Err(message) => return ToolResult::error(message),
+    };
+    let Some(skill) = skills.get(&request.skill_name) else {
+        return ToolResult::error(format!("skill `{}` is not available", request.skill_name));
+    };
+    if skill_is_manual_only(skill) {
+        return ToolResult::error(format!(
+            "skill `{}` is type `flow` and can only be invoked manually via /skill:{}",
+            request.skill_name, request.skill_name
+        ));
+    }
+
+    let invocation = request.into_invocation();
+
+    match crate::skills::expand_skill_body(skill, &invocation) {
+        Ok(body) => ToolResult::ok(body),
+        Err(err) => ToolResult::error(format!(
+            "failed to expand skill `{}`: {err}",
+            invocation.name
+        )),
+    }
+}
+
+struct SkillToolRequest {
+    skill_name: String,
+    arguments: serde_json::Map<String, serde_json::Value>,
+}
+
+impl SkillToolRequest {
+    fn into_invocation(self) -> crate::skills::SkillInvocation {
+        crate::skills::SkillInvocation {
+            name: self.skill_name,
+            raw_arguments: serde_json::to_string(&self.arguments).unwrap_or_default(),
+            positional: Vec::new(),
+            named: string_skill_arguments(self.arguments),
+        }
+    }
+}
+
+fn skill_tool_request(arguments: &serde_json::Value) -> Result<SkillToolRequest, String> {
+    let skill_name = arguments
+        .get("skill")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "Skill requires a `skill` string argument".to_owned())?;
+    let arguments = arguments
+        .get("arguments")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+    Ok(SkillToolRequest {
+        skill_name: skill_name.to_owned(),
+        arguments,
+    })
+}
+
+fn string_skill_arguments(
+    arguments: serde_json::Map<String, serde_json::Value>,
+) -> std::collections::HashMap<String, String> {
+    arguments
+        .into_iter()
+        .filter_map(|(key, value)| value.as_str().map(|string| (key, string.to_owned())))
+        .collect()
+}
+
+fn skill_is_manual_only(skill: &crate::skills::LoadedSkill) -> bool {
+    matches!(skill.manifest.skill_type, crate::skills::SkillType::Flow)
+}
+
 fn default_tool_context(
     config: &AgentConfig,
     cancel_token: &CancellationToken,
@@ -2506,10 +2681,178 @@ fn default_tool_context(
     ToolContext::new(workspace_root)
         .map(|context| {
             context
-                .with_permission_policy(config.tool_permission_policy.clone())
+                .with_access(ToolAccess::none())
                 .with_cancel_token(cancel_token.clone())
                 .with_process_supervisor(process_supervisor)
                 .with_background_tasks(config.background_tasks.clone())
         })
         .map_err(AgentRuntimeError::Tool)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skills::{SkillArgument, SkillManifest, SkillSource, SkillType};
+    use serde_json::json;
+    use std::sync::atomic::Ordering;
+
+    fn write_skill(root: &std::path::Path, name: &str, skill_type: &str, body: &str) {
+        let skill_dir = root.join(name);
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!(
+                r"---
+name: {name}
+description: {name} skill
+type: {skill_type}
+arguments:
+  - name: target
+    required: true
+---
+{body}
+"
+            ),
+        )
+        .expect("skill file");
+    }
+
+    fn skill_tool_call(arguments: serde_json::Value) -> AgentToolCall {
+        AgentToolCall {
+            id: "tool-1".to_owned(),
+            name: "Skill".to_owned(),
+            arguments,
+        }
+    }
+
+    fn skill_store(root: &std::path::Path) -> SkillStore {
+        SkillStore::load(None, &[], &[root.to_path_buf()], Vec::new()).expect("skill store")
+    }
+
+    #[test]
+    fn execute_invoke_skill_expands_named_string_arguments() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_skill(temp.path(), "review", "prompt", "Review $target.");
+        let store = skill_store(temp.path());
+        let active = AtomicBool::new(false);
+
+        let result = execute_invoke_skill(
+            Some(&store),
+            &active,
+            &skill_tool_call(json!({
+                "skill": "review",
+                "arguments": {
+                    "target": "src/lib.rs",
+                    "ignored": 42
+                }
+            })),
+        );
+
+        assert_eq!(result, ToolResult::ok("Review src/lib.rs.\n"));
+        assert!(active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn execute_invoke_skill_rejects_disabled_missing_nested_and_flow_cases() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_skill(temp.path(), "manual-flow", "flow", "Manual only.");
+        let store = skill_store(temp.path());
+
+        let no_store = execute_invoke_skill(
+            None,
+            &AtomicBool::new(false),
+            &skill_tool_call(json!({"skill": "review"})),
+        );
+        assert_eq!(no_store.content, "skill system is not enabled");
+        assert!(no_store.is_error);
+
+        let missing_name = execute_invoke_skill(
+            Some(&store),
+            &AtomicBool::new(false),
+            &skill_tool_call(json!({"arguments": {}})),
+        );
+        assert_eq!(
+            missing_name.content,
+            "Skill requires a `skill` string argument"
+        );
+
+        let missing_skill = execute_invoke_skill(
+            Some(&store),
+            &AtomicBool::new(false),
+            &skill_tool_call(json!({"skill": "review"})),
+        );
+        assert_eq!(missing_skill.content, "skill `review` is not available");
+
+        let flow = execute_invoke_skill(
+            Some(&store),
+            &AtomicBool::new(false),
+            &skill_tool_call(json!({"skill": "manual-flow"})),
+        );
+        assert_eq!(
+            flow.content,
+            "skill `manual-flow` is type `flow` and can only be invoked manually via /skill:manual-flow"
+        );
+
+        let nested = execute_invoke_skill(
+            Some(&store),
+            &AtomicBool::new(true),
+            &skill_tool_call(json!({"skill": "manual-flow"})),
+        );
+        assert_eq!(nested.content, "nested skill invocation is not allowed");
+    }
+
+    #[test]
+    fn skill_tool_request_converts_only_string_named_arguments() {
+        let request = skill_tool_request(&json!({
+            "skill": "review",
+            "arguments": {
+                "target": "src/lib.rs",
+                "count": 3,
+                "flag": true
+            }
+        }))
+        .expect("request");
+        let invocation = request.into_invocation();
+
+        assert_eq!(invocation.name, "review");
+        assert_eq!(
+            invocation.named.get("target"),
+            Some(&"src/lib.rs".to_owned())
+        );
+        assert!(!invocation.named.contains_key("count"));
+        assert!(!invocation.named.contains_key("flag"));
+        assert_eq!(
+            invocation.raw_arguments,
+            r#"{"count":3,"flag":true,"target":"src/lib.rs"}"#
+        );
+    }
+
+    #[test]
+    fn skill_is_manual_only_tracks_flow_manifest_type() {
+        let prompt = crate::skills::LoadedSkill {
+            name: "prompt".to_owned(),
+            root: PathBuf::from("/tmp/prompt"),
+            manifest: SkillManifest {
+                name: "prompt".to_owned(),
+                description: "Prompt".to_owned(),
+                skill_type: SkillType::Prompt,
+                when_to_use: None,
+                disable_model_invocation: false,
+                arguments: Vec::<SkillArgument>::new(),
+                slash_commands: Vec::new(),
+            },
+            body: String::new(),
+            source: SkillSource::default(),
+        };
+        let flow = crate::skills::LoadedSkill {
+            manifest: SkillManifest {
+                skill_type: SkillType::Flow,
+                ..prompt.manifest.clone()
+            },
+            ..prompt.clone()
+        };
+
+        assert!(!skill_is_manual_only(&prompt));
+        assert!(skill_is_manual_only(&flow));
+    }
 }

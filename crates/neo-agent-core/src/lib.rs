@@ -15,6 +15,8 @@ pub use events::*;
 pub use injection::*;
 pub use messages::*;
 pub use mode::*;
-pub use permissions::*;
+pub use permissions::{
+    PermissionApprovalDecision, PermissionMode, PermissionOperation, ToolAccess,
+};
 pub use runtime::*;
 pub use tools::*;

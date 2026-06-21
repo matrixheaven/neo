@@ -278,40 +278,11 @@ impl McpHttpToolAdapter {
     ) -> Result<serde_json::Value, McpError> {
         let (id, response) = self.send_raw_request(method, params).await?;
         let status = response.status();
-        let is_sse = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|content_type| content_type.contains("text/event-stream"));
-        let body = response.text().await.map_err(|err| {
-            McpError::protocol(format!("failed to read MCP HTTP response: {err}"))
-        })?;
-        if !status.is_success() {
-            return Err(McpError::protocol(format!(
-                "MCP HTTP server returned {status}: {body}"
-            )));
-        }
-        let response_value = if is_sse {
-            parse_sse_json_rpc_response(&body)?
-        } else {
-            serde_json::from_str(&body).map_err(|err| McpError::protocol(err.to_string()))?
-        };
-        if response_value.get("id").and_then(serde_json::Value::as_u64) != Some(id) {
-            return Err(McpError::protocol(
-                "MCP HTTP response id did not match request",
-            ));
-        }
-        if let Some(error) = response_value.get("error") {
-            let message = error
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("MCP HTTP server returned JSON-RPC error");
-            return Err(McpError::protocol(message));
-        }
-        response_value
-            .get("result")
-            .cloned()
-            .ok_or_else(|| McpError::protocol("MCP HTTP response missing result"))
+        let is_sse = http_response_is_sse(&response);
+        let body = read_http_response_body(response).await?;
+        ensure_http_success(status, &body)?;
+        let response_value = parse_http_json_rpc_body(&body, is_sse)?;
+        validate_json_rpc_result(&response_value, id)
     }
 
     async fn send_raw_request(
@@ -377,11 +348,7 @@ impl McpHttpToolAdapter {
             McpError::protocol(format!("failed to open MCP HTTP event stream: {err}"))
         })?;
         let status = response.status();
-        let is_sse = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|content_type| content_type.contains("text/event-stream"));
+        let is_sse = http_response_is_sse(&response);
         if !status.is_success() {
             let body = response.text().await.map_err(|err| {
                 McpError::protocol(format!("failed to read MCP HTTP event response: {err}"))
@@ -400,6 +367,93 @@ impl McpHttpToolAdapter {
         *self.resource_sse_reader.lock().await = Some(reader);
         Ok(())
     }
+
+    async fn handle_subscribe_response(
+        &self,
+        id: u64,
+        response: reqwest::Response,
+    ) -> Result<(), McpError> {
+        let status = response.status();
+        let is_sse = http_response_is_sse(&response);
+        if !status.is_success() {
+            let body = read_http_response_body(response).await?;
+            return Err(McpError::protocol(format!(
+                "MCP HTTP server returned {status}: {body}"
+            )));
+        }
+        if is_sse {
+            return self.handle_sse_subscribe_response(id, response).await;
+        }
+        self.handle_json_subscribe_response(id, response).await
+    }
+
+    async fn handle_json_subscribe_response(
+        &self,
+        id: u64,
+        response: reqwest::Response,
+    ) -> Result<(), McpError> {
+        let body = read_http_response_body(response).await?;
+        let response_value: serde_json::Value =
+            serde_json::from_str(&body).map_err(|err| McpError::protocol(err.to_string()))?;
+        let result = validate_json_rpc_result(&response_value, id)?;
+        let event_stream_url = resource_event_stream_url(&self.config.url, &result)?;
+        self.start_resource_event_reader(event_stream_url.as_str())
+            .await
+    }
+
+    async fn handle_sse_subscribe_response(
+        &self,
+        id: u64,
+        response: reqwest::Response,
+    ) -> Result<(), McpError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let update_tx = self.resource_update_tx.clone();
+        let reader = tokio::spawn(read_http_sse_messages(
+            response,
+            Some(id),
+            Some(response_tx),
+            update_tx,
+        ));
+        *self.resource_sse_reader.lock().await = Some(reader);
+        let result = response_rx.await.map_err(|_| {
+            McpError::protocol("MCP HTTP SSE stream ended before subscribe response")
+        })?;
+        if result.is_err() {
+            self.stop_resource_sse_reader().await;
+        }
+        result
+    }
+}
+
+fn http_response_is_sse(response: &reqwest::Response) -> bool {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|content_type| content_type.contains("text/event-stream"))
+}
+
+async fn read_http_response_body(response: reqwest::Response) -> Result<String, McpError> {
+    response
+        .text()
+        .await
+        .map_err(|err| McpError::protocol(format!("failed to read MCP HTTP response: {err}")))
+}
+
+fn ensure_http_success(status: reqwest::StatusCode, body: &str) -> Result<(), McpError> {
+    if status.is_success() {
+        return Ok(());
+    }
+    Err(McpError::protocol(format!(
+        "MCP HTTP server returned {status}: {body}"
+    )))
+}
+
+fn parse_http_json_rpc_body(body: &str, is_sse: bool) -> Result<serde_json::Value, McpError> {
+    if is_sse {
+        return parse_sse_json_rpc_response(body);
+    }
+    serde_json::from_str(body).map_err(|err| McpError::protocol(err.to_string()))
 }
 
 #[async_trait]
@@ -484,49 +538,7 @@ impl McpToolAdapter for McpHttpToolAdapter {
                 )])),
             )
             .await?;
-        let status = response.status();
-        let is_sse = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|content_type| content_type.contains("text/event-stream"));
-        if !status.is_success() {
-            let body = response.text().await.map_err(|err| {
-                McpError::protocol(format!("failed to read MCP HTTP response: {err}"))
-            })?;
-            return Err(McpError::protocol(format!(
-                "MCP HTTP server returned {status}: {body}"
-            )));
-        }
-        if !is_sse {
-            let body = response.text().await.map_err(|err| {
-                McpError::protocol(format!("failed to read MCP HTTP response: {err}"))
-            })?;
-            let response_value: serde_json::Value =
-                serde_json::from_str(&body).map_err(|err| McpError::protocol(err.to_string()))?;
-            let result = validate_json_rpc_result(&response_value, id)?;
-            let event_stream_url = resource_event_stream_url(&self.config.url, &result)?;
-            self.start_resource_event_reader(event_stream_url.as_str())
-                .await?;
-            return Ok(());
-        }
-
-        let (response_tx, response_rx) = oneshot::channel();
-        let update_tx = self.resource_update_tx.clone();
-        let reader = tokio::spawn(read_http_sse_messages(
-            response,
-            Some(id),
-            Some(response_tx),
-            update_tx,
-        ));
-        *self.resource_sse_reader.lock().await = Some(reader);
-        let result = response_rx.await.map_err(|_| {
-            McpError::protocol("MCP HTTP SSE stream ended before subscribe response")
-        })?;
-        if result.is_err() {
-            self.stop_resource_sse_reader().await;
-        }
-        result
+        self.handle_subscribe_response(id, response).await
     }
 
     async fn unsubscribe_resource(&self, uri: &str) -> Result<(), McpError> {

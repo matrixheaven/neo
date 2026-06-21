@@ -182,24 +182,30 @@ fn sanitize_markdown_url(value: &str) -> Option<String> {
 
     if let Some(colon_index) = href.find(':') {
         let scheme = strip_percent_encoded_controls(&href[..colon_index]);
-        let has_scheme = scheme
-            .chars()
-            .next()
-            .is_some_and(|char| char.is_ascii_alphabetic())
-            && scheme
-                .chars()
-                .all(|char| char.is_ascii_alphanumeric() || matches!(char, '+' | '.' | '-'));
-        if !has_scheme
-            || !matches!(
-                scheme.to_ascii_lowercase().as_str(),
-                "http" | "https" | "mailto" | "tel" | "ftp"
-            )
-        {
+        if !is_allowed_markdown_url_scheme(&scheme) {
             return None;
         }
     }
 
     Some(href)
+}
+
+fn is_allowed_markdown_url_scheme(scheme: &str) -> bool {
+    is_markdown_url_scheme(scheme)
+        && matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "http" | "https" | "mailto" | "tel" | "ftp"
+        )
+}
+
+fn is_markdown_url_scheme(scheme: &str) -> bool {
+    scheme
+        .chars()
+        .next()
+        .is_some_and(|char| char.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|char| char.is_ascii_alphanumeric() || matches!(char, '+' | '.' | '-'))
 }
 
 fn strip_ascii_controls(value: &str) -> String {
@@ -244,21 +250,27 @@ fn strip_percent_encoded_controls(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'%'
-            && index + 2 < bytes.len()
-            && let (Some(high), Some(low)) =
-                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
-        {
-            let decoded = high * 16 + low;
-            if decoded <= 0x1f || decoded == 0x7f {
-                index += 3;
-                continue;
-            }
+        if percent_encoded_control_len(bytes, index).is_some() {
+            index += 3;
+            continue;
         }
         output.push(bytes[index] as char);
         index += 1;
     }
     output
+}
+
+fn percent_encoded_control_len(bytes: &[u8], index: usize) -> Option<usize> {
+    if bytes.get(index) != Some(&b'%') || index + 2 >= bytes.len() {
+        return None;
+    }
+    let high = hex_value(bytes[index + 1])?;
+    let low = hex_value(bytes[index + 2])?;
+    is_ascii_control_byte(high * 16 + low).then_some(3)
+}
+
+const fn is_ascii_control_byte(byte: u8) -> bool {
+    byte <= 0x1f || byte == 0x7f
 }
 
 fn hex_value(byte: u8) -> Option<u8> {
@@ -267,5 +279,46 @@ fn hex_value(byte: u8) -> Option<u8> {
         b'a'..=b'f' => Some(byte - b'a' + 10),
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_markdown_url_allows_known_schemes_and_relative_urls() {
+        assert_eq!(
+            sanitize_markdown_url(" https://example.test/a "),
+            Some("https://example.test/a".to_owned())
+        );
+        assert_eq!(
+            sanitize_markdown_url("../docs/readme.md"),
+            Some("../docs/readme.md".to_owned())
+        );
+        assert_eq!(
+            sanitize_markdown_url("mailto:team@example.test"),
+            Some("mailto:team@example.test".to_owned())
+        );
+    }
+
+    #[test]
+    fn sanitize_markdown_url_rejects_obfuscated_unsafe_schemes() {
+        assert_eq!(sanitize_markdown_url("javascript:alert(1)"), None);
+        assert_eq!(sanitize_markdown_url("java%0ascript:alert(1)"), None);
+        assert_eq!(sanitize_markdown_url("1http://example.test"), None);
+    }
+
+    #[test]
+    fn strip_percent_encoded_controls_removes_only_control_bytes() {
+        assert_eq!(
+            strip_percent_encoded_controls("java%0Ascript"),
+            "javascript"
+        );
+        assert_eq!(strip_percent_encoded_controls("a%7Fb"), "ab");
+        assert_eq!(
+            strip_percent_encoded_controls("hello%20world"),
+            "hello%20world"
+        );
     }
 }

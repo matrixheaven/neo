@@ -2,81 +2,45 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum PermissionDecision {
-    Allow,
-    Ask,
-    Deny,
+#[serde(rename_all = "lowercase")]
+pub enum PermissionMode {
+    Manual,
+    Auto,
+    Yolo,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct PermissionPolicy {
-    pub file_read: PermissionDecision,
-    pub file_write: PermissionDecision,
-    pub shell: PermissionDecision,
-    pub tool: PermissionDecision,
-}
-
-impl PermissionPolicy {
+impl PermissionMode {
     #[must_use]
-    pub const fn read_only() -> Self {
-        Self {
-            file_read: PermissionDecision::Allow,
-            file_write: PermissionDecision::Deny,
-            shell: PermissionDecision::Deny,
-            tool: PermissionDecision::Deny,
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Auto => "auto",
+            Self::Yolo => "yolo",
         }
     }
 
     #[must_use]
-    pub const fn allow_all() -> Self {
-        Self {
-            file_read: PermissionDecision::Allow,
-            file_write: PermissionDecision::Allow,
-            shell: PermissionDecision::Allow,
-            tool: PermissionDecision::Allow,
+    pub const fn next_after_plan(self) -> Self {
+        match self {
+            Self::Manual => Self::Auto,
+            Self::Auto => Self::Yolo,
+            Self::Yolo => Self::Manual,
         }
-    }
-
-    #[must_use]
-    pub const fn deny_all() -> Self {
-        Self {
-            file_read: PermissionDecision::Deny,
-            file_write: PermissionDecision::Deny,
-            shell: PermissionDecision::Deny,
-            tool: PermissionDecision::Deny,
-        }
-    }
-
-    #[must_use]
-    pub const fn can_read_files(&self) -> bool {
-        matches!(self.file_read, PermissionDecision::Allow)
-    }
-
-    #[must_use]
-    pub const fn can_write_files(&self) -> bool {
-        matches!(self.file_write, PermissionDecision::Allow)
-    }
-
-    #[must_use]
-    pub const fn can_run_shell(&self) -> bool {
-        matches!(self.shell, PermissionDecision::Allow)
-    }
-
-    #[must_use]
-    pub const fn can_run_tools(&self) -> bool {
-        matches!(self.tool, PermissionDecision::Allow)
     }
 }
 
-impl Default for PermissionPolicy {
+#[allow(clippy::derivable_impls)]
+impl Default for PermissionMode {
     fn default() -> Self {
-        Self {
-            file_read: PermissionDecision::Allow,
-            file_write: PermissionDecision::Ask,
-            shell: PermissionDecision::Ask,
-            tool: PermissionDecision::Allow,
-        }
+        Self::Manual
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionApprovalDecision {
+    AllowOnce,
+    AllowForSession,
+    Reject,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -85,4 +49,40 @@ pub enum PermissionOperation {
     FileWrite,
     Shell,
     Tool,
+    UserQuestion,
+    PlanTransition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ToolAccess {
+    pub file_read: bool,
+    pub file_write: bool,
+    pub shell: bool,
+    pub tool: bool,
+    pub user_question: bool,
+}
+
+impl ToolAccess {
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            file_read: false,
+            file_write: false,
+            shell: false,
+            tool: false,
+            user_question: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn all() -> Self {
+        Self {
+            file_read: true,
+            file_write: true,
+            shell: true,
+            tool: true,
+            user_question: true,
+        }
+    }
 }

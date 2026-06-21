@@ -190,12 +190,18 @@ impl Tool for AskUserTool {
         super::schema::<AskUserInput>()
     }
 
+    #[allow(clippy::too_many_lines)]
     fn execute<'a>(
         &'a self,
         ctx: &'a ToolContext,
         input: serde_json::Value,
     ) -> super::ToolFuture<'a> {
         Box::pin(async move {
+            if !ctx.access.user_question {
+                return Ok(ToolResult::error(
+                    "AskUserQuestion is disabled while auto permission mode is active",
+                ));
+            }
             let input: AskUserInput = super::parse_input(self.name(), input)?;
             validate_ask_user_input(&input)?;
 
@@ -311,14 +317,14 @@ impl Tool for AskUserTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PermissionPolicy, ToolContext};
+    use crate::{ToolAccess, ToolContext};
     use serde_json::json;
     use tokio::sync::mpsc;
 
     fn make_ctx() -> ToolContext {
         ToolContext::new(std::env::current_dir().unwrap())
             .unwrap()
-            .with_permission_policy(PermissionPolicy::allow_all())
+            .with_access(ToolAccess::all())
     }
 
     #[test]

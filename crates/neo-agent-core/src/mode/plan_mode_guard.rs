@@ -1,29 +1,61 @@
 use std::path::{Component, Path, PathBuf};
 
 use crate::mode::plan::PlanMode;
-use crate::permissions::PermissionDecision;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanModeGuard {
+    Allow,
+    Deny { message: String },
+}
+
+/// Returns `true` if `tool_path` refers to the active plan file.
+/// Relative paths are resolved against `workspace_root` (if provided) before
+/// comparison.
+#[must_use]
+pub fn is_active_plan_file_path(
+    plan_mode: &PlanMode,
+    workspace_root: Option<&Path>,
+    tool_path: &str,
+) -> bool {
+    let Some(plan_path) = plan_mode.plan_file_path() else {
+        return false;
+    };
+    let candidate = Path::new(tool_path);
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else if let Some(root) = workspace_root {
+        root.join(candidate)
+    } else {
+        candidate.to_path_buf()
+    };
+    paths_match(plan_path, &resolved)
+}
 
 #[must_use]
 pub fn check_plan_mode_guard(
     plan_mode: &PlanMode,
+    workspace_root: Option<&Path>,
     tool_name: &str,
     args: &serde_json::Value,
-) -> PermissionDecision {
+) -> PlanModeGuard {
     if !plan_mode.is_active() {
-        return PermissionDecision::Allow;
+        return PlanModeGuard::Allow;
     }
     match tool_name {
         "Write" | "Edit" => {
             if let Some(path) = args.get("path").and_then(serde_json::Value::as_str)
-                && let Some(plan_path) = plan_mode.plan_file_path()
-                && paths_match(plan_path, Path::new(path))
+                && is_active_plan_file_path(plan_mode, workspace_root, path)
             {
-                return PermissionDecision::Allow;
+                return PlanModeGuard::Allow;
             }
-            PermissionDecision::Deny
+            PlanModeGuard::Deny {
+                message: format!("blocked by plan mode: {tool_name} is read-only while planning"),
+            }
         }
-        "Bash" | "Terminal" | "TaskStop" | "CronCreate" | "CronDelete" => PermissionDecision::Deny,
-        _ => PermissionDecision::Allow,
+        "TaskStop" | "CronCreate" | "CronDelete" => PlanModeGuard::Deny {
+            message: format!("blocked by plan mode: {tool_name} is not allowed while planning"),
+        },
+        _ => PlanModeGuard::Allow,
     }
 }
 
@@ -64,33 +96,54 @@ mod tests {
     #[test]
     fn inactive_allows() {
         let s = PlanMode::default();
-        assert_eq!(
-            check_plan_mode_guard(&s, "Write", &json!({"path":"a"})),
-            PermissionDecision::Allow
-        );
+        assert!(matches!(
+            check_plan_mode_guard(&s, None, "Write", &json!({"path":"a"})),
+            PlanModeGuard::Allow
+        ));
     }
     #[test]
     fn active_denies_write() {
         let s = active_state(Path::new("/tmp/p.md"));
-        assert_eq!(
-            check_plan_mode_guard(&s, "Write", &json!({"path":"a"})),
-            PermissionDecision::Deny
-        );
+        assert!(matches!(
+            check_plan_mode_guard(&s, None, "Write", &json!({"path":"a"})),
+            PlanModeGuard::Deny { .. }
+        ));
     }
     #[test]
     fn active_allows_plan_file_write() {
         let s = active_state(Path::new("/h/p.md"));
-        assert_eq!(
-            check_plan_mode_guard(&s, "Write", &json!({"path":"/h/p.md"})),
-            PermissionDecision::Allow
-        );
+        assert!(matches!(
+            check_plan_mode_guard(&s, None, "Write", &json!({"path":"/h/p.md"})),
+            PlanModeGuard::Allow
+        ));
     }
     #[test]
-    fn active_denies_bash() {
+    fn active_allows_plan_file_write_with_relative_path() {
+        let s = active_state(Path::new("/ws/plans/p.md"));
+        assert!(matches!(
+            check_plan_mode_guard(
+                &s,
+                Some(Path::new("/ws")),
+                "Write",
+                &json!({"path":"plans/p.md"})
+            ),
+            PlanModeGuard::Allow
+        ));
+    }
+    #[test]
+    fn active_allows_bash() {
         let s = active_state(Path::new("/tmp/p.md"));
-        assert_eq!(
-            check_plan_mode_guard(&s, "Bash", &json!({})),
-            PermissionDecision::Deny
-        );
+        assert!(matches!(
+            check_plan_mode_guard(&s, None, "Bash", &json!({})),
+            PlanModeGuard::Allow
+        ));
+    }
+    #[test]
+    fn active_denies_task_stop() {
+        let s = active_state(Path::new("/tmp/p.md"));
+        assert!(matches!(
+            check_plan_mode_guard(&s, None, "TaskStop", &json!({})),
+            PlanModeGuard::Deny { .. }
+        ));
     }
 }

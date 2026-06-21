@@ -149,7 +149,7 @@ fn format_find_message(total: usize, truncated: bool, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PermissionPolicy, ToolContext};
+    use crate::{ToolAccess, ToolContext};
     use serde_json::json;
 
     fn setup_workspace() -> tempfile::TempDir {
@@ -180,7 +180,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_find(&ctx, "lib", json!({})).await;
         assert!(result.content.contains("lib.rs"));
@@ -194,7 +194,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_find(&ctx, "main", json!({ "include_dirs": false })).await;
         assert!(result.content.contains("src/main.rs"));
@@ -207,7 +207,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_find(&ctx, "src", json!({ "include_dirs": true })).await;
         assert!(result.content.lines().any(|l| l == "src"));
@@ -218,7 +218,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_find(&ctx, "main", json!({ "limit": 1 })).await;
         let non_system_lines = result
@@ -235,7 +235,7 @@ mod tests {
         let workspace = setup_workspace();
         let ctx = ToolContext::new(workspace.path())
             .expect("context")
-            .with_permission_policy(PermissionPolicy::allow_all());
+            .with_access(ToolAccess::all());
 
         let result = run_find(&ctx, "nonexistent", json!({})).await;
         assert!(result.content.contains("No matching paths found"));

@@ -94,6 +94,39 @@ pub fn api_kind_from_str(s: &str) -> Option<ApiKind> {
     ApiType::from_config_str(s).map(ApiType::to_api_kind)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_type_config_strings_are_canonical_kebab_case() {
+        assert_eq!(ApiType::OpenAiResponses.as_config_str(), "openai-responses");
+        assert_eq!(
+            ApiType::OpenAiCompatible.as_config_str(),
+            "openai-compatible"
+        );
+        assert_eq!(ApiType::OpenAiChat.as_config_str(), "openai-chat");
+        assert_eq!(ApiType::Anthropic.as_config_str(), "anthropic");
+        assert_eq!(ApiType::Google.as_config_str(), "google");
+    }
+
+    #[test]
+    fn api_type_config_strings_round_trip() {
+        for api_type in [
+            ApiType::OpenAiResponses,
+            ApiType::OpenAiCompatible,
+            ApiType::OpenAiChat,
+            ApiType::Anthropic,
+            ApiType::Google,
+        ] {
+            assert_eq!(
+                ApiType::from_config_str(api_type.as_config_str()),
+                Some(api_type)
+            );
+        }
+    }
+}
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelCapabilities {

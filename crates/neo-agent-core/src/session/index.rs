@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::fs::File;
 use tokio::io::AsyncBufReadExt;
 
 use super::{SessionError, SessionMetadataFile, SessionSummary, validate_session_id};
@@ -173,16 +174,28 @@ impl SessionIndex {
 ///
 /// Reads the index file line by line using tokio async I/O.
 pub async fn list_all_async(index_path: &Path) -> Result<Vec<SessionIndexEntry>, SessionError> {
-    use tokio::fs::File;
-
-    let file = match File::open(index_path).await {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Vec::new());
-        }
-        Err(error) => return Err(SessionError::Io(error)),
+    let file = open_index_file_async(index_path).await?;
+    let Some(file) = file else {
+        return Ok(Vec::new());
     };
     let mut reader = tokio::io::BufReader::new(file);
+    collect_index_entries_async(&mut reader).await
+}
+
+async fn open_index_file_async(index_path: &Path) -> Result<Option<File>, SessionError> {
+    match File::open(index_path).await {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(SessionError::Io(error)),
+    }
+}
+
+async fn collect_index_entries_async<R>(
+    reader: &mut R,
+) -> Result<Vec<SessionIndexEntry>, SessionError>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
     let mut entries = Vec::new();
     let mut line_buf = String::new();
     loop {
@@ -194,17 +207,22 @@ pub async fn list_all_async(index_path: &Path) -> Result<Vec<SessionIndexEntry>,
         if n == 0 {
             break;
         }
-        let trimmed = line_buf.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(entry) = serde_json::from_str::<SessionIndexEntry>(trimmed)
-            && validate_session_id(&entry.session_id).is_ok()
-        {
+        if let Some(entry) = parse_index_entry_line(&line_buf) {
             entries.push(entry);
         }
     }
     Ok(entries)
+}
+
+fn parse_index_entry_line(line: &str) -> Option<SessionIndexEntry> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let entry = serde_json::from_str::<SessionIndexEntry>(trimmed).ok()?;
+    validate_session_id(&entry.session_id)
+        .is_ok()
+        .then_some(entry)
 }
 
 #[cfg(test)]
@@ -327,5 +345,28 @@ mod tests {
         let index = SessionIndex::new(tmp.path());
         let entries = index.list_all().unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_all_async_skips_empty_malformed_and_legacy_entries() {
+        let tmp = TempDir::new().unwrap();
+        let index_path = tmp.path().join(INDEX_FILENAME);
+
+        tokio::fs::write(
+            &index_path,
+            "\n\
+             {invalid json\n\
+             {\"session_id\":\"session_00000000-0000-4000-8000-000000000005\",\"session_dir\":\"/a.jsonl\",\"workdir\":\"/a\"}\n\
+             {\"session_id\":\"1234567890\",\"session_dir\":\"/old.jsonl\",\"workdir\":\"/old\"}\n",
+        )
+        .await
+        .unwrap();
+
+        let entries = list_all_async(&index_path).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].session_id,
+            "session_00000000-0000-4000-8000-000000000005"
+        );
     }
 }

@@ -34,8 +34,8 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::PermissionPolicy;
 use crate::TodoEventData;
+use crate::ToolAccess;
 use crate::goal::GoalManager;
 
 pub const DEFAULT_BASH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -104,7 +104,7 @@ pub enum ToolError {
 #[derive(Clone)]
 pub struct ToolContext {
     pub cwd: PathBuf,
-    pub permissions: PermissionPolicy,
+    pub access: ToolAccess,
     pub bash_timeout: Duration,
     pub max_output_bytes: usize,
     pub cancel_token: CancellationToken,
@@ -119,7 +119,7 @@ impl std::fmt::Debug for ToolContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolContext")
             .field("cwd", &self.cwd)
-            .field("permissions", &self.permissions)
+            .field("access", &self.access)
             .field("bash_timeout", &self.bash_timeout)
             .field("max_output_bytes", &self.max_output_bytes)
             .field("cancel_token", &self.cancel_token)
@@ -135,7 +135,7 @@ impl ToolContext {
         let cwd = workspace_root.as_ref().canonicalize()?;
         Ok(Self {
             cwd,
-            permissions: PermissionPolicy::default(),
+            access: ToolAccess::none(),
             bash_timeout: DEFAULT_BASH_TIMEOUT,
             max_output_bytes: 64 * 1024,
             cancel_token: CancellationToken::new(),
@@ -146,8 +146,8 @@ impl ToolContext {
     }
 
     #[must_use]
-    pub fn with_permission_policy(mut self, permissions: PermissionPolicy) -> Self {
-        self.permissions = permissions;
+    pub const fn with_access(mut self, access: ToolAccess) -> Self {
+        self.access = access;
         self
     }
 
@@ -195,7 +195,7 @@ impl ToolContext {
     }
 
     pub fn ensure_file_read_allowed(&self) -> Result<(), ToolError> {
-        if self.permissions.can_read_files() {
+        if self.access.file_read {
             Ok(())
         } else {
             Err(ToolError::PermissionDenied {
@@ -205,7 +205,7 @@ impl ToolContext {
     }
 
     pub fn ensure_file_write_allowed(&self) -> Result<(), ToolError> {
-        if self.permissions.can_write_files() {
+        if self.access.file_write {
             Ok(())
         } else {
             Err(ToolError::PermissionDenied {
@@ -215,7 +215,7 @@ impl ToolContext {
     }
 
     pub fn ensure_shell_allowed(&self) -> Result<(), ToolError> {
-        if self.permissions.can_run_shell() {
+        if self.access.shell {
             Ok(())
         } else {
             Err(ToolError::PermissionDenied { operation: "shell" })

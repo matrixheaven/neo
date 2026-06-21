@@ -147,31 +147,47 @@ async fn list_recent_sessions(neo_home: &Path, days: u32) -> Result<Vec<PathBuf>
     let content = fs::read_to_string(&index_path)
         .await
         .map_err(ToolError::Io)?;
-    let cutoff = u64::try_from(
+    let cutoff = recent_session_cutoff_ms(days);
+    let mut paths = Vec::new();
+    for line in content.lines() {
+        let entry = parse_session_index_line(line)?;
+        if let Some(path) = recent_session_path(&entry, cutoff) {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
+}
+
+fn recent_session_cutoff_ms(days: u32) -> u64 {
+    current_time_ms().saturating_sub(u64::from(days) * 24 * 60 * 60 * 1000)
+}
+
+fn current_time_ms() -> u64 {
+    u64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis(),
     )
     .unwrap_or(u64::MAX)
-    .saturating_sub(u64::from(days) * 24 * 60 * 60 * 1000);
-    let mut paths = Vec::new();
-    for line in content.lines() {
-        let entry: serde_json::Value =
-            serde_json::from_str(line).map_err(|err| ToolError::InvalidInput {
-                tool: "SummarizeSessions".to_owned(),
-                message: err.to_string(),
-            })?;
-        let ts = entry["timestamp_ms"].as_u64().unwrap_or(0);
-        if ts >= cutoff
-            && let (Some(session_id), Some(session_dir)) =
-                (entry["session_id"].as_str(), entry["session_dir"].as_str())
-            && validate_session_id(session_id).is_ok()
-        {
-            paths.push(PathBuf::from(session_dir).join(format!("{session_id}.jsonl")));
-        }
+}
+
+fn parse_session_index_line(line: &str) -> Result<serde_json::Value, ToolError> {
+    serde_json::from_str(line).map_err(|err| ToolError::InvalidInput {
+        tool: "SummarizeSessions".to_owned(),
+        message: err.to_string(),
+    })
+}
+
+fn recent_session_path(entry: &serde_json::Value, cutoff: u64) -> Option<PathBuf> {
+    if entry["timestamp_ms"].as_u64().unwrap_or(0) < cutoff {
+        return None;
     }
-    Ok(paths)
+    let session_id = entry["session_id"].as_str()?;
+    let session_dir = entry["session_dir"].as_str()?;
+    validate_session_id(session_id)
+        .is_ok()
+        .then(|| PathBuf::from(session_dir).join(format!("{session_id}.jsonl")))
 }
 
 fn validate_tool_session_id(session_id: &str) -> Result<(), ToolError> {
@@ -196,27 +212,31 @@ async fn summarize_session(path: &Path) -> Result<String, ToolError> {
     let mut turn = 0u32;
     for line in content.lines() {
         let event: serde_json::Value = serde_json::from_str(line).unwrap_or_default();
-        match event["type"].as_str() {
-            Some("user") => {
-                turn += 1;
-                if let Some(text) = event["content"]["text"].as_str() {
-                    lines.push(format!("Turn {turn} user: {text}"));
-                }
-            }
-            Some("assistant") => {
-                if let Some(text) = event["content"]["text"].as_str() {
-                    lines.push(format!("Turn {turn} assistant: {text}"));
-                }
-            }
-            Some("tool_result") => {
-                if let Some(name) = event["name"].as_str() {
-                    lines.push(format!("  tool {name} executed"));
-                }
-            }
-            _ => {}
+        if let Some(summary_line) = summarize_session_event(&event, &mut turn) {
+            lines.push(summary_line);
         }
     }
     Ok(lines.join("\n"))
+}
+
+fn summarize_session_event(event: &serde_json::Value, turn: &mut u32) -> Option<String> {
+    match event["type"].as_str() {
+        Some("user") => summarize_user_event(event, turn),
+        Some("assistant") => event_text(event).map(|text| format!("Turn {turn} assistant: {text}")),
+        Some("tool_result") => event["name"]
+            .as_str()
+            .map(|name| format!("  tool {name} executed")),
+        _ => None,
+    }
+}
+
+fn summarize_user_event(event: &serde_json::Value, turn: &mut u32) -> Option<String> {
+    *turn += 1;
+    event_text(event).map(|text| format!("Turn {turn} user: {text}"))
+}
+
+fn event_text(event: &serde_json::Value) -> Option<&str> {
+    event["content"]["text"].as_str()
 }
 
 #[cfg(test)]
@@ -294,6 +314,79 @@ mod tests {
             result
                 .content
                 .contains("No sessions found in the requested time range.")
+        );
+    }
+
+    #[tokio::test]
+    async fn summarize_sessions_by_days_uses_recent_valid_index_entries() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let recent_id = "session_550e8400-e29b-41d4-a716-446655440001";
+        let old_id = "session_550e8400-e29b-41d4-a716-446655440002";
+        let recent_dir = temp.path().join("wd_recent_1234567890ab");
+        let old_dir = temp.path().join("wd_old_1234567890ab");
+        fs::create_dir_all(&recent_dir).await.expect("mkdir recent");
+        fs::create_dir_all(&old_dir).await.expect("mkdir old");
+        fs::write(
+            recent_dir.join(format!("{recent_id}.jsonl")),
+            json!({
+                "type": "user",
+                "content": {"text": "recent"}
+            })
+            .to_string(),
+        )
+        .await
+        .expect("write recent session");
+        fs::write(
+            old_dir.join(format!("{old_id}.jsonl")),
+            json!({
+                "type": "user",
+                "content": {"text": "old"}
+            })
+            .to_string(),
+        )
+        .await
+        .expect("write old session");
+
+        let now = current_time_ms();
+        fs::write(
+            temp.path().join("session_index.jsonl"),
+            [
+                json!({
+                    "session_id": recent_id,
+                    "session_dir": recent_dir.to_str().unwrap(),
+                    "timestamp_ms": now,
+                })
+                .to_string(),
+                json!({
+                    "session_id": old_id,
+                    "session_dir": old_dir.to_str().unwrap(),
+                    "timestamp_ms": now.saturating_sub(10 * 24 * 60 * 60 * 1000),
+                })
+                .to_string(),
+                json!({
+                    "session_id": "1234567890",
+                    "session_dir": recent_dir.to_str().unwrap(),
+                    "timestamp_ms": now,
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        )
+        .await
+        .expect("write index");
+
+        let tool = SummarizeSessionsTool::new(temp.path());
+        let result = tool
+            .execute(&make_ctx(), json!({"days": 7}))
+            .await
+            .expect("execute");
+        assert!(!result.is_error);
+        assert!(result.content.contains("Turn 1 user: recent"));
+        assert!(!result.content.contains("Turn 1 user: old"));
+        assert!(
+            result
+                .content
+                .contains("<system>Summarized 1 session(s).</system>")
         );
     }
 
