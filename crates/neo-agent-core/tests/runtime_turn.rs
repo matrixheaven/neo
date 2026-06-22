@@ -4507,6 +4507,121 @@ async fn exit_plan_mode_continues_loop_after_approval() {
     );
 }
 
+/// Regression: when the user approves a specific model-supplied plan-review
+/// option, the runtime prefixes the `ExitPlanMode` tool result with
+/// "Selected approach: <label>" so the model executes only that branch. The
+/// selected label reaches the runtime through the `plan_review_selected_label`
+/// side-channel, mirroring the Revise-feedback channel.
+#[tokio::test]
+async fn exit_plan_mode_selected_option_label_prefixes_tool_result() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_root = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+    let plans_dir =
+        workspace_sessions_dir(&home.path().join("sessions"), &workspace_root).join("plans");
+    let mut config = AgentConfig::for_model(fake_model());
+    config.home_dir = Some(home.path().to_path_buf());
+    config.workspace_root = Some(workspace_root);
+    set_config_permission_mode(&mut config, PermissionMode::Ask);
+    let plan_path = {
+        let mut pm = config.plan_mode.write().expect("plan mode lock");
+        let data = pm.enter(&plans_dir, true).expect("enter plan mode");
+        std::fs::write(&data.path, "ship feature X").expect("write plan");
+        data.path
+    };
+
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "ExitPlanMode".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({
+                    "plan_summary": "Two approaches available",
+                    "options": [
+                        {"label": "Option A", "description": "fast"},
+                        {"label": "Option B", "description": "safe"}
+                    ]
+                }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "running option a".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    // The TUI would populate this side-channel after the user picked "Option A".
+    let selected_label_map = Arc::clone(&config.plan_review_selected_label);
+    {
+        let mut labels = selected_label_map
+            .lock()
+            .expect("selected label lock");
+        labels.insert("tool_1".to_owned(), "Option A".to_owned());
+    }
+    let config = config.with_approval_handler(|request| {
+        assert_eq!(request.operation, PermissionOperation::PlanTransition);
+        PermissionApprovalDecision::AllowOnce
+    });
+    let runtime =
+        AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
+    let mut context = AgentContext::new();
+
+    let _events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("approve option A"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    // The selected-approach prefix must reach the next model turn. The harness
+    // records every ChatRequest, so turn 2's messages must contain the prefix
+    // in the ExitPlanMode tool result that was appended to the context.
+    let requests = harness.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "an approved ExitPlanMode should continue into a second model turn"
+    );
+    let turn2 = &requests[1];
+    let turn2_text = serde_json::to_string(turn2).unwrap_or_default();
+    assert!(
+        turn2_text.contains("Selected approach: Option A"),
+        "turn 2 request must carry the selected-approach prefix; got: {turn2_text}"
+    );
+    assert!(
+        turn2_text.contains("Execute ONLY the selected approach"),
+        "turn 2 request must carry the execute-only instruction"
+    );
+    // The label is consumed once.
+    let labels = selected_label_map.lock().expect("selected label lock");
+    assert!(
+        !labels.contains_key("tool_1"),
+        "selected label should be consumed after attach_exit_plan_details"
+    );
+    let _ = plan_path;
+}
+
 /// Regression: `ExitGoalMode` starts the durable goal and the run ends
 /// cleanly. Unlike `ExitPlanMode`, the loop must NOT continue inline here —
 /// goal continuation (`goal_continuation_messages`) drives subsequent turns on

@@ -143,7 +143,14 @@ fn transcript_pane_renders_inline_bash_approval_prompt() {
             .iter()
             .any(|line| line.contains("4. Reject with feedback"))
     );
-    assert!(frame.iter().any(|line| line.contains("1/2/3/4 choose")));
+    assert!(
+        frame.iter().any(|line| {
+            line.contains("↑/↓ select")
+                && line.contains("number keys choose")
+                && line.contains("↵ confirm")
+        }),
+        "approval prompt should show the keyboard hint: {frame:?}"
+    );
 
     transcript_pane.resize(36, 24);
     let narrow = plain_frame(&mut transcript_pane, 36, 24);

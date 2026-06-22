@@ -1349,9 +1349,12 @@ async fn run_agent_turn(
             final_stop_reason = StopReason::Cancelled;
             break;
         }
+        // Attach plan details + the selected-option prefix BEFORE appending the
+        // tool results to the context so the next model turn sees the prefix,
+        // and before the side-effect events flip plan mode off.
+        attach_exit_plan_details(&config, &mut tool_results);
         append_tool_result_messages(&tool_results, emitter);
         emit_effective_context_window(&config, emitter, turn).await;
-        attach_exit_plan_details(&config, &mut tool_results);
         emit_tool_side_effect_events(turn, &config, &tool_results, emitter);
         drain_live_steer_input(&steer_input, emitter);
         if terminates_tool_batch(&tool_results) {

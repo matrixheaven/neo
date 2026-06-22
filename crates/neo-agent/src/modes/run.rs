@@ -962,6 +962,9 @@ pub struct PromptApprovalRequest {
     pub operation: PermissionOperation,
     pub decision_tx: oneshot::Sender<PermissionApprovalDecision>,
     pub feedback_tx: Option<oneshot::Sender<Option<String>>>,
+    /// Returns the model-supplied plan-review option label the user picked,
+    /// when the approval was an `ExitPlanMode` plan-review approve choice.
+    pub selected_label_tx: Option<oneshot::Sender<Option<String>>>,
     /// Display label for the session-approval option (Layer 1). `None` hides it.
     pub session_option_label: Option<String>,
     /// Display label for the prefix-approval option (Layer 2). `None` hides it.
@@ -1593,12 +1596,15 @@ pub(crate) fn agent_config_for_app(
     }
     if let Some(approval_tx) = approval_tx {
         let plan_review_feedback = Arc::clone(&agent_config.plan_review_feedback);
+        let plan_review_selected_label = Arc::clone(&agent_config.plan_review_selected_label);
         agent_config = agent_config.with_async_approval_handler(move |request| {
             let approval_tx = approval_tx.clone();
             let plan_review_feedback = Arc::clone(&plan_review_feedback);
+            let plan_review_selected_label = Arc::clone(&plan_review_selected_label);
             async move {
                 let (decision_tx, decision_rx) = oneshot::channel();
                 let (feedback_tx, feedback_rx) = oneshot::channel();
+                let (selected_label_tx, selected_label_rx) = oneshot::channel();
                 let id = request.id.clone();
                 let operation = request.operation;
                 let session_scope = request.session_scope.clone();
@@ -1616,6 +1622,7 @@ pub(crate) fn agent_config_for_app(
                         operation,
                         decision_tx,
                         feedback_tx: Some(feedback_tx),
+                        selected_label_tx: Some(selected_label_tx),
                         session_option_label,
                         prefix_option_label,
                         prefix_rule,
@@ -1637,7 +1644,18 @@ pub(crate) fn agent_config_for_app(
                     && !feedback.trim().is_empty()
                     && let Ok(mut map) = plan_review_feedback.lock()
                 {
-                    map.insert(request.id, feedback);
+                    map.insert(request.id.clone(), feedback);
+                }
+                // The user approved a specific model-supplied plan-review
+                // option. Record its label so `attach_exit_plan_details` can
+                // prefix the tool result with "Selected approach: <label>".
+                if decision == PermissionApprovalDecision::AllowOnce
+                    && operation == PermissionOperation::PlanTransition
+                    && let Ok(Some(label)) = selected_label_rx.await
+                    && !label.trim().is_empty()
+                    && let Ok(mut map) = plan_review_selected_label.lock()
+                {
+                    map.insert(request.id.clone(), label);
                 }
                 decision
             }
@@ -2518,6 +2536,7 @@ mod tests {
             operation: _,
             decision_tx,
             feedback_tx: _,
+            selected_label_tx: _,
             session_option_label: _,
             prefix_option_label: _,
             prefix_rule: _,
