@@ -98,13 +98,50 @@ async call delegation.
 `transport = "http"`, and `transport = "sse"` servers from the single Neo config and
 advertise their tools to the configured model.
 
-The `neo mcp` CLI surface is intentionally small:
+## Connection Manager
+
+`neo-agent-core::tools::mcp_manager::McpConnectionManager` owns the lifecycle of
+configured MCP servers. It keeps a snapshot of each server (`Connected`,
+`Failed`, `Pending`, `Reconnecting`, or `Disabled`), reconnects failed stdio and
+remote servers with exponential backoff, and exposes live snapshots and
+resource operations to the CLI and TUI.
+
+The manager is created once per TUI session and kept in sync with the on-disk
+config whenever it is reloaded (config edits, enable/disable, add, delete, and
+`/reload`). `register_connected_tools_into` lets the runtime register connected
+MCP tools into a `ToolRegistry` so the model sees them as
+`mcp__<server_id>__<tool_name>`.
+
+## TUI Overlay
+
+In interactive TUI mode, `/mcp` opens the MCP manager overlay. It shows each
+configured server with its transport, endpoint, enablement state, and live tool
+discovery status. Keys:
+
+- `↑` / `↓` — navigate.
+- `Enter` — test/refresh the selected server.
+- `a` — add a new server (choose stdio / HTTP / SSE, then fill the fields).
+- `e` — toggle enablement.
+- `d` — delete (confirm with `y`).
+- `Esc` — close.
+
+The overlay reflects the connection manager's live snapshots when the manager is
+available; otherwise it falls back to static config summaries.
+
+## CLI
+
+The `neo mcp` CLI surface:
 
 - `neo mcp list` — list configured servers and their advertised tools.
 - `neo mcp add <name> -t studio|remote-http|remote-sse ...` — add a server,
   test the connection, and persist the entry to config.
 - `neo mcp del <name>` — remove a server from config.
 - `neo mcp enable <name>` / `neo mcp disable <name>` — toggle enablement.
+- `neo mcp status` — connect to each configured server and print connection
+  state, tool count, and the most recent error.
+- `neo mcp resources [--server-id <id>]` — list resources exposed by connected
+  servers.
+- `neo mcp read-resource <server-id> <uri>` — read a single resource.
 
 Studio servers take a shell command string (`-C`), optional working directory
 (`--cwd`), and environment variables. Remote servers take a URL (`--url`) and

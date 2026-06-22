@@ -16,7 +16,7 @@ use neo_agent_core::{
     CompactionSettings, Content, CreateSkillTool, ListSkillsTool, McpHttpConfig,
     McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter, McpToolProvider,
     MoveSkillTool, PendingQuestion, PermissionApprovalDecision, PermissionOperation,
-    SummarizeSessionsTool, ToolRegistry, mode::PlanMode,
+    SteerInputHandle, SummarizeSessionsTool, ToolRegistry, mode::PlanMode,
 };
 use neo_ai::{
     ChatMessage, ContentPart, CredentialResolver, ModelClient, ModelRegistry, ModelSpec,
@@ -974,7 +974,16 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
     let mut writer = SessionEventWriter::jsonl(&mut writer);
     let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
     record_session_activity(config, &session_id, &prompt);
-    let runtime = runtime_for_config(config, None, None, None, None, false).await?;
+    let runtime = runtime_for_config(
+        config,
+        None,
+        None,
+        None,
+        None,
+        false,
+        SteerInputHandle::new(),
+    )
+    .await?;
     let turn = finish_prompt_turn(
         user_message,
         AgentContext::new(),
@@ -995,7 +1004,16 @@ pub async fn run_prompt_ephemeral(
     let prompt = prompt.join(" ");
     let mut writer = SessionEventWriter::memory();
     let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
-    let runtime = runtime_for_config(config, None, None, None, None, false).await?;
+    let runtime = runtime_for_config(
+        config,
+        None,
+        None,
+        None,
+        None,
+        false,
+        SteerInputHandle::new(),
+    )
+    .await?;
     finish_prompt_turn(
         user_message,
         AgentContext::new(),
@@ -1023,7 +1041,16 @@ pub async fn run_prompt_in_session(
     let mut writer = SessionEventWriter::jsonl(&mut writer);
     let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
     record_session_activity(config, session_id, &prompt);
-    let runtime = runtime_for_config(config, None, None, None, None, false).await?;
+    let runtime = runtime_for_config(
+        config,
+        None,
+        None,
+        None,
+        None,
+        false,
+        SteerInputHandle::new(),
+    )
+    .await?;
     runtime.restore_plan_mode(&context);
     finish_prompt_turn(
         user_message,
@@ -1049,6 +1076,7 @@ pub async fn run_prompt_streaming(
     plan_review_feedback: Option<std::collections::BTreeMap<String, String>>,
     plan_mode: Option<Arc<RwLock<PlanMode>>>,
     goal_mode_authoring: bool,
+    steer_input: SteerInputHandle,
 ) -> anyhow::Result<PromptTurn> {
     let prepared = prepare_new_streaming_turn(prompt, config, session_id_tx, skill_context).await?;
     let prompt = prepared.prompt.clone();
@@ -1059,6 +1087,7 @@ pub async fn run_prompt_streaming(
         plan_review_feedback.clone(),
         plan_mode.clone(),
         goal_mode_authoring,
+        steer_input,
     )
     .await?;
     let turn = run_prepared_streaming_turn(prepared, runtime, event_tx, cancel_token).await?;
@@ -1080,6 +1109,7 @@ pub async fn run_prompt_in_session_streaming(
     plan_review_feedback: Option<std::collections::BTreeMap<String, String>>,
     plan_mode: Option<Arc<RwLock<PlanMode>>>,
     goal_mode_authoring: bool,
+    steer_input: SteerInputHandle,
 ) -> anyhow::Result<PromptTurn> {
     let prepared =
         prepare_existing_streaming_turn(session_id, prompt, config, session_id_tx, skill_context)
@@ -1091,6 +1121,7 @@ pub async fn run_prompt_in_session_streaming(
         plan_review_feedback.clone(),
         plan_mode.clone(),
         goal_mode_authoring,
+        steer_input,
     )
     .await?;
     runtime.restore_plan_mode(&prepared.context);
@@ -1211,6 +1242,7 @@ async fn runtime_for_config(
     plan_review_feedback: Option<std::collections::BTreeMap<String, String>>,
     plan_mode: Option<Arc<RwLock<PlanMode>>>,
     goal_mode_authoring: bool,
+    steer_input: SteerInputHandle,
 ) -> anyhow::Result<AgentRuntime> {
     let model = resolve_model(config)?;
     let client = resolve_model_client(config, &model)?;
@@ -1247,6 +1279,7 @@ async fn runtime_for_config(
         tools.register(SummarizeSessionsTool::new(home));
     }
     let mut runtime = AgentRuntime::with_tools_and_skills(agent_config, client, tools, skill_store);
+    runtime = runtime.with_steer_input(steer_input);
     if let Some(home) = neo_home() {
         let goal_manager = Arc::new(GoalManager::load(home).await?);
         if let Some(tools) = runtime.tools_mut() {
@@ -2082,6 +2115,7 @@ mod tests {
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
             project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
         };
@@ -2151,6 +2185,7 @@ mod tests {
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
             project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
         };
@@ -2192,6 +2227,7 @@ mod tests {
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
             project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
         };
@@ -2295,6 +2331,7 @@ mod tests {
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
             project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
         };
@@ -2355,6 +2392,7 @@ mod tests {
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
             project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
         };
@@ -2402,6 +2440,7 @@ mod tests {
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
             project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: temp.path().to_path_buf(),
             config_path: temp.path().join(".neo/config.toml"),
         };
@@ -2778,6 +2817,7 @@ mod tests {
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
             project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: project_dir.to_path_buf(),
             config_path: project_dir.join(".neo/config.toml"),
         }

@@ -77,6 +77,23 @@ pub enum Command {
     },
     /// JSONL RPC 服务端模式
     Rpc,
+    /// 工作区信任管理
+    Trust {
+        #[command(subcommand)]
+        command: TrustCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TrustCommand {
+    /// 显示当前工作区的信任状态
+    Status,
+    /// 信任当前工作区
+    Approve,
+    /// 拒绝信任当前工作区
+    Deny,
+    /// 清除当前工作区的信任决定
+    Clear,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -266,6 +283,21 @@ pub enum McpCommand {
     Enable {
         /// MCP 名称
         mcp_name: String,
+    },
+    /// 显示每个 MCP 的连接状态、工具数和最近的错误
+    Status,
+    /// 列出已连接 MCP 暴露的资源
+    Resources {
+        /// 仅列出指定 MCP 服务器的资源
+        #[arg(short, long, value_name = "SERVER")]
+        server_id: Option<String>,
+    },
+    /// 读取已连接 MCP 暴露的资源内容
+    ReadResource {
+        /// MCP 服务器名称
+        server_id: String,
+        /// 资源 URI
+        uri: String,
     },
 }
 

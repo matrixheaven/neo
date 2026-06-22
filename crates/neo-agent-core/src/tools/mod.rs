@@ -10,6 +10,7 @@ mod goal;
 mod grep;
 mod list;
 mod mcp;
+mod mcp_manager;
 mod plan_mode;
 mod process_supervisor;
 mod read;
@@ -41,6 +42,7 @@ use crate::goal::GoalManager;
 pub const DEFAULT_BASH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 pub use mcp::*;
+pub use mcp_manager::*;
 pub use process_supervisor::{ProcessKind, ProcessSupervisor};
 
 // Re-export AskUser tool types for external use (TUI / CLI layer).

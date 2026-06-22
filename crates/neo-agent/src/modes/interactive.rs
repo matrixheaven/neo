@@ -1,11 +1,13 @@
 use crate::{
     config::{self, AppConfig, neo_home, workspace_sessions_dir},
+    mcp_ops,
     modes::sessions::{SessionPickerScope as SessionDataScope, session_summaries},
     prompt_templates::{
         PromptTemplateLocation, discover_prompt_template_commands, expand_prompt_template_args,
         load_project_prompt_templates,
     },
     resources,
+    trust::{self, ProjectTrustState},
 };
 use std::{
     cell::RefCell,
@@ -25,8 +27,8 @@ use std::{
 use anyhow::{Context, Result};
 use crossterm::{event, terminal::size};
 use neo_agent_core::{
-    AgentEvent, AgentMessage, PendingQuestion, PermissionApprovalDecision, PermissionMode,
-    QuestionResponse, format_collected_answers,
+    AgentEvent, AgentMessage, McpConnectionManager, PendingQuestion, PermissionApprovalDecision,
+    PermissionMode, ProcessSupervisor, QuestionResponse, format_collected_answers,
     goal::GoalManager,
     mode::PlanMode,
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
@@ -39,6 +41,7 @@ use neo_tui::{
         SessionPickerScope, StreamUpdate,
     },
     core::InputResult,
+    dialogs::{McpManagerOptions, McpServerRow, McpToolStatus},
     image::{ImageProtocolPreference, ImageRenderPolicy, TerminalImageCapabilities},
     input::{InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager},
     terminal::TuiRenderer,
@@ -312,6 +315,15 @@ pub fn execute_with_startup(
     controller.render_snapshot()
 }
 
+fn trust_dialog_data_for_startup(config: &AppConfig) -> Option<neo_tui::dialogs::TrustDialogData> {
+    match &config.project_trust {
+        ProjectTrustState::Unknown { inputs } => {
+            Some(trust::trust_dialog_data_from_inputs(inputs.clone()))
+        }
+        _ => None,
+    }
+}
+
 pub async fn execute_tty_with_startup(
     config: &AppConfig,
     startup: StartupAction,
@@ -323,6 +335,18 @@ pub async fn execute_tty_with_startup(
 
     let mut controller = controller_for_config(config);
     controller.apply_startup_options(config, options);
+
+    let terminal = RefCell::new(NeoTerminal::enter()?);
+
+    if let Some(data) = trust_dialog_data_for_startup(config) {
+        controller
+            .resolve_trust_dialog_at_startup(
+                data,
+                CrosstermEvents::new(controller.keybindings.clone()),
+                |tui| terminal.borrow_mut().draw_tui(tui),
+            )
+            .await?;
+    }
     if let StartupAction::LoadSession(session_id) = &startup {
         if let Err(error) = controller.load_session_at_startup(session_id).await {
             controller.push_status(format!("Failed to resume session: {error}"));
@@ -331,16 +355,13 @@ pub async fn execute_tty_with_startup(
         controller.apply_startup_action(&startup);
     }
     let events = CrosstermEvents::new(controller.keybindings.clone());
-    {
-        let terminal = RefCell::new(NeoTerminal::enter()?);
-        controller
-            .run_terminal_loop_with_suspend(
-                |tui| terminal.borrow_mut().draw_tui(tui),
-                || terminal.borrow_mut().suspend(),
-                events,
-            )
-            .await?;
-    }
+    controller
+        .run_terminal_loop_with_suspend(
+            |tui| terminal.borrow_mut().draw_tui(tui),
+            || terminal.borrow_mut().suspend(),
+            events,
+        )
+        .await?;
     Ok(Some(exit_message(controller.active_session_id())))
 }
 
@@ -379,6 +400,27 @@ struct PendingCatalogFetch {
     pending_add: Option<PendingCatalogAdd>,
 }
 
+struct PendingMcpProbe {
+    server_id: String,
+    handle: tokio::task::JoinHandle<anyhow::Result<Vec<String>>>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingMcpAdd {
+    transport: &'static str,
+    step: McpAddStep,
+    id: String,
+    command: Option<String>,
+    url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum McpAddStep {
+    Id,
+    Command,
+    Url,
+}
+
 struct PendingApprovalResponse {
     decision_tx: oneshot::Sender<PermissionApprovalDecision>,
     feedback_tx: Option<oneshot::Sender<Option<String>>>,
@@ -415,6 +457,9 @@ pub(crate) struct InteractiveController {
     pending_custom_registry: Option<PendingCustomRegistry>,
     pending_catalog_provider_id: Option<String>,
     pending_catalog_fetch: Option<PendingCatalogFetch>,
+    pending_mcp_probe: Option<PendingMcpProbe>,
+    pending_mcp_add: Option<PendingMcpAdd>,
+    mcp_manager: Option<McpConnectionManager>,
     skill_store: Option<neo_agent_core::skills::SkillStore>,
     /// Expanded skill body waiting to be injected as context for the next turn.
     pending_skill_context: Option<String>,
@@ -429,6 +474,9 @@ pub(crate) struct InteractiveController {
     /// do not exercise persistence. Real controllers seed `PromptState` from
     /// this on startup and append accepted prompts to it after each submit.
     prompt_history: Option<crate::prompt_history::PromptHistoryStore>,
+    /// Optional trust store override for tests. Production controllers created
+    /// via `controller_for_config` initialize this from `~/.neo/trust.json`.
+    trust_store: Option<crate::trust::ProjectTrustStore>,
 }
 
 pub(crate) struct TurnChannels {
@@ -438,6 +486,9 @@ pub(crate) struct TurnChannels {
     cancel_token: CancellationToken,
     /// Channel sender for `AskUserTool`'s reverse-RPC questions.
     questions: mpsc::UnboundedSender<PendingQuestion>,
+    /// Shared handle for pushing live steer/follow-up input into the running
+    /// turn. The controller writes; the runtime drains at step boundaries.
+    steer_input: neo_agent_core::SteerInputHandle,
 }
 
 #[cfg(test)]
@@ -455,6 +506,9 @@ struct RunningTurn {
     cancel_token: CancellationToken,
     /// Receiver for `AskUserTool`'s reverse-RPC questions.
     questions: mpsc::UnboundedReceiver<PendingQuestion>,
+    /// Shared handle kept so the controller can push steer/follow-up input
+    /// while the turn runs.
+    steer_input: neo_agent_core::SteerInputHandle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -700,6 +754,9 @@ impl InteractiveController {
             pending_custom_registry: None,
             pending_catalog_provider_id: None,
             pending_catalog_fetch: None,
+            pending_mcp_probe: None,
+            pending_mcp_add: None,
+            mcp_manager: Some(McpConnectionManager::new(ProcessSupervisor::default())),
             skill_store: None,
             pending_skill_context: None,
             goal_manager: None,
@@ -707,6 +764,7 @@ impl InteractiveController {
             permission_mode: PermissionMode::default(),
             pending_plan_review_feedback: BTreeMap::new(),
             prompt_history: None,
+            trust_store: None,
         }
     }
 
@@ -835,6 +893,11 @@ impl InteractiveController {
     }
 
     #[cfg(test)]
+    fn set_trust_store(&mut self, store: crate::trust::ProjectTrustStore) {
+        self.trust_store = Some(store);
+    }
+
+    #[cfg(test)]
     const fn chrome(&self) -> &NeoChromeState {
         self.tui.chrome()
     }
@@ -858,6 +921,7 @@ impl InteractiveController {
             config_path: Some(path),
             yolo: false,
             auto: false,
+            ..crate::config::ConfigOverrides::default()
         };
         match crate::config::AppConfig::load(overrides) {
             Ok(config) => {
@@ -867,11 +931,35 @@ impl InteractiveController {
                 self.model_items = catalogs.model_items;
                 self.tui.chrome_mut().set_theme(config.theme.theme);
                 self.local_config = Some(config);
+                self.spawn_sync_mcp_manager();
             }
             Err(error) => {
                 tracing::warn!("failed to reload config: {error}");
             }
         }
+    }
+
+    /// Push the current application config onto the MCP connection manager.
+    ///
+    /// Must be called after `local_config` is updated. Runs in a spawned task
+    /// so it can be used from synchronous refresh paths. If there is no async
+    /// runtime available (e.g. in unit tests that build a controller without
+    /// one), the sync is skipped silently.
+    fn spawn_sync_mcp_manager(&self) {
+        let Some(config) = self.local_config.clone() else {
+            return;
+        };
+        let Some(manager) = self.mcp_manager.clone() else {
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        tokio::spawn(async move {
+            if let Err(error) = mcp_ops::reload_mcp_manager_from_config(&config, &manager).await {
+                tracing::warn!("failed to sync MCP manager: {error}");
+            }
+        });
     }
 
     pub fn apply_startup_action(&mut self, startup: &StartupAction) {
@@ -892,6 +980,85 @@ impl InteractiveController {
             .set_session_label(loaded.label.clone());
         self.rebuild_transcript_from_session(&loaded);
         self.active_session_id = Some(session_id.to_owned());
+        Ok(())
+    }
+
+    /// Run the workspace trust dialog until the user makes a choice, then persist
+    /// and apply the decision. Cancel/close without a choice is treated as
+    /// untrusted.
+    async fn resolve_trust_dialog_at_startup(
+        &mut self,
+        data: neo_tui::dialogs::TrustDialogData,
+        mut events: impl TerminalEvents,
+        mut render: impl FnMut(&mut neo_tui::NeoTui) -> Result<()>,
+    ) -> Result<()> {
+        self.tui.chrome_mut().open_trust_dialog(data);
+        render(&mut self.tui)?;
+        loop {
+            let result = self.tui.chrome_mut().take_trust_dialog_result();
+            if let Some(result) = result {
+                self.tui.chrome_mut().close_focused_overlay();
+                self.apply_trust_dialog_result(result).await?;
+                return Ok(());
+            }
+            match events.poll_input_event(Duration::from_millis(50))? {
+                Some(event) => {
+                    let exit = self.handle_input_event(event).await?;
+                    if exit {
+                        // Treat an early loop exit (e.g. double Ctrl-C) as
+                        // untrusted so the workspace is never silently trusted.
+                        let target = self
+                            .local_config
+                            .as_ref()
+                            .map(|config| config.project_dir.clone())
+                            .unwrap_or_else(|| self.workspace_root.clone());
+                        self.apply_trust_dialog_result(
+                            neo_tui::dialogs::TrustDialogResult::Untrusted { target },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                }
+                None => tokio::task::yield_now().await,
+            }
+            self.tui.chrome_mut().advance_activity_frame();
+            render(&mut self.tui)?;
+        }
+    }
+
+    async fn apply_trust_dialog_result(
+        &mut self,
+        result: neo_tui::dialogs::TrustDialogResult,
+    ) -> Result<()> {
+        let (trusted, target) = match result {
+            neo_tui::dialogs::TrustDialogResult::Trust { target } => (true, target),
+            neo_tui::dialogs::TrustDialogResult::Untrusted { target } => (false, target),
+        };
+
+        if let Some(store) = self.trust_store.as_ref() {
+            store.set(&target, Some(trusted))?;
+        }
+
+        let status_message = if trusted {
+            format!("Workspace trusted: {}", target.display())
+        } else {
+            "Workspace untrusted: project context disabled".to_owned()
+        };
+
+        if let Some(config) = self.local_config.as_mut() {
+            config.project_trusted = trusted;
+            config.project_trust = if trusted {
+                trust::ProjectTrustState::Trusted {
+                    target: target.clone(),
+                }
+            } else {
+                trust::ProjectTrustState::Untrusted {
+                    target: target.clone(),
+                }
+            };
+        }
+
+        self.push_status(status_message);
         Ok(())
     }
 
@@ -1059,6 +1226,7 @@ impl InteractiveController {
                 self.refresh_git_status_if_due();
             }
             self.poll_pending_catalog_fetch().await;
+            self.poll_pending_mcp_probe().await;
             self.tui.chrome_mut().advance_activity_frame();
             render(&mut self.tui)?;
         }
@@ -1299,6 +1467,9 @@ impl InteractiveController {
             KeybindingAction::InputNewLine => self.apply_prompt_edit(PromptEdit::Insert("\n")),
             KeybindingAction::InputTab => self.complete_prompt_or_insert_tab(),
             KeybindingAction::InputCopy => self.copy_prompt_to_clipboard(),
+            KeybindingAction::PromptSteer => {
+                return self.handle_prompt_steer().await.map(|()| Some(false));
+            }
             KeybindingAction::AppClear => return self.handle_app_clear_action().await.map(Some),
             KeybindingAction::AppExit => return Ok(Some(self.handle_app_exit())),
             KeybindingAction::AppSuspend => {
@@ -1494,6 +1665,10 @@ impl InteractiveController {
             &prefix.text,
             &self.model_items,
             self.skill_store.as_ref(),
+            self.local_config
+                .as_ref()
+                .map(|c| c.project_trusted)
+                .unwrap_or(false),
         ) {
             Ok(completions) => completions,
             Err(error) => {
@@ -1551,6 +1726,10 @@ impl InteractiveController {
             &prefix.text,
             &self.model_items,
             self.skill_store.as_ref(),
+            self.local_config
+                .as_ref()
+                .map(|c| c.project_trusted)
+                .unwrap_or(false),
         ) {
             Ok(completions) => completions,
             Err(error) => {
@@ -1726,7 +1905,12 @@ impl InteractiveController {
     }
 
     fn open_command_palette(&mut self) {
-        let (commands, error) = command_specs(&self.completion_root);
+        let project_trusted = self
+            .local_config
+            .as_ref()
+            .map(|config| config.project_trusted)
+            .unwrap_or(false);
+        let (commands, error) = command_specs(&self.completion_root, project_trusted);
         if let Some(error) = error {
             self.push_status(format!("Error loading prompt templates: {error}"));
         }
@@ -1740,7 +1924,7 @@ impl InteractiveController {
         if self.run_prompt_template_command(&command.id) {
             return Ok(());
         }
-        if self.run_sync_command(&command.id) {
+        if self.run_sync_command(&command.id).await {
             return Ok(());
         }
         self.run_async_command(&command.id).await
@@ -1757,22 +1941,28 @@ impl InteractiveController {
         true
     }
 
-    fn run_sync_command(&mut self, command_id: &str) -> bool {
-        self.run_picker_command(command_id)
-            || self.run_transcript_command(command_id)
+    async fn run_sync_command(&mut self, command_id: &str) -> bool {
+        if self.run_picker_command(command_id).await {
+            return true;
+        }
+        self.run_transcript_command(command_id)
             || self.run_permission_command(command_id)
             || self.run_plan_command(command_id)
     }
 
-    fn run_picker_command(&mut self, command_id: &str) -> bool {
-        self.run_open_picker_command(command_id) || self.run_copy_prompt_command(command_id)
+    async fn run_picker_command(&mut self, command_id: &str) -> bool {
+        if self.run_open_picker_command(command_id).await {
+            return true;
+        }
+        self.run_copy_prompt_command(command_id)
     }
 
-    fn run_open_picker_command(&mut self, command_id: &str) -> bool {
+    async fn run_open_picker_command(&mut self, command_id: &str) -> bool {
         match command_id {
             "sessions" => self.open_session_picker(),
             "models" => self.open_model_picker(),
             "providers" => self.open_provider_picker(),
+            "mcp" => self.open_mcp_manager().await,
             _ => return false,
         }
         true
@@ -1863,7 +2053,7 @@ impl InteractiveController {
     /// not be submitted as a chat turn.
     async fn handle_slash_command(&mut self, prompt: &str) -> bool {
         let prompt = prompt.trim();
-        if self.handle_simple_slash_command(prompt) {
+        if self.handle_simple_slash_command(prompt).await {
             return true;
         }
         if self.handle_model_or_skill_slash_command(prompt) {
@@ -1878,7 +2068,7 @@ impl InteractiveController {
         self.handle_goal_slash_prefix(prompt).await
     }
 
-    fn handle_simple_slash_command(&mut self, prompt: &str) -> bool {
+    async fn handle_simple_slash_command(&mut self, prompt: &str) -> bool {
         match prompt {
             "/new" | "/clear" => {
                 let blocked = self.active_turn.is_some();
@@ -1891,6 +2081,7 @@ impl InteractiveController {
             }
             "/resume" => self.open_session_picker(),
             "/provider" => self.open_provider_picker(),
+            "/mcp" => self.open_mcp_manager().await,
             _ => return false,
         }
         self.clear_submitted_prompt();
@@ -2226,12 +2417,15 @@ impl InteractiveController {
         // dispatchable while a turn is running (and report their own blocked
         // status), so dispatch them before the turn-active guard below.
         if matches!(prompt.as_str(), "/new" | "/clear") {
-            self.handle_simple_slash_command(&prompt);
+            self.handle_simple_slash_command(&prompt).await;
             return Ok(());
         }
 
+        // While a turn is running, Enter queues the message as a follow-up
+        // instead of rejecting it. The runtime drains follow-ups FIFO after
+        // the current workflow completes.
         if self.active_turn.is_some() {
-            self.push_status("A turn is already running");
+            self.enqueue_follow_up_from_prompt(&prompt);
             return Ok(());
         }
 
@@ -2261,6 +2455,75 @@ impl InteractiveController {
         self.start_pending_background_question_followups().await
     }
 
+    /// Queue the current composer text as a follow-up message into the running
+    /// turn. Called when Enter is pressed while a turn is active. The runtime
+    /// drains follow-ups FIFO after the current workflow completes.
+    fn enqueue_follow_up_from_prompt(&mut self, prompt: &str) {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return;
+        }
+        // Slash commands are not meaningful as queued follow-ups; surface a
+        // hint instead of silently queueing them.
+        if prompt.starts_with('/') {
+            self.push_status("Slash commands can't be queued — wait for the turn to finish");
+            return;
+        }
+        let message = AgentMessage::user_text(prompt.to_owned());
+        self.push_queued_message(prompt, false);
+        let Some(turn) = &self.active_turn else {
+            return;
+        };
+        turn.steer_input
+            .push(neo_agent_core::ActiveTurnInput::FollowUp(message));
+    }
+
+    /// Handle the `PromptSteer` keybinding (Ctrl+S by default).
+    ///
+    /// 1. If the composer has text, steer the running turn with it (inject at
+    ///    the next natural break point).
+    /// 2. If the composer is empty and a turn is active, re-classify the oldest
+    ///    queued follow-up as a steer (FIFO pull).
+    /// 3. If no turn is active, fall back to a normal submit so Ctrl+S is never
+    ///    a dead key when idle.
+    async fn handle_prompt_steer(&mut self) -> Result<()> {
+        let text = self.tui.chrome().prompt().text.trim().to_owned();
+        if !text.is_empty() {
+            if self.active_turn.is_some() {
+                let message = AgentMessage::user_text(text.clone());
+                self.push_queued_message(&text, true);
+                if let Some(turn) = &self.active_turn {
+                    turn.steer_input
+                        .push(neo_agent_core::ActiveTurnInput::SteerNow(message));
+                }
+                self.tui.chrome_mut().prompt_mut().clear_after_submit();
+                return Ok(());
+            }
+            // Idle: behave like a normal submit.
+            return self.submit_current_prompt().await;
+        }
+        // Empty composer: promote the oldest queued follow-up to a steer.
+        if let Some(text) = self.transcript_mut().pop_pending_follow_up()
+            && let Some(turn) = &self.active_turn
+        {
+            let message = AgentMessage::user_text(text);
+            turn.steer_input
+                .push(neo_agent_core::ActiveTurnInput::SteerNow(message));
+            self.push_status("Promoted oldest queued message to steer");
+        }
+        Ok(())
+    }
+
+    /// Push a queued/steered message preview into the transcript so the user
+    /// sees visual feedback that their input was captured. `is_steer` selects
+    /// the steer styling vs the follow-up styling.
+    fn push_queued_message(&mut self, text: &str, is_steer: bool) {
+        self.transcript_mut().push_queued_message(text, is_steer);
+        let label = if is_steer { "Steered" } else { "Queued" };
+        let preview: String = text.chars().take(60).collect();
+        self.push_status(format!("{label}: {preview}"));
+    }
+
     fn start_turn_with_prompt(
         &mut self,
         prompt: String,
@@ -2279,12 +2542,14 @@ impl InteractiveController {
         let (session_id_tx, session_id_rx) = mpsc::unbounded_channel();
         let (question_tx, question_rx) = mpsc::unbounded_channel::<PendingQuestion>();
         let cancel_token = CancellationToken::new();
+        let steer_input = neo_agent_core::SteerInputHandle::new();
         let channels = TurnChannels {
             events: event_tx.clone(),
             approvals: approval_tx,
             session_ids: session_id_tx,
             cancel_token: cancel_token.clone(),
             questions: question_tx,
+            steer_input: steer_input.clone(),
         };
         let mut request = TurnRequest::new(
             vec![prompt],
@@ -2303,7 +2568,7 @@ impl InteractiveController {
             DevelopmentMode::Goal(GoalModeStatus::Pending)
         );
         request.plan_review_feedback = std::mem::take(&mut self.pending_plan_review_feedback);
-        request.base_config = self.local_config.clone();
+        request.base_config.clone_from(&self.local_config);
         let request = if let Some(skill_context) = self.pending_skill_context.take() {
             request.with_skill_context(skill_context)
         } else {
@@ -2324,6 +2589,7 @@ impl InteractiveController {
             task,
             cancel_token,
             questions: question_rx,
+            steer_input,
         });
     }
 
@@ -2777,6 +3043,46 @@ impl InteractiveController {
             });
     }
 
+    async fn open_mcp_manager(&mut self) {
+        let Some(config) = self.local_config.clone() else {
+            self.push_status("No config available");
+            return;
+        };
+        let summaries = if let Some(manager) = &self.mcp_manager {
+            let snapshots = manager.snapshots().await;
+            mcp_ops::summarize_mcp_servers_from_snapshots(&config, &snapshots)
+        } else {
+            mcp_ops::summarize_mcp_servers_without_discovery(&config)
+        };
+        let rows = Self::mcp_rows_from_summaries(summaries);
+        let theme = self.tui.chrome().theme();
+        self.tui.chrome_mut().open_mcp_manager(&McpManagerOptions {
+            servers: rows,
+            theme,
+        });
+    }
+
+    fn mcp_rows_from_summaries(summaries: Vec<mcp_ops::McpServerSummary>) -> Vec<McpServerRow> {
+        summaries
+            .into_iter()
+            .map(|summary| McpServerRow {
+                id: summary.id,
+                transport_label: summary.transport_label,
+                enabled: summary.enabled,
+                endpoint_summary: summary.endpoint_summary,
+                cwd_summary: summary.cwd.map(|p| p.to_string_lossy().into_owned()),
+                env_keys: summary.env_keys,
+                header_keys: summary.header_keys,
+                tool_status: match summary.tools {
+                    mcp_ops::McpToolDiscovery::SkippedDisabled => McpToolStatus::SkippedDisabled,
+                    mcp_ops::McpToolDiscovery::NotRequested => McpToolStatus::NotDiscovered,
+                    mcp_ops::McpToolDiscovery::Success(names) => McpToolStatus::Discovered(names),
+                    mcp_ops::McpToolDiscovery::Failed(reason) => McpToolStatus::Failed(reason),
+                },
+            })
+            .collect()
+    }
+
     async fn load_selected_session(&mut self) -> Result<()> {
         let Some(session) = self.tui.chrome_mut().confirm_session_picker() else {
             return Ok(());
@@ -3004,8 +3310,12 @@ impl InteractiveController {
     async fn process_provider_dialog_result(&mut self) -> bool {
         if self.tui.chrome_mut().provider_manager_action().is_some() {
             self.handle_provider_manager_action();
+        } else if self.tui.chrome_mut().mcp_manager_action().is_some() {
+            self.handle_mcp_manager_action().await;
         } else if self.tui.chrome_mut().choice_picker_result().is_some() {
             self.handle_choice_picker_result();
+        } else if self.tui.chrome_mut().text_input_result().is_some() {
+            self.handle_text_input_result().await;
         } else if self.tui.chrome_mut().api_key_input_result().is_some() {
             self.handle_api_key_input_result().await;
         } else if self
@@ -3133,6 +3443,233 @@ impl InteractiveController {
         }
     }
 
+    async fn handle_mcp_manager_action(&mut self) {
+        let action = self.tui.chrome_mut().mcp_manager_action();
+        let Some(action) = action else {
+            return;
+        };
+        match action {
+            neo_tui::dialogs::McpManagerAction::Close => {
+                self.tui.chrome_mut().close_focused_overlay();
+            }
+            neo_tui::dialogs::McpManagerAction::Add => {
+                self.tui.chrome_mut().close_focused_overlay();
+                self.open_add_mcp_transport_picker();
+            }
+            neo_tui::dialogs::McpManagerAction::Test(id)
+            | neo_tui::dialogs::McpManagerAction::Refresh(id) => {
+                self.start_mcp_probe(&id);
+            }
+            neo_tui::dialogs::McpManagerAction::ToggleEnabled(id) => {
+                self.toggle_mcp_server_enabled(&id).await;
+            }
+            neo_tui::dialogs::McpManagerAction::Delete(id) => {
+                self.delete_mcp_server(&id).await;
+            }
+        }
+    }
+
+    fn open_add_mcp_transport_picker(&mut self) {
+        let theme = self.tui.chrome().theme();
+        self.tui
+            .chrome_mut()
+            .open_choice_picker(neo_tui::dialogs::ChoicePickerOptions {
+                title: "Add MCP Server".to_owned(),
+                items: vec![
+                    neo_tui::dialogs::ChoiceItem::new("mcp:add:stdio", "Local stdio (studio)")
+                        .with_description("Run a command on this machine"),
+                    neo_tui::dialogs::ChoiceItem::new("mcp:add:http", "Remote HTTP")
+                        .with_description("JSON-RPC HTTP endpoint"),
+                    neo_tui::dialogs::ChoiceItem::new("mcp:add:sse", "Remote SSE")
+                        .with_description("JSON-RPC endpoint over SSE"),
+                ],
+                initial_id: None,
+                theme,
+                page_size: 0,
+                current_id: None,
+            });
+    }
+
+    fn handle_mcp_choice_item(&mut self, id: &str) -> bool {
+        let transport = match id {
+            "mcp:add:stdio" => "stdio",
+            "mcp:add:http" => "http",
+            "mcp:add:sse" => "sse",
+            _ => return false,
+        };
+        self.pending_mcp_add = Some(PendingMcpAdd {
+            transport,
+            step: McpAddStep::Id,
+            id: String::new(),
+            command: None,
+            url: None,
+        });
+        self.open_mcp_input("Server id");
+        true
+    }
+
+    fn open_mcp_input(&mut self, label: &str) {
+        self.tui
+            .chrome_mut()
+            .open_text_input(neo_tui::dialogs::TextInputOptions {
+                title: label.to_owned(),
+                prompt: label.to_owned(),
+                submit_label: "Enter".to_owned(),
+            });
+    }
+
+    async fn continue_mcp_add(&mut self, value: String) {
+        let Some(mut pending) = self.pending_mcp_add.take() else {
+            return;
+        };
+        match pending.step {
+            McpAddStep::Id => {
+                pending.id = value;
+                let next_step = if pending.transport == "stdio" {
+                    McpAddStep::Command
+                } else {
+                    McpAddStep::Url
+                };
+                let label = if pending.transport == "stdio" {
+                    "Command"
+                } else {
+                    "URL"
+                };
+                pending.step = next_step;
+                self.pending_mcp_add = Some(pending);
+                self.open_mcp_input(label);
+            }
+            McpAddStep::Command => {
+                pending.command = Some(value);
+                self.save_pending_mcp_server(pending).await;
+            }
+            McpAddStep::Url => {
+                pending.url = Some(value);
+                self.save_pending_mcp_server(pending).await;
+            }
+        }
+    }
+
+    async fn save_pending_mcp_server(&mut self, pending: PendingMcpAdd) {
+        let input = mcp_ops::AddMcpServerInput {
+            id: pending.id,
+            cli_type: pending.transport.to_owned(),
+            command: pending.command,
+            url: pending.url,
+            env: vec![],
+            headers: vec![],
+            cwd: None,
+            enabled_tools: vec![],
+            disabled_tools: vec![],
+            startup_timeout_ms: None,
+            tool_timeout_ms: None,
+            enabled: true,
+        };
+        let config = match mcp_ops::build_mcp_server_config(input) {
+            Ok(config) => config,
+            Err(err) => {
+                self.push_status(format!("Invalid MCP server: {err}"));
+                return;
+            }
+        };
+        let Some(config_path) = self.config_path() else {
+            return;
+        };
+        if let Err(err) = config::upsert_mcp_server(&config, &config_path) {
+            self.push_status(format!("Failed to save MCP server: {err}"));
+            return;
+        }
+        self.push_status(format!("MCP server {} saved", config.id));
+        self.refresh_config();
+        self.open_mcp_manager().await;
+    }
+
+    fn start_mcp_probe(&mut self, id: &str) {
+        let Some(config) = self.local_config.clone() else {
+            return;
+        };
+        let Some(server) = config.mcp.servers.iter().find(|s| s.id == id).cloned() else {
+            self.push_status(format!("MCP server '{id}' not found"));
+            return;
+        };
+        self.tui
+            .chrome_mut()
+            .set_custom_working_label(Some(format!("Testing MCP server {id}...")));
+        let id = id.to_owned();
+        let handle = tokio::spawn(async move {
+            mcp_ops::probe_mcp_server(&server, server.startup_timeout_ms).await
+        });
+        self.pending_mcp_probe = Some(PendingMcpProbe {
+            server_id: id,
+            handle,
+        });
+    }
+
+    async fn poll_pending_mcp_probe(&mut self) {
+        let Some(pending) = self.pending_mcp_probe.take() else {
+            return;
+        };
+        if !pending.handle.is_finished() {
+            self.pending_mcp_probe = Some(pending);
+            return;
+        }
+        self.tui.chrome_mut().set_custom_working_label(None);
+        match pending.handle.await {
+            Ok(Ok(tools)) => {
+                self.push_status(format!(
+                    "MCP {} connected ({} tools)",
+                    pending.server_id,
+                    tools.len()
+                ));
+            }
+            Ok(Err(err)) => {
+                self.push_status(format!("MCP {} connect failed: {err}", pending.server_id));
+            }
+            Err(join_err) => {
+                self.push_status(format!(
+                    "MCP {} probe panicked: {join_err}",
+                    pending.server_id
+                ));
+            }
+        }
+    }
+
+    async fn toggle_mcp_server_enabled(&mut self, id: &str) {
+        let Some(config) = self.local_config.clone() else {
+            return;
+        };
+        let Some(server) = config.mcp.servers.iter().find(|s| s.id == id) else {
+            return;
+        };
+        let new_enabled = !server.enabled;
+        let Some(config_path) = self.config_path() else {
+            return;
+        };
+        if let Err(err) = config::set_mcp_server_enabled(id, new_enabled, &config_path) {
+            self.push_status(format!("Failed to update MCP server: {err}"));
+            return;
+        }
+        self.push_status(format!(
+            "MCP server {id} {}",
+            if new_enabled { "enabled" } else { "disabled" }
+        ));
+        self.refresh_config();
+        self.open_mcp_manager().await;
+    }
+
+    async fn delete_mcp_server(&mut self, id: &str) {
+        let Some(config_path) = self.config_path() else {
+            return;
+        };
+        if let Err(err) = config::remove_mcp_server(id, &config_path) {
+            self.push_status(format!("Failed to remove MCP server: {err}"));
+            return;
+        }
+        self.push_status(format!("MCP server {id} removed"));
+        self.refresh_config();
+        self.open_mcp_manager().await;
+    }
+
     fn open_add_provider_picker(&mut self) {
         let theme = self.tui.chrome().theme();
         self.tui
@@ -3187,6 +3724,9 @@ impl InteractiveController {
     }
 
     fn handle_builtin_choice_item(&mut self, id: &str) -> bool {
+        if self.handle_mcp_choice_item(id) {
+            return true;
+        }
         match id {
             "known" => self.fetch_known_catalog(),
             "custom" => self.open_custom_registry_import(),
@@ -3290,11 +3830,33 @@ impl InteractiveController {
             }
             neo_tui::dialogs::ApiKeyInputResult::Cancelled => {
                 self.pending_catalog_provider_id = None;
+                self.pending_mcp_add = None;
+            }
+        }
+    }
+
+    async fn handle_text_input_result(&mut self) {
+        let Some(result) = self.tui.chrome_mut().text_input_result().cloned() else {
+            return;
+        };
+        self.tui.chrome_mut().close_focused_overlay();
+        match result {
+            neo_tui::dialogs::TextInputResult::Submitted(value) => {
+                if self.pending_mcp_add.is_some() {
+                    self.continue_mcp_add(value).await;
+                }
+            }
+            neo_tui::dialogs::TextInputResult::Cancelled => {
+                self.pending_mcp_add = None;
             }
         }
     }
 
     async fn handle_api_key_submitted(&mut self, key: &str) {
+        if self.pending_mcp_add.is_some() {
+            self.continue_mcp_add(key.to_owned()).await;
+            return;
+        }
         let Some(provider_id) = self.pending_catalog_provider_id.take() else {
             self.push_status("API key saved.");
             return;
@@ -3517,10 +4079,12 @@ fn prompt_completions(
     prefix: &str,
     model_items: &[PickerItem],
     skill_store: Option<&SkillStore>,
+    project_trusted: bool,
 ) -> Result<Vec<PickerItem>> {
     let catalog = CompletionCatalog {
-        slash_prompts: slash_prompt_template_completion_items(root, prefix)?.unwrap_or_default(),
-        prompt_packages: prompt_package_completion_items(root)?,
+        slash_prompts: slash_prompt_template_completion_items(root, prefix, project_trusted)?
+            .unwrap_or_default(),
+        prompt_packages: prompt_package_completion_items(root, project_trusted)?,
         extension_commands: extension_command_completion_items(root)?,
         session_commands: session_completion_items(skill_store),
         model_items: model_items.to_vec(),
@@ -3531,8 +4095,8 @@ fn prompt_completions(
         .collect())
 }
 
-fn prompt_package_completion_items(root: &Path) -> Result<Vec<PickerItem>> {
-    let mut items = discover_prompt_template_commands(root, None, &[])?
+fn prompt_package_completion_items(root: &Path, project_trusted: bool) -> Result<Vec<PickerItem>> {
+    let mut items = discover_prompt_template_commands(root, None, &[], project_trusted)?
         .into_iter()
         .filter(|command| command.location == PromptTemplateLocation::Project)
         .filter_map(|command| {
@@ -3643,6 +4207,15 @@ fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<PickerItem>
             )),
         ),
         PickerItem::new(
+            "/mcp",
+            "/mcp",
+            Some(prompt_source_description(
+                Some("View and manage MCP servers"),
+                Some("MCP manager"),
+                Some("local"),
+            )),
+        ),
+        PickerItem::new(
             "/plan",
             "/plan",
             Some(prompt_source_description(
@@ -3726,6 +4299,7 @@ fn prompt_source_description(
 fn slash_prompt_template_completion_items(
     root: &Path,
     prefix: &str,
+    project_trusted: bool,
 ) -> Result<Option<Vec<PickerItem>>> {
     let Some(name_prefix) = prefix.strip_prefix('/') else {
         return Ok(None);
@@ -3734,7 +4308,7 @@ fn slash_prompt_template_completion_items(
         return Ok(None);
     }
 
-    let mut completions = load_project_prompt_templates(root)?
+    let mut completions = load_project_prompt_templates(root, project_trusted)?
         .into_iter()
         .filter(|template| template.name.starts_with(name_prefix))
         .map(|template| {
@@ -4035,6 +4609,7 @@ fn expand_interactive_prompt(
         config::global_prompts_dir().as_deref(),
         &selectors,
         false,
+        config.map(|c| c.project_trusted).unwrap_or(false),
     )?;
     Ok(expanded.join(" "))
 }
@@ -4194,7 +4769,7 @@ fn clipboard_exit_error(output: &std::process::Output) -> anyhow::Error {
     anyhow::anyhow!("exited with {}{}", output.status, suffix)
 }
 
-fn command_specs(project_dir: &Path) -> (Vec<CommandSpec>, Option<String>) {
+fn command_specs(project_dir: &Path, project_trusted: bool) -> (Vec<CommandSpec>, Option<String>) {
     let mut commands = vec![
         CommandSpec::new("sessions", "Open sessions", Some("Browse local sessions")),
         CommandSpec::new("models", "Open models", Some("Switch active model")),
@@ -4203,6 +4778,7 @@ fn command_specs(project_dir: &Path) -> (Vec<CommandSpec>, Option<String>) {
             "Open providers",
             Some("View configured providers"),
         ),
+        CommandSpec::new("mcp", "Open MCP servers", Some("Manage MCP servers")),
         CommandSpec::new(
             "session.new",
             "New session",
@@ -4265,7 +4841,7 @@ fn command_specs(project_dir: &Path) -> (Vec<CommandSpec>, Option<String>) {
             Some("Read-only mode for investigation and planning"),
         ),
     ];
-    let mut templates = match load_project_prompt_templates(project_dir) {
+    let mut templates = match load_project_prompt_templates(project_dir, project_trusted) {
         Ok(templates) => templates,
         Err(error) => return (commands, Some(error.to_string())),
     };
@@ -4363,6 +4939,7 @@ impl CrosstermEvents {
 const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::InputSubmit,
     KeybindingAction::InputNewLine,
+    KeybindingAction::PromptSteer,
     KeybindingAction::CycleDevelopmentMode,
     KeybindingAction::TranscriptCopySelection,
     KeybindingAction::AppClear,
@@ -4571,6 +5148,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     Some(request.plan_review_feedback.clone()),
                     Some(Arc::clone(&request.plan_mode)),
                     request.goal_mode_authoring,
+                    channels.steer_input,
                 )
                 .await?;
                 Ok(TurnOutcome::session(turn.session_id))
@@ -4587,6 +5165,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     Some(request.plan_review_feedback.clone()),
                     Some(Arc::clone(&request.plan_mode)),
                     request.goal_mode_authoring,
+                    channels.steer_input,
                 )
                 .await?;
                 Ok(TurnOutcome::session(turn.session_id))
@@ -4646,6 +5225,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         .chrome_mut()
         .set_thinking_enabled(controller.current_thinking);
     controller.local_config = Some(config.clone());
+    controller.spawn_sync_mcp_manager();
     let skill_store = resources::load_skill_store(
         neo_home().as_deref(),
         &config.extra_skill_dirs,
@@ -4665,6 +5245,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         &config,
     ));
     controller.load_prompt_history();
+    controller.trust_store = crate::trust::ProjectTrustStore::from_home().ok();
     controller
 }
 
@@ -6921,7 +7502,7 @@ command = "echo"
         .expect("write extension manifest");
 
         let completions =
-            prompt_completions(temp.path(), "/", &[], None).expect("slash completions");
+            prompt_completions(temp.path(), "/", &[], None, true).expect("slash completions");
         let by_value = completions
             .iter()
             .map(|item| (item.value.as_str(), item))
@@ -7076,7 +7657,7 @@ command = "python3"
         .expect("write manifest");
 
         let completions =
-            prompt_completions(temp.path(), "/rev", &[], None).expect("prompt completions");
+            prompt_completions(temp.path(), "/rev", &[], None, true).expect("prompt completions");
 
         assert!(completions.iter().any(|item| {
             item.value == "/review-extension"
@@ -7146,7 +7727,7 @@ command = "python3"
     fn event_loop_slash_tree_absent() {
         let temp = tempfile::tempdir().expect("tempdir");
         let completions =
-            prompt_completions(temp.path(), "/", &[], None).expect("slash completions");
+            prompt_completions(temp.path(), "/", &[], None, true).expect("slash completions");
         assert!(
             !completions.iter().any(|item| item.value == "/tree"),
             "/tree should not appear in slash completion items"
@@ -10024,7 +10605,7 @@ command = "python3"
 
     #[test]
     fn slash_completions_include_permission_commands() {
-        let completions = prompt_completions(&test_workspace_root(), "/", &[], None)
+        let completions = prompt_completions(&test_workspace_root(), "/", &[], None, true)
             .expect("completions resolve");
         let values: Vec<_> = completions.iter().map(|item| item.value.as_str()).collect();
         assert!(
@@ -10382,6 +10963,7 @@ command = "python3"
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
             project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: project_dir.to_path_buf(),
             config_path: project_dir.join(".neo/config.toml"),
         }
@@ -11186,5 +11768,377 @@ command = "python3"
             "question Up/Down must not leak into PromptState"
         );
         drop(dir);
+    }
+
+    #[tokio::test]
+    async fn active_turn_enter_enqueues_follow_up_instead_of_rejecting() {
+        let captured_steer = Arc::new(std::sync::Mutex::new(
+            neo_agent_core::SteerInputHandle::new(),
+        ));
+        let observed_steer = Arc::clone(&captured_steer);
+        let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+            let observed_steer = Arc::clone(&observed_steer);
+            *observed_steer.lock().expect("steer lock") = channels.steer_input.clone();
+            Box::pin(async move {
+                channels.send_event(AgentEvent::TextDelta {
+                    turn: 1,
+                    text: "working".to_owned(),
+                });
+                channels.cancel_token.cancelled().await;
+                Ok(TurnOutcome::default())
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            run_turn,
+            PickerCatalogs::default(),
+            Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        );
+
+        controller.type_text("first prompt");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("first prompt starts turn");
+        assert!(controller.active_turn.is_some(), "turn should be active");
+
+        // While the turn is running, typing + Enter must enqueue (not reject).
+        controller.type_text("queued follow up");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("enter while busy enqueues");
+
+        let steer_handle = captured_steer.lock().expect("steer lock").clone();
+        assert_eq!(
+            steer_handle.pending(),
+            1,
+            "follow-up should be pushed into the steer input handle"
+        );
+        // Composer should be cleared after queuing.
+        assert_eq!(controller.chrome().prompt().text, "");
+        assert!(
+            controller.active_turn.is_some(),
+            "turn must still be running after enqueue"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_turn_ctrl_s_steers_running_turn() {
+        let captured_steer = Arc::new(std::sync::Mutex::new(
+            neo_agent_core::SteerInputHandle::new(),
+        ));
+        let observed_steer = Arc::clone(&captured_steer);
+        let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+            let observed_steer = Arc::clone(&observed_steer);
+            *observed_steer.lock().expect("steer lock") = channels.steer_input.clone();
+            Box::pin(async move {
+                channels.send_event(AgentEvent::TextDelta {
+                    turn: 1,
+                    text: "working".to_owned(),
+                });
+                channels.cancel_token.cancelled().await;
+                Ok(TurnOutcome::default())
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            run_turn,
+            PickerCatalogs::default(),
+            Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        );
+
+        controller.type_text("first prompt");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("first prompt starts turn");
+        assert!(controller.active_turn.is_some());
+
+        // Ctrl+S while busy should steer the running turn.
+        controller.type_text("steer this");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+            .await
+            .expect("ctrl+s steers");
+
+        let steer_handle = captured_steer.lock().expect("steer lock").clone();
+        assert_eq!(steer_handle.pending(), 1, "steer should be pushed");
+        // Composer cleared after steering.
+        assert_eq!(controller.chrome().prompt().text, "");
+    }
+
+    #[tokio::test]
+    async fn idle_ctrl_s_falls_back_to_normal_submit() {
+        let prompt_seen = Arc::new(std::sync::Mutex::new(None));
+        let observed_prompt = Arc::clone(&prompt_seen);
+        let run_turn: TurnDriver = Arc::new(move |request, channels| {
+            let observed_prompt = Arc::clone(&observed_prompt);
+            Box::pin(async move {
+                *observed_prompt.lock().expect("prompt lock") = Some(request.prompt.clone());
+                channels.send_event(AgentEvent::TurnFinished {
+                    turn: 1,
+                    stop_reason: StopReason::EndTurn,
+                });
+                Ok(TurnOutcome::default())
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            run_turn,
+            PickerCatalogs::default(),
+            Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        );
+
+        controller.type_text("submit via ctrl+s");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+            .await
+            .expect("ctrl+s submits when idle");
+
+        let seen = prompt_seen.lock().expect("prompt lock").clone();
+        assert_eq!(
+            seen,
+            Some(vec!["submit via ctrl+s".to_owned()]),
+            "idle Ctrl+S should behave like a normal submit"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_trust_dialog_opens_when_unknown_and_trusts_workspace() {
+        use std::collections::VecDeque;
+
+        struct ScriptedEvents(VecDeque<InputEvent>);
+        impl TerminalEvents for ScriptedEvents {
+            fn next_input_event(&mut self) -> Result<InputEvent> {
+                self.0
+                    .pop_front()
+                    .context("expected scripted trust dialog input")
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        fs::write(project_dir.join("AGENTS.md"), "rules").expect("write agents");
+
+        let trust_path = temp.path().join("trust.json");
+        let store = crate::trust::ProjectTrustStore::new(trust_path.clone());
+
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        let mut config = test_config(&project_dir, project_dir.join(".neo/sessions"));
+        let inputs =
+            crate::trust::collect_project_trust_inputs(&project_dir).expect("collect inputs");
+        config.project_trust = crate::trust::ProjectTrustState::Unknown { inputs };
+        config.project_trusted = false;
+        controller.local_config = Some(config);
+        controller.set_trust_store(store);
+
+        let data = crate::trust::trust_dialog_data_from_inputs(
+            crate::trust::collect_project_trust_inputs(&project_dir).expect("collect inputs"),
+        );
+        controller
+            .resolve_trust_dialog_at_startup(
+                data,
+                ScriptedEvents(VecDeque::from([
+                    // Default is ContinueUntrusted; move up once to TrustCurrent.
+                    InputEvent::Action(KeybindingAction::SelectUp),
+                    InputEvent::Action(KeybindingAction::SelectConfirm),
+                ])),
+                |_| Ok(()),
+            )
+            .await
+            .expect("resolve trust dialog");
+
+        assert!(controller.local_config.as_ref().unwrap().project_trusted);
+        assert!(matches!(
+            controller.local_config.as_ref().unwrap().project_trust,
+            crate::trust::ProjectTrustState::Trusted { .. }
+        ));
+        assert!(controller.render_snapshot().contains("Workspace trusted"));
+        assert_eq!(
+            crate::trust::ProjectTrustStore::new(trust_path)
+                .get(&project_dir)
+                .expect("read trust"),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_trust_dialog_opens_when_unknown_and_continues_untrusted() {
+        use std::collections::VecDeque;
+
+        struct ScriptedEvents(VecDeque<InputEvent>);
+        impl TerminalEvents for ScriptedEvents {
+            fn next_input_event(&mut self) -> Result<InputEvent> {
+                self.0
+                    .pop_front()
+                    .context("expected scripted trust dialog input")
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        fs::write(project_dir.join("AGENTS.md"), "rules").expect("write agents");
+
+        let trust_path = temp.path().join("trust.json");
+        let store = crate::trust::ProjectTrustStore::new(trust_path.clone());
+
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        let mut config = test_config(&project_dir, project_dir.join(".neo/sessions"));
+        let inputs =
+            crate::trust::collect_project_trust_inputs(&project_dir).expect("collect inputs");
+        config.project_trust = crate::trust::ProjectTrustState::Unknown { inputs };
+        config.project_trusted = false;
+        controller.local_config = Some(config);
+        controller.set_trust_store(store);
+
+        let data = crate::trust::trust_dialog_data_from_inputs(
+            crate::trust::collect_project_trust_inputs(&project_dir).expect("collect inputs"),
+        );
+        controller
+            .resolve_trust_dialog_at_startup(
+                data,
+                ScriptedEvents(VecDeque::from([InputEvent::Action(
+                    KeybindingAction::SelectConfirm,
+                )])),
+                |_| Ok(()),
+            )
+            .await
+            .expect("resolve trust dialog");
+
+        assert!(!controller.local_config.as_ref().unwrap().project_trusted);
+        assert!(matches!(
+            controller.local_config.as_ref().unwrap().project_trust,
+            crate::trust::ProjectTrustState::Untrusted { .. }
+        ));
+        assert!(controller.render_snapshot().contains("Workspace untrusted"));
+        assert_eq!(
+            crate::trust::ProjectTrustStore::new(trust_path)
+                .get(&project_dir)
+                .expect("read trust"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn startup_trust_dialog_data_is_some_for_unknown_and_none_otherwise() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+
+        let mut config = test_config(&project_dir, project_dir.join(".neo/sessions"));
+        config.project_trust = crate::trust::ProjectTrustState::NotRequired;
+        assert!(trust_dialog_data_for_startup(&config).is_none());
+
+        fs::write(project_dir.join("AGENTS.md"), "rules").expect("write agents");
+        let inputs =
+            crate::trust::collect_project_trust_inputs(&project_dir).expect("collect inputs");
+        config.project_trust = crate::trust::ProjectTrustState::Unknown { inputs };
+        let data = trust_dialog_data_for_startup(&config);
+        assert!(data.is_some());
+        assert_eq!(
+            data.unwrap().current_dir,
+            project_dir.canonicalize().expect("canonicalize")
+        );
+
+        config.project_trust = crate::trust::ProjectTrustState::Trusted {
+            target: project_dir.clone(),
+        };
+        assert!(trust_dialog_data_for_startup(&config).is_none());
+
+        config.project_trust = crate::trust::ProjectTrustState::Untrusted {
+            target: project_dir.clone(),
+        };
+        assert!(trust_dialog_data_for_startup(&config).is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_trust_dialog_cancels_to_untrusted() {
+        use std::collections::VecDeque;
+
+        struct ScriptedEvents(VecDeque<InputEvent>);
+        impl TerminalEvents for ScriptedEvents {
+            fn next_input_event(&mut self) -> Result<InputEvent> {
+                self.0
+                    .pop_front()
+                    .context("expected scripted trust dialog input")
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        fs::write(project_dir.join("AGENTS.md"), "rules").expect("write agents");
+
+        let trust_path = temp.path().join("trust.json");
+        let store = crate::trust::ProjectTrustStore::new(trust_path.clone());
+
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        let mut config = test_config(&project_dir, project_dir.join(".neo/sessions"));
+        let inputs =
+            crate::trust::collect_project_trust_inputs(&project_dir).expect("collect inputs");
+        config.project_trust = crate::trust::ProjectTrustState::Unknown { inputs };
+        config.project_trusted = false;
+        controller.local_config = Some(config);
+        controller.set_trust_store(store);
+
+        let data = crate::trust::trust_dialog_data_from_inputs(
+            crate::trust::collect_project_trust_inputs(&project_dir).expect("collect inputs"),
+        );
+        controller
+            .resolve_trust_dialog_at_startup(
+                data,
+                ScriptedEvents(VecDeque::from([InputEvent::Action(
+                    KeybindingAction::SelectCancel,
+                )])),
+                |_| Ok(()),
+            )
+            .await
+            .expect("resolve trust dialog");
+
+        assert!(!controller.local_config.as_ref().unwrap().project_trusted);
+        assert!(matches!(
+            controller.local_config.as_ref().unwrap().project_trust,
+            crate::trust::ProjectTrustState::Untrusted { .. }
+        ));
+        assert!(controller.render_snapshot().contains("Workspace untrusted"));
+        assert_eq!(
+            crate::trust::ProjectTrustStore::new(trust_path)
+                .get(&project_dir)
+                .expect("read trust"),
+            Some(false)
+        );
     }
 }

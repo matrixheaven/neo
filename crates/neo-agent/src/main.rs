@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod config_ops;
 mod extension_commands;
+mod mcp_ops;
 mod modes;
 mod prompt_history;
 mod prompt_templates;
@@ -10,6 +11,7 @@ mod rpc_mode;
 mod rpc_types;
 mod themes;
 mod trust;
+mod trust_commands;
 
 use std::{
     collections::BTreeMap,
@@ -100,6 +102,7 @@ async fn dispatch_command(
         Some(Command::Provider { command }) => dispatch_provider_command(config, command).await,
         Some(Command::Mcp { command }) => dispatch_mcp_command(config, command).await,
         Some(Command::Rpc) => rpc_mode::execute(config).await,
+        Some(Command::Trust { command }) => trust_commands::execute(config, command),
         None => dispatch_default_command(config, resume_picker, interactive_options).await,
     }
 }
@@ -335,6 +338,37 @@ async fn dispatch_mcp_command(config: &AppConfig, command: McpCommand) -> anyhow
             true,
             &config.config_path,
         )?),
+        McpCommand::Status => {
+            let snapshots = mcp_ops::probe_mcp_servers(config).await?;
+            Ok(mcp_ops::format_mcp_status(&snapshots))
+        }
+        McpCommand::Resources { server_id } => {
+            let entries = mcp_ops::list_mcp_resources(config, server_id.as_deref()).await?;
+            if entries.is_empty() {
+                return Ok("No MCP resources found.".to_owned());
+            }
+            let mut lines = Vec::with_capacity(entries.len() + 1);
+            lines.push(format!("{:<20} {:<40} {}", "Server", "URI", "Name"));
+            for entry in entries {
+                lines.push(format!(
+                    "{:<20} {:<40} {}",
+                    entry.server_id, entry.uri, entry.name
+                ));
+            }
+            Ok(lines.join("\n"))
+        }
+        McpCommand::ReadResource { server_id, uri } => {
+            let read = mcp_ops::read_mcp_resource(config, &server_id, &uri).await?;
+            let mut out = Vec::new();
+            for content in read.contents {
+                if let Some(text) = content.text {
+                    out.push(text);
+                } else if content.blob.is_some() {
+                    out.push(format!("[binary content for {}]", content.uri));
+                }
+            }
+            Ok(out.join("\n"))
+        }
     }
 }
 
@@ -373,6 +407,7 @@ fn prepare_prompt(prompt: Vec<String>, config: &AppConfig) -> anyhow::Result<Vec
         config::global_prompts_dir().as_deref(),
         &config.prompt_templates,
         false,
+        config.project_trusted,
     )?;
     let prompt = expand_prompt_files(prompt, &config.project_dir)?;
     prompt_with_piped_stdin(prompt)
