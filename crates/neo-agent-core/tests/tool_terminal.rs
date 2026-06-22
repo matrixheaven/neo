@@ -93,6 +93,80 @@ async fn terminal_read_waits_briefly_for_fresh_running_output() {
 }
 
 #[tokio::test]
+async fn terminal_read_waits_for_prompt_after_initial_output_burst() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let supervisor = ProcessSupervisor::default();
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_access(ToolAccess::all())
+        .with_process_supervisor(supervisor.clone());
+
+    let script = concat!(
+        "python3 -c '",
+        "import sys, time;",
+        "sys.stdout.write(\"diff --git a/file b/file\\n\");",
+        "sys.stdout.flush();",
+        "time.sleep(0.04);",
+        "sys.stdout.write(\"Stage this hunk [y,n,q,a,d,j,J,g,/,s,e,p,?]? \");",
+        "sys.stdout.flush();",
+        "sys.stdin.readline()",
+        "'"
+    );
+    let started = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({
+                "mode": "start",
+                "command": script,
+                "cols": 100,
+                "rows": 24
+            }),
+        )
+        .await
+        .expect("terminal start should succeed");
+    let handle = started.details.as_ref().expect("start details")["handle"]
+        .as_str()
+        .expect("handle")
+        .to_owned();
+
+    let read = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "read", "handle": handle, "max_output_bytes": 4096 }),
+        )
+        .await
+        .expect("terminal read should succeed");
+    let output = read.details.as_ref().expect("read details")["output"]
+        .as_str()
+        .expect("details output");
+
+    assert!(
+        output.contains("Stage this hunk [y,n,q,a,d,j,J,g,/,s,e,p,?]?"),
+        "Terminal.read must wait for the prompt, not return after the first diff bytes: {read:?}"
+    );
+
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "write", "handle": handle, "input": "q\n" }),
+        )
+        .await
+        .expect("terminal write should succeed");
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "stop", "handle": handle }),
+        )
+        .await
+        .expect("terminal stop should succeed");
+}
+
+#[tokio::test]
 async fn terminal_write_then_read_observes_interactive_shell_output() {
     let workspace = tempfile::tempdir().expect("workspace");
     let supervisor = ProcessSupervisor::default();
@@ -385,6 +459,136 @@ async fn terminal_rejects_unknown_handle() {
         .expect_err("terminal read should reject unknown handle");
 
     assert!(matches!(error, ToolError::InvalidInput { .. }));
+}
+
+#[tokio::test]
+async fn terminal_read_details_expose_state_for_interactive_debugging() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let supervisor = ProcessSupervisor::default();
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_access(ToolAccess::all())
+        .with_process_supervisor(supervisor.clone());
+
+    let started = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "start", "command": "printf prompt-visible; sleep 1" }),
+        )
+        .await
+        .expect("terminal start should succeed");
+    let handle = started.details.as_ref().expect("start details")["handle"]
+        .as_str()
+        .expect("handle")
+        .to_owned();
+
+    let read = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "read", "handle": handle, "max_output_bytes": 4096 }),
+        )
+        .await
+        .expect("terminal read should succeed");
+    let details = read.details.as_ref().expect("read details");
+
+    assert_eq!(details["read_offset_before"], 0);
+    assert!(
+        details["read_offset_after"].as_u64().expect("after offset")
+            >= "prompt-visible".len() as u64
+    );
+    assert!(
+        details["total_output_bytes"].as_u64().expect("total bytes")
+            >= "prompt-visible".len() as u64
+    );
+    assert_eq!(details["unread_bytes_after"], 0);
+    assert_eq!(details["cols"], 80);
+    assert_eq!(details["rows"], 24);
+
+    registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "stop", "handle": handle }),
+        )
+        .await
+        .expect("terminal stop should succeed");
+}
+
+fn run_git(workspace: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_stop_cleans_interactive_git_add_patch_and_index_lock() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    run_git(workspace.path(), &["init"]);
+    run_git(
+        workspace.path(),
+        &["config", "user.email", "neo@example.invalid"],
+    );
+    run_git(workspace.path(), &["config", "user.name", "Neo Test"]);
+    std::fs::write(workspace.path().join("tracked.txt"), "one\n").expect("write tracked");
+    run_git(workspace.path(), &["add", "tracked.txt"]);
+    run_git(workspace.path(), &["commit", "-m", "initial"]);
+    std::fs::write(workspace.path().join("tracked.txt"), "one\nsecond\n").expect("edit tracked");
+
+    let supervisor = ProcessSupervisor::default();
+    let registry = ToolRegistry::with_builtin_tools();
+    let context = ToolContext::new(workspace.path())
+        .expect("context")
+        .with_access(ToolAccess::all())
+        .with_process_supervisor(supervisor.clone());
+
+    let started = registry
+        .run(
+            "Terminal",
+            &context,
+            json!({ "mode": "start", "command": "git add -p tracked.txt", "cols": 100, "rows": 24 }),
+        )
+        .await
+        .expect("terminal start should succeed");
+    let handle = started.details.as_ref().expect("start details")["handle"]
+        .as_str()
+        .expect("handle")
+        .to_owned();
+
+    let read = read_terminal_until(&registry, &context, &handle, "Stage this hunk").await;
+    assert!(
+        read.contains("Stage this hunk"),
+        "git prompt should be observable: {read:?}"
+    );
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        registry.run(
+            "Terminal",
+            &context,
+            json!({ "mode": "stop", "handle": handle }),
+        ),
+    )
+    .await
+    .expect("terminal stop should not hang")
+    .expect("terminal stop should succeed");
+
+    assert_eq!(supervisor.active_count().await, 0);
+    assert!(
+        !workspace.path().join(".git/index.lock").exists(),
+        "Terminal stop must not leave .git/index.lock behind"
+    );
 }
 
 async fn read_terminal_until(

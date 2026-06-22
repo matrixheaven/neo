@@ -17,12 +17,13 @@ use tokio::{
 use uuid::Uuid;
 
 use super::{
-    ProcessKind, Tool, ToolContext, ToolError, ToolFuture, ToolResult, cap_output, parse_input,
-    schema,
+    ProcessKind, Tool, ToolContext, ToolError, ToolFuture, ToolResult, ToolUpdateCallback,
+    cap_output, parse_input, schema,
 };
 
-const TERMINAL_READ_SETTLE_TIMEOUT: Duration = Duration::from_millis(100);
-const TERMINAL_READ_SETTLE_INTERVAL: Duration = Duration::from_millis(10);
+const TERMINAL_READ_MAX_WAIT: Duration = Duration::from_millis(250);
+const TERMINAL_READ_QUIET_PERIOD: Duration = Duration::from_millis(50);
+const TERMINAL_READ_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -191,7 +192,12 @@ async fn start_terminal(
     drop(pair.slave);
 
     let output = Arc::new(StdMutex::new(Vec::new()));
-    let reader_thread = spawn_reader_thread(reader, Arc::clone(&output));
+    let reader_thread = spawn_reader_thread(
+        reader,
+        Arc::clone(&output),
+        ctx.tool_update.clone(),
+        ctx.max_output_bytes,
+    );
     let handle = Uuid::new_v4().to_string();
     TERMINALS.lock().await.insert(
         handle.clone(),
@@ -226,16 +232,30 @@ async fn start_terminal(
 fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     output: Arc<StdMutex<Vec<u8>>>,
+    callback: Option<ToolUpdateCallback>,
+    stream_max_bytes: usize,
 ) -> ThreadJoinHandle<()> {
+    let mut streamed = 0_usize;
     std::thread::spawn(move || {
         let mut local = [0_u8; 8192];
         loop {
             match reader.read(&mut local) {
                 Ok(0) | Err(_) => break,
-                Ok(bytes_read) => output
-                    .lock()
-                    .expect("terminal output lock poisoned")
-                    .extend_from_slice(&local[..bytes_read]),
+                Ok(bytes_read) => {
+                    let chunk = &local[..bytes_read];
+                    output
+                        .lock()
+                        .expect("terminal output lock poisoned")
+                        .extend_from_slice(chunk);
+                    if streamed < stream_max_bytes {
+                        let remaining = stream_max_bytes - streamed;
+                        let streamed_chunk = &chunk[..chunk.len().min(remaining)];
+                        streamed += streamed_chunk.len();
+                        if let Some(callback) = &callback {
+                            callback(&String::from_utf8_lossy(streamed_chunk));
+                        }
+                    }
+                }
             }
         }
     })
@@ -274,18 +294,25 @@ async fn read_terminal(
         .ok_or_else(|| unknown_terminal(tool, handle))?;
     let status = session.child.try_wait().map_err(ToolError::Io)?;
     if status.is_none() {
-        wait_for_fresh_output(Arc::clone(&session.output), session.read_offset).await;
+        wait_for_output_quiet_period(Arc::clone(&session.output), session.read_offset).await;
     }
-    let output = {
+    let read_offset_before = session.read_offset;
+    let (output, read_offset_after, total_output_bytes, unread_bytes_after) = {
         let output = session
             .output
             .lock()
             .expect("terminal output lock poisoned");
         let output_slice = output
-            .get(session.read_offset..)
+            .get(read_offset_before..)
             .ok_or_else(|| unknown_terminal(tool, handle))?;
-        session.read_offset = output.len();
-        String::from_utf8_lossy(output_slice).into_owned()
+        let total_output_bytes = output.len();
+        session.read_offset = total_output_bytes;
+        (
+            String::from_utf8_lossy(output_slice).into_owned(),
+            session.read_offset,
+            total_output_bytes,
+            0_usize,
+        )
     };
     let (output_capped, output_truncated) = cap_output(&output, max_output_bytes);
     let output_details = cap_output_details(&output, max_output_bytes);
@@ -301,24 +328,36 @@ async fn read_terminal(
         "output": output_details,
         "output_truncated": output_truncated,
         "truncated": output_truncated,
+        "read_offset_before": read_offset_before,
+        "read_offset_after": read_offset_after,
+        "total_output_bytes": total_output_bytes,
+        "unread_bytes_after": unread_bytes_after,
+        "cols": session.cols,
+        "rows": session.rows,
     })))
 }
 
-async fn wait_for_fresh_output(output: Arc<StdMutex<Vec<u8>>>, read_offset: usize) {
-    if has_fresh_output(&output, read_offset) {
-        return;
-    }
-    let deadline = Instant::now() + TERMINAL_READ_SETTLE_TIMEOUT;
+async fn wait_for_output_quiet_period(output: Arc<StdMutex<Vec<u8>>>, read_offset: usize) {
+    let deadline = Instant::now() + TERMINAL_READ_MAX_WAIT;
+    let mut last_len = output_len(&output);
+    let mut last_change = Instant::now();
+
     while Instant::now() < deadline {
-        sleep(TERMINAL_READ_SETTLE_INTERVAL).await;
-        if has_fresh_output(&output, read_offset) {
+        sleep(TERMINAL_READ_POLL_INTERVAL).await;
+        let current_len = output_len(&output);
+        if current_len != last_len {
+            last_len = current_len;
+            last_change = Instant::now();
+            continue;
+        }
+        if current_len > read_offset && last_change.elapsed() >= TERMINAL_READ_QUIET_PERIOD {
             break;
         }
     }
 }
 
-fn has_fresh_output(output: &StdMutex<Vec<u8>>, read_offset: usize) -> bool {
-    output.lock().expect("terminal output lock poisoned").len() > read_offset
+fn output_len(output: &StdMutex<Vec<u8>>) -> usize {
+    output.lock().expect("terminal output lock poisoned").len()
 }
 
 async fn resize_terminal(
