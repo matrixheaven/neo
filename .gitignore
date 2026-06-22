@@ -10,3 +10,7 @@ kimi-code
 kimi-code.worktrees/
 .superpowers
 .mimocode
+# Per-machine Cargo overrides (sccache, custom linker). Keep the shared
+# .cargo/config.toml platform-neutral; local tuning goes in
+# .cargo/config.local.toml or the user-global ~/.cargo/config.toml.
+.cargo/config.local.toml
