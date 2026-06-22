@@ -334,6 +334,30 @@ fn review_title(operation: PermissionOperation) -> &'static str {
     }
 }
 
+/// Extract the model-supplied option labels and a human-readable summary from
+/// an `ExitPlanMode` approval request's arguments. Returns `(labels, body)`
+/// where `labels` is the ordered list of approach labels (empty when the model
+/// supplied no alternatives) and `body` is a rendered list of
+/// `label — description` lines for the dialog body.
+fn plan_review_options(arguments: &serde_json::Value) -> (Vec<String>, String) {
+    let Some(options) = arguments.get("options").and_then(|v| v.as_array()) else {
+        return (Vec::new(), String::new());
+    };
+    let mut labels = Vec::new();
+    let mut lines = Vec::new();
+    for option in options {
+        let Some(label) = option.get("label").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        labels.push(label.to_owned());
+        match option.get("description").and_then(|v| v.as_str()) {
+            Some(desc) if !desc.trim().is_empty() => lines.push(format!("• {label} — {desc}")),
+            _ => lines.push(format!("• {label}")),
+        }
+    }
+    (labels, lines.join("\n"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NeoChromeState {
     title: String,
@@ -822,17 +846,40 @@ impl NeoChromeState {
                         .as_ref()
                         .map(|rule| format!("Approve commands starting with {}", rule.label))
                 };
-                self.pending_approvals.push_back(if is_review {
-                    ApprovalRequestModal::new_review(id, review_title(operation), body)
-                } else {
-                    ApprovalRequestModal::new_with_options(
-                        id,
-                        format!("{operation:?} approval"),
-                        body,
-                        session_label,
-                        prefix_label,
-                    )
-                });
+                self.pending_approvals.push_back(
+                    if operation == PermissionOperation::PlanTransition {
+                        // ExitPlanMode carries `{plan_summary, options: [{label, description}]}`.
+                        // Surface the model-supplied options as a real picker (mirrors
+                        // kimi-code) instead of dumping the raw JSON into the body.
+                        let (option_labels, options_body) = plan_review_options(&arguments);
+                        let body = match arguments.get("plan_summary").and_then(|v| v.as_str()) {
+                            Some(summary) if !summary.trim().is_empty() => {
+                                if options_body.is_empty() {
+                                    summary.to_owned()
+                                } else {
+                                    format!("{summary}\n\n{options_body}")
+                                }
+                            }
+                            _ => options_body,
+                        };
+                        ApprovalRequestModal::new_plan_review(
+                            id,
+                            review_title(operation),
+                            body,
+                            option_labels,
+                        )
+                    } else if is_review {
+                        ApprovalRequestModal::new_review(id, review_title(operation), body)
+                    } else {
+                        ApprovalRequestModal::new_with_options(
+                            id,
+                            format!("{operation:?} approval"),
+                            body,
+                            session_label,
+                            prefix_label,
+                        )
+                    },
+                );
                 self.focused_overlay = None;
                 self.mode = ChromeMode::Approval;
             }
@@ -1452,6 +1499,7 @@ impl NeoChromeState {
             choice: ApprovalChoice::Deny,
             feedback: None,
             picked_prefix: false,
+            selected_option_label: None,
         };
         if let Some(id) = id {
             let _ = self.close_overlay(id);
@@ -1468,6 +1516,7 @@ impl NeoChromeState {
                 choice: ApprovalChoice::Deny,
                 feedback: None,
                 picked_prefix: false,
+                selected_option_label: None,
             })
             .collect();
         self.mode = self.overlay_mode();
@@ -1491,6 +1540,12 @@ impl NeoChromeState {
                 && selected_label
                     .as_deref()
                     .is_some_and(|label| label.starts_with("Approve commands starting with"));
+            // Plan-review approve choices occupy the leading indices, one per
+            // model-supplied label. Recover the chosen approach label only when
+            // the user actually picked one of those entries.
+            let selected_option_label = (choice == ApprovalChoice::Approve
+                && selected < modal.plan_option_labels.len())
+            .then(|| modal.plan_option_labels[selected].clone());
             let result = ApprovalResult {
                 request_id: modal.request_id,
                 choice,
@@ -1498,6 +1553,7 @@ impl NeoChromeState {
                     .then_some(modal.feedback_input)
                     .filter(|feedback| !feedback.is_empty()),
                 picked_prefix,
+                selected_option_label,
             };
             self.mode = self.overlay_mode();
             return Some(result);
@@ -1513,6 +1569,7 @@ impl NeoChromeState {
             choice: modal.modal.selected_choice()?,
             feedback: None,
             picked_prefix: false,
+            selected_option_label: None,
         };
         if let Some(id) = id {
             let _ = self.close_overlay(id);
@@ -2948,6 +3005,11 @@ pub struct ApprovalRequestModal {
     pub request_id: String,
     pub modal: ApprovalModal,
     pub feedback_input: String,
+    /// Model-supplied plan-review option labels, in the order they were rendered
+    /// as the leading approve choices. Empty for non-plan-review approvals.
+    /// `confirm_approval` reads the entry at the selected index to populate
+    /// `ApprovalResult.selected_option_label`.
+    pub plan_option_labels: Vec<String>,
 }
 
 impl ApprovalRequestModal {
@@ -2985,10 +3047,14 @@ impl ApprovalRequestModal {
             options.push(ApprovalOption::new(ApprovalChoice::AlwaysApprove, label));
         }
         options.push(ApprovalOption::new(ApprovalChoice::Deny, "Reject"));
-        options.push(ApprovalOption::new(ApprovalChoice::Revise, "Reject with feedback"));
+        options.push(ApprovalOption::new(
+            ApprovalChoice::Revise,
+            "Reject with feedback",
+        ));
         Self {
             request_id: request_id.into(),
             feedback_input: String::new(),
+            plan_option_labels: Vec::new(),
             modal: ApprovalModal::new(title, body, options),
         }
     }
@@ -3003,6 +3069,7 @@ impl ApprovalRequestModal {
         Self {
             request_id: request_id.into(),
             feedback_input: String::new(),
+            plan_option_labels: Vec::new(),
             modal: ApprovalModal::new(
                 title,
                 body,
@@ -3012,6 +3079,40 @@ impl ApprovalRequestModal {
                     ApprovalOption::new(ApprovalChoice::Revise, "Reject with feedback"),
                 ],
             ),
+        }
+    }
+
+    /// Create a plan-review modal that renders the model-supplied options as
+    /// leading approve choices (one per label), followed by Reject and Revise.
+    /// Mirrors kimi-code's plan-review picker. When `plan_option_labels` is
+    /// empty, falls back to a single generic Approve choice (same as
+    /// [`Self::new_review`]) so a plan with no alternatives still reviews.
+    /// Each model option is an `ApprovalChoice::Approve`; the selected label is
+    /// recovered by index in [`Self::confirm_approval`]-equivalent handling.
+    #[must_use]
+    pub fn new_plan_review(
+        request_id: impl Into<String>,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        plan_option_labels: Vec<String>,
+    ) -> Self {
+        let mut options: Vec<ApprovalOption> = plan_option_labels
+            .iter()
+            .map(|label| ApprovalOption::new(ApprovalChoice::Approve, format!("Approach: {label}")))
+            .collect();
+        if options.is_empty() {
+            options.push(ApprovalOption::new(ApprovalChoice::Approve, "Approve"));
+        }
+        options.push(ApprovalOption::new(ApprovalChoice::Deny, "Reject"));
+        options.push(ApprovalOption::new(
+            ApprovalChoice::Revise,
+            "Reject with feedback",
+        ));
+        Self {
+            request_id: request_id.into(),
+            feedback_input: String::new(),
+            plan_option_labels,
+            modal: ApprovalModal::new(title, body, options),
         }
     }
 
@@ -3061,6 +3162,11 @@ pub struct ApprovalResult {
     /// Disambiguates from the session-approval option since both are
     /// `ApprovalChoice::AlwaysApprove`.
     pub picked_prefix: bool,
+    /// When the user approved a specific model-supplied plan-review option,
+    /// this carries that option's label so the runtime can tell the model to
+    /// execute only the selected approach. `None` for non-plan-review approvals
+    /// and for generic Approve/Reject/Revise choices.
+    pub selected_option_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
