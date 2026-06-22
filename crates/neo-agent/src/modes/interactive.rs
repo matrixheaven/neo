@@ -97,9 +97,7 @@ fn session_approval_resolved_label(
 ) -> String {
     match choice {
         ApprovalChoice::AlwaysApprove => {
-            if picked_prefix
-                && let Some(label) = prefix_option_label
-            {
+            if picked_prefix && let Some(label) = prefix_option_label {
                 return label.replacen("Approve", "Approved", 1);
             }
             match session_option_label {
@@ -2651,7 +2649,10 @@ impl InteractiveController {
             return;
         }
         let message = AgentMessage::user_text(prompt.to_owned());
-        self.tui.chrome_mut().pending_input_mut().queue_follow_up(prompt);
+        self.tui
+            .chrome_mut()
+            .pending_input_mut()
+            .queue_follow_up(prompt);
         self.tui.chrome_mut().prompt_mut().clear_after_submit();
         let Some(turn) = &self.active_turn else {
             return;
@@ -2673,10 +2674,7 @@ impl InteractiveController {
         if !text.is_empty() {
             if self.active_turn.is_some() {
                 let message = AgentMessage::user_text(text.clone());
-                self.tui
-                    .chrome_mut()
-                    .pending_input_mut()
-                    .queue_steer(text);
+                self.tui.chrome_mut().pending_input_mut().queue_steer(text);
                 if let Some(turn) = &self.active_turn {
                     turn.steer_input
                         .push(neo_agent_core::ActiveTurnInput::SteerNow(message));
@@ -3173,15 +3171,15 @@ impl InteractiveController {
         // resolved transcript line reflects the exact saved scope (or prefix
         // rule). `picked_prefix` comes from chrome's ApprovalResult, which
         // detects the prefix option by its label.
-        let (session_label, prefix_label) = self
-            .pending_approvals
-            .get(&result.request_id)
-            .map_or((None, None), |pending| {
-                (
-                    pending.session_option_label.clone(),
-                    pending.prefix_option_label.clone(),
-                )
-            });
+        let (session_label, prefix_label) =
+            self.pending_approvals
+                .get(&result.request_id)
+                .map_or((None, None), |pending| {
+                    (
+                        pending.session_option_label.clone(),
+                        pending.prefix_option_label.clone(),
+                    )
+                });
         let label = session_approval_resolved_label(
             result.choice,
             session_label.as_deref(),
