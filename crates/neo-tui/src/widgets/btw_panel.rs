@@ -648,7 +648,7 @@ mod tests {
         let mut state = BtwPanelState::new(sidecar);
         assert!(state.follow_tail);
 
-        BtwPanel::new(&mut state).render(40, 18);
+        let _ = BtwPanel::new(&mut state).render(40, 18);
         assert!(state.follow_tail);
         assert_eq!(state.scroll_offset, state.max_scroll_offset);
         assert!(state.max_scroll_offset > 0);
@@ -657,7 +657,7 @@ mod tests {
         assert!(!state.follow_tail);
         assert_eq!(state.scroll_offset, state.max_scroll_offset - 1);
 
-        BtwPanel::new(&mut state).render(40, 18);
+        let _ = BtwPanel::new(&mut state).render(40, 18);
         assert!(!state.follow_tail);
         assert_eq!(state.scroll_offset, state.max_scroll_offset - 1);
 
