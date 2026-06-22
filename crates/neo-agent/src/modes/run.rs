@@ -962,6 +962,17 @@ pub struct PromptApprovalRequest {
     pub operation: PermissionOperation,
     pub decision_tx: oneshot::Sender<PermissionApprovalDecision>,
     pub feedback_tx: Option<oneshot::Sender<Option<String>>>,
+    /// Display label for the session-approval option (Layer 1). `None` hides it.
+    pub session_option_label: Option<String>,
+    /// Display label for the prefix-approval option (Layer 2). `None` hides it.
+    /// When the user picks the prefix option, the controller sets
+    /// `prefix_rule` so the runtime persists the rule.
+    pub prefix_option_label: Option<String>,
+    /// The prefix rule to persist when the user picks the prefix option.
+    /// Forwarded back from the controller alongside the AllowForSession decision.
+    pub prefix_rule: Option<neo_agent_core::PrefixApprovalRule>,
+    /// The session scope to record when the user picks the session option.
+    pub session_scope: Option<neo_agent_core::SessionApprovalScope>,
 }
 
 pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result<PromptTurn> {
@@ -1550,6 +1561,9 @@ pub(crate) fn agent_config_for_app(
         .with_workspace_root(&config.project_dir)?;
     if let Some(home) = neo_home() {
         agent_config = agent_config.with_home_dir(home);
+        // Layer 2: load persistent prefix-approval rules from disk so they
+        // survive restarts.
+        agent_config.load_prefix_approval_rules();
     }
     agent_config.temperature = config.runtime.temperature;
     // Output token cap precedence: explicit `[runtime].max_tokens` wins; otherwise
@@ -1587,12 +1601,25 @@ pub(crate) fn agent_config_for_app(
                 let (feedback_tx, feedback_rx) = oneshot::channel();
                 let id = request.id.clone();
                 let operation = request.operation;
+                let session_scope = request.session_scope.clone();
+                let prefix_rule = request.prefix_rule.clone();
+                let session_option_label = session_scope
+                    .as_ref()
+                    .filter(|scope| !scope.is_empty())
+                    .map(|scope| scope.label.clone());
+                let prefix_option_label = prefix_rule
+                    .as_ref()
+                    .map(|rule| format!("Approve commands starting with {}", rule.label));
                 if approval_tx
                     .send(PromptApprovalRequest {
                         id,
                         operation,
                         decision_tx,
                         feedback_tx: Some(feedback_tx),
+                        session_option_label,
+                        prefix_option_label,
+                        prefix_rule,
+                        session_scope,
                     })
                     .is_err()
                 {
@@ -2483,12 +2510,18 @@ mod tests {
             operation: PermissionOperation::Tool,
             subject: "Write".to_owned(),
             arguments: serde_json::json!({"path": "approved.txt"}),
+            session_scope: None,
+            prefix_rule: None,
         }));
         let PromptApprovalRequest {
             id,
             operation: _,
             decision_tx,
             feedback_tx: _,
+            session_option_label: _,
+            prefix_option_label: _,
+            prefix_rule: _,
+            session_scope: _,
         } = approval_rx.recv().await.expect("approval waiter");
 
         assert_eq!(id, "tool-1");
