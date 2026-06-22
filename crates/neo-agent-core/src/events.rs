@@ -139,6 +139,14 @@ pub enum AgentEvent {
         operation: PermissionOperation,
         subject: String,
         arguments: serde_json::Value,
+        /// Reusable session scope (Layer 1). `None` for review transitions and
+        /// scope-ineligible prompts. `#[serde(default)]` keeps old JSONL working.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_scope: Option<crate::permissions::SessionApprovalScope>,
+        /// Proposed persistent prefix rule (Layer 2). `None` when no prefix
+        /// option should be offered.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix_rule: Option<crate::permissions::PrefixApprovalRule>,
     },
     ShellCommandStarted {
         turn: u32,
