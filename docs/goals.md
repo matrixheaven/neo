@@ -14,8 +14,8 @@ Neo saves the objective directly as a durable goal and sends the objective as
 the user message. This path is intentionally manual: `/goal <prompt>` remains
 the user's way to write the goal text themselves instead of asking the model to
 draft it first. After each turn, Neo checks whether the goal is `complete`,
-`blocked`, or still `active`. If active, it continues automatically until it
-completes, blocks, or hits the turn budget.
+`blocked`, or still `active`. If active, it continues automatically until the
+model marks it complete or blocked.
 
 ## Goal mode
 

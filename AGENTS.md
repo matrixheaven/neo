@@ -297,8 +297,8 @@ crate.
    is injected as a context message before the user's message; nested skill
    invocations within a single turn are rejected.
 9. Goals, when active, continue autonomously across turns using
-   `get_goal_status` / `update_goal_status` until complete, blocked, paused, or
-   the turn budget is reached.
+   `get_goal_status` / `update_goal_status` until complete, blocked, or paused.
+   There is no turn budget.
 10. Session events are appended to local JSONL so `resume` can reconstruct
    conversation and tool state.
 
@@ -473,8 +473,7 @@ Active goals are stored in `~/.neo/goals/`; structured runs also write
 `~/.neo/goals/runs/<goal-id>/GOAL.md`, `ROADMAP.md`, `STATE.md`,
 `THINKING.md`, `PROTOCOL.md`, and `phases/phase-N.md`. The runtime continues
 turns automatically while the goal is active; the model uses
-`update_goal_status` to mark completion or blockers. A default turn budget of
-30 prevents runaway work.
+`update_goal_status` to mark completion or blockers. There is no turn cap.
 
 See `docs/goals.md` for details.
 

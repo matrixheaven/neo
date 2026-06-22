@@ -27,8 +27,6 @@ pub struct Goal {
     pub status: GoalStatus,
     pub created_at: u64,
     pub updated_at: u64,
-    #[serde(default)]
-    pub turn_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,7 +61,6 @@ impl Goal {
             status: GoalStatus::Active,
             created_at: now,
             updated_at: now,
-            turn_count: 0,
             session_id: None,
             blocked_reason: None,
             artifact_dir: None,
@@ -411,20 +408,6 @@ impl GoalManager {
             }
         }
         Ok(goal)
-    }
-
-    pub async fn increment_turn(&self) -> Result<()> {
-        let goal = {
-            let mut store = self.store.lock().map_err(|_| GoalError::Lock)?;
-            let Some(goal) = store.active_mut() else {
-                return Ok(());
-            };
-            goal.turn_count += 1;
-            goal.touch();
-            goal.clone()
-        };
-        save_goal(&self.home, &goal).await?;
-        Ok(())
     }
 }
 

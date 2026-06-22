@@ -109,9 +109,6 @@ pub struct AgentConfig {
     pub tool_execution_mode: ToolExecutionMode,
     pub permission_mode: PermissionMode,
     pub compaction: Option<CompactionSettings>,
-    /// Maximum number of autonomous turns a goal may run before blocking.
-    #[serde(default)]
-    pub max_goal_turns: Option<u32>,
     #[serde(skip)]
     #[schemars(skip)]
     pub context_transform: Option<ContextTransform>,
@@ -183,7 +180,6 @@ impl AgentConfig {
             tool_execution_mode: ToolExecutionMode::Parallel,
             permission_mode: PermissionMode::default(),
             compaction: None,
-            max_goal_turns: None,
             context_transform: None,
             before_tool_call: None,
             async_before_tool_call: None,
@@ -1133,7 +1129,7 @@ async fn run_agent_turn(
         }) = assistant.clone()
         else {
             if let Some(messages) =
-                next_pending_after_assistant(&config, emitter, goal_manager.as_deref()).await
+                next_pending_after_assistant(&config, emitter, goal_manager.as_deref())
             {
                 pending_messages = messages;
                 continue;
@@ -1184,14 +1180,14 @@ async fn run_agent_turn(
     Ok(())
 }
 
-async fn next_pending_after_assistant(
+fn next_pending_after_assistant(
     config: &AgentConfig,
     emitter: &mut EventEmitter,
     goal_manager: Option<&GoalManager>,
 ) -> Option<Vec<AgentMessage>> {
     let pending_messages = drain_next_pending_queue(config, emitter);
     if pending_messages.is_empty() {
-        goal_continuation_messages(goal_manager, config).await
+        goal_continuation_messages(goal_manager)
     } else {
         Some(pending_messages)
     }
@@ -1325,23 +1321,9 @@ fn emit_todo_event(
     emitter.emit(AgentEvent::TodoUpdated { turn, todos });
 }
 
-async fn goal_continuation_messages(
-    manager: Option<&GoalManager>,
-    config: &AgentConfig,
-) -> Option<Vec<AgentMessage>> {
+fn goal_continuation_messages(manager: Option<&GoalManager>) -> Option<Vec<AgentMessage>> {
     let manager = manager?;
     let goal = manager.active()?;
-    let max_turns = config.max_goal_turns.unwrap_or(30);
-    if goal.turn_count >= max_turns {
-        let _ = manager
-            .update_status(
-                crate::goal::GoalStatus::Blocked,
-                Some(format!("turn budget of {max_turns} exceeded")),
-            )
-            .await;
-        return None;
-    }
-    let _ = manager.increment_turn().await;
     let objective = goal.objective;
     let artifact = goal.artifact_dir.as_ref().map_or_else(
         || "(no artifact directory)".to_owned(),
