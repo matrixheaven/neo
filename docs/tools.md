@@ -39,6 +39,17 @@ Use `neo_ai::tool_schema::schema_for<T>()` to generate JSON Schema from small se
 | `TaskOutput` | `{ "task_id": "bash-...", "block": false, "timeout": 30 }` or `{ "task_id": "question-..." }` | tool |
 | `TaskStop` | `{ "task_id": "bash-...", "reason": "no longer needed" }` or `{ "task_id": "question-..." }` | tool |
 | `Terminal` | `{ "mode": "start", "command": "bash" }` then `{ "mode": "write", "handle": "...", "input": "ls\n" }` / `{ "mode": "read", "handle": "..." }` / `{ "mode": "resize", "handle": "...", "cols": 120, "rows": 40 }` / `{ "mode": "stop", "handle": "..." }` | shell |
+
+`Terminal` operates a real PTY session. For one-shot, non-interactive commands, prefer `Bash`.
+`Terminal.read` waits for a short quiet period so prompt text that arrives after an initial
+output burst is included in the returned output. While the PTY is running, output is also
+streamed as `ToolExecutionUpdate` events. `read.details` includes `read_offset_before`,
+`read_offset_after`, `total_output_bytes`, `unread_bytes_after`, `cols`, and `rows` so the
+agent can diagnose read state. When driving interactive programs such as `git add -p`, read
+until the prompt (e.g. `Stage this hunk [y,n,q,a,d,j,J,g,/,s,e,p,?]?`) is visible before
+writing `y`, `n`, or `q`; this avoids acting on the wrong hunk and reduces the chance of
+leaving a stale `git` process or `.git/index.lock` behind.
+
 | `TodoList` | `{}` to read, `{ "todos": [{ "title": "Fix bug", "status": "in_progress" }] }` to replace, `{ "todos": [] }` to clear | tool |
 | `EnterPlanMode` | `{}` | tool |
 | `ExitPlanMode` | `{ "plan_summary": "..." }` | tool |

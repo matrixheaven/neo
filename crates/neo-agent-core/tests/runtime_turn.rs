@@ -3279,6 +3279,62 @@ async fn runtime_emits_terminal_lifecycle_events_for_terminal_tool() {
 }
 
 #[tokio::test]
+async fn runtime_streams_terminal_prompt_updates_before_read() {
+    let prompt = "Stage this hunk [y,n,q,a,d,j,J,g,/,s,e,p,?]?";
+    let harness = FakeHarness::from_turns([vec![
+        AiStreamEvent::MessageStart {
+            id: "msg_1".to_owned(),
+        },
+        AiStreamEvent::ToolCallStart {
+            id: "tool_1".to_owned(),
+            name: "Terminal".to_owned(),
+        },
+        AiStreamEvent::ToolCallEnd {
+            id: "tool_1".to_owned(),
+            arguments: json!({
+                "mode": "start",
+                "command": format!(
+                    "python3 - <<'PY'\nimport sys, time\nsys.stdout.write('{prompt} ')\nsys.stdout.flush()\ntime.sleep(1)\nPY"
+                ),
+                "cols": 100,
+                "rows": 24
+            }),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::ToolUse,
+            usage: None,
+        },
+    ]]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model()).with_permission_mode(PermissionMode::Yolo),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(
+            &mut context,
+            AgentMessage::user_text("open terminal prompt"),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("terminal turn should succeed");
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolExecutionUpdate {
+            id,
+            name,
+            partial_result,
+            ..
+        } if id == "tool_1" && name == "Terminal" && partial_result.content.contains(prompt)
+    )));
+}
+
+#[tokio::test]
 async fn runtime_events_and_session_jsonl_do_not_leak_capped_terminal_output() {
     let model = Arc::new(CappedTerminalOutputModel::default());
     let workspace = tempfile::tempdir().expect("workspace");
@@ -5284,4 +5340,139 @@ impl ModelClient for DelayedModelClient {
         })
         .boxed()
     }
+}
+
+#[tokio::test]
+async fn runtime_drains_live_steer_input_at_step_boundary() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "first".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "second".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let steer_input = neo_agent_core::SteerInputHandle::new();
+    steer_input.push(neo_agent_core::ActiveTurnInput::SteerNow(
+        AgentMessage::user_text("live steer"),
+    ));
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model())
+            .with_queue_modes(QueueMode::OneAtATime, QueueMode::All),
+        harness.client(),
+    )
+    .with_steer_input(steer_input.clone());
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("start"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("live-steer run should succeed");
+
+    // The runtime must emit a SteeringQueued event when it drains the live
+    // steer input, then inject the steer message before the second model call.
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::SteeringQueued { message }
+            if message == &AgentMessage::user_text("live steer")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::QueueDrained { kind, count: 1 } if *kind == neo_agent_core::QueueKind::Steering
+    )));
+    // The steer text should appear as an appended user message before "second".
+    let appended = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::MessageAppended { message } => Some(message.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(appended.contains(&AgentMessage::user_text("live steer")));
+    // The handle is drained after the turn.
+    assert_eq!(steer_input.pending(), 0);
+}
+
+#[tokio::test]
+async fn runtime_drains_live_follow_up_input_as_new_turn() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "first".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "second".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let steer_input = neo_agent_core::SteerInputHandle::new();
+    steer_input.push(neo_agent_core::ActiveTurnInput::FollowUp(
+        AgentMessage::user_text("queued follow"),
+    ));
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model())
+            .with_queue_modes(QueueMode::OneAtATime, QueueMode::All),
+        harness.client(),
+    )
+    .with_steer_input(steer_input.clone());
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("start"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("live-follow-up run should succeed");
+
+    // A FollowUpQueued event must be emitted, and the follow-up must start a
+    // fresh model turn after the first one ends (FIFO).
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::FollowUpQueued { message }
+            if message == &AgentMessage::user_text("queued follow")
+    )));
+    assert_eq!(
+        harness.requests().len(),
+        2,
+        "follow-up should trigger a second model call"
+    );
+    assert_eq!(steer_input.pending(), 0);
 }

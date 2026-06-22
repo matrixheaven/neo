@@ -543,3 +543,48 @@ async fn jsonl_session_compaction_keeps_unsent_thinking_out_of_estimates() {
     assert_eq!(result.compacted_message_count, 1);
     assert_eq!(result.summary.tokens_before, 9);
 }
+
+#[tokio::test]
+async fn jsonl_session_replays_queue_drained_clears_queues() {
+    use neo_agent_core::QueueKind;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let mut writer = JsonlSessionWriter::create(&path)
+        .await
+        .expect("create session");
+
+    for event in [
+        AgentEvent::SteeringQueued {
+            message: AgentMessage::user_text("steer one"),
+        },
+        AgentEvent::FollowUpQueued {
+            message: AgentMessage::user_text("follow one"),
+        },
+        AgentEvent::QueueDrained {
+            kind: QueueKind::Steering,
+            count: 1,
+        },
+        AgentEvent::QueueDrained {
+            kind: QueueKind::FollowUp,
+            count: 1,
+        },
+    ] {
+        writer.append(&event).await.expect("append event");
+    }
+    writer.flush().await.expect("flush");
+
+    let context = JsonlSessionReader::replay_context(&path)
+        .await
+        .expect("replay context");
+
+    assert_eq!(
+        context.pending_steering_len(),
+        0,
+        "QueueDrained(Steering) should clear the steering queue on replay"
+    );
+    assert_eq!(
+        context.pending_follow_up_len(),
+        0,
+        "QueueDrained(FollowUp) should clear the follow-up queue on replay"
+    );
+}
