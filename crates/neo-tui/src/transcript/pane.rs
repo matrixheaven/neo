@@ -20,7 +20,7 @@ use crate::transcript::{
     ApprovalPromptData, InlineImageRender, ToolCallComponent, ToolCallState, ToolGroup,
     TranscriptEntry, TranscriptStore, render_tool_group,
 };
-use crate::widgets::{TodoPanel, box_draw};
+use crate::widgets::{PendingInputPreview, TodoPanel, box_draw};
 
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 4;
 const GITHUB_YELLOW: Color = Color::Rgb(191, 135, 0);
@@ -555,9 +555,36 @@ impl TranscriptPane {
                 operation,
                 subject,
                 arguments,
+                session_scope,
+                prefix_rule,
                 ..
             } => {
-                self.request_approval(id.clone(), *operation, subject, arguments);
+                let mut session_label = session_scope
+                    .as_ref()
+                    .filter(|scope| !scope.is_empty())
+                    .map(|scope| scope.label.clone());
+                // Tool and shell approvals always offer a session-approval option,
+                // even when no explicit session scope was derived. Use the default
+                // label so the modal keeps its four-option layout.
+                if session_label.is_none()
+                    && matches!(
+                        operation,
+                        PermissionOperation::Tool | PermissionOperation::Shell
+                    )
+                {
+                    session_label = Some("Approve for this session".to_owned());
+                }
+                let prefix_label = prefix_rule
+                    .as_ref()
+                    .map(|rule| format!("Approve commands starting with {}", rule.label));
+                self.request_approval(
+                    id.clone(),
+                    *operation,
+                    subject,
+                    arguments,
+                    session_label,
+                    prefix_label,
+                );
                 true
             }
             AgentEvent::ToolExecutionUpdate {
@@ -598,18 +625,11 @@ impl TranscriptPane {
 
     fn apply_queue_event(&mut self, event: &AgentEvent) -> bool {
         match event {
-            AgentEvent::SteeringQueued { message } => {
-                self.push_status(format!("Steering queued: {}", message_text(message)));
-                true
-            }
-            AgentEvent::FollowUpQueued { message } => {
-                self.push_status(format!("Follow-up queued: {}", message_text(message)));
-                true
-            }
-            AgentEvent::QueueDrained { kind, count } => {
-                self.push_status(format!("{kind:?} queue drained ({count})"));
-                true
-            }
+            // Queue events are now rendered in the dedicated Pending Input
+            // Preview panel above the composer, not as transcript status lines.
+            AgentEvent::SteeringQueued { .. }
+            | AgentEvent::FollowUpQueued { .. }
+            | AgentEvent::QueueDrained { .. } => true,
             AgentEvent::Error { message, .. } => {
                 self.push_status(format!("Error: {message}"));
                 true
@@ -792,8 +812,17 @@ impl TranscriptPane {
         operation: PermissionOperation,
         subject: &str,
         arguments: &serde_json::Value,
+        session_option_label: Option<String>,
+        prefix_option_label: Option<String>,
     ) {
-        self.upsert_approval(id, operation, subject, arguments);
+        self.upsert_approval(
+            id,
+            operation,
+            subject,
+            arguments,
+            session_option_label,
+            prefix_option_label,
+        );
         self.mark_dirty();
     }
 
@@ -1045,6 +1074,8 @@ impl TranscriptPane {
         operation: PermissionOperation,
         subject: &str,
         arguments: &serde_json::Value,
+        session_option_label: Option<String>,
+        prefix_option_label: Option<String>,
     ) {
         let prompt = approval_prompt(operation, subject, arguments);
 
@@ -1054,6 +1085,8 @@ impl TranscriptPane {
             approval.queued_label = prompt.queued_label;
             approval.queued_count = self.queued_approvals.len();
             approval.resolved = None;
+            approval.session_option_label.clone_from(&session_option_label);
+            approval.prefix_option_label.clone_from(&prefix_option_label);
             return;
         }
 
@@ -1066,6 +1099,8 @@ impl TranscriptPane {
             selected: 0,
             feedback_input: String::new(),
             resolved: None,
+            session_option_label,
+            prefix_option_label,
         };
         if self.active_approval_mut().is_some() {
             self.queued_approvals.push_back(data);
@@ -1447,16 +1482,6 @@ fn is_groupable(name: &str) -> bool {
     matches!(name, "Read" | "Grep" | "Glob" | "Find" | "List")
 }
 
-fn message_text(message: &AgentMessage) -> String {
-    let content = match message {
-        AgentMessage::System { content }
-        | AgentMessage::User { content }
-        | AgentMessage::Assistant { content, .. }
-        | AgentMessage::ToolResult { content, .. } => content,
-    };
-    content_display_text(content)
-}
-
 fn content_display_text(content: &[Content]) -> String {
     content.iter().filter_map(content_visible_text).collect()
 }
@@ -1573,7 +1598,7 @@ pub struct ChromeRender {
 }
 
 #[must_use]
-pub fn render_chrome_lines(app: &NeoChromeState, width: usize) -> ChromeRender {
+pub fn render_chrome_lines(app: &NeoChromeState, width: usize, height: usize) -> ChromeRender {
     let content_width = frame_content_width(width);
     let mut lines = Vec::new();
     if app.has_todos() {
@@ -1587,12 +1612,82 @@ pub fn render_chrome_lines(app: &NeoChromeState, width: usize) -> ChromeRender {
         lines.extend(question.render_lines(content_width));
     }
     if let Some(btw_state) = app.btw_panel_state() {
-        let max_height = (content_width / 3).max(3);
+        let terminal_rows = u16::try_from(height).unwrap_or(u16::MAX);
+        let mut btw_state = btw_state.clone();
+        lines.extend(
+            crate::widgets::BtwPanel::new(&mut btw_state)
+                .with_theme(app.theme())
+                .render(content_width, terminal_rows),
+        );
+    }
+    let pending_input = PendingInputPreview::new(
+        app.pending_input().pending_steers(),
+        app.pending_input().queued_follow_ups(),
+    )
+    .with_theme(app.theme())
+    .render(content_width);
+    if !pending_input.is_empty() {
+        lines.extend(pending_input);
+        lines.push(String::new());
+    }
+    let prompt_start_row = lines.len();
+    let (prompt_lines, prompt_cursor) = if app.focused_overlay_blocks_prompt() {
+        (Vec::new(), None)
+    } else {
+        render_prompt_lines(app, content_width)
+    };
+    lines.extend(prompt_lines);
+    if !app.focused_overlay_blocks_prompt()
+        && let Some(dropdown) = render_prompt_completion_dropdown(app, content_width)
+    {
+        lines.extend(dropdown);
+    }
+    lines.extend(render_footer_lines(app, content_width));
+    ChromeRender {
+        lines,
+        cursor: prompt_cursor,
+        prompt_start_row,
+    }
+}
+
+/// Mutable variant of [`render_chrome_lines`] that updates the `/btw` panel's
+/// internal scroll and height state instead of discarding those updates.
+#[must_use]
+pub fn render_chrome_lines_mut(
+    app: &mut NeoChromeState,
+    width: usize,
+    height: usize,
+) -> ChromeRender {
+    let content_width = frame_content_width(width);
+    let mut lines = Vec::new();
+    if app.has_todos() {
+        lines.extend(
+            TodoPanel::new(app.todo_items())
+                .with_theme(app.theme())
+                .render(content_width),
+        );
+    }
+    if let Some(question) = app.question_dialog_state() {
+        lines.extend(question.render_lines(content_width));
+    }
+    let terminal_rows = u16::try_from(height).unwrap_or(u16::MAX);
+    let theme = app.theme();
+    if let Some(btw_state) = app.btw_panel_state_mut() {
         lines.extend(
             crate::widgets::BtwPanel::new(btw_state)
-                .with_theme(app.theme())
-                .render(content_width, max_height),
+                .with_theme(theme)
+                .render(content_width, terminal_rows),
         );
+    }
+    let pending_input = PendingInputPreview::new(
+        app.pending_input().pending_steers(),
+        app.pending_input().queued_follow_ups(),
+    )
+    .with_theme(app.theme())
+    .render(content_width);
+    if !pending_input.is_empty() {
+        lines.extend(pending_input);
+        lines.push(String::new());
     }
     let prompt_start_row = lines.len();
     let (prompt_lines, prompt_cursor) = if app.focused_overlay_blocks_prompt() {
@@ -1843,7 +1938,7 @@ mod tests {
         app.set_theme(TuiTheme::default());
         app.prompt_mut()
             .apply_edit(PromptEdit::Insert("hello world"));
-        let render = render_chrome_lines(&app, 40);
+        let render = render_chrome_lines(&app, 40, 24);
         // Lines render below terminal width so the caller can apply
         // CHROME_GUTTER without triggering terminal autowrap.
         let expected_width = frame_content_width(40);
@@ -1887,7 +1982,7 @@ mod tests {
                 PickerItem::new("/plan", "plan", Some("toggle plan")),
             ],
         );
-        let render = render_chrome_lines(&app, 60);
+        let render = render_chrome_lines(&app, 60, 24);
         // First line is the prompt top border.
         assert!(render.lines[0].contains('╭'));
         let dropdown_start = render

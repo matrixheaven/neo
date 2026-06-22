@@ -8,7 +8,7 @@ use neo_tui::transcript::{TranscriptPane, render_chrome_lines};
 use std::path::PathBuf;
 
 fn render_app(width: u16, app: &NeoChromeState) -> Vec<String> {
-    render_chrome_lines(app, usize::from(width))
+    render_chrome_lines(app, usize::from(width), 30)
         .lines
         .into_iter()
         .map(|line| neo_tui::ansi::strip_ansi(&line))
@@ -109,7 +109,7 @@ fn footer_git_status_uses_github_segment_colors() {
     );
     app.set_git_status_label(Some("main [+12 -3 ↑2↓1]".to_owned()));
 
-    let footer = render_chrome_lines(&app, 140)
+    let footer = render_chrome_lines(&app, 140, 30)
         .lines
         .into_iter()
         .find(|line| line.contains("main"))
@@ -275,6 +275,8 @@ fn app_shell_tracks_agent_core_approval_request_without_overlay_panel() {
         operation: neo_agent_core::PermissionOperation::Tool,
         subject: "shell.run".to_owned(),
         arguments: serde_json::json!({ "command": "cargo test -p neo-tui" }),
+    session_scope: None,
+    prefix_rule: None,
     });
 
     assert_eq!(app.mode(), ChromeMode::Approval);
@@ -291,6 +293,8 @@ fn plan_review_modal_offers_only_approve_reject_revise() {
         operation: neo_agent_core::PermissionOperation::PlanTransition,
         subject: "Exit plan mode".to_owned(),
         arguments: serde_json::json!({ "plan_summary": "Ready" }),
+    session_scope: None,
+    prefix_rule: None,
     });
     assert!(app.approval_is_pending());
 
@@ -312,6 +316,8 @@ fn plan_review_number_two_is_reject_in_three_option_modal() {
         operation: neo_agent_core::PermissionOperation::PlanTransition,
         subject: "Exit plan mode".to_owned(),
         arguments: serde_json::json!({ "plan_summary": "Ready" }),
+    session_scope: None,
+    prefix_rule: None,
     });
 
     // In the 3-option plan review modal, number 2 = Reject (no feedback).
@@ -336,6 +342,8 @@ fn plan_review_number_three_is_revise_and_collects_feedback() {
         operation: neo_agent_core::PermissionOperation::PlanTransition,
         subject: "Exit plan mode".to_owned(),
         arguments: serde_json::json!({ "plan_summary": "Ready" }),
+    session_scope: None,
+    prefix_rule: None,
     });
 
     // Number 3 = Revise does NOT confirm yet; it enters feedback collection.
@@ -365,6 +373,8 @@ fn plan_review_number_four_is_out_of_range_in_three_option_modal() {
         operation: neo_agent_core::PermissionOperation::PlanTransition,
         subject: "Exit plan mode".to_owned(),
         arguments: serde_json::json!({ "plan_summary": "Ready" }),
+    session_scope: None,
+    prefix_rule: None,
     });
 
     // The plan review modal has only 3 options, so number 4 is out of range and
@@ -386,6 +396,8 @@ fn tool_approval_number_two_is_approve_for_session_in_four_option_modal() {
         operation: neo_agent_core::PermissionOperation::Tool,
         subject: "shell.run".to_owned(),
         arguments: serde_json::json!({ "command": "cargo test" }),
+    session_scope: None,
+    prefix_rule: None,
     });
 
     // Ordinary tool approvals keep 4 options: number 2 = Approve for this
@@ -444,6 +456,8 @@ fn pending_approval_hides_composer_prompt() {
         operation: neo_agent_core::PermissionOperation::Tool,
         subject: "Bash".to_owned(),
         arguments: serde_json::json!({ "command": "echo hi" }),
+    session_scope: None,
+    prefix_rule: None,
     });
 
     let mut tui = neo_tui::NeoTui::new(app, TranscriptPane::new(80, 20));
@@ -529,7 +543,7 @@ fn app_shell_uses_brand_border_for_non_empty_prompt() {
     let mut app = NeoChromeState::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
     app.prompt_mut().apply_edit(PromptEdit::Insert("aaaa"));
 
-    let render = render_chrome_lines(&app, 92);
+    let render = render_chrome_lines(&app, 92, 30);
     let top_border = render
         .lines
         .first()
@@ -552,7 +566,7 @@ fn app_shell_prompt_renders_tabs_without_terminal_tab_controls() {
         .apply_edit(PromptEdit::Insert("\t\t\t\t\t"));
 
     let width = 80;
-    let render = render_chrome_lines(&app, width);
+    let render = render_chrome_lines(&app, width, 30);
     let content_width = neo_tui::transcript::frame_content_width(width);
     let prompt_box_lines = &render.lines[render.prompt_start_row..render.lines.len() - 1];
 
@@ -738,13 +752,19 @@ fn transcript_pane_maps_queue_notice_and_compaction_boundary() {
         },
     });
 
+    // Queue events are now rendered in the Pending Input Preview panel, not as
+    // transcript status lines. Compaction events still produce transcript
+    // entries.
+    assert!(
+        runtime
+            .transcript()
+            .entries()
+            .iter()
+            .all(|entry| !matches!(entry, neo_tui::transcript::TranscriptEntry::Status { text, .. } if text.contains("FollowUp queue drained"))),
+        "queue events must not produce transcript status lines"
+    );
     assert!(matches!(
         &runtime.transcript().entries()[0],
-        neo_tui::transcript::TranscriptEntry::Status { text, .. }
-            if text.contains("FollowUp queue drained")
-    ));
-    assert!(matches!(
-        &runtime.transcript().entries()[1],
         neo_tui::transcript::TranscriptEntry::Compaction { compacted_message_count, tokens_before, .. }
             if *compacted_message_count == 4 && *tokens_before == 12_345
     ));
@@ -906,7 +926,7 @@ fn todo_panel_offsets_prompt_start_row() {
         neo_tui::widgets::TodoDisplayStatus::InProgress,
     )]);
 
-    let chrome = render_chrome_lines(&app, 80);
+    let chrome = render_chrome_lines(&app, 80, 30);
 
     assert_eq!(chrome.prompt_start_row, 3);
     assert!(

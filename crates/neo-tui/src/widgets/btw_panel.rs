@@ -100,11 +100,27 @@ impl BtwSidecar {
     }
 }
 
+const MIN_PANEL_LINES: usize = 3;
+const THINKING_PREVIEW_LINES: usize = 2;
+
+fn max_body_lines(terminal_rows: u16) -> usize {
+    let rows = usize::from(terminal_rows);
+    let max_panel_lines = MIN_PANEL_LINES.max(rows / 3);
+    max_panel_lines.saturating_sub(1).max(1)
+}
+
 /// TUI state backing the `/btw` panel. Kept inside [`crate::chrome::NeoChromeState`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtwPanelState {
     pub sidecar: BtwSidecar,
     pub scroll_offset: usize,
+    /// Maximum scroll offset given the current content and panel size.
+    pub max_scroll_offset: usize,
+    /// Smallest body height the panel has ever taken; prevents the panel from
+    /// shrinking as content changes and causing layout jumps.
+    pub min_body_lines: usize,
+    /// Whether new content should keep the view pinned to the bottom.
+    pub follow_tail: bool,
     /// Optional panel-wide notice shown below the turn list (e.g. busy or
     /// tool-denied messages).
     pub status_message: Option<String>,
@@ -116,27 +132,32 @@ impl BtwPanelState {
         Self {
             sidecar,
             scroll_offset: 0,
+            max_scroll_offset: 0,
+            min_body_lines: 0,
+            follow_tail: true,
             status_message: None,
         }
     }
 
     pub fn scroll_up(&mut self, rows: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(rows);
+        self.follow_tail = false;
     }
 
     pub fn scroll_down(&mut self, rows: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_add(rows);
+        self.scroll_offset = (self.scroll_offset + rows).min(self.max_scroll_offset);
+        self.follow_tail = self.scroll_offset == self.max_scroll_offset;
     }
 }
 
 pub struct BtwPanel<'a> {
-    state: &'a BtwPanelState,
+    state: &'a mut BtwPanelState,
     theme: TuiTheme,
 }
 
 impl<'a> BtwPanel<'a> {
     #[must_use]
-    pub fn new(state: &'a BtwPanelState) -> Self {
+    pub fn new(state: &'a mut BtwPanelState) -> Self {
         Self {
             state,
             theme: TuiTheme::default(),
@@ -149,40 +170,61 @@ impl<'a> BtwPanel<'a> {
         self
     }
 
-    /// Render the sidecar panel at a fixed height of `max_height` rows.
+    /// Render the sidecar panel.
     ///
-    /// The panel is always `max_height` lines tall while active so that the
-    /// chrome layout stays stable as sidecar content grows; content scrolls
-    /// once it exceeds the visible inner area.
+    /// The panel body grows with its content, from a single line up to roughly
+    /// one third of `terminal_rows`, then scrolls. The panel height never
+    /// shrinks below the largest height it has already reached for the current
+    /// content (unless the terminal is resized smaller) so that layout stays
+    /// stable while new content streams in.
     #[must_use]
-    pub fn render(&self, width: usize, max_height: usize) -> Vec<String> {
-        if width < 2 || max_height < 2 {
+    pub fn render(&mut self, width: usize, terminal_rows: u16) -> Vec<String> {
+        if width < 2 || terminal_rows < 2 {
             return Vec::new();
         }
 
         let border_style = Style::default().fg(self.theme.surface_border);
         let inner_width = width.saturating_sub(2);
         let content_lines = self.build_content_lines(inner_width);
-        let visible_content_height = max_height.saturating_sub(2);
-        let overflows = content_lines.len() > visible_content_height;
+        let cap = max_body_lines(terminal_rows);
+        let previous_min = self.state.min_body_lines;
+        let target_body_lines = cap.min(content_lines.len().max(previous_min));
+        self.state.min_body_lines = target_body_lines;
+
+        let overflows = content_lines.len() > target_body_lines;
 
         let title = self.title(overflows);
         let top = top_border_with_title(width, &title, border_style);
         let bottom = bottom_border(width, border_style);
 
-        let mut lines = Vec::with_capacity(max_height);
+        let mut lines = Vec::with_capacity(target_body_lines + 2);
         lines.push(top);
 
-        let max_offset = content_lines.len().saturating_sub(visible_content_height);
-        let offset = self.state.scroll_offset.min(max_offset);
-        for line in content_lines
-            .iter()
-            .skip(offset)
-            .take(visible_content_height)
-        {
+        let visible = if overflows {
+            self.state.max_scroll_offset = content_lines.len() - target_body_lines;
+            if self.state.follow_tail {
+                self.state.scroll_offset = self.state.max_scroll_offset;
+            } else {
+                self.state.scroll_offset =
+                    self.state.scroll_offset.min(self.state.max_scroll_offset);
+            }
+            content_lines
+                .iter()
+                .skip(self.state.scroll_offset)
+                .take(target_body_lines)
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            self.state.scroll_offset = 0;
+            self.state.max_scroll_offset = 0;
+            self.state.follow_tail = true;
+            content_lines
+        };
+
+        for line in &visible {
             lines.push(content_line(line, width, border_style));
         }
-        while lines.len().saturating_add(1) < max_height {
+        while lines.len().saturating_add(1) < target_body_lines + 2 {
             lines.push(content_line("", width, border_style));
         }
         lines.push(bottom);
@@ -240,10 +282,16 @@ impl<'a> BtwPanel<'a> {
         let prompt = paint(&turn.prompt, Style::default().fg(self.theme.text_primary));
         lines.extend(wrap_ansi(&format!("{q_label}{prompt}"), inner_width));
 
-        // Optional thinking preview.
+        // Optional thinking preview. While the answer is still streaming only
+        // the last few reasoning lines are shown so the panel stays compact.
         if !turn.thinking.is_empty() {
             let thinking = paint(&turn.thinking, Style::default().fg(self.theme.text_muted));
-            lines.extend(wrap_ansi(&thinking, inner_width));
+            let mut thinking_lines = wrap_ansi(&thinking, inner_width);
+            if turn.phase == BtwPhase::Running && thinking_lines.len() > THINKING_PREVIEW_LINES {
+                thinking_lines =
+                    thinking_lines.split_off(thinking_lines.len() - THINKING_PREVIEW_LINES);
+            }
+            lines.extend(thinking_lines);
         }
 
         match turn.phase {
@@ -338,10 +386,12 @@ mod tests {
 
     #[test]
     fn btw_panel_renders_empty_state_with_esc_hint() {
-        let state = BtwPanelState::new(BtwSidecar::new("btw-1"));
-        let lines = BtwPanel::new(&state).render(40, 5);
+        let mut state = BtwPanelState::new(BtwSidecar::new("btw-1"));
+        let lines = BtwPanel::new(&mut state).render(40, 10);
 
-        assert_eq!(lines.len(), 5);
+        // 10 rows -> max body = max(3, 3) - 1 = 2, but empty content is only
+        // one line, so the panel collapses to the smallest possible height.
+        assert_eq!(lines.len(), 3);
         assert_width(&lines, 40);
         let plain = plain(&lines);
         assert!(plain[0].contains('╭'));
@@ -363,9 +413,11 @@ mod tests {
                 .with_thinking("Let me think...")
                 .with_phase(BtwPhase::Running),
         );
-        let state = BtwPanelState::new(sidecar);
-        let lines = BtwPanel::new(&state).render(40, 7);
+        let mut state = BtwPanelState::new(sidecar);
+        let lines = BtwPanel::new(&mut state).render(40, 12);
 
+        // 12 rows -> max body = max(3, 4) - 1 = 3; content is exactly 3 lines.
+        assert_eq!(lines.len(), 5);
         let plain = plain(&lines);
         assert!(plain.iter().any(|l| l.contains("Q: Explain lifetimes")));
         assert!(plain.iter().any(|l| l.contains("Let me think...")));
@@ -379,8 +431,8 @@ mod tests {
                 .with_answer("4")
                 .with_phase(BtwPhase::Done),
         );
-        let state = BtwPanelState::new(sidecar);
-        let lines = BtwPanel::new(&state).render(40, 6);
+        let mut state = BtwPanelState::new(sidecar);
+        let lines = BtwPanel::new(&mut state).render(40, 30);
 
         let plain = plain(&lines);
         assert!(plain.iter().any(|l| l.contains("Q: What is 2+2?")));
@@ -398,7 +450,7 @@ mod tests {
         let mut state = BtwPanelState::new(sidecar);
         state.status_message =
             Some("Wait for /btw to finish before sending another question.".to_owned());
-        let lines = BtwPanel::new(&state).render(80, 7);
+        let lines = BtwPanel::new(&mut state).render(80, 20);
 
         let plain = plain(&lines);
         assert!(
@@ -438,9 +490,10 @@ mod tests {
                 .with_error("Tool calls are disabled for side questions. Answer with text only.")
                 .with_phase(BtwPhase::Failed),
         );
-        let state = BtwPanelState::new(sidecar);
-        let lines = BtwPanel::new(&state).render(50, 5);
+        let mut state = BtwPanelState::new(sidecar);
+        let lines = BtwPanel::new(&mut state).render(50, 10);
 
+        assert_eq!(lines.len(), 4);
         let plain = plain(&lines);
         assert!(
             plain
@@ -453,8 +506,8 @@ mod tests {
     fn btw_panel_truncates_long_lines_without_overlapping_border() {
         let sidecar = BtwSidecar::new("btw-1")
             .with_turn(BtwTurn::new("a".repeat(200)).with_phase(BtwPhase::Running));
-        let state = BtwPanelState::new(sidecar);
-        let lines = BtwPanel::new(&state).render(20, 8);
+        let mut state = BtwPanelState::new(sidecar);
+        let lines = BtwPanel::new(&mut state).render(20, 20);
 
         assert_width(&lines, 20);
         let plain = plain(&lines);
@@ -468,11 +521,11 @@ mod tests {
             BtwTurn::new("line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10")
                 .with_phase(BtwPhase::Running),
         );
-        let state = BtwPanelState::new(sidecar);
-        let max_height = 6; // simulates max(3, 18 / 3)
-        let lines = BtwPanel::new(&state).render(40, max_height);
+        let mut state = BtwPanelState::new(sidecar);
+        let lines = BtwPanel::new(&mut state).render(40, 18);
 
-        assert_eq!(lines.len(), max_height);
+        // 18 rows -> max body = max(3, 6) - 1 = 5, plus top/bottom borders = 7.
+        assert_eq!(lines.len(), 7);
         let plain = plain(&lines);
         assert!(plain[0].contains("↑↓ scroll"));
     }
@@ -485,7 +538,7 @@ mod tests {
         );
         let mut state = BtwPanelState::new(sidecar);
         state.scroll_offset = 2;
-        let lines = BtwPanel::new(&state).render(40, 6);
+        let lines = BtwPanel::new(&mut state).render(40, 18);
 
         let plain = plain(&lines);
         assert!(!plain.iter().any(|l| l.contains("line1")));
@@ -495,8 +548,8 @@ mod tests {
     #[test]
     fn btw_panel_renders_narrow_width() {
         let sidecar = BtwSidecar::new("btw-1").with_turn(BtwTurn::new("Hi"));
-        let state = BtwPanelState::new(sidecar);
-        let lines = BtwPanel::new(&state).render(8, 5);
+        let mut state = BtwPanelState::new(sidecar);
+        let lines = BtwPanel::new(&mut state).render(8, 10);
 
         assert_width(&lines, 8);
         let plain = plain(&lines);
@@ -517,9 +570,9 @@ mod tests {
                 .with_answer("- first\n- second")
                 .with_phase(BtwPhase::Done),
         );
-        let state = BtwPanelState::new(sidecar);
+        let mut state = BtwPanelState::new(sidecar);
         let width = 30;
-        let lines = BtwPanel::new(&state).render(width, 6);
+        let lines = BtwPanel::new(&mut state).render(width, 30);
 
         assert_width(&lines, width);
         let plain = plain(&lines).join("\n");
@@ -530,15 +583,85 @@ mod tests {
              │Q: What to do?{q_pad}│\n\
              │• first{first_pad}│\n\
              │• second{second_pad}│\n\
-             │{empty_pad}│\n\
              ╰{bottom_dashes}╯",
             top_dashes = dashes(11),
             q_pad = spaces(14),
             first_pad = spaces(21),
             second_pad = spaces(20),
-            empty_pad = spaces(28),
             bottom_dashes = dashes(28),
         );
         assert_eq!(plain, expected);
+    }
+
+    #[test]
+    fn btw_panel_grows_dynamically_with_content() {
+        let mut state = BtwPanelState::new(BtwSidecar::new("btw-1"));
+        let empty = BtwPanel::new(&mut state).render(40, 30);
+        assert_eq!(empty.len(), 3);
+
+        state.sidecar.turns.push(
+            BtwTurn::new("multi")
+                .with_answer("one\ntwo\nthree")
+                .with_phase(BtwPhase::Done),
+        );
+        let grown = BtwPanel::new(&mut state).render(40, 30);
+        // Q line + three answer lines = 4 body lines + 2 borders.
+        assert_eq!(grown.len(), 6);
+    }
+
+    #[test]
+    fn btw_panel_trims_thinking_preview_while_running() {
+        let thinking = "a\nb\nc\nd\ne";
+        let sidecar_running = BtwSidecar::new("btw-1").with_turn(
+            BtwTurn::new("think")
+                .with_thinking(thinking)
+                .with_phase(BtwPhase::Running),
+        );
+        let mut state = BtwPanelState::new(sidecar_running);
+        let lines = BtwPanel::new(&mut state).render(40, 30);
+        let plain_running = plain(&lines);
+        assert!(!plain_running.iter().any(|l| l.contains('a')));
+        assert!(!plain_running.iter().any(|l| l.contains('b')));
+        assert!(!plain_running.iter().any(|l| l.contains('c')));
+        assert!(plain_running.iter().any(|l| l.contains('d')));
+        assert!(plain_running.iter().any(|l| l.contains('e')));
+
+        let sidecar_done = BtwSidecar::new("btw-1").with_turn(
+            BtwTurn::new("think")
+                .with_thinking(thinking)
+                .with_phase(BtwPhase::Done),
+        );
+        let mut state = BtwPanelState::new(sidecar_done);
+        let lines = BtwPanel::new(&mut state).render(40, 30);
+        let plain_done = plain(&lines);
+        assert!(plain_done.iter().any(|l| l.contains('a')));
+        assert!(plain_done.iter().any(|l| l.contains('e')));
+    }
+
+    #[test]
+    fn btw_panel_follow_tail_and_scroll_controls() {
+        let sidecar = BtwSidecar::new("btw-1").with_turn(
+            BtwTurn::new("line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8")
+                .with_phase(BtwPhase::Running),
+        );
+        let mut state = BtwPanelState::new(sidecar);
+        assert!(state.follow_tail);
+
+        BtwPanel::new(&mut state).render(40, 18);
+        assert!(state.follow_tail);
+        assert_eq!(state.scroll_offset, state.max_scroll_offset);
+        assert!(state.max_scroll_offset > 0);
+
+        state.scroll_up(1);
+        assert!(!state.follow_tail);
+        assert_eq!(state.scroll_offset, state.max_scroll_offset - 1);
+
+        BtwPanel::new(&mut state).render(40, 18);
+        assert!(!state.follow_tail);
+        assert_eq!(state.scroll_offset, state.max_scroll_offset - 1);
+
+        state.scroll_down(100);
+        assert!(state.follow_tail);
+        assert_eq!(state.scroll_offset, state.max_scroll_offset);
     }
 }

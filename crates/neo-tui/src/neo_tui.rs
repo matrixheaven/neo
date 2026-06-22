@@ -2,7 +2,7 @@ use crate::chrome::{NeoChromeState, OverlayKind};
 use crate::terminal::CursorPos;
 use crate::transcript::{
     CHROME_GUTTER, ChromeRender, TranscriptPane, apply_gutter, frame_content_width,
-    render_chrome_lines, render_footer_only_lines,
+    render_chrome_lines_mut, render_footer_only_lines,
 };
 
 pub struct NeoTui {
@@ -59,7 +59,7 @@ impl NeoTui {
         width: usize,
         height: usize,
     ) -> (Vec<String>, Option<CursorPos>) {
-        let chrome_render = render_chrome(&self.chrome, width);
+        let chrome_render = render_chrome(&mut self.chrome, width, height);
         let chrome_height = chrome_render.lines.len();
         if self.transcript.live_chrome_height() != chrome_height {
             self.transcript.set_live_chrome_height(chrome_height);
@@ -79,7 +79,7 @@ impl NeoTui {
     }
 }
 
-fn render_chrome(app: &NeoChromeState, width: usize) -> ChromeRender {
+fn render_chrome(app: &mut NeoChromeState, width: usize, height: usize) -> ChromeRender {
     if app.focused_overlay_blocks_prompt()
         && app.focused_overlay().is_some_and(|overlay| {
             !matches!(
@@ -99,7 +99,7 @@ fn render_chrome(app: &NeoChromeState, width: usize) -> ChromeRender {
             prompt_start_row: 0,
         }
     } else {
-        render_chrome_lines(app, width)
+        render_chrome_lines_mut(app, width, height)
     }
 }
 

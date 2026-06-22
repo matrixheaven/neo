@@ -84,6 +84,36 @@ fn approval_result_label(choice: ApprovalChoice) -> &'static str {
     }
 }
 
+/// Build the resolved-transcript label for an `AlwaysApprove` choice from the
+/// saved scope/prefix label. The prefix option says "Approve commands starting
+/// with X" → resolved shows "Approved commands starting with X". The session
+/// option says "Approve this exact command for this session" → resolved shows
+/// "Approved this exact command for this session".
+fn session_approval_resolved_label(
+    choice: ApprovalChoice,
+    session_option_label: Option<&str>,
+    prefix_option_label: Option<&str>,
+    picked_prefix: bool,
+) -> String {
+    match choice {
+        ApprovalChoice::AlwaysApprove => {
+            if picked_prefix
+                && let Some(label) = prefix_option_label
+            {
+                return label.replacen("Approve", "Approved", 1);
+            }
+            match session_option_label {
+                Some(label) if label.starts_with("Approve ") => {
+                    format!("Approved{}", &label["Approve".len()..])
+                }
+                Some(label) => format!("Approved: {label}"),
+                None => approval_result_label(choice).to_owned(),
+            }
+        }
+        other => approval_result_label(other).to_owned(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GitStatusBadge {
     branch: String,
@@ -431,6 +461,14 @@ enum McpAddStep {
 struct PendingApprovalResponse {
     decision_tx: oneshot::Sender<PermissionApprovalDecision>,
     feedback_tx: Option<oneshot::Sender<Option<String>>>,
+    /// Display label for the session-approval option, used for the resolved
+    /// transcript line.
+    session_option_label: Option<String>,
+    /// Display label for the prefix-approval option.
+    prefix_option_label: Option<String>,
+    /// True when the user picked the prefix option (vs the session option).
+    /// Both map to `AlwaysApprove`; this flag disambiguates the resolved label.
+    picked_prefix: bool,
 }
 
 pub(crate) struct InteractiveController {
@@ -1518,6 +1556,16 @@ impl InteractiveController {
             KeybindingAction::PromptSteer => {
                 return self.handle_prompt_steer().await.map(|()| Some(false));
             }
+            KeybindingAction::EditLastQueuedMessage => {
+                if let Some(text) = self
+                    .tui
+                    .chrome_mut()
+                    .pending_input_mut()
+                    .pop_most_recent_follow_up_for_edit()
+                {
+                    self.tui.chrome_mut().prompt_mut().set_text(text);
+                }
+            }
             KeybindingAction::AppClear => return self.handle_app_clear_action().await.map(Some),
             KeybindingAction::AppExit => return Ok(Some(self.handle_app_exit())),
             KeybindingAction::AppSuspend => {
@@ -1629,6 +1677,7 @@ impl InteractiveController {
                 request_id: modal.request_id,
                 choice: ApprovalChoice::Deny,
                 feedback: None,
+                picked_prefix: false,
             });
         }
         true
@@ -1851,7 +1900,18 @@ impl InteractiveController {
     fn handle_prompt_history_action(&mut self, action: KeybindingAction) -> bool {
         match action {
             KeybindingAction::EditorCursorUp => {
-                self.tui.chrome_mut().prompt_mut().recall_previous_history();
+                if !self.tui.chrome_mut().prompt_mut().recall_previous_history() {
+                    // No history to recall; pull the most recent queued
+                    // follow-up back into the composer for editing instead.
+                    if let Some(text) = self
+                        .tui
+                        .chrome_mut()
+                        .pending_input_mut()
+                        .pop_most_recent_follow_up_for_edit()
+                    {
+                        self.tui.chrome_mut().prompt_mut().set_text(text);
+                    }
+                }
             }
             KeybindingAction::EditorCursorDown => {
                 self.tui.chrome_mut().prompt_mut().recall_next_history();
@@ -2591,7 +2651,8 @@ impl InteractiveController {
             return;
         }
         let message = AgentMessage::user_text(prompt.to_owned());
-        self.push_queued_message(prompt, false);
+        self.tui.chrome_mut().pending_input_mut().queue_follow_up(prompt);
+        self.tui.chrome_mut().prompt_mut().clear_after_submit();
         let Some(turn) = &self.active_turn else {
             return;
         };
@@ -2612,7 +2673,10 @@ impl InteractiveController {
         if !text.is_empty() {
             if self.active_turn.is_some() {
                 let message = AgentMessage::user_text(text.clone());
-                self.push_queued_message(&text, true);
+                self.tui
+                    .chrome_mut()
+                    .pending_input_mut()
+                    .queue_steer(text);
                 if let Some(turn) = &self.active_turn {
                     turn.steer_input
                         .push(neo_agent_core::ActiveTurnInput::SteerNow(message));
@@ -2624,25 +2688,19 @@ impl InteractiveController {
             return self.submit_current_prompt().await;
         }
         // Empty composer: promote the oldest queued follow-up to a steer.
-        if let Some(text) = self.transcript_mut().pop_pending_follow_up()
-            && let Some(turn) = &self.active_turn
+        if let Some(text) = self
+            .tui
+            .chrome_mut()
+            .pending_input_mut()
+            .promote_oldest_follow_up_to_steer()
         {
-            let message = AgentMessage::user_text(text);
-            turn.steer_input
-                .push(neo_agent_core::ActiveTurnInput::SteerNow(message));
-            self.push_status("Promoted oldest queued message to steer");
+            if let Some(turn) = &self.active_turn {
+                let message = AgentMessage::user_text(text);
+                turn.steer_input
+                    .push(neo_agent_core::ActiveTurnInput::SteerNow(message));
+            }
         }
         Ok(())
-    }
-
-    /// Push a queued/steered message preview into the transcript so the user
-    /// sees visual feedback that their input was captured. `is_steer` selects
-    /// the steer styling vs the follow-up styling.
-    fn push_queued_message(&mut self, text: &str, is_steer: bool) {
-        self.transcript_mut().push_queued_message(text, is_steer);
-        let label = if is_steer { "Steered" } else { "Queued" };
-        let preview: String = text.chars().take(60).collect();
-        self.push_status(format!("{label}: {preview}"));
     }
 
     fn start_turn_with_prompt(
@@ -3102,15 +3160,37 @@ impl InteractiveController {
                 PendingApprovalResponse {
                     decision_tx: approval.decision_tx,
                     feedback_tx: approval.feedback_tx,
+                    session_option_label: None,
+                    prefix_option_label: None,
+                    picked_prefix: false,
                 },
             );
         }
     }
 
     fn resolve_approval(&mut self, result: &ApprovalResult) {
+        // Peek the pending labels before dispatch consumes the entry, so the
+        // resolved transcript line reflects the exact saved scope (or prefix
+        // rule). `picked_prefix` comes from chrome's ApprovalResult, which
+        // detects the prefix option by its label.
+        let (session_label, prefix_label) = self
+            .pending_approvals
+            .get(&result.request_id)
+            .map_or((None, None), |pending| {
+                (
+                    pending.session_option_label.clone(),
+                    pending.prefix_option_label.clone(),
+                )
+            });
+        let label = session_approval_resolved_label(
+            result.choice,
+            session_label.as_deref(),
+            prefix_label.as_deref(),
+            result.picked_prefix,
+        );
         self.tui
             .transcript_mut()
-            .resolve_approval(&result.request_id, approval_result_label(result.choice));
+            .resolve_approval(&result.request_id, label);
         let decision = Self::approval_decision(result.choice);
         let feedback = Self::approval_feedback(result);
         self.push_revision_feedback_status(feedback.as_deref());
@@ -4071,6 +4151,7 @@ impl InteractiveController {
             .chrome_mut()
             .set_custom_working_label(Some("Fetching models.dev catalog...".to_owned()));
         let handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
+        let handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
         self.pending_catalog_fetch = Some(PendingCatalogFetch {
             source: CatalogFetchSource::Known,
             handle,
@@ -4179,6 +4260,7 @@ impl InteractiveController {
         self.tui
             .chrome_mut()
             .set_custom_working_label(Some(format!("Importing provider {provider_id}...")));
+        let handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
         let handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
         self.pending_catalog_fetch = Some(PendingCatalogFetch {
             source: CatalogFetchSource::Known,
@@ -6028,7 +6110,7 @@ fn render_chrome_snapshot_lines(
     app: &NeoChromeState,
     width: usize,
 ) -> impl Iterator<Item = String> {
-    neo_tui::transcript::render_chrome_lines(app, width)
+    neo_tui::transcript::render_chrome_lines(app, width, 24)
         .lines
         .into_iter()
         .map(|line| neo_tui::ansi::strip_ansi(&line).trim_end().to_owned())
@@ -6078,6 +6160,9 @@ mod tests {
         PendingApprovalResponse {
             decision_tx,
             feedback_tx: None,
+            session_option_label: None,
+            prefix_option_label: None,
+            picked_prefix: false,
         }
     }
 
@@ -8940,6 +9025,8 @@ command = "python3"
                     operation: neo_agent_core::PermissionOperation::Tool,
                     subject: "Write".to_owned(),
                     arguments: serde_json::json!({"path": "approved.txt"}),
+                    session_scope: None,
+                    prefix_rule: None,
                 });
                 let (decision_tx, decision_rx) = oneshot::channel();
                 channels
@@ -8949,6 +9036,10 @@ command = "python3"
                         operation: neo_agent_core::PermissionOperation::Tool,
                         decision_tx,
                         feedback_tx: None,
+                        session_option_label: None,
+                        prefix_option_label: None,
+                        prefix_rule: None,
+                        session_scope: None,
                     })
                     .expect("approval waiter sent");
                 let decision = decision_rx.await.expect("approval decision");
@@ -9144,6 +9235,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Tool,
             subject: "Write".to_owned(),
             arguments: serde_json::json!({"path": "approved.txt"}),
+            session_scope: None,
+            prefix_rule: None,
         });
         let (decision_tx, decision_rx) = oneshot::channel();
         controller
@@ -9394,6 +9487,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Tool,
             subject: "Write".to_owned(),
             arguments: serde_json::json!({"path": "approved.txt"}),
+            session_scope: None,
+            prefix_rule: None,
         });
         let (decision_tx, decision_rx) = oneshot::channel();
         controller
@@ -9438,6 +9533,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Tool,
             subject: "Write".to_owned(),
             arguments: serde_json::json!({"path": "denied.txt"}),
+            session_scope: None,
+            prefix_rule: None,
         });
         let (decision_tx, decision_rx) = oneshot::channel();
         controller
@@ -9505,6 +9602,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Tool,
             subject: "Write".to_owned(),
             arguments: serde_json::json!({"path": "denied.txt"}),
+            session_scope: None,
+            prefix_rule: None,
         });
         let (decision_tx, decision_rx) = oneshot::channel();
         controller
@@ -9538,6 +9637,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: "printf one".to_owned(),
             arguments: serde_json::json!({"command": "printf one"}),
+            session_scope: None,
+            prefix_rule: None,
         });
         controller.apply_turn_event(AgentEvent::ApprovalRequested {
             turn: 1,
@@ -9545,6 +9646,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: "printf two".to_owned(),
             arguments: serde_json::json!({"command": "printf two"}),
+            session_scope: None,
+            prefix_rule: None,
         });
         let (first_tx, first_rx) = oneshot::channel();
         let (second_tx, _second_rx) = oneshot::channel();
@@ -9590,6 +9693,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: "printf one".to_owned(),
             arguments: serde_json::json!({"command": "printf one"}),
+            session_scope: None,
+            prefix_rule: None,
         });
         controller.apply_turn_event(AgentEvent::ApprovalRequested {
             turn: 1,
@@ -9597,6 +9702,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: "printf two".to_owned(),
             arguments: serde_json::json!({"command": "printf two"}),
+            session_scope: None,
+            prefix_rule: None,
         });
 
         let snapshot = controller.render_snapshot();
@@ -9620,6 +9727,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: "printf one".to_owned(),
             arguments: serde_json::json!({"command": "printf one"}),
+            session_scope: None,
+            prefix_rule: None,
         });
         controller.apply_turn_event(AgentEvent::ApprovalRequested {
             turn: 1,
@@ -9627,6 +9736,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: "printf two".to_owned(),
             arguments: serde_json::json!({"command": "printf two"}),
+            session_scope: None,
+            prefix_rule: None,
         });
         let (first_tx, first_rx) = oneshot::channel();
         let (second_tx, _second_rx) = oneshot::channel();
@@ -9667,6 +9778,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: "printf one".to_owned(),
             arguments: serde_json::json!({"command": "printf one"}),
+            session_scope: None,
+            prefix_rule: None,
         });
         controller.apply_turn_event(AgentEvent::ApprovalRequested {
             turn: 1,
@@ -9674,6 +9787,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: "printf two".to_owned(),
             arguments: serde_json::json!({"command": "printf two"}),
+            session_scope: None,
+            prefix_rule: None,
         });
         let (first_tx, first_rx) = oneshot::channel();
         let (second_tx, second_rx) = oneshot::channel();
@@ -9716,6 +9831,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: "printf one".to_owned(),
             arguments: serde_json::json!({"command": "printf one"}),
+            session_scope: None,
+            prefix_rule: None,
         });
 
         controller
@@ -9728,6 +9845,10 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Tool,
             decision_tx,
             feedback_tx: None,
+            session_option_label: None,
+            prefix_option_label: None,
+            prefix_rule: None,
+            session_scope: None,
         });
 
         assert_eq!(
@@ -11153,6 +11274,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::PlanTransition,
             subject: "Exit plan mode".to_owned(),
             arguments: serde_json::json!({}),
+            session_scope: None,
+            prefix_rule: None,
         });
         let (decision_tx, decision_rx) = oneshot::channel();
         let (feedback_tx, feedback_rx) = oneshot::channel();
@@ -11161,6 +11284,10 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::PlanTransition,
             decision_tx,
             feedback_tx: Some(feedback_tx),
+            session_option_label: None,
+            prefix_option_label: None,
+            prefix_rule: None,
+            session_scope: None,
         });
 
         // Select "Revise" (index 2) and enter feedback, then confirm.
@@ -11204,6 +11331,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: "printf one".to_owned(),
             arguments: serde_json::json!({"command": "printf one"}),
+            session_scope: None,
+            prefix_rule: None,
         });
         let (first_tx, first_rx) = oneshot::channel();
         controller
@@ -11233,6 +11362,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Tool,
             subject: "Write".to_owned(),
             arguments: serde_json::json!({"path": "later.txt"}),
+            session_scope: None,
+            prefix_rule: None,
         });
         let (second_tx, mut second_rx) = oneshot::channel();
         controller.register_pending_approval(crate::modes::run::PromptApprovalRequest {
@@ -11240,6 +11371,10 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Tool,
             decision_tx: second_tx,
             feedback_tx: None,
+            session_option_label: None,
+            prefix_option_label: None,
+            prefix_rule: None,
+            session_scope: None,
         });
         assert!(
             second_rx.try_recv().is_err(),
@@ -12192,6 +12327,8 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Tool,
             subject: "Write".to_owned(),
             arguments: serde_json::json!({"path": "approved.txt"}),
+            session_scope: None,
+            prefix_rule: None,
         });
         let (decision_tx, _decision_rx) = oneshot::channel();
         controller
@@ -12399,6 +12536,10 @@ command = "python3"
             .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
             .await
             .expect("ctrl+s submits when idle");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("idle ctrl+s turn completes");
 
         let seen = prompt_seen.lock().expect("prompt lock").clone();
         assert_eq!(

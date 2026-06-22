@@ -20,7 +20,7 @@ pub struct ChromeLayout {
 }
 
 #[must_use]
-pub fn chrome_layout(app: &NeoChromeState, area: Rect) -> ChromeLayout {
+pub fn chrome_layout(app: &mut NeoChromeState, area: Rect) -> ChromeLayout {
     let heights = ChromeLayoutHeights::new(app, area);
     let body_height = area.height.saturating_sub(heights.bottom_height());
     let body = Rect {
@@ -63,7 +63,7 @@ struct ChromeLayoutHeights {
 }
 
 impl ChromeLayoutHeights {
-    fn new(app: &NeoChromeState, area: Rect) -> Self {
+    fn new(app: &mut NeoChromeState, area: Rect) -> Self {
         Self {
             todo: todo_height(app, area.width),
             prompt: prompt_panel_height(app, area.width),
@@ -163,19 +163,18 @@ fn todo_height(app: &NeoChromeState, width: u16) -> u16 {
     }
 }
 
-fn btw_height(app: &NeoChromeState, area: Rect) -> u16 {
-    let Some(state) = app.btw_panel_state() else {
+fn btw_height(app: &mut NeoChromeState, area: Rect) -> u16 {
+    let theme = app.theme();
+    let Some(state) = app.btw_panel_state_mut() else {
         return 0;
     };
-    let max_height = (area.height / 3).max(3);
     u16::try_from(
         BtwPanel::new(state)
-            .with_theme(app.theme())
-            .render(usize::from(area.width), usize::from(max_height))
-            .len()
-            .clamp(0, usize::from(max_height)),
+            .with_theme(theme)
+            .render(usize::from(area.width), area.height)
+            .len(),
     )
-    .unwrap_or(max_height)
+    .unwrap_or(area.height / 3)
 }
 
 #[must_use]
