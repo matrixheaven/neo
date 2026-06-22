@@ -67,3 +67,59 @@ individual crate docs in `docs/` for module-by-module status.
 - Keep hosted/cloud distribution, profile sync, and managed collaboration out
   of the supported local-agent surface until the product deliberately reopens
   those boundaries.
+
+## Approval Scoping (NEO-30)
+
+"Approve for this session" operates on three layers, each narrower and more
+explicit than the last. Together they replace the old tool-name wildcard model
+where approving one `Bash` command approved every future `Bash` call.
+
+### Layer 1 — exact session key (in-memory)
+
+`AgentConfig::session_approvals` is a `HashSet<SessionApprovalKey>`, not a set
+of tool names. Each key is derived from the tool call's arguments:
+
+- **Bash**: `SessionApprovalKey::Shell { workspace, cwd, command }` where
+  `command` is the POSIX-tokenized argv (e.g. `["git", "status"]`). `git status`
+  and `git log` produce different keys and never share a grant. Compound
+  commands (`a && b`) that cannot be reduced to a single plain-word command are
+  stored as an opaque `["__shell_script__", <exact text>]` key, so approving the
+  whole line never implicitly approves one sub-command.
+- **Write/Edit**: `SessionApprovalKey::FileWrite { workspace, path, operation }`.
+  Approving `Write` for one file does not approve `Write` for another, and does
+  not approve `Edit` for the same file.
+
+A later request skips prompting only when *every* key in its scope is already
+approved. `AllowForSession` with no derived scope degrades to `AllowOnce` — it
+never creates a wildcard.
+
+### Layer 2 — persistent prefix rules (on disk)
+
+A separate, user-chosen mechanism: "Approve commands starting with `git`" is
+stored as a `PrefixApprovalRule { prefix, label }` in
+`~/.neo/approval_rules.json` and survives restarts. This is the correct home for
+the `git *` use case — an explicit grant, not an accidental side effect of the
+session cache. Loaded at startup via `load_prefix_approval_rules`, saved on
+approval via `save_prefix_approval_rules`. A guard refuses empty prefixes that
+would approve every command.
+
+### Layer 3 — command safety classification
+
+- `is_known_safe_command`: read-only commands (`cat`, `ls`, `git status`,
+  `cargo test`, etc.) skip the prompt entirely in ask mode. For `git`, only read
+  subcommands (`status`, `log`, `diff`, …) qualify — `git push`,
+  `git reset --hard`, `git clean` still prompt.
+- `command_might_be_dangerous`: `rm -rf`, `sudo`, `dd`, `mkfs`, `chmod`,
+  `curl | sh`, etc. always force a prompt and are never offered a session or
+  prefix scope, so the user re-reviews every time.
+
+### UI labels
+
+The modal and inline transcript show the exact cached target, not a generic
+"Approve for this session":
+
+- Session option: "Approve this exact command for this session" / "Approve
+  writes to this file for this session".
+- Prefix option: "Approve commands starting with git".
+- Options that cannot be safely offered (dangerous commands, review transitions,
+  generic tools) are omitted entirely so numeric shortcuts stay predictable.
