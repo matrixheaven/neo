@@ -656,6 +656,9 @@ model = "old"
             model_scope: Vec::new(),
             sessions_dir: project_dir.join(".neo/sessions"),
             permission_mode: neo_agent_core::PermissionMode::default(),
+            live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
+                neo_agent_core::PermissionMode::default(),
+            )),
             defaults: Defaults {
                 mode: "interactive".to_owned(),
             },

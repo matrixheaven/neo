@@ -109,6 +109,16 @@ pub struct AgentConfig {
     pub follow_up_queue_mode: QueueMode,
     pub tool_execution_mode: ToolExecutionMode,
     pub permission_mode: PermissionMode,
+    /// Shared live permission state. Updated by the TUI when the user runs
+    /// `/ask`, `/auto`, `/yolo` (or opens `/permissions`) even mid-turn, and
+    /// read by `permission_preparation_for_mode` at every tool call so a
+    /// running turn immediately honors the new posture.
+    ///
+    /// `permission_mode` above is kept for serialization/snapshots and initial
+    /// state; live evaluation must go through [`AgentConfig::current_permission_mode`].
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub live_permission_mode: Arc<RwLock<PermissionMode>>,
     pub compaction: Option<CompactionSettings>,
     #[serde(skip)]
     #[schemars(skip)]
@@ -180,6 +190,7 @@ impl AgentConfig {
             follow_up_queue_mode: QueueMode::All,
             tool_execution_mode: ToolExecutionMode::Parallel,
             permission_mode: PermissionMode::default(),
+            live_permission_mode: Arc::new(RwLock::new(PermissionMode::default())),
             compaction: None,
             context_transform: None,
             before_tool_call: None,
@@ -224,8 +235,25 @@ impl AgentConfig {
     }
 
     #[must_use]
-    pub const fn with_permission_mode(mut self, mode: PermissionMode) -> Self {
+    pub fn with_permission_mode(mut self, mode: PermissionMode) -> Self {
         self.permission_mode = mode;
+        if let Ok(mut live) = self.live_permission_mode.write() {
+            *live = mode;
+        }
+        self
+    }
+
+    /// Replace the shared live permission state. The static `permission_mode`
+    /// is seeded from the live value so they stay consistent at attachment time.
+    #[must_use]
+    pub fn with_live_permission_mode(
+        mut self,
+        live_permission_mode: Arc<RwLock<PermissionMode>>,
+    ) -> Self {
+        if let Ok(mode) = live_permission_mode.read().map(|guard| *guard) {
+            self.permission_mode = mode;
+        }
+        self.live_permission_mode = live_permission_mode;
         self
     }
 
@@ -1889,12 +1917,12 @@ fn scheduling_class_for_preparation(
         return ToolSchedulingClass::BlockingDialog;
     }
     if tool_call.name == "ExitPlanMode"
-        && config.permission_mode != PermissionMode::Auto
+        && current_permission_mode(config) != PermissionMode::Auto
         && exit_plan_mode_has_reviewable_plan(config)
     {
         return ToolSchedulingClass::BlockingDialog;
     }
-    if tool_call.name == "ExitGoalMode" && config.permission_mode != PermissionMode::Auto {
+    if tool_call.name == "ExitGoalMode" && current_permission_mode(config) != PermissionMode::Auto {
         return ToolSchedulingClass::BlockingDialog;
     }
     if matches!(
@@ -2467,6 +2495,11 @@ fn permission_preparation_for_mode(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
 ) -> PermissionPreparation {
+    // Read live permission state once. The TUI may switch this mid-turn via
+    // `/ask`, `/auto`, `/yolo`, or `/permissions`; every branch below must use
+    // this `mode` instead of the static `config.permission_mode` snapshot.
+    let mode = current_permission_mode(config);
+
     // 1. Plan-mode hard guard.
     {
         let Ok(plan_mode) = config.plan_mode.read() else {
@@ -2488,7 +2521,7 @@ fn permission_preparation_for_mode(
     }
 
     // 2. Auto mode hard deny for AskUserQuestion.
-    if tool_call.name == "AskUserQuestion" && config.permission_mode == PermissionMode::Auto {
+    if tool_call.name == "AskUserQuestion" && mode == PermissionMode::Auto {
         return PermissionPreparation::Deny(
             "AskUserQuestion is disabled while auto permission mode is active".to_owned(),
         );
@@ -2500,7 +2533,7 @@ fn permission_preparation_for_mode(
     }
 
     // 4. Auto mode approves everything else.
-    if config.permission_mode == PermissionMode::Auto {
+    if mode == PermissionMode::Auto {
         return PermissionPreparation::Run(access_for_tool(tool_call, true));
     }
 
@@ -2519,7 +2552,8 @@ fn permission_preparation_for_mode(
         return PermissionPreparation::Run(access_for_tool(tool_call, true));
     }
 
-    // 7. ExitPlanMode review in manual/yolo when plan is non-empty.
+    // 7. ExitPlanMode review in ask/yolo when plan is non-empty.
+    //    These transitions must never become session-scoped wildcards.
     if tool_call.name == "ExitPlanMode" {
         if exit_plan_mode_has_reviewable_plan(config) {
             return PermissionPreparation::Ask {
@@ -2531,7 +2565,7 @@ fn permission_preparation_for_mode(
     }
 
     if tool_call.name == "ExitGoalMode" {
-        if config.permission_mode == PermissionMode::Auto {
+        if mode == PermissionMode::Auto {
             return PermissionPreparation::Run(access_for_tool(tool_call, true));
         }
         return PermissionPreparation::Ask {
@@ -2554,19 +2588,30 @@ fn permission_preparation_for_mode(
     }
 
     // 9. Yolo mode approves all remaining tools.
-    if config.permission_mode == PermissionMode::Yolo {
+    if mode == PermissionMode::Yolo {
         return PermissionPreparation::Run(access_for_tool(tool_call, true));
     }
 
-    // 10. Default safe tools in manual mode.
+    // 10. Default safe tools in ask mode.
     if is_default_approved_tool(tool_call) {
         return PermissionPreparation::Run(access_for_tool(tool_call, true));
     }
 
-    // 11. Manual fallback ask.
+    // 11. Ask fallback prompt.
     let (operation, subject) = permission_operation_for_tool(tool_call)
         .unwrap_or((PermissionOperation::Tool, tool_call.name.clone()));
     PermissionPreparation::Ask { operation, subject }
+}
+
+/// Read the live permission mode. Falls back to the static snapshot only when
+/// the live lock is poisoned (which would already abort the turn elsewhere).
+#[inline]
+fn current_permission_mode(config: &AgentConfig) -> PermissionMode {
+    config
+        .live_permission_mode
+        .read()
+        .map(|guard| *guard)
+        .unwrap_or(config.permission_mode)
 }
 
 fn is_default_approved_tool(tool_call: &AgentToolCall) -> bool {

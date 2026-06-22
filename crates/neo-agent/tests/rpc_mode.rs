@@ -743,7 +743,6 @@ Review $1
 #[test]
 fn rpc_get_commands_omits_excluded_auto_discovered_prompt_template() {
     let project = TempDir::new().expect("project tempdir");
-    let project = TempDir::new().expect("project tempdir");
     let prompts_dir = isolated_home().join("prompts");
     std::fs::create_dir_all(&prompts_dir).expect("create prompts");
     std::fs::write(prompts_dir.join("review.md"), "Review should be excluded\n")

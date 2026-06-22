@@ -101,6 +101,23 @@ pub fn deny_sidecar_tool_call(_call: &AgentToolCall) -> Option<ToolResult> {
 mod tests {
     use super::*;
 
+    fn message_text(message: &AgentMessage) -> String {
+        let content = match message {
+            AgentMessage::System { content }
+            | AgentMessage::User { content }
+            | AgentMessage::Assistant { content, .. }
+            | AgentMessage::ToolResult { content, .. } => content,
+        };
+        content
+            .iter()
+            .filter_map(|part| match part {
+                crate::Content::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
     #[test]
     fn deny_sidecar_tool_call_returns_error() {
         let call = AgentToolCall {
@@ -113,6 +130,85 @@ mod tests {
         assert_eq!(
             result.content,
             "Tool calls are disabled for side questions. Answer with text only."
+        );
+    }
+
+    #[test]
+    fn btw_sidecar_inherits_projected_parent_history_without_mutating_parent() {
+        let parent = vec![
+            AgentMessage::user_text("first"),
+            AgentMessage::assistant(
+                [crate::Content::text("second")],
+                Vec::new(),
+                StopReason::EndTurn,
+            ),
+        ];
+        let parent_clone = parent.clone();
+
+        let projected = sidecar_projected_messages(&parent);
+
+        assert_eq!(parent, parent_clone, "parent must not be mutated");
+        let texts: Vec<String> = projected.iter().map(message_text).collect();
+        assert!(texts.iter().any(|t| t == "first"));
+        assert!(texts.iter().any(|t| t == "second"));
+        assert!(texts.iter().any(|t| t.contains("side-channel")));
+    }
+
+    #[test]
+    fn btw_sidecar_trims_incomplete_trailing_tool_exchange() {
+        let parent = vec![
+            AgentMessage::user_text("run a tool"),
+            AgentMessage::Assistant {
+                content: vec![crate::Content::text("ok")],
+                tool_calls: vec![AgentToolCall {
+                    id: "t1".to_owned(),
+                    name: "bash".to_owned(),
+                    arguments: serde_json::json!({"command": "echo hi"}),
+                }],
+                stop_reason: StopReason::ToolUse,
+            },
+        ];
+
+        let projected = sidecar_projected_messages(&parent);
+
+        // The open assistant tool-call turn should be removed, leaving only the
+        // user message and the side reminder.
+        assert!(
+            projected.iter().all(|message| !matches!(
+                message,
+                AgentMessage::Assistant {
+                    stop_reason: StopReason::ToolUse,
+                    ..
+                }
+            )),
+            "incomplete trailing tool turn must be trimmed"
+        );
+        assert!(
+            projected
+                .iter()
+                .any(|message| message_text(message) == "run a tool")
+        );
+        assert!(
+            projected
+                .iter()
+                .any(|message| message_text(message).contains("side-channel"))
+        );
+    }
+
+    #[test]
+    fn btw_sidecar_appends_side_question_system_reminder() {
+        let parent = vec![AgentMessage::user_text("hello")];
+
+        let projected = sidecar_projected_messages(&parent);
+
+        let reminder_idx = projected
+            .iter()
+            .position(|message| message_text(message).contains("side-channel"))
+            .expect("reminder should be present");
+        assert_eq!(
+            reminder_idx,
+            projected.len() - 1,
+            "reminder must be the last message"
         );
     }
 }

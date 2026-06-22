@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
+    sync::{Arc, RwLock},
 };
 
 use anyhow::Context;
@@ -205,6 +206,13 @@ pub struct AppConfig {
     pub model_scope: Vec<String>,
     pub sessions_dir: PathBuf,
     pub permission_mode: PermissionMode,
+    /// Shared live permission state for the interactive TUI. Updated by
+    /// `/ask`, `/auto`, `/yolo` (and `/permissions`) even while a turn is
+    /// running, and read at every tool-call approval so the active turn honors
+    /// the latest mode without needing to be cancelled. Seeded from
+    /// `permission_mode` at construction.
+    #[serde(skip)]
+    pub live_permission_mode: Arc<RwLock<PermissionMode>>,
     pub defaults: Defaults,
     pub runtime: RuntimeConfig,
     pub tui: TuiConfig,
@@ -511,6 +519,7 @@ impl AppConfig {
             model_scope,
             sessions_dir,
             permission_mode,
+            live_permission_mode: Arc::new(RwLock::new(permission_mode)),
             defaults: Defaults { mode },
             runtime,
             tui,
@@ -988,10 +997,10 @@ mod tests {
     }
 
     #[test]
-    fn config_defaults_to_manual_permission_mode() {
+    fn config_defaults_to_ask_permission_mode() {
         let (_temp, config_path, project_dir) = temp_project_config("");
         let config = load_config(config_path, project_dir);
-        assert_eq!(config.permission_mode, PermissionMode::Manual);
+        assert_eq!(config.permission_mode, PermissionMode::Ask);
     }
 
     /// Regression: the model display label must never stitch the provider onto
@@ -1088,8 +1097,7 @@ model = "gpt-4.1"
 
     #[test]
     fn cli_yolo_overrides_config_permission_mode() {
-        let (_temp, config_path, project_dir) =
-            temp_project_config("permission_mode = \"manual\"\n");
+        let (_temp, config_path, project_dir) = temp_project_config("permission_mode = \"ask\"\n");
         let config = AppConfig::load(ConfigOverrides {
             config_path: Some(config_path),
             yolo: true,
@@ -1103,8 +1111,7 @@ model = "gpt-4.1"
 
     #[test]
     fn cli_auto_overrides_config_permission_mode() {
-        let (_temp, config_path, project_dir) =
-            temp_project_config("permission_mode = \"manual\"\n");
+        let (_temp, config_path, project_dir) = temp_project_config("permission_mode = \"ask\"\n");
         let config = AppConfig::load(ConfigOverrides {
             config_path: Some(config_path),
             yolo: false,

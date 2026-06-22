@@ -1586,6 +1586,14 @@ pub fn render_chrome_lines(app: &NeoChromeState, width: usize) -> ChromeRender {
     if let Some(question) = app.question_dialog_state() {
         lines.extend(question.render_lines(content_width));
     }
+    if let Some(btw_state) = app.btw_panel_state() {
+        let max_height = (content_width / 3).max(3);
+        lines.extend(
+            crate::widgets::BtwPanel::new(btw_state)
+                .with_theme(app.theme())
+                .render(content_width, max_height),
+        );
+    }
     let prompt_start_row = lines.len();
     let (prompt_lines, prompt_cursor) = if app.focused_overlay_blocks_prompt() {
         (Vec::new(), None)

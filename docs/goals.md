@@ -21,7 +21,7 @@ model marks it complete or blocked.
 
 Goal mode is the AI-assisted authoring path. Shift+Tab cycles the development
 mode badge through normal, `[plan]`, and `[goal]`; permissions remain separate
-and still show as `[manual]`, `[auto]`, or `[yolo]`.
+and still show as `[ask]`, `[auto]`, or `[yolo]`.
 
 In goal mode, the model drafts a structured goal before any durable goal starts.
 The draft should include the objective, acceptance criteria, phase plan,

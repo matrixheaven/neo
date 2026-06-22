@@ -138,9 +138,9 @@ fn app_shell_context_color_changes_by_threshold() {
 #[test]
 fn footer_renders_permission_mode_badge() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.set_permission_mode(neo_agent_core::PermissionMode::Manual);
+    app.set_permission_mode(neo_agent_core::PermissionMode::Ask);
     let lines = render_app(80, &app);
-    assert!(lines.iter().any(|line| line.contains("[manual]")));
+    assert!(lines.iter().any(|line| line.contains("[ask]")));
 
     app.set_permission_mode(neo_agent_core::PermissionMode::Auto);
     let lines = render_app(80, &app);
@@ -156,7 +156,7 @@ fn footer_shows_plan_mode_indicator() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.set_plan_mode(true);
     let lines = render_app(80, &app);
-    assert!(lines.iter().any(|line| line.contains("[manual]")));
+    assert!(lines.iter().any(|line| line.contains("[ask]")));
     assert!(lines.iter().any(|line| line.contains("[plan]")));
     assert!(!lines.iter().any(|line| line.contains("[PLAN MODE]")));
 
@@ -459,7 +459,7 @@ fn pending_approval_hides_composer_prompt() {
         "composer should be hidden: {frame}"
     );
     assert!(
-        frame.contains("[manual]"),
+        frame.contains("[ask]"),
         "footer should remain visible: {frame}"
     );
     assert!(
@@ -512,7 +512,7 @@ fn app_shell_renders_neo_branded_footer_and_boxed_composer_pinned_to_bottom() {
         .expect("composer prompt renders");
     let status_row = lines
         .iter()
-        .rposition(|line| line.contains("[manual]"))
+        .rposition(|line| line.contains("[ask]"))
         .expect("footer status line renders");
 
     assert!(!lines.iter().any(|line| line.contains("enter send")));

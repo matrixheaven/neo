@@ -440,15 +440,15 @@ immediately and should not force the batch into blocking-dialog serialization.
 ### Development modes
 
 Neo keeps permission modes and development modes separate. Permission modes are
-only `[manual]`, `[auto]`, and `[yolo]`; they control approval policy for risky
+only `[ask]`, `[auto]`, and `[yolo]`; they control approval policy for risky
 tools. Development modes are mutually exclusive: `normal`, `plan`, and `goal`.
 
 - Shift+Tab cycles development mode only: normal → plan → goal → normal.
 - Do not bind Shift+Tab or Shift+Enter to permission cycling.
 - Shift+Enter, Alt+Enter, and Ctrl+J all insert a newline.
 - Footer badges render permission first, then development state, for example
-  `[manual] [plan] ...`, `[manual] [goal] ...`, `[manual] [goal•] ...`,
-  `[manual] [goal◌] ...`, or `[manual] [goal✗] ...`.
+  `[ask] [plan] ...`, `[ask] [goal] ...`, `[ask] [goal•] ...`,
+  `[ask] [goal◌] ...`, or `[ask] [goal✗] ...`.
 - Plan mode must synchronize with runtime `PlanMode`; it is not just a footer
   flag. The model writes the workspace-scoped plan file and exits through
   `ExitPlanMode`, which opens a blocking review dialog for Accept / Reject /
@@ -587,7 +587,7 @@ CLI provider/model management: `neo provider add/remove/list`,
 `neo provider catalog list/add` (models.dev integration),
 `neo models add/remove/list/set`.
 
-TUI slash commands: `/ask` (manual permission mode), `/auto` (auto permission
+TUI slash commands: `/ask` (ask permission mode), `/auto` (auto permission
 mode), `/yolo` (yolo permission mode), `/permissions` (permission mode
 selector), `/plan` (toggle plan mode), `/model` (model picker), `/provider`
 (provider list), `/resume` (session picker), `/skill:<name>` (activate a skill

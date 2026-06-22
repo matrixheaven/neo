@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionMode {
-    Manual,
+    Ask,
     Auto,
     Yolo,
 }
@@ -13,7 +13,7 @@ impl PermissionMode {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Manual => "manual",
+            Self::Ask => "ask",
             Self::Auto => "auto",
             Self::Yolo => "yolo",
         }
@@ -23,7 +23,7 @@ impl PermissionMode {
 #[allow(clippy::derivable_impls)]
 impl Default for PermissionMode {
     fn default() -> Self {
-        Self::Manual
+        Self::Ask
     }
 }
 

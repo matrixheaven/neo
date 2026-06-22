@@ -150,12 +150,12 @@ Neo uses a single top-level `permission_mode` setting that controls how
 risky tool actions are approved:
 
 ```toml
-permission_mode = "manual"
+permission_mode = "ask"
 ```
 
 Allowed values:
 
-- `"manual"` — Ask before commands, edits, and other risky actions.
+- `"ask"` — Ask before commands, edits, and other risky actions.
   Read/search tools run directly, and session approval rules are respected.
 - `"auto"` — Run fully non-interactively. Tool actions are approved
   automatically after hard safety policies; agent questions are skipped.
@@ -172,7 +172,7 @@ goal-authoring workflow and uses a review dialog before starting a durable goal.
 
 In interactive mode:
 
-- `/ask` — Switch to manual permission mode
+- `/ask` — Switch to ask permission mode
 - `/auto` — Switch to auto permission mode
 - `/yolo` — Switch to yolo permission mode
 - `/permissions` — Open the permission mode selector

@@ -3,7 +3,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     chrome::{ApprovalModal, NeoChromeState, OverlayKind, PromptState},
-    widgets::TodoPanel,
+    widgets::{BtwPanel, TodoPanel},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +14,7 @@ pub struct ChromeLayout {
     pub approval: Rect,
     pub session_picker: Rect,
     pub overlay: Rect,
+    pub btw: Rect,
     pub prompt: Rect,
     pub footer: Rect,
 }
@@ -34,6 +35,7 @@ pub fn chrome_layout(app: &NeoChromeState, area: Rect) -> ChromeLayout {
     let approval = stack.next(heights.approval);
     let session_picker = stack.next(heights.session_picker);
     let overlay = stack.next(heights.overlay);
+    let btw = stack.next(heights.btw);
     let prompt = stack.next(heights.prompt);
     let footer = stack.next(heights.footer_bar);
 
@@ -44,6 +46,7 @@ pub fn chrome_layout(app: &NeoChromeState, area: Rect) -> ChromeLayout {
         approval,
         session_picker,
         overlay,
+        btw,
         prompt,
         footer,
     }
@@ -56,6 +59,7 @@ struct ChromeLayoutHeights {
     session_picker: u16,
     approval: u16,
     overlay: u16,
+    btw: u16,
 }
 
 impl ChromeLayoutHeights {
@@ -67,6 +71,7 @@ impl ChromeLayoutHeights {
             session_picker: session_picker_height(app, area.height),
             approval: approval_height(app, area),
             overlay: overlay_height(app, area.height),
+            btw: btw_height(app, area),
         }
     }
 
@@ -77,6 +82,7 @@ impl ChromeLayoutHeights {
             .saturating_add(self.session_picker)
             .saturating_add(self.approval)
             .saturating_add(self.overlay)
+            .saturating_add(self.btw)
     }
 }
 
@@ -155,6 +161,21 @@ fn todo_height(app: &NeoChromeState, width: u16) -> u16 {
     } else {
         0
     }
+}
+
+fn btw_height(app: &NeoChromeState, area: Rect) -> u16 {
+    let Some(state) = app.btw_panel_state() else {
+        return 0;
+    };
+    let max_height = (area.height / 3).max(3);
+    u16::try_from(
+        BtwPanel::new(state)
+            .with_theme(app.theme())
+            .render(usize::from(area.width), usize::from(max_height))
+            .len()
+            .clamp(0, usize::from(max_height)),
+    )
+    .unwrap_or(max_height)
 }
 
 #[must_use]

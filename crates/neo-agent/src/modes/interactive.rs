@@ -244,8 +244,8 @@ fn parse_git_numstat_count(value: Option<&str>) -> u32 {
 fn permission_mode_items() -> Vec<neo_tui::dialogs::ChoiceItem> {
     vec![
         neo_tui::dialogs::ChoiceItem::new(
-            "permission:manual",
-            "Manual",
+            "permission:ask",
+            "Ask",
         )
         .with_description("Ask before commands, edits, and other risky actions. Read/search tools run directly; session approval rules are respected."),
         neo_tui::dialogs::ChoiceItem::new(
@@ -274,11 +274,18 @@ fn slash_arg<'a>(prompt: &'a str, command: &str) -> Option<&'a str> {
 
 fn slash_permission_mode(prompt: &str) -> Option<PermissionMode> {
     match prompt {
-        "/ask" => Some(PermissionMode::Manual),
+        "/ask" => Some(PermissionMode::Ask),
         "/auto" => Some(PermissionMode::Auto),
         "/yolo" => Some(PermissionMode::Yolo),
         _ => None,
     }
+}
+
+/// Direct permission-mode slashes (`/ask`, `/auto`, `/yolo`) are always
+/// dispatchable, even while a turn is running, because they only update live
+/// permission state and never submit a turn or open a focused overlay.
+fn is_live_permission_slash(prompt: &str) -> bool {
+    slash_permission_mode(prompt.trim()).is_some()
 }
 
 fn background_question_followup_prompt(task_id: &str) -> String {
@@ -440,6 +447,10 @@ pub(crate) struct InteractiveController {
     active_model: Option<SelectedModel>,
     current_thinking: bool,
     active_turn: Option<RunningTurn>,
+    btw_runner: Option<crate::modes::btw::BtwRunner>,
+    btw_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<crate::modes::btw::BtwEvent>>,
+    #[cfg(test)]
+    btw_client: Option<Arc<dyn neo_ai::ModelClient>>,
     pending_approvals: BTreeMap<String, PendingApprovalResponse>,
     resolved_approvals: BTreeMap<String, PermissionApprovalDecision>,
     /// Pending `AskUser` question response channels, keyed by question id.
@@ -467,6 +478,10 @@ pub(crate) struct InteractiveController {
     plan_mode: Arc<RwLock<PlanMode>>,
     /// Current permission mode for the session.
     permission_mode: PermissionMode,
+    /// Shared live permission state. The turn driver clones an `Arc` to this
+    /// into `TurnRequest`/`AppConfig`, and `set_permission_mode` writes here so
+    /// a running turn picks up the new mode at its next tool call.
+    live_permission_mode: Arc<RwLock<PermissionMode>>,
     /// Revise/feedback text keyed by approval request id, waiting to be sent to
     /// the runtime with the next turn.
     pending_plan_review_feedback: BTreeMap<String, String>,
@@ -555,6 +570,9 @@ pub(crate) struct TurnRequest {
     pub skill_context: Option<String>,
     /// Permission mode to use for this turn.
     pub permission_mode: PermissionMode,
+    /// Shared live permission state for this turn. Updated by `/ask` `/auto`
+    /// `/yolo` while the turn runs; the runtime reads it at each tool call.
+    pub live_permission_mode: Arc<RwLock<PermissionMode>>,
     /// Shared runtime plan-mode state for this turn.
     pub plan_mode: Arc<RwLock<PlanMode>>,
     /// Whether this turn should use AI-assisted goal authoring.
@@ -585,6 +603,7 @@ impl TurnRequest {
             reasoning_effort,
             skill_context: None,
             permission_mode: PermissionMode::default(),
+            live_permission_mode: Arc::new(RwLock::new(PermissionMode::default())),
             plan_mode: Arc::new(RwLock::new(PlanMode::default())),
             goal_mode_authoring: false,
             plan_review_feedback: BTreeMap::new(),
@@ -738,6 +757,10 @@ impl InteractiveController {
             active_model: None,
             current_thinking: false,
             active_turn: None,
+            btw_runner: None,
+            btw_receiver: None,
+            #[cfg(test)]
+            btw_client: None,
             pending_approvals: BTreeMap::new(),
             resolved_approvals: BTreeMap::new(),
             pending_questions: BTreeMap::new(),
@@ -762,6 +785,7 @@ impl InteractiveController {
             goal_manager: None,
             plan_mode: Arc::new(RwLock::new(PlanMode::default())),
             permission_mode: PermissionMode::default(),
+            live_permission_mode: Arc::new(RwLock::new(PermissionMode::default())),
             pending_plan_review_feedback: BTreeMap::new(),
             prompt_history: None,
             trust_store: None,
@@ -895,6 +919,11 @@ impl InteractiveController {
     #[cfg(test)]
     fn set_trust_store(&mut self, store: crate::trust::ProjectTrustStore) {
         self.trust_store = Some(store);
+    }
+
+    #[cfg(test)]
+    fn set_btw_client(&mut self, client: Arc<dyn neo_ai::ModelClient>) {
+        self.btw_client = Some(client);
     }
 
     #[cfg(test)]
@@ -1065,6 +1094,9 @@ impl InteractiveController {
     pub fn apply_startup_options(&mut self, config: &AppConfig, options: InteractiveOptions) {
         self.tui.chrome_mut().set_theme(config.theme.theme);
         self.permission_mode = config.permission_mode;
+        if let Ok(mut live) = self.live_permission_mode.write() {
+            *live = config.permission_mode;
+        }
         self.tui
             .chrome_mut()
             .set_permission_mode(config.permission_mode);
@@ -1092,6 +1124,9 @@ impl InteractiveController {
 
     fn set_permission_mode(&mut self, mode: PermissionMode) {
         self.permission_mode = mode;
+        if let Ok(mut live) = self.live_permission_mode.write() {
+            *live = mode;
+        }
         self.tui.chrome_mut().set_permission_mode(mode);
         self.push_status(format!("Permission Mode: {}", mode.label()));
     }
@@ -1222,6 +1257,7 @@ impl InteractiveController {
                 None => tokio::task::yield_now().await,
             }
             self.drain_active_turn().await?;
+            self.drain_btw_sidecar();
             if self.active_turn.is_some() {
                 self.refresh_git_status_if_due();
             }
@@ -1375,6 +1411,18 @@ impl InteractiveController {
             return Ok(false);
         }
         if self.cancel_focused_overlay() {
+            return Ok(false);
+        }
+        if self.tui.chrome().has_btw_panel() {
+            if !self.tui.chrome().prompt().text.is_empty() {
+                self.tui
+                    .chrome_mut()
+                    .prompt_mut()
+                    .apply_edit(PromptEdit::Clear);
+                return Ok(false);
+            }
+            self.cancel_btw_sidecar();
+            self.tui.chrome_mut().close_btw_panel();
             return Ok(false);
         }
         let _ = self.interrupt_active_or_stale_turn().await?;
@@ -1772,6 +1820,22 @@ impl InteractiveController {
     }
 
     fn handle_prompt_keybinding_action(&mut self, action: KeybindingAction) -> bool {
+        if self.tui.chrome().has_btw_panel() {
+            match action {
+                KeybindingAction::EditorCursorUp | KeybindingAction::EditorCursorDown => {
+                    if self.tui.chrome().prompt().text.is_empty() {
+                        self.clear_pending_exit_confirmation();
+                        if action == KeybindingAction::EditorCursorUp {
+                            self.tui.chrome_mut().scroll_btw_panel_up(1);
+                        } else {
+                            self.tui.chrome_mut().scroll_btw_panel_down(1);
+                        }
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
         if self.handle_prompt_history_action(action) {
             return true;
         }
@@ -1989,7 +2053,7 @@ impl InteractiveController {
     fn run_permission_command(&mut self, command_id: &str) -> bool {
         match command_id {
             "permissions" => self.open_permission_picker(),
-            "permission.manual" => self.set_permission_mode(PermissionMode::Manual),
+            "permission.ask" => self.set_permission_mode(PermissionMode::Ask),
             "permission.auto" => self.set_permission_mode(PermissionMode::Auto),
             "permission.yolo" => self.set_permission_mode(PermissionMode::Yolo),
             _ => return false,
@@ -2012,6 +2076,10 @@ impl InteractiveController {
         }
         if command_id == "submit" {
             self.submit_current_prompt().await?;
+            return Ok(());
+        }
+        if command_id == "btw" {
+            self.open_btw_panel(None).await;
             return Ok(());
         }
         self.push_status(format!("Unknown command: {command_id}"));
@@ -2053,6 +2121,16 @@ impl InteractiveController {
     /// not be submitted as a chat turn.
     async fn handle_slash_command(&mut self, prompt: &str) -> bool {
         let prompt = prompt.trim();
+        if let Some(arg) = slash_arg(prompt, "/btw") {
+            self.clear_submitted_prompt();
+            self.open_btw_panel(if arg.is_empty() {
+                None
+            } else {
+                Some(arg.to_owned())
+            })
+            .await;
+            return true;
+        }
         if self.handle_simple_slash_command(prompt).await {
             return true;
         }
@@ -2404,6 +2482,12 @@ impl InteractiveController {
     }
 
     async fn submit_current_prompt(&mut self) -> Result<()> {
+        // If the `/btw` sidecar panel is open, the composer is connected to the
+        // sidecar. Route Enter to the sidecar instead of the main turn path.
+        if self.tui.chrome().has_btw_panel() {
+            return self.submit_btw_prompt().await;
+        }
+
         let prompt = self.tui.chrome_mut().prompt().text.trim_end().to_owned();
         if prompt.trim().is_empty() {
             return Ok(());
@@ -2413,11 +2497,48 @@ impl InteractiveController {
         // or submitting, so it doesn't linger under a newly-opened picker.
         self.close_inline_prompt_completion();
 
+        // `/btw` is a sidecar command: it opens a panel and may start a side
+        // question, but it must never submit or queue a main turn, even while
+        // one is already running.
+        if let Some(arg) = slash_arg(&prompt, "/btw") {
+            self.clear_submitted_prompt();
+            self.open_btw_panel(if arg.is_empty() {
+                None
+            } else {
+                Some(arg.to_owned())
+            })
+            .await;
+            return Ok(());
+        }
+
         // `/new` / `/clear` are session-lifecycle commands. They stay
         // dispatchable while a turn is running (and report their own blocked
         // status), so dispatch them before the turn-active guard below.
         if matches!(prompt.as_str(), "/new" | "/clear") {
             self.handle_simple_slash_command(&prompt).await;
+            return Ok(());
+        }
+
+        // Permission-mode slashes (`/ask`, `/auto`, `/yolo`) are always
+        // dispatchable. They only update live runtime state and never submit a
+        // turn, so they must run even while a turn is active. This is what lets
+        // the user switch posture mid-turn without interrupting it.
+        if is_live_permission_slash(&prompt) {
+            self.handle_permission_slash_command(&prompt);
+            return Ok(());
+        }
+
+        // `/permissions` opens a focused overlay. During an active turn it could
+        // race with an approval/question dialog from that turn, so degrade to a
+        // hint and keep the turn uninterrupted. `/ask`/`/auto`/`/yolo` above
+        // remain the live switch path.
+        if matches!(prompt.as_str(), "/permissions" | "/permission") {
+            if self.active_turn.is_some() {
+                self.clear_submitted_prompt();
+                self.push_status("Use /ask, /auto, or /yolo while a turn is running");
+                return Ok(());
+            }
+            self.handle_permission_slash_command(&prompt);
             return Ok(());
         }
 
@@ -2562,6 +2683,7 @@ impl InteractiveController {
             },
         );
         request.permission_mode = self.permission_mode;
+        request.live_permission_mode = Arc::clone(&self.live_permission_mode);
         request.plan_mode = Arc::clone(&self.plan_mode);
         request.goal_mode_authoring = matches!(
             self.tui.chrome().development_mode(),
@@ -2686,6 +2808,193 @@ impl InteractiveController {
             self.refresh_git_status_now();
         } else {
             self.active_turn = Some(turn);
+        }
+        Ok(())
+    }
+
+    /// Cancel any running `/btw` sidecar and clear its receiver.
+    fn cancel_btw_sidecar(&mut self) {
+        if let Some(runner) = self.btw_runner.take() {
+            runner.cancel();
+        }
+        self.btw_receiver = None;
+    }
+
+    /// Open the `/btw` sidecar panel, cancelling any existing sidecar first.
+    ///
+    /// If `initial_prompt` is `Some`, a sidecar turn is started immediately using
+    /// a projected snapshot of the active session's messages. The main turn is
+    /// never touched.
+    async fn open_btw_panel(&mut self, initial_prompt: Option<String>) {
+        self.cancel_btw_sidecar();
+
+        let sidecar_id = uuid::Uuid::new_v4().to_string();
+        let state = neo_tui::widgets::btw_panel::BtwPanelState::new(
+            neo_tui::widgets::btw_panel::BtwSidecar::new(sidecar_id)
+                .with_parent_session_id(self.active_session_id.clone().unwrap_or_default()),
+        );
+        self.tui.chrome_mut().set_btw_panel_state(Some(state));
+
+        let Some(config) = self.local_config.clone() else {
+            self.push_status("BTW requires a loaded config");
+            return;
+        };
+
+        let inherited_messages = self.load_btw_inherited_messages(&config).await;
+        let Some(model) = self.resolve_btw_model(&config) else {
+            return;
+        };
+        let Some(client) = self.resolve_btw_client(&config, &model) else {
+            return;
+        };
+
+        let runner = crate::modes::btw::BtwRunner::new(model, client, config, inherited_messages);
+
+        if let Some(prompt) = initial_prompt {
+            match runner.run(prompt).await {
+                Ok(receiver) => {
+                    self.btw_runner = Some(runner);
+                    self.btw_receiver = Some(receiver);
+                }
+                Err(error) => {
+                    self.push_status(format!("BTW failed to start: {error}"));
+                    self.update_btw_panel_error(&error.to_string());
+                }
+            }
+        } else {
+            self.btw_runner = Some(runner);
+        }
+    }
+
+    async fn load_btw_inherited_messages(
+        &self,
+        config: &crate::config::AppConfig,
+    ) -> Vec<AgentMessage> {
+        let Some(session_id) = self.active_session_id.as_ref() else {
+            return Vec::new();
+        };
+        match crate::modes::sessions::session_path(session_id, config) {
+            Ok(path) => {
+                match neo_agent_core::session::JsonlSessionReader::replay_context(&path).await {
+                    Ok(context) => {
+                        neo_agent_core::sidecar::sidecar_projected_messages(context.messages())
+                    }
+                    Err(error) => {
+                        tracing::warn!(?error, "failed to replay session for /btw context");
+                        Vec::new()
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(?error, "failed to resolve session path for /btw context");
+                Vec::new()
+            }
+        }
+    }
+
+    #[allow(clippy::unnecessary_wraps)]
+    fn resolve_btw_model(
+        &mut self,
+        config: &crate::config::AppConfig,
+    ) -> Option<neo_ai::ModelSpec> {
+        #[cfg(test)]
+        {
+            let _ = self;
+            Some(
+                crate::modes::run::resolve_model(config).unwrap_or_else(|_| neo_ai::ModelSpec {
+                    provider: neo_ai::ProviderId("test-provider".to_owned()),
+                    model: "test-model".to_owned(),
+                    api: neo_ai::ApiKind::Local,
+                    capabilities: neo_ai::ModelCapabilities::tool_chat(),
+                }),
+            )
+        }
+        #[cfg(not(test))]
+        match crate::modes::run::resolve_model(config) {
+            Ok(model) => Some(model),
+            Err(error) => {
+                self.push_status(format!("BTW model unavailable: {error}"));
+                self.update_btw_panel_error(&error.to_string());
+                None
+            }
+        }
+    }
+
+    fn resolve_btw_client(
+        &mut self,
+        config: &crate::config::AppConfig,
+        model: &neo_ai::ModelSpec,
+    ) -> Option<Arc<dyn neo_ai::ModelClient>> {
+        #[cfg(test)]
+        if let Some(client) = self.btw_client.clone() {
+            return Some(client);
+        }
+        match crate::modes::run::resolve_model_client(config, model) {
+            Ok(client) => Some(client),
+            Err(error) => {
+                self.push_status(format!("BTW model client unavailable: {error}"));
+                self.update_btw_panel_error(&error.to_string());
+                None
+            }
+        }
+    }
+
+    fn update_btw_panel_error(&mut self, message: &str) {
+        if let Some(state) = self.tui.chrome_mut().btw_panel_state_mut() {
+            state.status_message = Some(message.to_owned());
+        }
+    }
+
+    /// Drain any pending `/btw` sidecar events into the panel state.
+    fn drain_btw_sidecar(&mut self) {
+        let Some(receiver) = &mut self.btw_receiver else {
+            return;
+        };
+        while let Ok(event) = receiver.try_recv() {
+            if let Some(state) = self.tui.chrome_mut().btw_panel_state_mut() {
+                crate::modes::btw::update_btw_panel_state(state, event);
+            }
+        }
+    }
+
+    /// Send the current composer text to the `/btw` sidecar instead of the main
+    /// turn. The main turn path is bypassed entirely.
+    async fn submit_btw_prompt(&mut self) -> Result<()> {
+        // If a sidecar turn is already running, preserve the user's typed text
+        // and show a busy notice instead of starting a second concurrent turn.
+        if self.tui.chrome().btw_panel_state().is_some_and(|state| {
+            state.sidecar.phase == neo_tui::widgets::btw_panel::BtwPhase::Running
+        }) {
+            if let Some(state) = self.tui.chrome_mut().btw_panel_state_mut() {
+                state.status_message =
+                    Some("Wait for /btw to finish before sending another question.".to_owned());
+            }
+            return Ok(());
+        }
+
+        self.open_btw_panel(None).await;
+
+        let Some(prompt) = self.tui.chrome_mut().submit_prompt() else {
+            return Ok(());
+        };
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return Ok(());
+        }
+
+        let Some(runner) = self.btw_runner.as_ref() else {
+            return Ok(());
+        };
+
+        match runner.run(prompt.to_owned()).await {
+            Ok(receiver) => {
+                self.btw_receiver = Some(receiver);
+                self.drain_btw_sidecar();
+            }
+            Err(error) => {
+                self.push_status(format!("BTW failed to start: {error}"));
+                self.update_btw_panel_error(&error.to_string());
+            }
         }
         Ok(())
     }
@@ -3737,7 +4046,7 @@ impl InteractiveController {
 
     fn handle_permission_choice_item(&mut self, id: &str) -> bool {
         match id {
-            "permission:manual" => self.set_permission_mode(PermissionMode::Manual),
+            "permission:ask" => self.set_permission_mode(PermissionMode::Ask),
             "permission:auto" => self.set_permission_mode(PermissionMode::Auto),
             "permission:yolo" => self.set_permission_mode(PermissionMode::Yolo),
             _ => return false,
@@ -4237,7 +4546,7 @@ fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<PickerItem>
             "/ask",
             "/ask",
             Some(prompt_source_description(
-                Some("manual permission mode"),
+                Some("ask permission mode"),
                 Some("permission mode"),
                 Some("local"),
             )),
@@ -4257,6 +4566,15 @@ fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<PickerItem>
             Some(prompt_source_description(
                 Some("yolo permission mode"),
                 Some("permission mode"),
+                Some("local"),
+            )),
+        ),
+        PickerItem::new(
+            "/btw",
+            "/btw",
+            Some(prompt_source_description(
+                Some("Open a temporary side-question panel"),
+                Some("sidecar dialog"),
                 Some("local"),
             )),
         ),
@@ -4821,8 +5139,8 @@ fn command_specs(project_dir: &Path, project_trusted: bool) -> (Vec<CommandSpec>
             Some("Select permission mode"),
         ),
         CommandSpec::new(
-            "permission.manual",
-            "Manual permission mode",
+            "permission.ask",
+            "Ask permission mode",
             Some("Ask before risky actions"),
         ),
         CommandSpec::new(
@@ -4839,6 +5157,11 @@ fn command_specs(project_dir: &Path, project_trusted: bool) -> (Vec<CommandSpec>
             "plan",
             "Toggle plan mode",
             Some("Read-only mode for investigation and planning"),
+        ),
+        CommandSpec::new(
+            "btw",
+            "/btw sidecar",
+            Some("Open a temporary side-question panel"),
         ),
     ];
     let mut templates = match load_project_prompt_templates(project_dir, project_trusted) {
@@ -5134,6 +5457,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
             }
             effective_config.runtime.reasoning_effort = request.reasoning_effort;
             effective_config.permission_mode = request.permission_mode;
+            effective_config.live_permission_mode = Arc::clone(&request.live_permission_mode);
             if let Some(session_id) = request.session_id {
                 let turn = crate::modes::run::run_prompt_in_session_streaming(
                     &session_id,
@@ -7151,6 +7475,28 @@ mod tests {
         assert!(
             controller.chrome().selected_prompt_completion().is_some(),
             "slash completion should select the first local command"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_completion_includes_btw_command() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+
+        controller
+            .handle_input_event(InputEvent::Insert('/'))
+            .await
+            .expect("slash insert opens completion");
+
+        let rendered = controller.chrome().focused_overlay_lines(80).join("\n");
+        assert!(
+            rendered.contains("/btw"),
+            "slash completion should include /btw; got:\n{rendered}"
         );
     }
 
@@ -10510,7 +10856,7 @@ command = "python3"
     }
 
     #[tokio::test]
-    async fn slash_ask_sets_manual_permission_mode() {
+    async fn slash_ask_sets_ask_permission_mode() {
         let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
@@ -10523,15 +10869,9 @@ command = "python3"
             .handle_input_event(InputEvent::Submit)
             .await
             .expect("slash command handled");
-        assert_eq!(
-            controller.chrome().permission_mode(),
-            PermissionMode::Manual
-        );
-        assert!(transcript_has_status(
-            &controller,
-            "Permission Mode: manual"
-        ));
-        assert!(controller.render_snapshot().contains("[manual]"));
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Ask);
+        assert!(transcript_has_status(&controller, "Permission Mode: ask"));
+        assert!(controller.render_snapshot().contains("[ask]"));
     }
 
     #[tokio::test]
@@ -10654,10 +10994,7 @@ command = "python3"
             test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
-        assert_eq!(
-            controller.chrome().permission_mode(),
-            PermissionMode::Manual
-        );
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Ask);
         assert_eq!(
             controller.chrome().development_mode(),
             DevelopmentMode::Normal
@@ -10667,10 +11004,7 @@ command = "python3"
             .handle_input_event(InputEvent::Action(KeybindingAction::CycleDevelopmentMode))
             .await
             .expect("cycle to plan");
-        assert_eq!(
-            controller.chrome().permission_mode(),
-            PermissionMode::Manual
-        );
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Ask);
         assert_eq!(
             controller.chrome().development_mode(),
             DevelopmentMode::Plan
@@ -10681,10 +11015,7 @@ command = "python3"
             .handle_input_event(InputEvent::Action(KeybindingAction::CycleDevelopmentMode))
             .await
             .expect("cycle to goal");
-        assert_eq!(
-            controller.chrome().permission_mode(),
-            PermissionMode::Manual
-        );
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Ask);
         assert_eq!(
             controller.chrome().development_mode(),
             DevelopmentMode::Goal(GoalModeStatus::Pending)
@@ -10695,10 +11026,7 @@ command = "python3"
             .handle_input_event(InputEvent::Action(KeybindingAction::CycleDevelopmentMode))
             .await
             .expect("cycle to normal");
-        assert_eq!(
-            controller.chrome().permission_mode(),
-            PermissionMode::Manual
-        );
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Ask);
         assert_eq!(
             controller.chrome().development_mode(),
             DevelopmentMode::Normal
@@ -10715,18 +11043,12 @@ command = "python3"
             test_workspace_root(),
             |_request| async move { Ok(Vec::<AgentEvent>::new()) },
         );
-        assert_eq!(
-            controller.chrome().permission_mode(),
-            PermissionMode::Manual
-        );
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Ask);
         controller
             .handle_input_event(InputEvent::Key(KeyId::new("shift+tab").expect("valid key")))
             .await
             .expect("shift tab cycles");
-        assert_eq!(
-            controller.chrome().permission_mode(),
-            PermissionMode::Manual
-        );
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Ask);
         assert_eq!(
             controller.chrome().development_mode(),
             DevelopmentMode::Plan
@@ -10868,7 +11190,7 @@ command = "python3"
     }
 
     #[tokio::test]
-    async fn approve_for_session_does_not_globally_skip_later_manual_prompt() {
+    async fn approve_for_session_does_not_globally_skip_later_ask_prompt() {
         let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
@@ -10904,7 +11226,7 @@ command = "python3"
         );
 
         // Tool-session approval is scoped by the runtime. The TUI must not
-        // turn one approval into a global bypass for later manual prompts.
+        // turn one approval into a global bypass for later ask prompts.
         controller.apply_turn_event(AgentEvent::ApprovalRequested {
             turn: 1,
             id: "tool-2".to_owned(),
@@ -10952,6 +11274,7 @@ command = "python3"
             model_scope: Vec::new(),
             sessions_dir,
             permission_mode: PermissionMode::default(),
+            live_permission_mode: Arc::new(RwLock::new(PermissionMode::default())),
             defaults: Defaults {
                 mode: "interactive".to_owned(),
             },
@@ -11312,6 +11635,120 @@ command = "python3"
         controller.cancel_active_turn().await.expect("cancel turn");
     }
 
+    async fn running_turn_controller() -> InteractiveController {
+        let run_turn: TurnDriver = Arc::new(move |_request, _channels| {
+            Box::pin(async move {
+                // Never complete: holds the turn open for live-slash tests.
+                std::future::pending::<Result<TurnOutcome>>().await
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            SESSION_A,
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            run_turn,
+            PickerCatalogs::default(),
+            Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        );
+        controller.active_session_id = Some(SESSION_A.to_owned());
+        controller.type_text("long running");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("first prompt submits");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(controller.active_turn.is_some(), "turn is running");
+        controller
+    }
+
+    #[tokio::test]
+    async fn slash_auto_updates_permission_mode_while_turn_is_running() {
+        let mut controller = running_turn_controller().await;
+
+        controller.type_text("/auto");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("slash handled");
+
+        assert!(controller.active_turn.is_some(), "turn should keep running");
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Auto);
+        assert!(transcript_has_status(&controller, "Permission Mode: auto"));
+        assert!(
+            !transcript_has_status(&controller, "A turn is already running"),
+            "live slash must not be blocked by the active-turn guard"
+        );
+
+        controller.cancel_active_turn().await.expect("cancel turn");
+    }
+
+    #[tokio::test]
+    async fn slash_ask_updates_permission_mode_while_turn_is_running() {
+        let mut controller = running_turn_controller().await;
+        // Flip to Auto first so /ask is a real change.
+        controller.type_text("/auto");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("slash handled");
+
+        controller.type_text("/ask");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("slash handled");
+
+        assert!(controller.active_turn.is_some(), "turn should keep running");
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Ask);
+        assert!(transcript_has_status(&controller, "Permission Mode: ask"));
+
+        controller.cancel_active_turn().await.expect("cancel turn");
+    }
+
+    #[tokio::test]
+    async fn slash_yolo_updates_permission_mode_while_turn_is_running() {
+        let mut controller = running_turn_controller().await;
+
+        controller.type_text("/yolo");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("slash handled");
+
+        assert!(controller.active_turn.is_some(), "turn should keep running");
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Yolo);
+        assert!(transcript_has_status(&controller, "Permission Mode: yolo"));
+
+        controller.cancel_active_turn().await.expect("cancel turn");
+    }
+
+    #[tokio::test]
+    async fn slash_permissions_degrades_to_hint_while_turn_is_running() {
+        let mut controller = running_turn_controller().await;
+
+        controller.type_text("/permissions");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("slash handled");
+
+        assert!(controller.active_turn.is_some(), "turn should keep running");
+        // The picker must NOT open during an active turn to avoid racing with
+        // approval/question overlays from the running turn.
+        assert!(
+            controller.chrome().focused_overlay().is_none(),
+            "picker overlay must not open during an active turn"
+        );
+        assert!(transcript_has_status(
+            &controller,
+            "Use /ask, /auto, or /yolo while a turn is running"
+        ));
+
+        controller.cancel_active_turn().await.expect("cancel turn");
+    }
+
     #[tokio::test]
     async fn slash_new_preserves_old_session_for_resume_picker_and_next_prompt_creates_new_session()
     {
@@ -11621,6 +12058,61 @@ command = "python3"
             "slash commands must not be persisted: {persisted}"
         );
         drop(dir);
+    }
+
+    #[tokio::test]
+    async fn slash_mcp_opens_mcp_manager_overlay() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async { Ok(vec![]) },
+        );
+        let project_dir = test_workspace_root();
+        controller.local_config =
+            Some(test_config(&project_dir, project_dir.join(".neo/sessions")));
+        controller.type_text("/mcp");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("slash command handled");
+        let overlay = controller
+            .chrome()
+            .focused_overlay()
+            .expect("/mcp should open an overlay");
+        assert!(
+            matches!(overlay.kind, OverlayKind::McpManager(_)),
+            "/mcp should open the MCP manager overlay, got {:?}",
+            overlay.kind
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_mcp_renders_mcp_manager_overlay() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async { Ok(vec![]) },
+        );
+        let project_dir = test_workspace_root();
+        controller.local_config =
+            Some(test_config(&project_dir, project_dir.join(".neo/sessions")));
+        controller.type_text("/mcp");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("slash command handled");
+        let mut transcript = controller.tui.transcript().clone();
+        let lines = compose_tui_frame(controller.chrome(), &mut transcript, 80, 24)
+            .expect("frame composes");
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("MCP Servers"),
+            "rendered frame should contain MCP manager title: {joined}"
+        );
     }
 
     #[tokio::test]
@@ -12140,5 +12632,387 @@ command = "python3"
                 .expect("read trust"),
             Some(false)
         );
+    }
+
+    fn btw_test_config(project_dir: &std::path::Path) -> crate::config::AppConfig {
+        test_config(project_dir, project_dir.join(".neo/sessions"))
+    }
+
+    fn btw_fake_client(answer: &str) -> Arc<dyn neo_ai::ModelClient> {
+        use neo_ai::{AiStreamEvent, StopReason};
+        Arc::new(neo_ai::providers::fake::FakeModelClient::new(vec![
+            AiStreamEvent::MessageStart {
+                id: "msg-1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: answer.to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]))
+    }
+
+    #[tokio::test]
+    async fn slash_btw_opens_empty_sidecar_panel_without_starting_main_turn() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.local_config = Some(btw_test_config(&project_dir));
+        controller.set_btw_client(btw_fake_client(""));
+
+        controller.handle_slash_command("/btw").await;
+
+        assert!(
+            controller.chrome().has_btw_panel(),
+            "/btw opens the sidecar panel"
+        );
+        assert!(
+            controller.btw_runner.is_some(),
+            "/btw creates a sidecar runner"
+        );
+        assert!(
+            controller.active_turn.is_none(),
+            "/btw must not start a main turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_btw_question_starts_in_memory_sidecar_only() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.local_config = Some(btw_test_config(&project_dir));
+        controller.set_btw_client(btw_fake_client("42"));
+
+        controller.handle_slash_command("/btw what is 2+2?").await;
+
+        assert!(controller.chrome().has_btw_panel());
+        assert!(controller.btw_receiver.is_some());
+        assert!(controller.active_turn.is_none());
+
+        // Drain events so the panel state reflects the sidecar answer.
+        for _ in 0..10 {
+            controller.drain_btw_sidecar();
+            tokio::task::yield_now().await;
+        }
+        let state = controller.chrome().btw_panel_state().expect("panel state");
+        assert_eq!(state.sidecar.turns.len(), 1);
+        assert_eq!(state.sidecar.turns[0].prompt, "what is 2+2?");
+        assert_eq!(state.sidecar.turns[0].answer, "42");
+    }
+
+    #[tokio::test]
+    async fn composer_routes_to_sidecar_when_panel_open() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.local_config = Some(btw_test_config(&project_dir));
+        controller.set_btw_client(btw_fake_client("answer"));
+
+        controller.handle_slash_command("/btw").await;
+        controller.type_text("explain this");
+        controller
+            .submit_current_prompt()
+            .await
+            .expect("submit routes to sidecar");
+
+        assert!(controller.active_turn.is_none(), "must not start main turn");
+        for _ in 0..10 {
+            controller.drain_btw_sidecar();
+            tokio::task::yield_now().await;
+        }
+        let state = controller.chrome().btw_panel_state().expect("panel state");
+        assert_eq!(state.sidecar.turns.len(), 1);
+        assert_eq!(state.sidecar.turns[0].prompt, "explain this");
+    }
+
+    #[tokio::test]
+    async fn empty_composer_esc_closes_panel() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.local_config = Some(btw_test_config(&project_dir));
+        controller.set_btw_client(btw_fake_client(""));
+
+        controller.handle_slash_command("/btw").await;
+        assert!(controller.chrome().has_btw_panel());
+
+        controller
+            .handle_input_event(InputEvent::Cancel)
+            .await
+            .expect("esc handled");
+
+        assert!(
+            !controller.chrome().has_btw_panel(),
+            "Esc closes empty panel"
+        );
+    }
+
+    #[tokio::test]
+    async fn sidecar_events_do_not_append_to_main_transcript() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.local_config = Some(btw_test_config(&project_dir));
+        controller.set_btw_client(btw_fake_client("side answer"));
+
+        let entries_before = controller.tui.transcript().transcript().entries().len();
+        controller.handle_slash_command("/btw side question").await;
+        for _ in 0..20 {
+            controller.drain_btw_sidecar();
+            tokio::task::yield_now().await;
+        }
+        let entries_after = controller.tui.transcript().transcript().entries().len();
+
+        assert_eq!(
+            entries_before, entries_after,
+            "sidecar must not append to main transcript"
+        );
+        let state = controller.chrome().btw_panel_state().expect("panel state");
+        assert_eq!(state.sidecar.turns[0].answer, "side answer");
+    }
+
+    #[tokio::test]
+    async fn slash_btw_while_main_turn_running_does_not_steer_or_queue_main_turn() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async move { std::future::pending::<Result<Vec<AgentEvent>>>().await },
+        );
+        controller.local_config = Some(btw_test_config(&project_dir));
+        controller.set_btw_client(btw_fake_client("side answer"));
+
+        controller.type_text("main question");
+        controller
+            .submit_current_prompt()
+            .await
+            .expect("main turn starts");
+        assert!(
+            controller.active_turn.is_some(),
+            "main turn should be active"
+        );
+
+        controller.handle_slash_command("/btw side question").await;
+        for _ in 0..20 {
+            controller.drain_btw_sidecar();
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            controller.active_turn.is_some(),
+            "/btw must not cancel or queue the main turn"
+        );
+        let state = controller.chrome().btw_panel_state().expect("panel state");
+        assert_eq!(state.sidecar.turns.len(), 1);
+        assert_eq!(state.sidecar.turns[0].answer, "side answer");
+    }
+
+    #[tokio::test]
+    async fn escape_closes_btw_without_touching_main_turn() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async move { std::future::pending::<Result<Vec<AgentEvent>>>().await },
+        );
+        controller.local_config = Some(btw_test_config(&project_dir));
+        controller.set_btw_client(btw_fake_client(""));
+
+        controller.type_text("main question");
+        controller
+            .submit_current_prompt()
+            .await
+            .expect("main turn starts");
+        assert!(controller.active_turn.is_some());
+
+        controller.handle_slash_command("/btw").await;
+        assert!(controller.chrome().has_btw_panel());
+
+        controller
+            .handle_input_event(InputEvent::Cancel)
+            .await
+            .expect("esc handled");
+
+        assert!(!controller.chrome().has_btw_panel(), "Esc closes BTW panel");
+        assert!(
+            controller.active_turn.is_some(),
+            "Esc must not cancel the main turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn btw_running_preserves_composer_text_and_shows_busy_notice() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.local_config = Some(btw_test_config(&project_dir));
+        controller.set_btw_client(btw_fake_client(""));
+
+        // Open an empty sidecar panel and mark it Running as if a turn were in
+        // progress. This avoids coupling the test to a hanging model client.
+        controller.handle_slash_command("/btw").await;
+        if let Some(state) = controller.tui.chrome_mut().btw_panel_state_mut() {
+            state.sidecar.phase = neo_tui::widgets::btw_panel::BtwPhase::Running;
+        }
+
+        controller.type_text("second question");
+        controller
+            .submit_current_prompt()
+            .await
+            .expect("busy check handled");
+
+        assert_eq!(
+            controller.chrome().prompt().text,
+            "second question",
+            "composer text must be preserved while sidecar is running"
+        );
+        let state = controller.chrome().btw_panel_state().expect("panel state");
+        assert_eq!(state.sidecar.turns.len(), 0, "no sidecar turn started");
+        assert!(
+            state
+                .status_message
+                .as_deref()
+                .expect("busy notice")
+                .contains("Wait for /btw to finish"),
+            "busy notice should be shown"
+        );
+    }
+
+    #[tokio::test]
+    async fn btw_conversation_is_not_written_to_main_session_jsonl() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        let sessions_dir = project_dir.join(".neo/sessions");
+        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+        let session_id = "session_00000000-0000-4000-8000-000000000901";
+        let session_path = sessions_dir.join(format!("{session_id}.jsonl"));
+        let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
+            .await
+            .expect("create session");
+        writer
+            .append_event(&AgentEvent::MessageAppended {
+                message: AgentMessage::user_text("existing main message"),
+            })
+            .await
+            .expect("append event");
+        writer.flush().await.expect("flush");
+        drop(writer);
+
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.local_config = Some(btw_test_config(&project_dir));
+        controller.set_btw_client(btw_fake_client("side answer"));
+        controller.active_session_id = Some(session_id.to_owned());
+
+        controller.handle_slash_command("/btw side question").await;
+        for _ in 0..20 {
+            controller.drain_btw_sidecar();
+            tokio::task::yield_now().await;
+        }
+
+        let state = controller.chrome().btw_panel_state().expect("panel state");
+        assert_eq!(state.sidecar.turns[0].answer, "side answer");
+
+        let content = fs::read_to_string(&session_path).expect("read session");
+        assert!(
+            content.contains("existing main message"),
+            "original main event should still be present"
+        );
+        assert!(
+            !content.contains("side question"),
+            "side question must not be written to main JSONL"
+        );
+        assert!(
+            !content.contains("side answer"),
+            "side answer must not be written to main JSONL"
+        );
+    }
+
+    #[tokio::test]
+    async fn shift_enter_inserts_newline_while_btw_panel_open() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.local_config = Some(btw_test_config(&project_dir));
+        controller.set_btw_client(btw_fake_client(""));
+
+        controller.handle_slash_command("/btw").await;
+        assert!(controller.chrome().has_btw_panel());
+
+        controller.type_text("line1");
+        controller
+            .handle_input_event(InputEvent::NewLine)
+            .await
+            .expect("newline handled");
+        controller.type_text("line2");
+
+        assert_eq!(controller.chrome().prompt().text, "line1\nline2");
     }
 }

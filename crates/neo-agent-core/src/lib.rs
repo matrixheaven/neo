@@ -8,6 +8,7 @@ pub mod permissions;
 pub mod rpc;
 pub mod runtime;
 pub mod session;
+pub mod sidecar;
 pub mod skills;
 pub mod tools;
 

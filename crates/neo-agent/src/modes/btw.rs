@@ -84,9 +84,7 @@ impl BtwRunner {
     /// Cancellation is independent of any main-turn cancellation token.
     pub fn cancel(&self) {
         if let Ok(guard) = self.cancel_token.lock() {
-            if let Some(token) = guard.as_ref() {
-                token.cancel();
-            }
+            guard.as_ref().map(CancellationToken::cancel);
         }
     }
 
@@ -240,32 +238,30 @@ fn forward_event(
             });
             false
         }
-        Ok(AgentEvent::MessageFinished { stop_reason, .. }) => match stop_reason {
-            StopReason::Cancelled => {
-                let _ = event_tx.send(BtwEvent::Cancelled);
-                true
+        Ok(
+            AgentEvent::MessageFinished {
+                stop_reason: StopReason::Cancelled,
+                ..
             }
-            StopReason::Error => {
-                // The matching `AgentEvent::Error` already emits `Failed`.
-                false
-            }
-            _ => {
-                let _ = event_tx.send(BtwEvent::Finished);
-                true
-            }
-        },
-        Ok(AgentEvent::TurnFinished { stop_reason, .. })
-            if stop_reason == StopReason::Cancelled =>
-        {
+            | AgentEvent::TurnFinished {
+                stop_reason: StopReason::Cancelled,
+                ..
+            },
+        )
+        | Err(AgentRuntimeError::Cancelled) => {
             let _ = event_tx.send(BtwEvent::Cancelled);
+            true
+        }
+        Ok(AgentEvent::MessageFinished { stop_reason, .. }) => {
+            if stop_reason == StopReason::Error {
+                // The matching `AgentEvent::Error` already emits `Failed`.
+                return false;
+            }
+            let _ = event_tx.send(BtwEvent::Finished);
             true
         }
         Ok(AgentEvent::Error { message, .. }) => {
             let _ = event_tx.send(BtwEvent::Failed(message));
-            true
-        }
-        Err(AgentRuntimeError::Cancelled) => {
-            let _ = event_tx.send(BtwEvent::Cancelled);
             true
         }
         Err(error) => {
@@ -293,6 +289,7 @@ mod tests {
         AppConfig, Defaults, McpConfig, RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
     };
     use crate::trust;
+    use neo_tui::widgets::btw_panel::BtwSidecar;
 
     fn test_config(project_dir: &std::path::Path) -> AppConfig {
         AppConfig {
@@ -507,5 +504,112 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    #[test]
+    fn update_state_started_creates_running_turn() {
+        let mut state = BtwPanelState::new(BtwSidecar::new("btw-1"));
+        update_btw_panel_state(
+            &mut state,
+            BtwEvent::Started {
+                sidecar_id: "btw-1".to_owned(),
+                prompt: "hello".to_owned(),
+            },
+        );
+        assert_eq!(state.sidecar.turns.len(), 1);
+        assert_eq!(state.sidecar.turns[0].prompt, "hello");
+        assert_eq!(state.sidecar.turns[0].phase, BtwPhase::Running);
+        assert_eq!(state.sidecar.phase, BtwPhase::Running);
+    }
+
+    #[test]
+    fn update_state_appends_thinking_and_text_to_last_turn() {
+        let mut state = BtwPanelState::new(BtwSidecar::new("btw-1"));
+        update_btw_panel_state(
+            &mut state,
+            BtwEvent::Started {
+                sidecar_id: "btw-1".to_owned(),
+                prompt: "q".to_owned(),
+            },
+        );
+        update_btw_panel_state(&mut state, BtwEvent::ThinkingDelta("thinking ".to_owned()));
+        update_btw_panel_state(&mut state, BtwEvent::TextDelta("answer".to_owned()));
+
+        assert_eq!(state.sidecar.turns[0].thinking, "thinking ");
+        assert_eq!(state.sidecar.turns[0].answer, "answer");
+    }
+
+    #[test]
+    fn update_state_finished_marks_turn_done() {
+        let mut state = BtwPanelState::new(BtwSidecar::new("btw-1"));
+        update_btw_panel_state(
+            &mut state,
+            BtwEvent::Started {
+                sidecar_id: "btw-1".to_owned(),
+                prompt: "q".to_owned(),
+            },
+        );
+        update_btw_panel_state(&mut state, BtwEvent::Finished);
+        assert_eq!(state.sidecar.turns[0].phase, BtwPhase::Done);
+        assert_eq!(state.sidecar.phase, BtwPhase::Done);
+    }
+
+    #[test]
+    fn update_state_cancelled_pops_empty_turn() {
+        let mut state = BtwPanelState::new(BtwSidecar::new("btw-1"));
+        update_btw_panel_state(
+            &mut state,
+            BtwEvent::Started {
+                sidecar_id: "btw-1".to_owned(),
+                prompt: "q".to_owned(),
+            },
+        );
+        update_btw_panel_state(&mut state, BtwEvent::Cancelled);
+        assert!(state.sidecar.turns.is_empty());
+        assert_eq!(state.sidecar.phase, BtwPhase::Cancelled);
+    }
+
+    #[test]
+    fn update_state_cancelled_keeps_nonempty_turn() {
+        let mut state = BtwPanelState::new(BtwSidecar::new("btw-1"));
+        update_btw_panel_state(
+            &mut state,
+            BtwEvent::Started {
+                sidecar_id: "btw-1".to_owned(),
+                prompt: "q".to_owned(),
+            },
+        );
+        update_btw_panel_state(&mut state, BtwEvent::TextDelta("partial".to_owned()));
+        update_btw_panel_state(&mut state, BtwEvent::Cancelled);
+        assert_eq!(state.sidecar.turns[0].phase, BtwPhase::Cancelled);
+        assert_eq!(state.sidecar.phase, BtwPhase::Cancelled);
+    }
+
+    #[test]
+    fn update_state_failed_sets_error_and_phase() {
+        let mut state = BtwPanelState::new(BtwSidecar::new("btw-1"));
+        update_btw_panel_state(
+            &mut state,
+            BtwEvent::Started {
+                sidecar_id: "btw-1".to_owned(),
+                prompt: "q".to_owned(),
+            },
+        );
+        update_btw_panel_state(&mut state, BtwEvent::Failed("boom".to_owned()));
+        assert_eq!(state.sidecar.turns[0].error, Some("boom".to_owned()));
+        assert_eq!(state.sidecar.turns[0].phase, BtwPhase::Failed);
+        assert_eq!(state.sidecar.phase, BtwPhase::Failed);
+    }
+
+    #[test]
+    fn update_state_tool_denied_without_turn_sets_status_message() {
+        let mut state = BtwPanelState::new(BtwSidecar::new("btw-1"));
+        update_btw_panel_state(
+            &mut state,
+            BtwEvent::ToolDenied {
+                message: "denied".to_owned(),
+            },
+        );
+        assert_eq!(state.status_message, Some("denied".to_owned()));
     }
 }

@@ -29,7 +29,7 @@ impl Tool for EnterPlanModeTool {
          7. User Preferences Matter - if user input would materially change the implementation approach.\n\n\
          Permission mode notes:\n\
          - EnterPlanMode enters plan mode automatically without an approval prompt in all permission modes.\n\
-         - In yolo and manual modes, ExitPlanMode still presents the plan to the user for approval.\n\
+         - In yolo and ask modes, ExitPlanMode still presents the plan to the user for approval.\n\
          - In auto permission mode, do not use AskUserQuestion; make the best decision from available context.\n\
          - In auto permission mode, ExitPlanMode exits plan mode without asking the user.\n\
          - Use EnterPlanMode only when planning itself adds value.\n\n\
@@ -119,14 +119,14 @@ impl Tool for ExitPlanModeTool {
          - If your plan contains multiple alternative approaches, pass them via the `options` parameter so the user can choose which approach to execute.\n\
          - Each option should have a concise label and a brief description of trade-offs.\n\
          - If you recommend one option, list it first and append \"(Recommended)\" to its label.\n\
-         - In yolo and manual modes, the user will see all options alongside Reject and Revise choices.\n\
+         - In yolo and ask modes, the user will see all options alongside Reject and Revise choices.\n\
          - Provide up to 3 options; the host adds the standard rejection and revision controls.\n\
          - Passing a single option is allowed and is equivalent to a plain plan approval.\n\
          - Do NOT use \"Reject\", \"Reject and Exit\", \"Revise\", or \"Approve\" as option labels - these are reserved by the system.\n\n\
          Before using:\n\
          - In auto permission mode, do NOT use AskUserQuestion; make the best decision from available context.\n\
          - In auto permission mode, this tool exits plan mode without asking the user.\n\
-         - In yolo and manual modes, this tool still presents the plan to the user for approval.\n\
+         - In yolo and ask modes, this tool still presents the plan to the user for approval.\n\
          - If auto permission mode is not active and you have unresolved questions, use AskUserQuestion first.\n\
          - If auto permission mode is not active and you have multiple approaches and have not narrowed down yet, consider using AskUserQuestion first to let the user choose, then write a plan for the chosen approach only.\n\
          - Once your plan is finalized, use THIS tool to request approval.\n\

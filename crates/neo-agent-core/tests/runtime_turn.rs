@@ -2371,7 +2371,7 @@ async fn runtime_emits_approval_request_for_ask_permission_and_skips_tool_execut
     let mut tools = ToolRegistry::new();
     tools.register(EchoTool);
     let runtime = AgentRuntime::with_tools(
-        AgentConfig::for_model(harness.model()).with_permission_mode(PermissionMode::Manual),
+        AgentConfig::for_model(harness.model()).with_permission_mode(PermissionMode::Ask),
         harness.client(),
         tools,
     );
@@ -2457,7 +2457,7 @@ async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
     });
     let runtime = AgentRuntime::with_tools(
         AgentConfig::for_model(harness.model())
-            .with_permission_mode(PermissionMode::Manual)
+            .with_permission_mode(PermissionMode::Ask)
             .with_approval_handler(|request| {
                 assert_eq!(request.operation, PermissionOperation::Tool);
                 assert_eq!(request.subject, "echo");
@@ -2501,6 +2501,232 @@ async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
 }
 
 #[tokio::test]
+async fn live_permission_switch_to_auto_skips_approval_for_later_tool_calls() {
+    // One turn with two model ToolUse round-trips. The first echo requires
+    // approval in Ask mode. The approval handler switches the shared live mode
+    // to Auto while granting this first call; the second echo must therefore
+    // run WITHOUT a second ApprovalRequested event.
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "text": "first" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_2".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_2".to_owned(),
+                arguments: json!({ "text": "second" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_3".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools.register(RecordingEchoTool {
+        executed: Arc::clone(&executed),
+    });
+    let live_mode = Arc::new(std::sync::RwLock::new(PermissionMode::Ask));
+    let live_for_handler = Arc::clone(&live_mode);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Ask)
+            .with_live_permission_mode(Arc::clone(&live_mode))
+            .with_approval_handler(move |_request| {
+                // Flip the live mode to Auto before returning so the second tool
+                // call is prepared under Auto and must not request approval again.
+                if let Ok(mut mode) = live_for_handler.write() {
+                    *mode = PermissionMode::Auto;
+                }
+                PermissionApprovalDecision::AllowOnce
+            }),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("call tools"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("live-switch tool loop should succeed");
+
+    let first_approval = events.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::ApprovalRequested { id, .. } if id == "tool_1"
+        )
+    });
+    let second_approval = events.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::ApprovalRequested { id, .. } if id == "tool_2"
+        )
+    });
+    assert!(
+        first_approval,
+        "first call should request approval under Ask"
+    );
+    assert!(
+        !second_approval,
+        "second call should NOT request approval after live switch to Auto"
+    );
+    assert_eq!(
+        *executed.lock().expect("executed lock poisoned"),
+        vec!["first".to_owned(), "second".to_owned()]
+    );
+    assert_eq!(*live_mode.read().unwrap(), PermissionMode::Auto);
+}
+
+#[tokio::test]
+async fn live_permission_switch_to_ask_requests_approval_for_later_tool_calls() {
+    // Inverse of the above: start Auto (no approval), flip live mode to Ask
+    // mid-turn via the async after-tool hook, and the second generic tool call
+    // must request approval.
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "text": "first" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_2".to_owned(),
+                name: "echo".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_2".to_owned(),
+                arguments: json!({ "text": "second" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_3".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "done".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools.register(RecordingEchoTool {
+        executed: Arc::clone(&executed),
+    });
+    let live_mode = Arc::new(std::sync::RwLock::new(PermissionMode::Auto));
+    let live_for_hook = Arc::clone(&live_mode);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Auto)
+            .with_live_permission_mode(Arc::clone(&live_mode))
+            .with_async_after_tool_call(move |_call, result, _cancel| {
+                let live = Arc::clone(&live_for_hook);
+                async move {
+                    if let Ok(mut mode) = live.write() {
+                        *mode = PermissionMode::Ask;
+                    }
+                    result
+                }
+            })
+            .with_approval_handler(|_request| PermissionApprovalDecision::AllowOnce),
+        harness.client(),
+        tools,
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("call tools"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("live-switch tool loop should succeed");
+
+    let first_approval = events.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::ApprovalRequested { id, .. } if id == "tool_1"
+        )
+    });
+    let second_approval = events.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::ApprovalRequested { id, .. } if id == "tool_2"
+        )
+    });
+    assert!(
+        !first_approval,
+        "first call should NOT request approval under Auto"
+    );
+    assert!(
+        second_approval,
+        "second call should request approval after live switch to Ask"
+    );
+    assert_eq!(
+        *executed.lock().expect("executed lock poisoned"),
+        vec!["first".to_owned(), "second".to_owned()]
+    );
+}
+
+#[tokio::test]
 async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
     let harness = FakeHarness::from_turns([
         vec![
@@ -2540,7 +2766,7 @@ async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
     });
     let runtime = AgentRuntime::with_tools(
         AgentConfig::for_model(harness.model())
-            .with_permission_mode(PermissionMode::Manual)
+            .with_permission_mode(PermissionMode::Ask)
             .with_approval_handler(|request| {
                 assert_eq!(request.operation, PermissionOperation::Tool);
                 assert_eq!(request.subject, "echo");
@@ -2617,7 +2843,7 @@ fn async_echo_runtime(harness: &FakeHarness) -> AsyncEchoRuntime {
     let observed_requests = Arc::new(Mutex::new(Vec::new()));
     let runtime = AgentRuntime::with_tools(
         AgentConfig::for_model(harness.model())
-            .with_permission_mode(PermissionMode::Manual)
+            .with_permission_mode(PermissionMode::Ask)
             .with_async_approval_handler({
                 let decision_receiver = Arc::clone(&decision_receiver);
                 let observed_requests = Arc::clone(&observed_requests);
@@ -2684,6 +2910,17 @@ where
             .is_err(),
         "runtime should wait for the async approval decision before {action}"
     );
+}
+
+/// Set the permission mode on a config while keeping the static snapshot and
+/// the live runtime state in sync. Direct field mutation of
+/// `config.permission_mode` no longer affects permission evaluation because
+/// `permission_preparation_for_mode` reads the shared live handle.
+fn set_config_permission_mode(config: &mut AgentConfig, mode: PermissionMode) {
+    config.permission_mode = mode;
+    if let Ok(mut live) = config.live_permission_mode.write() {
+        *live = mode;
+    }
 }
 
 fn final_done_turn() -> Vec<AiStreamEvent> {
@@ -2877,7 +3114,7 @@ async fn runtime_cancels_while_waiting_for_async_approval_decision() {
 }
 
 #[tokio::test]
-async fn parallel_mode_serializes_manual_approval_batches() {
+async fn parallel_mode_serializes_ask_approval_batches() {
     let workspace = tempfile::tempdir().expect("workspace");
     let harness = parallel_write_and_glob_harness();
     let (decision_sender, decision_receiver) = oneshot::channel();
@@ -2885,7 +3122,7 @@ async fn parallel_mode_serializes_manual_approval_batches() {
     let runtime = AgentRuntime::with_tools(
         AgentConfig::for_model(harness.model())
             .with_tool_execution_mode(ToolExecutionMode::Parallel)
-            .with_permission_mode(PermissionMode::Manual)
+            .with_permission_mode(PermissionMode::Ask)
             .with_workspace_root(workspace.path())
             .expect("workspace config")
             .with_async_approval_handler({
@@ -3029,7 +3266,7 @@ async fn runtime_approval_handler_allows_file_write_tool_permission() {
     ]);
     let runtime = AgentRuntime::with_tools(
         AgentConfig::for_model(harness.model())
-            .with_permission_mode(PermissionMode::Manual)
+            .with_permission_mode(PermissionMode::Ask)
             .with_workspace_root(workspace.path())
             .expect("workspace config")
             .with_approval_handler(|request| {
@@ -3620,7 +3857,7 @@ async fn parallel_mode_serializes_non_background_ask_user_question() {
 }
 
 #[tokio::test]
-async fn manual_mode_ask_user_question_dispatches_without_approval() {
+async fn ask_mode_ask_user_question_dispatches_without_approval() {
     let harness = FakeHarness::from_turns([
         vec![
             AiStreamEvent::MessageStart {
@@ -3653,7 +3890,7 @@ async fn manual_mode_ask_user_question_dispatches_without_approval() {
     let mut tools = ToolRegistry::new();
     tools.register(neo_agent_core::AskUserTool::new(question_tx));
     let runtime = AgentRuntime::with_tools(
-        AgentConfig::for_model(harness.model()).with_permission_mode(PermissionMode::Manual),
+        AgentConfig::for_model(harness.model()).with_permission_mode(PermissionMode::Ask),
         harness.client(),
         tools,
     );
@@ -3662,7 +3899,7 @@ async fn manual_mode_ask_user_question_dispatches_without_approval() {
     let stream = runtime.run_turn(&mut context, AgentMessage::user_text("ask user"));
     let pending = timeout(Duration::from_millis(250), question_rx.recv())
         .await
-        .expect("manual mode should dispatch AskUserQuestion to the host")
+        .expect("ask mode should dispatch AskUserQuestion to the host")
         .expect("question should be pending");
     assert_eq!(pending.questions[0].question, "Which language?");
 
@@ -3688,7 +3925,7 @@ async fn manual_mode_ask_user_question_dispatches_without_approval() {
 }
 
 #[tokio::test]
-async fn manual_mode_skill_tool_runs_without_approval() {
+async fn ask_mode_skill_tool_runs_without_approval() {
     let skills_dir = tempfile::tempdir().expect("skills dir");
     std::fs::write(
         skills_dir.path().join("SKILL.md"),
@@ -3724,7 +3961,7 @@ Review the current change carefully.
         final_done_turn(),
     ]);
     let runtime = AgentRuntime::with_tools_and_skills(
-        AgentConfig::for_model(harness.model()).with_permission_mode(PermissionMode::Manual),
+        AgentConfig::for_model(harness.model()).with_permission_mode(PermissionMode::Ask),
         harness.client(),
         ToolRegistry::new(),
         skill_store,
@@ -3935,7 +4172,7 @@ async fn runtime_auto_mode_denies_ask_user_question() {
 }
 
 #[tokio::test]
-async fn runtime_manual_mode_read_runs_and_custom_tool_asks() {
+async fn runtime_ask_mode_read_runs_and_custom_tool_asks() {
     let workspace = tempfile::tempdir().expect("workspace");
     std::fs::write(workspace.path().join("file.txt"), "hello").expect("seed file");
     let harness = FakeHarness::from_turns([
@@ -3970,7 +4207,7 @@ async fn runtime_manual_mode_read_runs_and_custom_tool_asks() {
     tools.register(EchoTool);
     let runtime = AgentRuntime::with_tools(
         AgentConfig::for_model(harness.model())
-            .with_permission_mode(PermissionMode::Manual)
+            .with_permission_mode(PermissionMode::Ask)
             .with_workspace_root(workspace.path())
             .expect("workspace root"),
         harness.client(),
@@ -3996,7 +4233,7 @@ async fn runtime_manual_mode_read_runs_and_custom_tool_asks() {
                 ..
             } if id == "tool_1" && name == "Read" && result.content.contains("hello")
         )),
-        "Read should run without approval in manual mode"
+        "Read should run without approval in ask mode"
     );
     assert!(events.contains(&AgentEvent::ApprovalRequested {
         turn: 1,
@@ -4045,7 +4282,7 @@ async fn runtime_session_approval_persists_for_same_tool() {
     });
     let runtime = AgentRuntime::with_tools(
         AgentConfig::for_model(harness.model())
-            .with_permission_mode(PermissionMode::Manual)
+            .with_permission_mode(PermissionMode::Ask)
             .with_approval_handler({
                 let count = Arc::clone(&approval_count);
                 move |_request| {
@@ -4078,7 +4315,7 @@ async fn runtime_session_approval_persists_for_same_tool() {
 }
 
 #[tokio::test]
-async fn runtime_manual_mode_reviews_exit_plan_mode_with_non_empty_plan() {
+async fn runtime_ask_mode_reviews_exit_plan_mode_with_non_empty_plan() {
     let home = tempfile::tempdir().expect("home");
     let workspace = tempfile::tempdir().expect("workspace");
     let workspace_root = workspace
@@ -4090,7 +4327,7 @@ async fn runtime_manual_mode_reviews_exit_plan_mode_with_non_empty_plan() {
     let mut config = AgentConfig::for_model(fake_model());
     config.home_dir = Some(home.path().to_path_buf());
     config.workspace_root = Some(workspace_root);
-    config.permission_mode = PermissionMode::Manual;
+    set_config_permission_mode(&mut config, PermissionMode::Ask);
     {
         let mut pm = config.plan_mode.write().expect("plan mode lock");
         let data = pm.enter(&plans_dir, true).expect("enter plan mode");
@@ -4186,7 +4423,7 @@ async fn runtime_allow_for_session_does_not_cache_exit_plan_mode() {
     let mut config = AgentConfig::for_model(fake_model());
     config.home_dir = Some(home.path().to_path_buf());
     config.workspace_root = Some(workspace_root);
-    config.permission_mode = PermissionMode::Manual;
+    set_config_permission_mode(&mut config, PermissionMode::Ask);
     {
         let mut pm = config.plan_mode.write().expect("plan mode lock");
         let data = pm.enter(&plans_dir, true).expect("enter plan mode");
@@ -4222,7 +4459,7 @@ async fn runtime_allow_for_session_does_not_cache_exit_plan_mode() {
 }
 
 #[tokio::test]
-async fn runtime_manual_mode_reviews_exit_goal_mode_and_emits_goal_started() {
+async fn runtime_ask_mode_reviews_exit_goal_mode_and_emits_goal_started() {
     let home = tempfile::tempdir().expect("home");
     let workspace = tempfile::tempdir().expect("workspace");
     let mut config = AgentConfig::for_model(fake_model());
@@ -4233,7 +4470,7 @@ async fn runtime_manual_mode_reviews_exit_goal_mode_and_emits_goal_started() {
             .canonicalize()
             .expect("canonical workspace"),
     );
-    config.permission_mode = PermissionMode::Manual;
+    set_config_permission_mode(&mut config, PermissionMode::Ask);
 
     let harness = FakeHarness::from_turns([
         vec![
@@ -4302,7 +4539,7 @@ async fn runtime_manual_mode_reviews_exit_goal_mode_and_emits_goal_started() {
 }
 
 #[tokio::test]
-async fn runtime_manual_mode_exit_plan_mode_reject_keeps_plan_active_with_feedback() {
+async fn runtime_ask_mode_exit_plan_mode_reject_keeps_plan_active_with_feedback() {
     let home = tempfile::tempdir().expect("home");
     let workspace = tempfile::tempdir().expect("workspace");
     let workspace_root = workspace
@@ -4314,7 +4551,7 @@ async fn runtime_manual_mode_exit_plan_mode_reject_keeps_plan_active_with_feedba
     let mut config = AgentConfig::for_model(fake_model());
     config.home_dir = Some(home.path().to_path_buf());
     config.workspace_root = Some(workspace_root);
-    config.permission_mode = PermissionMode::Manual;
+    set_config_permission_mode(&mut config, PermissionMode::Ask);
     {
         let mut pm = config.plan_mode.write().expect("plan mode lock");
         let data = pm.enter(&plans_dir, true).expect("enter plan mode");
@@ -4396,7 +4633,7 @@ async fn runtime_plan_mode_guard_denies_write_outside_plan_file() {
     let mut config = AgentConfig::for_model(fake_model());
     config.home_dir = Some(home.path().to_path_buf());
     config.workspace_root = Some(workspace_root);
-    config.permission_mode = PermissionMode::Yolo;
+    set_config_permission_mode(&mut config, PermissionMode::Yolo);
     {
         let mut pm = config.plan_mode.write().expect("plan mode lock");
         let _data = pm.enter(&plans_dir, true).expect("enter plan mode");
@@ -4466,7 +4703,7 @@ async fn runtime_plan_mode_allows_writing_active_plan_file_outside_workspace() {
     let mut config = AgentConfig::for_model(fake_model());
     config.home_dir = Some(home.path().to_path_buf());
     config.workspace_root = Some(workspace_root);
-    config.permission_mode = PermissionMode::Yolo;
+    set_config_permission_mode(&mut config, PermissionMode::Yolo);
     let plan_path = {
         let mut pm = config.plan_mode.write().expect("plan mode lock");
         pm.enter(&plans_dir, true).expect("enter plan mode").path
@@ -4542,7 +4779,7 @@ fn setup_active_plan(
 }
 
 #[tokio::test]
-async fn manual_mode_asks_for_bash() {
+async fn ask_mode_asks_for_bash() {
     let workspace = tempfile::tempdir().expect("workspace");
     let harness = FakeHarness::from_turns([
         vec![
@@ -4566,7 +4803,7 @@ async fn manual_mode_asks_for_bash() {
     ]);
     let runtime = AgentRuntime::with_tools(
         AgentConfig::for_model(harness.model())
-            .with_permission_mode(PermissionMode::Manual)
+            .with_permission_mode(PermissionMode::Ask)
             .with_workspace_root(workspace.path())
             .expect("workspace root"),
         harness.client(),
@@ -4716,7 +4953,7 @@ async fn auto_exit_plan_mode_does_not_request_review() {
     let workspace = tempfile::tempdir().expect("workspace");
     let mut config = AgentConfig::for_model(fake_model());
     setup_active_plan(&mut config, &home, &workspace, "do the thing");
-    config.permission_mode = PermissionMode::Auto;
+    set_config_permission_mode(&mut config, PermissionMode::Auto);
 
     let harness = FakeHarness::from_turns([
         vec![
@@ -4768,7 +5005,7 @@ async fn yolo_exit_plan_mode_with_non_empty_plan_requests_review() {
     let workspace = tempfile::tempdir().expect("workspace");
     let mut config = AgentConfig::for_model(fake_model());
     setup_active_plan(&mut config, &home, &workspace, "do the thing");
-    config.permission_mode = PermissionMode::Yolo;
+    set_config_permission_mode(&mut config, PermissionMode::Yolo);
 
     let harness = FakeHarness::from_turns([
         vec![

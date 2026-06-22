@@ -1533,7 +1533,7 @@ fn assistant_text_from_event(event: &AgentEvent) -> Option<String> {
     }
 }
 
-fn agent_config_for_app(
+pub(crate) fn agent_config_for_app(
     model: ModelSpec,
     config: &AppConfig,
     approval_tx: Option<mpsc::UnboundedSender<PromptApprovalRequest>>,
@@ -1541,6 +1541,7 @@ fn agent_config_for_app(
 ) -> anyhow::Result<AgentConfig> {
     let mut agent_config = AgentConfig::for_model(model)
         .with_permission_mode(config.permission_mode)
+        .with_live_permission_mode(Arc::clone(&config.live_permission_mode))
         .with_queue_modes(
             config.runtime.steering_queue_mode,
             config.runtime.follow_up_queue_mode,
@@ -1637,7 +1638,7 @@ fn effective_compaction_max_estimated_tokens(
     configured_max_estimated_tokens.max(model_threshold)
 }
 
-async fn tool_registry_for_config(
+pub(crate) async fn tool_registry_for_config(
     config: &AppConfig,
     todos: std::sync::Arc<std::sync::Mutex<Vec<neo_agent_core::TodoEventData>>>,
 ) -> anyhow::Result<ToolRegistry> {
@@ -1773,7 +1774,7 @@ pub(crate) fn latest_session_id(config: &AppConfig) -> anyhow::Result<String> {
         .with_context(|| format!("no sessions found in {}", bucket_dir.display()))
 }
 
-fn resolve_model(config: &AppConfig) -> anyhow::Result<ModelSpec> {
+pub(crate) fn resolve_model(config: &AppConfig) -> anyhow::Result<ModelSpec> {
     let registry = model_registry_for_config(config)?;
     select_config_model(&registry, config)
 }
@@ -2009,7 +2010,7 @@ fn parse_model_capabilities(
     mc
 }
 
-fn resolve_model_client(
+pub(crate) fn resolve_model_client(
     config: &AppConfig,
     model: &ModelSpec,
 ) -> anyhow::Result<Arc<dyn ModelClient>> {
@@ -2091,6 +2092,9 @@ mod tests {
             model_scope: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
             permission_mode: PermissionMode::default(),
+            live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
+                PermissionMode::default(),
+            )),
             defaults: Defaults {
                 mode: "events".to_owned(),
             },
@@ -2165,6 +2169,9 @@ mod tests {
             model_scope: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
             permission_mode: PermissionMode::default(),
+            live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
+                PermissionMode::default(),
+            )),
             defaults: Defaults {
                 mode: "events".to_owned(),
             },
@@ -2216,6 +2223,9 @@ mod tests {
             model_scope: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
             permission_mode: PermissionMode::default(),
+            live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
+                PermissionMode::default(),
+            )),
             defaults: Defaults {
                 mode: "events".to_owned(),
             },
@@ -2307,6 +2317,9 @@ mod tests {
             model_scope: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
             permission_mode: PermissionMode::default(),
+            live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
+                PermissionMode::default(),
+            )),
             defaults: Defaults {
                 mode: "interactive".to_owned(),
             },
@@ -2368,6 +2381,9 @@ mod tests {
             model_scope: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
             permission_mode: PermissionMode::default(),
+            live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
+                PermissionMode::default(),
+            )),
             defaults: Defaults {
                 mode: "interactive".to_owned(),
             },
@@ -2429,6 +2445,9 @@ mod tests {
             model_scope: Vec::new(),
             sessions_dir: temp.path().join(".neo/sessions"),
             permission_mode: PermissionMode::default(),
+            live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
+                PermissionMode::default(),
+            )),
             defaults: Defaults {
                 mode: "interactive".to_owned(),
             },
@@ -2806,6 +2825,9 @@ mod tests {
             model_scope: Vec::new(),
             sessions_dir: project_dir.join(".neo/sessions"),
             permission_mode: PermissionMode::default(),
+            live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
+                PermissionMode::default(),
+            )),
             defaults: Defaults {
                 mode: "interactive".to_owned(),
             },

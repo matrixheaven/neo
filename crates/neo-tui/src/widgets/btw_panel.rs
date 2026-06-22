@@ -323,7 +323,7 @@ mod tests {
     use crate::ansi::strip_ansi;
 
     fn plain(lines: &[String]) -> Vec<String> {
-        lines.iter().map(|l| strip_ansi(l).to_owned()).collect()
+        lines.iter().map(|l| strip_ansi(l).clone()).collect()
     }
 
     fn assert_width(lines: &[String], expected: usize) {
@@ -384,7 +384,7 @@ mod tests {
 
         let plain = plain(&lines);
         assert!(plain.iter().any(|l| l.contains("Q: What is 2+2?")));
-        assert!(plain.iter().any(|l| l.contains("4")));
+        assert!(plain.iter().any(|l| l.contains('4')));
         assert!(!plain.iter().any(|l| l.contains("Waiting for answer...")));
     }
 

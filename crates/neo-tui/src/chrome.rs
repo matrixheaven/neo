@@ -321,6 +321,8 @@ pub struct NeoChromeState {
     development_mode: DevelopmentMode,
     /// Current todo list for the `TodoPanel`.
     todo_items: Vec<TodoDisplayItem>,
+    /// Optional `/btw` sidecar panel state.
+    btw_panel_state: Option<crate::widgets::btw_panel::BtwPanelState>,
     /// Optional custom label shown in the footer as a working indicator.
     custom_working_label: Option<String>,
     /// Whether the current model has thinking enabled (shown in the footer).
@@ -361,6 +363,7 @@ impl NeoChromeState {
             plan_mode_active: false,
             development_mode: DevelopmentMode::Normal,
             todo_items: Vec::new(),
+            btw_panel_state: None,
             custom_working_label: None,
             thinking_enabled: false,
             exit_confirmation_label: None,
@@ -456,7 +459,7 @@ impl NeoChromeState {
     #[must_use]
     pub fn permission_badge(&self) -> (&'static str, Color) {
         match self.permission_mode {
-            PermissionMode::Manual => ("manual", self.theme().footer_permission_ask),
+            PermissionMode::Ask => ("ask", self.theme().footer_permission_ask),
             PermissionMode::Auto => ("auto", self.theme().footer_permission_allow),
             PermissionMode::Yolo => ("yolo", self.theme().footer_permission_deny),
         }
@@ -554,6 +557,40 @@ impl NeoChromeState {
     /// Clear the todo panel (e.g. when all items are done).
     pub fn clear_todos(&mut self) {
         self.todo_items.clear();
+    }
+
+    #[must_use]
+    pub fn btw_panel_state(&self) -> Option<&crate::widgets::btw_panel::BtwPanelState> {
+        self.btw_panel_state.as_ref()
+    }
+
+    pub fn btw_panel_state_mut(&mut self) -> Option<&mut crate::widgets::btw_panel::BtwPanelState> {
+        self.btw_panel_state.as_mut()
+    }
+
+    pub fn set_btw_panel_state(&mut self, state: Option<crate::widgets::btw_panel::BtwPanelState>) {
+        self.btw_panel_state = state;
+    }
+
+    #[must_use]
+    pub fn has_btw_panel(&self) -> bool {
+        self.btw_panel_state.is_some()
+    }
+
+    pub fn close_btw_panel(&mut self) {
+        self.btw_panel_state = None;
+    }
+
+    pub fn scroll_btw_panel_up(&mut self, rows: usize) {
+        if let Some(state) = self.btw_panel_state.as_mut() {
+            state.scroll_up(rows);
+        }
+    }
+
+    pub fn scroll_btw_panel_down(&mut self, rows: usize) {
+        if let Some(state) = self.btw_panel_state.as_mut() {
+            state.scroll_down(rows);
+        }
     }
 
     #[must_use]
@@ -1576,6 +1613,7 @@ impl NeoChromeState {
                 | OverlayKind::ModelSelector(_)
                 | OverlayKind::TabbedModelSelector(_)
                 | OverlayKind::ProviderManager(_)
+                | OverlayKind::McpManager(_)
                 | OverlayKind::ChoicePicker(_)
                 | OverlayKind::ApiKeyInput(_)
                 | OverlayKind::CustomRegistryImport(_)
@@ -2187,13 +2225,16 @@ impl SessionPickerState {
         } else {
             String::new()
         };
-        lines.push(format!(
+        let title_line = format!(
             "{}{}",
             crate::ansi::paint(title, crate::ansi::Style::default().fg(brand).bold()),
             title_suffix
-        ));
+        );
+        lines.push(truncate_styled_to_width(&title_line, width));
 
-        // Hint line
+        // Hint line. When the terminal is too narrow to hold the full hint,
+        // drop the lower-priority segments (keep navigate/Enter/Esc) so the
+        // line never overflows the renderer's hard width check.
         let scope_hint = match self.scope {
             SessionPickerScope::Workspace => "Ctrl+A all",
             SessionPickerScope::All => "Ctrl+A current cwd",
@@ -2214,19 +2255,42 @@ impl SessionPickerState {
                 "Esc cancel",
             ]
         };
-        lines.push(crate::ansi::paint(
+        let hint_full = crate::ansi::paint(
             &hint_parts.join(" \u{00b7} "),
             crate::ansi::Style::default().fg(text_muted),
-        ));
+        );
+        let hint_line = if crate::ansi::visible_width(&hint_full) <= width {
+            hint_full
+        } else {
+            // Narrow terminal: keep only the essential segments, in priority
+            // order, until the budget is exhausted.
+            let essential = ["\u{2191}\u{2193} navigate", "Enter select", "Esc cancel"];
+            let mut joined = String::new();
+            for part in essential {
+                let candidate = if joined.is_empty() {
+                    part.to_owned()
+                } else {
+                    format!("{joined} \u{00b7} {part}")
+                };
+                if crate::ansi::visible_width(&candidate) <= width {
+                    joined = candidate;
+                } else {
+                    break;
+                }
+            }
+            crate::ansi::paint(&joined, crate::ansi::Style::default().fg(text_muted))
+        };
+        lines.push(hint_line);
 
         lines.push(String::new());
 
         if !self.filter.is_empty() {
-            lines.push(format!(
+            let search_line = format!(
                 "{}{}",
                 crate::ansi::paint("Search: ", crate::ansi::Style::default().fg(brand)),
                 crate::ansi::paint(&self.filter, crate::ansi::Style::default().fg(text_color))
-            ));
+            );
+            lines.push(truncate_styled_to_width(&search_line, width));
         }
 
         let filtered = self.filtered_items();
@@ -2349,8 +2413,9 @@ impl SessionPickerState {
             ));
         }
 
-        // Truncate header to width
-        let mut card = vec![truncate_ansi_to_width(&header, width)];
+        // Truncate header to the live terminal width, display-width aware
+        // so wide glyphs (CJK, emoji, full-width punctuation) do not overflow.
+        let mut card = vec![truncate_styled_to_width(&header, width)];
 
         // Meta line: session id + work_dir
         let id_str = &item.id;
@@ -2364,15 +2429,20 @@ impl SessionPickerState {
             crate::ansi::paint(meta_gap, crate::ansi::Style::default().fg(text_muted)),
             crate::ansi::paint(&dir_str, crate::ansi::Style::default().fg(text_muted))
         );
-        let meta_visible = crate::ansi::strip_ansi(&meta_line).chars().count();
+        let meta_visible = crate::ansi::visible_width(&meta_line);
         if meta_visible <= width {
             card.push(meta_line);
         } else {
-            // Wrap: id on one line, dir on next
+            // Wrap: id on one line, dir on next. Both must still respect the
+            // terminal width — session ids are long UUIDs that can exceed a
+            // narrow terminal, so left-truncate the trailing (most distinctive)
+            // portion.
+            let id_budget = width.saturating_sub(indent.len());
+            let truncated_id = truncate_left(id_str, id_budget);
             card.push(format!(
                 "{}{}",
                 indent,
-                crate::ansi::paint(id_str, crate::ansi::Style::default().fg(text_muted))
+                crate::ansi::paint(&truncated_id, crate::ansi::Style::default().fg(text_muted))
             ));
             let dir_budget = width.saturating_sub(indent.len());
             let truncated_dir = truncate_left(&dir_str, dir_budget);
@@ -2388,8 +2458,13 @@ impl SessionPickerState {
             let trimmed = single_line(prompt);
             if !trimmed.is_empty() {
                 let marker = "\u{203a} ";
-                let budget = width.saturating_sub(indent.len() + marker.len());
-                let truncated = truncate_to_chars(&trimmed, budget);
+                // Budget in *display columns*, not character count: wide glyphs
+                // (CJK, emoji, full-width punctuation) take 2 columns each, so
+                // counting chars under-counts and can overflow the renderer's
+                // hard width check.
+                let prefix_width = indent.len() + marker.len();
+                let budget = width.saturating_sub(prefix_width);
+                let truncated = truncate_plain_to_width(&trimmed, budget);
                 card.push(format!(
                     "{}{}{}",
                     indent,
@@ -2443,44 +2518,75 @@ fn home_alias(path: &Path) -> String {
     path.display().to_string()
 }
 
-fn truncate_left(s: &str, max_width: usize) -> String {
+/// Truncate a plain (unstyled) string to at most `max_width` display columns,
+/// keeping the *leading* portion and appending an ellipsis ("…") if anything
+/// was cut. Wide glyphs (CJK, emoji, full-width punctuation) are counted by
+/// their display width, not character count.
+fn truncate_plain_to_width(s: &str, max_width: usize) -> String {
+    let total = crate::ansi::visible_width(s);
+    if total <= max_width {
+        return s.to_owned();
+    }
     if max_width == 0 {
         return String::new();
-    }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_width {
-        return s.to_owned();
     }
     if max_width == 1 {
         return "\u{2026}".to_owned();
     }
-    let keep = max_width - 1;
-    let start = chars.len() - keep;
-    format!("\u{2026}{}", chars[start..].iter().collect::<String>())
+    let prefix = crate::ansi::clip_plain_to_width(s, max_width - 1);
+    format!("{prefix}\u{2026}")
 }
 
-fn truncate_to_chars(s: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_chars {
+/// Truncate an ANSI-styled string to at most `max_width` display columns,
+/// preserving the existing escape sequences of the kept leading portion.
+/// Appends a plain "…" if anything was cut. ANSI-aware so styles do not get
+/// stripped, and display-width aware so wide glyphs do not overflow.
+fn truncate_styled_to_width(s: &str, max_width: usize) -> String {
+    let total = crate::ansi::visible_width(s);
+    if total <= max_width {
         return s.to_owned();
     }
-    if max_chars <= 1 {
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
         return "\u{2026}".to_owned();
     }
-    format!(
-        "{}\u{2026}",
-        chars[..max_chars - 1].iter().collect::<String>()
-    )
+    let prefix = crate::ansi::clip_visible_to_width(s, max_width - 1);
+    format!("{prefix}\u{2026}")
 }
 
-fn truncate_ansi_to_width(s: &str, width: usize) -> String {
-    let visible = crate::ansi::strip_ansi(s);
-    if visible.chars().count() <= width {
+/// Truncate a plain (unstyled) string to at most `max_width` display columns,
+/// keeping the *trailing* portion and prepending an ellipsis ("…") if anything
+/// was cut. Used for path-like content where the end is more informative than
+/// the start. Display-width aware so wide glyphs do not overflow.
+fn truncate_left(s: &str, max_width: usize) -> String {
+    let total = crate::ansi::visible_width(s);
+    if total <= max_width {
         return s.to_owned();
     }
-    // Simple truncation: just cut at width characters of visible text
-    let truncated: String = visible.chars().take(width).collect();
-    truncated
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "\u{2026}".to_owned();
+    }
+    // Reserve one column for the leading ellipsis, then keep trailing graphemes
+    // until we fill the remaining budget.
+    let budget = max_width - 1;
+    let graphemes: Vec<&str> =
+        <str as unicode_segmentation::UnicodeSegmentation>::graphemes(s, true).collect();
+    let mut kept = String::new();
+    let mut width = 0usize;
+    for g in graphemes.iter().rev() {
+        let gw = crate::ansi::visible_width(g);
+        if width + gw > budget {
+            break;
+        }
+        kept = format!("{g}{kept}");
+        width += gw;
+    }
+    format!("\u{2026}{kept}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3611,4 +3717,106 @@ fn select_item_matches(item: &SelectItem, filter: &str) -> bool {
             .description
             .as_deref()
             .is_some_and(|description| description.to_lowercase().contains(filter))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ansi::{strip_ansi, visible_width};
+
+    /// Helper: build a picker with a single item and render it at `width`.
+    fn render_single(item: SessionPickerItem, width: usize) -> Vec<String> {
+        let picker =
+            SessionPickerState::new(vec![item], "current", SessionPickerScope::Workspace, 8);
+        picker.render_lines(width, &TuiTheme::default())
+    }
+
+    /// Every line of a rendered picker must stay within the terminal width —
+    /// the regression behind the original `/resume` width crash.
+    fn assert_all_lines_fit(lines: &[String], width: usize) {
+        for (i, line) in lines.iter().enumerate() {
+            let w = visible_width(line);
+            assert!(
+                w <= width,
+                "rendered line {i} (w={w}) exceeds terminal width {width}: {:?}",
+                strip_ansi(line)
+            );
+        }
+    }
+
+    #[test]
+    fn plain_truncation_counts_wide_glyphs_by_display_width() {
+        // 5 CJK chars = 10 display columns. A budget of 5 must keep 4 columns
+        // of content + "…", never 5 characters (which would be 10 columns).
+        let s = "你好世界你好世界";
+        assert_eq!(visible_width(s), 16);
+        let out = truncate_plain_to_width(s, 5);
+        assert!(visible_width(&out) <= 5);
+        assert!(out.ends_with('\u{2026}'));
+        // ASCII path is unaffected in shape.
+        let ascii = truncate_plain_to_width("hello world", 5);
+        assert_eq!(ascii, "hell\u{2026}");
+    }
+
+    #[test]
+    fn left_truncation_counts_wide_glyphs_by_display_width() {
+        // Path-like: keep the trailing portion, leading ellipsis.
+        let s = "/very/long/路径/结尾";
+        let out = truncate_left(s, 8);
+        assert!(visible_width(&out) <= 8);
+        assert!(out.starts_with('\u{2026}'));
+        assert!(out.ends_with("结尾"));
+    }
+
+    #[test]
+    fn picker_renders_cjk_prompt_without_overflowing_narrow_width() {
+        // Reproduces the original crash: a CJK-heavy prompt preview under a
+        // narrow terminal. Before the fix this rendered at 252 cols on a
+        // 238-col terminal and panicked the renderer.
+        let prompt = "请对当前的修改再来一次提交和 push 建议： fix(tools): add schemars descriptions to built-in tool input schemas - Add #[schemars(description)] to Bash/Read/Write fields";
+        let item = SessionPickerItem::new(
+            "session_65992064-e2f2-4ed9-b9eb-bad077b460f1",
+            "Splitting workspace changes into multiple commits",
+            Some(prompt.to_owned()),
+            "~/Workspace/neo",
+            SystemTime::now(),
+            false,
+        );
+
+        for width in [40usize, 60, 80, 120, 200, 238] {
+            let lines = render_single(item.clone(), width);
+            assert_all_lines_fit(&lines, width);
+        }
+    }
+
+    #[test]
+    fn picker_truncates_long_title_under_narrow_width() {
+        let long_title = "A very long session title that definitely exceeds a tiny terminal width and must be clipped";
+        let item = SessionPickerItem::new(
+            "session_title",
+            long_title.to_owned(),
+            None,
+            "~/Workspace/neo",
+            SystemTime::now(),
+            false,
+        );
+        let lines = render_single(item, 30);
+        assert_all_lines_fit(&lines, 30);
+    }
+
+    #[test]
+    fn picker_meta_line_wraps_when_workdir_exceeds_width() {
+        // Short id + very long path under a narrow width must wrap (id line,
+        // then left-truncated dir line) without overflow.
+        let item = SessionPickerItem::new(
+            "session_meta",
+            "Short title",
+            None,
+            "/Users/someone/projects/really/deeply/nested/workspace/directory/here",
+            SystemTime::now(),
+            false,
+        );
+        let lines = render_single(item, 40);
+        assert_all_lines_fit(&lines, 40);
+    }
 }
