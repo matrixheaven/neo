@@ -459,6 +459,8 @@ enum McpAddStep {
 struct PendingApprovalResponse {
     decision_tx: oneshot::Sender<PermissionApprovalDecision>,
     feedback_tx: Option<oneshot::Sender<Option<String>>>,
+    /// Returns the model-supplied plan-review option label the user picked.
+    selected_label_tx: Option<oneshot::Sender<Option<String>>>,
     /// Display label for the session-approval option, used for the resolved
     /// transcript line.
     session_option_label: Option<String>,
@@ -1676,6 +1678,7 @@ impl InteractiveController {
                 choice: ApprovalChoice::Deny,
                 feedback: None,
                 picked_prefix: false,
+                selected_option_label: None,
             });
         }
         true
@@ -1700,6 +1703,9 @@ impl InteractiveController {
                 .transcript_mut()
                 .resolve_approval(&request_id, "Rejected");
             if let Some(tx) = pending.feedback_tx {
+                let _ = tx.send(None);
+            }
+            if let Some(tx) = pending.selected_label_tx {
                 let _ = tx.send(None);
             }
             let _ = pending.decision_tx.send(PermissionApprovalDecision::Reject);
@@ -3151,6 +3157,9 @@ impl InteractiveController {
             if let Some(tx) = approval.feedback_tx {
                 let _ = tx.send(None);
             }
+            if let Some(tx) = approval.selected_label_tx {
+                let _ = tx.send(None);
+            }
             let _ = approval.decision_tx.send(decision);
         } else {
             self.pending_approvals.insert(
@@ -3158,6 +3167,7 @@ impl InteractiveController {
                 PendingApprovalResponse {
                     decision_tx: approval.decision_tx,
                     feedback_tx: approval.feedback_tx,
+                    selected_label_tx: approval.selected_label_tx,
                     session_option_label: None,
                     prefix_option_label: None,
                     picked_prefix: false,
@@ -3224,6 +3234,9 @@ impl InteractiveController {
         if let Some(pending) = self.pending_approvals.remove(&result.request_id) {
             if let Some(tx) = pending.feedback_tx {
                 let _ = tx.send(feedback);
+            }
+            if let Some(tx) = pending.selected_label_tx {
+                let _ = tx.send(result.selected_option_label.clone());
             }
             let _ = pending.decision_tx.send(decision);
         } else {
@@ -6158,6 +6171,7 @@ mod tests {
         PendingApprovalResponse {
             decision_tx,
             feedback_tx: None,
+            selected_label_tx: None,
             session_option_label: None,
             prefix_option_label: None,
             picked_prefix: false,
@@ -9034,6 +9048,7 @@ command = "python3"
                         operation: neo_agent_core::PermissionOperation::Tool,
                         decision_tx,
                         feedback_tx: None,
+                        selected_label_tx: None,
                         session_option_label: None,
                         prefix_option_label: None,
                         prefix_rule: None,
@@ -9843,6 +9858,7 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Tool,
             decision_tx,
             feedback_tx: None,
+            selected_label_tx: None,
             session_option_label: None,
             prefix_option_label: None,
             prefix_rule: None,
@@ -11282,6 +11298,7 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::PlanTransition,
             decision_tx,
             feedback_tx: Some(feedback_tx),
+            selected_label_tx: None,
             session_option_label: None,
             prefix_option_label: None,
             prefix_rule: None,
@@ -11369,6 +11386,7 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Tool,
             decision_tx: second_tx,
             feedback_tx: None,
+            selected_label_tx: None,
             session_option_label: None,
             prefix_option_label: None,
             prefix_rule: None,

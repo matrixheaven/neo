@@ -388,6 +388,101 @@ fn plan_review_number_four_is_out_of_range_in_three_option_modal() {
 }
 
 #[test]
+fn plan_review_renders_model_options_as_picker_choices() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "exit-plan-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::PlanTransition,
+        subject: "Exit plan mode".to_owned(),
+        arguments: serde_json::json!({
+            "plan_summary": "Two approaches",
+            "options": [
+                {"label": "Option A", "description": "fast"},
+                {"label": "Option B", "description": "safe"},
+            ],
+        }),
+        session_scope: None,
+        prefix_rule: None,
+    });
+    assert!(app.approval_is_pending());
+
+    // Layout: 1=Approach: Option A, 2=Approach: Option B, 3=Reject, 4=Revise.
+    // Picking number 2 approves model option "Option B" and surfaces its label.
+    let result = app
+        .choose_approval_number(2)
+        .expect("option B should confirm as an approve choice");
+    assert_eq!(result.request_id, "exit-plan-1");
+    assert_eq!(result.choice, ApprovalChoice::Approve);
+    assert_eq!(
+        result.selected_option_label.as_deref(),
+        Some("Option B"),
+        "approving a model option must surface its label for the runtime"
+    );
+    assert!(
+        result.feedback.is_none(),
+        "approving an option must not collect feedback"
+    );
+}
+
+#[test]
+fn plan_review_approve_option_a_surfaces_its_label() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "exit-plan-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::PlanTransition,
+        subject: "Exit plan mode".to_owned(),
+        arguments: serde_json::json!({
+            "plan_summary": "Two approaches",
+            "options": [
+                {"label": "Option A", "description": "fast"},
+                {"label": "Option B", "description": "safe"},
+            ],
+        }),
+        session_scope: None,
+        prefix_rule: None,
+    });
+
+    // Number 1 is the first model option (Option A).
+    let result = app
+        .choose_approval_number(1)
+        .expect("option A should confirm");
+    assert_eq!(result.choice, ApprovalChoice::Approve);
+    assert_eq!(result.selected_option_label.as_deref(), Some("Option A"));
+}
+
+#[test]
+fn plan_review_reject_does_not_surface_a_selected_label() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "exit-plan-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::PlanTransition,
+        subject: "Exit plan mode".to_owned(),
+        arguments: serde_json::json!({
+            "plan_summary": "Two approaches",
+            "options": [
+                {"label": "Option A", "description": "fast"},
+                {"label": "Option B", "description": "safe"},
+            ],
+        }),
+        session_scope: None,
+        prefix_rule: None,
+    });
+
+    // Reject is now number 3 in the 5-option layout (A, B, Reject, Revise).
+    let result = app
+        .choose_approval_number(3)
+        .expect("Reject should confirm");
+    assert_eq!(result.choice, ApprovalChoice::Deny);
+    assert!(
+        result.selected_option_label.is_none(),
+        "Reject must not surface a model option label"
+    );
+}
+
+#[test]
 fn tool_approval_number_two_is_approve_for_session_in_four_option_modal() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
