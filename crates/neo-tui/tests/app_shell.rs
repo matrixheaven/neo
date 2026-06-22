@@ -275,8 +275,8 @@ fn app_shell_tracks_agent_core_approval_request_without_overlay_panel() {
         operation: neo_agent_core::PermissionOperation::Tool,
         subject: "shell.run".to_owned(),
         arguments: serde_json::json!({ "command": "cargo test -p neo-tui" }),
-    session_scope: None,
-    prefix_rule: None,
+        session_scope: None,
+        prefix_rule: None,
     });
 
     assert_eq!(app.mode(), ChromeMode::Approval);
@@ -293,8 +293,8 @@ fn plan_review_modal_offers_only_approve_reject_revise() {
         operation: neo_agent_core::PermissionOperation::PlanTransition,
         subject: "Exit plan mode".to_owned(),
         arguments: serde_json::json!({ "plan_summary": "Ready" }),
-    session_scope: None,
-    prefix_rule: None,
+        session_scope: None,
+        prefix_rule: None,
     });
     assert!(app.approval_is_pending());
 
@@ -316,8 +316,8 @@ fn plan_review_number_two_is_reject_in_three_option_modal() {
         operation: neo_agent_core::PermissionOperation::PlanTransition,
         subject: "Exit plan mode".to_owned(),
         arguments: serde_json::json!({ "plan_summary": "Ready" }),
-    session_scope: None,
-    prefix_rule: None,
+        session_scope: None,
+        prefix_rule: None,
     });
 
     // In the 3-option plan review modal, number 2 = Reject (no feedback).
@@ -342,8 +342,8 @@ fn plan_review_number_three_is_revise_and_collects_feedback() {
         operation: neo_agent_core::PermissionOperation::PlanTransition,
         subject: "Exit plan mode".to_owned(),
         arguments: serde_json::json!({ "plan_summary": "Ready" }),
-    session_scope: None,
-    prefix_rule: None,
+        session_scope: None,
+        prefix_rule: None,
     });
 
     // Number 3 = Revise does NOT confirm yet; it enters feedback collection.
@@ -373,8 +373,8 @@ fn plan_review_number_four_is_out_of_range_in_three_option_modal() {
         operation: neo_agent_core::PermissionOperation::PlanTransition,
         subject: "Exit plan mode".to_owned(),
         arguments: serde_json::json!({ "plan_summary": "Ready" }),
-    session_scope: None,
-    prefix_rule: None,
+        session_scope: None,
+        prefix_rule: None,
     });
 
     // The plan review modal has only 3 options, so number 4 is out of range and
@@ -396,8 +396,8 @@ fn tool_approval_number_two_is_approve_for_session_in_four_option_modal() {
         operation: neo_agent_core::PermissionOperation::Tool,
         subject: "shell.run".to_owned(),
         arguments: serde_json::json!({ "command": "cargo test" }),
-    session_scope: None,
-    prefix_rule: None,
+        session_scope: None,
+        prefix_rule: None,
     });
 
     // Ordinary tool approvals keep 4 options: number 2 = Approve for this
@@ -456,8 +456,8 @@ fn pending_approval_hides_composer_prompt() {
         operation: neo_agent_core::PermissionOperation::Tool,
         subject: "Bash".to_owned(),
         arguments: serde_json::json!({ "command": "echo hi" }),
-    session_scope: None,
-    prefix_rule: None,
+        session_scope: None,
+        prefix_rule: None,
     });
 
     let mut tui = neo_tui::NeoTui::new(app, TranscriptPane::new(80, 20));
