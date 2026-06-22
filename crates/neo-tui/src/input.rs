@@ -447,6 +447,11 @@ pub enum KeybindingAction {
     InputSubmit,
     InputTab,
     InputCopy,
+    /// Steer the running turn with the current composer text at the next
+    /// natural break point, or queue a follow-up if no turn is active.
+    /// Default: Ctrl+S (requires `stty -ixon` to disable XON/XOFF flow control
+    /// in terminals that swallow Ctrl+S by default).
+    PromptSteer,
     TranscriptSelectionStart,
     TranscriptSelectionClear,
     TranscriptSelectionExtendUp,
@@ -529,6 +534,7 @@ const KEYBINDING_ACTION_IDS: &[(KeybindingAction, &str)] = &[
     (KeybindingAction::InputSubmit, "tui.input.submit"),
     (KeybindingAction::InputTab, "tui.input.tab"),
     (KeybindingAction::InputCopy, "tui.input.copy"),
+    (KeybindingAction::PromptSteer, "tui.input.steer"),
     (
         KeybindingAction::TranscriptSelectionStart,
         "tui.transcript.selection.start",
@@ -816,6 +822,11 @@ fn input_keybinding_definitions() -> Vec<KeybindingDefinition> {
         definition(Action::InputSubmit, &["enter"], "Submit input"),
         definition(Action::InputTab, &["tab"], "Tab"),
         definition(Action::InputCopy, &["ctrl+c"], "Copy selection"),
+        definition(
+            Action::PromptSteer,
+            &["ctrl+s"],
+            "Steer the running turn or queue a follow-up",
+        ),
         definition(
             Action::CycleDevelopmentMode,
             &["shift+tab"],

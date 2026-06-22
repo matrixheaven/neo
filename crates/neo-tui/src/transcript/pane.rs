@@ -125,6 +125,39 @@ impl TranscriptPane {
         self.push_transcript(TranscriptEntry::user_message(content));
     }
 
+    /// Push a queued (Enter while busy) or steered (Ctrl+S) message preview
+    /// into the transcript. Rendered with a distinct prefix so the user sees
+    /// visual feedback that their input was captured mid-turn.
+    pub fn push_queued_message(&mut self, content: impl Into<String>, is_steer: bool) {
+        self.push_transcript(TranscriptEntry::queued_message(content, is_steer));
+    }
+
+    /// Pop the most recent queued follow-up entry from the transcript. Used
+    /// when the user presses Ctrl+S with an empty composer to promote the
+    /// oldest queued follow-up to a steer. Returns the text if found.
+    pub fn pop_pending_follow_up(&mut self) -> Option<String> {
+        let index = self
+            .transcript
+            .entries()
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, entry)| match entry {
+                TranscriptEntry::QueuedMessage {
+                    is_steer: false, ..
+                } => Some(i),
+                _ => None,
+            })?;
+        let entry = self.transcript.remove(index)?;
+        match entry {
+            TranscriptEntry::QueuedMessage { text, .. } => {
+                self.mark_dirty();
+                Some(text)
+            }
+            _ => None,
+        }
+    }
+
     pub fn push_assistant_message(&mut self, content: impl Into<String>) {
         self.push_transcript(TranscriptEntry::assistant_message(content));
     }

@@ -265,6 +265,18 @@ impl TranscriptStore {
         &mut self.entries
     }
 
+    /// Remove the entry at `index`, shifting later entries down. Returns the
+    /// removed entry. Used to pop a queued follow-up when it is promoted to a
+    /// steer.
+    pub fn remove(&mut self, index: usize) -> Option<TranscriptEntry> {
+        if index >= self.entries.len() {
+            return None;
+        }
+        let entry = self.entries.remove(index);
+        self.viewport.follow_bottom();
+        Some(entry)
+    }
+
     #[must_use]
     pub const fn viewport(&self) -> &TranscriptViewport {
         &self.viewport

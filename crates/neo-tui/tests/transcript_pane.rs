@@ -901,3 +901,64 @@ fn replayed_messages_render_through_same_transcript_pane_path() {
     assert!(frame.iter().any(|l| l.contains("●")));
     assert!(frame.iter().any(|l| l.contains("previous answer")));
 }
+
+#[test]
+fn queued_follow_up_message_renders_with_distinct_prefix() {
+    let mut transcript_pane = TranscriptPane::new(80, 12);
+    transcript_pane.push_transcript(TranscriptEntry::user_message("original"));
+    transcript_pane.push_queued_message("follow up text", false);
+
+    let frame = plain_frame(&mut transcript_pane, 80, 12);
+    let queued_line = frame
+        .iter()
+        .find(|l| l.contains("follow up text"))
+        .expect("queued follow-up text should render");
+    assert!(
+        queued_line.starts_with("↪"),
+        "queued follow-up should use the ↪ prefix, got: {queued_line:?}"
+    );
+    // Normal user message keeps its own prefix.
+    assert!(
+        frame
+            .iter()
+            .any(|l| l.contains("✨") && l.contains("original"))
+    );
+}
+
+#[test]
+fn steered_message_renders_with_distinct_prefix() {
+    let mut transcript_pane = TranscriptPane::new(80, 12);
+    transcript_pane.push_queued_message("steer text", true);
+
+    let frame = plain_frame(&mut transcript_pane, 80, 12);
+    let steer_line = frame
+        .iter()
+        .find(|l| l.contains("steer text"))
+        .expect("steered text should render");
+    assert!(
+        steer_line.starts_with("↳"),
+        "steered message should use the ↳ prefix, got: {steer_line:?}"
+    );
+}
+
+#[test]
+fn pop_pending_follow_up_removes_oldest_queued_entry() {
+    let mut transcript_pane = TranscriptPane::new(80, 12);
+    transcript_pane.push_queued_message("first follow", false);
+    transcript_pane.push_queued_message("steer", true);
+    transcript_pane.push_queued_message("second follow", false);
+
+    let popped = transcript_pane
+        .pop_pending_follow_up()
+        .expect("should pop a follow-up");
+    // The most recently queued follow-up is popped first (reverse search).
+    assert_eq!(popped, "second follow");
+    // Remaining entries still render.
+    let frame = plain_frame(&mut transcript_pane, 80, 12);
+    assert!(frame.iter().any(|l| l.contains("first follow")));
+    assert!(frame.iter().any(|l| l.contains("steer")));
+    assert!(
+        !frame.iter().any(|l| l.contains("second follow")),
+        "popped entry should be removed from transcript"
+    );
+}

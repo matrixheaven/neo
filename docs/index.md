@@ -13,6 +13,7 @@ policy, terminal UI, and developer tooling can evolve independently.
 - [Tools](tools.md) - implemented built-in tools, schemas, permissions, and runtime boundary.
 - [Sessions](sessions.md) - JSONL event persistence and current resume expectations.
 - [MCP](mcp.md) - Model Context Protocol interface, adapters, and safety rules.
+- [Message Queue & Steer](queue-and-steer.md) - queue follow-ups and steer running turns with Ctrl+S.
 - [Local Assets](packages.md) - local extensions, prompt templates, themes, and unsupported distribution surfaces.
 
 ## Repository Map

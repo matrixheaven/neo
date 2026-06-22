@@ -68,6 +68,14 @@ pub enum TranscriptEntry {
         /// line with no prefix.
         severity: Option<StatusSeverity>,
     },
+    /// A user message that was queued (Enter while busy) or steered (Ctrl+S)
+    /// into a running turn. Rendered with a distinct prefix so the user can tell
+    /// it apart from a normal delivered user message. `is_steer` selects the
+    /// steer styling (↳) vs the follow-up styling (↪).
+    QueuedMessage {
+        text: String,
+        is_steer: bool,
+    },
     GoalCard {
         kind: GoalCardKind,
         objective: String,
@@ -202,6 +210,14 @@ impl TranscriptEntry {
     }
 
     #[must_use]
+    pub fn queued_message(content: impl Into<String>, is_steer: bool) -> Self {
+        Self::QueuedMessage {
+            text: content.into(),
+            is_steer,
+        }
+    }
+
+    #[must_use]
     pub fn skill_activated(
         name: impl Into<String>,
         description: Option<impl Into<String>>,
@@ -272,6 +288,9 @@ impl TranscriptEntry {
             Self::Banner(data) => render_welcome_banner(data, inner_width, theme),
             Self::UserMessage(content) => render_user_message(content, inner_width, theme),
             Self::Status { text, severity } => render_status(text, *severity, inner_width, theme),
+            Self::QueuedMessage { text, is_steer } => {
+                render_queued_message(text, *is_steer, inner_width, theme)
+            }
             Self::AssistantMessage { content } => {
                 render_assistant_message(content, inner_width, theme)
             }
@@ -337,7 +356,8 @@ impl TranscriptEntry {
             | Self::UserMessage(_)
             | Self::Status { .. }
             | Self::AssistantMessage { .. }
-            | Self::ThinkingBlock { .. } => unreachable!("message entries handled above"),
+            | Self::ThinkingBlock { .. }
+            | Self::QueuedMessage { .. } => unreachable!("message entries handled above"),
         }
     }
 
@@ -431,7 +451,8 @@ fn card_copy_parts(entry: &TranscriptEntry) -> (&'static str, String) {
         | TranscriptEntry::ThinkingBlock { .. }
         | TranscriptEntry::ApprovalPrompt(_)
         | TranscriptEntry::Image { .. }
-        | TranscriptEntry::Status { .. } => unreachable!("simple copy parts handled above"),
+        | TranscriptEntry::Status { .. }
+        | TranscriptEntry::QueuedMessage { .. } => unreachable!("simple copy parts handled above"),
         TranscriptEntry::Banner(_)
         | TranscriptEntry::ToolRun { .. }
         | TranscriptEntry::Compaction { .. } => unreachable!("utility copy parts handled above"),
@@ -449,6 +470,10 @@ fn text_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str, String)> {
         TranscriptEntry::UserMessage(content) => Some(("You", content.clone())),
         TranscriptEntry::AssistantMessage { content } => Some(("Assistant", content.clone())),
         TranscriptEntry::ThinkingBlock { content, .. } => Some(("Thinking", content.clone())),
+        TranscriptEntry::QueuedMessage { text, is_steer } => {
+            let label = if *is_steer { "Steer" } else { "Queued" };
+            Some((label, text.clone()))
+        }
         _ => None,
     }
 }
@@ -842,6 +867,18 @@ fn render_welcome_banner(data: &BannerData, width: usize, theme: &TuiTheme) -> V
 fn render_user_message(content: &str, width: usize, theme: &TuiTheme) -> Vec<Line> {
     let style = Style::default().fg(theme.user_message);
     bulleted_wrap(content, width, "✨ ", style)
+}
+
+/// Render a queued/steered message. Steer uses `↳` (brand color) to signal an
+/// immediate mid-turn injection; follow-up uses `↪` (muted) to signal a queued
+/// turn that runs after the current one.
+fn render_queued_message(text: &str, is_steer: bool, width: usize, theme: &TuiTheme) -> Vec<Line> {
+    let (prefix, style) = if is_steer {
+        ("↳ ", Style::default().fg(theme.brand).italic())
+    } else {
+        ("↪ ", Style::default().fg(theme.text_muted))
+    };
+    bulleted_wrap(text, width, prefix, style)
 }
 
 fn render_status(

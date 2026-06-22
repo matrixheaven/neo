@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     future::Future,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock, atomic::AtomicBool},
@@ -632,6 +633,61 @@ pub enum AgentRuntimeError {
 
 pub type AgentEventStream<'a> = stream::BoxStream<'a, Result<AgentEvent, AgentRuntimeError>>;
 
+/// Live input pushed into a running turn by the controller.
+///
+/// `SteerNow` injects at the next step boundary (tool-call end / thinking end)
+/// as a steering context message, without interrupting the current step.
+/// `FollowUp` is appended to the follow-up queue and starts a fresh turn after
+/// the current workflow drains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActiveTurnInput {
+    /// Inject as a steering message at the next natural break point.
+    SteerNow(AgentMessage),
+    /// Queue as a follow-up turn after the current turn completes (FIFO).
+    FollowUp(AgentMessage),
+}
+
+/// Shared handle used to push live input into a running turn.
+///
+/// Created by the controller before a turn starts, threaded into the
+/// [`AgentRuntime`], and drained at each step boundary by `run_agent_turn`.
+/// Both the controller and the runtime share the same cell.
+#[derive(Debug, Clone, Default)]
+pub struct SteerInputHandle {
+    inner: Arc<Mutex<VecDeque<ActiveTurnInput>>>,
+}
+
+impl SteerInputHandle {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Push a live input onto the queue. Called by the controller.
+    pub fn push(&self, input: ActiveTurnInput) {
+        if let Ok(mut queue) = self.inner.lock() {
+            queue.push_back(input);
+        }
+    }
+
+    /// Drain all pending live inputs. Called by the runtime at step boundaries.
+    fn drain(&self) -> Vec<ActiveTurnInput> {
+        self.inner
+            .lock()
+            .map(|mut queue| queue.drain(..).collect())
+            .unwrap_or_default()
+    }
+
+    /// Number of pending live inputs (for UI status).
+    #[must_use]
+    pub fn pending(&self) -> usize {
+        self.inner
+            .lock()
+            .map(|queue| queue.len())
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Clone)]
 pub struct AgentRuntime {
     config: AgentConfig,
@@ -640,6 +696,7 @@ pub struct AgentRuntime {
     skills: Option<Arc<SkillStore>>,
     skill_invocation_active: Arc<AtomicBool>,
     goal_manager: Option<Arc<GoalManager>>,
+    steer_input: SteerInputHandle,
 }
 
 impl AgentRuntime {
@@ -652,6 +709,7 @@ impl AgentRuntime {
             skills: None,
             skill_invocation_active: Arc::new(AtomicBool::new(false)),
             goal_manager: None,
+            steer_input: SteerInputHandle::new(),
         }
     }
 
@@ -670,6 +728,7 @@ impl AgentRuntime {
             skills: None,
             skill_invocation_active: Arc::new(AtomicBool::new(false)),
             goal_manager: None,
+            steer_input: SteerInputHandle::new(),
         }
     }
 
@@ -690,7 +749,17 @@ impl AgentRuntime {
             skills: Some(Arc::new(skills)),
             skill_invocation_active: Arc::new(AtomicBool::new(false)),
             goal_manager: None,
+            steer_input: SteerInputHandle::new(),
         }
+    }
+
+    /// Attach a shared steer-input handle so the controller can push live
+    /// input into a running turn. The runtime drains this handle at each
+    /// step boundary and feeds it into the existing queue machinery.
+    #[must_use]
+    pub fn with_steer_input(mut self, steer_input: SteerInputHandle) -> Self {
+        self.steer_input = steer_input;
+        self
     }
 
     #[must_use]
@@ -749,6 +818,7 @@ impl AgentRuntime {
         let skill_invocation_active = Arc::clone(&self.skill_invocation_active);
         let goal_manager = self.goal_manager.clone();
         let config = self.config.clone();
+        let steer_input = self.steer_input.clone();
         let process_supervisor = ProcessSupervisor::default();
         let (sender, receiver) = mpsc::unbounded_channel();
         let (final_sender, final_receiver) = oneshot::channel();
@@ -771,6 +841,7 @@ impl AgentRuntime {
                 skills,
                 skill_invocation_active,
                 goal_manager,
+                steer_input,
                 &mut emitter,
                 cancel_token,
                 process_supervisor.clone(),
@@ -1073,6 +1144,7 @@ async fn run_agent_turn(
     skills: Option<Arc<SkillStore>>,
     skill_invocation_active: Arc<AtomicBool>,
     goal_manager: Option<Arc<GoalManager>>,
+    steer_input: SteerInputHandle,
     emitter: &mut EventEmitter,
     cancel_token: CancellationToken,
     process_supervisor: ProcessSupervisor,
@@ -1080,6 +1152,7 @@ async fn run_agent_turn(
     skill_invocation_active.store(false, std::sync::atomic::Ordering::SeqCst);
     let mut final_turn: u32;
     let mut final_stop_reason = StopReason::EndTurn;
+    drain_live_steer_input(&steer_input, emitter);
     let mut pending_messages = drain_steering_queue(&config, emitter);
 
     loop {
@@ -1123,6 +1196,7 @@ async fn run_agent_turn(
             ..
         }) = assistant.clone()
         else {
+            drain_live_steer_input(&steer_input, emitter);
             if let Some(messages) =
                 next_pending_after_assistant(&config, emitter, goal_manager.as_deref())
             {
@@ -1160,6 +1234,7 @@ async fn run_agent_turn(
         emit_effective_context_window(&config, emitter, turn).await;
         attach_exit_plan_details(&config, &mut tool_results);
         emit_tool_side_effect_events(turn, &config, &tool_results, emitter);
+        drain_live_steer_input(&steer_input, emitter);
         if terminates_tool_batch(&tool_results) {
             if continues_after_terminating_batch(&tool_results) {
                 pending_messages = drain_steering_queue(&config, emitter);
@@ -1418,6 +1493,27 @@ fn drain_follow_up_queue(config: &AgentConfig, emitter: &mut EventEmitter) -> Ve
     );
     emit_queue_drained(emitter, QueueKind::FollowUp, messages.len());
     messages
+}
+
+/// Drain live input pushed by the controller into the running turn and route
+/// each item into the matching context queue via a persisted queue event.
+///
+/// `SteerNow` feeds the steering queue (injected at the next model call);
+/// `FollowUp` feeds the follow-up queue (starts a fresh turn after the current
+/// workflow drains). Both emit their queue events so the TUI and JSONL replay
+/// stay in sync — this is the only production emitter of `SteeringQueued` and
+/// `FollowUpQueued`.
+fn drain_live_steer_input(handle: &SteerInputHandle, emitter: &mut EventEmitter) {
+    for input in handle.drain() {
+        match input {
+            ActiveTurnInput::SteerNow(message) => {
+                emitter.emit(AgentEvent::SteeringQueued { message });
+            }
+            ActiveTurnInput::FollowUp(message) => {
+                emitter.emit(AgentEvent::FollowUpQueued { message });
+            }
+        }
+    }
 }
 
 fn emit_queue_drained(emitter: &mut EventEmitter, kind: QueueKind, count: usize) {
