@@ -538,6 +538,7 @@ mod tests {
         );
         let mut state = BtwPanelState::new(sidecar);
         state.scroll_offset = 2;
+        state.follow_tail = false;
         let lines = BtwPanel::new(&mut state).render(40, 18);
 
         let plain = plain(&lines);
