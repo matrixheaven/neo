@@ -95,6 +95,7 @@ pub fn fake_model() -> ModelSpec {
             reasoning: false,
             embeddings: false,
             max_context_tokens: None,
+            max_output_tokens: None,
         },
     }
 }

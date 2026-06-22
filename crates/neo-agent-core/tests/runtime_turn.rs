@@ -5066,6 +5066,7 @@ impl DelayedHarness {
                     reasoning: false,
                     embeddings: false,
                     max_context_tokens: None,
+                    max_output_tokens: None,
                 },
             },
             client: Arc::new(DelayedModelClient {

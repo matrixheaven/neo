@@ -175,7 +175,10 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     let mut body = json!({
         "model": request.model.model,
         "stream": true,
-        "max_tokens": request.options.max_tokens.unwrap_or(4096),
+        // Anthropic requires `max_tokens`. When neither the user nor the model
+        // catalog supplied one, use a coding-agent-friendly default rather than
+        // the chat-era 4096 which truncates long edits/plans mid-stream.
+        "max_tokens": request.options.max_tokens.unwrap_or(32_000),
         "messages": message_bodies(&request.messages, request.options.replay_reasoning)?,
     });
 

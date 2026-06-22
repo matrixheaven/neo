@@ -277,6 +277,7 @@ pub fn catalog_model_to_capabilities(info: &CatalogModelInfo) -> ModelCapabiliti
         .any(|c| c == "reasoning" || c == "thinking");
     mc.embeddings = false;
     mc.max_context_tokens = info.max_context_tokens;
+    mc.max_output_tokens = info.max_output_tokens;
     mc
 }
 

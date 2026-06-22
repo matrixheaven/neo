@@ -136,6 +136,11 @@ pub struct ModelCapabilities {
     pub reasoning: bool,
     pub embeddings: bool,
     pub max_context_tokens: Option<u32>,
+    /// Maximum output tokens the model can emit in a single response.
+    /// When `Some`, this feeds `RequestOptions.max_tokens` unless the user
+    /// overrides it with `[runtime].max_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
 }
 
 impl Default for ModelCapabilities {
@@ -154,6 +159,7 @@ impl ModelCapabilities {
             reasoning: false,
             embeddings: false,
             max_context_tokens: None,
+            max_output_tokens: None,
         }
     }
 
@@ -190,12 +196,19 @@ impl ModelCapabilities {
             reasoning: false,
             embeddings: true,
             max_context_tokens: None,
+            max_output_tokens: None,
         }
     }
 
     #[must_use]
     pub const fn with_max_context_tokens(mut self, max_context_tokens: u32) -> Self {
         self.max_context_tokens = Some(max_context_tokens);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_output_tokens(mut self, max_output_tokens: u32) -> Self {
+        self.max_output_tokens = Some(max_output_tokens);
         self
     }
 }
