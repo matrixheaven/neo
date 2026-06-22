@@ -2,7 +2,7 @@ use crate::ansi::{Rect, clip_visible_to_width, display_width, next_sequence};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    chrome::{ApprovalModal, NeoChromeState, OverlayKind, PromptState},
+    chrome::{ApprovalModal, MAX_PROMPT_VISIBLE_LINES, NeoChromeState, OverlayKind, PromptState},
     widgets::{BtwPanel, TodoPanel},
 };
 
@@ -234,61 +234,73 @@ pub fn truncate_width(text: &str, max_width: usize, ellipsis: &str, pad: bool) -
 
 #[must_use]
 pub fn wrap_width(text: &str, max_width: usize) -> Vec<String> {
+    wrap_width_with_indices(text, max_width)
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect()
+}
+
+/// Wrap `text` to `max_width` display columns and return each wrapped segment
+/// with the char index in `text` where that segment starts.
+#[must_use]
+pub fn wrap_width_with_indices(text: &str, max_width: usize) -> Vec<(usize, String)> {
     if max_width == 0 {
-        return vec![String::new()];
+        return vec![(0, String::new())];
     }
 
-    let mut lines = Vec::new();
+    let mut result = Vec::new();
+    let mut char_index = 0;
+
     for logical_line in text.split('\n') {
         if logical_line.is_empty() {
-            lines.push(String::new());
-            continue;
+            result.push((char_index, String::new()));
+        } else {
+            let mut current = String::new();
+            let mut current_width = 0;
+            let mut active_sgr = String::new();
+            let mut byte_index = 0;
+            let mut segment_start = char_index;
+
+            while byte_index < logical_line.len() {
+                if let Some(sequence) = next_sequence(logical_line, byte_index) {
+                    current.push_str(sequence);
+                    update_active_sgr(sequence, &mut active_sgr);
+                    byte_index += sequence.len();
+                    continue;
+                }
+
+                let Some(grapheme) = logical_line[byte_index..].graphemes(true).next() else {
+                    break;
+                };
+
+                let grapheme_width = display_width(grapheme);
+                if current_width > 0 && current_width + grapheme_width > max_width {
+                    result.push((segment_start, std::mem::take(&mut current)));
+                    segment_start = char_index;
+                    current.push_str(&active_sgr);
+                    current_width = 0;
+                }
+
+                current.push_str(grapheme);
+                current_width += grapheme_width;
+                byte_index += grapheme.len();
+                char_index += grapheme.chars().count();
+            }
+
+            if !current.is_empty() {
+                result.push((segment_start, current));
+            }
         }
-        wrap_single_line(logical_line, max_width, &mut lines);
+        char_index += 1; // for the '\n' separator
     }
 
-    if lines.is_empty() {
-        lines.push(String::new());
+    if result.is_empty() {
+        result.push((0, String::new()));
     }
-    lines
+    result
 }
 
-fn wrap_single_line(text: &str, max_width: usize, lines: &mut Vec<String>) {
-    let mut current = String::new();
-    let mut current_width = 0;
-    let mut active_sgr = String::new();
-    let mut index = 0;
-
-    while index < text.len() {
-        if let Some(sequence) = next_sequence(text, index) {
-            current.push_str(sequence);
-            update_active_sgr(sequence, &mut active_sgr);
-            index += sequence.len();
-            continue;
-        }
-
-        let Some(grapheme) = text[index..].graphemes(true).next() else {
-            break;
-        };
-
-        let grapheme_width = display_width(grapheme);
-        if current_width > 0 && current_width + grapheme_width > max_width {
-            lines.push(std::mem::take(&mut current));
-            current.push_str(&active_sgr);
-            current_width = 0;
-        }
-
-        current.push_str(grapheme);
-        current_width += grapheme_width;
-        index += grapheme.len();
-    }
-
-    if !current.is_empty() {
-        lines.push(current);
-    }
-}
-
-fn update_active_sgr(sequence: &str, active_sgr: &mut String) {
+pub(crate) fn update_active_sgr(sequence: &str, active_sgr: &mut String) {
     if !sequence.starts_with("\x1b[") || !sequence.ends_with('m') {
         return;
     }
@@ -350,7 +362,7 @@ fn prompt_height(prompt: &PromptState, width: u16) -> u16 {
     let display_width = usize::from(width.saturating_sub(2).max(1));
     let lines = wrap_width(&format!("> {}", prompt.text), display_width)
         .len()
-        .clamp(1, 6);
+        .clamp(1, MAX_PROMPT_VISIBLE_LINES);
     u16::try_from(lines.saturating_add(2)).unwrap_or(8)
 }
 

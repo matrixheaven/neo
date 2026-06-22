@@ -4,7 +4,7 @@ use crate::{
     trust::{self, ProjectTrustDecision, ProjectTrustStore, TrustInputKind},
 };
 
-pub(crate) fn execute(config: &AppConfig, command: TrustCommand) -> anyhow::Result<String> {
+pub(crate) fn execute(config: &AppConfig, command: &TrustCommand) -> anyhow::Result<String> {
     let store = ProjectTrustStore::from_home()?;
     match command {
         TrustCommand::Status => status(config, &store),

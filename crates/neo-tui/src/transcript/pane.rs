@@ -9,7 +9,8 @@ use neo_agent_core::{
 
 use crate::ansi::{Color, Style, paint, truncate_to_width, visible_width};
 use crate::chrome::{
-    DevelopmentMode, GoalModeStatus, NeoChromeState, PromptState, ToolStatusKind, TuiTheme,
+    DevelopmentMode, GoalModeStatus, MAX_PROMPT_VISIBLE_LINES, NeoChromeState, PromptState,
+    ToolStatusKind, TuiTheme,
 };
 use crate::components::wrap_width;
 use crate::core::{Expandable, Line};
@@ -20,6 +21,7 @@ use crate::transcript::{
     ApprovalPromptData, InlineImageRender, ToolCallComponent, ToolCallState, ToolGroup,
     TranscriptEntry, TranscriptStore, render_tool_group,
 };
+use crate::widgets::box_draw::{ROUNDED, repeat_char};
 use crate::widgets::{PendingInputPreview, TodoPanel, box_draw};
 
 const DEFAULT_LIVE_CHROME_HEIGHT: usize = 4;
@@ -1769,14 +1771,36 @@ fn render_prompt_lines(app: &NeoChromeState, width: usize) -> (Vec<String>, Opti
 
     let logical_lines = build_prompt_logical_lines(prompt, body_width);
 
+    // Total wrapped lines, counting empty logical lines as one display row.
+    // Tabs must be expanded first so the count matches what build_prompt_logical_lines renders.
+    let total_lines: usize = prompt
+        .text
+        .split('\n')
+        .map(|line| {
+            wrap_width(&expand_prompt_tabs(line), body_width)
+                .len()
+                .max(1)
+        })
+        .sum();
+    let scroll_offset = prompt.scroll_offset();
+    let lines_below = total_lines.saturating_sub(scroll_offset + logical_lines.len());
+
     let mut lines = Vec::with_capacity(logical_lines.len() + 2);
-    lines.push(box_draw::top_border(width, border_style));
+    lines.push(if scroll_offset > 0 {
+        scroll_indicator_top_border(width, scroll_offset, border_style)
+    } else {
+        box_draw::top_border(width, border_style)
+    });
     for (idx, line) in logical_lines.iter().enumerate() {
         let prefix = if idx == 0 { "  > " } else { "    " };
         let content = paint(&format!("{prefix}{line}"), text_style);
         lines.push(box_draw::content_line(&content, width, border_style));
     }
-    lines.push(box_draw::bottom_border(width, border_style));
+    lines.push(if lines_below > 0 {
+        scroll_indicator_bottom_border(width, lines_below, border_style)
+    } else {
+        box_draw::bottom_border(width, border_style)
+    });
 
     let cursor = find_cursor(&lines);
     let lines = lines
@@ -1795,19 +1819,90 @@ fn build_prompt_logical_lines(prompt: &PromptState, body_width: usize) -> Vec<St
     let before: String = chars[..cursor].iter().collect();
     let after: String = chars[cursor..].iter().collect();
     let marked = expand_prompt_tabs(&format!("{before}{CURSOR_MARKER}{after}"));
-    let mut out = Vec::new();
+    let mut all_lines = Vec::new();
     for logical in marked.split('\n') {
         let wrapped = wrap_width(logical, body_width);
         if wrapped.is_empty() {
-            out.push(String::new());
+            all_lines.push(String::new());
         } else {
-            out.extend(wrapped);
+            all_lines.extend(wrapped);
         }
     }
-    if out.len() > 6 {
-        out.truncate(6);
+    if all_lines.len() <= MAX_PROMPT_VISIBLE_LINES {
+        return all_lines;
     }
-    out
+    let max_offset = all_lines.len().saturating_sub(MAX_PROMPT_VISIBLE_LINES);
+    let scroll_offset = prompt.scroll_offset().min(max_offset);
+    all_lines
+        .into_iter()
+        .skip(scroll_offset)
+        .take(MAX_PROMPT_VISIBLE_LINES)
+        .collect()
+}
+
+fn scroll_indicator_top_border(width: usize, count: usize, style: Style) -> String {
+    scroll_indicator_border(
+        width,
+        count,
+        "↑",
+        style,
+        ROUNDED.top_left,
+        ROUNDED.top_right,
+    )
+}
+
+fn scroll_indicator_bottom_border(width: usize, count: usize, style: Style) -> String {
+    scroll_indicator_border(
+        width,
+        count,
+        "↓",
+        style,
+        ROUNDED.bottom_left,
+        ROUNDED.bottom_right,
+    )
+}
+
+fn scroll_indicator_border(
+    width: usize,
+    count: usize,
+    arrow: &str,
+    style: Style,
+    left_corner: char,
+    right_corner: char,
+) -> String {
+    if width < 4 {
+        return format!(
+            "{}{}{}",
+            paint(&left_corner.to_string(), style),
+            paint(
+                &repeat_char(ROUNDED.horizontal, width.saturating_sub(2)),
+                style
+            ),
+            paint(&right_corner.to_string(), style)
+        );
+    }
+    let label = format!(" {arrow} {count} more ");
+    let label_width = visible_width(&label);
+    let inner = width.saturating_sub(2);
+    if label_width >= inner {
+        return format!(
+            "{}{}{}",
+            paint(&left_corner.to_string(), style),
+            paint(&repeat_char(ROUNDED.horizontal, inner), style),
+            paint(&right_corner.to_string(), style)
+        );
+    }
+    let bars = inner.saturating_sub(label_width);
+    let left_bars = bars / 2;
+    let right_bars = bars - left_bars;
+    format!(
+        "{}{}{}{}{}",
+        paint(&left_corner.to_string(), style),
+        paint(&repeat_char(ROUNDED.horizontal, left_bars), style),
+        paint(&label, style),
+        paint(&repeat_char(ROUNDED.horizontal, right_bars), style),
+        paint(&right_corner.to_string(), style)
+    )
 }
 
 fn expand_prompt_tabs(text: &str) -> String {

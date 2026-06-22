@@ -45,7 +45,7 @@ use neo_tui::{
     image::{ImageProtocolPreference, ImageRenderPolicy, TerminalImageCapabilities},
     input::{InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager},
     terminal::TuiRenderer,
-    transcript::TranscriptPane,
+    transcript::{TranscriptPane, pane::frame_content_width},
 };
 
 use tokio::{
@@ -466,9 +466,6 @@ struct PendingApprovalResponse {
     session_option_label: Option<String>,
     /// Display label for the prefix-approval option.
     prefix_option_label: Option<String>,
-    /// True when the user picked the prefix option (vs the session option).
-    /// Both map to `AlwaysApprove`; this flag disambiguates the resolved label.
-    picked_prefix: bool,
 }
 
 pub(crate) struct InteractiveController {
@@ -1065,7 +1062,7 @@ impl InteractiveController {
             let result = self.tui.chrome_mut().take_trust_dialog_result();
             if let Some(result) = result {
                 self.tui.chrome_mut().close_focused_overlay();
-                self.apply_trust_dialog_result(result).await?;
+                self.apply_trust_dialog_result(result)?;
                 return Ok(());
             }
             match events.poll_input_event(Duration::from_millis(50))? {
@@ -1074,15 +1071,13 @@ impl InteractiveController {
                     if exit {
                         // Treat an early loop exit (e.g. double Ctrl-C) as
                         // untrusted so the workspace is never silently trusted.
-                        let target = self
-                            .local_config
-                            .as_ref()
-                            .map(|config| config.project_dir.clone())
-                            .unwrap_or_else(|| self.workspace_root.clone());
+                        let target = self.local_config.as_ref().map_or_else(
+                            || self.workspace_root.clone(),
+                            |config| config.project_dir.clone(),
+                        );
                         self.apply_trust_dialog_result(
                             neo_tui::dialogs::TrustDialogResult::Untrusted { target },
-                        )
-                        .await?;
+                        )?;
                         return Ok(());
                     }
                 }
@@ -1093,7 +1088,7 @@ impl InteractiveController {
         }
     }
 
-    async fn apply_trust_dialog_result(
+    fn apply_trust_dialog_result(
         &mut self,
         result: neo_tui::dialogs::TrustDialogResult,
     ) -> Result<()> {
@@ -1440,7 +1435,11 @@ impl InteractiveController {
 
     fn apply_prompt_edit(&mut self, edit: PromptEdit<'_>) {
         self.clear_pending_exit_confirmation();
-        self.tui.chrome_mut().prompt_mut().apply_edit(edit);
+        let body_width = Self::prompt_body_width();
+        self.tui
+            .chrome_mut()
+            .prompt_mut()
+            .apply_edit_with_width(edit, body_width);
         self.sync_inline_prompt_completion();
     }
 
@@ -1766,10 +1765,7 @@ impl InteractiveController {
             &prefix.text,
             &self.model_items,
             self.skill_store.as_ref(),
-            self.local_config
-                .as_ref()
-                .map(|c| c.project_trusted)
-                .unwrap_or(false),
+            self.project_trusted(),
         ) {
             Ok(completions) => completions,
             Err(error) => {
@@ -1827,10 +1823,7 @@ impl InteractiveController {
             &prefix.text,
             &self.model_items,
             self.skill_store.as_ref(),
-            self.local_config
-                .as_ref()
-                .map(|c| c.project_trusted)
-                .unwrap_or(false),
+            self.project_trusted(),
         ) {
             Ok(completions) => completions,
             Err(error) => {
@@ -1873,32 +1866,79 @@ impl InteractiveController {
     }
 
     fn handle_prompt_keybinding_action(&mut self, action: KeybindingAction) -> bool {
-        if self.tui.chrome().has_btw_panel() {
-            match action {
-                KeybindingAction::EditorCursorUp | KeybindingAction::EditorCursorDown => {
-                    if self.tui.chrome().prompt().text.is_empty() {
+        let prompt = self.tui.chrome().prompt();
+        let prompt_empty = prompt.text.is_empty();
+        let in_history_navigation = prompt.in_history_navigation();
+
+        if prompt_empty {
+            if self.tui.chrome().has_btw_panel() {
+                match action {
+                    KeybindingAction::EditorCursorUp => {
                         self.clear_pending_exit_confirmation();
-                        if action == KeybindingAction::EditorCursorUp {
-                            self.tui.chrome_mut().scroll_btw_panel_up(1);
-                        } else {
-                            self.tui.chrome_mut().scroll_btw_panel_down(1);
-                        }
+                        self.tui.chrome_mut().scroll_btw_panel_up(1);
                         return true;
                     }
+                    KeybindingAction::EditorCursorDown => {
+                        self.clear_pending_exit_confirmation();
+                        self.tui.chrome_mut().scroll_btw_panel_down(1);
+                        return true;
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
-        if self.handle_prompt_history_action(action) {
+            if self.handle_prompt_history_action(action) {
+                return true;
+            }
+        } else if !in_history_navigation
+            && matches!(
+                action,
+                KeybindingAction::EditorCursorUp | KeybindingAction::EditorCursorDown
+            )
+        {
+            // Normal editing mode: ↑/↓ move the cursor through wrapped lines.
+            self.clear_pending_exit_confirmation();
+            let body_width = Self::prompt_body_width();
+            let edit = if action == KeybindingAction::EditorCursorUp {
+                PromptEdit::MoveUp(body_width)
+            } else {
+                PromptEdit::MoveDown(body_width)
+            };
+            self.tui
+                .chrome_mut()
+                .prompt_mut()
+                .apply_edit_with_width(edit, body_width);
+            self.sync_inline_prompt_completion();
             return true;
+        } else if in_history_navigation
+            && matches!(
+                action,
+                KeybindingAction::EditorCursorUp | KeybindingAction::EditorCursorDown
+            )
+        {
+            // History navigation mode: keep recalling entries even though the
+            // composer now shows a non-empty historical prompt.
+            if self.handle_prompt_history_action(action) {
+                return true;
+            }
         }
         let Some(edit) = prompt_edit_for_action(action) else {
             return false;
         };
         self.clear_pending_exit_confirmation();
-        self.tui.chrome_mut().prompt_mut().apply_edit(edit);
+        let body_width = Self::prompt_body_width();
+        self.tui
+            .chrome_mut()
+            .prompt_mut()
+            .apply_edit_with_width(edit, body_width);
         self.sync_inline_prompt_completion();
         true
+    }
+
+    /// Width available for prompt content after borders and padding.
+    fn prompt_body_width() -> usize {
+        let (cols, _) = size().unwrap_or((80, 24));
+        let content_width = frame_content_width(usize::from(cols));
+        content_width.saturating_sub(2).saturating_sub(4).max(1)
     }
 
     fn handle_prompt_history_action(&mut self, action: KeybindingAction) -> bool {
@@ -2032,13 +2072,14 @@ impl InteractiveController {
         self.tui.chrome_mut().set_exit_confirmation_label(None);
     }
 
-    fn open_command_palette(&mut self) {
-        let project_trusted = self
-            .local_config
+    fn project_trusted(&self) -> bool {
+        self.local_config
             .as_ref()
-            .map(|config| config.project_trusted)
-            .unwrap_or(false);
-        let (commands, error) = command_specs(&self.completion_root, project_trusted);
+            .is_none_or(|config| config.project_trusted)
+    }
+
+    fn open_command_palette(&mut self) {
+        let (commands, error) = command_specs(&self.completion_root, self.project_trusted());
         if let Some(error) = error {
             self.push_status(format!("Error loading prompt templates: {error}"));
         }
@@ -2697,12 +2738,11 @@ impl InteractiveController {
             .chrome_mut()
             .pending_input_mut()
             .promote_oldest_follow_up_to_steer()
+            && let Some(turn) = &self.active_turn
         {
-            if let Some(turn) = &self.active_turn {
-                let message = AgentMessage::user_text(text);
-                turn.steer_input
-                    .push(neo_agent_core::ActiveTurnInput::SteerNow(message));
-            }
+            let message = AgentMessage::user_text(text);
+            turn.steer_input
+                .push(neo_agent_core::ActiveTurnInput::SteerNow(message));
         }
         Ok(())
     }
@@ -3170,7 +3210,6 @@ impl InteractiveController {
                     selected_label_tx: approval.selected_label_tx,
                     session_option_label: None,
                     prefix_option_label: None,
-                    picked_prefix: false,
                 },
             );
         }
@@ -3749,11 +3788,13 @@ impl InteractiveController {
             self.local_config.as_ref(),
             &self.model_items,
         )
-        .map(Some)
-        .unwrap_or_else(|error| {
-            tracing::warn!("failed to parse selected model: {error}");
-            None
-        });
+        .map_or_else(
+            |error| {
+                tracing::warn!("failed to parse selected model: {error}");
+                None
+            },
+            Some,
+        );
         let max_ctx = selected_model
             .as_ref()
             .and_then(|model| model.max_context_tokens);
@@ -3773,18 +3814,17 @@ impl InteractiveController {
             };
             // Keep the in-memory config in sync so subsequent turns and the next
             // startup resolve the same model.
-            config.default_model = selection.alias.clone();
+            config.default_model.clone_from(&selection.alias);
             if let Some(model) = &self.active_model {
                 config.default_provider.clone_from(&model.provider);
             }
         }
         // Persist the selection to disk so the next session opens on the same
         // model the user chose, instead of reverting to a stale default.
-        if let Some(config_path) = self.config_path() {
-            if let Err(error) = crate::config_ops::set_default_model(&config_path, &selection.alias)
-            {
-                tracing::warn!("failed to persist default model: {error}");
-            }
+        if let Some(config_path) = self.config_path()
+            && let Err(error) = crate::config_ops::set_default_model(&config_path, &selection.alias)
+        {
+            tracing::warn!("failed to persist default model: {error}");
         }
         let notice = if selection.thinking {
             format!("Switched to {} (thinking: on)", selection.alias)
@@ -4161,7 +4201,7 @@ impl InteractiveController {
         self.tui
             .chrome_mut()
             .set_custom_working_label(Some("Fetching models.dev catalog...".to_owned()));
-        let handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
+        let _handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
         let handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
         self.pending_catalog_fetch = Some(PendingCatalogFetch {
             source: CatalogFetchSource::Known,
@@ -4271,7 +4311,7 @@ impl InteractiveController {
         self.tui
             .chrome_mut()
             .set_custom_working_label(Some(format!("Importing provider {provider_id}...")));
-        let handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
+        let _handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
         let handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
         self.pending_catalog_fetch = Some(PendingCatalogFetch {
             source: CatalogFetchSource::Known,
@@ -4484,10 +4524,10 @@ fn prompt_completions(
     project_trusted: bool,
 ) -> Result<Vec<PickerItem>> {
     let catalog = CompletionCatalog {
-        slash_prompts: slash_prompt_template_completion_items(root, prefix, project_trusted)?
+        slash_prompts: slash_prompt_template_completion_items(root, prefix, project_trusted)
             .unwrap_or_default(),
         prompt_packages: prompt_package_completion_items(root, project_trusted)?,
-        extension_commands: extension_command_completion_items(root)?,
+        extension_commands: extension_command_completion_items(root, project_trusted)?,
         session_commands: session_completion_items(skill_store),
         model_items: model_items.to_vec(),
     };
@@ -4528,150 +4568,153 @@ fn prompt_package_completion_items(root: &Path, project_trusted: bool) -> Result
     Ok(items)
 }
 
-fn extension_command_completion_items(_root: &Path) -> Result<Vec<PickerItem>> {
-    let Some(neo_home) = crate::config::neo_home() else {
-        return Ok(Vec::new());
-    };
-    let extension_root = neo_agent_core::tools::extensions::default_extension_root(&neo_home);
-    if !extension_root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut items = neo_agent_core::tools::extensions::ExtensionDiscovery::new(&extension_root)
-        .discover()
-        .with_context(|| {
-            format!(
-                "failed to discover extensions under {}",
-                extension_root.display()
-            )
-        })?
-        .into_iter()
-        .map(|extension| {
-            let value = format!("/{}", extension.manifest.id);
-            let description = prompt_source_description(
-                extension.manifest.description.as_deref(),
-                Some(&extension.manifest.id),
-                Some("local extension"),
+fn extension_command_completion_items(
+    root: &Path,
+    project_trusted: bool,
+) -> Result<Vec<PickerItem>> {
+    let mut items = Vec::new();
+    if project_trusted {
+        let project_extension_root = root.join(".neo/extensions");
+        if project_extension_root.exists() {
+            items.extend(
+                discover_extension_commands(&project_extension_root).with_context(|| {
+                    format!(
+                        "failed to discover project extensions under {}",
+                        project_extension_root.display()
+                    )
+                })?,
             );
-            PickerItem::new(value.clone(), value, Some(description))
-        })
-        .collect::<Vec<_>>();
+        }
+    }
+    if let Some(neo_home) = crate::config::neo_home() {
+        let user_extension_root =
+            neo_agent_core::tools::extensions::default_extension_root(&neo_home);
+        if user_extension_root.exists() {
+            items.extend(
+                discover_extension_commands(&user_extension_root).with_context(|| {
+                    format!(
+                        "failed to discover user extensions under {}",
+                        user_extension_root.display()
+                    )
+                })?,
+            );
+        }
+    }
     items.sort_by(|left, right| left.value.cmp(&right.value));
     items.dedup_by(|left, right| left.value == right.value);
     items.truncate(100);
     Ok(items)
 }
 
+fn discover_extension_commands(extension_root: &Path) -> Result<Vec<PickerItem>> {
+    Ok(
+        neo_agent_core::tools::extensions::ExtensionDiscovery::new(extension_root)
+            .discover()
+            .with_context(|| {
+                format!(
+                    "failed to discover extensions under {}",
+                    extension_root.display()
+                )
+            })?
+            .into_iter()
+            .map(|extension| {
+                let value = format!("/{}", extension.manifest.id);
+                let description = prompt_source_description(
+                    extension.manifest.description.as_deref(),
+                    Some(&extension.manifest.id),
+                    Some("local extension"),
+                );
+                PickerItem::new(value.clone(), value, Some(description))
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+static STATIC_SLASH_COMMANDS: &[(&str, &str, Option<&str>, Option<&str>)] = &[
+    (
+        "/resume",
+        "Resume a local session",
+        Some("local sessions"),
+        Some("local"),
+    ),
+    (
+        "/new",
+        "Start a fresh local session",
+        Some("session"),
+        Some("local"),
+    ),
+    ("/clear", "Alias for /new", Some("session"), Some("local")),
+    (
+        "/model",
+        "Switch active model",
+        Some("model picker"),
+        Some("local"),
+    ),
+    (
+        "/provider",
+        "View configured providers",
+        Some("provider picker"),
+        Some("local"),
+    ),
+    (
+        "/mcp",
+        "View and manage MCP servers",
+        Some("MCP manager"),
+        Some("local"),
+    ),
+    (
+        "/plan",
+        "Toggle plan mode (on / off / clear)",
+        Some("plan mode"),
+        Some("local"),
+    ),
+    (
+        "/permissions",
+        "select permission mode",
+        Some("permission mode"),
+        Some("local"),
+    ),
+    (
+        "/ask",
+        "ask permission mode",
+        Some("permission mode"),
+        Some("local"),
+    ),
+    (
+        "/auto",
+        "auto permission mode",
+        Some("permission mode"),
+        Some("local"),
+    ),
+    (
+        "/yolo",
+        "yolo permission mode",
+        Some("permission mode"),
+        Some("local"),
+    ),
+    (
+        "/btw",
+        "Open a temporary side-question panel",
+        Some("sidecar dialog"),
+        Some("local"),
+    ),
+];
+
 fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<PickerItem> {
-    let mut items = vec![
-        PickerItem::new(
-            "/resume",
-            "/resume",
-            Some(prompt_source_description(
-                Some("Resume a local session"),
-                Some("local sessions"),
-                Some("local"),
-            )),
-        ),
-        PickerItem::new(
-            "/new",
-            "/new",
-            Some(prompt_source_description(
-                Some("Start a fresh local session"),
-                Some("session"),
-                Some("local"),
-            )),
-        ),
-        PickerItem::new(
-            "/clear",
-            "/clear",
-            Some(prompt_source_description(
-                Some("Alias for /new"),
-                Some("session"),
-                Some("local"),
-            )),
-        ),
-        PickerItem::new(
-            "/model",
-            "/model",
-            Some(prompt_source_description(
-                Some("Switch active model"),
-                Some("model picker"),
-                Some("local"),
-            )),
-        ),
-        PickerItem::new(
-            "/provider",
-            "/provider",
-            Some(prompt_source_description(
-                Some("View configured providers"),
-                Some("provider picker"),
-                Some("local"),
-            )),
-        ),
-        PickerItem::new(
-            "/mcp",
-            "/mcp",
-            Some(prompt_source_description(
-                Some("View and manage MCP servers"),
-                Some("MCP manager"),
-                Some("local"),
-            )),
-        ),
-        PickerItem::new(
-            "/plan",
-            "/plan",
-            Some(prompt_source_description(
-                Some("Toggle plan mode (on / off / clear)"),
-                Some("plan mode"),
-                Some("local"),
-            )),
-        ),
-        PickerItem::new(
-            "/permissions",
-            "/permissions",
-            Some(prompt_source_description(
-                Some("select permission mode"),
-                Some("permission mode"),
-                Some("local"),
-            )),
-        ),
-        PickerItem::new(
-            "/ask",
-            "/ask",
-            Some(prompt_source_description(
-                Some("ask permission mode"),
-                Some("permission mode"),
-                Some("local"),
-            )),
-        ),
-        PickerItem::new(
-            "/auto",
-            "/auto",
-            Some(prompt_source_description(
-                Some("auto permission mode"),
-                Some("permission mode"),
-                Some("local"),
-            )),
-        ),
-        PickerItem::new(
-            "/yolo",
-            "/yolo",
-            Some(prompt_source_description(
-                Some("yolo permission mode"),
-                Some("permission mode"),
-                Some("local"),
-            )),
-        ),
-        PickerItem::new(
-            "/btw",
-            "/btw",
-            Some(prompt_source_description(
-                Some("Open a temporary side-question panel"),
-                Some("sidecar dialog"),
-                Some("local"),
-            )),
-        ),
-    ];
+    let mut items: Vec<PickerItem> = STATIC_SLASH_COMMANDS
+        .iter()
+        .map(|(value, description, provider, trust)| {
+            PickerItem::new(
+                (*value).to_owned(),
+                (*value).to_owned(),
+                Some(prompt_source_description(
+                    Some(description),
+                    *provider,
+                    *trust,
+                )),
+            )
+        })
+        .collect();
     if let Some(skill_store) = skill_store {
         for skill in skill_store.iter() {
             let value = format!("/skill:{}", skill.name);
@@ -4711,16 +4754,25 @@ fn slash_prompt_template_completion_items(
     root: &Path,
     prefix: &str,
     project_trusted: bool,
-) -> Result<Option<Vec<PickerItem>>> {
-    let Some(name_prefix) = prefix.strip_prefix('/') else {
-        return Ok(None);
-    };
+) -> Option<Vec<PickerItem>> {
+    let name_prefix = prefix.strip_prefix('/')?;
     if name_prefix.contains('/') {
-        return Ok(None);
+        return None;
     }
 
-    let mut completions = load_project_prompt_templates(root, project_trusted)?
+    let project_prompts_dir = root.join(".neo/prompts");
+    let mut completions = load_project_prompt_templates(root, project_trusted)
         .into_iter()
+        .filter(|template| {
+            template
+                .path
+                .strip_prefix(&project_prompts_dir)
+                .is_ok_and(|relative| {
+                    relative
+                        .parent()
+                        .is_none_or(|parent| parent.as_os_str().is_empty())
+                })
+        })
         .filter(|template| template.name.starts_with(name_prefix))
         .map(|template| {
             let value = format!("/{}", template.name);
@@ -4730,7 +4782,7 @@ fn slash_prompt_template_completion_items(
         .collect::<Vec<_>>();
     completions.sort_by(|left, right| left.value.cmp(&right.value));
     completions.truncate(100);
-    Ok(Some(completions))
+    Some(completions)
 }
 
 fn filesystem_completion_candidates(root: &Path, prefix: &str) -> Result<Vec<CompletionCandidate>> {
@@ -5020,7 +5072,7 @@ fn expand_interactive_prompt(
         config::global_prompts_dir().as_deref(),
         &selectors,
         false,
-        config.map(|c| c.project_trusted).unwrap_or(false),
+        config.is_none_or(|c| c.project_trusted),
     )?;
     Ok(expanded.join(" "))
 }
@@ -5257,10 +5309,7 @@ fn command_specs(project_dir: &Path, project_trusted: bool) -> (Vec<CommandSpec>
             Some("Open a temporary side-question panel"),
         ),
     ];
-    let mut templates = match load_project_prompt_templates(project_dir, project_trusted) {
-        Ok(templates) => templates,
-        Err(error) => return (commands, Some(error.to_string())),
-    };
+    let mut templates = load_project_prompt_templates(project_dir, project_trusted);
     templates.sort_by(|left, right| left.name.cmp(&right.name));
     commands.extend(templates.into_iter().map(|template| {
         let label = format!("/{}", template.name);
@@ -5536,6 +5585,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     let mut config = config.clone();
     if let Some(model) = &selected_model {
         config.default_provider.clone_from(&model.provider.0);
+        config.default_model.clone_from(&model.model);
     }
     let run_config = config.clone();
     let run_turn: TurnDriver = Arc::new(move |request, channels| {
@@ -5855,6 +5905,8 @@ const fn prompt_cursor_edit_for_action(action: KeybindingAction) -> Option<Promp
         KeybindingAction::EditorCursorWordRight => Some(PromptEdit::MoveWordRight),
         KeybindingAction::EditorCursorLineStart => Some(PromptEdit::MoveHome),
         KeybindingAction::EditorCursorLineEnd => Some(PromptEdit::MoveEnd),
+        // Up/Down are handled directly in handle_prompt_keybinding_action, where
+        // the composer body width is known, so we do not map them here.
         _ => None,
     }
 }
@@ -6174,7 +6226,6 @@ mod tests {
             selected_label_tx: None,
             session_option_label: None,
             prefix_option_label: None,
-            picked_prefix: false,
         }
     }
 
@@ -8666,7 +8717,7 @@ command = "python3"
             .expect("selection moves down");
         assert_eq!(
             controller.chrome().approval_choice(),
-            Some(ApprovalChoice::AlwaysApprove)
+            Some(ApprovalChoice::Deny)
         );
 
         controller

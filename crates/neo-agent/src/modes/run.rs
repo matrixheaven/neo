@@ -966,15 +966,19 @@ pub struct PromptApprovalRequest {
     /// when the approval was an `ExitPlanMode` plan-review approve choice.
     pub selected_label_tx: Option<oneshot::Sender<Option<String>>>,
     /// Display label for the session-approval option (Layer 1). `None` hides it.
+    #[allow(dead_code)]
     pub session_option_label: Option<String>,
     /// Display label for the prefix-approval option (Layer 2). `None` hides it.
     /// When the user picks the prefix option, the controller sets
     /// `prefix_rule` so the runtime persists the rule.
+    #[allow(dead_code)]
     pub prefix_option_label: Option<String>,
     /// The prefix rule to persist when the user picks the prefix option.
-    /// Forwarded back from the controller alongside the AllowForSession decision.
+    /// Forwarded back from the controller alongside the `AllowForSession` decision.
+    #[allow(dead_code)]
     pub prefix_rule: Option<neo_agent_core::PrefixApprovalRule>,
     /// The session scope to record when the user picks the session option.
+    #[allow(dead_code)]
     pub session_scope: Option<neo_agent_core::SessionApprovalScope>,
 }
 
@@ -1595,73 +1599,80 @@ pub(crate) fn agent_config_for_app(
         });
     }
     if let Some(approval_tx) = approval_tx {
-        let plan_review_feedback = Arc::clone(&agent_config.plan_review_feedback);
-        let plan_review_selected_label = Arc::clone(&agent_config.plan_review_selected_label);
-        agent_config = agent_config.with_async_approval_handler(move |request| {
-            let approval_tx = approval_tx.clone();
-            let plan_review_feedback = Arc::clone(&plan_review_feedback);
-            let plan_review_selected_label = Arc::clone(&plan_review_selected_label);
-            async move {
-                let (decision_tx, decision_rx) = oneshot::channel();
-                let (feedback_tx, feedback_rx) = oneshot::channel();
-                let (selected_label_tx, selected_label_rx) = oneshot::channel();
-                let id = request.id.clone();
-                let operation = request.operation;
-                let session_scope = request.session_scope.clone();
-                let prefix_rule = request.prefix_rule.clone();
-                let session_option_label = session_scope
-                    .as_ref()
-                    .filter(|scope| !scope.is_empty())
-                    .map(|scope| scope.label.clone());
-                let prefix_option_label = prefix_rule
-                    .as_ref()
-                    .map(|rule| format!("Approve commands starting with {}", rule.label));
-                if approval_tx
-                    .send(PromptApprovalRequest {
-                        id,
-                        operation,
-                        decision_tx,
-                        feedback_tx: Some(feedback_tx),
-                        selected_label_tx: Some(selected_label_tx),
-                        session_option_label,
-                        prefix_option_label,
-                        prefix_rule,
-                        session_scope,
-                    })
-                    .is_err()
-                {
-                    return PermissionApprovalDecision::Reject;
-                }
-                let decision = decision_rx
-                    .await
-                    .unwrap_or(PermissionApprovalDecision::Reject);
-                if decision == PermissionApprovalDecision::Reject
-                    && matches!(
-                        operation,
-                        PermissionOperation::PlanTransition | PermissionOperation::GoalTransition
-                    )
-                    && let Ok(Some(feedback)) = feedback_rx.await
-                    && !feedback.trim().is_empty()
-                    && let Ok(mut map) = plan_review_feedback.lock()
-                {
-                    map.insert(request.id.clone(), feedback);
-                }
-                // The user approved a specific model-supplied plan-review
-                // option. Record its label so `attach_exit_plan_details` can
-                // prefix the tool result with "Selected approach: <label>".
-                if decision == PermissionApprovalDecision::AllowOnce
-                    && operation == PermissionOperation::PlanTransition
-                    && let Ok(Some(label)) = selected_label_rx.await
-                    && !label.trim().is_empty()
-                    && let Ok(mut map) = plan_review_selected_label.lock()
-                {
-                    map.insert(request.id.clone(), label);
-                }
-                decision
-            }
-        });
+        agent_config = attach_async_approval_handler(agent_config, approval_tx);
     }
     Ok(agent_config)
+}
+
+fn attach_async_approval_handler(
+    agent_config: AgentConfig,
+    approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
+) -> AgentConfig {
+    let plan_review_feedback = Arc::clone(&agent_config.plan_review_feedback);
+    let plan_review_selected_label = Arc::clone(&agent_config.plan_review_selected_label);
+    agent_config.with_async_approval_handler(move |request| {
+        let approval_tx = approval_tx.clone();
+        let plan_review_feedback = Arc::clone(&plan_review_feedback);
+        let plan_review_selected_label = Arc::clone(&plan_review_selected_label);
+        async move {
+            let (decision_tx, decision_rx) = oneshot::channel();
+            let (feedback_tx, feedback_rx) = oneshot::channel();
+            let (selected_label_tx, selected_label_rx) = oneshot::channel();
+            let id = request.id.clone();
+            let operation = request.operation;
+            let session_scope = request.session_scope.clone();
+            let prefix_rule = request.prefix_rule.clone();
+            let session_option_label = session_scope
+                .as_ref()
+                .filter(|scope| !scope.is_empty())
+                .map(|scope| scope.label.clone());
+            let prefix_option_label = prefix_rule
+                .as_ref()
+                .map(|rule| format!("Approve commands starting with {}", rule.label));
+            if approval_tx
+                .send(PromptApprovalRequest {
+                    id,
+                    operation,
+                    decision_tx,
+                    feedback_tx: Some(feedback_tx),
+                    selected_label_tx: Some(selected_label_tx),
+                    session_option_label,
+                    prefix_option_label,
+                    prefix_rule,
+                    session_scope,
+                })
+                .is_err()
+            {
+                return PermissionApprovalDecision::Reject;
+            }
+            let decision = decision_rx
+                .await
+                .unwrap_or(PermissionApprovalDecision::Reject);
+            if decision == PermissionApprovalDecision::Reject
+                && matches!(
+                    operation,
+                    PermissionOperation::PlanTransition | PermissionOperation::GoalTransition
+                )
+                && let Ok(Some(feedback)) = feedback_rx.await
+                && !feedback.trim().is_empty()
+                && let Ok(mut map) = plan_review_feedback.lock()
+            {
+                map.insert(request.id.clone(), feedback);
+            }
+            // The user approved a specific model-supplied plan-review
+            // option. Record its label so `attach_exit_plan_details` can
+            // prefix the tool result with "Selected approach: <label>".
+            if decision == PermissionApprovalDecision::AllowOnce
+                && operation == PermissionOperation::PlanTransition
+                && let Ok(Some(label)) = selected_label_rx.await
+                && !label.trim().is_empty()
+                && let Ok(mut map) = plan_review_selected_label.lock()
+            {
+                map.insert(request.id.clone(), label);
+            }
+            decision
+        }
+    })
 }
 
 const LEGACY_DEFAULT_COMPACTION_MAX_ESTIMATED_TOKENS: usize = 32_000;

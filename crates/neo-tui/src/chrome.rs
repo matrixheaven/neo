@@ -6,6 +6,7 @@ use std::{
 };
 
 use neo_agent_core::{AgentEvent, AgentMessage, PermissionMode, PermissionOperation};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
     ansi::Color,
@@ -22,6 +23,115 @@ use crate::{
         QuestionStateMachine, TodoDisplayItem, TodoDisplayStatus,
     },
 };
+
+/// Maximum number of visible content lines in the composer input box.
+pub(crate) const MAX_PROMPT_VISIBLE_LINES: usize = 8;
+
+/// Display width of a grapheme for prompt cursor math. Tabs are treated as
+/// four columns to match the visual expansion used by the renderer.
+fn prompt_grapheme_width(grapheme: &str) -> usize {
+    if grapheme == "\t" {
+        4
+    } else {
+        visible_width(grapheme)
+    }
+}
+
+/// Wrap `text` into display rows of at most `body_width` columns, treating tabs
+/// as four columns. The returned strings preserve the original graphemes (tabs
+/// stay as tabs); only the segment boundaries depend on expanded widths.
+fn wrap_prompt_lines(text: &str, body_width: usize) -> Vec<(usize, String)> {
+    if body_width == 0 {
+        return vec![(0, String::new())];
+    }
+
+    let mut result = Vec::new();
+    let mut char_index = 0;
+
+    for logical_line in text.split('\n') {
+        if logical_line.is_empty() {
+            result.push((char_index, String::new()));
+        } else {
+            let mut current = String::new();
+            let mut current_width = 0;
+            let mut active_sgr = String::new();
+            let mut byte_index = 0;
+            let mut segment_start = char_index;
+
+            while byte_index < logical_line.len() {
+                if let Some(sequence) = crate::ansi::next_sequence(logical_line, byte_index) {
+                    current.push_str(sequence);
+                    crate::components::update_active_sgr(sequence, &mut active_sgr);
+                    byte_index += sequence.len();
+                    continue;
+                }
+
+                let Some(grapheme) = logical_line[byte_index..].graphemes(true).next() else {
+                    break;
+                };
+
+                let grapheme_width = prompt_grapheme_width(grapheme);
+                if current_width > 0 && current_width + grapheme_width > body_width {
+                    result.push((segment_start, std::mem::take(&mut current)));
+                    segment_start = char_index;
+                    current.push_str(&active_sgr);
+                    current_width = 0;
+                }
+
+                current.push_str(grapheme);
+                current_width += grapheme_width;
+                byte_index += grapheme.len();
+                char_index += grapheme.chars().count();
+            }
+
+            if !current.is_empty() {
+                result.push((segment_start, current));
+            }
+        }
+        char_index += 1; // for the '\n' separator
+    }
+
+    if result.is_empty() {
+        result.push((0, String::new()));
+    }
+    result
+}
+
+/// Return the char index in `text` whose left edge is closest to but not
+/// greater than `target_col` display columns. Tabs count as four columns and
+/// ANSI sequences are skipped because they have zero display width.
+fn char_index_at_visual_col(text: &str, target_col: usize) -> usize {
+    let mut walked = 0;
+    let mut chars = 0;
+    for grapheme in text.graphemes(true) {
+        let width = prompt_grapheme_width(grapheme);
+        if width == 0 {
+            chars += grapheme.chars().count();
+            continue;
+        }
+        if walked + width > target_col {
+            break;
+        }
+        walked += width;
+        chars += grapheme.chars().count();
+    }
+    chars
+}
+
+/// Return the display width of the first `char_index` characters of `text`.
+/// Tabs count as four columns and ANSI sequences contribute zero width.
+fn visual_col_at_char_index(text: &str, char_index: usize) -> usize {
+    let mut walked = 0;
+    let mut chars = 0;
+    for grapheme in text.graphemes(true) {
+        if chars >= char_index {
+            break;
+        }
+        walked += prompt_grapheme_width(grapheme);
+        chars += grapheme.chars().count();
+    }
+    walked
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TuiTheme {
@@ -3298,6 +3408,7 @@ impl ToolStatusKind {
 pub struct PromptState {
     pub text: String,
     pub cursor: usize,
+    scroll_offset: usize,
     history: Vec<String>,
     history_index: Option<usize>,
     history_draft: Option<PromptSnapshot>,
@@ -3319,6 +3430,7 @@ impl PromptState {
         Self {
             text,
             cursor,
+            scroll_offset: 0,
             history: Vec::new(),
             history_index: None,
             history_draft: None,
@@ -3372,6 +3484,7 @@ impl PromptState {
     pub fn clear_after_submit(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.scroll_offset = 0;
         self.undo_stack.clear();
         self.kill_ring.clear();
         self.stop_history_navigation();
@@ -3382,6 +3495,7 @@ impl PromptState {
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.cursor = self.char_len();
+        self.scroll_offset = 0;
         self.stop_history_navigation();
     }
 
@@ -3428,9 +3542,18 @@ impl PromptState {
     }
 
     pub fn apply_edit(&mut self, edit: PromptEdit<'_>) -> Option<String> {
+        self.apply_edit_with_width(edit, 0)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub fn apply_edit_with_width(
+        &mut self,
+        edit: PromptEdit<'_>,
+        body_width: usize,
+    ) -> Option<String> {
         self.cursor = self.cursor.min(self.char_len());
 
-        match edit {
+        let result = match edit {
             PromptEdit::Insert(text) => {
                 let inserted = text.to_string();
                 if inserted.is_empty() {
@@ -3452,6 +3575,7 @@ impl PromptState {
                 let before = self.snapshot();
                 let cleared = std::mem::take(&mut self.text);
                 self.cursor = 0;
+                self.scroll_offset = 0;
                 self.push_undo(before);
                 Some(cleared)
             }
@@ -3523,7 +3647,89 @@ impl PromptState {
                 }
                 None
             }
+            PromptEdit::MoveUp(width) => {
+                self.move_cursor_vertical(width, -1);
+                None
+            }
+            PromptEdit::MoveDown(width) => {
+                self.move_cursor_vertical(width, 1);
+                None
+            }
+        };
+        if body_width > 0 {
+            self.clamp_scroll_offset(body_width);
         }
+        result
+    }
+
+    /// Move the cursor up/down by one wrapped logical line, preserving the
+    /// visual column when possible. `body_width` is the width available for the
+    /// composer body (content width minus borders and padding).
+    fn move_cursor_vertical(&mut self, body_width: usize, direction: isize) {
+        if body_width == 0 || self.text.is_empty() {
+            return;
+        }
+        let wrapped = wrap_prompt_lines(&self.text, body_width);
+        if wrapped.len() <= 1 {
+            return;
+        }
+        let current_idx = wrapped
+            .partition_point(|(start, _)| *start <= self.cursor)
+            .saturating_sub(1);
+        let target_idx = if direction < 0 {
+            current_idx.saturating_sub(1)
+        } else {
+            (current_idx + 1).min(wrapped.len() - 1)
+        };
+        if target_idx == current_idx {
+            return;
+        }
+        let (current_start, _) = &wrapped[current_idx];
+        let offset_in_current = self.cursor.saturating_sub(*current_start);
+        let prefix_text: String = self
+            .text
+            .chars()
+            .skip(*current_start)
+            .take(offset_in_current)
+            .collect();
+        let visual_col = visual_col_at_char_index(&prefix_text, offset_in_current);
+        let (target_start, target_line) = &wrapped[target_idx];
+        let target_offset = char_index_at_visual_col(target_line, visual_col);
+        self.cursor = target_start + target_offset;
+        self.clamp_scroll_offset(body_width);
+    }
+
+    /// Keep the scroll offset within bounds and ensure the cursor line is
+    /// visible in the viewport.
+    fn clamp_scroll_offset(&mut self, body_width: usize) {
+        if body_width == 0 {
+            self.scroll_offset = 0;
+            return;
+        }
+        let wrapped = wrap_prompt_lines(&self.text, body_width);
+        let cursor_line = wrapped
+            .partition_point(|(start, _)| *start <= self.cursor)
+            .saturating_sub(1);
+        if cursor_line < self.scroll_offset {
+            self.scroll_offset = cursor_line;
+        } else if cursor_line >= self.scroll_offset + MAX_PROMPT_VISIBLE_LINES {
+            self.scroll_offset = cursor_line.saturating_sub(MAX_PROMPT_VISIBLE_LINES - 1);
+        }
+        let max_offset = wrapped.len().saturating_sub(MAX_PROMPT_VISIBLE_LINES);
+        self.scroll_offset = self.scroll_offset.min(max_offset);
+    }
+
+    #[must_use]
+    pub const fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    /// Whether the prompt is currently navigating history (true) or editing
+    /// the current draft (false). Used by keybinding dispatch to decide whether
+    /// ↑/↓ should move the cursor or recall the next/previous history entry.
+    #[must_use]
+    pub fn in_history_navigation(&self) -> bool {
+        self.history_index.is_some()
     }
 
     #[must_use]
@@ -3614,6 +3820,7 @@ impl PromptState {
     fn replace_with_history_text(&mut self, index: usize) {
         self.text = self.history[index].clone();
         self.cursor = self.char_len();
+        self.scroll_offset = 0;
         self.undo_stack.clear();
     }
 
@@ -3697,6 +3904,12 @@ pub enum PromptEdit<'a> {
     DeleteToLineEnd,
     Yank,
     Undo,
+    /// Move the cursor up one wrapped logical line. The `usize` is the body
+    /// width used to compute the wrapped lines.
+    MoveUp(usize),
+    /// Move the cursor down one wrapped logical line. The `usize` is the body
+    /// width used to compute the wrapped lines.
+    MoveDown(usize),
 }
 
 fn find_word_backward(text: &str, cursor: usize) -> usize {

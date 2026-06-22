@@ -678,6 +678,57 @@ fn app_shell_prompt_renders_tabs_without_terminal_tab_controls() {
 }
 
 #[test]
+fn app_shell_prompt_grows_to_eight_lines() {
+    let mut app = NeoChromeState::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
+    for _ in 0..9 {
+        app.prompt_mut().apply_edit(PromptEdit::Insert("\n"));
+    }
+
+    let width = 80;
+    let render = render_chrome_lines(&app, width, 30);
+    let prompt_box_lines = &render.lines[render.prompt_start_row..render.lines.len() - 1];
+
+    // 8 content rows + top/bottom border = 10 rows.
+    assert_eq!(
+        prompt_box_lines.len(),
+        10,
+        "prompt should cap at 8 visible content lines: {prompt_box_lines:?}"
+    );
+}
+
+#[test]
+fn app_shell_prompt_shows_scroll_indicators_when_clipped() {
+    let mut app = NeoChromeState::new("neo", "new", "anthropic/deepseek-v4-pro[1m]", "/tmp/neo-ws");
+    for _ in 0..9 {
+        app.prompt_mut().apply_edit(PromptEdit::Insert("\n"));
+    }
+    // Cursor is at the end; viewport should scroll to keep it visible.
+    app.prompt_mut()
+        .apply_edit_with_width(PromptEdit::MoveEnd, 72);
+
+    let width = 80;
+    let render = render_chrome_lines(&app, width, 30);
+    let prompt_box_lines = &render.lines[render.prompt_start_row..render.lines.len() - 1];
+    let top_border = neo_tui::ansi::strip_ansi(&prompt_box_lines[0]);
+    assert!(
+        top_border.contains('↑') && top_border.contains("more"),
+        "top border should show scroll-up indicator when content is scrolled: {top_border:?}"
+    );
+
+    // Move cursor back to the top; viewport should scroll back and show bottom indicator.
+    app.prompt_mut()
+        .apply_edit_with_width(PromptEdit::MoveHome, 72);
+    let render = render_chrome_lines(&app, width, 30);
+    let prompt_box_lines = &render.lines[render.prompt_start_row..render.lines.len() - 1];
+    let bottom_border =
+        neo_tui::ansi::strip_ansi(prompt_box_lines.last().expect("prompt has bottom border"));
+    assert!(
+        bottom_border.contains('↓') && bottom_border.contains("more"),
+        "bottom border should show scroll-down indicator when content is clipped: {bottom_border:?}"
+    );
+}
+
+#[test]
 fn transcript_pane_frame_keeps_latest_live_row_visible() {
     let mut runtime = TranscriptPane::new(80, 12);
     runtime.set_live_chrome_height(4);

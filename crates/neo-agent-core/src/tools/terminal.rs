@@ -132,7 +132,7 @@ impl Tool for TerminalTool {
                 }
                 TerminalMode::Read => {
                     let handle = required_field(self.name(), input.handle, "handle")?;
-                    read_terminal(self.name(), &handle, max_output_bytes).await
+                    read_terminal(ctx, self.name(), &handle, max_output_bytes).await
                 }
                 TerminalMode::Resize => {
                     let handle = required_field(self.name(), input.handle, "handle")?;
@@ -161,6 +161,9 @@ struct TerminalSession {
     reader_thread: Option<ThreadJoinHandle<()>>,
     cols: u16,
     rows: u16,
+    stream_callback: Arc<StdMutex<Option<ToolUpdateCallback>>>,
+    stream_max_bytes: Arc<StdMutex<usize>>,
+    streamed: Arc<StdMutex<usize>>,
 }
 
 fn required_field<T>(tool: &str, value: Option<T>, field: &'static str) -> Result<T, ToolError> {
@@ -201,11 +204,15 @@ async fn start_terminal(
     drop(pair.slave);
 
     let output = Arc::new(StdMutex::new(Vec::new()));
+    let stream_callback: Arc<StdMutex<Option<ToolUpdateCallback>>> = Arc::new(StdMutex::new(None));
+    let stream_max_bytes: Arc<StdMutex<usize>> = Arc::new(StdMutex::new(0));
+    let streamed: Arc<StdMutex<usize>> = Arc::new(StdMutex::new(0));
     let reader_thread = spawn_reader_thread(
         reader,
         Arc::clone(&output),
-        ctx.tool_update.clone(),
-        ctx.max_output_bytes,
+        Arc::clone(&stream_callback),
+        Arc::clone(&stream_max_bytes),
+        Arc::clone(&streamed),
     );
     let handle = Uuid::new_v4().to_string();
     TERMINALS.lock().await.insert(
@@ -219,6 +226,9 @@ async fn start_terminal(
             reader_thread: Some(reader_thread),
             cols,
             rows,
+            stream_callback,
+            stream_max_bytes,
+            streamed,
         },
     );
     ctx.process_supervisor
@@ -241,10 +251,10 @@ async fn start_terminal(
 fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     output: Arc<StdMutex<Vec<u8>>>,
-    callback: Option<ToolUpdateCallback>,
-    stream_max_bytes: usize,
+    stream_callback: Arc<StdMutex<Option<ToolUpdateCallback>>>,
+    stream_max_bytes: Arc<StdMutex<usize>>,
+    streamed: Arc<StdMutex<usize>>,
 ) -> ThreadJoinHandle<()> {
-    let mut streamed = 0_usize;
     std::thread::spawn(move || {
         let mut local = [0_u8; 8192];
         loop {
@@ -256,11 +266,21 @@ fn spawn_reader_thread(
                         .lock()
                         .expect("terminal output lock poisoned")
                         .extend_from_slice(chunk);
-                    if streamed < stream_max_bytes {
-                        let remaining = stream_max_bytes - streamed;
+                    let (max, mut already_streamed) = {
+                        let max = *stream_max_bytes.lock().expect("stream max lock poisoned");
+                        let already = *streamed.lock().expect("streamed lock poisoned");
+                        (max, already)
+                    };
+                    if already_streamed < max {
+                        let remaining = max - already_streamed;
                         let streamed_chunk = &chunk[..chunk.len().min(remaining)];
-                        streamed += streamed_chunk.len();
-                        if let Some(callback) = &callback {
+                        already_streamed += streamed_chunk.len();
+                        *streamed.lock().expect("streamed lock poisoned") = already_streamed;
+                        if let Some(callback) = stream_callback
+                            .lock()
+                            .expect("stream callback lock poisoned")
+                            .as_ref()
+                        {
                             callback(&String::from_utf8_lossy(streamed_chunk));
                         }
                     }
@@ -293,6 +313,7 @@ async fn write_terminal(tool: &str, handle: &str, input: &str) -> Result<ToolRes
 }
 
 async fn read_terminal(
+    ctx: &ToolContext,
     tool: &str,
     handle: &str,
     max_output_bytes: usize,
@@ -302,6 +323,15 @@ async fn read_terminal(
         .get_mut(handle)
         .ok_or_else(|| unknown_terminal(tool, handle))?;
     let status = session.child.try_wait().map_err(ToolError::Io)?;
+    session
+        .stream_callback
+        .lock()
+        .expect("stream callback lock poisoned")
+        .clone_from(&ctx.tool_update);
+    *session
+        .stream_max_bytes
+        .lock()
+        .expect("stream max lock poisoned") = max_output_bytes;
     if status.is_none() {
         wait_for_output_quiet_period(Arc::clone(&session.output), session.read_offset).await;
     }
@@ -325,6 +355,10 @@ async fn read_terminal(
     };
     let (output_capped, output_truncated) = cap_output(&output, max_output_bytes);
     let output_details = cap_output_details(&output, max_output_bytes);
+    if let Some(callback) = ctx.tool_update.as_ref() {
+        callback(&output_capped);
+    }
+    *session.streamed.lock().expect("streamed lock poisoned") = total_output_bytes;
     let status_text = status.as_ref().map_or("running", |_| "exited");
     let exit_code = status.map(|status| i32::try_from(status.exit_code()).unwrap_or(i32::MAX));
     Ok(ToolResult::ok(format!(
@@ -410,14 +444,21 @@ async fn stop_terminal(
         .remove(handle)
         .ok_or_else(|| unknown_terminal(tool, handle))?;
     ctx.process_supervisor.unregister(handle).await;
-    Ok(stop_session_blocking(handle.to_owned(), session, "stopped", max_output_bytes).await)
+    Ok(stop_session_blocking(
+        handle.to_owned(),
+        session,
+        "stopped",
+        max_output_bytes,
+        ctx.tool_update.clone(),
+    )
+    .await)
 }
 
 async fn cleanup_terminal_session(handle: &str) {
     let Some(session) = TERMINALS.lock().await.remove(handle) else {
         return;
     };
-    let _ = stop_session_blocking(handle.to_owned(), session, "stopped", 0).await;
+    let _ = stop_session_blocking(handle.to_owned(), session, "stopped", 0, None).await;
 }
 
 async fn stop_session_blocking(
@@ -425,10 +466,13 @@ async fn stop_session_blocking(
     session: TerminalSession,
     status: &'static str,
     max_output_bytes: usize,
+    stream_callback: Option<ToolUpdateCallback>,
 ) -> ToolResult {
-    task::spawn_blocking(move || stop_session(&handle, session, status, max_output_bytes))
-        .await
-        .expect("terminal stop blocking task should not panic")
+    task::spawn_blocking(move || {
+        stop_session(&handle, session, status, max_output_bytes, stream_callback)
+    })
+    .await
+    .expect("terminal stop blocking task should not panic")
 }
 
 fn stop_session(
@@ -436,7 +480,16 @@ fn stop_session(
     mut session: TerminalSession,
     status: &'static str,
     max_output_bytes: usize,
+    stream_callback: Option<ToolUpdateCallback>,
 ) -> ToolResult {
+    *session
+        .stream_callback
+        .lock()
+        .expect("stream callback lock poisoned") = stream_callback;
+    *session
+        .stream_max_bytes
+        .lock()
+        .expect("stream max lock poisoned") = max_output_bytes;
     drop(session.writer);
     drop(session.master);
     let _ = session.child.kill();

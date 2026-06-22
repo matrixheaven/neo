@@ -3546,33 +3546,10 @@ async fn runtime_emits_terminal_lifecycle_events_for_terminal_tool() {
 #[tokio::test]
 async fn runtime_streams_terminal_prompt_updates_before_read() {
     let prompt = "Stage this hunk [y,n,q,a,d,j,J,g,/,s,e,p,?]?";
-    let harness = FakeHarness::from_turns([vec![
-        AiStreamEvent::MessageStart {
-            id: "msg_1".to_owned(),
-        },
-        AiStreamEvent::ToolCallStart {
-            id: "tool_1".to_owned(),
-            name: "Terminal".to_owned(),
-        },
-        AiStreamEvent::ToolCallEnd {
-            id: "tool_1".to_owned(),
-            arguments: json!({
-                "mode": "start",
-                "command": format!(
-                    "python3 - <<'PY'\nimport sys, time\nsys.stdout.write('{prompt} ')\nsys.stdout.flush()\ntime.sleep(1)\nPY"
-                ),
-                "cols": 100,
-                "rows": 24
-            }),
-        },
-        AiStreamEvent::MessageEnd {
-            stop_reason: neo_ai::StopReason::ToolUse,
-            usage: None,
-        },
-    ]]);
+    let model = Arc::new(TerminalStreamingModel::default());
     let runtime = AgentRuntime::with_tools(
-        AgentConfig::for_model(harness.model()).with_permission_mode(PermissionMode::Yolo),
-        harness.client(),
+        AgentConfig::for_model(fake_model()).with_permission_mode(PermissionMode::Yolo),
+        model,
         ToolRegistry::with_builtin_tools(),
     );
     let mut context = AgentContext::new();
@@ -3588,15 +3565,17 @@ async fn runtime_streams_terminal_prompt_updates_before_read() {
         .collect::<Result<Vec<_>, _>>()
         .expect("terminal turn should succeed");
 
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AgentEvent::ToolExecutionUpdate {
-            id,
-            name,
-            partial_result,
-            ..
-        } if id == "tool_1" && name == "Terminal" && partial_result.content.contains(prompt)
-    )));
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolExecutionUpdate {
+                name,
+                partial_result,
+                ..
+            } if name == "Terminal" && partial_result.content.contains(prompt)
+        )),
+        "expected a Terminal streaming update carrying the prompt before read returned; events: {events:?}"
+    );
 }
 
 #[tokio::test]
@@ -4573,9 +4552,7 @@ async fn exit_plan_mode_selected_option_label_prefixes_tool_result() {
     // The TUI would populate this side-channel after the user picked "Option A".
     let selected_label_map = Arc::clone(&config.plan_review_selected_label);
     {
-        let mut labels = selected_label_map
-            .lock()
-            .expect("selected label lock");
+        let mut labels = selected_label_map.lock().expect("selected label lock");
         labels.insert("tool_1".to_owned(), "Option A".to_owned());
     }
     let config = config.with_approval_handler(|request| {
@@ -5679,6 +5656,66 @@ impl ModelClient for CappedTerminalOutputModel {
             .expect("request lock poisoned")
             .push(request);
         futures::stream::iter(next.into_iter().map(Ok)).boxed()
+    }
+}
+
+#[derive(Default)]
+struct TerminalStreamingModel {
+    requests: Mutex<Vec<ChatRequest>>,
+}
+
+impl ModelClient for TerminalStreamingModel {
+    fn stream_chat(
+        &self,
+        request: ChatRequest,
+    ) -> futures::stream::BoxStream<'static, Result<AiStreamEvent, AiError>> {
+        self.requests
+            .lock()
+            .expect("request lock poisoned")
+            .push(request.clone());
+        let next = terminal_streaming_events_for_request(&request);
+        futures::stream::iter(next.into_iter().map(Ok)).boxed()
+    }
+}
+
+fn terminal_streaming_events_for_request(request: &ChatRequest) -> Vec<AiStreamEvent> {
+    const PROMPT: &str = "Stage this hunk [y,n,q,a,d,j,J,g,/,s,e,p,?]?";
+    let tool_results = request
+        .messages
+        .iter()
+        .filter_map(tool_result_text)
+        .collect::<Vec<_>>();
+    let turn_index = tool_results.len() + 1;
+    let handle = tool_results
+        .iter()
+        .find_map(|content| terminal_handle(content));
+    let last = tool_results.last().map(String::as_str).unwrap_or_default();
+
+    match handle {
+        None => terminal_tool_turn(
+            turn_index,
+            "tool_1",
+            json!({
+                "mode": "start",
+                "command": format!(
+                    "python3 - <<'PY'\nimport sys, time\nsys.stdout.write('{PROMPT} ')\nsys.stdout.flush()\ntime.sleep(1)\nPY"
+                ),
+                "cols": 100,
+                "rows": 24
+            }),
+        ),
+        Some(handle) if !last.contains("status: stopped") && !last.contains("output:") => {
+            terminal_tool_turn(
+                turn_index,
+                "tool_2",
+                json!({
+                    "mode": "read",
+                    "handle": handle,
+                    "max_output_bytes": 1024
+                }),
+            )
+        }
+        _ => end_turn_done(turn_index),
     }
 }
 
