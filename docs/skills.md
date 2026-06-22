@@ -49,7 +49,7 @@ Fields:
 - `arguments` (optional): list of named arguments. Each argument may declare
   `name`, `description`, `required` (default `false`), and `default`. Declaring
   arguments is optional: undeclared named arguments are never rejected. If the
-  body contains a matching `$<name>` placeholder it is substituted with the
+  body contains a matching `$<name>` marker it is replaced with the
   supplied value; otherwise the argument is passed through as part of
   `$ARGUMENTS`. Only a **declared `required` argument that is missing** produces
   an error.

@@ -153,10 +153,9 @@ fn write_mock_responses_config(temp: &TempDir, base_url: &str) {
 
 fn write_trust_store(home: &std::path::Path, project: &std::path::Path, trusted: bool) {
     let canonical = project.canonicalize().expect("canonicalize project");
-    let store_dir = home.join(".neo");
-    std::fs::create_dir_all(&store_dir).expect("create .neo");
+    std::fs::create_dir_all(home).expect("create neo home");
     std::fs::write(
-        store_dir.join("trust.json"),
+        home.join("trust.json"),
         json!({ canonical.to_str().expect("utf8 project path"): trusted }).to_string(),
     )
     .expect("write trust store");

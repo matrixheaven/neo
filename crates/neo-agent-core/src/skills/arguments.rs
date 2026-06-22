@@ -154,8 +154,8 @@ fn resolve_arguments(
 
     // Undeclared named arguments are tolerated: they are merged into the
     // resolved map so a skill body that references `$<name>` can still
-    // substitute them. When the body has no matching placeholder they simply
-    // ride along in `raw_arguments` via the no-placeholder fallback path.
+    // use them. If the body does not reference them, they remain in
+    // `raw_arguments`.
     for (key, value) in &invocation.named {
         resolved.entry(key.clone()).or_insert_with(|| value.clone());
     }

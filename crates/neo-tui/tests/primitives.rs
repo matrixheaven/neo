@@ -705,7 +705,7 @@ fn prompt_history_set_history_trims_and_dedupes_consecutive_entries() {
     prompt.set_history([
         "  alpha  ".to_owned(),
         "alpha".to_owned(),
-        "".to_owned(),
+        String::new(),
         "beta".to_owned(),
         "gamma".to_owned(),
     ]);
