@@ -55,6 +55,11 @@ impl Tool for SummarizeSessionsTool {
          Parameters:\n\
          - `session_id`: summarize a single specific session.\n\
          - `days`: summarize all sessions from the last N days.\n\n\
+         Note: `session_id` and `days` are mutually exclusive — provide exactly one. If `session_id` \
+         is given, only that specific session is summarized. If `days` is given, all sessions from \
+         the last N days are summarized. If the specified `session_id` does not exist, the tool \
+         returns an error listing available session IDs. If `days` yields no sessions, the tool \
+         returns a status message indicating no sessions were found in the given time range.\n\n\
          Output format:\n\
          - Each summarized session is prefixed with `Session: <id>`.\n\
          - User and assistant messages are grouped by turn.\n\
