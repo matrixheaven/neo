@@ -5,6 +5,7 @@ use crate::core::Line;
 use crate::image::{ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities};
 use crate::transcript::ToolCallComponent;
 use crate::widgets::box_draw;
+use serde::{Deserialize, Serialize};
 
 /// Rich welcome-banner content rendered as a rounded box (matching Neo).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -18,7 +19,7 @@ pub struct BannerData {
     pub mcp: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalPromptData {
     pub id: String,
     pub title: String,
@@ -28,6 +29,14 @@ pub struct ApprovalPromptData {
     pub selected: usize,
     pub feedback_input: String,
     pub resolved: Option<String>,
+    /// Dynamic label for the reusable session-approval option (Layer 1).
+    /// `None` omits the option, keeping numeric shortcuts aligned.
+    #[serde(default)]
+    pub session_option_label: Option<String>,
+    /// Dynamic label for the persistent prefix-approval option (Layer 2).
+    /// `None` omits the option.
+    #[serde(default)]
+    pub prefix_option_label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -648,15 +657,21 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         rows.extend(styled_wrap_with_indent(detail, width, 2, 4, body));
     }
     rows.push(Line::raw(""));
-    for (index, label) in [
-        "Approve once",
-        "Approve for this session",
-        "Reject",
-        "Reject with feedback",
-    ]
-    .iter()
-    .enumerate()
-    {
+    // Build the option list dynamically. The session-approval (Layer 1) and
+    // prefix-rule (Layer 2) options appear only when their labels are `Some`,
+    // so numeric shortcuts and the feedback-input index track the visible list.
+    let mut options: Vec<String> = vec!["Approve once".to_owned()];
+    if let Some(label) = &data.session_option_label {
+        options.push(label.clone());
+    }
+    if let Some(label) = &data.prefix_option_label {
+        options.push(label.clone());
+    }
+    options.push("Reject".to_owned());
+    options.push("Reject with feedback".to_owned());
+    let revise_index = options.len() - 1;
+
+    for (index, label) in options.iter().enumerate() {
         let prefix = if data.selected == index {
             "  ▶ "
         } else {
@@ -676,7 +691,7 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         ));
     }
     rows.push(Line::raw(""));
-    if data.selected == 3 {
+    if data.selected == revise_index {
         let feedback = if data.feedback_input.is_empty() {
             "feedback: ▌".to_owned()
         } else {
@@ -707,7 +722,7 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         rows.push(Line::raw(""));
     }
     rows.extend(styled_wrap_with_indent(
-        "  ↑/↓ select · 1/2/3/4 choose · ↵ confirm",
+        "  ↑/↓ select · number keys choose · ↵ confirm",
         width,
         0,
         2,

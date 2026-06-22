@@ -5,7 +5,7 @@ use std::{
     time::SystemTime,
 };
 
-use neo_agent_core::{AgentEvent, PermissionMode, PermissionOperation};
+use neo_agent_core::{AgentEvent, AgentMessage, PermissionMode, PermissionOperation};
 
 use crate::{
     ansi::Color,
@@ -58,6 +58,9 @@ pub struct TuiTheme {
     pub footer_context_ok: Color,
     pub footer_context_warn: Color,
     pub footer_context_critical: Color,
+    pub pending_input_header: Color,
+    pub pending_input_text: Color,
+    pub pending_input_steer_prefix: Color,
 }
 
 impl Default for TuiTheme {
@@ -98,6 +101,9 @@ impl Default for TuiTheme {
             footer_context_ok: Color::Rgb(139, 148, 158),
             footer_context_warn: Color::Rgb(232, 168, 56),
             footer_context_critical: Color::Rgb(232, 84, 84),
+            pending_input_header: Color::Rgb(139, 148, 158),
+            pending_input_text: Color::Rgb(139, 148, 158),
+            pending_input_steer_prefix: Color::Rgb(198, 120, 221),
         }
     }
 }
@@ -222,6 +228,24 @@ impl TuiTheme {
         self.footer_context_critical = color;
         self
     }
+
+    #[must_use]
+    pub const fn with_pending_input_header(mut self, color: Color) -> Self {
+        self.pending_input_header = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_pending_input_text(mut self, color: Color) -> Self {
+        self.pending_input_text = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_pending_input_steer_prefix(mut self, color: Color) -> Self {
+        self.pending_input_steer_prefix = color;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,6 +313,20 @@ fn format_token_count(tokens: u32) -> String {
     }
 }
 
+/// Extract the display text from an [`AgentMessage`].
+fn message_text(message: &AgentMessage) -> String {
+    match message {
+        AgentMessage::User { content } => content
+            .iter()
+            .filter_map(|part| match part {
+                neo_agent_core::Content::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>(),
+        _ => String::new(),
+    }
+}
+
 fn review_title(operation: PermissionOperation) -> &'static str {
     match operation {
         PermissionOperation::GoalTransition => "Goal Review",
@@ -331,6 +369,8 @@ pub struct NeoChromeState {
     exit_confirmation_label: Option<String>,
     /// Formatted git branch/status badge shown after the workspace path.
     git_status_label: Option<String>,
+    /// Pending steers and queued follow-ups waiting to be injected or sent.
+    pending_input: PendingInputState,
 }
 
 impl NeoChromeState {
@@ -368,6 +408,7 @@ impl NeoChromeState {
             thinking_enabled: false,
             exit_confirmation_label: None,
             git_status_label: None,
+            pending_input: PendingInputState::new(),
         }
     }
 
@@ -630,6 +671,15 @@ impl NeoChromeState {
     }
 
     #[must_use]
+    pub const fn pending_input(&self) -> &PendingInputState {
+        &self.pending_input
+    }
+
+    pub fn pending_input_mut(&mut self) -> &mut PendingInputState {
+        &mut self.pending_input
+    }
+
+    #[must_use]
     pub fn copy_buffer(&self) -> Option<&str> {
         self.copy_buffer.as_deref()
     }
@@ -733,6 +783,8 @@ impl NeoChromeState {
                 operation,
                 subject,
                 arguments,
+                session_scope,
+                prefix_rule,
                 ..
             } => {
                 let is_review = matches!(
@@ -744,10 +796,42 @@ impl NeoChromeState {
                 } else {
                     format!("{subject}\n{arguments}")
                 };
+                // Derive the dynamic option labels. Review transitions and
+                // scope-less prompts omit both; prefix is offered only when the
+                // runtime proposed a persistent rule.
+                let mut session_label = if is_review {
+                    None
+                } else {
+                    session_scope
+                        .as_ref()
+                        .filter(|scope| !scope.is_empty())
+                        .map(|scope| scope.label.clone())
+                };
+                if session_label.is_none()
+                    && matches!(
+                        operation,
+                        PermissionOperation::Tool | PermissionOperation::Shell
+                    )
+                {
+                    session_label = Some("Approve for this session".to_owned());
+                }
+                let prefix_label = if is_review {
+                    None
+                } else {
+                    prefix_rule
+                        .as_ref()
+                        .map(|rule| format!("Approve commands starting with {}", rule.label))
+                };
                 self.pending_approvals.push_back(if is_review {
                     ApprovalRequestModal::new_review(id, review_title(operation), body)
                 } else {
-                    ApprovalRequestModal::new(id, format!("{operation:?} approval"), body)
+                    ApprovalRequestModal::new_with_options(
+                        id,
+                        format!("{operation:?} approval"),
+                        body,
+                        session_label,
+                        prefix_label,
+                    )
                 });
                 self.focused_overlay = None;
                 self.mode = ChromeMode::Approval;
@@ -766,10 +850,16 @@ impl NeoChromeState {
             AgentEvent::RunFinished { turn, stop_reason } => {
                 self.apply_stream_update(StreamUpdate::RunFinished { turn, stop_reason });
             }
-            AgentEvent::SteeringQueued { .. }
-            | AgentEvent::FollowUpQueued { .. }
-            | AgentEvent::QueueDrained { .. }
-            | AgentEvent::CompactionStarted { .. }
+            AgentEvent::SteeringQueued { message } => {
+                self.pending_input.queue_steer(message_text(&message));
+            }
+            AgentEvent::FollowUpQueued { message } => {
+                self.pending_input.queue_follow_up(message_text(&message));
+            }
+            AgentEvent::QueueDrained { kind, count } => {
+                self.pending_input.drain(kind, count);
+            }
+            AgentEvent::CompactionStarted { .. }
             | AgentEvent::CompactionProgress { .. }
             | AgentEvent::CompactionApplied { .. }
             | AgentEvent::MessageAppended { .. }
@@ -1361,6 +1451,7 @@ impl NeoChromeState {
             request_id: modal.request_id.clone(),
             choice: ApprovalChoice::Deny,
             feedback: None,
+            picked_prefix: false,
         };
         if let Some(id) = id {
             let _ = self.close_overlay(id);
@@ -1376,6 +1467,7 @@ impl NeoChromeState {
                 request_id: modal.request_id,
                 choice: ApprovalChoice::Deny,
                 feedback: None,
+                picked_prefix: false,
             })
             .collect();
         self.mode = self.overlay_mode();
@@ -1384,13 +1476,28 @@ impl NeoChromeState {
 
     pub fn confirm_approval(&mut self) -> Option<ApprovalResult> {
         if let Some(modal) = self.pending_approvals.pop_front() {
+            let selected = modal.modal.selected;
+            let selected_label = modal
+                .modal
+                .options
+                .get(selected)
+                .map(|opt| opt.label.clone());
             let choice = modal.modal.selected_choice()?;
+            // The prefix option (Layer 2) is rendered as
+            // "Approve commands starting with …" and uses AlwaysApprove. Detect
+            // it by label so the controller persists a prefix rule instead of a
+            // session key.
+            let picked_prefix = choice == ApprovalChoice::AlwaysApprove
+                && selected_label
+                    .as_deref()
+                    .is_some_and(|label| label.starts_with("Approve commands starting with"));
             let result = ApprovalResult {
                 request_id: modal.request_id,
                 choice,
                 feedback: (choice == ApprovalChoice::Revise)
                     .then_some(modal.feedback_input)
                     .filter(|feedback| !feedback.is_empty()),
+                picked_prefix,
             };
             self.mode = self.overlay_mode();
             return Some(result);
@@ -1405,6 +1512,7 @@ impl NeoChromeState {
             request_id: modal.request_id.clone(),
             choice: modal.modal.selected_choice()?,
             feedback: None,
+            picked_prefix: false,
         };
         if let Some(id) = id {
             let _ = self.close_overlay(id);
@@ -2849,19 +2957,39 @@ impl ApprovalRequestModal {
         title: impl Into<String>,
         body: impl Into<String>,
     ) -> Self {
+        Self::new_with_options(request_id, title, body, None, None)
+    }
+
+    /// Build a tool approval modal with dynamic session/prefix options.
+    ///
+    /// - `session_option_label`: when `Some`, the second option uses that label
+    ///   (e.g. "Approve this exact command for this session"). When `None`, the
+    ///   session-approval option is omitted.
+    /// - `prefix_option_label`: when `Some`, a persistent prefix option is added
+    ///   (Layer 2), e.g. "Approve commands starting with git". Also uses
+    ///   `AlwaysApprove`; the runtime distinguishes the two by whether a
+    ///   `prefix_rule` is attached to the request.
+    #[must_use]
+    pub fn new_with_options(
+        request_id: impl Into<String>,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        session_option_label: Option<String>,
+        prefix_option_label: Option<String>,
+    ) -> Self {
+        let mut options = vec![ApprovalOption::new(ApprovalChoice::Approve, "Approve once")];
+        if let Some(label) = session_option_label {
+            options.push(ApprovalOption::new(ApprovalChoice::AlwaysApprove, label));
+        }
+        if let Some(label) = prefix_option_label {
+            options.push(ApprovalOption::new(ApprovalChoice::AlwaysApprove, label));
+        }
+        options.push(ApprovalOption::new(ApprovalChoice::Deny, "Reject"));
+        options.push(ApprovalOption::new(ApprovalChoice::Revise, "Reject with feedback"));
         Self {
             request_id: request_id.into(),
             feedback_input: String::new(),
-            modal: ApprovalModal::new(
-                title,
-                body,
-                [
-                    ApprovalOption::new(ApprovalChoice::Approve, "Approve once"),
-                    ApprovalOption::new(ApprovalChoice::AlwaysApprove, "Approve for this session"),
-                    ApprovalOption::new(ApprovalChoice::Deny, "Reject"),
-                    ApprovalOption::new(ApprovalChoice::Revise, "Reject with feedback"),
-                ],
-            ),
+            modal: ApprovalModal::new(title, body, options),
         }
     }
 
@@ -2929,6 +3057,10 @@ pub struct ApprovalResult {
     pub choice: ApprovalChoice,
     /// Feedback text when the user picks Revise (`ExitPlanMode` plan review).
     pub feedback: Option<String>,
+    /// True when the user picked the persistent prefix-approval option (Layer 2).
+    /// Disambiguates from the session-approval option since both are
+    /// `ApprovalChoice::AlwaysApprove`.
+    pub picked_prefix: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2960,6 +3092,77 @@ impl InlineImageRenderCache {
             pending.push(render);
         }
         pending
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PendingInputState {
+    /// Steers already submitted to the runtime but not yet drained.
+    pending_steers: VecDeque<String>,
+    /// Follow-ups queued while a turn is running (FIFO).
+    queued_follow_ups: VecDeque<String>,
+}
+
+impl PendingInputState {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queue a follow-up message that will start a fresh turn after the
+    /// current one finishes.
+    pub fn queue_follow_up(&mut self, text: impl Into<String>) {
+        self.queued_follow_ups.push_back(text.into());
+    }
+
+    /// Queue a steer message that will be injected at the next natural break
+    /// point in the running turn.
+    pub fn queue_steer(&mut self, text: impl Into<String>) {
+        self.pending_steers.push_back(text.into());
+    }
+
+    /// Drain `count` messages from the matching queue (used when the runtime
+    /// consumes queued messages).
+    pub fn drain(&mut self, kind: neo_agent_core::QueueKind, count: usize) {
+        match kind {
+            neo_agent_core::QueueKind::Steering => {
+                let drain_count = count.min(self.pending_steers.len());
+                self.pending_steers.drain(0..drain_count);
+            }
+            neo_agent_core::QueueKind::FollowUp => {
+                let drain_count = count.min(self.queued_follow_ups.len());
+                self.queued_follow_ups.drain(0..drain_count);
+            }
+        }
+    }
+
+    /// Promote the oldest queued follow-up to a steer (FIFO). Returns the text
+    /// if any was available.
+    pub fn promote_oldest_follow_up_to_steer(&mut self) -> Option<String> {
+        let text = self.queued_follow_ups.pop_front()?;
+        self.pending_steers.push_back(text.clone());
+        Some(text)
+    }
+
+    /// Pop the most recent queued follow-up back into the composer for editing
+    /// (LIFO). Returns the text if any was available.
+    pub fn pop_most_recent_follow_up_for_edit(&mut self) -> Option<String> {
+        self.queued_follow_ups.pop_back()
+    }
+
+    #[must_use]
+    pub fn pending_steers(&self) -> &VecDeque<String> {
+        &self.pending_steers
+    }
+
+    #[must_use]
+    pub fn queued_follow_ups(&self) -> &VecDeque<String> {
+        &self.queued_follow_ups
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pending_steers.is_empty() && self.queued_follow_ups.is_empty()
     }
 }
 
@@ -3065,6 +3268,14 @@ impl PromptState {
         self.cursor = 0;
         self.undo_stack.clear();
         self.kill_ring.clear();
+        self.stop_history_navigation();
+    }
+
+    /// Replace the composer text and move the cursor to the end. Used when
+    /// pulling a queued message back into the composer for editing.
+    pub fn set_text(&mut self, text: impl Into<String>) {
+        self.text = text.into();
+        self.cursor = self.char_len();
         self.stop_history_navigation();
     }
 

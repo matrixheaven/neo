@@ -452,6 +452,9 @@ pub enum KeybindingAction {
     /// Default: Ctrl+S (requires `stty -ixon` to disable XON/XOFF flow control
     /// in terminals that swallow Ctrl+S by default).
     PromptSteer,
+    /// Pop the most recent queued follow-up back into the composer for editing.
+    /// Default: Alt+Up.
+    EditLastQueuedMessage,
     TranscriptSelectionStart,
     TranscriptSelectionClear,
     TranscriptSelectionExtendUp,
@@ -535,6 +538,10 @@ const KEYBINDING_ACTION_IDS: &[(KeybindingAction, &str)] = &[
     (KeybindingAction::InputTab, "tui.input.tab"),
     (KeybindingAction::InputCopy, "tui.input.copy"),
     (KeybindingAction::PromptSteer, "tui.input.steer"),
+    (
+        KeybindingAction::EditLastQueuedMessage,
+        "tui.input.editLastQueuedMessage",
+    ),
     (
         KeybindingAction::TranscriptSelectionStart,
         "tui.transcript.selection.start",
@@ -826,6 +833,11 @@ fn input_keybinding_definitions() -> Vec<KeybindingDefinition> {
             Action::PromptSteer,
             &["ctrl+s"],
             "Steer the running turn or queue a follow-up",
+        ),
+        definition(
+            Action::EditLastQueuedMessage,
+            &["alt+up"],
+            "Edit the last queued follow-up message",
         ),
         definition(
             Action::CycleDevelopmentMode,

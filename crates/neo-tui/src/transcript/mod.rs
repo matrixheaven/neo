@@ -13,7 +13,7 @@ pub use entry::{
 };
 pub use pane::{
     CHROME_GUTTER, ChromeRender, TranscriptPane, apply_gutter, frame_content_width,
-    render_chrome_lines, render_footer_only_lines,
+    render_chrome_lines, render_chrome_lines_mut, render_footer_only_lines,
 };
 pub use plan_box::PlanBoxComponent;
 pub use store::{TranscriptSelection, TranscriptStore, TranscriptViewport};
