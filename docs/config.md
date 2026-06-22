@@ -4,8 +4,8 @@ This document describes how to configure providers and models in Neo.
 
 ## Quick Start
 
-Define providers and models directly in `config.toml` (usually `~/.neo/config.toml`
-or `.neo/config.toml` in your project):
+Define providers and models directly in the single Neo config file
+(`~/.neo/config.toml`, or `$NEO_HOME/config.toml` when `NEO_HOME` is set):
 
 ```toml
 default_model = "openai/gpt-4.1"
@@ -182,18 +182,19 @@ In interactive mode:
 - `/model` — Open the model picker
 - `/provider` — Open the provider list
 - `/resume` — Open session picker
+- `/new`, `/clear` — Start a fresh unsaved session in the current workspace (preserves model, permission, and development mode; the old session remains in `/resume`)
 
 ## Themes
 
 The default theme is **magenta-dark**: a magenta (`#C678DD`) brand accent with
 teal/green status colors, soft-white body text, and an amber user-role hue.
-Project themes live under `.neo/themes/*.json` and override individual color
-tokens:
+Themes live under `~/.neo/themes/*.json` (or `$NEO_HOME/themes/*.json`) and
+override individual color tokens:
 
 ```bash
 neo themes list
 neo themes preview night-owl
-neo --theme .neo/themes/night-owl.json
+neo --theme ~/.neo/themes/night-owl.json
 ```
 
 Theme JSON files use a `colors` object with named color values (hex, ANSI
@@ -243,8 +244,8 @@ all its models to `config.toml` automatically.
 
 Use `skill_path` to add extra directories where Neo looks for skills. It can be
 a single string or a list of strings. `~/.neo/skills/` and the built-in
-`.builtin/` release are always searched; `skill_path` entries are searched
-after them and before project skills.
+`.builtin/` release are always searched; `skill_path` entries are searched as
+additional global skill directories.
 
 ```toml
 # single path
@@ -264,6 +265,5 @@ skill_path = ["~/.agents/skills", "~/.claude/skills"]
 ## Config Precedence
 
 1. CLI flags (`--model`, `--provider`, `--api-key`)
-2. Project config (`.neo/config.toml`)
-3. User-global config (`~/.neo/config.toml`)
-5. Built-in defaults
+2. User-global config (`~/.neo/config.toml`, or `$NEO_HOME/config.toml`)
+3. Built-in defaults

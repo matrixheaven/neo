@@ -257,13 +257,13 @@ fn sanitize_tool_name(value: &str) -> String {
 }
 
 #[must_use]
-pub fn default_extension_root(project_dir: &Path) -> PathBuf {
-    project_dir.join(".neo/extensions")
+pub fn default_extension_root(neo_home: &Path) -> PathBuf {
+    neo_home.join("extensions")
 }
 
 #[must_use]
-pub fn default_extension_state_path(project_dir: &Path) -> PathBuf {
-    project_dir.join(".neo/extensions-state.toml")
+pub fn default_extension_state_path(neo_home: &Path) -> PathBuf {
+    neo_home.join("extensions-state.toml")
 }
 
 #[cfg(test)]

@@ -58,7 +58,10 @@ impl MockSseServer {
 
 fn neo() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_neo"));
-    command.env("HOME", isolated_home_path());
+    let home = isolated_home_path();
+    // NEO_HOME is the single source of truth for config/skills/prompts/themes.
+    command.env("NEO_HOME", &home);
+    command.env("HOME", &home);
     command
 }
 
@@ -116,9 +119,13 @@ fn isolated_home_path() -> std::path::PathBuf {
     })
 }
 
-fn write_config(temp: &TempDir, content: &str) {
-    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    std::fs::write(temp.path().join(".neo/config.toml"), content).expect("write config");
+/// Write config into the isolated NEO_HOME (not the workspace `temp`). Config
+/// now lives only under ~/.neo; the `temp` arg is retained for call-site
+/// compatibility but ignored.
+fn write_config(_temp: &TempDir, content: &str) {
+    let config_dir = isolated_home_path();
+    std::fs::create_dir_all(&config_dir).expect("create neo home");
+    std::fs::write(config_dir.join("config.toml"), content).expect("write config");
 }
 
 fn mock_responses_config(base_url: &str) -> String {
@@ -157,7 +164,7 @@ fn write_trust_store(home: &std::path::Path, project: &std::path::Path, trusted:
 
 fn session_files(_root: &std::path::Path) -> Vec<std::path::PathBuf> {
     // Sessions are stored under the isolated home in workspace-scoped bucket dirs.
-    let home_sessions = isolated_home_path().join(".neo").join("sessions");
+    let home_sessions = isolated_home_path().join("sessions");
     let mut entries = Vec::new();
     collect_jsonl_recursive(&home_sessions, &mut entries);
     entries.sort();
@@ -778,9 +785,10 @@ fn root_run_text_flag_expands_workspace_relative_file_prompt_args() {
 #[test]
 fn run_expands_project_prompt_template_before_json_output() {
     let temp = TempDir::new().expect("tempdir");
-    std::fs::create_dir_all(temp.path().join(".neo/prompts")).expect("create prompts");
+    let prompts_dir = isolated_home_path().join("prompts");
+    std::fs::create_dir_all(&prompts_dir).expect("create prompts");
     std::fs::write(
-        temp.path().join(".neo/prompts/review.md"),
+        prompts_dir.join("review.md"),
         "Review the following code: $@",
     )
     .expect("write template");
@@ -812,9 +820,10 @@ fn run_expands_project_prompt_template_before_json_output() {
 #[test]
 fn run_text_expands_project_prompt_template_with_arguments() {
     let temp = TempDir::new().expect("tempdir");
-    std::fs::create_dir_all(temp.path().join(".neo/prompts")).expect("create prompts");
+    let prompts_dir = isolated_home_path().join("prompts");
+    std::fs::create_dir_all(&prompts_dir).expect("create prompts");
     std::fs::write(
-        temp.path().join(".neo/prompts/review.md"),
+        prompts_dir.join("review.md"),
         "Review the following code: $@",
     )
     .expect("write template");
@@ -841,9 +850,8 @@ fn run_text_expands_project_prompt_template_with_arguments() {
 fn run_text_includes_project_system_prompt_file_before_user_message() {
     let temp = TempDir::new().expect("tempdir");
     write_trust_store(&isolated_home_path(), temp.path(), true);
-    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
     std::fs::write(
-        temp.path().join(".neo/SYSTEM.md"),
+        isolated_home_path().join("SYSTEM.md"),
         "You are a test assistant.",
     )
     .expect("write system prompt");
@@ -952,7 +960,7 @@ fn run_text_rejects_prompt_file_args_outside_workspace() {
 #[test]
 fn run_text_registers_enabled_extension_tool_in_model_request() {
     let temp = TempDir::new().expect("tempdir");
-    write_echo_extension_at(&temp.path().join(".neo/extensions/echo"));
+    write_echo_extension_at(&isolated_home_path().join("extensions/echo"));
     let server = MockSseServer::start(vec![openai_response_sse("resp-ext", "extension ready")]);
     write_mock_responses_config(&temp, &server.url);
 

@@ -146,6 +146,114 @@ fn expand_skill_body_appends_arguments_when_no_placeholders() {
 }
 
 #[test]
+fn expand_skill_body_substitutes_undeclared_named_argument_via_placeholder() {
+    // A skill with no declared arguments but a body that references `$task`.
+    // The model passed an undeclared `task` argument — it must be substituted
+    // rather than rejected (the brainstorming scenario).
+    let skill = LoadedSkill {
+        name: "brainstorming".into(),
+        root: std::path::PathBuf::from("/tmp/skills/brainstorming"),
+        manifest: SkillManifest {
+            name: "brainstorming".into(),
+            description: "Brainstorm".into(),
+            skill_type: SkillType::Prompt,
+            when_to_use: None,
+            disable_model_invocation: false,
+            arguments: vec![],
+            slash_commands: vec![],
+        },
+        body: "Explore the idea: $task".into(),
+        source: SkillSource::default(),
+    };
+    let mut named = HashMap::new();
+    named.insert("task".to_string(), "refactor skills".to_string());
+    let invocation = SkillInvocation {
+        name: "brainstorming".into(),
+        raw_arguments: "{\"task\":\"refactor skills\"}".into(),
+        positional: vec![],
+        named,
+    };
+
+    let expanded = expand_skill_body(&skill, &invocation).unwrap();
+
+    assert_eq!(expanded, "Explore the idea: refactor skills");
+}
+
+#[test]
+fn expand_skill_body_passes_undeclared_argument_through_when_no_placeholder() {
+    // No declared arguments, no `$task` placeholder in body: the undeclared
+    // argument must not error; it rides along in the ARGUMENTS trailer.
+    let skill = LoadedSkill {
+        name: "brainstorming".into(),
+        root: std::path::PathBuf::from("/tmp/skills/brainstorming"),
+        manifest: SkillManifest {
+            name: "brainstorming".into(),
+            description: "Brainstorm".into(),
+            skill_type: SkillType::Prompt,
+            when_to_use: None,
+            disable_model_invocation: false,
+            arguments: vec![],
+            slash_commands: vec![],
+        },
+        body: "Start the brainstorming process.".into(),
+        source: SkillSource::default(),
+    };
+    let mut named = HashMap::new();
+    named.insert("task".to_string(), "refactor skills".to_string());
+    let invocation = SkillInvocation {
+        name: "brainstorming".into(),
+        raw_arguments: "{\"task\":\"refactor skills\"}".into(),
+        positional: vec![],
+        named,
+    };
+
+    let expanded = expand_skill_body(&skill, &invocation).unwrap();
+
+    assert_eq!(
+        expanded,
+        "Start the brainstorming process.\n\nARGUMENTS: {\"task\":\"refactor skills\"}"
+    );
+}
+
+#[test]
+fn expand_skill_body_still_fails_on_missing_required_argument() {
+    // Tolerance of undeclared arguments must not weaken the required check.
+    let skill = LoadedSkill {
+        name: "review".into(),
+        root: std::path::PathBuf::from("/tmp/skills/review"),
+        manifest: SkillManifest {
+            name: "review".into(),
+            description: "Review".into(),
+            skill_type: SkillType::Prompt,
+            when_to_use: None,
+            disable_model_invocation: false,
+            arguments: vec![SkillArgument {
+                name: "target".into(),
+                description: None,
+                required: true,
+                default: None,
+            }],
+            slash_commands: vec![],
+        },
+        body: "Review $target.".into(),
+        source: SkillSource::default(),
+    };
+    // An undeclared arg is passed but the required `target` is missing.
+    let mut named = HashMap::new();
+    named.insert("extra".to_string(), "noise".to_string());
+    let invocation = SkillInvocation {
+        name: "review".into(),
+        raw_arguments: "{\"extra\":\"noise\"}".into(),
+        positional: vec![],
+        named,
+    };
+
+    let err = expand_skill_body(&skill, &invocation).unwrap_err();
+
+    assert_eq!(err.to_string(), "missing required skill argument `target`");
+}
+
+#[test]
 fn parse_skill_invocation_handles_named_and_positional_args() {
     let invocation = parse_skill_invocation("#123 --mode=full").unwrap();
 
@@ -188,23 +296,10 @@ Brainstorm.
 
 #[test]
 fn skill_store_tiers_override() {
-    let project_dir = tempfile::tempdir().unwrap();
+    // With the project tier removed, skills load only from user/extra dirs.
+    // A user skill is the sole source for a given name.
     let user_dir = tempfile::tempdir().unwrap();
 
-    write(
-        project_dir
-            .path()
-            .join(".neo")
-            .join("skills")
-            .join("shared")
-            .join("SKILL.md"),
-        r"---
-name: shared
-description: project version
----
-project
-",
-    );
     write(
         user_dir
             .path()
@@ -219,17 +314,11 @@ user
 ",
     );
 
-    let store = SkillStore::load(
-        Some(project_dir.path()),
-        &[user_dir.path().join("skills")],
-        &[],
-        Vec::new(),
-    )
-    .unwrap();
+    let store = SkillStore::load(&[user_dir.path().join("skills")], &[], Vec::new()).unwrap();
 
     assert_eq!(
         store.get("shared").unwrap().manifest.description,
-        "project version"
+        "user version"
     );
 }
 

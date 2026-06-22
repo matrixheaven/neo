@@ -58,20 +58,14 @@ pub struct CreateSkillArgs {
 }
 
 pub struct ListSkillsTool {
-    project_dir: PathBuf,
     user_home: Option<PathBuf>,
     extra_dirs: Vec<PathBuf>,
 }
 
 impl ListSkillsTool {
     #[must_use]
-    pub fn new(
-        project_dir: impl Into<PathBuf>,
-        user_home: Option<PathBuf>,
-        extra_dirs: Vec<PathBuf>,
-    ) -> Self {
+    pub fn new(user_home: Option<PathBuf>, extra_dirs: Vec<PathBuf>) -> Self {
         Self {
-            project_dir: project_dir.into(),
             user_home,
             extra_dirs,
         }
@@ -84,9 +78,8 @@ impl Tool for ListSkillsTool {
     }
 
     fn description(&self) -> &'static str {
-        "List all discoverable skills by tier (project, user, extra, builtin) with their names and filesystem paths.\n\n\
+        "List all discoverable skills by tier (user, extra, builtin) with their names and filesystem paths.\n\n\
          Use this tool to inspect which skills are available in the current environment before invoking one with the Skill tool or a slash command. Skills are discovered from:\n\
-         - project: .neo/skills/\n\
          - user: ~/.neo/skills/\n\
          - extra: directories listed in config\n\
          - builtin: skills shipped with Neo (only when include_builtin=true)\n\n\
@@ -104,17 +97,11 @@ impl Tool for ListSkillsTool {
                 message: err.to_string(),
             }
         });
-        let project_dir = self.project_dir.clone();
         let user_home = self.user_home.clone();
         let extra_dirs = self.extra_dirs.clone();
         Box::pin(async move {
             let _args = args?;
             let mut tiers: HashMap<&'static str, Vec<(String, PathBuf)>> = HashMap::new();
-            let project_skills =
-                discover_skills_in(&project_dir.join(".neo").join("skills")).await?;
-            if !project_skills.is_empty() {
-                tiers.insert("project", project_skills);
-            }
             if let Some(home) = user_home {
                 let user_skills = discover_skills_in(&home.join("skills")).await?;
                 if !user_skills.is_empty() {
@@ -395,9 +382,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_skills_discovers_project_skills() {
+    async fn list_skills_discovers_user_skills() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let skills_dir = temp.path().join(".neo").join("skills").join("my-skill");
+        let skills_dir = temp.path().join("skills").join("my-skill");
         fs::create_dir_all(&skills_dir).await.expect("mkdir");
         fs::write(
             skills_dir.join("SKILL.md"),
@@ -406,10 +393,10 @@ mod tests {
         .await
         .expect("write");
 
-        let tool = ListSkillsTool::new(temp.path(), None, Vec::new());
+        let tool = ListSkillsTool::new(Some(temp.path().to_path_buf()), Vec::new());
         let result = tool.execute(&make_ctx(), json!({})).await.expect("execute");
         assert!(!result.is_error);
-        assert!(result.content.contains("[project]"));
+        assert!(result.content.contains("[user]"));
         assert!(result.content.contains("my-skill"));
     }
 
@@ -497,7 +484,7 @@ mod tests {
     #[test]
     fn tool_descriptions_are_non_empty() {
         assert!(
-            !ListSkillsTool::new(".", None, Vec::new())
+            !ListSkillsTool::new(None, Vec::new())
                 .description()
                 .is_empty()
         );

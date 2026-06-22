@@ -20,7 +20,7 @@ cargo run -p neo-agent -- --thinking high print "solve this carefully"
 ```
 
 The binary exposes local CLI/TUI surfaces for provider-backed `print` / `run`,
-local JSONL sessions, local skills, local extensions, project config, model
+local JSONL sessions, local skills, local extensions, single Neo config, model
 catalogs, image generation, trust decisions, and configured MCP servers. It
 does not require or start a hosted service for normal operation.
 
@@ -95,7 +95,9 @@ cargo run -p neo-agent -- resume <session-id>
 ```
 
 Live TUI mode opens the local session picker with `ctrl+r` or `/resume`, and can
-fork the selected local session with `ctrl+n`.
+fork the selected local session with `ctrl+n`. Type `/new` (or `/clear`) to start
+a fresh unsaved session in the current workspace without deleting the previous
+one; the next prompt then creates a new workspace-scoped local session.
 
 ## Local Extensions And Skills
 
@@ -119,7 +121,8 @@ enabled tools through each extension's JSONL RPC `tools.list`.
 
 ## MCP
 
-Configure MCP servers in `.neo/config.toml`, or manage them from the CLI:
+Configure MCP servers in `~/.neo/config.toml` (or `$NEO_HOME/config.toml`), or
+manage them from the CLI:
 
 ```bash
 # list configured MCP servers and their advertised tools
@@ -155,7 +158,7 @@ cargo run -p neo-agent -- images generate "a compact terminal workstation" \
 ```
 
 Base64 provider image data is written directly. If a provider returns only a
-remote image URL, Neo refuses to fetch it unless project config explicitly sets
+remote image URL, Neo refuses to fetch it unless config explicitly sets
 `tui.fetch_remote_images = true`; remote fetches must use HTTP(S), return an
 image content type, and stay under the configured size guard.
 

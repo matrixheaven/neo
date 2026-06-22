@@ -63,29 +63,22 @@ struct ThemeColors {
     footer_context_critical: Option<String>,
 }
 
-pub fn resolve_theme(project_dir: &Path) -> anyhow::Result<ResolvedTheme> {
+pub fn resolve_theme() -> anyhow::Result<ResolvedTheme> {
     let mut paths = Vec::new();
-    paths.extend(discover_project_themes(project_dir)?);
-    paths.extend(discover_global_themes()?);
+    paths.extend(discover_themes()?);
 
     let Some(path) = paths.first() else {
         return Ok(ResolvedTheme::default());
     };
-    load_theme(path, project_dir)
+    load_theme(path)
 }
 
-fn discover_project_themes(project_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    discover_theme_dir(&project_dir.join(".neo").join("themes"))
-}
-
-fn discover_global_themes() -> anyhow::Result<Vec<PathBuf>> {
-    let Some(home) = std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-    else {
+/// Discover theme files under `~/.neo/themes` (the single neo home).
+fn discover_themes() -> anyhow::Result<Vec<PathBuf>> {
+    let Some(home) = crate::config::neo_home() else {
         return Ok(Vec::new());
     };
-    discover_theme_dir(&home.join(".neo").join("themes"))
+    discover_theme_dir(&home.join("themes"))
 }
 
 fn discover_theme_dir(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
@@ -118,8 +111,8 @@ fn collect_theme_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> anyhow::Result<(
     Ok(())
 }
 
-fn load_theme(path: &Path, project_dir: &Path) -> anyhow::Result<ResolvedTheme> {
-    let path = resolve_theme_path(path, project_dir);
+fn load_theme(path: &Path) -> anyhow::Result<ResolvedTheme> {
+    let path = resolve_theme_path(path);
     if path.is_dir() {
         let discovered = discover_theme_dir(&path)?;
         let Some(path) = discovered.first() else {
@@ -133,29 +126,34 @@ fn load_theme(path: &Path, project_dir: &Path) -> anyhow::Result<ResolvedTheme> 
     load_theme_file(&path)
 }
 
-fn resolve_theme_path(path: &Path, project_dir: &Path) -> PathBuf {
+fn resolve_theme_path(path: &Path) -> PathBuf {
     let path = expand_user_path(path.to_path_buf());
     if path.is_absolute() {
         path
     } else {
-        project_dir.join(path)
+        // Relative theme paths resolve against the neo home.
+        crate::config::neo_home().map_or_else(|| PathBuf::from("."), |home| home.join(path))
     }
 }
 
 fn expand_user_path(path: PathBuf) -> PathBuf {
+    expand_user_path_with_home(path, user_home().as_deref())
+}
+
+fn expand_user_path_with_home(path: PathBuf, home: Option<&Path>) -> PathBuf {
     let Some(raw) = path.to_str().map(str::to_owned) else {
         return path;
     };
     if raw == "~" {
-        return home_dir().unwrap_or(path);
+        return home.map(Path::to_path_buf).unwrap_or(path);
     }
     let Some(rest) = raw.strip_prefix("~/") else {
         return path;
     };
-    home_dir().map_or(path, |home| home.join(rest))
+    home.map_or(path, |home| home.join(rest))
 }
 
-fn home_dir() -> Option<PathBuf> {
+fn user_home() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
@@ -498,5 +496,16 @@ mod tests {
 
         let error = load_theme_file(&path).expect_err("old key should fail");
         assert!(error.to_string().contains("failed to parse theme"));
+    }
+
+    #[test]
+    fn theme_path_tilde_expands_to_user_home() {
+        assert_eq!(
+            expand_user_path_with_home(
+                PathBuf::from("~/themes/night.json"),
+                Some(Path::new("/home/alice")),
+            ),
+            PathBuf::from("/home/alice/themes/night.json")
+        );
     }
 }

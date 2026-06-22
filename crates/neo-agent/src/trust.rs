@@ -1,12 +1,11 @@
 use std::{
     collections::BTreeMap,
-    env, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, bail};
 
-const CONFIG_DIR: &str = ".neo";
 const TRUST_FILE: &str = "trust.json";
 const CONTEXT_FILE_CANDIDATES: &[&str] = &["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
 
@@ -17,9 +16,10 @@ pub(crate) struct ProjectTrustStore {
 
 impl ProjectTrustStore {
     pub(crate) fn from_home() -> anyhow::Result<Self> {
-        let home = home_dir().context("HOME is required to resolve project trust store")?;
+        let home = crate::config::neo_home()
+            .context("NEO_HOME or HOME is required to resolve project trust store")?;
         Ok(Self {
-            path: home.join(CONFIG_DIR).join(TRUST_FILE),
+            path: home.join(TRUST_FILE),
         })
     }
 
@@ -78,9 +78,6 @@ pub(crate) fn resolve_project_trust(project_dir: &Path, yolo: bool) -> anyhow::R
 }
 
 pub(crate) fn has_project_trust_inputs(project_dir: &Path) -> bool {
-    if project_dir.join(CONFIG_DIR).is_dir() {
-        return true;
-    }
     project_dir.ancestors().any(|directory| {
         CONTEXT_FILE_CANDIDATES
             .iter()
@@ -100,12 +97,6 @@ fn project_key(project_dir: &Path) -> anyhow::Result<String> {
         bail!("project dir is not valid UTF-8: {}", canonical.display());
     };
     Ok(key.to_owned())
-}
-
-fn home_dir() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
 }
 
 #[cfg(test)]

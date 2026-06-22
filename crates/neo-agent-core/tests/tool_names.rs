@@ -20,7 +20,7 @@ fn built_in_and_skill_management_tool_names_are_model_function_safe() {
         assert_model_function_name_safe(&spec.name);
     }
 
-    let list_skills = ListSkillsTool::new(".", None, Vec::new());
+    let list_skills = ListSkillsTool::new(None, Vec::new());
     assert_model_function_name_safe(list_skills.name());
 
     let create_skill = CreateSkillTool::new(".");
@@ -42,7 +42,7 @@ async fn optional_tool_names_use_model_facing_kimi_style_casing() {
             .unwrap(),
     );
     let tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(ListSkillsTool::new(".", None, Vec::new())),
+        Box::new(ListSkillsTool::new(None, Vec::new())),
         Box::new(CreateSkillTool::new(".")),
         Box::new(MoveSkillTool::new(".")),
         Box::new(SummarizeSessionsTool::new(".")),

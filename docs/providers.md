@@ -77,7 +77,7 @@ succeeded.
 The production resolver requires a registered provider with an explicit
 `type`, credentials from the provider's environment-key list, and a base URL.
 Built-in provider base URLs and credential environment names can be overridden
-from `neo-agent` project config with `providers.<provider-id>.base_url` and
+from Neo config with `providers.<provider-id>.base_url` and
 `providers.<provider-id>.api_key_env`. The provider `type` selects the wire
 client. OpenAI supports both Responses and Chat Completions models; OpenRouter
 supports OpenAI-compatible and Chat Completions models. Anthropic, Google, and

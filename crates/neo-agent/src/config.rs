@@ -433,18 +433,17 @@ pub(crate) struct FileTuiConfig {
 impl AppConfig {
     #[allow(clippy::too_many_lines)]
     pub fn load(overrides: ConfigOverrides) -> anyhow::Result<Self> {
-        let config_path = overrides.config_path.unwrap_or(find_config_path()?);
-        let project_dir = config_path
-            .parent()
-            .and_then(Path::parent)
-            .map_or(env::current_dir()?, Path::to_path_buf);
+        // There is exactly one config file: `~/.neo/config.toml` (or wherever
+        // `NEO_HOME` points). There is no project-local config anymore —
+        // providers/models/settings/skills/prompts/themes all live under the
+        // single neo home and are shared across every workspace.
+        let config_path = overrides.config_path.unwrap_or_else(default_config_path);
+        // `project_dir` is the *workspace identity* (used for trust keying,
+        // session bucketing, git status, `@file` sandboxing). It is NOT a config
+        // location. Default to the current working directory.
+        let project_dir = env::current_dir()?;
 
-        let global_config = find_global_config_path()
-            .map(|path| read_file_config(&path))
-            .transpose()?
-            .unwrap_or_default();
-        let project_config = read_file_config(&config_path)?;
-        let file_config = merge_file_configs(global_config, project_config);
+        let file_config = read_file_config(&config_path)?;
         let project_trusted = project_trusted_from_yolo(&project_dir, overrides.yolo)?;
         anyhow::ensure!(
             !(overrides.yolo && overrides.auto),
@@ -469,7 +468,7 @@ impl AppConfig {
         let sessions_dir = file_config.sessions_dir.map_or_else(
             || {
                 neo_home().map_or_else(
-                    || project_dir.join(CONFIG_DIR).join("sessions"),
+                    || project_dir.join("sessions"),
                     |home| home.join("sessions"),
                 )
             },
@@ -486,7 +485,7 @@ impl AppConfig {
         validate_runtime_config(&runtime)?;
         let tui = tui_from_file(file_config.tui);
         validate_tui_config(&tui)?;
-        let theme = themes::resolve_theme(&project_dir)?;
+        let theme = themes::resolve_theme()?;
         let mcp = file_config.mcp.unwrap_or_default();
         let mode = file_config
             .defaults
@@ -515,6 +514,25 @@ impl AppConfig {
             config_path,
         })
     }
+
+    /// The canonical `provider/model` display label for the configured default
+    /// model. This is the single source of truth for label formatting.
+    ///
+    /// `default_model` stores the model alias. If that alias exists in
+    /// `[models.*]`, the label is derived from the referenced provider/model.
+    /// Otherwise built-in bare model ids such as `gpt-4.1` are prefixed with
+    /// `default_provider`, while already-qualified values are used as-is.
+    #[must_use]
+    pub fn default_model_label(&self) -> String {
+        if let Some(model) = self.models.get(&self.default_model) {
+            return format!("{}/{}", model.provider, model.model);
+        }
+        if self.default_model.contains('/') {
+            self.default_model.clone()
+        } else {
+            format!("{}/{}", self.default_provider, self.default_model)
+        }
+    }
 }
 
 fn project_trusted_from_yolo(project_dir: &Path, yolo: bool) -> anyhow::Result<bool> {
@@ -530,10 +548,9 @@ fn provider_api_key_env(
         .and_then(|provider| provider.api_key_env.clone())
 }
 
-pub fn upsert_mcp_server(server: &McpServerConfig) -> anyhow::Result<String> {
+pub fn upsert_mcp_server(server: &McpServerConfig, config_path: &Path) -> anyhow::Result<String> {
     validate_mcp_server(server)?;
-    let config_path = find_config_path()?;
-    let mut config = read_file_config(&config_path)?;
+    let mut config = read_file_config(config_path)?;
     let mcp = config.mcp.get_or_insert_with(McpConfig::default);
     if let Some(existing) = mcp
         .servers
@@ -544,13 +561,12 @@ pub fn upsert_mcp_server(server: &McpServerConfig) -> anyhow::Result<String> {
     } else {
         mcp.servers.push(server.clone());
     }
-    write_file_config(&config_path, &config)?;
+    write_file_config(config_path, &config)?;
     Ok(format!("added MCP server {}\n", server.id))
 }
 
-pub fn remove_mcp_server(server_id: &str) -> anyhow::Result<String> {
-    let config_path = find_config_path()?;
-    let mut config = read_file_config(&config_path)?;
+pub fn remove_mcp_server(server_id: &str, config_path: &Path) -> anyhow::Result<String> {
+    let mut config = read_file_config(config_path)?;
     let Some(mcp) = config.mcp.as_mut() else {
         anyhow::bail!("MCP server {server_id} is not configured");
     };
@@ -560,13 +576,16 @@ pub fn remove_mcp_server(server_id: &str) -> anyhow::Result<String> {
         mcp.servers.len() != original_len,
         "MCP server {server_id} is not configured"
     );
-    write_file_config(&config_path, &config)?;
+    write_file_config(config_path, &config)?;
     Ok(format!("removed MCP server {server_id}\n"))
 }
 
-pub fn set_mcp_server_enabled(server_id: &str, enabled: bool) -> anyhow::Result<String> {
-    let config_path = find_config_path()?;
-    let mut config = read_file_config(&config_path)?;
+pub fn set_mcp_server_enabled(
+    server_id: &str,
+    enabled: bool,
+    config_path: &Path,
+) -> anyhow::Result<String> {
+    let mut config = read_file_config(config_path)?;
     let Some(server) = config
         .mcp
         .as_mut()
@@ -575,173 +594,9 @@ pub fn set_mcp_server_enabled(server_id: &str, enabled: bool) -> anyhow::Result<
         anyhow::bail!("MCP server {server_id} is not configured");
     };
     server.enabled = enabled;
-    write_file_config(&config_path, &config)?;
+    write_file_config(config_path, &config)?;
     let action = if enabled { "enabled" } else { "disabled" };
     Ok(format!("{action} MCP server {server_id}\n"))
-}
-
-fn merge_file_configs(base: FileConfig, layer: FileConfig) -> FileConfig {
-    FileConfig {
-        default_model: layer.default_model.or(base.default_model),
-        default_provider: layer.default_provider.or(base.default_provider),
-        api_key_env: layer.api_key_env.or(base.api_key_env),
-        providers: merge_provider_configs(base.providers, layer.providers),
-        models: merge_model_configs(base.models, layer.models),
-        model_scope: merge_string_lists(base.model_scope, layer.model_scope),
-        prompt_templates: merge_string_lists(base.prompt_templates, layer.prompt_templates),
-        extra_skill_dirs: merge_string_lists(base.extra_skill_dirs, layer.extra_skill_dirs),
-        skill_path: [base.skill_path, layer.skill_path].concat(),
-        sessions_dir: layer.sessions_dir.or(base.sessions_dir),
-        permission_mode: layer.permission_mode.or(base.permission_mode),
-        defaults: merge_defaults(base.defaults, layer.defaults),
-        runtime: merge_runtime_configs(base.runtime, layer.runtime),
-        tui: merge_tui_configs(base.tui, layer.tui),
-        mcp: merge_mcp_configs(base.mcp, layer.mcp),
-    }
-}
-
-fn merge_provider_configs(
-    base: Option<BTreeMap<String, ProviderConfig>>,
-    layer: Option<BTreeMap<String, ProviderConfig>>,
-) -> Option<BTreeMap<String, ProviderConfig>> {
-    match (base, layer) {
-        (None, None) => None,
-        (Some(providers), None) | (None, Some(providers)) => Some(providers),
-        (Some(mut base), Some(layer)) => {
-            for (provider_id, layer_config) in layer {
-                base.entry(provider_id)
-                    .and_modify(|base_config| {
-                        *base_config =
-                            merge_provider_config(base_config.clone(), layer_config.clone());
-                    })
-                    .or_insert(layer_config);
-            }
-            Some(base)
-        }
-    }
-}
-
-fn merge_provider_config(base: ProviderConfig, layer: ProviderConfig) -> ProviderConfig {
-    ProviderConfig {
-        provider_type: layer.provider_type.or(base.provider_type),
-        base_url: layer.base_url.or(base.base_url),
-        api_key: layer.api_key.or(base.api_key),
-        api_key_env: layer.api_key_env.or(base.api_key_env),
-    }
-}
-
-fn merge_model_configs(
-    base: Option<BTreeMap<String, ModelConfig>>,
-    layer: Option<BTreeMap<String, ModelConfig>>,
-) -> Option<BTreeMap<String, ModelConfig>> {
-    match (base, layer) {
-        (None, None) => None,
-        (Some(models), None) | (None, Some(models)) => Some(models),
-        (Some(mut base), Some(layer)) => {
-            for (alias, cfg) in layer {
-                base.insert(alias, cfg);
-            }
-            Some(base)
-        }
-    }
-}
-
-fn merge_string_lists(
-    base: Option<Vec<String>>,
-    layer: Option<Vec<String>>,
-) -> Option<Vec<String>> {
-    match (base, layer) {
-        (None, None) => None,
-        (Some(values), None) | (None, Some(values)) => Some(values),
-        (Some(mut base), Some(layer)) => {
-            for value in layer {
-                if !base.contains(&value) {
-                    base.push(value);
-                }
-            }
-            Some(base)
-        }
-    }
-}
-
-fn merge_defaults(base: Option<FileDefaults>, layer: Option<FileDefaults>) -> Option<FileDefaults> {
-    match (base, layer) {
-        (None, None) => None,
-        (Some(defaults), None) | (None, Some(defaults)) => Some(defaults),
-        (Some(base), Some(layer)) => Some(FileDefaults {
-            mode: layer.mode.or(base.mode),
-        }),
-    }
-}
-
-fn merge_runtime_configs(
-    base: Option<FileRuntimeConfig>,
-    layer: Option<FileRuntimeConfig>,
-) -> Option<FileRuntimeConfig> {
-    match (base, layer) {
-        (None, None) => None,
-        (Some(runtime), None) | (None, Some(runtime)) => Some(runtime),
-        (Some(base), Some(layer)) => Some(FileRuntimeConfig {
-            temperature: layer.temperature.or(base.temperature),
-            max_tokens: layer.max_tokens.or(base.max_tokens),
-            reasoning_effort: layer.reasoning_effort.or(base.reasoning_effort),
-            replay_reasoning: layer.replay_reasoning.or(base.replay_reasoning),
-            steering_queue_mode: layer.steering_queue_mode.or(base.steering_queue_mode),
-            follow_up_queue_mode: layer.follow_up_queue_mode.or(base.follow_up_queue_mode),
-            tool_execution_mode: layer.tool_execution_mode.or(base.tool_execution_mode),
-            compaction: merge_runtime_compaction_configs(base.compaction, layer.compaction),
-        }),
-    }
-}
-
-fn merge_runtime_compaction_configs(
-    base: Option<FileRuntimeCompactionConfig>,
-    layer: Option<FileRuntimeCompactionConfig>,
-) -> Option<FileRuntimeCompactionConfig> {
-    match (base, layer) {
-        (None, None) => None,
-        (Some(compaction), None) | (None, Some(compaction)) => Some(compaction),
-        (Some(base), Some(layer)) => Some(FileRuntimeCompactionConfig {
-            enabled: layer.enabled.or(base.enabled),
-            max_estimated_tokens: layer.max_estimated_tokens.or(base.max_estimated_tokens),
-            keep_recent_messages: layer.keep_recent_messages.or(base.keep_recent_messages),
-        }),
-    }
-}
-
-fn merge_tui_configs(
-    base: Option<FileTuiConfig>,
-    layer: Option<FileTuiConfig>,
-) -> Option<FileTuiConfig> {
-    match (base, layer) {
-        (None, None) => None,
-        (Some(tui), None) | (None, Some(tui)) => Some(tui),
-        (Some(base), Some(layer)) => {
-            let mut keybindings = base.keybindings.unwrap_or_default();
-            for (action, keys) in layer.keybindings.unwrap_or_default() {
-                keybindings.insert(action, keys);
-            }
-            Some(FileTuiConfig {
-                image_protocol: layer.image_protocol.or(base.image_protocol),
-                fetch_remote_images: layer.fetch_remote_images.or(base.fetch_remote_images),
-                keybindings: (!keybindings.is_empty()).then_some(keybindings),
-            })
-        }
-    }
-}
-
-fn merge_mcp_configs(base: Option<McpConfig>, layer: Option<McpConfig>) -> Option<McpConfig> {
-    match (base, layer) {
-        (None, None) => None,
-        (Some(mcp), None) | (None, Some(mcp)) => Some(mcp),
-        (Some(mut base), Some(layer)) => {
-            for server in layer.servers {
-                base.servers.retain(|candidate| candidate.id != server.id);
-                base.servers.push(server);
-            }
-            Some(base)
-        }
-    }
 }
 
 fn validate_mcp_server(server: &McpServerConfig) -> anyhow::Result<()> {
@@ -976,30 +831,29 @@ impl TuiConfig {
     }
 }
 
-pub(crate) fn find_config_path() -> anyhow::Result<PathBuf> {
-    Ok(env::current_dir()?.join(CONFIG_DIR).join(CONFIG_FILE))
-}
-
-fn find_global_config_path() -> Option<PathBuf> {
-    home_dir().map(|home| home.join(CONFIG_DIR).join(CONFIG_FILE))
-}
-
-pub(crate) fn global_prompts_dir() -> Option<PathBuf> {
-    home_dir().map(|home| home.join(CONFIG_DIR).join("prompts"))
-}
-
-fn home_dir() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-}
-
 /// Resolve the neo home directory: `$NEO_HOME` if set, otherwise `~/.neo`.
+/// This is the single source of truth for the neo home directory — every
+/// config file, skill, prompt, theme, and extension lives under here.
 pub(crate) fn neo_home() -> Option<PathBuf> {
     env::var_os("NEO_HOME")
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
-        .or_else(|| home_dir().map(|home| home.join(CONFIG_DIR)))
+        .or_else(|| {
+            env::var_os("HOME")
+                .filter(|home| !home.is_empty())
+                .map(|home| PathBuf::from(home).join(CONFIG_DIR))
+        })
+}
+
+/// The single config file path: `<neo_home>/config.toml`.
+pub(crate) fn default_config_path() -> PathBuf {
+    neo_home()
+        .unwrap_or_else(|| PathBuf::from(".").join(CONFIG_DIR))
+        .join(CONFIG_FILE)
+}
+
+pub(crate) fn global_prompts_dir() -> Option<PathBuf> {
+    neo_home().map(|home| home.join("prompts"))
 }
 
 /// Compute the workspace-scoped sessions directory for a given config.
@@ -1011,16 +865,26 @@ pub(crate) fn workspace_sessions_dir(config: &AppConfig) -> PathBuf {
 }
 
 fn expand_user_path(path: PathBuf) -> PathBuf {
+    expand_user_path_with_home(path, user_home().as_deref())
+}
+
+fn expand_user_path_with_home(path: PathBuf, home: Option<&Path>) -> PathBuf {
     let Some(raw) = path.to_str().map(str::to_owned) else {
         return path;
     };
     if raw == "~" {
-        return home_dir().unwrap_or(path);
+        return home.map(Path::to_path_buf).unwrap_or(path);
     }
     let Some(rest) = raw.strip_prefix("~/") else {
         return path;
     };
-    home_dir().map_or(path, |home| home.join(rest))
+    home.map_or(path, |home| home.join(rest))
+}
+
+fn user_home() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
 }
 
 pub(crate) fn read_file_config(path: &Path) -> anyhow::Result<FileConfig> {
@@ -1075,6 +939,91 @@ mod tests {
         let (_temp, config_path) = temp_project_config("");
         let config = load_config(config_path);
         assert_eq!(config.permission_mode, PermissionMode::Manual);
+    }
+
+    /// Regression: the model display label must never stitch the provider onto
+    /// an already-qualified alias. When `default_model` is a `<provider>/<model>`
+    /// alias, `default_model_label()` returns it as-is; otherwise it prefixes
+    /// `default_provider/`. This avoids both
+    /// `deepseek/minimax-.../MiniMax-M2` (stale provider) and
+    /// `minimax-.../minimax-.../MiniMax-M2` (double prefix).
+    #[test]
+    fn default_model_label_never_double_prefixes() {
+        let (_temp, config_path) = temp_project_config(
+            r#"
+default_model = "minimax-cn-coding-plan/MiniMax-M2"
+default_provider = "deepseek"
+
+[providers.deepseek]
+type = "openai-chat"
+base_url = "https://deepseek.example/v1"
+
+[providers."minimax-cn-coding-plan"]
+type = "anthropic"
+base_url = "https://api.minimaxi.com/anthropic/v1"
+
+[models."minimax-cn-coding-plan/MiniMax-M2"]
+provider = "minimax-cn-coding-plan"
+model = "MiniMax-M2"
+"#,
+        );
+        let config = load_config(config_path);
+        // Alias is used as-is: no stale deepseek prefix, no double minimax prefix.
+        assert_eq!(
+            config.default_model_label(),
+            "minimax-cn-coding-plan/MiniMax-M2"
+        );
+    }
+
+    /// When `default_model` has no `/` (a plain model id), the label prefixes
+    /// `default_provider/`.
+    #[test]
+    fn default_model_label_prefixes_provider_for_plain_model_id() {
+        let (_temp, config_path) = temp_project_config(
+            r#"
+default_model = "deepseek-v4-pro"
+default_provider = "deepseek"
+
+[providers.deepseek]
+type = "openai-chat"
+base_url = "https://deepseek.example/v1"
+"#,
+        );
+        let config = load_config(config_path);
+        assert_eq!(config.default_model_label(), "deepseek/deepseek-v4-pro");
+    }
+
+    #[test]
+    fn default_model_label_resolves_unqualified_alias() {
+        let (_temp, config_path) = temp_project_config(
+            r#"
+default_model = "fast"
+default_provider = "openai"
+
+[providers.openai]
+type = "openai-responses"
+
+[models.fast]
+provider = "openai"
+model = "gpt-4.1"
+"#,
+        );
+        let config = load_config(config_path);
+        assert_eq!(config.default_model_label(), "openai/gpt-4.1");
+    }
+
+    #[test]
+    fn tilde_expansion_uses_user_home_semantics() {
+        let home = PathBuf::from("/home/alice");
+
+        assert_eq!(
+            super::expand_user_path_with_home(PathBuf::from("~/neo-sessions"), Some(&home)),
+            PathBuf::from("/home/alice/neo-sessions")
+        );
+        assert_eq!(
+            super::expand_user_path_with_home(PathBuf::from("relative/path"), Some(&home)),
+            PathBuf::from("relative/path")
+        );
     }
 
     #[test]

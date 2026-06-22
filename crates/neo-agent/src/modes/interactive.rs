@@ -364,9 +364,19 @@ enum CatalogFetchSource {
     Custom(neo_tui::dialogs::CustomRegistrySource),
 }
 
+/// When set, the fetched catalog should be used to write a provider into config
+/// (the API-key submit path) instead of opening a provider picker.
+#[derive(Clone)]
+struct PendingCatalogAdd {
+    provider_id: String,
+    api_key: Option<String>,
+    config_path: PathBuf,
+}
+
 struct PendingCatalogFetch {
     source: CatalogFetchSource,
     handle: tokio::task::JoinHandle<Result<CatalogEntries, neo_ai::error::AiError>>,
+    pending_add: Option<PendingCatalogAdd>,
 }
 
 struct PendingApprovalResponse {
@@ -415,6 +425,10 @@ pub(crate) struct InteractiveController {
     /// Revise/feedback text keyed by approval request id, waiting to be sent to
     /// the runtime with the next turn.
     pending_plan_review_feedback: BTreeMap<String, String>,
+    /// Workspace-scoped prompt history store. `None` for test controllers that
+    /// do not exercise persistence. Real controllers seed `PromptState` from
+    /// this on startup and append accepted prompts to it after each submit.
+    prompt_history: Option<crate::prompt_history::PromptHistoryStore>,
 }
 
 pub(crate) struct TurnChannels {
@@ -495,6 +509,11 @@ pub(crate) struct TurnRequest {
     /// the runtime. The production driver is responsible for forwarding this to
     /// the runtime's plan-review side-channel when possible.
     pub plan_review_feedback: std::collections::BTreeMap<String, String>,
+    /// Live config snapshot at dispatch time. Lets the turn driver pick up
+    /// providers/models added at runtime (e.g. via `/provider`) instead of the
+    /// stale snapshot captured when the controller was built. `None` for test
+    /// drivers that don't depend on config.
+    pub base_config: Option<crate::config::AppConfig>,
 }
 
 impl TurnRequest {
@@ -515,6 +534,7 @@ impl TurnRequest {
             plan_mode: Arc::new(RwLock::new(PlanMode::default())),
             goal_mode_authoring: false,
             plan_review_feedback: BTreeMap::new(),
+            base_config: None,
         }
     }
 
@@ -540,6 +560,7 @@ impl TurnOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SelectedModel {
+    pub alias: String,
     pub provider: String,
     pub model: String,
     pub max_context_tokens: Option<u32>,
@@ -551,9 +572,37 @@ impl SelectedModel {
             anyhow::bail!("invalid model picker value {}", item.value);
         };
         Ok(Self {
+            alias: item.value.clone(),
             provider: provider.to_owned(),
             model: model.to_owned(),
             max_context_tokens: context_window_from_picker_item(item),
+        })
+    }
+
+    fn from_alias(
+        alias: &str,
+        config: Option<&AppConfig>,
+        model_items: &[PickerItem],
+    ) -> Result<Self> {
+        if let Some(model_cfg) = config.and_then(|config| config.models.get(alias)) {
+            return Ok(Self {
+                alias: alias.to_owned(),
+                provider: model_cfg.provider.clone(),
+                model: model_cfg.model.clone(),
+                max_context_tokens: model_cfg.max_context_tokens,
+            });
+        }
+        if let Some(item) = model_items.iter().find(|item| item.value == alias) {
+            return Self::from_picker_item(item);
+        }
+        let Some((provider, model)) = alias.split_once('/') else {
+            anyhow::bail!("invalid model alias {alias}");
+        };
+        Ok(Self {
+            alias: alias.to_owned(),
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            max_context_tokens: None,
         })
     }
 }
@@ -657,6 +706,7 @@ impl InteractiveController {
             plan_mode: Arc::new(RwLock::new(PlanMode::default())),
             permission_mode: PermissionMode::default(),
             pending_plan_review_feedback: BTreeMap::new(),
+            prompt_history: None,
         }
     }
 
@@ -1781,6 +1831,7 @@ impl InteractiveController {
     async fn run_session_async_command(&mut self, command_id: &str) -> Result<bool> {
         match command_id {
             "session.exportHtml" => self.export_active_session_to_html().await?,
+            "session.new" => self.start_new_session_from_slash(),
             "fork" => self.fork_current_session().await?,
             _ => return Ok(false),
         }
@@ -1829,6 +1880,15 @@ impl InteractiveController {
 
     fn handle_simple_slash_command(&mut self, prompt: &str) -> bool {
         match prompt {
+            "/new" | "/clear" => {
+                let blocked = self.active_turn.is_some();
+                self.start_new_session_from_slash();
+                if blocked {
+                    // Preserve the command text so the user can retry after
+                    // interrupting the running turn.
+                    return true;
+                }
+            }
             "/resume" => self.open_session_picker(),
             "/provider" => self.open_provider_picker(),
             _ => return false,
@@ -2020,8 +2080,8 @@ impl InteractiveController {
     fn show_goal_status(&mut self, manager: &GoalManager) -> bool {
         match manager.active() {
             Some(goal) => self.push_status(format!(
-                "Goal: {} | status: {:?} | turns: {}",
-                goal.objective, goal.status, goal.turn_count
+                "Goal: {} | status: {:?}",
+                goal.objective, goal.status
             )),
             None => self.push_status("No active goal."),
         }
@@ -2153,10 +2213,6 @@ impl InteractiveController {
     }
 
     async fn submit_current_prompt(&mut self) -> Result<()> {
-        if self.active_turn.is_some() {
-            self.push_status("A turn is already running");
-            return Ok(());
-        }
         let prompt = self.tui.chrome_mut().prompt().text.trim_end().to_owned();
         if prompt.trim().is_empty() {
             return Ok(());
@@ -2165,6 +2221,19 @@ impl InteractiveController {
         // Dismiss any open prompt-completion overlay before handling slash commands
         // or submitting, so it doesn't linger under a newly-opened picker.
         self.close_inline_prompt_completion();
+
+        // `/new` / `/clear` are session-lifecycle commands. They stay
+        // dispatchable while a turn is running (and report their own blocked
+        // status), so dispatch them before the turn-active guard below.
+        if matches!(prompt.as_str(), "/new" | "/clear") {
+            self.handle_simple_slash_command(&prompt);
+            return Ok(());
+        }
+
+        if self.active_turn.is_some() {
+            self.push_status("A turn is already running");
+            return Ok(());
+        }
 
         // Slash commands: handle without submitting a turn or entering streaming mode.
         if self.handle_slash_command(&prompt).await {
@@ -2183,6 +2252,10 @@ impl InteractiveController {
             self.local_config.as_ref(),
             &self.completion_root,
         )?;
+        // Persist the resolved user prompt (after @model/prompt-template
+        // expansion) to the workspace history. Slash commands already returned
+        // above, so they never reach this point. Append failures are non-fatal.
+        self.append_prompt_history(&prompt);
         self.start_turn_with_prompt(prompt, model_override, true);
         self.drain_active_turn().await?;
         self.start_pending_background_question_followups().await
@@ -2230,6 +2303,7 @@ impl InteractiveController {
             DevelopmentMode::Goal(GoalModeStatus::Pending)
         );
         request.plan_review_feedback = std::mem::take(&mut self.pending_plan_review_feedback);
+        request.base_config = self.local_config.clone();
         let request = if let Some(skill_context) = self.pending_skill_context.take() {
             request.with_skill_context(skill_context)
         } else {
@@ -2357,6 +2431,42 @@ impl InteractiveController {
 
     fn active_session_id(&self) -> Option<&str> {
         self.active_session_id.as_deref()
+    }
+
+    /// Load workspace prompt history into the composer's in-memory history.
+    /// Failures are non-fatal: prompt history is a convenience, not a runtime
+    /// dependency, so we silently keep an empty history on load errors.
+    fn load_prompt_history(&mut self) {
+        let Some(store) = self.prompt_history.clone() else {
+            return;
+        };
+        match store.load_recent() {
+            Ok(entries) => {
+                self.tui.chrome_mut().prompt_mut().set_history(entries);
+            }
+            Err(error) => {
+                tracing::warn!(?error, "prompt history unavailable");
+            }
+        }
+    }
+
+    /// Persist an accepted prompt to the workspace history store. Never fails
+    /// the calling submit path: append errors become a soft status warning.
+    fn append_prompt_history(&mut self, prompt: &str) {
+        let Some(store) = self.prompt_history.clone() else {
+            return;
+        };
+        let session_id = self.active_session_id.as_deref();
+        if let Err(error) = store.append(session_id, prompt) {
+            tracing::warn!(?error, "failed to append prompt history");
+            self.push_status(format!("Prompt history unavailable: {error}"));
+        }
+    }
+
+    /// Replace the workspace prompt history store (test hook).
+    #[cfg(test)]
+    fn set_prompt_history_store(&mut self, store: crate::prompt_history::PromptHistoryStore) {
+        self.prompt_history = Some(store);
     }
 
     fn refresh_git_status_now(&mut self) {
@@ -2782,6 +2892,63 @@ impl InteractiveController {
         *self.tui.transcript_mut() = transcript;
     }
 
+    /// Rebuild the transcript pane from scratch with only the welcome banner,
+    /// matching the startup layout for an unsaved `new` session. Used by
+    /// `/new` / `/clear` to wipe visible transcript state without deleting the
+    /// previous JSONL session.
+    fn rebuild_empty_welcome_transcript(&mut self) {
+        let (cols, rows) = size().unwrap_or((80, 24));
+        let mut transcript = TranscriptPane::new(usize::from(cols), usize::from(rows));
+        transcript.set_theme(self.tui.chrome().theme());
+        transcript.push_welcome_banner(
+            self.tui.chrome().title(),
+            self.tui.chrome().session_label(),
+            self.tui.chrome().model_label(),
+            &self.tui.chrome().cwd_label(),
+            env!("CARGO_PKG_VERSION"),
+            None,
+        );
+        *self.tui.transcript_mut() = transcript;
+    }
+
+    /// Reset the in-memory TUI/runtime state so the next prompt starts a fresh
+    /// workspace-scoped session. Preserves user-facing choices (model, thinking,
+    /// permission mode, plan/goal development mode, workspace root) and only
+    /// clears transient turn/overlay/transcript state.
+    fn reset_for_new_session(&mut self) {
+        self.active_turn = None;
+        self.pending_approvals.clear();
+        self.resolved_approvals.clear();
+        self.pending_questions.clear();
+        self.pending_question_prompts.clear();
+        self.pending_background_question_followups.clear();
+        self.pending_skill_context = None;
+        self.pending_plan_review_feedback.clear();
+        self.clear_pending_exit_confirmation();
+        self.close_inline_prompt_completion();
+        self.tui.chrome_mut().clear_interrupted_turn_state();
+        self.tui.chrome_mut().clear_todos();
+        self.tui.chrome_mut().prompt_mut().clear_after_submit();
+        self.active_session_id = None;
+        self.tui.chrome_mut().set_session_label("new");
+        self.rebuild_empty_welcome_transcript();
+    }
+
+    /// Begin a fresh session transition from `/new` / `/clear`. Blocked (with a
+    /// status message and no state change) when a turn is still running so we
+    /// never drop an in-flight session's tool/approval state on the floor.
+    fn start_new_session_from_slash(&mut self) {
+        if self.active_turn.is_some() {
+            self.push_status(
+                "Cannot start a new session while a turn is running. Press Esc to interrupt first.",
+            );
+            return;
+        }
+        self.close_inline_prompt_completion();
+        self.reset_for_new_session();
+        self.push_status("Started fresh session");
+    }
+
     fn apply_selected_model(&mut self) {
         let Some(item) = self.tui.chrome_mut().confirm_model_picker() else {
             return;
@@ -2864,26 +3031,26 @@ impl InteractiveController {
     /// Apply a model selection, updating the active model, context window,
     /// thinking state, and footer indicator.
     fn apply_model_selection(&mut self, selection: &neo_tui::dialogs::ModelSelection) {
-        let (provider, model) = selection
-            .alias
-            .split_once('/')
-            .unwrap_or((&selection.alias, ""));
         self.tui
             .chrome_mut()
             .set_model_label(selection.alias.clone());
-        let max_ctx = self
-            .model_items
-            .iter()
-            .find(|item| item.value == selection.alias)
-            .and_then(context_window_from_picker_item);
+        let selected_model = SelectedModel::from_alias(
+            &selection.alias,
+            self.local_config.as_ref(),
+            &self.model_items,
+        )
+        .map(Some)
+        .unwrap_or_else(|error| {
+            tracing::warn!("failed to parse selected model: {error}");
+            None
+        });
+        let max_ctx = selected_model
+            .as_ref()
+            .and_then(|model| model.max_context_tokens);
         self.tui
             .chrome_mut()
             .set_context_window(max_ctx.map(ContextWindow::new));
-        self.active_model = Some(SelectedModel {
-            provider: provider.to_owned(),
-            model: model.to_owned(),
-            max_context_tokens: max_ctx,
-        });
+        self.active_model = selected_model;
         self.current_thinking = selection.thinking;
         self.tui
             .chrome_mut()
@@ -2894,6 +3061,20 @@ impl InteractiveController {
             } else {
                 None
             };
+            // Keep the in-memory config in sync so subsequent turns and the next
+            // startup resolve the same model.
+            config.default_model = selection.alias.clone();
+            if let Some(model) = &self.active_model {
+                config.default_provider.clone_from(&model.provider);
+            }
+        }
+        // Persist the selection to disk so the next session opens on the same
+        // model the user chose, instead of reverting to a stale default.
+        if let Some(config_path) = self.config_path() {
+            if let Err(error) = crate::config_ops::set_default_model(&config_path, &selection.alias)
+            {
+                tracing::warn!("failed to persist default model: {error}");
+            }
         }
         let notice = if selection.thinking {
             format!("Switched to {} (thinking: on)", selection.alias)
@@ -3044,6 +3225,7 @@ impl InteractiveController {
         self.pending_catalog_fetch = Some(PendingCatalogFetch {
             source: CatalogFetchSource::Known,
             handle,
+            pending_add: None,
         });
     }
 
@@ -3121,17 +3303,21 @@ impl InteractiveController {
             self.push_status("No config available");
             return;
         };
-        match crate::config_ops::catalog_add_provider(&config_path, &provider_id, Some(key), None)
-            .await
-        {
-            Ok(message) => {
-                self.push_status(message);
-                self.refresh_config();
-            }
-            Err(error) => {
-                self.push_status(format!("Error: Failed to add provider: {error}"));
-            }
-        }
+        // Fetch the catalog off the main loop so the footer spinner can animate
+        // instead of freezing the UI for the duration of the network request.
+        self.tui
+            .chrome_mut()
+            .set_custom_working_label(Some(format!("Importing provider {provider_id}...")));
+        let handle = tokio::spawn(async move { neo_ai::catalog::fetch_catalog().await });
+        self.pending_catalog_fetch = Some(PendingCatalogFetch {
+            source: CatalogFetchSource::Known,
+            handle,
+            pending_add: Some(PendingCatalogAdd {
+                provider_id,
+                api_key: Some(key.to_owned()),
+                config_path,
+            }),
+        });
     }
 
     /// Handle a custom registry import result.
@@ -3156,6 +3342,7 @@ impl InteractiveController {
                 self.pending_catalog_fetch = Some(PendingCatalogFetch {
                     source: CatalogFetchSource::Custom(source),
                     handle,
+                    pending_add: None,
                 });
             }
             neo_tui::dialogs::CustomRegistryImportResult::Cancelled => {}
@@ -3175,6 +3362,37 @@ impl InteractiveController {
         self.tui.chrome_mut().set_custom_working_label(None);
         match pending.handle.await {
             Ok(Ok(catalog)) => {
+                // API-key submit path: write the provider into config and report.
+                if let Some(add) = pending.pending_add {
+                    match catalog.get(&add.provider_id) {
+                        Some(entry) => {
+                            match crate::config_ops::add_provider_from_catalog_entry(
+                                &add.config_path,
+                                &add.provider_id,
+                                entry,
+                                add.api_key.as_deref(),
+                                None,
+                            ) {
+                                Ok(message) => {
+                                    self.push_status(message);
+                                    self.refresh_config();
+                                }
+                                Err(error) => {
+                                    self.push_status(format!(
+                                        "Error: Failed to add provider: {error}"
+                                    ));
+                                }
+                            }
+                        }
+                        None => {
+                            self.push_status(format!(
+                                "Error: provider '{}' not found in models.dev catalog",
+                                add.provider_id
+                            ));
+                        }
+                    }
+                    return;
+                }
                 let items = catalog_choice_items(&catalog);
                 if items.is_empty() {
                     self.push_status("No providers found in catalog.");
@@ -3344,8 +3562,11 @@ fn prompt_package_completion_items(root: &Path) -> Result<Vec<PickerItem>> {
     Ok(items)
 }
 
-fn extension_command_completion_items(root: &Path) -> Result<Vec<PickerItem>> {
-    let extension_root = neo_agent_core::tools::extensions::default_extension_root(root);
+fn extension_command_completion_items(_root: &Path) -> Result<Vec<PickerItem>> {
+    let Some(neo_home) = crate::config::neo_home() else {
+        return Ok(Vec::new());
+    };
+    let extension_root = neo_agent_core::tools::extensions::default_extension_root(&neo_home);
     if !extension_root.exists() {
         return Ok(Vec::new());
     }
@@ -3382,6 +3603,24 @@ fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<PickerItem>
             Some(prompt_source_description(
                 Some("Resume a local session"),
                 Some("local sessions"),
+                Some("local"),
+            )),
+        ),
+        PickerItem::new(
+            "/new",
+            "/new",
+            Some(prompt_source_description(
+                Some("Start a fresh local session"),
+                Some("session"),
+                Some("local"),
+            )),
+        ),
+        PickerItem::new(
+            "/clear",
+            "/clear",
+            Some(prompt_source_description(
+                Some("Alias for /new"),
+                Some("session"),
                 Some("local"),
             )),
         ),
@@ -3753,12 +3992,12 @@ impl PromptSubmission {
                 model_override: None,
             });
         };
-        let Some(model_item) = model_items.iter().find(|item| item.value == model_value) else {
+        if !model_items.iter().any(|item| item.value == model_value) {
             return Ok(Self {
                 prompt: expand_interactive_prompt(&prompt, config, fallback_project_dir)?,
                 model_override: None,
             });
-        };
+        }
         let prompt_after_model = rest.trim_start();
         if prompt_after_model.is_empty() {
             return Ok(Self {
@@ -3769,7 +4008,7 @@ impl PromptSubmission {
 
         Ok(Self {
             prompt: expand_interactive_prompt(prompt_after_model, config, fallback_project_dir)?,
-            model_override: Some(SelectedModel::from_picker_item(model_item)?),
+            model_override: Some(SelectedModel::from_alias(model_value, config, model_items)?),
         })
     }
 }
@@ -3963,6 +4202,11 @@ fn command_specs(project_dir: &Path) -> (Vec<CommandSpec>, Option<String>) {
             "providers",
             "Open providers",
             Some("View configured providers"),
+        ),
+        CommandSpec::new(
+            "session.new",
+            "New session",
+            Some("Start a fresh local session"),
         ),
         CommandSpec::new(
             "session.exportHtml",
@@ -4299,15 +4543,17 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     let mut config = config.clone();
     if let Some(model) = &selected_model {
         config.default_provider.clone_from(&model.provider.0);
-        config.default_model.clone_from(&model.model);
     }
     let run_config = config.clone();
     let run_turn: TurnDriver = Arc::new(move |request, channels| {
-        let mut effective_config = run_config.clone();
+        // Prefer the live config snapshot from the dispatching controller so
+        // providers/models added at runtime (e.g. via `/provider`) resolve;
+        // fall back to the startup snapshot for safety.
+        let mut effective_config = request.base_config.unwrap_or_else(|| run_config.clone());
         Box::pin(async move {
             if let Some(model) = request.model {
                 effective_config.default_provider = model.provider;
-                effective_config.default_model = model.model;
+                effective_config.default_model = model.alias;
             }
             effective_config.runtime.reasoning_effort = request.reasoning_effort;
             effective_config.permission_mode = request.permission_mode;
@@ -4361,7 +4607,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     let mut controller = InteractiveController::new(
         "neo",
         "new",
-        format!("{}/{}", config.default_provider, config.default_model),
+        config.default_model_label(),
         config.project_dir.clone(),
         run_turn,
         catalogs,
@@ -4377,7 +4623,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     );
     controller.keybindings = keybindings;
     controller.completion_root.clone_from(&config.project_dir);
-    let default_model_value = format!("{}/{}", config.default_provider, config.default_model);
+    let default_model_value = config.default_model.clone();
     let default_context_window = selected_model
         .as_ref()
         .and_then(|model| model.capabilities.max_context_tokens)
@@ -4401,7 +4647,6 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         .set_thinking_enabled(controller.current_thinking);
     controller.local_config = Some(config.clone());
     let skill_store = resources::load_skill_store(
-        &config.project_dir,
         neo_home().as_deref(),
         &config.extra_skill_dirs,
         &config.skill_path,
@@ -4414,6 +4659,12 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
             .set_skill_store(store.clone());
     }
     controller.skill_store = skill_store;
+    // Seed the composer's in-memory history from the workspace bucket so Up/Down
+    // can recall prompts submitted in earlier TUI sessions for this workspace.
+    controller.prompt_history = Some(crate::prompt_history::PromptHistoryStore::for_config(
+        &config,
+    ));
+    controller.load_prompt_history();
     controller
 }
 
@@ -4467,6 +4718,12 @@ fn session_catalog_for_config(config: &AppConfig) -> SessionCatalog {
 }
 
 fn model_picker_catalog_for_config(config: &AppConfig) -> ModelPickerCatalog {
+    if !config.models.is_empty() {
+        return ModelPickerCatalog {
+            items: model_picker_items_from_config(config),
+            error: None,
+        };
+    }
     match crate::modes::run::model_registry_for_config(config) {
         Ok(registry) => {
             let models = registry.list();
@@ -4481,6 +4738,20 @@ fn model_picker_catalog_for_config(config: &AppConfig) -> ModelPickerCatalog {
             error: Some(error.to_string()),
         },
     }
+}
+
+fn model_picker_items_from_config(config: &AppConfig) -> Vec<PickerItem> {
+    config
+        .models
+        .iter()
+        .map(|(alias, model)| {
+            let description = model.max_context_tokens.map_or_else(
+                || model.provider.clone(),
+                |max_context_tokens| format!("{} · ctx {max_context_tokens}", model.provider),
+            );
+            PickerItem::new(alias.clone(), alias.clone(), Some(description))
+        })
+        .collect()
 }
 
 fn model_to_picker_item(model: &neo_ai::ModelSpec) -> PickerItem {
@@ -4502,11 +4773,6 @@ fn model_entries_from_config(config: &AppConfig) -> Vec<neo_tui::dialogs::ModelE
             .iter()
             .map(|(alias, model)| {
                 let provider_id = model.provider.clone();
-                let alias_full = if alias.contains('/') {
-                    alias.clone()
-                } else {
-                    format!("{}/{}", provider_id, model.model)
-                };
                 let mut capabilities = model.capabilities.clone();
                 if capabilities.iter().any(|c| c == "reasoning")
                     && !capabilities.iter().any(|c| c == "thinking")
@@ -4514,7 +4780,7 @@ fn model_entries_from_config(config: &AppConfig) -> Vec<neo_tui::dialogs::ModelE
                     capabilities.push("thinking".to_owned());
                 }
                 neo_tui::dialogs::ModelEntry {
-                    alias: alias_full,
+                    alias: alias.clone(),
                     provider_id,
                     display_name: model.display_name.clone().unwrap_or_else(|| alias.clone()),
                     model_id: model.model.clone(),
@@ -10129,5 +10395,796 @@ command = "python3"
         let mut config = test_config(project_dir, sessions_dir);
         config.models = models;
         config
+    }
+
+    /// Regression: the turn driver must receive the controller's *live*
+    /// `local_config` (via `TurnRequest.base_config`), not the stale snapshot
+    /// captured at construction. Without this, a provider added at runtime via
+    /// `/provider` is written to disk but the next turn fails with
+    /// "unknown model" because the stale registry is used.
+    #[tokio::test]
+    async fn turn_request_carries_live_local_config() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let captured_config = std::sync::Arc::clone(&captured);
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            move |request| {
+                let captured_config = std::sync::Arc::clone(&captured_config);
+                async move {
+                    *captured_config.lock().expect("capture config") = request.base_config;
+                    Ok(vec![
+                        AgentEvent::MessageStarted {
+                            turn: 1,
+                            id: "m".to_owned(),
+                        },
+                        AgentEvent::TurnFinished {
+                            turn: 1,
+                            stop_reason: neo_agent_core::StopReason::EndTurn,
+                        },
+                    ])
+                }
+            },
+        );
+
+        // Simulate a runtime config change (e.g. provider added via `/provider`)
+        // by setting local_config AFTER the controller was built.
+        let live_config = test_config_with_models(
+            &test_workspace_root(),
+            test_workspace_root().join(".neo/sessions"),
+            BTreeMap::from([(
+                "minimax-cn-coding-plan/MiniMax-M3".to_owned(),
+                ModelConfig {
+                    provider: "minimax-cn-coding-plan".to_owned(),
+                    model: "MiniMax-M3".to_owned(),
+                    ..ModelConfig::default()
+                },
+            )]),
+        );
+        controller.local_config = Some(live_config);
+
+        controller.type_text("hello");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("submit");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("turn completes");
+
+        let captured = captured.lock().expect("captured").take();
+        let config = captured.expect("base_config was forwarded to the driver");
+        assert_eq!(config.default_provider, "openai");
+        assert!(
+            config
+                .models
+                .contains_key("minimax-cn-coding-plan/MiniMax-M3")
+        );
+    }
+
+    fn controller_with_session_for_new_tests() -> (
+        InteractiveController,
+        std::sync::Arc<std::sync::Mutex<Vec<TurnRequest>>>,
+    ) {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            SESSION_A,
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            move |request| {
+                let captured_requests = std::sync::Arc::clone(&captured_requests);
+                async move {
+                    captured_requests
+                        .lock()
+                        .expect("record request")
+                        .push(request);
+                    Ok(vec![
+                        AgentEvent::MessageStarted {
+                            turn: 1,
+                            id: "assistant-1".to_owned(),
+                        },
+                        AgentEvent::TextDelta {
+                            turn: 1,
+                            text: "hi back".to_owned(),
+                        },
+                        AgentEvent::MessageFinished {
+                            turn: 1,
+                            id: "assistant-1".to_owned(),
+                            stop_reason: StopReason::EndTurn,
+                        },
+                        AgentEvent::TurnFinished {
+                            turn: 1,
+                            stop_reason: StopReason::EndTurn,
+                        },
+                    ])
+                }
+            },
+        );
+        // Seed an active session id, transcript content, prompt text, and todos
+        // so the reset tests can prove all of them are cleared.
+        controller.active_session_id = Some(SESSION_A.to_owned());
+        controller
+            .tui
+            .chrome_mut()
+            .set_session_label(SESSION_A.to_owned());
+        controller
+            .transcript_mut()
+            .push_user_message("continue the permission refactor");
+        controller
+            .transcript_mut()
+            .push_assistant_message("I found the old policy conversion path...");
+        controller
+            .tui
+            .chrome_mut()
+            .set_todo_items(vec![neo_tui::widgets::TodoDisplayItem::new(
+                "Step 1",
+                neo_tui::widgets::TodoDisplayStatus::Pending,
+            )]);
+        (controller, requests)
+    }
+
+    #[tokio::test]
+    async fn slash_new_resets_to_unsaved_fresh_session_without_streaming() {
+        let (mut controller, _requests) = controller_with_session_for_new_tests();
+
+        controller.type_text("/new");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("/new submits");
+
+        assert_eq!(controller.active_session_id(), None);
+        assert_eq!(controller.chrome().session_label(), "new");
+        assert_eq!(controller.chrome().mode(), ChromeMode::Editing);
+        let snapshot = controller.render_snapshot();
+        assert!(
+            snapshot.contains("Welcome to neo!"),
+            "snapshot shows welcome banner"
+        );
+        assert!(
+            snapshot.contains("Started fresh session"),
+            "snapshot shows fresh session status"
+        );
+        assert!(
+            !snapshot.contains("permission refactor"),
+            "old transcript content is gone"
+        );
+        assert!(
+            !snapshot.contains("policy conversion"),
+            "old assistant content is gone"
+        );
+        assert!(controller.chrome().prompt().text.is_empty());
+        assert!(controller.chrome().todo_items().is_empty());
+    }
+
+    #[tokio::test]
+    async fn slash_clear_alias_resets_to_unsaved_fresh_session() {
+        let (mut controller, _requests) = controller_with_session_for_new_tests();
+
+        controller.type_text("/clear");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("/clear submits");
+
+        assert_eq!(controller.active_session_id(), None);
+        assert_eq!(controller.chrome().session_label(), "new");
+        assert_eq!(controller.chrome().mode(), ChromeMode::Editing);
+        let snapshot = controller.render_snapshot();
+        assert!(snapshot.contains("Started fresh session"));
+        assert!(!snapshot.contains("permission refactor"));
+    }
+
+    #[tokio::test]
+    async fn slash_new_does_not_enter_streaming_mode() {
+        let (mut controller, requests) = controller_with_session_for_new_tests();
+
+        controller.type_text("/new");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("/new submits");
+
+        assert_eq!(controller.chrome().mode(), ChromeMode::Editing);
+        assert!(requests.lock().expect("recorded requests").is_empty());
+    }
+
+    #[tokio::test]
+    async fn slash_new_preserves_model_permission_thinking_and_plan_mode() {
+        let (mut controller, _requests) = controller_with_session_for_new_tests();
+        // Configure preserved state.
+        controller.set_permission_mode(PermissionMode::Yolo);
+        controller.current_thinking = true;
+        controller.tui.chrome_mut().set_thinking_enabled(true);
+        controller.set_plan_mode_from_user(true);
+
+        controller.type_text("/new");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("/new submits");
+
+        assert_eq!(controller.chrome().permission_mode(), PermissionMode::Yolo);
+        assert!(controller.chrome().thinking_enabled());
+        assert_eq!(controller.chrome().model_label(), "openai/gpt-4.1");
+        assert!(
+            controller.chrome().is_plan_mode(),
+            "user-enabled plan mode is preserved across /new"
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_new_clears_transcript_todos_prompt_and_pending_overlays() {
+        let (mut controller, _requests) = controller_with_session_for_new_tests();
+
+        controller.type_text("/new");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("/new submits");
+
+        let snapshot = controller.render_snapshot();
+        assert!(snapshot.contains("Welcome to neo!"));
+        assert!(
+            !snapshot.contains("permission refactor"),
+            "old transcript content is cleared"
+        );
+        assert!(controller.chrome().prompt().text.is_empty());
+        assert!(controller.chrome().todo_items().is_empty());
+        assert!(controller.active_session_id().is_none());
+    }
+
+    #[tokio::test]
+    async fn slash_new_preserves_loaded_prompt_history() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+        store.append(Some(SESSION_A), "remembered prompt").unwrap();
+        let mut controller = controller_with_history_store(store);
+        controller.active_session_id = Some(SESSION_A.to_owned());
+        controller
+            .tui
+            .chrome_mut()
+            .set_session_label(SESSION_A.to_owned());
+
+        controller.type_text("/new");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("/new submits");
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("up").expect("valid key")))
+            .await
+            .expect("up recalls history after /new");
+        assert_eq!(controller.chrome().prompt().text, "remembered prompt");
+    }
+
+    #[tokio::test]
+    async fn slash_new_is_blocked_while_turn_is_running_and_preserves_prompt() {
+        // Use a driver that blocks forever until cancelled, so the turn stays
+        // active while we submit /new.
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let run_turn: TurnDriver = Arc::new(move |request, _channels| {
+            let captured_requests = std::sync::Arc::clone(&captured_requests);
+            Box::pin(async move {
+                captured_requests
+                    .lock()
+                    .expect("record request")
+                    .push(request);
+                // Never complete: holds the turn open.
+                std::future::pending::<Result<TurnOutcome>>().await
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            SESSION_A,
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            run_turn,
+            PickerCatalogs::default(),
+            Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        );
+        controller.active_session_id = Some(SESSION_A.to_owned());
+
+        controller.type_text("long running");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("first prompt submits");
+        // Let the turn task spawn and register itself.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(controller.active_turn.is_some(), "turn is running");
+
+        controller.type_text("/new");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("/new submit handles blocking");
+
+        assert_eq!(
+            controller.active_session_id(),
+            Some(SESSION_A),
+            "active session id is unchanged when blocked"
+        );
+        assert!(
+            transcript_has_status(
+                &controller,
+                "Cannot start a new session while a turn is running"
+            ),
+            "blocked status is shown"
+        );
+        assert_eq!(
+            controller.chrome().prompt().text,
+            "/new",
+            "blocked /new preserves the command text for retry"
+        );
+
+        // Clean up the dangling turn.
+        controller.cancel_active_turn().await.expect("cancel turn");
+    }
+
+    #[tokio::test]
+    async fn slash_new_preserves_old_session_for_resume_picker_and_next_prompt_creates_new_session()
+    {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_requests = std::sync::Arc::clone(&requests);
+        let run_turn: TurnDriver = Arc::new(move |request, channels| {
+            let captured_requests = std::sync::Arc::clone(&captured_requests);
+            Box::pin(async move {
+                let is_first = {
+                    let mut requests = captured_requests.lock().expect("record request");
+                    let is_first = requests.is_empty();
+                    requests.push(request);
+                    is_first
+                };
+                if is_first {
+                    // First prompt after /new should carry session_id = None and
+                    // report a brand-new session id.
+                    channels
+                        .session_ids
+                        .send(SESSION_NEW.to_owned())
+                        .expect("session id sent");
+                }
+                channels.send_event(AgentEvent::MessageStarted {
+                    turn: 1,
+                    id: "assistant-1".to_owned(),
+                });
+                channels.send_event(AgentEvent::TextDelta {
+                    turn: 1,
+                    text: "ok".to_owned(),
+                });
+                channels.send_event(AgentEvent::MessageFinished {
+                    turn: 1,
+                    id: "assistant-1".to_owned(),
+                    stop_reason: StopReason::EndTurn,
+                });
+                channels.send_event(AgentEvent::TurnFinished {
+                    turn: 1,
+                    stop_reason: StopReason::EndTurn,
+                });
+                Ok(TurnOutcome::default())
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            SESSION_A,
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            run_turn,
+            PickerCatalogs {
+                session_items: vec![test_session_summary(
+                    SESSION_A,
+                    "Alpha",
+                    test_workspace_root(),
+                    "permission refactor",
+                )],
+                session_error: None,
+                model_items: Vec::new(),
+            },
+            Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        );
+        controller.active_session_id = Some(SESSION_A.to_owned());
+
+        controller.type_text("/new");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("/new submits");
+
+        assert_eq!(controller.active_session_id(), None);
+        assert_eq!(controller.chrome().session_label(), "new");
+        // The old session is still advertised in the picker catalog.
+        assert!(
+            controller
+                .session_items
+                .iter()
+                .any(|item| item.id == SESSION_A),
+            "old session remains in the picker catalog"
+        );
+
+        // The next real prompt should carry session_id = None so the runtime
+        // creates a brand-new JSONL session.
+        controller.type_text("hello new session");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("next prompt submits");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("next turn completes");
+
+        let requests = requests.lock().expect("recorded requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].prompt,
+            vec!["hello new session".to_owned()],
+            "next prompt text is forwarded"
+        );
+        assert_eq!(
+            requests[0].session_id, None,
+            "next prompt carries no session id so a new session is created"
+        );
+        assert_eq!(
+            controller.chrome().session_label(),
+            SESSION_NEW,
+            "new session id becomes active"
+        );
+        assert_eq!(controller.active_session_id(), Some(SESSION_NEW));
+    }
+
+    #[test]
+    fn slash_completions_include_new_and_clear() {
+        let items = session_completion_items(None);
+        let values: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
+        assert!(values.contains(&"/new"), "completions include /new");
+        assert!(values.contains(&"/clear"), "completions include /clear");
+    }
+
+    #[test]
+    fn configured_model_picker_preserves_unqualified_alias() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = test_config_with_models(
+            temp.path(),
+            temp.path().join(".neo/sessions"),
+            BTreeMap::from([(
+                "fast".to_owned(),
+                ModelConfig {
+                    provider: "openai".to_owned(),
+                    model: "gpt-4.1".to_owned(),
+                    max_context_tokens: Some(1_000_000),
+                    ..ModelConfig::default()
+                },
+            )]),
+        );
+
+        let items = model_picker_items_from_config(&config);
+        assert_eq!(items[0].value, "fast");
+        let selected =
+            SelectedModel::from_alias("fast", Some(&config), &items).expect("alias resolves");
+        assert_eq!(selected.alias, "fast");
+        assert_eq!(selected.provider, "openai");
+        assert_eq!(selected.model, "gpt-4.1");
+        assert_eq!(selected.max_context_tokens, Some(1_000_000));
+    }
+
+    #[tokio::test]
+    async fn command_palette_new_session_resets_to_fresh_session() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            SESSION_A,
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.active_session_id = Some(SESSION_A.to_owned());
+        controller
+            .tui
+            .chrome_mut()
+            .set_session_label(SESSION_A.to_owned());
+        controller
+            .transcript_mut()
+            .push_user_message("old session content");
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::CommandPaletteOpen))
+            .await
+            .expect("command palette opens");
+        for _ in 0..64 {
+            let selected = controller
+                .chrome()
+                .selected_command()
+                .expect("selected command");
+            if selected.id == "session.new" {
+                break;
+            }
+            controller
+                .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+                .await
+                .expect("move to next command");
+        }
+        assert_eq!(
+            controller
+                .chrome()
+                .selected_command()
+                .expect("new session command")
+                .id,
+            "session.new"
+        );
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectConfirm))
+            .await
+            .expect("new session command runs");
+
+        assert_eq!(controller.active_session_id(), None);
+        assert_eq!(controller.chrome().session_label(), "new");
+        let snapshot = controller.render_snapshot();
+        assert!(snapshot.contains("Started fresh session"));
+        assert!(!snapshot.contains("old session content"));
+    }
+
+    // --- NEO-23: cross-session prompt history -----------------------------
+
+    /// Build a test controller with a temp-backed prompt history store so tests
+    /// exercise the real load/append path without touching the user's home.
+    fn controller_with_history_store(
+        store: crate::prompt_history::PromptHistoryStore,
+    ) -> InteractiveController {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.set_prompt_history_store(store);
+        controller.load_prompt_history();
+        controller
+    }
+
+    #[tokio::test]
+    async fn controller_loads_workspace_prompt_history_on_startup() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+        store
+            .append(Some("prior-session"), "earlier prompt")
+            .expect("seed earlier");
+        store
+            .append(Some("prior-session"), "latest prompt")
+            .expect("seed latest");
+
+        let mut controller = controller_with_history_store(store);
+
+        // Empty composer: first Up recalls the most recent persisted prompt.
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("up").expect("valid key")))
+            .await
+            .expect("up recalls latest persisted prompt");
+        assert_eq!(controller.chrome().prompt().text, "latest prompt");
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("up").expect("valid key")))
+            .await
+            .expect("up recalls older persisted prompt");
+        assert_eq!(controller.chrome().prompt().text, "earlier prompt");
+    }
+
+    #[tokio::test]
+    async fn submitted_prompt_is_persisted_to_workspace_history() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("prompt-history.jsonl");
+        let store = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+
+        let mut controller = controller_with_history_store(store);
+
+        controller.type_text("real prompt from this session");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("prompt submits");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("turn completes");
+
+        let persisted = std::fs::read_to_string(&path).expect("history file exists");
+        assert!(
+            persisted.contains("real prompt from this session"),
+            "prompt should be persisted: {persisted}"
+        );
+
+        // A fresh controller on the same workspace bucket recalls it.
+        let store2 = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+        let controller2 = controller_with_history_store(store2);
+        assert_eq!(
+            controller2
+                .chrome()
+                .prompt()
+                .history_snapshot()
+                .last()
+                .map(String::as_str),
+            Some("real prompt from this session")
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn slash_commands_are_not_persisted_to_prompt_history() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("prompt-history.jsonl");
+        let store = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+
+        let mut controller = controller_with_history_store(store);
+
+        // `/model` opens the model picker overlay and never becomes a user
+        // turn, so it must not be written to prompt history.
+        controller.type_text("/model");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("slash command handled");
+
+        let persisted = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            !persisted.contains("/model"),
+            "slash commands must not be persisted: {persisted}"
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn prompt_history_is_shared_across_sessions_in_same_workspace() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store_a = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+
+        // Session A submits a prompt.
+        let mut controller_a = controller_with_history_store(store_a);
+        controller_a.type_text("first from session a");
+        controller_a
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("session a submits");
+        controller_a
+            .wait_for_active_turn()
+            .await
+            .expect("session a turn completes");
+
+        // Session B starts fresh in the same workspace bucket and recalls A's
+        // prompt via Up from an empty composer.
+        let store_b = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+        let mut controller_b = controller_with_history_store(store_b);
+        controller_b
+            .handle_input_event(InputEvent::Key(KeyId::new("up").expect("valid key")))
+            .await
+            .expect("up recalls cross-session prompt");
+        assert_eq!(controller_b.chrome().prompt().text, "first from session a");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn prompt_history_is_isolated_by_workspace_bucket() {
+        let dir_one = tempfile::tempdir().expect("temp dir one");
+        let dir_two = tempfile::tempdir().expect("temp dir two");
+
+        let store_one =
+            crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir_one.path()));
+        let mut controller_one = controller_with_history_store(store_one);
+        controller_one.type_text("workspace one");
+        controller_one
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("workspace one submits");
+        controller_one
+            .wait_for_active_turn()
+            .await
+            .expect("workspace one turn completes");
+
+        // A different workspace bucket must not recall workspace one's prompt.
+        let store_two =
+            crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir_two.path()));
+        let controller_two = controller_with_history_store(store_two);
+        assert!(
+            controller_two
+                .chrome()
+                .prompt()
+                .history_snapshot()
+                .is_empty(),
+            "history must be isolated per workspace bucket"
+        );
+        drop(dir_one);
+        drop(dir_two);
+    }
+
+    #[tokio::test]
+    async fn approval_up_down_does_not_recall_prompt_history() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+        store.append(None, "old prompt").expect("seed history");
+        let mut controller = controller_with_history_store(store);
+        // Composer is empty so any leaked Up would otherwise recall "old prompt".
+
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Tool,
+            subject: "Write".to_owned(),
+            arguments: serde_json::json!({"path": "approved.txt"}),
+        });
+        let (decision_tx, _decision_rx) = oneshot::channel();
+        controller
+            .pending_approvals
+            .insert("tool-1".to_owned(), pending_approval_response(decision_tx));
+
+        // Up/Down while approval is focused must move the dialog, not history.
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("up").expect("valid key")))
+            .await
+            .expect("up moves approval selection");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
+            .await
+            .expect("down moves approval selection");
+
+        assert_eq!(
+            controller.chrome().prompt().text,
+            "",
+            "approval Up/Down must not leak into PromptState"
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn question_up_down_does_not_recall_prompt_history() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+        store.append(None, "old prompt").expect("seed history");
+        let mut controller = controller_with_history_store(store);
+
+        let (response_tx, _response_rx) = oneshot::channel();
+        controller.register_pending_question(PendingQuestion {
+            id: "question-1".to_owned(),
+            questions: vec![neo_agent_core::QuestionEventData {
+                question: "Pick one".to_owned(),
+                header: Some("Single".to_owned()),
+                body: None,
+                options: vec![
+                    neo_agent_core::QuestionOptionData {
+                        label: "First".to_owned(),
+                        description: None,
+                    },
+                    neo_agent_core::QuestionOptionData {
+                        label: "Second".to_owned(),
+                        description: None,
+                    },
+                ],
+                multi_select: false,
+            }],
+            response_tx,
+        });
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("up").expect("valid key")))
+            .await
+            .expect("up moves question selection");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
+            .await
+            .expect("down moves question selection");
+
+        assert_eq!(
+            controller.chrome().prompt().text,
+            "",
+            "question Up/Down must not leak into PromptState"
+        );
+        drop(dir);
     }
 }

@@ -104,7 +104,6 @@ impl SkillStore {
     /// are extracted into `user_dir/skills/.builtin/` first and then loaded
     /// from disk, so users can inspect and override them.
     pub fn load(
-        project_dir: Option<&Path>,
         user_dirs: &[PathBuf],
         extra_dirs: &[PathBuf],
         builtin_skills: Vec<LoadedSkill>,
@@ -134,16 +133,6 @@ impl SkillStore {
                     continue;
                 }
                 skills.insert(skill.name.clone(), skill);
-            }
-        }
-
-        if let Some(project_dir) = project_dir {
-            let project_skills_dir = project_dir.join(".neo").join("skills");
-            let agents_skills_dir = project_dir.join(".agents").join("skills");
-            for dir in [project_skills_dir, agents_skills_dir] {
-                for skill in discover_skills(&dir, SkillSource::Project)? {
-                    skills.insert(skill.name.clone(), skill);
-                }
             }
         }
 

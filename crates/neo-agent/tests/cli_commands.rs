@@ -6,13 +6,15 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-
-static ISOLATED_HOME: OnceLock<PathBuf> = OnceLock::new();
 
 const SESSION_A: &str = "session_00000000-0000-4000-8000-000000000201";
 const SESSION_B: &str = "session_00000000-0000-4000-8000-000000000202";
@@ -20,19 +22,39 @@ const SESSION_CHILD: &str = "session_00000000-0000-4000-8000-000000000203";
 
 fn neo() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_neo"));
-    command.env("HOME", isolated_home());
+    // Each test gets its own unique NEO_HOME so config writes (now under
+    // ~/.neo, not the project .neo) don't collide between concurrent tests.
+    command.env("NEO_HOME", neo_home_for_test());
     command
 }
 
-fn isolated_home() -> &'static Path {
-    ISOLATED_HOME.get_or_init(|| {
-        let home = TempDir::new().expect("isolated home");
-        // Leak the TempDir so it survives for the entire test process.
-        // It will be cleaned up by the OS when the test process exits.
-        let path = home.path().to_path_buf();
-        std::mem::forget(home);
-        path
+/// Unique per-test neo home directory. NEO_HOME is the single source of truth
+/// for config, skills, prompts, themes, sessions — so each test isolates it.
+/// NEO_HOME IS the neo root (equivalent to ~/.neo), so config lives at
+/// `<NEO_HOME>/config.toml`, prompts at `<NEO_HOME>/prompts`, etc.
+fn neo_home_for_test() -> PathBuf {
+    thread_local! {
+        static HOME: std::cell::OnceCell<PathBuf> = const { std::cell::OnceCell::new() };
+    }
+    HOME.with(|cell| {
+        cell.get_or_init(|| {
+            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time after epoch")
+                .as_nanos();
+            std::env::temp_dir().join(format!("neo-cli-home-{nanos}-{id}"))
+        })
+        .clone()
     })
+}
+
+/// Write the config.toml content into the test's isolated NEO_HOME.
+fn write_home_config(content: &str) {
+    let config_path = neo_home_for_test().join("config.toml");
+    fs::create_dir_all(config_path.parent().expect("config parent")).expect("create neo home");
+    fs::write(&config_path, content).expect("write home config");
 }
 
 fn run(mut command: Command) -> String {
@@ -111,7 +133,7 @@ fn sessions_metadata_json(entries: &[(&str, Value)]) -> String {
 }
 
 fn session_bucket(project_dir: &Path) -> PathBuf {
-    let sessions_root = isolated_home().join(".neo").join("sessions");
+    let sessions_root = neo_home_for_test().join("sessions");
     neo_agent_core::session::workspace_sessions_dir(&sessions_root, project_dir)
 }
 
@@ -133,15 +155,12 @@ fn root_command_reports_interactive_entrypoint_without_placeholders() {
 #[test]
 fn root_command_renders_configured_tui_session_state() {
     let temp = TempDir::new().expect("tempdir");
-    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    fs::write(
-        temp.path().join(".neo/config.toml"),
+    write_home_config(
         r#"
 default_provider = "anthropic"
 default_model = "claude-sonnet-4-5"
 "#,
-    )
-    .expect("write config");
+    );
 
     let mut command = neo();
     command.current_dir(temp.path());
@@ -157,14 +176,11 @@ default_model = "claude-sonnet-4-5"
 #[test]
 fn root_verbose_flag_renders_real_startup_details() {
     let temp = TempDir::new().expect("tempdir");
-    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    fs::write(
-        temp.path().join(".neo/config.toml"),
+    write_home_config(
         r#"
 model_scope = ["sonnet"]
 "#,
-    )
-    .expect("write config");
+    );
 
     let mut command = neo();
     command.current_dir(temp.path()).arg("--verbose");
@@ -188,7 +204,7 @@ model_scope = ["sonnet"]
 #[test]
 fn project_theme_auto_discovery_loads_theme_for_verbose_startup() {
     let temp = TempDir::new().expect("tempdir");
-    let themes = temp.path().join(".neo/themes");
+    let themes = neo_home_for_test().join("themes");
     fs::create_dir_all(&themes).expect("create themes");
     fs::write(
         themes.join("solarized-neo.json"),
@@ -389,7 +405,7 @@ fn run_text_with_missing_credentials_does_not_persist_assistant_response() {
     assert!(!output.status.success());
     // Session files are stored under the isolated home in a workspace-scoped
     // bucket directory. Find them by searching for the project's bucket.
-    let home_sessions = isolated_home().join(".neo").join("sessions");
+    let home_sessions = neo_home_for_test().join("sessions");
     let sessions: Vec<_> = find_jsonl_files_in_bucket(&home_sessions, temp.path());
     assert_eq!(sessions.len(), 1);
     let path = &sessions[0];
@@ -724,7 +740,7 @@ fn extensions_install_update_and_list_sources_from_local_directory() {
     assert!(listed.contains("disabled"));
     assert!(listed.contains(source.to_string_lossy().as_ref()));
 
-    let state = fs::read_to_string(temp.path().join(".neo/extensions-state.toml"))
+    let state = fs::read_to_string(neo_home_for_test().join("extensions-state.toml"))
         .expect("read lifecycle state");
     assert!(state.contains("[extensions.echo]"));
     assert!(state.contains("enabled = false"));
@@ -734,17 +750,13 @@ fn extensions_install_update_and_list_sources_from_local_directory() {
 fn extensions_defaults_use_project_config_directory_when_invoked_from_another_cwd() {
     let project = TempDir::new().expect("project tempdir");
     let caller = TempDir::new().expect("caller tempdir");
-    fs::create_dir_all(project.path().join(".neo")).expect("create project .neo");
-    fs::write(project.path().join(".neo/config.toml"), "").expect("write project config");
+    write_home_config("");
     let source = project.path().join("source");
     write_extension_manifest(&source, "echo", "Echo", "0.1.0");
 
-    let config_path = project.path().join(".neo/config.toml");
     let mut install = neo();
     install
         .current_dir(caller.path())
-        .arg("--config")
-        .arg(&config_path)
         .args(["extensions", "install"])
         .arg(&source);
     let installed = run(install);
@@ -753,8 +765,6 @@ fn extensions_defaults_use_project_config_directory_when_invoked_from_another_cw
     let mut disable = neo();
     disable
         .current_dir(caller.path())
-        .arg("--config")
-        .arg(&config_path)
         .args(["extensions", "disable", "echo"]);
     let disabled = run(disable);
     assert!(disabled.contains("echo disabled"));
@@ -764,36 +774,30 @@ fn extensions_defaults_use_project_config_directory_when_invoked_from_another_cw
     let mut update = neo();
     update
         .current_dir(caller.path())
-        .arg("--config")
-        .arg(&config_path)
         .args(["extensions", "update", "echo"]);
     let updated = run(update);
     assert!(updated.contains("echo updated"));
     assert!(updated.contains("0.2.0"));
 
     let mut list = neo();
-    list.current_dir(caller.path())
-        .arg("--config")
-        .arg(&config_path)
-        .args(["extensions", "list"]);
+    list.current_dir(caller.path()).args(["extensions", "list"]);
     let listed = run(list);
     assert!(listed.contains("echo"));
     assert!(listed.contains("0.2.0"));
     assert!(listed.contains("disabled"));
     assert!(listed.contains(source.to_string_lossy().as_ref()));
 
-    let project_state = fs::read_to_string(project.path().join(".neo/extensions-state.toml"))
-        .expect("read project lifecycle state");
+    let project_state = fs::read_to_string(neo_home_for_test().join("extensions-state.toml"))
+        .expect("read lifecycle state");
     assert!(project_state.contains("[extensions.echo]"));
     assert!(project_state.contains("enabled = false"));
-    let project_registry = fs::read_to_string(project.path().join(".neo/extensions-sources.toml"))
-        .expect("read project source registry");
+    let project_registry = fs::read_to_string(neo_home_for_test().join("extensions-sources.toml"))
+        .expect("read source registry");
     assert!(project_registry.contains("[extensions.echo"));
     assert!(project_registry.contains(source.to_string_lossy().as_ref()));
     assert!(
-        project
-            .path()
-            .join(".neo/extensions/echo/neo-extension.toml")
+        neo_home_for_test()
+            .join("extensions/echo/neo-extension.toml")
             .exists()
     );
 
@@ -829,7 +833,7 @@ fn extensions_uninstall_removes_install_dir_and_source_entry() {
     assert!(uninstalled.contains("echo uninstalled"));
     assert!(!root.join("echo").exists());
 
-    let registry = fs::read_to_string(temp.path().join(".neo/extensions-sources.toml"))
+    let registry = fs::read_to_string(neo_home_for_test().join("extensions-sources.toml"))
         .expect("read extension source registry");
     assert!(!registry.contains("[extensions.echo"));
     assert!(!registry.contains(source.to_string_lossy().as_ref()));
@@ -933,7 +937,7 @@ args = [{}]
     let disabled = run(disable);
     assert!(disabled.contains("echo disabled"));
 
-    let state = fs::read_to_string(temp.path().join(".neo/extensions-state.toml"))
+    let state = fs::read_to_string(neo_home_for_test().join("extensions-state.toml"))
         .expect("read lifecycle state");
     assert!(state.contains("[extensions.echo]"));
     assert!(state.contains("enabled = false"));
@@ -1006,14 +1010,11 @@ command = "python3"
 #[test]
 fn config_model_scope_selects_first_matching_model_for_interactive_start() {
     let temp = TempDir::new().expect("tempdir");
-    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    fs::write(
-        temp.path().join(".neo/config.toml"),
+    write_home_config(
         r#"
 model_scope = ["sonnet"]
 "#,
-    )
-    .expect("write config");
+    );
 
     let mut command = neo();
     command.current_dir(temp.path());
@@ -1039,9 +1040,7 @@ fn mcp_list_reports_empty_configuration_without_placeholder_language() {
 #[test]
 fn mcp_list_reads_project_config_servers() {
     let temp = TempDir::new().expect("tempdir");
-    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    fs::write(
-        temp.path().join(".neo/config.toml"),
+    write_home_config(
         r#"
 [[mcp.servers]]
 id = "filesystem"
@@ -1053,8 +1052,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 [mcp.servers.env]
 RUST_LOG = "info"
 "#,
-    )
-    .expect("write config");
+    );
 
     let mut mcp = neo();
     mcp.current_dir(temp.path()).args(["mcp", "list"]);
@@ -1066,9 +1064,7 @@ RUST_LOG = "info"
 #[test]
 fn mcp_list_displays_remote_servers() {
     let temp = TempDir::new().expect("tempdir");
-    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    fs::write(
-        temp.path().join(".neo/config.toml"),
+    write_home_config(
         r#"
 [[mcp.servers]]
 id = "remote-docs"
@@ -1082,8 +1078,7 @@ enabled = true
 transport = "sse"
 url = "https://mcp.example.test/sse"
 "#,
-    )
-    .expect("write config");
+    );
 
     let mut mcp = neo();
     mcp.current_dir(temp.path()).args(["mcp", "list"]);
@@ -1117,7 +1112,7 @@ fn mcp_add_enable_disable_del_persists_project_config_without_printing_secrets()
     assert!(add_stdout.contains("added MCP server remote-docs"));
     assert!(!add_stdout.contains(secret_value));
 
-    let config_path = temp.path().join(".neo/config.toml");
+    let config_path = neo_home_for_test().join("config.toml");
     let config_content = fs::read_to_string(&config_path).expect("read config");
     assert!(config_content.contains("id = \"remote-docs\""));
     assert!(config_content.contains("transport = \"http\""));
@@ -1199,7 +1194,7 @@ fn mcp_add_remote_http_probes_and_reports_success() {
     assert!(stdout.contains("added MCP server remote-docs"));
     assert!(stdout.contains("remote-docs successfully connected!"));
 
-    let config_path = temp.path().join(".neo/config.toml");
+    let config_path = neo_home_for_test().join("config.toml");
     let config_content = fs::read_to_string(&config_path).expect("read config");
     assert!(config_content.contains("transport = \"http\""));
     assert!(config_content.contains(&format!("url = \"{}\"", mcp_server.url)));
@@ -1225,7 +1220,7 @@ fn mcp_add_remote_http_reports_failure_without_abort() {
     assert!(stdout.contains("added MCP server bad-remote"));
     assert!(stdout.contains("bad-remote connect failed"));
 
-    let config_path = temp.path().join(".neo/config.toml");
+    let config_path = neo_home_for_test().join("config.toml");
     let config_content = fs::read_to_string(&config_path).expect("read config");
     assert!(config_content.contains("id = \"bad-remote\""));
 }
@@ -1249,7 +1244,7 @@ fn mcp_add_with_disable_creates_enabled_false() {
     assert!(stdout.contains("added MCP server offline-server"));
     assert!(stdout.contains("offline-server added (disabled)"));
 
-    let config_path = temp.path().join(".neo/config.toml");
+    let config_path = neo_home_for_test().join("config.toml");
     let config_content = fs::read_to_string(&config_path).expect("read config");
     assert!(config_content.contains("enabled = false"));
 }
@@ -1275,7 +1270,7 @@ fn mcp_add_studio_parses_command_string_and_cwd() {
     assert!(stdout.contains("added MCP server filesystem"));
     assert!(stdout.contains("filesystem added (disabled)"));
 
-    let config_path = temp.path().join(".neo/config.toml");
+    let config_path = neo_home_for_test().join("config.toml");
     let config_content = fs::read_to_string(&config_path).expect("read config");
     assert!(config_content.contains("enabled = false"));
     assert!(config_content.contains("command = \"npx\""));
@@ -1372,11 +1367,8 @@ fn run_text_registers_enabled_stdio_mcp_tools_from_project_config() {
     let provider = MockSseServer::start(vec![openai_response_sse("resp-mcp", "mcp tools listed")]);
     let mcp_fixture = temp.path().join("mcp-fixture.py");
     fs::write(&mcp_fixture, MCP_STDIO_FIXTURE).expect("write MCP fixture");
-    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    fs::write(
-        temp.path().join(".neo/config.toml"),
-        format!(
-            r#"{}
+    write_home_config(&format!(
+        r#"{}
 
 [[mcp.servers]]
 id = "docs-server"
@@ -1385,11 +1377,9 @@ transport = "stdio"
 command = "python3"
 args = ["-u", "{}"]
 "#,
-            mock_responses_config(&provider.url),
-            mcp_fixture.display()
-        ),
-    )
-    .expect("write config");
+        mock_responses_config(&provider.url),
+        mcp_fixture.display()
+    ));
 
     let mut command = neo();
     command
@@ -1452,11 +1442,8 @@ fn run_text_registers_enabled_http_mcp_tools_from_project_config() {
             }),
         ),
     ]);
-    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    fs::write(
-        temp.path().join(".neo/config.toml"),
-        format!(
-            r#"{}
+    write_home_config(&format!(
+        r#"{}
 
 [[mcp.servers]]
 id = "remote-docs"
@@ -1467,11 +1454,9 @@ url = "{}"
 [mcp.servers.headers]
 "x-neo-test" = "remote-mcp"
 "#,
-            mock_responses_config(&provider.url),
-            mcp_server.url
-        ),
-    )
-    .expect("write config");
+        mock_responses_config(&provider.url),
+        mcp_server.url
+    ));
 
     let mut command = neo();
     command
@@ -1509,21 +1494,16 @@ url = "{}"
 fn run_text_rejects_remote_mcp_server_missing_url() {
     let temp = TempDir::new().expect("tempdir");
     let provider = MockSseServer::start(vec![]);
-    fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    fs::write(
-        temp.path().join(".neo/config.toml"),
-        format!(
-            r#"{}
+    write_home_config(&format!(
+        r#"{}
 
 [[mcp.servers]]
 id = "remote-docs"
 enabled = true
 transport = "http"
 "#,
-            mock_responses_config(&provider.url)
-        ),
-    )
-    .expect("write config");
+        mock_responses_config(&provider.url)
+    ));
 
     let mut command = neo();
     command

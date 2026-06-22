@@ -321,9 +321,19 @@ async fn dispatch_mcp_command(config: &AppConfig, command: McpCommand) -> anyhow
             )
             .await?)
         }
-        McpCommand::Del { mcp_name } => Ok(config::remove_mcp_server(&mcp_name)?),
-        McpCommand::Disable { mcp_name } => Ok(config::set_mcp_server_enabled(&mcp_name, false)?),
-        McpCommand::Enable { mcp_name } => Ok(config::set_mcp_server_enabled(&mcp_name, true)?),
+        McpCommand::Del { mcp_name } => {
+            Ok(config::remove_mcp_server(&mcp_name, &config.config_path)?)
+        }
+        McpCommand::Disable { mcp_name } => Ok(config::set_mcp_server_enabled(
+            &mcp_name,
+            false,
+            &config.config_path,
+        )?),
+        McpCommand::Enable { mcp_name } => Ok(config::set_mcp_server_enabled(
+            &mcp_name,
+            true,
+            &config.config_path,
+        )?),
     }
 }
 
@@ -526,17 +536,17 @@ struct ExtensionPaths {
 }
 
 fn extension_paths(config: &AppConfig, root: PathBuf) -> ExtensionPaths {
-    let project_neo_dir = config.project_dir.join(".neo");
+    let neo_home = crate::config::neo_home().unwrap_or_else(|| config.project_dir.join(".neo"));
     ExtensionPaths {
-        root: resolve_default_extension_root(config, root),
-        state_path: project_neo_dir.join("extensions-state.toml"),
-        registry_path: project_neo_dir.join("extensions-sources.toml"),
+        root: resolve_default_extension_root(&neo_home, root),
+        state_path: neo_home.join("extensions-state.toml"),
+        registry_path: neo_home.join("extensions-sources.toml"),
     }
 }
 
-fn resolve_default_extension_root(config: &AppConfig, root: PathBuf) -> PathBuf {
-    if root == Path::new(".neo/extensions") {
-        config.project_dir.join(root)
+fn resolve_default_extension_root(neo_home: &Path, root: PathBuf) -> PathBuf {
+    if root == Path::new("extensions") || root == Path::new(".neo/extensions") {
+        neo_home.join("extensions")
     } else {
         root
     }

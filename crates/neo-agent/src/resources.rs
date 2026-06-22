@@ -9,7 +9,6 @@ use std::{
 use anyhow::Context;
 use neo_agent_core::skills::{LoadedSkill, SkillStore, builtin::builtin_skills, discovery};
 
-const CONFIG_DIR: &str = ".neo";
 const SYSTEM_PROMPT_FILE: &str = "SYSTEM.md";
 const APPEND_SYSTEM_PROMPT_FILE: &str = "APPEND_SYSTEM.md";
 const CONTEXT_FILE_CANDIDATES: &[&str] = &["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
@@ -19,28 +18,11 @@ pub(crate) fn load_system_prompt(
     project_trusted: bool,
     skill_store: &SkillStore,
 ) -> anyhow::Result<Option<String>> {
-    let system_prompt =
-        read_first_existing(&system_prompt_candidates(project_dir), "system prompt")?;
-    let mut append_prompts: Vec<String> = read_first_existing(
-        &append_system_prompt_candidates(project_dir),
-        "append system prompt",
-    )?
-    .into_iter()
-    .collect();
-    if let Some(available_skills) = format_available_skills(skill_store) {
-        append_prompts.push(available_skills);
-    }
-    if let Some(project_context) =
-        format_project_context(&load_context_files(project_dir, project_trusted)?)
-    {
-        append_prompts.push(project_context);
-    }
-    let mut append_prompts: Vec<String> = read_first_existing(
-        &append_system_prompt_candidates(project_dir),
-        "append system prompt",
-    )?
-    .into_iter()
-    .collect();
+    let system_prompt = read_first_existing(&system_prompt_candidates(), "system prompt")?;
+    let mut append_prompts: Vec<String> =
+        read_first_existing(&append_system_prompt_candidates(), "append system prompt")?
+            .into_iter()
+            .collect();
     if let Some(available_skills) = format_available_skills(skill_store) {
         append_prompts.push(available_skills);
     }
@@ -54,7 +36,6 @@ pub(crate) fn load_system_prompt(
 }
 
 pub(crate) fn load_skill_store(
-    project_dir: &Path,
     user_dir: Option<&Path>,
     extra_dirs: &[String],
     skill_path: &[String],
@@ -70,8 +51,7 @@ pub(crate) fn load_skill_store(
     if let Some(user_dir) = user_dir {
         user.extend(discovery::user_skill_dirs(user_dir));
     }
-    SkillStore::load(Some(project_dir), &user, &extra, builtin_skills()?)
-        .map_err(anyhow::Error::from)
+    SkillStore::load(&user, &extra, builtin_skills()?).map_err(anyhow::Error::from)
 }
 
 #[derive(Debug, Clone)]
@@ -87,8 +67,8 @@ fn load_context_files(
     let mut context_files = Vec::new();
     let mut seen = HashSet::new();
 
-    if let Some(home) = home_dir()
-        && let Some(global_context) = load_context_file_from_dir(&home.join(CONFIG_DIR))?
+    if let Some(home) = crate::config::neo_home()
+        && let Some(global_context) = load_context_file_from_dir(&home)?
     {
         seen.insert(global_context.path.clone());
         context_files.push(global_context);
@@ -214,12 +194,22 @@ fn xml_escape(value: &str) -> String {
 }
 
 fn expand_user_path(path: PathBuf) -> PathBuf {
+    expand_user_path_with_home(path, user_home().as_deref())
+}
+
+fn expand_user_path_with_home(path: PathBuf, home: Option<&Path>) -> PathBuf {
     if let Some(rest) = path.to_string_lossy().strip_prefix("~/")
-        && let Some(home) = home_dir()
+        && let Some(home) = home
     {
         return home.join(rest);
     }
     path
+}
+
+fn user_home() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
 }
 
 fn normalize_prompt(prompt: &str) -> String {
@@ -251,26 +241,19 @@ fn read_first_existing(paths: &[PathBuf], description: &str) -> anyhow::Result<O
     Ok(None)
 }
 
-fn system_prompt_candidates(project_dir: &Path) -> Vec<PathBuf> {
-    resource_candidates(project_dir, SYSTEM_PROMPT_FILE)
+fn system_prompt_candidates() -> Vec<PathBuf> {
+    resource_candidates(SYSTEM_PROMPT_FILE)
 }
 
-fn append_system_prompt_candidates(project_dir: &Path) -> Vec<PathBuf> {
-    resource_candidates(project_dir, APPEND_SYSTEM_PROMPT_FILE)
+fn append_system_prompt_candidates() -> Vec<PathBuf> {
+    resource_candidates(APPEND_SYSTEM_PROMPT_FILE)
 }
 
-fn resource_candidates(project_dir: &Path, file_name: &str) -> Vec<PathBuf> {
-    let mut candidates = vec![project_dir.join(CONFIG_DIR).join(file_name)];
-    if let Some(home) = home_dir() {
-        candidates.push(home.join(CONFIG_DIR).join(file_name));
-    }
-    candidates
-}
-
-fn home_dir() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
+fn resource_candidates(file_name: &str) -> Vec<PathBuf> {
+    // System/append prompts live only under the neo home (`~/.neo`).
+    crate::config::neo_home()
+        .map(|home| vec![home.join(file_name)])
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -324,6 +307,17 @@ mod tests {
             Some(
                 "<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"/repo/AGENTS.md\">\nFollow repo rules.\n</project_instructions>\n\n</project_context>"
             )
+        );
+    }
+
+    #[test]
+    fn skill_path_tilde_expands_to_user_home() {
+        assert_eq!(
+            expand_user_path_with_home(
+                PathBuf::from("~/.agents/skills"),
+                Some(Path::new("/home/alice")),
+            ),
+            PathBuf::from("/home/alice/.agents/skills")
         );
     }
 }

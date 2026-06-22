@@ -14,8 +14,6 @@ pub struct SkillInvocation {
 pub enum SkillArgumentError {
     #[error("missing required skill argument `{0}`")]
     MissingRequired(String),
-    #[error("unknown skill argument `{0}`")]
-    UnknownArgument(String),
     #[error("failed to parse invocation arguments: {0}")]
     ParseError(String),
 }
@@ -154,10 +152,12 @@ fn resolve_arguments(
         resolved.insert(arg.name.clone(), value);
     }
 
-    for key in invocation.named.keys() {
-        if !declared.iter().any(|arg| &arg.name == key) {
-            return Err(SkillArgumentError::UnknownArgument(key.clone()));
-        }
+    // Undeclared named arguments are tolerated: they are merged into the
+    // resolved map so a skill body that references `$<name>` can still
+    // substitute them. When the body has no matching placeholder they simply
+    // ride along in `raw_arguments` via the no-placeholder fallback path.
+    for (key, value) in &invocation.named {
+        resolved.entry(key.clone()).or_insert_with(|| value.clone());
     }
 
     Ok(resolved)

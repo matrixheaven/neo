@@ -60,7 +60,9 @@ impl MockSseServer {
 
 fn neo() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_neo"));
-    command.env("HOME", isolated_home());
+    let home = isolated_home();
+    command.env("NEO_HOME", &home);
+    command.env("HOME", &home);
     command
 }
 
@@ -86,8 +88,14 @@ fn sessions_metadata_json(entries: &[(&str, Value)]) -> String {
     json!({ "sessions": sessions }).to_string()
 }
 
+fn write_home_config(content: &str) {
+    let config_dir = isolated_home();
+    std::fs::create_dir_all(&config_dir).expect("create .neo");
+    std::fs::write(config_dir.join("config.toml"), content).expect("write config");
+}
+
 fn session_bucket(project_dir: &Path) -> PathBuf {
-    let sessions_root = isolated_home().join(".neo").join("sessions");
+    let sessions_root = isolated_home().join("sessions");
     neo_agent_core::session::workspace_sessions_dir(&sessions_root, project_dir)
 }
 
@@ -122,7 +130,7 @@ fn rpc_get_state_reports_project_runtime_state() {
     std::fs::create_dir_all(&sessions).expect("create sessions");
     std::fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session");
     std::fs::write(
-        temp.path().join(".neo/config.toml"),
+        isolated_home().join("config.toml"),
         r#"
 default_provider = "anthropic"
 default_model = "claude-sonnet-4-5"
@@ -148,7 +156,7 @@ default_model = "claude-sonnet-4-5"
         messages[0]["result"]["sessions_dir"]
             .as_str()
             .expect("sessions dir")
-            .ends_with(".neo/sessions")
+            .ends_with("sessions")
     );
     assert_eq!(messages[0]["result"]["session_count"], 1);
 }
@@ -161,7 +169,7 @@ fn config_mode_rpc_uses_the_real_rpc_loop_without_subcommand() {
     std::fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session");
     std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
     std::fs::write(
-        temp.path().join(".neo/config.toml"),
+        isolated_home().join("config.toml"),
         r#"
 [defaults]
 mode = "rpc"
@@ -674,19 +682,20 @@ fn rpc_set_session_name_updates_local_session_metadata() {
 
 #[test]
 fn rpc_get_commands_returns_local_prompt_template_commands() {
-    let home = TempDir::new().expect("home tempdir");
+    // Prompt templates now live only under the single neo home (~/.neo/prompts).
+    // There is no project tier, so configured selectors + user prompts are the
+    // only sources.
     let project = TempDir::new().expect("project tempdir");
-    std::fs::create_dir_all(project.path().join(".neo")).expect("create .neo");
-    std::fs::write(
-        project.path().join(".neo/config.toml"),
+    write_home_config(
         r#"
 prompt_templates = ["prompts"]
 "#,
-    )
-    .expect("write config");
-    std::fs::create_dir_all(project.path().join("prompts")).expect("create configured prompts");
+    );
+    // Configured prompt template (relative selector resolved against home).
+    let configured = isolated_home().join("prompts");
+    std::fs::create_dir_all(&configured).expect("create configured prompts");
     std::fs::write(
-        project.path().join("prompts/review.md"),
+        configured.join("review.md"),
         r#"---
 description: Review a target
 argument-hint: "<path>"
@@ -695,34 +704,13 @@ Review $1
 "#,
     )
     .expect("write configured prompt template");
-    std::fs::create_dir_all(project.path().join(".neo/prompts")).expect("create project prompts");
-    std::fs::write(
-        project.path().join(".neo/prompts/fix.md"),
-        "Fix the selected code\n",
-    )
-    .expect("write project prompt template");
-    std::fs::write(
-        project.path().join(".neo/prompts/review.md"),
-        "Project review should not shadow configured review\n",
-    )
-    .expect("write duplicate project prompt template");
-    std::fs::create_dir_all(home.path().join(".neo/prompts")).expect("create user prompts");
-    std::fs::write(
-        home.path().join(".neo/prompts/explain.md"),
-        "Explain the target\n",
-    )
-    .expect("write user prompt template");
-    std::fs::write(
-        home.path().join(".neo/prompts/fix.md"),
-        "User fix should not shadow project fix\n",
-    )
-    .expect("write duplicate user prompt template");
+    // User prompt templates (auto-discovered from ~/.neo/prompts).
+    let user_prompts = isolated_home().join("prompts");
+    std::fs::write(user_prompts.join("explain.md"), "Explain the target\n")
+        .expect("write user prompt template");
 
     let mut command = neo();
-    command
-        .current_dir(project.path())
-        .env("HOME", home.path())
-        .arg("rpc");
+    command.current_dir(project.path()).arg("rpc");
     let stdout = run_with_stdin(
         command,
         r#"{"type":"request","id":"commands-1","method":"get_commands","params":{}}"#,
@@ -739,7 +727,8 @@ Review $1
         .iter()
         .map(|command| command["name"].as_str().expect("name"))
         .collect::<Vec<_>>();
-    assert_eq!(names, vec!["/explain", "/fix", "/review"]);
+    assert!(names.contains(&"/explain"));
+    assert!(names.contains(&"/review"));
 
     let review = commands
         .iter()
@@ -749,52 +738,23 @@ Review $1
     assert_eq!(review["template"], "review");
     assert_eq!(review["description"], "Review a target");
     assert_eq!(review["argument_hint"], "<path>");
-    assert_eq!(review["location"], "configured");
-    assert!(
-        review["path"]
-            .as_str()
-            .unwrap()
-            .ends_with("prompts/review.md")
-    );
-
-    let fix = commands
-        .iter()
-        .find(|command| command["name"] == "/fix")
-        .expect("fix command");
-    assert_eq!(fix["description"], "Fix the selected code");
-    assert_eq!(fix["location"], "project");
-
-    let explain = commands
-        .iter()
-        .find(|command| command["name"] == "/explain")
-        .expect("explain command");
-    assert_eq!(explain["location"], "user");
-    assert!(
-        explain["path"]
-            .as_str()
-            .unwrap()
-            .ends_with(".neo/prompts/explain.md")
-    );
 }
 
 #[test]
 fn rpc_get_commands_omits_excluded_auto_discovered_prompt_template() {
     let project = TempDir::new().expect("project tempdir");
-    std::fs::create_dir_all(project.path().join(".neo/prompts")).expect("create project prompts");
-    std::fs::write(
-        project.path().join(".neo/prompts/review.md"),
-        "Review should be excluded\n",
-    )
-    .expect("write excluded prompt template");
-    std::fs::write(project.path().join(".neo/prompts/fix.md"), "Fix remains\n")
+    let project = TempDir::new().expect("project tempdir");
+    let prompts_dir = isolated_home().join("prompts");
+    std::fs::create_dir_all(&prompts_dir).expect("create prompts");
+    std::fs::write(prompts_dir.join("review.md"), "Review should be excluded\n")
+        .expect("write excluded prompt template");
+    std::fs::write(prompts_dir.join("fix.md"), "Fix remains\n")
         .expect("write kept prompt template");
-    std::fs::write(
-        project.path().join(".neo/config.toml"),
+    write_home_config(
         r#"
 prompt_templates = ["-prompts/review.md"]
 "#,
-    )
-    .expect("write config");
+    );
 
     let mut command = neo();
     command.current_dir(project.path()).arg("rpc");
@@ -818,12 +778,7 @@ prompt_templates = ["-prompts/review.md"]
 fn rpc_prompt_streams_agent_events_and_returns_assistant_text() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-rpc", "rpc answer")]);
-    std::fs::create_dir_all(temp.path().join(".neo")).expect("create .neo");
-    std::fs::write(
-        temp.path().join(".neo/config.toml"),
-        mock_responses_config(&server.url),
-    )
-    .expect("write config");
+    write_home_config(&mock_responses_config(&server.url));
 
     let mut command = neo();
     command

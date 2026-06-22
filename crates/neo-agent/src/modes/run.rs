@@ -631,10 +631,7 @@ fn configured_model_entry<'a>(
 }
 
 fn configured_model_is_default(alias: &str, model_cfg: &ModelConfig, config: &AppConfig) -> bool {
-    alias == config.default_model
-        || format!("{}/{}", model_cfg.provider, model_cfg.model) == config.default_model
-        || (model_cfg.provider == config.default_provider
-            && model_cfg.model == config.default_model)
+    model_config_matches_default(alias, model_cfg, config)
 }
 
 fn configured_models_json(
@@ -860,7 +857,7 @@ pub async fn add_mcp_server(
     startup_timeout_ms: Option<u64>,
     tool_timeout_ms: Option<u64>,
     enabled: bool,
-    _config: &AppConfig,
+    config: &AppConfig,
 ) -> anyhow::Result<String> {
     let transport = parse_mcp_kind(&r#type)?;
 
@@ -912,7 +909,7 @@ pub async fn add_mcp_server(
         tool_timeout_ms,
     };
 
-    let saved = config::upsert_mcp_server(&server)?;
+    let saved = config::upsert_mcp_server(&server, &config.config_path)?;
 
     if !enabled {
         return Ok(format!("{saved}{mcp_name} added (disabled)\n"));
@@ -1218,7 +1215,6 @@ async fn runtime_for_config(
     let model = resolve_model(config)?;
     let client = resolve_model_client(config, &model)?;
     let skill_store = resources::load_skill_store(
-        &config.project_dir,
         neo_home().as_deref(),
         &config.extra_skill_dirs,
         &config.skill_path,
@@ -1242,7 +1238,6 @@ async fn runtime_for_config(
     let extra_skill_paths: Vec<PathBuf> =
         config.extra_skill_dirs.iter().map(PathBuf::from).collect();
     tools.register(ListSkillsTool::new(
-        &config.project_dir,
         neo_home().map(|home| home.join("skills")),
         extra_skill_paths,
     ));
@@ -1523,7 +1518,13 @@ fn agent_config_for_app(
         agent_config = agent_config.with_home_dir(home);
     }
     agent_config.temperature = config.runtime.temperature;
-    agent_config.max_tokens = config.runtime.max_tokens;
+    // Output token cap precedence: explicit `[runtime].max_tokens` wins; otherwise
+    // fall back to the model's declared `max_output_tokens`; otherwise leave unset
+    // and let the provider decide (Anthropic applies its own fallback).
+    agent_config.max_tokens = config
+        .runtime
+        .max_tokens
+        .or(agent_config.model.capabilities.max_output_tokens);
     agent_config.reasoning_effort = config.runtime.reasoning_effort;
     agent_config.replay_reasoning = config.runtime.replay_reasoning;
     if let Some(system_prompt) =
@@ -1608,10 +1609,12 @@ async fn tool_registry_for_config(
     todos: std::sync::Arc<std::sync::Mutex<Vec<neo_agent_core::TodoEventData>>>,
 ) -> anyhow::Result<ToolRegistry> {
     let mut registry = ToolRegistry::with_builtin_tools_and_todos(todos);
+    let extension_home =
+        crate::config::neo_home().unwrap_or_else(|| config.project_dir.join(".neo"));
     neo_agent_core::tools::extensions::register_enabled_extension_tools(
         &mut registry,
-        &neo_agent_core::tools::extensions::default_extension_root(&config.project_dir),
-        &neo_agent_core::tools::extensions::default_extension_state_path(&config.project_dir),
+        &neo_agent_core::tools::extensions::default_extension_root(&extension_home),
+        &neo_agent_core::tools::extensions::default_extension_state_path(&extension_home),
     )
     .await?;
     for server in config.mcp.servers.iter().filter(|server| server.enabled) {
@@ -1865,31 +1868,50 @@ pub(crate) fn select_config_model(
             config.model_scope.join(",")
         );
     }
-    let default = models.iter().find(|model| {
-        model.provider.0 == config.default_provider && model.model == config.default_model
-    });
+    let default = find_default_model(&models, config);
     if config.model_scope.is_empty() {
         return default.cloned().with_context(|| {
             format!(
-                "unknown model {}/{}; run `neo models list` for supported catalog entries",
-                config.default_provider, config.default_model
+                "unknown model {}; run `neo models list` for supported catalog entries",
+                config.default_model_label()
             )
         });
     }
 
     candidates
         .iter()
-        .find(|model| {
-            model.provider.0 == config.default_provider && model.model == config.default_model
-        })
+        .find(|model| model_spec_matches_default(model, config))
         .or_else(|| candidates.first())
         .cloned()
         .with_context(|| {
             format!(
-                "unknown model {}/{}; run `neo models list` for supported catalog entries",
-                config.default_provider, config.default_model
+                "unknown model {}; run `neo models list` for supported catalog entries",
+                config.default_model_label()
             )
         })
+}
+
+fn find_default_model<'a>(models: &'a [ModelSpec], config: &AppConfig) -> Option<&'a ModelSpec> {
+    if let Some(model_cfg) = config.models.get(&config.default_model) {
+        return models.iter().find(|model| {
+            model.provider.0 == model_cfg.provider && model.model == model_cfg.model
+        });
+    }
+    models
+        .iter()
+        .find(|model| model_spec_matches_default(model, config))
+}
+
+fn model_spec_matches_default(model: &ModelSpec, config: &AppConfig) -> bool {
+    let qualified = format!("{}/{}", model.provider.0, model.model);
+    qualified == config.default_model
+        || (model.provider.0 == config.default_provider && model.model == config.default_model)
+}
+
+fn model_config_matches_default(alias: &str, model_cfg: &ModelConfig, config: &AppConfig) -> bool {
+    alias == config.default_model
+        || (model_cfg.provider == config.default_provider
+            && model_cfg.model == config.default_model)
 }
 
 /// Convert a `[models.<alias>]` config entry into a `ModelSpec`.
@@ -1913,7 +1935,11 @@ fn model_config_to_spec(
         .to_api_kind();
 
     // Parse capabilities from string list
-    let capabilities = parse_model_capabilities(&cfg.capabilities, cfg.max_context_tokens);
+    let capabilities = parse_model_capabilities(
+        &cfg.capabilities,
+        cfg.max_context_tokens,
+        cfg.max_output_tokens,
+    );
 
     Ok(ModelSpec {
         provider: neo_ai::ProviderId(cfg.provider.clone()),
@@ -1927,6 +1953,7 @@ fn model_config_to_spec(
 fn parse_model_capabilities(
     caps: &[String],
     max_context_tokens: Option<u32>,
+    max_output_tokens: Option<u32>,
 ) -> neo_ai::ModelCapabilities {
     let mut mc = neo_ai::ModelCapabilities::tool_chat();
     mc.streaming = false;
@@ -1945,6 +1972,7 @@ fn parse_model_capabilities(
         }
     }
     mc.max_context_tokens = max_context_tokens;
+    mc.max_output_tokens = max_output_tokens;
     mc
 }
 
@@ -2010,7 +2038,8 @@ mod tests {
 
     use super::{
         PromptApprovalRequest, StableJsonState, agent_config_for_app, create_session_path,
-        list_configured_models, run_prompt_with_runtime,
+        list_configured_models, model_registry_for_config, run_prompt_with_runtime,
+        select_config_model,
     };
     use crate::config::{
         AppConfig, Defaults, McpConfig, ModelConfig, ProviderConfig, RuntimeCompactionConfig,
@@ -2063,7 +2092,7 @@ mod tests {
             capabilities: ModelCapabilities::tool_chat(),
         };
 
-        let skill_store = SkillStore::load(None, &[], &[], Vec::new()).expect("skill store");
+        let skill_store = SkillStore::load(&[], &[], Vec::new()).expect("skill store");
         let agent_config =
             agent_config_for_app(model, &config, None, &skill_store).expect("agent config");
 
@@ -2088,6 +2117,56 @@ mod tests {
             })
         );
         assert!(agent_config.workspace_root.is_some());
+    }
+
+    #[test]
+    fn agent_config_for_app_falls_back_to_model_max_output_tokens() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            default_model: "test-model".to_owned(),
+            default_provider: "openai".to_owned(),
+            api_key_env: None,
+            providers: BTreeMap::new(),
+            models: BTreeMap::new(),
+            model_scope: Vec::new(),
+            sessions_dir: temp.path().join(".neo/sessions"),
+            permission_mode: PermissionMode::default(),
+            defaults: Defaults {
+                mode: "events".to_owned(),
+            },
+            runtime: RuntimeConfig {
+                temperature: None,
+                max_tokens: None,
+                reasoning_effort: None,
+                replay_reasoning: true,
+                steering_queue_mode: QueueMode::OneAtATime,
+                follow_up_queue_mode: QueueMode::OneAtATime,
+                tool_execution_mode: ToolExecutionMode::Sequential,
+                compaction: None,
+            },
+            tui: TuiConfig::default(),
+            theme: crate::themes::ResolvedTheme::default(),
+            mcp: McpConfig::default(),
+            prompt_templates: Vec::new(),
+            extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
+            project_trusted: true,
+            project_dir: temp.path().to_path_buf(),
+            config_path: temp.path().join(".neo/config.toml"),
+        };
+        // Model declares max_output_tokens; runtime does not override.
+        let model = ModelSpec {
+            provider: ProviderId("openai".to_owned()),
+            model: "test-model".to_owned(),
+            api: ApiKind::OpenAiResponses,
+            capabilities: ModelCapabilities::tool_chat().with_max_output_tokens(64_000),
+        };
+
+        let skill_store = SkillStore::load(&[], &[], Vec::new()).expect("skill store");
+        let agent_config =
+            agent_config_for_app(model, &config, None, &skill_store).expect("agent config");
+
+        assert_eq!(agent_config.max_tokens, Some(64_000));
     }
 
     #[tokio::test]
@@ -2226,7 +2305,7 @@ mod tests {
             capabilities: ModelCapabilities::tool_chat().with_max_context_tokens(1_000_000),
         };
 
-        let skill_store = SkillStore::load(None, &[], &[], Vec::new()).expect("skill store");
+        let skill_store = SkillStore::load(&[], &[], Vec::new()).expect("skill store");
         let agent_config =
             agent_config_for_app(model, &config, None, &skill_store).expect("agent config");
 
@@ -2286,7 +2365,7 @@ mod tests {
             capabilities: ModelCapabilities::tool_chat().with_max_context_tokens(1_000_000),
         };
 
-        let skill_store = SkillStore::load(None, &[], &[], Vec::new()).expect("skill store");
+        let skill_store = SkillStore::load(&[], &[], Vec::new()).expect("skill store");
         let agent_config =
             agent_config_for_app(model, &config, None, &skill_store).expect("agent config");
 
@@ -2333,7 +2412,7 @@ mod tests {
             capabilities: ModelCapabilities::tool_chat(),
         };
         let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
-        let skill_store = SkillStore::load(None, &[], &[], Vec::new()).expect("skill store");
+        let skill_store = SkillStore::load(&[], &[], Vec::new()).expect("skill store");
         let agent_config = agent_config_for_app(model, &config, Some(approval_tx), &skill_store)
             .expect("agent config");
         let handler = agent_config
@@ -2576,6 +2655,80 @@ mod tests {
                 "default_model": "fast",
             })
         );
+    }
+
+    #[test]
+    fn select_config_model_accepts_default_model_alias() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(temp.path());
+        config.default_provider = "openai".to_owned();
+        config.default_model = "openai/gpt-large".to_owned();
+        config.providers.insert(
+            "openai".to_owned(),
+            ProviderConfig {
+                provider_type: Some(ApiType::OpenAiResponses),
+                ..ProviderConfig::default()
+            },
+        );
+        config.models.insert(
+            "openai/gpt-large".to_owned(),
+            ModelConfig {
+                provider: "openai".to_owned(),
+                model: "gpt-large".to_owned(),
+                capabilities: vec!["streaming".to_owned(), "tools".to_owned()],
+                ..ModelConfig::default()
+            },
+        );
+
+        let registry = model_registry_for_config(&config).expect("registry");
+        let model = select_config_model(&registry, &config).expect("model resolves");
+
+        assert_eq!(model.provider.0, "openai");
+        assert_eq!(model.model, "gpt-large");
+    }
+
+    #[test]
+    fn select_config_model_accepts_unqualified_config_alias() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(temp.path());
+        config.default_provider = "openai".to_owned();
+        config.default_model = "fast".to_owned();
+        config.providers.insert(
+            "openai".to_owned(),
+            ProviderConfig {
+                provider_type: Some(ApiType::OpenAiResponses),
+                ..ProviderConfig::default()
+            },
+        );
+        config.models.insert(
+            "fast".to_owned(),
+            ModelConfig {
+                provider: "openai".to_owned(),
+                model: "gpt-4.1".to_owned(),
+                capabilities: vec!["streaming".to_owned(), "tools".to_owned()],
+                ..ModelConfig::default()
+            },
+        );
+
+        let registry = model_registry_for_config(&config).expect("registry");
+        let model = select_config_model(&registry, &config).expect("alias resolves");
+
+        assert_eq!(model.provider.0, "openai");
+        assert_eq!(model.model, "gpt-4.1");
+    }
+
+    #[test]
+    fn select_config_model_accepts_bare_default_model_id() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(temp.path());
+        config.default_provider = "openai".to_owned();
+        config.default_model = "gpt-4.1".to_owned();
+
+        let registry = model_registry_for_config(&config).expect("registry");
+        let model = select_config_model(&registry, &config).expect("builtin model resolves");
+
+        assert_eq!(model.provider.0, "openai");
+        assert_eq!(model.model, "gpt-4.1");
     }
 
     fn fake_model() -> ModelSpec {

@@ -105,6 +105,7 @@ pub enum ToolError {
 pub struct ToolContext {
     pub cwd: PathBuf,
     pub access: ToolAccess,
+    allowed_external_write_paths: BTreeSet<PathBuf>,
     pub bash_timeout: Duration,
     pub max_output_bytes: usize,
     pub cancel_token: CancellationToken,
@@ -120,6 +121,10 @@ impl std::fmt::Debug for ToolContext {
         f.debug_struct("ToolContext")
             .field("cwd", &self.cwd)
             .field("access", &self.access)
+            .field(
+                "allowed_external_write_paths",
+                &self.allowed_external_write_paths,
+            )
             .field("bash_timeout", &self.bash_timeout)
             .field("max_output_bytes", &self.max_output_bytes)
             .field("cancel_token", &self.cancel_token)
@@ -136,6 +141,7 @@ impl ToolContext {
         Ok(Self {
             cwd,
             access: ToolAccess::none(),
+            allowed_external_write_paths: BTreeSet::new(),
             bash_timeout: DEFAULT_BASH_TIMEOUT,
             max_output_bytes: 64 * 1024,
             cancel_token: CancellationToken::new(),
@@ -148,6 +154,18 @@ impl ToolContext {
     #[must_use]
     pub const fn with_access(mut self, access: ToolAccess) -> Self {
         self.access = access;
+        self
+    }
+
+    #[must_use]
+    pub fn with_allowed_external_write_paths(
+        mut self,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Self {
+        self.allowed_external_write_paths = paths
+            .into_iter()
+            .map(|path| normalize_path(&path))
+            .collect();
         self
     }
 
@@ -228,6 +246,9 @@ impl ToolContext {
         } else {
             self.cwd.join(path)
         };
+        if self.is_allowed_external_write_path(&candidate) {
+            return Ok(normalize_path(&candidate));
+        }
         let normalized = normalize_inside_workspace(&self.cwd, &candidate)?;
         if normalized.exists() {
             let canonical = normalized.canonicalize()?;
@@ -247,6 +268,9 @@ impl ToolContext {
         } else {
             self.cwd.join(path)
         };
+        if self.is_allowed_external_write_path(&candidate) {
+            return Ok(normalize_path(&candidate));
+        }
         let parent = candidate.parent().unwrap_or(&self.cwd);
         let resolved_parent = normalize_inside_workspace(&self.cwd, parent)?;
         let file_name = candidate
@@ -255,6 +279,11 @@ impl ToolContext {
                 path: candidate.clone(),
             })?;
         Ok(resolved_parent.join(file_name))
+    }
+
+    fn is_allowed_external_write_path(&self, path: &Path) -> bool {
+        self.allowed_external_write_paths
+            .contains(&normalize_path(path))
     }
 }
 
@@ -410,6 +439,17 @@ where
 }
 
 fn normalize_inside_workspace(workspace_root: &Path, path: &Path) -> Result<PathBuf, ToolError> {
+    let normalized = normalize_path(path);
+    if normalized.starts_with(workspace_root) {
+        Ok(normalized)
+    } else {
+        Err(ToolError::PathOutsideWorkspace {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -422,14 +462,7 @@ fn normalize_inside_workspace(workspace_root: &Path, path: &Path) -> Result<Path
             }
         }
     }
-
-    if normalized.starts_with(workspace_root) {
-        Ok(normalized)
-    } else {
-        Err(ToolError::PathOutsideWorkspace {
-            path: path.to_path_buf(),
-        })
-    }
+    normalized
 }
 
 fn cap_output(content: &str, max_bytes: usize) -> (String, bool) {

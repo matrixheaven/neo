@@ -8,7 +8,6 @@ pub enum SkillSource {
     Builtin,
     Extra,
     User,
-    Project,
 }
 
 pub fn discover_skills(
@@ -70,14 +69,6 @@ fn discover_recursive(
     }
 
     Ok(skills)
-}
-
-#[must_use]
-pub fn project_skill_dirs(project_dir: &Path) -> Vec<PathBuf> {
-    vec![
-        project_dir.join(".neo").join("skills"),
-        project_dir.join(".agents").join("skills"),
-    ]
 }
 
 #[must_use]

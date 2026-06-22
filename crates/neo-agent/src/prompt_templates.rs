@@ -134,11 +134,13 @@ const fn location_rank(location: PromptTemplateLocation) -> u8 {
     }
 }
 
+/// Project-local prompt templates are no longer loaded — prompts live only
+/// under the single neo home (`~/.neo/prompts`). Retained as a no-op so
+/// callers that still thread `project_dir` compile unchanged.
 pub(crate) fn load_project_prompt_templates(
-    project_dir: &Path,
+    _project_dir: &Path,
 ) -> anyhow::Result<Vec<PromptTemplate>> {
-    let prompts_dir = project_dir.join(".neo/prompts");
-    load_prompt_templates_from_tree(&prompts_dir)
+    Ok(Vec::new())
 }
 
 fn load_user_prompt_templates(prompts_dir: &Path) -> anyhow::Result<Vec<PromptTemplate>> {
@@ -306,22 +308,17 @@ fn load_explicit_prompt_templates(
 }
 
 impl PromptTemplateExclusion {
-    fn new(selector: &str, project_dir: &Path, global_prompts_dir: Option<&Path>) -> Self {
+    fn new(selector: &str, _project_dir: &Path, global_prompts_dir: Option<&Path>) -> Self {
         let path = Path::new(selector);
         let mut paths = Vec::new();
         if path.is_absolute() {
             paths.push(path.to_path_buf());
-        } else {
-            paths.push(project_dir.join(path));
-            paths.push(project_dir.join(".neo").join(path));
-            if let Some(stripped) = selector.strip_prefix("prompts/") {
-                paths.push(project_dir.join(".neo/prompts").join(stripped));
-                if let Some(global_prompts_dir) = global_prompts_dir {
-                    paths.push(global_prompts_dir.join(stripped));
-                }
-            } else if let Some(global_prompts_dir) = global_prompts_dir {
-                paths.push(global_prompts_dir.join(path));
+        } else if let Some(stripped) = selector.strip_prefix("prompts/") {
+            if let Some(global_prompts_dir) = global_prompts_dir {
+                paths.push(global_prompts_dir.join(stripped));
             }
+        } else if let Some(global_prompts_dir) = global_prompts_dir {
+            paths.push(global_prompts_dir.join(path));
         }
         paths.sort();
         paths.dedup();
@@ -384,25 +381,26 @@ fn selector_as_template_path(selector: &str) -> Option<&Path> {
 
 fn explicit_path_exists(
     path: &Path,
-    project_dir: &Path,
+    _project_dir: &Path,
     global_prompts_dir: Option<&Path>,
 ) -> bool {
     if path.is_absolute() {
         return path.exists();
     }
-    project_dir.join(path).exists()
-        || global_prompts_dir.is_some_and(|prompts_dir| prompts_dir.join(path).exists())
+    global_prompts_dir.is_some_and(|prompts_dir| prompts_dir.join(path).exists())
 }
 
 fn load_templates_from_checked_path(
     path: &Path,
-    project_dir: &Path,
+    _project_dir: &Path,
     global_prompts_dir: Option<&Path>,
 ) -> anyhow::Result<Vec<PromptTemplate>> {
     let candidate = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        project_dir.join(path)
+        global_prompts_dir
+            .map(|prompts_dir| prompts_dir.join(path))
+            .unwrap_or_else(|| path.to_path_buf())
     };
     let candidate = candidate.canonicalize().map_err(|err| {
         anyhow::anyhow!(
@@ -410,19 +408,12 @@ fn load_templates_from_checked_path(
             candidate.display()
         )
     })?;
-    let project_dir = project_dir.canonicalize().map_err(|err| {
-        anyhow::anyhow!(
-            "failed to resolve project directory {}: {err}",
-            project_dir.display()
-        )
-    })?;
     let global_prompts_dir = global_prompts_dir.and_then(|path| path.canonicalize().ok());
     anyhow::ensure!(
-        candidate.starts_with(&project_dir)
-            || global_prompts_dir
-                .as_ref()
-                .is_some_and(|prompts_dir| candidate.starts_with(prompts_dir)),
-        "prompt template path must stay inside project directory or user prompt directory"
+        global_prompts_dir
+            .as_ref()
+            .is_some_and(|prompts_dir| candidate.starts_with(prompts_dir)),
+        "prompt template path must stay inside the user prompt directory"
     );
     if candidate.is_dir() {
         return load_prompt_templates_from_dir(&candidate);

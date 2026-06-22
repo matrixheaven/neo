@@ -1,7 +1,7 @@
 # Neo Configuration — Providers and Models
 #
 # This example demonstrates the full provider/model configuration system.
-# Copy this to ~/.neo/config.toml or .neo/config.toml and customize.
+# Copy this to ~/.neo/config.toml (or $NEO_HOME/config.toml) and customize.
 
 # ─── Default Model ───
 # Format: "provider/model-alias" (matches a [models."..."] key)

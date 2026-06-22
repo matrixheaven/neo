@@ -55,18 +55,17 @@ neo --prompt-template review print src/lib.rs
 ```
 
 Template directories from explicit selectors are non-recursive. Auto-discovered
-project and user prompt templates are selected by slash name during `print`,
-`run`, RPC prompts, and TUI turns.
+user prompt templates are selected by slash name during `print`, `run`, RPC
+prompts, and TUI turns.
 
 ## Themes
 
-Project themes live under `.neo/themes`, and user themes may be loaded through
-the same local theme resolution path:
+Themes live under `~/.neo/themes` (or `$NEO_HOME/themes`):
 
 ```bash
 neo themes list
 neo themes preview night-owl
-neo --theme .neo/themes/night-owl.json
+neo --theme ~/.neo/themes/night-owl.json
 ```
 
 ## Out Of Scope

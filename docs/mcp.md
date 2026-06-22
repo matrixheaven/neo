@@ -95,15 +95,15 @@ adapter, HTTP/SSE JSON-RPC adapter, discovery-to-`ToolSpec` bridge, namespaced
 `ToolRegistry` registration, persistent initialized stdio session reuse, and
 async call delegation.
 `neo-agent print` and `neo-agent run` load enabled `transport = "stdio"`,
-`transport = "http"`, and `transport = "sse"` servers from project config and
+`transport = "http"`, and `transport = "sse"` servers from the single Neo config and
 advertise their tools to the configured model.
 
 The `neo mcp` CLI surface is intentionally small:
 
 - `neo mcp list` — list configured servers and their advertised tools.
 - `neo mcp add <name> -t studio|remote-http|remote-sse ...` — add a server,
-  test the connection, and persist the entry to project config.
-- `neo mcp del <name>` — remove a server from project config.
+  test the connection, and persist the entry to config.
+- `neo mcp del <name>` — remove a server from config.
 - `neo mcp enable <name>` / `neo mcp disable <name>` — toggle enablement.
 
 Studio servers take a shell command string (`-C`), optional working directory

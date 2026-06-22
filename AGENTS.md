@@ -274,8 +274,9 @@ crate.
 ## Runtime architecture
 
 1. `neo-agent` parses CLI args (with some `pi`-style short aliases normalised in
-   `main.rs`) and loads merged config from CLI → environment → project
-   `.neo/config.toml` → `~/.neo/config.toml` → built-in defaults.
+   `main.rs`) and loads config from CLI → environment → `~/.neo/config.toml`
+   (or `$NEO_HOME/config.toml`) → built-in defaults. There is no
+   project-local config.
 2. The runtime opens or creates a local JSONL session via
    `neo_agent_core::session`.
 3. The configured model is resolved through `neo_ai::ModelRegistry`
@@ -360,8 +361,8 @@ The interactive TUI mode (`neo-agent` with no subcommand) provides:
 - **Session fork**: `ctrl+n` in the session picker forks the selected session.
 - **Transcript selection copy**: `ctrl+shift+c` copies selected transcript text.
 - **Paste buffering**: bracketed-paste handling for multi-line input.
-- **Theme support**: customizable color themes via `.neo/themes/*.json` or
-  `~/.neo/themes/*.json`.
+- **Theme support**: customizable color themes via `~/.neo/themes/*.json`
+  (or `$NEO_HOME/themes/*.json`).
 - **Keybinding customization**: configurable keybindings via config.
 - **Development modes**: Shift+Tab cycles normal → plan → goal → normal.
   Development modes are independent from permission modes; Shift+Enter inserts
@@ -432,8 +433,8 @@ neo images generate "a compact terminal workstation" \
 
 ### Prompt templates
 
-Project prompt templates live in `.neo/prompts/*.md` and are invoked by slash
-name. User-global templates live in `~/.neo/prompts/*.md`:
+Prompt templates live in `~/.neo/prompts/*.md` (or `$NEO_HOME/prompts/*.md`)
+and are invoked by slash name:
 
 ```bash
 neo prompts list
@@ -444,7 +445,7 @@ neo --prompt-template review print src/lib.rs
 ### Skills
 
 Skills are reusable prompt fragments with YAML frontmatter. They are discovered
-from four tiers: project `.neo/skills/**/SKILL.md`, user `~/.neo/skills/**/SKILL.md`,
+from three tiers: user `~/.neo/skills/**/SKILL.md` (or `$NEO_HOME/skills`),
 `extra_skill_dirs` in config, and built-in skills shipped with Neo. When a skill
 is activated manually via `/skill:<name>` or automatically by the `Skill` tool,
 its expanded body is injected into the conversation as a context message before
@@ -514,12 +515,14 @@ methods.
 Config precedence:
 
 1. CLI flags.
-2. Project `.neo/config.toml` (or path from `--config` / `NEO_CONFIG`).
-3. User-global `~/.neo/config.toml`.
-4. Built-in defaults (`openai/gpt-4.1`).
+2. The single config file at `~/.neo/config.toml` (or path from `--config` /
+   `NEO_CONFIG`; `NEO_HOME` overrides the home directory).
+3. Built-in defaults (`openai/gpt-4.1`).
 
-Project config merges over user-global config field by field. Provider maps are
-merged by provider id; MCP servers are merged by server id. Important sections:
+There is no project-local config. All config (providers, models, settings,
+MCP servers, skills, prompts, themes, extensions) lives under the single
+neo home (`~/.neo` by default, or `$NEO_HOME`) and is shared across every
+workspace. Important sections:
 
 - `default_provider`, `default_model`, `api_key_env`.
 - `providers.<id>` — full provider definition with `type`, `base_url`,
@@ -562,8 +565,8 @@ CLI image generation: `neo images generate --model <provider/model> --output <pa
 
 System prompt resources:
 
-- `.neo/SYSTEM.md` and `~/.neo/SYSTEM.md`.
-- `.neo/APPEND_SYSTEM.md` and `~/.neo/APPEND_SYSTEM.md`.
+- `~/.neo/SYSTEM.md` (or `$NEO_HOME/SYSTEM.md`).
+- `~/.neo/APPEND_SYSTEM.md` (or `$NEO_HOME/APPEND_SYSTEM.md`).
 
 Project context files (`AGENTS.md`, `CLAUDE.md`) are loaded only when the
 project is trusted; trust is stored in `~/.neo/trust.json`.

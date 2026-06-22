@@ -155,9 +155,9 @@ pub fn list_providers(config: &AppConfig, json: bool) -> anyhow::Result<String> 
 }
 
 fn remove_provider_config(file_config: &mut FileConfig, provider_id: &str) {
+    clear_provider_default(file_config, provider_id);
     remove_provider_entry(file_config.providers.as_mut(), provider_id);
     remove_provider_models(file_config.models.as_mut(), provider_id);
-    clear_provider_default(&mut file_config.default_model, provider_id);
 }
 
 fn remove_provider_entry(
@@ -175,12 +175,18 @@ fn remove_provider_models(models: Option<&mut BTreeMap<String, ModelConfig>>, pr
     }
 }
 
-fn clear_provider_default(default_model: &mut Option<String>, provider_id: &str) {
-    if default_model
-        .as_deref()
-        .is_some_and(|default| provider_owns_default(provider_id, default))
+fn clear_provider_default(file_config: &mut FileConfig, provider_id: &str) {
+    let Some(default_model) = file_config.default_model.as_deref() else {
+        return;
+    };
+    if file_config
+        .models
+        .as_ref()
+        .and_then(|models| models.get(default_model))
+        .is_some_and(|model| model.provider == provider_id)
+        || provider_owns_default(provider_id, default_model)
     {
-        *default_model = None;
+        file_config.default_model = None;
     }
 }
 
@@ -201,6 +207,11 @@ fn replace_provider_from_catalog(
     if let Some(default_alias) = catalog_default_alias(provider_id, provider_config, default_model)
     {
         file_config.default_model = Some(default_alias);
+        // Keep default_provider in sync with the new default model alias
+        // (which is `<provider_id>/<model>`). Otherwise the label formatter
+        // (`{default_provider}/{default_model}`) would stitch the stale provider
+        // onto the new alias, producing e.g. `deepseek/minimax-.../MiniMax-M2`.
+        file_config.default_provider = Some(provider_id.to_owned());
     }
 }
 
@@ -296,7 +307,7 @@ fn provider_entry_json(id: &str, cfg: &ProviderConfig, config: &AppConfig) -> se
         "base_url": provider_base_url_label(cfg),
         "credential": provider_credential_label(cfg),
         "model_count": provider_model_count(config, id),
-        "default": config.default_model.starts_with(&format!("{id}/")),
+        "default": provider_is_current(config, id),
     })
 }
 
@@ -330,11 +341,20 @@ fn provider_model_count(config: &AppConfig, provider_id: &str) -> usize {
 }
 
 fn provider_current_marker(config: &AppConfig, provider_id: &str) -> &'static str {
-    if config.default_model.starts_with(&format!("{provider_id}/")) {
+    if provider_is_current(config, provider_id) {
         " ← current"
     } else {
         ""
     }
+}
+
+fn provider_is_current(config: &AppConfig, provider_id: &str) -> bool {
+    config
+        .models
+        .get(&config.default_model)
+        .is_some_and(|model| model.provider == provider_id)
+        || provider_owns_default(provider_id, &config.default_model)
+        || (config.default_provider == provider_id && !config.default_model.contains('/'))
 }
 
 fn provider_credential_label(cfg: &ProviderConfig) -> &'static str {
@@ -450,6 +470,32 @@ model = "claude-sonnet-4"
     }
 
     #[test]
+    fn remove_provider_clears_unqualified_default_alias_owned_by_provider() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_project_config(
+            temp.path(),
+            r#"
+default_model = "fast"
+default_provider = "openai"
+
+[providers.openai]
+type = "openai-responses"
+
+[models.fast]
+provider = "openai"
+model = "gpt-4.1"
+"#,
+        );
+
+        let message = remove_provider(&config_path, "openai").expect("remove provider");
+        assert_eq!(message, "removed provider 'openai' and its models\n");
+
+        let written = fs::read_to_string(config_path).expect("read config");
+        assert!(!written.contains("default_model"));
+        assert!(!written.contains("[models.fast]"));
+    }
+
+    #[test]
     fn add_provider_from_catalog_entry_replaces_existing_provider_models() {
         let temp = TempDir::new().expect("temp dir");
         let config_path = write_project_config(
@@ -487,6 +533,7 @@ model = "stays"
         );
         let written = fs::read_to_string(config_path).expect("read config");
         assert!(written.contains("default_model = \"openai/gpt-large\""));
+        assert!(written.contains("default_provider = \"openai\""));
         assert!(written.contains("[providers.openai]"));
         assert!(written.contains("type = \"openai-responses\""));
         assert!(written.contains("api_key = \"inline-key\""));
@@ -495,6 +542,52 @@ model = "stays"
         assert!(written.contains("[models.\"other/stays\"]"));
         assert!(!written.contains("[models.\"openai/old\"]"));
         assert!(!written.contains("OPENAI_API_KEY"));
+    }
+
+    /// Regression: importing a *new* provider must update `default_provider` to
+    /// match the new default model alias (`<provider>/<model>`). Otherwise the
+    /// model label formatter (`{default_provider}/{default_model}`) stitches the
+    /// stale provider onto the new alias, producing e.g.
+    /// `deepseek/minimax-.../MiniMax-M2`.
+    #[test]
+    fn add_provider_syncs_default_provider_to_new_provider() {
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = write_project_config(
+            temp.path(),
+            r#"
+default_model = "deepseek/old"
+default_provider = "deepseek"
+
+[providers.deepseek]
+type = "openai-chat"
+base_url = "https://deepseek.example/v1"
+
+[models."deepseek/old"]
+provider = "deepseek"
+model = "old"
+"#,
+        );
+        let entry = catalog_entry();
+
+        let message = add_provider_from_catalog_entry(
+            &config_path,
+            "openai",
+            &entry,
+            Some("inline-key"),
+            Some("gpt-large"),
+        )
+        .expect("import provider");
+
+        assert_eq!(
+            message,
+            "imported provider 'openai' with 2 models from models.dev\n"
+        );
+        let written = fs::read_to_string(config_path).expect("read config");
+        // The new provider's default alias and provider must be consistent so
+        // the label is `openai/gpt-large`, not `deepseek/openai/gpt-large`.
+        assert!(written.contains("default_model = \"openai/gpt-large\""));
+        assert!(written.contains("default_provider = \"openai\""));
+        assert!(!written.contains("default_provider = \"deepseek\""));
     }
 
     fn write_project_config(project_dir: &std::path::Path, content: &str) -> std::path::PathBuf {
