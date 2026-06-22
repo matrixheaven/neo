@@ -746,6 +746,47 @@ fn prompt_completion_prefix_replaces_token_before_cursor() {
 }
 
 #[test]
+fn prompt_move_up_down_wraps_logical_lines() {
+    // Body width of 4 forces each logical source line to wrap to two display rows.
+    let mut prompt = PromptState::new("abcd\nefgh").with_cursor(9);
+    prompt.apply_edit(PromptEdit::MoveUp(4));
+    // Cursor should land near the start of the second wrapped row of the first line.
+    assert_eq!(prompt.text, "abcd\nefgh");
+    assert_eq!(prompt.cursor, 4);
+
+    prompt.apply_edit(PromptEdit::MoveDown(4));
+    assert_eq!(prompt.cursor, 9);
+}
+
+#[test]
+fn prompt_scroll_offset_keeps_cursor_visible() {
+    let mut prompt = PromptState::default();
+    // Insert nine newlines so there are ten display rows at body_width 4.
+    for _ in 0..9 {
+        prompt.apply_edit(PromptEdit::Insert("\n"));
+    }
+    prompt.apply_edit(PromptEdit::Insert("x"));
+    prompt.apply_edit_with_width(PromptEdit::MoveEnd, 4);
+    // Cursor is on the last line; viewport should scroll so the cursor is visible.
+    assert!(prompt.scroll_offset() > 0);
+
+    // Move to the first line; viewport should scroll back to the top.
+    prompt.apply_edit_with_width(PromptEdit::MoveHome, 4);
+    assert_eq!(prompt.scroll_offset(), 0);
+}
+
+#[test]
+fn prompt_move_up_down_treats_tabs_as_four_columns() {
+    // At body_width 4, "ab\tcd" expands to 8 columns and wraps after "ab\t".
+    let mut prompt = PromptState::new("ab\tcd\nef").with_cursor(7);
+    prompt.apply_edit(PromptEdit::MoveUp(4));
+    // Cursor should land in the second wrapped segment of the first source line.
+    assert_eq!(prompt.cursor, 4);
+    prompt.apply_edit(PromptEdit::MoveDown(4));
+    assert_eq!(prompt.cursor, 7);
+}
+
+#[test]
 fn ansi_width_cases_are_display_width_safe() {
     struct Case {
         name: &'static str,

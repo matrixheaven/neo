@@ -455,10 +455,7 @@ impl AppConfig {
         // `project_dir` is the *workspace identity* (used for trust keying,
         // session bucketing, git status, `@file` sandboxing). It is NOT a config
         // location. Default to the current working directory.
-        let project_dir = overrides
-            .project_dir
-            .map(Ok)
-            .unwrap_or_else(env::current_dir)?;
+        let project_dir = overrides.project_dir.map_or_else(env::current_dir, Ok)?;
 
         let file_config = read_file_config(&config_path)?;
         let (project_trusted, project_trust) =
@@ -576,9 +573,7 @@ fn resolve_project_trust_state(
         return Ok((true, trust::ProjectTrustState::NotRequired));
     }
 
-    let store = trust_store
-        .map(Ok)
-        .unwrap_or_else(trust::ProjectTrustStore::from_home)?;
+    let store = trust_store.map_or_else(trust::ProjectTrustStore::from_home, Ok)?;
     match trust::resolve_project_trust_decision(&project_dir, false, &store)? {
         trust::ProjectTrustDecision::Trusted { source } => Ok((
             true,
@@ -1178,9 +1173,9 @@ model = "gpt-4.1"
 
     #[test]
     fn config_trust_is_unknown_when_inputs_exist_without_decision() {
-        let (_temp, config_path, project_dir) = temp_project_config("");
+        let (temp, config_path, project_dir) = temp_project_config("");
         fs::write(project_dir.join("AGENTS.md"), "rules").expect("write agents");
-        let store = ProjectTrustStore::new(_temp.path().join("trust.json"));
+        let store = ProjectTrustStore::new(temp.path().join("trust.json"));
 
         let config = load_config_with_store(config_path, project_dir.clone(), store);
 
@@ -1193,9 +1188,9 @@ model = "gpt-4.1"
 
     #[test]
     fn config_trust_is_trusted_when_store_approves_current_dir() {
-        let (_temp, config_path, project_dir) = temp_project_config("");
+        let (temp, config_path, project_dir) = temp_project_config("");
         fs::write(project_dir.join("AGENTS.md"), "rules").expect("write agents");
-        let store = ProjectTrustStore::new(_temp.path().join("trust.json"));
+        let store = ProjectTrustStore::new(temp.path().join("trust.json"));
         store.set(&project_dir, Some(true)).expect("approve");
 
         let config = load_config_with_store(config_path, project_dir.clone(), store);
@@ -1211,9 +1206,9 @@ model = "gpt-4.1"
 
     #[test]
     fn config_trust_is_untrusted_when_store_denies_current_dir() {
-        let (_temp, config_path, project_dir) = temp_project_config("");
+        let (temp, config_path, project_dir) = temp_project_config("");
         fs::write(project_dir.join("AGENTS.md"), "rules").expect("write agents");
-        let store = ProjectTrustStore::new(_temp.path().join("trust.json"));
+        let store = ProjectTrustStore::new(temp.path().join("trust.json"));
         store.set(&project_dir, Some(false)).expect("deny");
 
         let config = load_config_with_store(config_path, project_dir.clone(), store);

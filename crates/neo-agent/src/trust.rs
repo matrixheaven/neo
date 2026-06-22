@@ -55,18 +55,19 @@ pub enum ProjectTrustDecision {
 }
 
 /// The trust state carried through `AppConfig` for startup routing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ProjectTrustState {
-    Trusted { target: PathBuf },
-    Untrusted { target: PathBuf },
-    Unknown { inputs: ProjectTrustInputs },
+    Trusted {
+        target: PathBuf,
+    },
+    Untrusted {
+        target: PathBuf,
+    },
+    Unknown {
+        inputs: ProjectTrustInputs,
+    },
+    #[default]
     NotRequired,
-}
-
-impl Default for ProjectTrustState {
-    fn default() -> Self {
-        Self::NotRequired
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -100,7 +101,7 @@ impl ProjectTrustStore {
         } else {
             data.remove(&key);
         }
-        self.write(data)
+        self.write(&data)
     }
 
     pub(crate) fn get(&self, project_dir: &Path) -> anyhow::Result<Option<bool>> {
@@ -108,7 +109,7 @@ impl ProjectTrustStore {
         Ok(data.get(&project_key(project_dir)?).copied())
     }
 
-    fn write(&self, data: BTreeMap<String, bool>) -> anyhow::Result<()> {
+    fn write(&self, data: &BTreeMap<String, bool>) -> anyhow::Result<()> {
         let parent = self.path.parent().context("trust store has no parent")?;
         fs::create_dir_all(parent).with_context(|| {
             format!(
@@ -209,21 +210,21 @@ pub(crate) fn resolve_project_trust_decision(
 
     // Otherwise inherit from the nearest ancestor with a stored decision.
     for ancestor in project_dir.ancestors().skip(1) {
-        if !inputs_in_dir(ancestor).is_empty() {
-            if let Some(value) = store.get(ancestor)? {
-                let canonical_ancestor = ancestor.canonicalize().with_context(|| {
-                    format!("failed to canonicalize ancestor {}", ancestor.display())
-                })?;
-                return Ok(if value {
-                    ProjectTrustDecision::Trusted {
-                        source: TrustSource::Ancestor(canonical_ancestor),
-                    }
-                } else {
-                    ProjectTrustDecision::Untrusted {
-                        source: TrustSource::Ancestor(canonical_ancestor),
-                    }
-                });
-            }
+        if !inputs_in_dir(ancestor).is_empty()
+            && let Some(value) = store.get(ancestor)?
+        {
+            let canonical_ancestor = ancestor.canonicalize().with_context(|| {
+                format!("failed to canonicalize ancestor {}", ancestor.display())
+            })?;
+            return Ok(if value {
+                ProjectTrustDecision::Trusted {
+                    source: TrustSource::Ancestor(canonical_ancestor),
+                }
+            } else {
+                ProjectTrustDecision::Untrusted {
+                    source: TrustSource::Ancestor(canonical_ancestor),
+                }
+            });
         }
     }
 

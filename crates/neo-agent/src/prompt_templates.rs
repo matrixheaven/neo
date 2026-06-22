@@ -108,7 +108,7 @@ pub(crate) fn discover_prompt_template_commands(
         );
     }
     commands.extend(
-        load_project_prompt_templates(project_dir, project_trusted)?
+        load_project_prompt_templates(project_dir, project_trusted)
             .into_iter()
             .filter(|template| !is_prompt_template_excluded(template, &selectors.exclusions))
             .map(|template| PromptTemplateCommand {
@@ -146,20 +146,17 @@ const fn location_rank(location: PromptTemplateLocation) -> u8 {
     }
 }
 
-/// Project-local prompt templates are no longer loaded — prompts live only
-/// under the single neo home (`~/.neo/prompts`). Retained as a no-op so
-/// callers that still thread `project_dir` compile unchanged.
-///
-/// When `project_trusted` is `false`, project-local templates are explicitly
-/// not loaded even if a project-local prompts directory is introduced later.
+/// Load project-local prompt templates from `.neo/prompts/**/*.md` under the
+/// workspace root. Project-local templates are only loaded when the workspace
+/// is trusted; when untrusted the directory is ignored entirely.
 pub(crate) fn load_project_prompt_templates(
-    _project_dir: &Path,
+    project_dir: &Path,
     project_trusted: bool,
-) -> anyhow::Result<Vec<PromptTemplate>> {
+) -> Vec<PromptTemplate> {
     if !project_trusted {
-        return Ok(Vec::new());
+        return Vec::new();
     }
-    Ok(Vec::new())
+    load_prompt_templates_from_tree(&project_dir.join(".neo/prompts")).unwrap_or_default()
 }
 
 fn load_user_prompt_templates(prompts_dir: &Path) -> anyhow::Result<Vec<PromptTemplate>> {
@@ -238,7 +235,7 @@ fn find_prompt_template_by_name(
     global_prompts_dir: Option<&Path>,
     project_trusted: bool,
 ) -> anyhow::Result<Option<PromptTemplate>> {
-    if let Some(template) = load_project_prompt_templates(project_dir, project_trusted)?
+    if let Some(template) = load_project_prompt_templates(project_dir, project_trusted)
         .into_iter()
         .find(|template| template.name == name)
     {
@@ -259,7 +256,7 @@ fn find_auto_prompt_template_by_name(
     exclusions: &[PromptTemplateExclusion],
     project_trusted: bool,
 ) -> anyhow::Result<Option<PromptTemplate>> {
-    if let Some(template) = load_project_prompt_templates(project_dir, project_trusted)?
+    if let Some(template) = load_project_prompt_templates(project_dir, project_trusted)
         .into_iter()
         .filter(|template| !is_prompt_template_excluded(template, exclusions))
         .find(|template| template.name == name)
@@ -395,6 +392,21 @@ fn load_selected_prompt_templates(
     if explicit_path_exists(path, project_dir, global_prompts_dir) {
         return load_templates_from_checked_path(path, project_dir, global_prompts_dir);
     }
+    // Allow selecting the global prompts dir itself by its basename
+    // (e.g. `prompt_templates = ["prompts"]`) when the global prompts root is
+    // `~/.neo/prompts`.
+    if let Some(global_prompts_dir) = global_prompts_dir
+        && global_prompts_dir
+            .file_name()
+            .is_some_and(|name| name.as_encoded_bytes() == selector.as_bytes())
+        && global_prompts_dir.exists()
+    {
+        return load_templates_from_checked_path(
+            global_prompts_dir,
+            project_dir,
+            Some(global_prompts_dir),
+        );
+    }
     Err(anyhow::anyhow!("unknown prompt template: {selector}"))
 }
 
@@ -427,9 +439,7 @@ fn load_templates_from_checked_path(
     let candidate = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        global_prompts_dir
-            .map(|prompts_dir| prompts_dir.join(path))
-            .unwrap_or_else(|| path.to_path_buf())
+        global_prompts_dir.map_or_else(|| path.to_path_buf(), |prompts_dir| prompts_dir.join(path))
     };
     let candidate = candidate.canonicalize().map_err(|err| {
         anyhow::anyhow!(

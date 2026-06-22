@@ -19,7 +19,7 @@ pub const ROUNDED: BoxSpec = BoxSpec {
     vertical: '│',
 };
 
-fn repeat_char(ch: char, n: usize) -> String {
+pub(crate) fn repeat_char(ch: char, n: usize) -> String {
     std::iter::repeat_n(ch, n).collect()
 }
 

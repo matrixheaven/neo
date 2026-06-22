@@ -119,7 +119,7 @@ fn isolated_home_path() -> std::path::PathBuf {
     })
 }
 
-/// Write config into the isolated NEO_HOME (not the workspace `temp`). Config
+/// Write config into the isolated `NEO_HOME` (not the workspace `temp`). Config
 /// now lives only under ~/.neo; the `temp` arg is retained for call-site
 /// compatibility but ignored.
 fn write_config(_temp: &TempDir, content: &str) {

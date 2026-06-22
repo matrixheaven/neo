@@ -102,7 +102,7 @@ async fn dispatch_command(
         Some(Command::Provider { command }) => dispatch_provider_command(config, command).await,
         Some(Command::Mcp { command }) => dispatch_mcp_command(config, command).await,
         Some(Command::Rpc) => rpc_mode::execute(config).await,
-        Some(Command::Trust { command }) => trust_commands::execute(config, command),
+        Some(Command::Trust { command }) => trust_commands::execute(config, &command),
         None => dispatch_default_command(config, resume_picker, interactive_options).await,
     }
 }

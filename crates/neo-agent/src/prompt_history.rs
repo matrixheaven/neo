@@ -15,7 +15,7 @@
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -52,9 +52,9 @@ impl PromptHistoryStore {
     }
 
     /// Build a store rooted at an explicit directory (primarily for tests).
-    pub(crate) fn for_dir(dir: PathBuf) -> Self {
+    pub(crate) fn for_dir(dir: impl AsRef<Path>) -> Self {
         Self {
-            path: dir.join(HISTORY_FILE_NAME),
+            path: dir.as_ref().join(HISTORY_FILE_NAME),
             max_entries: DEFAULT_MAX_ENTRIES,
         }
     }
@@ -197,7 +197,12 @@ fn now_iso8601() -> String {
 }
 
 /// Convert days since the Unix epoch (1970-01-01) into a (year, month, day).
-/// Source: Howard Hinnant, "civil_from_days".
+/// Source: Howard Hinnant, "`civil_from_days`".
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 fn civil_from_days(z: u64) -> (i32, u32, u32) {
     let z = z as i64 + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
