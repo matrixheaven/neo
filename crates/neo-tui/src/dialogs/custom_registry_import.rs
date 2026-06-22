@@ -453,8 +453,7 @@ mod tests {
         assert!(combined.contains('…'));
         let token_line = lines
             .iter()
-            .filter(|l| l.contains('•'))
-            .next_back()
+            .rfind(|l| l.contains('•'))
             .expect("masked token line present");
         assert!(
             visible_width(token_line) <= width,
