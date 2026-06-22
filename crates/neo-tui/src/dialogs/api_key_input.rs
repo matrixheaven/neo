@@ -271,9 +271,7 @@ mod tests {
             theme(),
         );
         state.handle_input(&InputEvent::Paste("  sk-abcd1234  \n".to_owned()));
-        if let Some(_) = state.take_result() {
-            panic!("pasting should not submit");
-        }
+        assert!(state.take_result().is_none(), "pasting should not submit");
         // Verify the value got the trimmed, non-whitespace characters.
         let mut submit_state = state;
         submit_state.handle_input(&InputEvent::Submit);
