@@ -17,7 +17,9 @@ pub use injection::*;
 pub use messages::*;
 pub use mode::*;
 pub use permissions::{
-    PermissionApprovalDecision, PermissionMode, PermissionOperation, ToolAccess,
+    ApprovalRuleStore, FileWriteApprovalOperation, PermissionApprovalDecision, PermissionMode,
+    PermissionOperation, PrefixApprovalRule, SessionApprovalKey, SessionApprovalScope, ToolAccess,
+    command_might_be_dangerous, is_known_safe_command,
 };
 pub use runtime::*;
 pub use tools::*;
