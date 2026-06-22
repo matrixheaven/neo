@@ -12,8 +12,8 @@ use crate::{
     components::{truncate_width, visible_width},
     core::InputResult,
     dialogs::{
-        ApiKeyInputState, ChoicePickerState, CustomRegistryImportState, ModelSelectorState,
-        ProviderManagerState, TabbedModelSelectorState,
+        ApiKeyInputState, ChoicePickerState, CustomRegistryImportState, McpManagerState,
+        ModelSelectorState, ProviderManagerState, TabbedModelSelectorState, TextInputState,
     },
     image::{ImageRenderPolicy, TerminalImageCapabilities},
     input::{InputEvent, KeybindingAction},
@@ -1030,6 +1030,11 @@ impl NeoChromeState {
         ))
     }
 
+    pub fn open_mcp_manager(&mut self, opts: &crate::dialogs::McpManagerOptions) -> OverlayId {
+        let state = crate::dialogs::McpManagerState::new(opts);
+        self.push_overlay(Overlay::new("mcp", OverlayKind::McpManager(state)))
+    }
+
     pub fn open_choice_picker(&mut self, opts: crate::dialogs::ChoicePickerOptions) -> OverlayId {
         let state = crate::dialogs::ChoicePickerState::new(opts);
         self.push_overlay(Overlay::new("choice", OverlayKind::ChoicePicker(state)))
@@ -1038,6 +1043,11 @@ impl NeoChromeState {
     pub fn open_api_key_input(&mut self, opts: crate::dialogs::ApiKeyInputOptions) -> OverlayId {
         let state = crate::dialogs::ApiKeyInputState::new(opts, self.theme);
         self.push_overlay(Overlay::new("api-key", OverlayKind::ApiKeyInput(state)))
+    }
+
+    pub fn open_text_input(&mut self, opts: crate::dialogs::TextInputOptions) -> OverlayId {
+        let state = crate::dialogs::TextInputState::new(opts, self.theme);
+        self.push_overlay(Overlay::new("text-input", OverlayKind::TextInput(state)))
     }
 
     pub fn open_custom_registry_import(
@@ -1049,6 +1059,30 @@ impl NeoChromeState {
             "registry",
             OverlayKind::CustomRegistryImport(state),
         ))
+    }
+
+    pub fn open_trust_dialog(&mut self, data: crate::dialogs::TrustDialogData) -> OverlayId {
+        let state = crate::dialogs::TrustDialogState::new(data, self.theme);
+        self.push_overlay(Overlay::new("trust", OverlayKind::TrustDialog(state)))
+    }
+
+    #[must_use]
+    pub fn trust_dialog_result(&self) -> Option<&crate::dialogs::TrustDialogResult> {
+        let overlay = self.focused_overlay()?;
+        let OverlayKind::TrustDialog(state) = &overlay.kind else {
+            return None;
+        };
+        state.result()
+    }
+
+    #[must_use]
+    pub fn take_trust_dialog_result(&mut self) -> Option<crate::dialogs::TrustDialogResult> {
+        let id = self.focused_overlay?;
+        let overlay = self.overlays.iter_mut().find(|overlay| overlay.id == id)?;
+        let OverlayKind::TrustDialog(state) = &mut overlay.kind else {
+            return None;
+        };
+        state.take_result()
     }
 
     /// Render the focused overlay (if any) into ANSI lines at the given width.
@@ -1076,10 +1110,13 @@ impl NeoChromeState {
             OverlayKind::ModelSelector(_)
                 | OverlayKind::TabbedModelSelector(_)
                 | OverlayKind::ProviderManager(_)
+                | OverlayKind::McpManager(_)
                 | OverlayKind::ChoicePicker(_)
                 | OverlayKind::ApiKeyInput(_)
+                | OverlayKind::TextInput(_)
                 | OverlayKind::CustomRegistryImport(_)
                 | OverlayKind::QuestionDialog(_)
+                | OverlayKind::TrustDialog(_)
         )
     }
 
@@ -1097,8 +1134,10 @@ impl NeoChromeState {
             OverlayKind::ModelSelector(state) => state.handle_input(&input),
             OverlayKind::TabbedModelSelector(state) => state.handle_input(&input),
             OverlayKind::ProviderManager(state) => state.handle_input(&input),
+            OverlayKind::McpManager(state) => state.handle_input(&input),
             OverlayKind::ChoicePicker(state) => state.handle_input(&input),
             OverlayKind::ApiKeyInput(state) => state.handle_input(&input),
+            OverlayKind::TextInput(state) => state.handle_input(&input),
             OverlayKind::CustomRegistryImport(state) => state.handle_input(input),
             OverlayKind::QuestionDialog(state) => {
                 let result = state.handle_input(&input);
@@ -1113,6 +1152,7 @@ impl NeoChromeState {
                 }
                 result
             }
+            OverlayKind::TrustDialog(state) => state.handle_input(&input),
             _ => InputResult::Ignored,
         };
         if close_overlay {
@@ -1178,6 +1218,14 @@ impl NeoChromeState {
     }
 
     #[must_use]
+    pub fn mcp_manager_action(&self) -> Option<crate::dialogs::McpManagerAction> {
+        let OverlayKind::McpManager(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        state.action()
+    }
+
+    #[must_use]
     pub fn choice_picker_result(&self) -> Option<&crate::dialogs::ChoiceResult> {
         let OverlayKind::ChoicePicker(state) = &self.focused_overlay()?.kind else {
             return None;
@@ -1188,6 +1236,14 @@ impl NeoChromeState {
     #[must_use]
     pub fn api_key_input_result(&self) -> Option<&crate::dialogs::ApiKeyInputResult> {
         let OverlayKind::ApiKeyInput(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        state.result()
+    }
+
+    #[must_use]
+    pub fn text_input_result(&self) -> Option<&crate::dialogs::TextInputResult> {
+        let OverlayKind::TextInput(state) = &self.focused_overlay()?.kind else {
             return None;
         };
         state.result()
@@ -1525,6 +1581,7 @@ impl NeoChromeState {
                 | OverlayKind::CustomRegistryImport(_)
                 | OverlayKind::QuestionDialog(_)
                 | OverlayKind::Approval(_)
+                | OverlayKind::TrustDialog(_)
         )
     }
 }
@@ -1696,9 +1753,12 @@ pub enum OverlayKind {
     ModelSelector(crate::dialogs::ModelSelectorState),
     TabbedModelSelector(crate::dialogs::TabbedModelSelectorState),
     ProviderManager(crate::dialogs::ProviderManagerState),
+    McpManager(crate::dialogs::McpManagerState),
     ChoicePicker(crate::dialogs::ChoicePickerState),
     ApiKeyInput(crate::dialogs::ApiKeyInputState),
+    TextInput(crate::dialogs::TextInputState),
     CustomRegistryImport(crate::dialogs::CustomRegistryImportState),
+    TrustDialog(crate::dialogs::TrustDialogState),
 }
 
 impl OverlayKind {
@@ -1743,6 +1803,7 @@ impl OverlayKind {
             Self::ModelSelector(state) => Some(state.render_lines(width)),
             Self::TabbedModelSelector(state) => Some(state.render_lines(width)),
             Self::ProviderManager(state) => Some(state.render_lines(width)),
+            Self::McpManager(state) => Some(state.render_lines(width)),
             _ => self.input_dialog_lines(width),
         }
     }
@@ -1752,7 +1813,9 @@ impl OverlayKind {
         match self {
             Self::ChoicePicker(state) => Some(state.render_lines(width)),
             Self::ApiKeyInput(state) => Some(state.render_lines(width)),
+            Self::TextInput(state) => Some(state.render_lines(width)),
             Self::CustomRegistryImport(state) => Some(state.render_lines(width)),
+            Self::TrustDialog(state) => Some(state.render_lines(width)),
             _ => None,
         }
     }
@@ -1778,14 +1841,16 @@ impl OverlayKind {
     #[must_use]
     fn input_dialog_height(&self) -> Option<u16> {
         match self {
-            Self::ApiKeyInput(_) | Self::CustomRegistryImport(_) => Some(10),
+            Self::ApiKeyInput(_) | Self::TextInput(_) | Self::CustomRegistryImport(_) => Some(10),
             Self::SessionPicker(_)
             | Self::ModelPicker(_)
             | Self::QuestionDialog(_)
             | Self::ModelSelector(_)
             | Self::TabbedModelSelector(_)
             | Self::ProviderManager(_)
-            | Self::ChoicePicker(_) => Some(16),
+            | Self::McpManager(_)
+            | Self::ChoicePicker(_)
+            | Self::TrustDialog(_) => Some(16),
             _ => None,
         }
     }
@@ -1863,6 +1928,7 @@ fn handle_model_dialog_selection(kind: &mut OverlayKind, input: &InputEvent) -> 
 fn handle_provider_choice_dialog_selection(kind: &mut OverlayKind, input: &InputEvent) -> bool {
     match kind {
         OverlayKind::ProviderManager(state) => handle_input_ref(state, input),
+        OverlayKind::McpManager(state) => handle_input_ref(state, input),
         OverlayKind::ChoicePicker(state) => handle_input_ref(state, input),
         _ => return false,
     }
@@ -1911,6 +1977,12 @@ impl DialogInputRef for ProviderManagerState {
     }
 }
 
+impl DialogInputRef for McpManagerState {
+    fn handle_dialog_input(&mut self, input: &InputEvent) {
+        let _ = self.handle_input(input);
+    }
+}
+
 impl DialogInputRef for ChoicePickerState {
     fn handle_dialog_input(&mut self, input: &InputEvent) {
         let _ = self.handle_input(input);
@@ -1918,6 +1990,12 @@ impl DialogInputRef for ChoicePickerState {
 }
 
 impl DialogInputRef for ApiKeyInputState {
+    fn handle_dialog_input(&mut self, input: &InputEvent) {
+        let _ = self.handle_input(input);
+    }
+}
+
+impl DialogInputRef for TextInputState {
     fn handle_dialog_input(&mut self, input: &InputEvent) {
         let _ = self.handle_input(input);
     }
