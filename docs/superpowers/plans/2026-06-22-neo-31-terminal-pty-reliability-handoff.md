@@ -1,4 +1,4 @@
-# Neo Terminal PTY Reliability Implementation Plan
+# NEO-31 Terminal PTY Reliability Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -7,6 +7,16 @@
 **Architecture:** Keep `Terminal` as a real PTY tool in `neo-agent-core`, but make its read contract stateful and observable. Replace the current "return immediately when any fresh byte exists" read wait with a quiet-period settle loop, add structured read diagnostics, stream PTY output updates through the existing `ToolUpdateCallback`, and harden stop/cleanup around process-group-like behavior and handle removal. Tests must reproduce the Minimax M3 report before implementation: prompt text not surfaced, black-box state after writes, and stale process/lock cleanup.
 
 **Tech Stack:** Rust 2024, `portable-pty`, `tokio`, `neo-agent-core` tool registry, `ProcessSupervisor`, `nextest` via `cargo run -p xtask -- test`, real-process PTY tests in `crates/neo-agent-core/tests/tool_terminal.rs`.
+
+---
+
+## Linear Context
+
+- Linear: [NEO-31](https://linear.app/neo-agent/issue/NEO-31/fix-terminal-pty-reliability-for-interactive-programs-git-add-p)
+- Title: Fix Terminal PTY reliability for interactive programs (git add -p)
+- Priority: High
+- Project: Tool System
+- Summary: Fix the Terminal PTY tool so interactive prompts are observable, read state is diagnosable, and stopped terminals do not leave child processes or lock files behind.
 
 ---
 

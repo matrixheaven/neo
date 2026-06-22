@@ -25,7 +25,7 @@
 - Before coding:
 
 ```bash
-rtk icm recall-context "NEO-22 /new slash command fresh session" --limit 5
+rtk icm recall-context "NEO-26 /new slash command fresh session" --limit 5
 ```
 
 - Use `rtk` for shell commands.
@@ -37,7 +37,7 @@ rtk icm recall-context "NEO-22 /new slash command fresh session" --limit 5
 - Store completion memory before final response:
 
 ```bash
-rtk icm store -t context-neo -c "Completed NEO-22: /new and /clear reset Neo to a fresh unsaved workspace session state, next prompt creates a new JSONL session through the existing path, current config choices are preserved, and focused plus full xtask gates pass." -i high -k "NEO-22,new-session,slash,tui"
+rtk icm store -t context-neo -c "Completed NEO-26: /new and /clear reset Neo to a fresh unsaved workspace session state, next prompt creates a new JSONL session through the existing path, current config choices are preserved, and focused plus full xtask gates pass." -i high -k "NEO-26,new-session,slash,tui"
 ```
 
 ## Current Code Map
@@ -533,7 +533,7 @@ rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_new_preser
 
   > Skipped full parity: `cargo run -p xtask -- parity` currently fails on
   > pre-existing unrelated regressions (skills/arguments.rs placeholder
-  > markers, docs/Plans/, docs/skills.md). NEO-22's own doc edits in
+  > markers, docs/Plans/, docs/skills.md). NEO-26's own doc edits in
   > config.md/quickstart.md/sessions.md are not flagged by parity.
 
 ```bash
@@ -608,8 +608,8 @@ Artifacts:
   > (in-progress `SkillStore::load` signature refactor in
   > `run.rs`/`resources.rs`, and prompt-template/extension discovery
   > regressions), so workspace-wide LCOV/CRAP/CI cannot complete. Per
-  > AGENTS.md, those failures are out of NEO-22's scope and must not be
-  > fixed here. All 9 NEO-22 focused tests pass via
+  > AGENTS.md, those failures are out of NEO-26's scope and must not be
+  > fixed here. All 9 NEO-26 focused tests pass via
   > `cargo run -p xtask -- test -p neo-agent interactive::tests::slash_new …`,
   > and the other 119 interactive unit tests unrelated to prompt-template
   > discovery continue to pass.

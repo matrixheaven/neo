@@ -26,7 +26,7 @@
 - Before coding:
 
 ```bash
-rtk icm recall-context "NEO-23 cross-session prompt history" --limit 5
+rtk icm recall-context "NEO-27 cross-session prompt history" --limit 5
 ```
 
 - Use `rtk` for shell commands.
@@ -37,7 +37,7 @@ rtk icm recall-context "NEO-23 cross-session prompt history" --limit 5
 - Store completion memory before final response:
 
 ```bash
-rtk icm store -t context-neo -c "Completed NEO-23: workspace-scoped prompt-history JSONL loads across TUI sessions, Up/Down recalls from empty composer, consecutive duplicate/blank prompts are skipped, blocking dialogs do not leak into PromptState, and xtask gates pass." -i high -k "NEO-23,prompt-history,tui"
+rtk icm store -t context-neo -c "Completed NEO-27: workspace-scoped prompt-history JSONL loads across TUI sessions, Up/Down recalls from empty composer, consecutive duplicate/blank prompts are skipped, blocking dialogs do not leak into PromptState, and xtask gates pass." -i high -k "NEO-27,prompt-history,tui"
 ```
 
 ## Current Code Map

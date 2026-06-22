@@ -12,7 +12,7 @@
 
 ## Linear Context
 
-- Linear: [NEO-25](https://linear.app/ezc2/issue/NEO-25/实现新目录进入-neo-时的-workspace-trust-tui-对话框)
+- Linear: [NEO-29](https://linear.app/neo-agent/issue/NEO-29/实现新目录进入-neo-时的-workspace-trust-tui-对话框)
 - Title: 实现新目录进入 neo 时的 Workspace Trust TUI 对话框
 - Priority: Medium
 - Project: TUI & UX Polish
@@ -76,7 +76,7 @@ Keep this gate. The main bug is that unknown trust silently becomes untrusted an
   - `project_trusted_from_yolo` calls `trust::resolve_project_trust`.
   - `AppConfig` stores only `project_trusted: bool`.
 
-For NEO-25, add enough trust metadata to know whether startup should show a dialog.
+For NEO-29, add enough trust metadata to know whether startup should show a dialog.
 
 ### CLI Docs Are Ahead Of Code
 
@@ -142,7 +142,7 @@ The TUI dialog must offer:
 
 Default highlighted option: Continue untrusted.
 
-Reason: NEO-25 is a security prompt. The safest selection should be default.
+Reason: NEO-29 is a security prompt. The safest selection should be default.
 
 ### Trust Parent Semantics
 
@@ -562,5 +562,5 @@ Artifacts to inspect:
 ## Suggested ICM Store On Completion
 
 ```bash
-rtk icm store -t context-neo -c "Implemented NEO-25 Workspace Trust TUI dialog: Neo now resolves project trust as trusted/untrusted/unknown, prompts before loading project context, persists trust and untrusted decisions, supports trust parent selection, restores CLI trust commands, and keeps untrusted workspaces in restricted mode." -i high -k "NEO-25,workspace-trust,tui,security,codex"
+rtk icm store -t context-neo -c "Implemented NEO-29 Workspace Trust TUI dialog: Neo now resolves project trust as trusted/untrusted/unknown, prompts before loading project context, persists trust and untrusted decisions, supports trust parent selection, restores CLI trust commands, and keeps untrusted workspaces in restricted mode." -i high -k "NEO-29,workspace-trust,tui,security,codex"
 ```

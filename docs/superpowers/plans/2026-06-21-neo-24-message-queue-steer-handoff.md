@@ -1,4 +1,4 @@
-# NEO-20 Message Queue And Ctrl+S Steer Handoff Plan
+# NEO-24 Message Queue And Ctrl+S Steer Handoff Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -12,11 +12,11 @@
 
 ## Linear Context
 
-- Linear: [NEO-20](https://linear.app/ezc2/issue/NEO-20/implement-message-queue-and-message-steer-for-long-running-agent)
+- Linear: [NEO-24](https://linear.app/neo-agent/issue/NEO-24/implement-message-queue-and-message-steer-for-long-running-agent)
 - Priority: Urgent
 - Project: Mode System
 - Summary: Implement message queue and message steer for long-running agent workflows.
-- Recommended order: implement before NEO-22 and NEO-23.
+- Recommended order: implement before NEO-26 and NEO-27.
 - Why first: active-turn queue and steer affect the runtime, JSONL event replay, transcript state, keybindings, and live TUI input flow.
 
 ## Mandatory References
@@ -50,7 +50,7 @@ Neo-specific override:
 - Before coding, run:
 
 ```bash
-rtk icm recall-context "NEO-20 message queue ctrl-s steer implementation" --limit 5
+rtk icm recall-context "NEO-24 message queue ctrl-s steer implementation" --limit 5
 ```
 
 - Use `rtk` for shell commands.
@@ -58,12 +58,12 @@ rtk icm recall-context "NEO-20 message queue ctrl-s steer implementation" --limi
 - Do not run bare `cargo test`; use `cargo run -p xtask -- test ...` through `rtk`.
 - Do not perform git mutations unless the user gives explicit per-command authorization. This includes `git add`, `git commit`, `git push`, `git switch`, `git checkout`, `git reset`, `git stash`, `git clean`, `git rm`, `git merge`, and `git rebase`.
 - Do not preserve obsolete compatibility branches or duplicate models. Make one clean model.
-- Stay inside NEO-20 scope. Do not fix unrelated failures.
+- Stay inside NEO-24 scope. Do not fix unrelated failures.
 - If a meaningful error is resolved, store it with ICM before final response.
 - When the task is complete, store a significant-task memory before final response:
 
 ```bash
-rtk icm store -t context-neo -c "Completed NEO-20: active-turn queue and Ctrl+S steer UX, including Enter FIFO follow-up queueing, composer-first steer priority, TUI queue rendering, JSONL replay, tests, coverage, CRAP, and CI evidence." -i high -k "NEO-20,message-queue,steer,ctrl-s,tui"
+rtk icm store -t context-neo -c "Completed NEO-24: active-turn queue and Ctrl+S steer UX, including Enter FIFO follow-up queueing, composer-first steer priority, TUI queue rendering, JSONL replay, tests, coverage, CRAP, and CI evidence." -i high -k "NEO-24,message-queue,steer,ctrl-s,tui"
 ```
 
 ## Current Code Map
@@ -566,5 +566,5 @@ Artifacts to inspect:
 After completing and verifying implementation, store:
 
 ```bash
-rtk icm store -t context-neo -c "Implemented NEO-20 active-turn queue and Ctrl+S steer UX: Enter enqueues FIFO follow-ups, Ctrl+S steers composer text first or oldest queued item, queue state renders in TUI and persists through JSONL replay." -i high -k "NEO-20,queue,steer,ctrl-s,tui,runtime"
+rtk icm store -t context-neo -c "Implemented NEO-24 active-turn queue and Ctrl+S steer UX: Enter enqueues FIFO follow-ups, Ctrl+S steers composer text first or oldest queued item, queue state renders in TUI and persists through JSONL replay." -i high -k "NEO-24,queue,steer,ctrl-s,tui,runtime"
 ```

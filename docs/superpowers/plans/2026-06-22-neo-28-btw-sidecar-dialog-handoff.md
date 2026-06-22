@@ -12,11 +12,11 @@
 
 ## Linear Context
 
-- Linear: [NEO-24](https://linear.app/ezc2/issue/NEO-24/neo-24-implement-btw-sidecar-dialog-for-temporary-questions-without)
+- Linear: [NEO-28](https://linear.app/neo-agent/issue/NEO-28/neo-28-implement-btw-sidecar-dialog-for-temporary-questions-without)
 - Title: Implement `/btw` sidecar dialog for temporary questions without polluting main context
 - Priority: High
 - Project: CLI Commands
-- Related issue: NEO-16 Multi-Agent system. Implement NEO-24 as a deliberately small same-session sidecar. If NEO-16 is already complete by implementation time, reuse only its low-level in-memory agent primitives and keep the `/btw` product behavior defined here.
+- Related issue: NEO-20 Multi-Agent system. Implement NEO-28 as a deliberately small same-session sidecar. If NEO-20 is already complete by implementation time, reuse only its low-level in-memory agent primitives and keep the `/btw` product behavior defined here.
 - User-facing promise: ask a quick side question, get an answer using current context, close with Esc, and leave the main session untouched.
 
 ## Mandatory References
@@ -60,7 +60,7 @@ Why:
 - It allows `/btw` to be visually and semantically a temporary panel, not a forked workspace.
 - It avoids main JSONL pollution.
 
-Do not start with the Codex-style persistent fork-session approach. It is useful as a conceptual comparison, but it creates a new session identity and risks losing the same prompt-cache-key behavior that NEO-24 explicitly calls out as the sensitive design point.
+Do not start with the Codex-style persistent fork-session approach. It is useful as a conceptual comparison, but it creates a new session identity and risks losing the same prompt-cache-key behavior that NEO-28 explicitly calls out as the sensitive design point.
 
 ### Tool Policy
 
@@ -83,7 +83,7 @@ The sidecar conversation is in-memory only:
 - no `sessions.metadata.json` entry;
 - no `session_index.jsonl` entry;
 - no main transcript replay contribution;
-- no prompt history persistence unless the user explicitly submits `/btw ...` as a slash command history item and the prompt-history implementation intentionally stores slash commands, which NEO-23 should not do.
+- no prompt history persistence unless the user explicitly submits `/btw ...` as a slash command history item and the prompt-history implementation intentionally stores slash commands, which NEO-27 should not do.
 
 When the user closes the panel, discard sidecar state.
 
@@ -91,7 +91,7 @@ When the user closes the panel, discard sidecar state.
 
 `/btw` is not message queueing and not steering:
 
-- It does not enqueue a follow-up for NEO-20.
+- It does not enqueue a follow-up for NEO-24.
 - It does not steer the active main turn.
 - It may run while the main turn is streaming if implementation supports a separate side runtime task.
 - It reads from a parent context snapshot at creation time; later main-turn deltas do not silently mutate the sidecar context.
@@ -619,7 +619,7 @@ Artifacts to inspect:
 - Do not let sidecar tools run in yolo mode.
 - Do not remove tool definitions from the side request if doing so changes the prompt-cache prefix.
 - Do not inherit an open/incomplete trailing tool exchange.
-- Do not let `/btw` become NEO-20 queue or steer behavior.
+- Do not let `/btw` become NEO-24 queue or steer behavior.
 - Do not cancel the main turn when closing/cancelling the sidecar.
 - Do not let panel height exceed one third of the terminal.
 - Do not create a separate page or route for the panel.
@@ -644,5 +644,5 @@ Artifacts to inspect:
 ## Suggested ICM Store On Completion
 
 ```bash
-rtk icm store -t context-neo -c "Implemented NEO-24 /btw sidecar dialog: same-session in-memory side agent inherits projected parent context, denies all tools while preserving tool definitions for prompt-cache stability, renders a bounded TUI panel, and keeps main transcript/JSONL clean." -i high -k "NEO-24,btw,sidecar,tui,prompt-cache"
+rtk icm store -t context-neo -c "Implemented NEO-28 /btw sidecar dialog: same-session in-memory side agent inherits projected parent context, denies all tools while preserving tool definitions for prompt-cache stability, renders a bounded TUI panel, and keeps main transcript/JSONL clean." -i high -k "NEO-28,btw,sidecar,tui,prompt-cache"
 ```

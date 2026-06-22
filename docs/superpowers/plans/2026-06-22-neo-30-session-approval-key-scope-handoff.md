@@ -12,7 +12,7 @@
 
 ## Linear Context
 
-- Linear: [NEO-26](https://linear.app/ezc2/issue/NEO-26/scope-approve-for-this-session-by-approval-key-instead-of-tool-name)
+- Linear: [NEO-30](https://linear.app/neo-agent/issue/NEO-30/scope-approve-for-this-session-by-approval-key-instead-of-tool-name)
 - Title: Scope "Approve for this session" by approval key instead of tool name
 - Priority: Urgent
 - Project: Mode System
@@ -55,7 +55,7 @@ Reference conclusions:
 - Before coding, run:
 
 ```bash
-rtk icm recall-context "NEO-26 session approval key scope Approve for this session Bash tool name" --limit 5
+rtk icm recall-context "NEO-30 session approval key scope Approve for this session Bash tool name" --limit 5
 ```
 
 - Use `rtk` for shell commands.
@@ -63,12 +63,12 @@ rtk icm recall-context "NEO-26 session approval key scope Approve for this sessi
 - Do not run bare `cargo test`; use `cargo run -p xtask -- test ...` through `rtk`.
 - Do not perform git mutations unless the user gives explicit per-command authorization. This includes `git add`, `git commit`, `git push`, `git switch`, `git checkout`, `git reset`, `git stash`, `git clean`, `git rm`, `git merge`, and `git rebase`.
 - Do not preserve obsolete compatibility branches or duplicate approval stores. Replace the old tool-name model.
-- Stay inside NEO-26 scope. Do not redesign all permission modes.
+- Stay inside NEO-30 scope. Do not redesign all permission modes.
 - If a meaningful error is resolved, store it with ICM before final response.
 - When the task is complete, store a significant-task memory before final response:
 
 ```bash
-rtk icm store -t context-neo -c "Completed NEO-26: replaced tool-name session approvals with narrow approval-key scoped session approvals, added dynamic approval scope labels, and verified Bash/file approval regressions." -i high -k "NEO-26,approval,session,Bash,permissions"
+rtk icm store -t context-neo -c "Completed NEO-30: replaced tool-name session approvals with narrow approval-key scoped session approvals, added dynamic approval scope labels, and verified Bash/file approval regressions." -i high -k "NEO-30,approval,session,Bash,permissions"
 ```
 
 ## Current Neo State
