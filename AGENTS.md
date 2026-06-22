@@ -12,6 +12,12 @@ This repository is developed by many AI agents at the same time. Stay inside you
 
 Do not preserve the status quo by piling on compatibility branches, fallback paths, or duplicate models. Simplify the model, delete obsolete paths when possible, and avoid code that only appears safe because tests still pass.
 
+<important>
+
+YOU HAVE NO RIGHT AND NO WHY TO RESTORE ANY CODE FILE TO `HEAD`，THIS IS CRITICAL MESS !!! NEVER USE `git` UNLESS ONLY WHEN YOU NEED TO DIFF.
+
+</important>
+
 ## Work loop: recall → scope → verify proportionally
 
 Every task follows this loop, but verification effort scales with task size.
@@ -218,6 +224,18 @@ cargo run -p xtask -- test -p xtask
 
 ## Testing instructions
 
+**ABSOLUTE RULE — read this before every test run:**
+Never revert, reset, restore, or overwrite any worktree file to a prior state
+in order to make tests compile or pass. This includes `git checkout HEAD --`,
+`git restore`, `git show HEAD:... > file`, `cp`/`Write` of a HEAD snapshot over
+a modified file, moving other agents' untracked files aside, or any equivalent
+trick. The worktree is a shared, concurrent workspace. Other agents' in-flight
+changes (tracked or untracked) are their work, not an obstacle to your testing.
+If your tests fail to compile or link because of another agent's in-progress
+work, that is expected — skip those tests, note it, and move on. Your test
+convenience is never worth destroying someone else's work. This rule overrides
+any desire for a green build and has no exceptions.
+
 - Tests live next to source in `src/` (`#[cfg(test)]`) and in `tests/` per
 crate.
 - **When you run tests, use `xtask` as the entrypoint.** Do not claim
@@ -227,7 +245,9 @@ crate.
 - **Run tests only at the scope the task needs** (see "Verification tiers"
   above). Small tasks need no tests; medium tasks need focused crate/target
   tests; only complex refactors warrant LCOV/CRAP/CI. Do not run the workspace
-  suite or `ci` for routine changes.
+  suite or `ci` for routine changes. If a build failure is caused by another
+  agent's concurrent work outside your scope, do NOT "fix" it by reverting
+  their files — skip the affected test target and report it.
 - `cargo nextest` is the test runner for unit and integration tests. If
   `cargo nextest` is not installed, fail closed and install it; do not silently
   fall back to `cargo test`.
@@ -302,6 +322,16 @@ crate.
    There is no turn budget.
 10. Session events are appended to local JSONL so `resume` can reconstruct
    conversation and tool state.
+11. While a turn runs, the controller can push live input through a shared
+   `SteerInputHandle` (`AgentRuntime::with_steer_input`) threaded from
+   `TurnChannels` into the streaming turn driver. `run_agent_turn` drains it at
+   every step boundary and routes items into the existing steering/follow-up
+   queues via `SteeringQueued` / `FollowUpQueued` events (the only production
+   emitters of those variants). `ActiveTurnInput::SteerNow` injects at the next
+   model call; `FollowUp` starts a fresh turn after the current workflow drains.
+   In the TUI, `Enter` while busy enqueues a follow-up (FIFO); `Ctrl+S` steers
+   the running turn at the next natural break point (or falls back to submit
+   when idle). See `docs/queue-and-steer.md`.
 
 ### Session storage and workspace scoping
 
@@ -364,6 +394,14 @@ The interactive TUI mode (`neo-agent` with no subcommand) provides:
 - **Theme support**: customizable color themes via `~/.neo/themes/*.json`
   (or `$NEO_HOME/themes/*.json`).
 - **Keybinding customization**: configurable keybindings via config.
+- **Message queue & steer**: while a turn is running, `Enter` queues a
+  follow-up message (FIFO, starts a new turn after the current one drains);
+  `Ctrl+S` steers the running turn by injecting the message at the next
+  natural break point (tool-call end / thinking end). Steer is append-only and
+  prefix-cache friendly. `Ctrl+S` is the terminal XOFF flow-control character:
+  users may need `stty -ixon` (or rebinding via `tui.input.steer`) for it to
+  reach Neo. When idle, `Ctrl+S` falls back to a normal submit. See
+  `docs/queue-and-steer.md`.
 - **Development modes**: Shift+Tab cycles normal → plan → goal → normal.
   Development modes are independent from permission modes; Shift+Enter inserts
   a newline, and permissions are changed through `/permissions`, `/ask`,
@@ -481,7 +519,11 @@ See `docs/goals.md` for details.
 ### Trust management
 
 Project context files (`AGENTS.md`, `CLAUDE.md`) are loaded only when the
-project is trusted; trust is stored in `~/.neo/trust.json`:
+project is trusted; trust is stored in `~/.neo/trust.json`. When running
+interactively, Neo opens a blocking trust dialog at startup if a project context
+file is detected and no decision is recorded; you can trust the current workspace
+or an ancestor directory, continue untrusted, or deny. In `yolo` permission mode
+trust is treated as not required.
 
 ```bash
 neo trust status
@@ -656,6 +698,13 @@ hide, rewrite, or switch worktree content remain forbidden as convenience
 operations. Index-only staging operations are allowed only after explicit
 per-command authorization, because they are sometimes necessary for
 fine-grained commits and can be undone without losing worktree edits.
+
+Blocked work is never a reason to revert worktree files. If an error, failed
+test, merge conflict, build issue, or any other blocker prevents the current
+work from continuing, record the blocker, move to another safe task if possible,
+and retry later. Do not restore any code file to `HEAD` or any earlier revision
+to "get unstuck"; doing so can erase another agent's work and make their entire
+task unrecoverable.
 
 ### Never run these without explicit approval
 
