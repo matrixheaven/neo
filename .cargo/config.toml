@@ -1,9 +1,17 @@
-[build]
-# sccache: cache compiled artifacts across rebuilds (especially dependencies).
-rustc-wrapper = "sccache"
-# Use lld (via homebrew) for dramatically faster linking on macOS.
-# Benchmark: 51s -> 7s for incremental builds.
-rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/Cellar/lld@20/20.1.8/bin/ld64.lld"]
+# This file is checked into the repo and must stay platform-neutral so the
+# CI build (ubuntu-latest) works without extra setup. Machine-specific build
+# accelerators — sccache and the macOS `lld` linker — are NOT configured here:
+#
+#   * sccache:  set `RUSTC_WRAPPER=sccache` in your shell rc and install
+#               sccache yourself (`brew install sccache` / `apt install sccache`).
+#   * lld:      configure the linker for your target in your user-global
+#               ~/.cargo/config.toml, e.g. for Apple Silicon:
+#
+#     [target.aarch64-apple-darwin]
+#     rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/Cellar/lld@20/20.1.8/bin/ld64.lld"]
+#
+# Keeping these out of the shared config avoids hard-failing on machines that
+# don't have those binaries (notably GitHub Actions runners).
 
 [term]
 quiet = false
