@@ -63,6 +63,8 @@ pub struct ConfigOverrides {
     pub config_path: Option<PathBuf>,
     pub yolo: bool,
     pub auto: bool,
+    pub(crate) trust_store: Option<trust::ProjectTrustStore>,
+    pub(crate) project_dir: Option<PathBuf>,
 }
 
 impl ConfigOverrides {
@@ -71,6 +73,8 @@ impl ConfigOverrides {
             config_path: cli.config.clone(),
             yolo: cli.yolo,
             auto: cli.auto,
+            trust_store: None,
+            project_dir: None,
         }
     }
 }
@@ -215,6 +219,8 @@ pub struct AppConfig {
     pub skill_path: Vec<String>,
     #[serde(skip)]
     pub project_trusted: bool,
+    #[serde(skip)]
+    pub project_trust: trust::ProjectTrustState,
     pub project_dir: PathBuf,
 
     #[serde(skip)]
@@ -441,10 +447,14 @@ impl AppConfig {
         // `project_dir` is the *workspace identity* (used for trust keying,
         // session bucketing, git status, `@file` sandboxing). It is NOT a config
         // location. Default to the current working directory.
-        let project_dir = env::current_dir()?;
+        let project_dir = overrides
+            .project_dir
+            .map(Ok)
+            .unwrap_or_else(env::current_dir)?;
 
         let file_config = read_file_config(&config_path)?;
-        let project_trusted = project_trusted_from_yolo(&project_dir, overrides.yolo)?;
+        let (project_trusted, project_trust) =
+            resolve_project_trust_state(&project_dir, overrides.yolo, overrides.trust_store)?;
         anyhow::ensure!(
             !(overrides.yolo && overrides.auto),
             "--yolo and --auto cannot be used together"
@@ -510,6 +520,7 @@ impl AppConfig {
             extra_skill_dirs,
             skill_path,
             project_trusted,
+            project_trust,
             project_dir,
             config_path,
         })
@@ -535,8 +546,47 @@ impl AppConfig {
     }
 }
 
-fn project_trusted_from_yolo(project_dir: &Path, yolo: bool) -> anyhow::Result<bool> {
-    trust::resolve_project_trust(project_dir, yolo)
+fn resolve_project_trust_state(
+    project_dir: &Path,
+    yolo: bool,
+    trust_store: Option<trust::ProjectTrustStore>,
+) -> anyhow::Result<(bool, trust::ProjectTrustState)> {
+    let project_dir = project_dir.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize project dir {}",
+            project_dir.display()
+        )
+    })?;
+
+    if yolo {
+        return Ok((false, trust::ProjectTrustState::NotRequired));
+    }
+
+    let inputs = trust::collect_project_trust_inputs(&project_dir)?;
+    if inputs.detected.is_empty() && inputs.parent_candidates.is_empty() {
+        return Ok((true, trust::ProjectTrustState::NotRequired));
+    }
+
+    let store = trust_store
+        .map(Ok)
+        .unwrap_or_else(trust::ProjectTrustStore::from_home)?;
+    match trust::resolve_project_trust_decision(&project_dir, false, &store)? {
+        trust::ProjectTrustDecision::Trusted { source } => Ok((
+            true,
+            trust::ProjectTrustState::Trusted {
+                target: source.target(&project_dir),
+            },
+        )),
+        trust::ProjectTrustDecision::Untrusted { source } => Ok((
+            false,
+            trust::ProjectTrustState::Untrusted {
+                target: source.target(&project_dir),
+            },
+        )),
+        trust::ProjectTrustDecision::Unknown { inputs } => {
+            Ok((false, trust::ProjectTrustState::Unknown { inputs }))
+        }
+    }
 }
 
 fn provider_api_key_env(
@@ -915,29 +965,32 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::config::{AppConfig, ConfigOverrides, PermissionMode};
+    use crate::trust::{ProjectTrustState, ProjectTrustStore};
 
-    fn temp_project_config(content: &str) -> (TempDir, PathBuf) {
+    fn temp_project_config(content: &str) -> (TempDir, PathBuf, PathBuf) {
         let temp = TempDir::new().expect("temp dir");
-        let config_dir = temp.path().join(".neo");
-        fs::create_dir_all(&config_dir).expect("create .neo");
-        let config_path = config_dir.join("config.toml");
+        let config_path = temp.path().join("config.toml");
         fs::write(&config_path, content).expect("write config");
-        (temp, config_path)
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        (temp, config_path, project_dir)
     }
 
-    fn load_config(config_path: PathBuf) -> AppConfig {
+    fn load_config(config_path: PathBuf, project_dir: PathBuf) -> AppConfig {
         AppConfig::load(ConfigOverrides {
             config_path: Some(config_path),
             yolo: false,
             auto: false,
+            trust_store: None,
+            project_dir: Some(project_dir),
         })
         .expect("load config")
     }
 
     #[test]
     fn config_defaults_to_manual_permission_mode() {
-        let (_temp, config_path) = temp_project_config("");
-        let config = load_config(config_path);
+        let (_temp, config_path, project_dir) = temp_project_config("");
+        let config = load_config(config_path, project_dir);
         assert_eq!(config.permission_mode, PermissionMode::Manual);
     }
 
@@ -949,7 +1002,7 @@ mod tests {
     /// `minimax-.../minimax-.../MiniMax-M2` (double prefix).
     #[test]
     fn default_model_label_never_double_prefixes() {
-        let (_temp, config_path) = temp_project_config(
+        let (_temp, config_path, project_dir) = temp_project_config(
             r#"
 default_model = "minimax-cn-coding-plan/MiniMax-M2"
 default_provider = "deepseek"
@@ -967,7 +1020,7 @@ provider = "minimax-cn-coding-plan"
 model = "MiniMax-M2"
 "#,
         );
-        let config = load_config(config_path);
+        let config = load_config(config_path, project_dir);
         // Alias is used as-is: no stale deepseek prefix, no double minimax prefix.
         assert_eq!(
             config.default_model_label(),
@@ -979,7 +1032,7 @@ model = "MiniMax-M2"
     /// `default_provider/`.
     #[test]
     fn default_model_label_prefixes_provider_for_plain_model_id() {
-        let (_temp, config_path) = temp_project_config(
+        let (_temp, config_path, project_dir) = temp_project_config(
             r#"
 default_model = "deepseek-v4-pro"
 default_provider = "deepseek"
@@ -989,13 +1042,13 @@ type = "openai-chat"
 base_url = "https://deepseek.example/v1"
 "#,
         );
-        let config = load_config(config_path);
+        let config = load_config(config_path, project_dir);
         assert_eq!(config.default_model_label(), "deepseek/deepseek-v4-pro");
     }
 
     #[test]
     fn default_model_label_resolves_unqualified_alias() {
-        let (_temp, config_path) = temp_project_config(
+        let (_temp, config_path, project_dir) = temp_project_config(
             r#"
 default_model = "fast"
 default_provider = "openai"
@@ -1008,7 +1061,7 @@ provider = "openai"
 model = "gpt-4.1"
 "#,
         );
-        let config = load_config(config_path);
+        let config = load_config(config_path, project_dir);
         assert_eq!(config.default_model_label(), "openai/gpt-4.1");
     }
 
@@ -1028,18 +1081,21 @@ model = "gpt-4.1"
 
     #[test]
     fn config_loads_permission_mode_auto() {
-        let (_temp, config_path) = temp_project_config("permission_mode = \"auto\"\n");
-        let config = load_config(config_path);
+        let (_temp, config_path, project_dir) = temp_project_config("permission_mode = \"auto\"\n");
+        let config = load_config(config_path, project_dir);
         assert_eq!(config.permission_mode, PermissionMode::Auto);
     }
 
     #[test]
     fn cli_yolo_overrides_config_permission_mode() {
-        let (_temp, config_path) = temp_project_config("permission_mode = \"manual\"\n");
+        let (_temp, config_path, project_dir) =
+            temp_project_config("permission_mode = \"manual\"\n");
         let config = AppConfig::load(ConfigOverrides {
             config_path: Some(config_path),
             yolo: true,
             auto: false,
+            trust_store: None,
+            project_dir: Some(project_dir),
         })
         .expect("load config");
         assert_eq!(config.permission_mode, PermissionMode::Yolo);
@@ -1047,11 +1103,14 @@ model = "gpt-4.1"
 
     #[test]
     fn cli_auto_overrides_config_permission_mode() {
-        let (_temp, config_path) = temp_project_config("permission_mode = \"manual\"\n");
+        let (_temp, config_path, project_dir) =
+            temp_project_config("permission_mode = \"manual\"\n");
         let config = AppConfig::load(ConfigOverrides {
             config_path: Some(config_path),
             yolo: false,
             auto: true,
+            trust_store: None,
+            project_dir: Some(project_dir),
         })
         .expect("load config");
         assert_eq!(config.permission_mode, PermissionMode::Auto);
@@ -1085,5 +1144,97 @@ model = "gpt-4.1"
                 .collect::<Vec<_>>(),
             vec!["openai/gpt-4.1", "anthropic/claude-sonnet-4"]
         );
+    }
+
+    fn load_config_with_store(
+        config_path: PathBuf,
+        project_dir: PathBuf,
+        store: ProjectTrustStore,
+    ) -> AppConfig {
+        AppConfig::load(ConfigOverrides {
+            config_path: Some(config_path),
+            yolo: false,
+            auto: false,
+            trust_store: Some(store),
+            project_dir: Some(project_dir),
+        })
+        .expect("load config")
+    }
+
+    #[test]
+    fn config_trust_is_not_required_for_directory_without_inputs() {
+        let (_temp, config_path, project_dir) = temp_project_config("");
+        let config = load_config(config_path, project_dir.clone());
+        assert!(config.project_trusted);
+        assert_eq!(config.project_trust, ProjectTrustState::NotRequired);
+    }
+
+    #[test]
+    fn config_trust_is_unknown_when_inputs_exist_without_decision() {
+        let (_temp, config_path, project_dir) = temp_project_config("");
+        fs::write(project_dir.join("AGENTS.md"), "rules").expect("write agents");
+        let store = ProjectTrustStore::new(_temp.path().join("trust.json"));
+
+        let config = load_config_with_store(config_path, project_dir.clone(), store);
+
+        assert!(!config.project_trusted);
+        assert!(matches!(
+            config.project_trust,
+            ProjectTrustState::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn config_trust_is_trusted_when_store_approves_current_dir() {
+        let (_temp, config_path, project_dir) = temp_project_config("");
+        fs::write(project_dir.join("AGENTS.md"), "rules").expect("write agents");
+        let store = ProjectTrustStore::new(_temp.path().join("trust.json"));
+        store.set(&project_dir, Some(true)).expect("approve");
+
+        let config = load_config_with_store(config_path, project_dir.clone(), store);
+
+        assert!(config.project_trusted);
+        assert_eq!(
+            config.project_trust,
+            ProjectTrustState::Trusted {
+                target: project_dir.canonicalize().expect("canonicalize"),
+            }
+        );
+    }
+
+    #[test]
+    fn config_trust_is_untrusted_when_store_denies_current_dir() {
+        let (_temp, config_path, project_dir) = temp_project_config("");
+        fs::write(project_dir.join("AGENTS.md"), "rules").expect("write agents");
+        let store = ProjectTrustStore::new(_temp.path().join("trust.json"));
+        store.set(&project_dir, Some(false)).expect("deny");
+
+        let config = load_config_with_store(config_path, project_dir.clone(), store);
+
+        assert!(!config.project_trusted);
+        assert_eq!(
+            config.project_trust,
+            ProjectTrustState::Untrusted {
+                target: project_dir.canonicalize().expect("canonicalize"),
+            }
+        );
+    }
+
+    #[test]
+    fn config_yolo_sets_not_required_and_untrusted() {
+        let (_temp, config_path, project_dir) = temp_project_config("");
+        fs::write(project_dir.join("AGENTS.md"), "rules").expect("write agents");
+
+        let config = AppConfig::load(ConfigOverrides {
+            config_path: Some(config_path),
+            yolo: true,
+            auto: false,
+            trust_store: None,
+            project_dir: Some(project_dir),
+        })
+        .expect("load config");
+
+        assert!(!config.project_trusted);
+        assert_eq!(config.project_trust, ProjectTrustState::NotRequired);
     }
 }

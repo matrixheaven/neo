@@ -1,3 +1,10 @@
+//! Resource loading for system prompts, skills, and project context files.
+//!
+//! Trust gating: project-local resources (`AGENTS.md`, `CLAUDE.md`,
+//! `.neo/SYSTEM.md`, `.neo/APPEND_SYSTEM.md`, project skills, and any future
+//! project-local MCP configuration) must only be loaded when the workspace is
+//! trusted. User-global resources under `~/.neo` are always loaded.
+
 use std::{
     collections::HashSet,
     env,
@@ -13,6 +20,13 @@ const SYSTEM_PROMPT_FILE: &str = "SYSTEM.md";
 const APPEND_SYSTEM_PROMPT_FILE: &str = "APPEND_SYSTEM.md";
 const CONTEXT_FILE_CANDIDATES: &[&str] = &["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
 
+/// Load the system prompt for a turn.
+///
+/// Trust gate: project-local `.neo/SYSTEM.md` and `.neo/APPEND_SYSTEM.md` are
+/// not loaded. Only user-global files under `~/.neo` are considered. If a
+/// project-local system prompt path is introduced later, it must be gated by
+/// `project_trusted` the same way `load_context_files` gates project context
+/// files.
 pub(crate) fn load_system_prompt(
     project_dir: &Path,
     project_trusted: bool,
@@ -35,6 +49,12 @@ pub(crate) fn load_system_prompt(
     Ok(join_system_prompt_parts(system_prompt, append_prompts))
 }
 
+/// Load the skill store for the session.
+///
+/// Trust gate: project-local skills (e.g. `.agents/skills/`) are not loaded.
+/// Only user-global skills under `~/.neo/skills`, extra skill directories from
+/// config, and built-in skills are included. If project-local skill discovery
+/// is introduced later, it must be skipped when `project_trusted` is `false`.
 pub(crate) fn load_skill_store(
     user_dir: Option<&Path>,
     extra_dirs: &[String],
@@ -60,6 +80,12 @@ struct ContextFile {
     content: String,
 }
 
+/// Load project context files (`AGENTS.md`, `CLAUDE.md`, and variants).
+///
+/// Trust gate: project-local context files are loaded only when
+/// `project_trusted` is `true`. User-global context files under `~/.neo` are
+/// always loaded. This gate must remain in place for all project-local context
+/// file loading.
 fn load_context_files(
     project_dir: &Path,
     project_trusted: bool,

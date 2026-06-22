@@ -28,9 +28,9 @@ fn neo() -> Command {
     command
 }
 
-/// Unique per-test neo home directory. NEO_HOME is the single source of truth
+/// Unique per-test neo home directory. `NEO_HOME` is the single source of truth
 /// for config, skills, prompts, themes, sessions — so each test isolates it.
-/// NEO_HOME IS the neo root (equivalent to ~/.neo), so config lives at
+/// `NEO_HOME` IS the neo root (equivalent to ~/.neo), so config lives at
 /// `<NEO_HOME>/config.toml`, prompts at `<NEO_HOME>/prompts`, etc.
 fn neo_home_for_test() -> PathBuf {
     thread_local! {
@@ -50,7 +50,7 @@ fn neo_home_for_test() -> PathBuf {
     })
 }
 
-/// Write the config.toml content into the test's isolated NEO_HOME.
+/// Write the config.toml content into the test's isolated `NEO_HOME`.
 fn write_home_config(content: &str) {
     let config_path = neo_home_for_test().join("config.toml");
     fs::create_dir_all(config_path.parent().expect("config parent")).expect("create neo home");
@@ -987,6 +987,90 @@ fn removed_remote_cli_surfaces_fail_parser() {
             .expect("neo command should run");
         assert!(!output.status.success());
     }
+}
+
+fn canonical_project_dir(temp: &TempDir) -> PathBuf {
+    temp.path().canonicalize().expect("canonicalize temp dir")
+}
+
+#[test]
+fn trust_status_reports_unknown_when_inputs_present_without_decision() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::write(temp.path().join("AGENTS.md"), "rules").expect("write agents file");
+    let project_dir = canonical_project_dir(&temp);
+
+    let mut command = neo();
+    command.current_dir(temp.path()).args(["trust", "status"]);
+    let stdout = run(command);
+
+    assert!(stdout.contains(&format!("Directory: {}", project_dir.display())));
+    assert!(stdout.contains("Trust target:"));
+    assert!(stdout.contains("Detected inputs:"));
+    assert!(stdout.contains("AGENTS.md"));
+    assert!(stdout.contains("context file"));
+    assert!(stdout.contains("Effective decision: unknown"));
+}
+
+#[test]
+fn trust_status_reports_trusted_when_no_inputs_exist() {
+    let temp = TempDir::new().expect("tempdir");
+    let project_dir = canonical_project_dir(&temp);
+
+    let mut command = neo();
+    command.current_dir(temp.path()).args(["trust", "status"]);
+    let stdout = run(command);
+
+    assert!(stdout.contains(&format!("Directory: {}", project_dir.display())));
+    assert!(stdout.contains("Detected inputs: none"));
+    assert!(stdout.contains("Effective decision: trusted"));
+}
+
+#[test]
+fn trust_approve_and_clear_persist_and_remove_decision() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::write(temp.path().join("AGENTS.md"), "rules").expect("write agents file");
+    let project_dir = canonical_project_dir(&temp);
+
+    let mut approve = neo();
+    approve.current_dir(temp.path()).args(["trust", "approve"]);
+    let approve_stdout = run(approve);
+    assert!(approve_stdout.contains("approved trust"));
+    assert!(approve_stdout.contains(&project_dir.display().to_string()));
+
+    let mut status_after_approve = neo();
+    status_after_approve
+        .current_dir(temp.path())
+        .args(["trust", "status"]);
+    let status_stdout = run(status_after_approve);
+    assert!(status_stdout.contains("Effective decision: trusted"));
+
+    let mut clear = neo();
+    clear.current_dir(temp.path()).args(["trust", "clear"]);
+    let clear_stdout = run(clear);
+    assert!(clear_stdout.contains("cleared trust decision"));
+
+    let mut status_after_clear = neo();
+    status_after_clear
+        .current_dir(temp.path())
+        .args(["trust", "status"]);
+    let status_after_clear_stdout = run(status_after_clear);
+    assert!(status_after_clear_stdout.contains("Effective decision: unknown"));
+}
+
+#[test]
+fn trust_deny_persists_untrusted_decision() {
+    let temp = TempDir::new().expect("tempdir");
+    fs::write(temp.path().join("AGENTS.md"), "rules").expect("write agents file");
+
+    let mut deny = neo();
+    deny.current_dir(temp.path()).args(["trust", "deny"]);
+    let deny_stdout = run(deny);
+    assert!(deny_stdout.contains("denied trust"));
+
+    let mut status = neo();
+    status.current_dir(temp.path()).args(["trust", "status"]);
+    let status_stdout = run(status);
+    assert!(status_stdout.contains("Effective decision: untrusted"));
 }
 
 fn write_extension_manifest(root: &std::path::Path, id: &str, name: &str, version: &str) {

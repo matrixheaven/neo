@@ -99,6 +99,7 @@ fn handle_get_commands(
         &config.project_dir,
         config::global_prompts_dir().as_deref(),
         &config.prompt_templates,
+        config.project_trusted,
     ) {
         Ok(commands) => commands,
         Err(err) => {

@@ -44,11 +44,16 @@ pub(crate) fn expand_prompt_template_args(
     global_prompts_dir: Option<&Path>,
     explicit_selectors: &[String],
     disabled: bool,
+    project_trusted: bool,
 ) -> anyhow::Result<Vec<String>> {
     let selectors =
         parse_prompt_template_selectors(explicit_selectors, project_dir, global_prompts_dir)?;
-    let explicit_templates =
-        load_explicit_prompt_templates(&selectors.includes, project_dir, global_prompts_dir)?;
+    let explicit_templates = load_explicit_prompt_templates(
+        &selectors.includes,
+        project_dir,
+        global_prompts_dir,
+        project_trusted,
+    )?;
 
     let Some(invocation) = PromptInvocation::from_prompt_args(&prompt) else {
         if let [template] = explicit_templates.as_slice() {
@@ -70,6 +75,7 @@ pub(crate) fn expand_prompt_template_args(
         project_dir,
         global_prompts_dir,
         &selectors.exclusions,
+        project_trusted,
     )?
     else {
         return Ok(prompt);
@@ -81,22 +87,28 @@ pub(crate) fn discover_prompt_template_commands(
     project_dir: &Path,
     global_prompts_dir: Option<&Path>,
     configured_selectors: &[String],
+    project_trusted: bool,
 ) -> anyhow::Result<Vec<PromptTemplateCommand>> {
     let selectors =
         parse_prompt_template_selectors(configured_selectors, project_dir, global_prompts_dir)?;
     let mut commands = Vec::new();
     for selector in &selectors.includes {
         commands.extend(
-            load_selected_prompt_templates(selector, project_dir, global_prompts_dir)?
-                .into_iter()
-                .map(|template| PromptTemplateCommand {
-                    template,
-                    location: PromptTemplateLocation::Configured,
-                }),
+            load_selected_prompt_templates(
+                selector,
+                project_dir,
+                global_prompts_dir,
+                project_trusted,
+            )?
+            .into_iter()
+            .map(|template| PromptTemplateCommand {
+                template,
+                location: PromptTemplateLocation::Configured,
+            }),
         );
     }
     commands.extend(
-        load_project_prompt_templates(project_dir)?
+        load_project_prompt_templates(project_dir, project_trusted)?
             .into_iter()
             .filter(|template| !is_prompt_template_excluded(template, &selectors.exclusions))
             .map(|template| PromptTemplateCommand {
@@ -137,9 +149,16 @@ const fn location_rank(location: PromptTemplateLocation) -> u8 {
 /// Project-local prompt templates are no longer loaded — prompts live only
 /// under the single neo home (`~/.neo/prompts`). Retained as a no-op so
 /// callers that still thread `project_dir` compile unchanged.
+///
+/// When `project_trusted` is `false`, project-local templates are explicitly
+/// not loaded even if a project-local prompts directory is introduced later.
 pub(crate) fn load_project_prompt_templates(
     _project_dir: &Path,
+    project_trusted: bool,
 ) -> anyhow::Result<Vec<PromptTemplate>> {
+    if !project_trusted {
+        return Ok(Vec::new());
+    }
     Ok(Vec::new())
 }
 
@@ -217,8 +236,9 @@ fn find_prompt_template_by_name(
     name: &str,
     project_dir: &Path,
     global_prompts_dir: Option<&Path>,
+    project_trusted: bool,
 ) -> anyhow::Result<Option<PromptTemplate>> {
-    if let Some(template) = load_project_prompt_templates(project_dir)?
+    if let Some(template) = load_project_prompt_templates(project_dir, project_trusted)?
         .into_iter()
         .find(|template| template.name == name)
     {
@@ -237,8 +257,9 @@ fn find_auto_prompt_template_by_name(
     project_dir: &Path,
     global_prompts_dir: Option<&Path>,
     exclusions: &[PromptTemplateExclusion],
+    project_trusted: bool,
 ) -> anyhow::Result<Option<PromptTemplate>> {
-    if let Some(template) = load_project_prompt_templates(project_dir)?
+    if let Some(template) = load_project_prompt_templates(project_dir, project_trusted)?
         .into_iter()
         .filter(|template| !is_prompt_template_excluded(template, exclusions))
         .find(|template| template.name == name)
@@ -285,10 +306,16 @@ fn load_explicit_prompt_templates(
     selectors: &[String],
     project_dir: &Path,
     global_prompts_dir: Option<&Path>,
+    project_trusted: bool,
 ) -> anyhow::Result<Vec<PromptTemplate>> {
     let mut templates = Vec::new();
     for selector in selectors {
-        let selected = load_selected_prompt_templates(selector, project_dir, global_prompts_dir)?;
+        let selected = load_selected_prompt_templates(
+            selector,
+            project_dir,
+            global_prompts_dir,
+            project_trusted,
+        )?;
         for template in selected {
             if let Some(existing) = templates
                 .iter()
@@ -351,6 +378,7 @@ fn load_selected_prompt_templates(
     selector: &str,
     project_dir: &Path,
     global_prompts_dir: Option<&Path>,
+    project_trusted: bool,
 ) -> anyhow::Result<Vec<PromptTemplate>> {
     if selector.is_empty() {
         anyhow::bail!("prompt template selector cannot be empty");
@@ -358,7 +386,8 @@ fn load_selected_prompt_templates(
     if let Some(path) = selector_as_template_path(selector) {
         return load_templates_from_checked_path(path, project_dir, global_prompts_dir);
     }
-    if let Some(template) = find_prompt_template_by_name(selector, project_dir, global_prompts_dir)?
+    if let Some(template) =
+        find_prompt_template_by_name(selector, project_dir, global_prompts_dir, project_trusted)?
     {
         return Ok(vec![template]);
     }

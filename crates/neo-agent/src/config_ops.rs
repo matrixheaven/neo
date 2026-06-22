@@ -667,6 +667,7 @@ model = "old"
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
             project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
             project_dir: project_dir.to_path_buf(),
             config_path: project_dir.join(".neo/config.toml"),
         }

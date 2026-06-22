@@ -58,7 +58,10 @@ adds follow-up instructions. User-global fallbacks live under `~/.neo/`.
 
 Project context files can live in `AGENTS.md` or `CLAUDE.md` at the project or
 an ancestor directory. User-global context files always load; project context
-files require project trust:
+files require project trust. In interactive TUI mode, Neo shows a blocking trust
+dialog at startup when a project context file is detected and no decision is
+recorded; you can trust the current workspace, trust an ancestor, continue
+untrusted, or deny.
 
 ```bash
 cargo run -p neo-agent -- trust status
