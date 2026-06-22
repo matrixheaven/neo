@@ -1085,8 +1085,12 @@ impl TranscriptPane {
             approval.queued_label = prompt.queued_label;
             approval.queued_count = self.queued_approvals.len();
             approval.resolved = None;
-            approval.session_option_label.clone_from(&session_option_label);
-            approval.prefix_option_label.clone_from(&prefix_option_label);
+            approval
+                .session_option_label
+                .clone_from(&session_option_label);
+            approval
+                .prefix_option_label
+                .clone_from(&prefix_option_label);
             return;
         }
 
