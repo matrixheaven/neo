@@ -26,6 +26,20 @@ fn heading_h1_renders_without_hash_prefix() {
 }
 
 #[test]
+fn heading_h1_renders_bold_and_underlined() {
+    let lines = render_markdown("# Title", 80, &TuiTheme::default(), "", "");
+    let ansi = lines[0].to_ansi();
+    assert!(
+        ansi.contains("\x1b[1m"),
+        "h1 should emit ANSI bold: {ansi:?}"
+    );
+    assert!(
+        ansi.contains("\x1b[4m"),
+        "h1 should emit ANSI underline: {ansi:?}"
+    );
+}
+
+#[test]
 fn bold_and_italic_strip_markers() {
     let lines = plain("this is **bold** and *italic*", 80);
     let joined = lines.join("\n");
@@ -47,6 +61,68 @@ fn inline_code_renders_without_backticks() {
         "code text present: {joined}"
     );
     assert!(!joined.contains('`'), "backticks stripped: {joined}");
+}
+
+#[test]
+fn inline_code_renders_with_brand_color() {
+    let theme = TuiTheme::default();
+    let lines = render_markdown("use `cargo build` to compile", 80, &theme, "", "");
+    let ansi = lines[0].to_ansi();
+    let expected = "\x1b[38;2;198;120;221m";
+    assert!(
+        ansi.contains(expected),
+        "inline code should be painted with brand color: {ansi:?}"
+    );
+}
+
+#[test]
+fn bold_inline_renders_with_bold_ansi() {
+    let lines = render_markdown("this is **bold** text", 80, &TuiTheme::default(), "", "");
+    let ansi = lines[0].to_ansi();
+    assert!(
+        ansi.contains("\x1b[1m"),
+        "bold inline should emit ANSI bold: {ansi:?}"
+    );
+}
+
+#[test]
+fn link_renders_with_underline_and_brand_color() {
+    let lines = render_markdown(
+        "see [Neo](https://neo.dev) for details",
+        80,
+        &TuiTheme::default(),
+        "",
+        "",
+    );
+    let ansi = lines[0].to_ansi();
+    assert!(
+        ansi.contains("\x1b[38;2;198;120;221m"),
+        "link text should use brand color: {ansi:?}"
+    );
+    assert!(
+        ansi.contains("\x1b[4m"),
+        "link text should be underlined: {ansi:?}"
+    );
+}
+
+#[test]
+fn italic_inline_renders_with_italic_ansi() {
+    let lines = render_markdown("this is *italic* text", 80, &TuiTheme::default(), "", "");
+    let ansi = lines[0].to_ansi();
+    assert!(
+        ansi.contains("\x1b[3m"),
+        "italic inline should emit ANSI italic: {ansi:?}"
+    );
+}
+
+#[test]
+fn strikethrough_inline_renders_with_crossed_out_ansi() {
+    let lines = render_markdown("this is ~~deleted~~ text", 80, &TuiTheme::default(), "", "");
+    let ansi = lines[0].to_ansi();
+    assert!(
+        ansi.contains("\x1b[9m"),
+        "strikethrough inline should emit ANSI crossed-out: {ansi:?}"
+    );
 }
 
 #[test]
@@ -200,6 +276,32 @@ fn finalized_bullet_prefix_keeps_first_line_inline_and_indents_continuation() {
             "continuation line indented with two spaces: {line:?}"
         );
     }
+}
+
+#[test]
+fn wrapped_inline_code_keeps_brand_color_on_continuation_lines() {
+    // Force a wrap so the styled inline code may land on a continuation line.
+    let lines = render_markdown(
+        "some words before `cargo build` and more words after",
+        20,
+        &TuiTheme::default(),
+        "● ",
+        "  ",
+    );
+    assert!(
+        lines.len() > 1,
+        "text should wrap to multiple lines: {lines:?}"
+    );
+    let joined = lines
+        .iter()
+        .map(neo_tui::core::Line::to_ansi)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let brand_color = "\x1b[38;2;198;120;221m";
+    assert!(
+        joined.contains(brand_color),
+        "wrapped inline code should still be painted with brand color: {joined:?}"
+    );
 }
 
 #[test]
