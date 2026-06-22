@@ -34,6 +34,12 @@ impl Span {
         &self.text
     }
 
+    /// The style applied to this span.
+    #[must_use]
+    pub fn style(&self) -> Style {
+        self.style
+    }
+
     #[must_use]
     pub fn visible_width(&self) -> usize {
         visible_width(&self.text)

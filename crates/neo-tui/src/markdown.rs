@@ -8,7 +8,6 @@ use std::sync::OnceLock;
 
 use crate::ansi::{Color, Style, clip_plain_to_width, visible_width};
 use crate::chrome::TuiTheme;
-use crate::components::wrap_width;
 use crate::core::{Line, Span};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
@@ -358,16 +357,16 @@ impl<'a> MdRenderer<'a> {
 
     fn emit_wrapped_spans(&mut self, spans: &[Span], prefix: &str) {
         let body_width = self.width.saturating_sub(visible_width(prefix)).max(1);
-        let single = spans_to_ansi(spans);
-        let wrapped = wrap_width(&single, body_width);
+        let wrapped = wrap_spans(spans, body_width);
         let indent = " ".repeat(visible_width(prefix));
-        for (i, line) in wrapped.into_iter().enumerate() {
-            let text = crate::ansi::strip_ansi(&line);
-            if i == 0 {
-                self.out.push(Line::raw(format!("{prefix}{text}")));
+        for (i, line_spans) in wrapped.into_iter().enumerate() {
+            let mut line = Line::from_spans(line_spans);
+            line = if i == 0 {
+                line.prepend_prefix(prefix)
             } else {
-                self.out.push(Line::raw(format!("{indent}{text}")));
-            }
+                line.prepend_prefix(&indent)
+            };
+            self.out.push(line);
         }
     }
 
@@ -459,15 +458,72 @@ impl<'a> MdRenderer<'a> {
     }
 }
 
-fn spans_to_ansi(spans: &[Span]) -> String {
-    spans.iter().map(Span::to_ansi).collect()
-}
-
 fn spans_to_plain(spans: &[Span]) -> String {
     spans
         .iter()
         .map(|s| crate::ansi::strip_ansi(&s.to_ansi()))
         .collect()
+}
+
+/// Wrap a sequence of styled spans to a maximum visible width, preserving the
+/// style of each original span. Spans that fit entirely on the current line are
+/// kept intact; spans that would overflow are split and continued on the next
+/// line.
+fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Vec<Span>> {
+    if max_width == 0 {
+        return vec![Vec::new()];
+    }
+
+    let mut lines: Vec<Vec<Span>> = Vec::new();
+    let mut current_line: Vec<Span> = Vec::new();
+    let mut current_width: usize = 0;
+
+    for span in spans {
+        let style = span.style();
+        let text = span.text();
+        let span_width = span.visible_width();
+
+        if span_width == 0 {
+            continue;
+        }
+
+        // If the span fits on the current line, keep it whole.
+        if current_width + span_width <= max_width {
+            current_line.push(span.clone());
+            current_width += span_width;
+            continue;
+        }
+
+        // The span does not fit. Flush the current line first.
+        if !current_line.is_empty() {
+            lines.push(std::mem::take(&mut current_line));
+            current_width = 0;
+        }
+
+        // Now the line is empty. If the span still overflows the width, hard-wrap it.
+        if span_width > max_width {
+            let mut remaining = text;
+            while !remaining.is_empty() {
+                let chunk = clip_plain_to_width(remaining, max_width);
+                if chunk.is_empty() {
+                    break;
+                }
+                let consumed = chunk.len();
+                current_line.push(Span::styled(chunk, style));
+                lines.push(std::mem::take(&mut current_line));
+                remaining = &remaining[consumed..];
+            }
+        } else {
+            current_line.push(span.clone());
+            current_width = span_width;
+        }
+    }
+
+    if !current_line.is_empty() || lines.is_empty() {
+        lines.push(current_line);
+    }
+
+    lines
 }
 
 fn highlight_code(code: &str, lang: &str, theme: &TuiTheme) -> Vec<String> {
