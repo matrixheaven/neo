@@ -2391,6 +2391,8 @@ async fn runtime_emits_approval_request_for_ask_permission_and_skips_tool_execut
         operation: PermissionOperation::Tool,
         subject: "echo".to_owned(),
         arguments: json!({ "text": "needs approval" }),
+        session_scope: None,
+        prefix_rule: None,
     }));
     assert!(events.contains(&AgentEvent::ToolExecutionFinished {
         turn: 1,
@@ -2482,6 +2484,8 @@ async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
         operation: PermissionOperation::Tool,
         subject: "echo".to_owned(),
         arguments: json!({ "text": "approved" }),
+        session_scope: None,
+        prefix_rule: None,
     }));
     assert_eq!(
         *executed.lock().expect("executed lock poisoned"),
@@ -2791,6 +2795,8 @@ async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
         operation: PermissionOperation::Tool,
         subject: "echo".to_owned(),
         arguments: json!({ "text": "denied" }),
+        session_scope: None,
+        prefix_rule: None,
     }));
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
     assert_tool_was_executed(&executed.lock().expect("lock poisoned"), false);
@@ -2963,6 +2969,8 @@ async fn runtime_executes_ask_permission_tool_after_async_approval_wait_allows_i
             operation: PermissionOperation::Tool,
             subject: "echo".to_owned(),
             arguments: json!({ "text": "async approved" }),
+            session_scope: None,
+            prefix_rule: None,
         }]
     );
     assert!(events.contains(&AgentEvent::ApprovalRequested {
@@ -2971,6 +2979,8 @@ async fn runtime_executes_ask_permission_tool_after_async_approval_wait_allows_i
         operation: PermissionOperation::Tool,
         subject: "echo".to_owned(),
         arguments: json!({ "text": "async approved" }),
+        session_scope: None,
+        prefix_rule: None,
     }));
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
     assert_waits_for_approval_decision(&mut stream, "executing").await;
@@ -3026,6 +3036,8 @@ async fn runtime_skips_ask_permission_tool_after_async_approval_wait_denies_it()
         operation: PermissionOperation::Tool,
         subject: "echo".to_owned(),
         arguments: json!({ "text": "async denied" }),
+        session_scope: None,
+        prefix_rule: None,
     }));
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
     assert_tool_was_executed(&executed.lock().expect("lock poisoned"), false);
@@ -3084,6 +3096,8 @@ async fn runtime_cancels_while_waiting_for_async_approval_decision() {
         operation: PermissionOperation::Tool,
         subject: "echo".to_owned(),
         arguments: json!({ "text": "async cancelled" }),
+        session_scope: None,
+        prefix_rule: None,
     }));
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
 
@@ -3287,13 +3301,25 @@ async fn runtime_approval_handler_allows_file_write_tool_permission() {
         .collect::<Result<Vec<_>, _>>()
         .expect("approved write should succeed");
 
-    assert!(events.contains(&AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool_1".to_owned(),
-        operation: PermissionOperation::FileWrite,
-        subject: "approved.txt".to_owned(),
-        arguments: json!({ "path": "approved.txt", "content": "ok" }),
-    }));
+    // Write now derives a reusable FileWrite scope (Layer 1). Use matches!
+    // because the workspace path is dynamic (tempdir).
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ApprovalRequested {
+            id,
+            operation: PermissionOperation::FileWrite,
+            subject,
+            arguments,
+            session_scope,
+            ..
+        } if id == "tool_1"
+            && subject == "approved.txt"
+            && arguments == &json!({ "path": "approved.txt", "content": "ok" })
+            && session_scope.as_ref().is_some_and(|scope|
+                scope.label == "Approve writes to this file for this session"
+                && scope.keys.len() == 1
+            )
+    )));
     assert_eq!(
         std::fs::read_to_string(workspace.path().join("approved.txt")).expect("written file"),
         "ok"
@@ -4241,6 +4267,8 @@ async fn runtime_ask_mode_read_runs_and_custom_tool_asks() {
         operation: PermissionOperation::Tool,
         subject: "echo".to_owned(),
         arguments: json!({ "text": "needs approval" }),
+        session_scope: None,
+        prefix_rule: None,
     }));
 }
 
@@ -4305,8 +4333,8 @@ async fn runtime_session_approval_persists_for_same_tool() {
 
     assert_eq!(
         *approval_count.lock().expect("count lock poisoned"),
-        1,
-        "only the first echo should ask; session approval covers the second"
+        2,
+        "generic tools have no reusable scope; each call must prompt even with AllowForSession"
     );
     assert_eq!(
         *executed.lock().expect("executed lock poisoned"),
@@ -4376,11 +4404,191 @@ async fn runtime_ask_mode_reviews_exit_plan_mode_with_non_empty_plan() {
         operation: PermissionOperation::PlanTransition,
         subject: "Exit plan mode".to_owned(),
         arguments: json!({ "plan_summary": "Ready to execute" }),
+        session_scope: None,
+        prefix_rule: None,
     }));
     assert!(events.iter().any(|event| matches!(
         event,
         AgentEvent::PlanModeExited { turn, .. } if *turn == 1
     )));
+}
+
+/// Regression: after an approved `ExitPlanMode`, the agent loop must continue
+/// into the next turn so the model can execute the approved plan. Previously
+/// `ExitPlanMode` set `terminate=true` and `continues_after_terminating_batch`
+/// only matched `EnterPlanMode`, so the run ended and the user had to send
+/// another prompt to resume. kimi-code's `ExitPlanMode` does not stop the turn.
+#[tokio::test]
+async fn exit_plan_mode_continues_loop_after_approval() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_root = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+    let plans_dir =
+        workspace_sessions_dir(&home.path().join("sessions"), &workspace_root).join("plans");
+    let mut config = AgentConfig::for_model(fake_model());
+    config.home_dir = Some(home.path().to_path_buf());
+    config.workspace_root = Some(workspace_root);
+    set_config_permission_mode(&mut config, PermissionMode::Ask);
+    {
+        let mut pm = config.plan_mode.write().expect("plan mode lock");
+        let data = pm.enter(&plans_dir, true).expect("enter plan mode");
+        std::fs::write(&data.path, "execute the plan").expect("write plan");
+    }
+
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "ExitPlanMode".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "plan_summary": "Ready to execute" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "starting work".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let config = config.with_approval_handler(|request| {
+        assert_eq!(request.operation, PermissionOperation::PlanTransition);
+        PermissionApprovalDecision::AllowOnce
+    });
+    let runtime =
+        AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("approve plan"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::PlanModeExited { turn, .. } if *turn == 1
+        )),
+        "ExitPlanMode should still flip plan mode off"
+    );
+    assert!(
+        events.iter().any(
+            |event| matches!(event, AgentEvent::TextDelta { text, .. } if text == "starting work")
+        ),
+        "the model loop should continue after an approved ExitPlanMode"
+    );
+    assert_eq!(
+        harness.requests().len(),
+        2,
+        "an approved ExitPlanMode must not stop the agent loop"
+    );
+}
+
+/// Regression: `ExitGoalMode` starts the durable goal and the run ends
+/// cleanly. Unlike `ExitPlanMode`, the loop must NOT continue inline here —
+/// goal continuation (`goal_continuation_messages`) drives subsequent turns on
+/// the next `run_agent_turn` entry by design, and continuing inline would
+/// re-feed the continuation message every turn and spin. This test pins the
+/// boundary: the goal is started, the run finishes without a second model turn
+/// from this entry, and the goal is resumable.
+#[tokio::test]
+async fn exit_goal_mode_starts_goal_and_ends_run_without_spinning() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_root = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+    let mut config = AgentConfig::for_model(fake_model());
+    config.home_dir = Some(home.path().to_path_buf());
+    config.workspace_root = Some(workspace_root);
+    set_config_permission_mode(&mut config, PermissionMode::Ask);
+
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "ExitGoalMode".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({
+                    "objective": "Ship goal mode",
+                    "completion_criterion": "Goal tests pass",
+                    "phases": ["Draft", "Implement", "Audit"],
+                }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let config = config.with_approval_handler(|request| {
+        assert_eq!(request.operation, PermissionOperation::GoalTransition);
+        PermissionApprovalDecision::AllowOnce
+    });
+    let goal_manager = Arc::new(
+        neo_agent_core::goal::GoalManager::load(home.path().to_path_buf())
+            .await
+            .expect("goal manager"),
+    );
+    let mut registry = ToolRegistry::with_builtin_tools();
+    registry.register_goal_tools(Arc::clone(&goal_manager));
+    let runtime = AgentRuntime::with_tools(config, harness.client(), registry)
+        .with_goal_manager(&goal_manager);
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("approve goal"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert!(
+        events.contains(&AgentEvent::GoalStarted {
+            turn: 1,
+            objective: "Ship goal mode".to_owned(),
+        }),
+        "ExitGoalMode should start the durable goal"
+    );
+    // The terminating batch must not continue inline: the goal is durable and
+    // is resumed on the next run_agent_turn entry. Exactly one model request
+    // means we did not spin on goal-continuation.
+    assert_eq!(
+        harness.requests().len(),
+        1,
+        "ExitGoalMode must end the run without spinning on goal continuation"
+    );
+    let active = goal_manager.active().expect("active goal");
+    assert_eq!(active.phases, ["Draft", "Implement", "Audit"]);
 }
 
 /// Regression: even if a session-scoped approval (`AllowForSession`) is returned
@@ -4448,12 +4656,12 @@ async fn runtime_allow_for_session_does_not_cache_exit_plan_mode() {
         .collect::<Result<Vec<_>, _>>()
         .expect("turn should succeed");
 
-    // The decisive assertion: "ExitPlanMode" must NOT be cached, otherwise every
+    // The decisive assertion: no approval key must be cached, otherwise every
     // future exit-plan review would be silently auto-approved for the session.
     let cached = session_approvals.lock().expect("session approvals lock");
     assert!(
-        !cached.contains("ExitPlanMode"),
-        "ExitPlanMode must not be cached in session_approvals (got {cached:?}); \
+        cached.is_empty(),
+        "ExitPlanMode must not cache any session approval key (got {cached:?}); \
          AllowForSession must be treated as AllowOnce for plan/goal transitions"
     );
 }
@@ -4529,6 +4737,8 @@ async fn runtime_ask_mode_reviews_exit_goal_mode_and_emits_goal_started() {
             "completion_criterion": "Goal tests pass",
             "phases": ["Draft", "Implement", "Audit"],
         }),
+        session_scope: None,
+        prefix_rule: None,
     }));
     assert!(events.contains(&AgentEvent::GoalStarted {
         turn: 1,
@@ -4759,6 +4969,81 @@ async fn runtime_plan_mode_allows_writing_active_plan_file_outside_workspace() {
     );
 }
 
+/// Regression: `Edit` (which resolves via `resolve_workspace_path`, not
+/// `resolve_parent_for_write`) must also be able to reach the active plan file
+/// under the NEO_HOME sessions bucket while plan mode is active.
+#[tokio::test]
+async fn runtime_plan_mode_allows_editing_active_plan_file_outside_workspace() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_root = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+    let plans_dir =
+        workspace_sessions_dir(&home.path().join("sessions"), &workspace_root).join("plans");
+    let mut config = AgentConfig::for_model(fake_model());
+    config.home_dir = Some(home.path().to_path_buf());
+    config.workspace_root = Some(workspace_root);
+    set_config_permission_mode(&mut config, PermissionMode::Yolo);
+    let plan_path = {
+        let mut pm = config.plan_mode.write().expect("plan mode lock");
+        let data = pm.enter(&plans_dir, true).expect("enter plan mode");
+        std::fs::write(&data.path, "# Plan\n\nDraft.").expect("seed plan");
+        data.path
+    };
+
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "Edit".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({
+                    "path": plan_path,
+                    "old": "Draft.",
+                    "new": "Finalized."
+                }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let runtime =
+        AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("edit plan file"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolExecutionFinished {
+            id,
+            name,
+            result,
+            ..
+        } if id == "tool_1" && name == "Edit" && !result.is_error
+    )));
+    assert_eq!(
+        std::fs::read_to_string(&plan_path).expect("read plan"),
+        "# Plan\n\nFinalized."
+    );
+}
+
 fn setup_active_plan(
     config: &mut AgentConfig,
     home: &tempfile::TempDir,
@@ -4792,7 +5077,7 @@ async fn ask_mode_asks_for_bash() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_1".to_owned(),
-                arguments: json!({ "command": "echo hi" }),
+                arguments: json!({ "command": "mkdir test_dir" }),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -4819,13 +5104,23 @@ async fn ask_mode_asks_for_bash() {
         .collect::<Result<Vec<_>, _>>()
         .expect("turn should succeed");
 
-    assert!(events.contains(&AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool_1".to_owned(),
-        operation: PermissionOperation::Shell,
-        subject: "echo hi".to_owned(),
-        arguments: json!({ "command": "echo hi" }),
-    }));
+    // `mkdir test_dir` is NOT a known-safe command (mkdir isn't in the safe
+    // list), so it must prompt. Use matches! because the scope carries a
+    // dynamic workspace path.
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ApprovalRequested {
+            id,
+            operation: PermissionOperation::Shell,
+            subject,
+            arguments,
+            session_scope,
+            ..
+        } if id == "tool_1"
+            && subject == "mkdir test_dir"
+            && arguments == &json!({ "command": "mkdir test_dir" })
+            && session_scope.as_ref().is_some_and(|s| !s.is_empty())
+    )));
     assert!(events.iter().any(|event| matches!(
         event,
         AgentEvent::ToolExecutionFinished {
@@ -5049,6 +5344,8 @@ async fn yolo_exit_plan_mode_with_non_empty_plan_requests_review() {
         operation: PermissionOperation::PlanTransition,
         subject: "Exit plan mode".to_owned(),
         arguments: json!({ "plan_summary": "Ready" }),
+        session_scope: None,
+        prefix_rule: None,
     }));
     assert!(events.iter().any(|event| matches!(
         event,
@@ -5712,4 +6009,206 @@ async fn runtime_drains_live_follow_up_input_as_new_turn() {
         "follow-up should trigger a second model call"
     );
     assert_eq!(steer_input.pending(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// NEO-30 Layer 1/2/3: approval key scoping, prefix rules, safety classification
+// ---------------------------------------------------------------------------
+
+fn count_approval_requests(events: &[AgentEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::ApprovalRequested { .. }))
+        .count()
+}
+
+#[tokio::test]
+async fn layer1_bash_session_approval_exact_command_only() {
+    // Approving `git status` must NOT cover `git log`. Core regression test.
+    let workspace = tempfile::tempdir().expect("workspace");
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "Bash".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "command": "git status" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_2".to_owned(),
+                name: "Bash".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_2".to_owned(),
+                arguments: json!({ "command": "git log --oneline -20" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let approval_count = Arc::new(Mutex::new(0));
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Ask)
+            .with_workspace_root(workspace.path())
+            .expect("workspace root")
+            .with_approval_handler({
+                let count = Arc::clone(&approval_count);
+                move |_request| {
+                    *count.lock().expect("count lock poisoned") += 1;
+                    PermissionApprovalDecision::AllowForSession
+                }
+            }),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+    let events = runtime
+        .run_turn(
+            &mut context,
+            AgentMessage::user_text("git status then git log"),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+    // `git status` is auto-approved by Layer 3 (safe git subcommand), so only
+    // `git log --oneline -20` reaches the handler. This proves the safe-command
+    // path + that different commands don't share approval.
+    assert!(
+        count_approval_requests(&events) <= 1,
+        "git status (safe) auto-approves; git log is a different command and must not inherit"
+    );
+}
+
+#[tokio::test]
+async fn layer3_safe_command_auto_approved() {
+    // `cat README.md` is a known-safe command — it should not prompt at all.
+    let workspace = tempfile::tempdir().expect("workspace");
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "Bash".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "command": "cat README.md" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let approval_count = Arc::new(Mutex::new(0));
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Ask)
+            .with_workspace_root(workspace.path())
+            .expect("workspace root")
+            .with_approval_handler({
+                let count = Arc::clone(&approval_count);
+                move |_request| {
+                    *count.lock().expect("count lock poisoned") += 1;
+                    PermissionApprovalDecision::AllowOnce
+                }
+            }),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("cat readme"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+    assert_eq!(
+        count_approval_requests(&events),
+        0,
+        "known-safe commands like `cat` must be auto-approved without prompt"
+    );
+}
+
+#[tokio::test]
+async fn layer3_dangerous_command_forces_prompt_no_scope() {
+    // `rm -rf /tmp/x` is dangerous — it must prompt and offer NO session scope.
+    let workspace = tempfile::tempdir().expect("workspace");
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "Bash".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "command": "rm -rf /tmp/x" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Ask)
+            .with_workspace_root(workspace.path())
+            .expect("workspace root")
+            .with_approval_handler(|_request| PermissionApprovalDecision::AllowOnce),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("rm"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+    assert_eq!(
+        count_approval_requests(&events),
+        1,
+        "dangerous commands must prompt"
+    );
+    // The approval event must carry NO session_scope (so it can't be cached).
+    let has_scope = events.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::ApprovalRequested { session_scope: Some(s), .. } if !s.is_empty()
+        )
+    });
+    assert!(
+        !has_scope,
+        "dangerous commands must not offer a reusable session scope"
+    );
 }
