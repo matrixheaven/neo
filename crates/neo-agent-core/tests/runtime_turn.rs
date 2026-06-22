@@ -2505,6 +2505,7 @@ async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn live_permission_switch_to_auto_skips_approval_for_later_tool_calls() {
     // One turn with two model ToolUse round-trips. The first echo requires
     // approval in Ask mode. The approval handler switches the shared live mode
@@ -2618,6 +2619,7 @@ async fn live_permission_switch_to_auto_skips_approval_for_later_tool_calls() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn live_permission_switch_to_ask_requests_approval_for_later_tool_calls() {
     // Inverse of the above: start Auto (no approval), flip live mode to Ask
     // mid-turn via the async after-tool hook, and the second generic tool call
@@ -4971,7 +4973,7 @@ async fn runtime_plan_mode_allows_writing_active_plan_file_outside_workspace() {
 
 /// Regression: `Edit` (which resolves via `resolve_workspace_path`, not
 /// `resolve_parent_for_write`) must also be able to reach the active plan file
-/// under the NEO_HOME sessions bucket while plan mode is active.
+/// under the `NEO_HOME` sessions bucket while plan mode is active.
 #[tokio::test]
 async fn runtime_plan_mode_allows_editing_active_plan_file_outside_workspace() {
     let home = tempfile::tempdir().expect("home");
