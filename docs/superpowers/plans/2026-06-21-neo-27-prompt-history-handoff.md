@@ -1,4 +1,4 @@
-# NEO-23 Cross-Session Prompt History Handoff Plan
+# NEO-27 Cross-Session Prompt History Handoff Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -12,7 +12,7 @@
 
 ## Linear Context
 
-- Linear: [NEO-23](https://linear.app/ezc2/issue/NEO-23/neo-23-implement-cross-session-prompt-input-history-with-updown-arrow)
+- Linear: [NEO-27](https://linear.app/neo-agent/issue/NEO-27/neo-27-implement-cross-session-prompt-input-history-with-updown-arrow)
 - Priority: Urgent
 - Project: TUI & UX Polish
 - Summary: Implement global prompt input history across sessions for the current workspace. Up/Down recalls prompts sorted by send time, not by session recency.

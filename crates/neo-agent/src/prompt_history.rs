@@ -6,7 +6,7 @@
 //! composer's in-memory history on startup so Up/Down can recall them across
 //! sessions in the same workspace.
 //!
-//! Storage rules (see `docs/superpowers/plans/2026-06-21-neo-23-prompt-history-handoff.md`):
+//! Storage rules (see `docs/superpowers/plans/2026-06-21-neo-27-prompt-history-handoff.md`):
 //! - Append only; never rewrite the whole file.
 //! - Skip empty/whitespace-only prompts.
 //! - Skip consecutive duplicate prompts (non-consecutive repeats are kept).

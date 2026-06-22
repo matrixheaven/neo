@@ -1,4 +1,4 @@
-# NEO-22 `/new` Fresh Session Handoff Plan
+# NEO-26 `/new` Fresh Session Handoff Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -12,7 +12,7 @@
 
 ## Linear Context
 
-- Linear: [NEO-22](https://linear.app/ezc2/issue/NEO-22/neo-22-implement-new-slash-command-to-start-a-fresh-session)
+- Linear: [NEO-26](https://linear.app/neo-agent/issue/NEO-26/neo-26-implement-new-slash-command-to-start-a-fresh-session)
 - Priority: Urgent
 - Project: CLI Commands
 - Summary: Implement `/new` slash command, alias `/clear`, to create a new session, clear in-memory context/transcript, and show welcome.
