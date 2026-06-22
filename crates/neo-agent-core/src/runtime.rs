@@ -417,6 +417,7 @@ impl AgentConfig {
     /// Persist the current Layer-2 prefix rules to `<home>/approval_rules.json`.
     /// Returns the path written, or `None` if no home dir is set or the write
     /// failed (a failed write is logged but does not interrupt the turn).
+    #[must_use]
     pub fn save_prefix_approval_rules(&self) -> Option<PathBuf> {
         let path = self.approval_rules_path()?;
         let store = self
@@ -425,11 +426,11 @@ impl AgentConfig {
             .ok()
             .map(|guard| guard.clone())?;
         let text = serde_json::to_string_pretty(&store).ok()?;
-        if let Some(parent) = path.parent() {
-            if std::fs::create_dir_all(parent).is_err() {
-                eprintln!("failed to create dir for approval rules");
-                return None;
-            }
+        if let Some(parent) = path.parent()
+            && std::fs::create_dir_all(parent).is_err()
+        {
+            eprintln!("failed to create dir for approval rules");
+            return None;
         }
         if std::fs::write(&path, text).is_err() {
             eprintln!("failed to write approval rules at {}", path.display());
@@ -2617,6 +2618,7 @@ async fn prepare_tool_call(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn permission_preparation_for_mode(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
@@ -2790,8 +2792,7 @@ fn current_permission_mode(config: &AgentConfig) -> PermissionMode {
     config
         .live_permission_mode
         .read()
-        .map(|guard| *guard)
-        .unwrap_or(config.permission_mode)
+        .map_or(config.permission_mode, |guard| *guard)
 }
 
 fn is_default_approved_tool(tool_call: &AgentToolCall) -> bool {
@@ -2835,6 +2836,7 @@ fn access_for_tool(tool_call: &AgentToolCall, grant: bool) -> ToolAccess {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_approval(
     config: &AgentConfig,
     turn: u32,
@@ -2902,7 +2904,7 @@ async fn resolve_approval(
                     false
                 };
                 if should_save {
-                    config.save_prefix_approval_rules();
+                    let _ = config.save_prefix_approval_rules();
                 }
             }
             None
@@ -3065,12 +3067,12 @@ fn tokenize_shell_command(command: &str) -> Option<Vec<String>> {
             if ch == '"' {
                 in_double = false;
             } else if ch == '\\' {
-                if let Some(&next) = chars.peek() {
-                    if matches!(next, '"' | '\\' | '$' | '`') {
-                        current.push(next);
-                        chars.next();
-                        continue;
-                    }
+                if let Some(&next) = chars.peek()
+                    && matches!(next, '"' | '\\' | '$' | '`')
+                {
+                    current.push(next);
+                    chars.next();
+                    continue;
                 }
                 current.push(ch);
             } else {
@@ -3137,17 +3139,8 @@ fn is_compound_or_opaque_command(command: &str) -> bool {
                     return true;
                 }
             }
-            '|' if !in_single && !in_double => return true,
-            ';' if !in_single && !in_double => return true,
-            '>' if !in_single && !in_double => return true,
-            '<' if !in_single && !in_double => return true,
-            '`' if !in_single && !in_double => return true,
-            '$' if !in_single && !in_double => {
-                if chars.peek() == Some(&'(') {
-                    return true;
-                }
-            }
-            '{' if !in_single && !in_double => return true,
+            '|' | ';' | '>' | '<' | '`' | '{' if !in_single && !in_double => return true,
+            '$' if !in_single && !in_double && chars.peek() == Some(&'(') => return true,
             _ => {}
         }
     }
