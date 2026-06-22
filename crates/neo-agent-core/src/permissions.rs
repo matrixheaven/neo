@@ -227,40 +227,67 @@ impl ApprovalRuleStore {
 /// Mirrors Codex `is_known_safe_command`. Kept conservative on purpose.
 #[must_use]
 pub fn is_known_safe_command(command: &[String]) -> bool {
-    let Some(program) = command.first().map(String::as_str) else {
-        return false;
-    };
-    // Resolve the basename so `/usr/bin/ls` is treated as `ls`.
-    let program = program.rsplit('/').next().unwrap_or(program);
     const SAFE_PROGRAMS: &[&str] = &[
         "cat", "cd", "cut", "echo", "expr", "false", "grep", "head", "id", "ls", "nl", "paste",
         "pwd", "rev", "seq", "sort", "tail", "test", "tr", "true", "uname", "uniq", "wc", "whoami",
         "which", "basename", "dirname", "file", "find", "git", "cargo", "rustc", "rg", "fd",
     ];
+    let Some(program) = command.first().map(String::as_str) else {
+        return false;
+    };
+    // Resolve the basename so `/usr/bin/ls` is treated as `ls`.
+    let program = program.rsplit('/').next().unwrap_or(program);
     if !SAFE_PROGRAMS.contains(&program) {
         return false;
     }
     // For `git`, only read subcommands are safe. `git push`, `git reset --hard`,
     // `git clean`, etc. must still prompt.
     if program == "git" {
-        return match command.get(1).map(String::as_str) {
+        return matches!(
+            command.get(1).map(String::as_str),
             Some(
-                "status" | "log" | "diff" | "show" | "branch" | "remote" | "stash" | "describe"
-                | "tag" | "reflog" | "shortlog" | "blame" | "ls-files" | "ls-tree" | "rev-parse"
-                | "rev-list" | "config" | "--version" | "--help",
-            ) => true,
-            _ => false,
-        };
+                "status"
+                    | "log"
+                    | "diff"
+                    | "show"
+                    | "branch"
+                    | "remote"
+                    | "stash"
+                    | "describe"
+                    | "tag"
+                    | "reflog"
+                    | "shortlog"
+                    | "blame"
+                    | "ls-files"
+                    | "ls-tree"
+                    | "rev-parse"
+                    | "rev-list"
+                    | "config"
+                    | "--version"
+                    | "--help"
+            )
+        );
     }
     // `cargo`/`rustc` build/check commands are read-only enough.
     if matches!(program, "cargo" | "rustc") {
-        return match command.get(1).map(String::as_str) {
+        return matches!(
+            command.get(1).map(String::as_str),
             Some(
-                "test" | "check" | "build" | "run" | "fmt" | "clippy" | "doc" | "tree" | "metadata"
-                | "search" | "--version" | "--help" | "-V",
-            ) => true,
-            _ => false,
-        };
+                "test"
+                    | "check"
+                    | "build"
+                    | "run"
+                    | "fmt"
+                    | "clippy"
+                    | "doc"
+                    | "tree"
+                    | "metadata"
+                    | "search"
+                    | "--version"
+                    | "--help"
+                    | "-V"
+            )
+        );
     }
     true
 }
