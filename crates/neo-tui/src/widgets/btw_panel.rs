@@ -612,7 +612,11 @@ mod tests {
 
     #[test]
     fn btw_panel_trims_thinking_preview_while_running() {
-        let thinking = "a\nb\nc\nd\ne";
+        // Use bracketed markers so the per-line assertions cannot collide with
+        // ordinary status copy (the running-phase footer is "Waiting for
+        // answer...", which contains the letter 'a' and would falsely match a
+        // bare `contains('a')` check).
+        let thinking = "[a]\n[b]\n[c]\n[d]\n[e]";
         let sidecar_running = BtwSidecar::new("btw-1").with_turn(
             BtwTurn::new("think")
                 .with_thinking(thinking)
@@ -621,11 +625,11 @@ mod tests {
         let mut state = BtwPanelState::new(sidecar_running);
         let lines = BtwPanel::new(&mut state).render(40, 30);
         let plain_running = plain(&lines);
-        assert!(!plain_running.iter().any(|l| l.contains('a')));
-        assert!(!plain_running.iter().any(|l| l.contains('b')));
-        assert!(!plain_running.iter().any(|l| l.contains('c')));
-        assert!(plain_running.iter().any(|l| l.contains('d')));
-        assert!(plain_running.iter().any(|l| l.contains('e')));
+        assert!(!plain_running.iter().any(|l| l.contains("[a]")));
+        assert!(!plain_running.iter().any(|l| l.contains("[b]")));
+        assert!(!plain_running.iter().any(|l| l.contains("[c]")));
+        assert!(plain_running.iter().any(|l| l.contains("[d]")));
+        assert!(plain_running.iter().any(|l| l.contains("[e]")));
 
         let sidecar_done = BtwSidecar::new("btw-1").with_turn(
             BtwTurn::new("think")
@@ -635,8 +639,8 @@ mod tests {
         let mut state = BtwPanelState::new(sidecar_done);
         let lines = BtwPanel::new(&mut state).render(40, 30);
         let plain_done = plain(&lines);
-        assert!(plain_done.iter().any(|l| l.contains('a')));
-        assert!(plain_done.iter().any(|l| l.contains('e')));
+        assert!(plain_done.iter().any(|l| l.contains("[a]")));
+        assert!(plain_done.iter().any(|l| l.contains("[e]")));
     }
 
     #[test]
