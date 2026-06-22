@@ -632,8 +632,13 @@ fn prompt_history_recalls_entries_and_restores_draft() {
     let mut prompt = PromptState::default();
     prompt.remember_history("first prompt");
     prompt.remember_history("second prompt");
+    // Seed a draft that the first Up must preserve (non-empty composer).
     prompt.apply_edit(PromptEdit::Insert("draft"));
+    assert!(!prompt.recall_previous_history());
+    assert_eq!(prompt.text, "draft");
 
+    // Clear the draft so Up can start navigation from an empty composer.
+    prompt.apply_edit(PromptEdit::Clear);
     assert!(prompt.recall_previous_history());
     assert_eq!(prompt.text, "second prompt");
     assert_eq!(prompt.cursor, 13);
@@ -645,15 +650,76 @@ fn prompt_history_recalls_entries_and_restores_draft() {
     assert!(prompt.recall_next_history());
     assert_eq!(prompt.text, "second prompt");
 
+    // Down past the newest entry restores the (now empty) draft.
     assert!(prompt.recall_next_history());
-    assert_eq!(prompt.text, "draft");
-    assert_eq!(prompt.cursor, 5);
+    assert_eq!(prompt.text, "");
 
     assert!(prompt.recall_previous_history());
     assert_eq!(prompt.text, "second prompt");
     prompt.apply_edit(PromptEdit::Insert(" edited"));
     assert_eq!(prompt.text, "second prompt edited");
     assert!(!prompt.recall_next_history());
+}
+
+#[test]
+fn prompt_history_skips_blank_and_consecutive_duplicates() {
+    let mut prompt = PromptState::default();
+    prompt.remember_history("  first prompt  ");
+    prompt.remember_history("first prompt");
+    prompt.remember_history("   ");
+    prompt.remember_history("second prompt");
+
+    assert!(prompt.recall_previous_history());
+    assert_eq!(prompt.text, "second prompt");
+    assert!(prompt.recall_previous_history());
+    assert_eq!(prompt.text, "first prompt");
+    // Clamped at oldest entry; no duplicate "first prompt" is stored.
+    assert!(prompt.recall_previous_history());
+    assert_eq!(prompt.text, "first prompt");
+}
+
+#[test]
+fn prompt_history_does_not_overwrite_non_empty_draft_on_first_up() {
+    let mut prompt = PromptState::new("partial").with_cursor(7);
+    prompt.remember_history("old prompt");
+
+    assert!(!prompt.recall_previous_history());
+    assert_eq!(prompt.text, "partial");
+}
+
+#[test]
+fn prompt_history_continues_navigation_after_history_entry_is_active() {
+    let mut prompt = PromptState::default();
+    prompt.remember_history("first");
+    prompt.remember_history("second");
+
+    assert!(prompt.recall_previous_history());
+    assert_eq!(prompt.text, "second");
+    assert!(prompt.recall_previous_history());
+    assert_eq!(prompt.text, "first");
+}
+
+#[test]
+fn prompt_history_set_history_trims_and_dedupes_consecutive_entries() {
+    let mut prompt = PromptState::default();
+    prompt.set_history([
+        "  alpha  ".to_owned(),
+        "alpha".to_owned(),
+        "".to_owned(),
+        "beta".to_owned(),
+        "gamma".to_owned(),
+    ]);
+
+    // Newest first.
+    assert!(prompt.recall_previous_history());
+    assert_eq!(prompt.text, "gamma");
+    assert!(prompt.recall_previous_history());
+    assert_eq!(prompt.text, "beta");
+    assert!(prompt.recall_previous_history());
+    assert_eq!(prompt.text, "alpha");
+    // No duplicate alpha.
+    assert!(prompt.recall_previous_history());
+    assert_eq!(prompt.text, "alpha");
 }
 
 #[test]

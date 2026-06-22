@@ -3,6 +3,7 @@ mod config;
 mod config_ops;
 mod extension_commands;
 mod modes;
+mod prompt_history;
 mod prompt_templates;
 mod resources;
 mod rpc_mode;

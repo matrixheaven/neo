@@ -355,6 +355,31 @@ fn transcript_pane_maps_user_and_assistant_events_to_transcript_entries() {
 }
 
 #[test]
+fn long_user_message_with_wide_chars_never_exceeds_terminal_width() {
+    // Regression for a width-overflow crash in `bulleted_wrap`: the `✨ `
+    // prefix width was not subtracted from the wrap budget, so long CJK
+    // prompts produced a first row wider than the terminal and tripped the
+    // renderer's width invariant. Keep this test if you touch that path.
+    let mut transcript_pane = TranscriptPane::new(40, 30);
+    let prompt = "停下来所有提交工作，总结一下你的工作，为什么你之前要用工具来提交？还有就是你用工具时遇到了什么问题？";
+    transcript_pane.push_user_message(prompt);
+    transcript_pane.mark_dirty();
+    let width = 40_u16;
+    let frame = transcript_pane
+        .render_frame(usize::from(width), 30)
+        .expect("render frame");
+
+    for (i, line) in frame.iter().enumerate() {
+        let w = visible_width(line);
+        assert!(
+            w <= usize::from(width),
+            "line {i} visible width {w} exceeds terminal width {width}: {}",
+            strip_ansi(line)
+        );
+    }
+}
+
+#[test]
 fn persisted_message_events_do_not_duplicate_live_transcript() {
     let mut transcript_pane = TranscriptPane::new(80, 12);
 

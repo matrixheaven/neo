@@ -30,6 +30,56 @@ canonicalized absolute path. This ensures:
 The global `session_index.jsonl` enables `neo resume <session_id>` to locate
 sessions across workspaces.
 
+## Prompt History
+
+Neo persists prompt input history per workspace bucket so the Up/Down keys can
+recall prompts submitted in earlier TUI sessions for the same project.
+
+```
+~/.neo/sessions/
+├── wd_neo_eb208ec56c5c/
+│   ├── prompt-history.jsonl     ← append-only prompt input history
+│   ├── 1718370000000.jsonl
+│   └── ...
+```
+
+Each workspace bucket holds a single `prompt-history.jsonl` file. The format is
+one JSON record per line:
+
+```json
+{"created_at":"2026-06-21T12:34:56.789Z","session_id":"01KV...","text":"implement /new"}
+```
+
+Storage rules:
+
+- **Append only.** The file is never rewritten on each prompt; new entries are
+  appended with `O_APPEND`.
+- **Workspace scoped.** History lives under the session bucket, so different
+  projects never share prompts.
+- **Real prompts only.** Slash commands (for example `/model`, `/resume`,
+  `/new`) never become user turns and are never persisted.
+- **Trimmed and de-duplicated.** Blank prompts are skipped, and consecutive
+  repeats are collapsed. Non-consecutive repeats are kept so recurring prompts
+  stay recallable.
+- **Bounded in memory.** Only the most recent 500 entries are loaded into the
+  composer; the file itself is unbounded.
+- **File order is authoritative.** `created_at` is informational; recall order
+  follows the order entries were appended, not session id.
+
+Navigation semantics:
+
+- Up from an **empty** composer recalls the most recent prompt.
+- Up while already navigating moves older; Down moves newer.
+- Down past the newest restores the original draft (usually empty).
+- Up from a **non-empty** composer that is not already navigating does **not**
+  overwrite the draft — type or clear it first.
+- Edits during navigation stop history navigation.
+- Blocking dialogs (approval, question, model/session picker) consume Up/Down
+  before the composer, so they never leak into prompt history.
+
+History is non-critical: load and append failures never block prompt submission
+or turn execution.
+
 `neo-agent-core` provides JSONL helpers under `neo_agent_core::session`:
 
 - `JsonlSessionWriter::create(path)`
@@ -87,6 +137,17 @@ uses that same replayed context for the next prompt. With the session picker
 focused, `ctrl+n` forks the selected session through
 `SessionMetadataStore::fork()`, loads the forked JSONL transcript, and appends
 subsequent prompts to the child session.
+
+The `/new` slash command (alias `/clear`) starts a fresh unsaved session state
+in the current workspace. It clears the active session id, transcript, todos,
+pending approvals/questions, and prompt text, then redraws the welcome banner
+and shows a `Started fresh session` status. Workspace root, selected model,
+thinking, permission mode, and the current development mode are preserved. The
+previous JSONL session is **not** deleted and remains visible in `/resume`. The
+next real prompt carries `session_id = None`, so the existing streaming path
+creates a brand-new workspace-scoped JSONL session. `/new` is blocked while a
+turn is running (interrupt the turn first) and never pre-creates an empty
+session file.
 
 ## CLI Surface
 

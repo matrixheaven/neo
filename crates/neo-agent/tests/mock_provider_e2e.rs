@@ -681,6 +681,90 @@ max_tokens = 512
 }
 
 #[test]
+fn run_text_falls_back_to_model_max_output_tokens_when_runtime_max_tokens_unset() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-mout", "mout")]);
+    write_config(
+        &temp,
+        &format!(
+            r#"
+default_provider = "mock"
+default_model = "gpt-4.1"
+
+[providers.mock]
+type = "openai-responses"
+base_url = "{base_url}"
+api_key_env = "OPENAI_API_KEY"
+
+[models."mock/gpt-4.1"]
+provider = "mock"
+model = "gpt-4.1"
+max_output_tokens = 64000
+capabilities = ["streaming", "tools"]
+"#,
+            base_url = server.url,
+        ),
+    );
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .args(["run", "--output", "text", "hello"]);
+
+    run(command);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    // No [runtime].max_tokens set, so the model-declared max_output_tokens
+    // should flow through to the request body.
+    assert_eq!(requests[0].body["max_output_tokens"], 64_000);
+}
+
+#[test]
+fn run_text_runtime_max_tokens_overrides_model_max_output_tokens() {
+    let temp = TempDir::new().expect("tempdir");
+    let server = MockSseServer::start(vec![openai_response_sse("resp-over", "over")]);
+    write_config(
+        &temp,
+        &format!(
+            r#"
+default_provider = "mock"
+default_model = "gpt-4.1"
+
+[providers.mock]
+type = "openai-responses"
+base_url = "{base_url}"
+api_key_env = "OPENAI_API_KEY"
+
+[models."mock/gpt-4.1"]
+provider = "mock"
+model = "gpt-4.1"
+max_output_tokens = 64000
+capabilities = ["streaming", "tools"]
+
+[runtime]
+max_tokens = 2048
+"#,
+            base_url = server.url,
+        ),
+    );
+
+    let mut command = neo();
+    command
+        .current_dir(temp.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .args(["run", "--output", "text", "hello"]);
+
+    run(command);
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    // Explicit runtime override wins over the model-declared value.
+    assert_eq!(requests[0].body["max_output_tokens"], 2048);
+}
+
+#[test]
 fn run_text_continue_flag_replays_latest_session_and_appends_turn() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![

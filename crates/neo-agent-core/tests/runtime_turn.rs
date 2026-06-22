@@ -425,7 +425,6 @@ async fn runtime_cancels_in_flight_model_stream_and_emits_cancelled_barriers() {
             stop_reason: StopReason::Cancelled,
         })
     );
-    assert!(context.is_cancelled());
     assert!(!events.iter().any(|event| matches!(
         event,
         AgentEvent::TextDelta { text, .. } if text == "late"
@@ -1199,35 +1198,6 @@ async fn runtime_compaction_keeps_valid_tool_result_boundaries() {
 }
 
 #[tokio::test]
-async fn runtime_reports_cancelled_without_calling_model() {
-    let harness = FakeHarness::from_events([]);
-    let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
-    let mut context = AgentContext::new();
-    context.cancel();
-    let events = runtime
-        .run_turn(&mut context, AgentMessage::user_text("cancelled"))
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect("cancel event");
-    assert_eq!(
-        events,
-        vec![
-            AgentEvent::RunStarted { turn: 1 },
-            AgentEvent::TurnFinished {
-                turn: 1,
-                stop_reason: StopReason::Cancelled,
-            },
-            AgentEvent::RunFinished {
-                turn: 1,
-                stop_reason: StopReason::Cancelled,
-            },
-        ]
-    );
-}
-
-#[tokio::test]
 async fn runtime_external_cancellation_before_model_emits_cancelled_barriers() {
     let harness = FakeHarness::from_events([]);
     let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
@@ -1268,8 +1238,62 @@ async fn runtime_external_cancellation_before_model_emits_cancelled_barriers() {
             },
         ]
     );
-    assert!(context.is_cancelled());
     assert!(harness.requests().is_empty());
+}
+
+#[tokio::test]
+async fn runtime_resumed_cancelled_turn_accepts_followup_prompt() {
+    let harness = FakeHarness::from_events([
+        AiStreamEvent::MessageStart {
+            id: "msg_after_resume".to_owned(),
+        },
+        AiStreamEvent::TextDelta {
+            text: "resumed".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
+    let runtime = AgentRuntime::new(AgentConfig::for_model(harness.model()), harness.client());
+    let mut context = AgentContext::from_replay(
+        [
+            AgentEvent::RunStarted { turn: 1 },
+            AgentEvent::MessageAppended {
+                message: AgentMessage::user_text("cancel this turn"),
+            },
+            AgentEvent::TurnFinished {
+                turn: 1,
+                stop_reason: StopReason::Cancelled,
+            },
+            AgentEvent::RunFinished {
+                turn: 1,
+                stop_reason: StopReason::Cancelled,
+            },
+        ]
+        .iter(),
+    );
+
+    let events = runtime
+        .run_turn(
+            &mut context,
+            AgentMessage::user_text("continue after resume"),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("follow-up turn should run after replayed cancellation");
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::TextDelta { text, .. } if text == "resumed"
+    )));
+    assert!(events.contains(&AgentEvent::TurnFinished {
+        turn: 2,
+        stop_reason: StopReason::EndTurn,
+    }));
+    assert_eq!(harness.requests().len(), 1);
 }
 
 #[tokio::test]
@@ -1737,7 +1761,6 @@ async fn runtime_cancels_in_flight_tool_execution_and_finishes_run() {
             stop_reason: StopReason::Cancelled,
         })
     );
-    assert!(context.is_cancelled());
     assert_eq!(context.messages().len(), 2);
 }
 
@@ -1887,7 +1910,6 @@ fn assert_async_hook_cancelled_cleanly(events: &[AgentEvent], context: &AgentCon
             stop_reason: StopReason::Cancelled,
         })
     );
-    assert!(context.is_cancelled());
     assert_eq!(context.messages().len(), 2);
 }
 
@@ -1983,7 +2005,6 @@ async fn runtime_parallel_cancellation_finishes_all_started_tool_wrappers() {
             stop_reason: StopReason::Cancelled,
         })
     );
-    assert!(context.is_cancelled());
     assert_eq!(context.messages().len(), 2);
 }
 
@@ -2069,7 +2090,6 @@ async fn runtime_parallel_cancellation_does_not_start_later_tool_calls() {
             stop_reason: StopReason::Cancelled,
         })
     );
-    assert!(context.is_cancelled());
     assert_eq!(context.messages().len(), 2);
 }
 
@@ -2852,7 +2872,6 @@ async fn runtime_cancels_while_waiting_for_async_approval_decision() {
             stop_reason: StopReason::Cancelled,
         })
     );
-    assert!(context.is_cancelled());
     assert_eq!(context.messages().len(), 2);
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
 }
@@ -3625,7 +3644,7 @@ Review the current change carefully.
 ",
     )
     .expect("write skill");
-    let skill_store = SkillStore::load(None, &[], &[skills_dir.path().to_path_buf()], Vec::new())
+    let skill_store = SkillStore::load(&[], &[skills_dir.path().to_path_buf()], Vec::new())
         .expect("load skill store");
 
     let harness = FakeHarness::from_turns([
@@ -4071,6 +4090,81 @@ async fn runtime_manual_mode_reviews_exit_plan_mode_with_non_empty_plan() {
     )));
 }
 
+/// Regression: even if a session-scoped approval (`AllowForSession`) is returned
+/// for an `ExitPlanMode` review, the tool name must NOT be cached in
+/// `session_approvals`. Plan/goal transitions are one-shot — caching the name
+/// would silently auto-approve every future exit review for the rest of the
+/// session. The decision is treated as `AllowOnce` for these operations.
+#[tokio::test]
+async fn runtime_allow_for_session_does_not_cache_exit_plan_mode() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_root = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+    let plans_dir =
+        workspace_sessions_dir(&home.path().join("sessions"), &workspace_root).join("plans");
+
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "ExitPlanMode".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "plan_summary": "Ready to execute" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+
+    let mut config = AgentConfig::for_model(fake_model());
+    config.home_dir = Some(home.path().to_path_buf());
+    config.workspace_root = Some(workspace_root);
+    config.permission_mode = PermissionMode::Manual;
+    {
+        let mut pm = config.plan_mode.write().expect("plan mode lock");
+        let data = pm.enter(&plans_dir, true).expect("enter plan mode");
+        std::fs::write(&data.path, "do the thing").expect("write plan");
+    }
+    let session_approvals = Arc::clone(&config.session_approvals);
+    let config = config.with_approval_handler(|request| {
+        assert_eq!(request.operation, PermissionOperation::PlanTransition);
+        // Pretend the (now-removed) "Approve for this session" option was chosen.
+        PermissionApprovalDecision::AllowForSession
+    });
+
+    let runtime =
+        AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
+    let mut context = AgentContext::new();
+
+    runtime
+        .run_turn(&mut context, AgentMessage::user_text("approve plan"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    // The decisive assertion: "ExitPlanMode" must NOT be cached, otherwise every
+    // future exit-plan review would be silently auto-approved for the session.
+    let cached = session_approvals.lock().expect("session approvals lock");
+    assert!(
+        !cached.contains("ExitPlanMode"),
+        "ExitPlanMode must not be cached in session_approvals (got {cached:?}); \
+         AllowForSession must be treated as AllowOnce for plan/goal transitions"
+    );
+}
+
 #[tokio::test]
 async fn runtime_manual_mode_reviews_exit_goal_mode_and_emits_goal_started() {
     let home = tempfile::tempdir().expect("home");
@@ -4300,6 +4394,75 @@ async fn runtime_plan_mode_guard_denies_write_outside_plan_file() {
     assert!(
         plan_mode.read().expect("plan mode lock").is_active(),
         "plan mode should stay active after a blocked write"
+    );
+}
+
+#[tokio::test]
+async fn runtime_plan_mode_allows_writing_active_plan_file_outside_workspace() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_root = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
+    let plans_dir =
+        workspace_sessions_dir(&home.path().join("sessions"), &workspace_root).join("plans");
+    let mut config = AgentConfig::for_model(fake_model());
+    config.home_dir = Some(home.path().to_path_buf());
+    config.workspace_root = Some(workspace_root);
+    config.permission_mode = PermissionMode::Yolo;
+    let plan_path = {
+        let mut pm = config.plan_mode.write().expect("plan mode lock");
+        pm.enter(&plans_dir, true).expect("enter plan mode").path
+    };
+
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "Write".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({
+                    "path": plan_path,
+                    "content": "# Plan\n\nUse Write, not Bash."
+                }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let runtime =
+        AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("write plan file"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolExecutionFinished {
+            id,
+            name,
+            result,
+            ..
+        } if id == "tool_1" && name == "Write" && !result.is_error
+    )));
+    assert_eq!(
+        std::fs::read_to_string(&plan_path).expect("read plan"),
+        "# Plan\n\nUse Write, not Bash."
     );
 }
 

@@ -283,6 +283,121 @@ fn app_shell_tracks_agent_core_approval_request_without_overlay_panel() {
 }
 
 #[test]
+fn plan_review_modal_offers_only_approve_reject_revise() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "exit-plan-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::PlanTransition,
+        subject: "Exit plan mode".to_owned(),
+        arguments: serde_json::json!({ "plan_summary": "Ready" }),
+    });
+    assert!(app.approval_is_pending());
+
+    // Number 1 = Approve confirms immediately.
+    let result = app
+        .choose_approval_number(1)
+        .expect("plan review option 1 (Approve) should confirm");
+    assert_eq!(result.request_id, "exit-plan-1");
+    assert_eq!(result.choice, ApprovalChoice::Approve);
+    assert!(!app.approval_is_pending());
+}
+
+#[test]
+fn plan_review_number_two_is_reject_in_three_option_modal() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "exit-plan-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::PlanTransition,
+        subject: "Exit plan mode".to_owned(),
+        arguments: serde_json::json!({ "plan_summary": "Ready" }),
+    });
+
+    // In the 3-option plan review modal, number 2 = Reject (no feedback).
+    let result = app
+        .choose_approval_number(2)
+        .expect("plan review option 2 (Reject) should confirm");
+
+    assert_eq!(result.request_id, "exit-plan-1");
+    assert_eq!(result.choice, ApprovalChoice::Deny);
+    assert!(
+        result.feedback.is_none(),
+        "Reject must not collect feedback"
+    );
+}
+
+#[test]
+fn plan_review_number_three_is_revise_and_collects_feedback() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "exit-plan-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::PlanTransition,
+        subject: "Exit plan mode".to_owned(),
+        arguments: serde_json::json!({ "plan_summary": "Ready" }),
+    });
+
+    // Number 3 = Revise does NOT confirm yet; it enters feedback collection.
+    let pre = app.choose_approval_number(3);
+    assert!(
+        pre.is_none(),
+        "Revise should enter feedback collection, not confirm"
+    );
+    assert_eq!(app.approval_choice(), Some(ApprovalChoice::Revise));
+
+    app.handle_pending_approval_input(neo_tui::input::InputEvent::Insert('r'));
+    let result = app
+        .handle_pending_approval_input(neo_tui::input::InputEvent::Submit)
+        .expect("confirming revise feedback returns a result");
+
+    assert_eq!(result.request_id, "exit-plan-1");
+    assert_eq!(result.choice, ApprovalChoice::Revise);
+    assert_eq!(result.feedback.as_deref(), Some("r"));
+}
+
+#[test]
+fn plan_review_number_four_is_out_of_range_in_three_option_modal() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "exit-plan-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::PlanTransition,
+        subject: "Exit plan mode".to_owned(),
+        arguments: serde_json::json!({ "plan_summary": "Ready" }),
+    });
+
+    // The plan review modal has only 3 options, so number 4 is out of range and
+    // must not confirm. This locks the 3-option layout (a 4-option modal would
+    // let number 4 select Revise).
+    let result = app.choose_approval_number(4);
+    assert!(
+        result.is_none(),
+        "number 4 must be out of range in the 3-option plan review modal"
+    );
+}
+
+#[test]
+fn tool_approval_number_two_is_approve_for_session_in_four_option_modal() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "shell-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::Tool,
+        subject: "shell.run".to_owned(),
+        arguments: serde_json::json!({ "command": "cargo test" }),
+    });
+
+    // Ordinary tool approvals keep 4 options: number 2 = Approve for this
+    // session (AlwaysApprove), which IS meaningful for repeating tools.
+    let result = app
+        .choose_approval_number(2)
+        .expect("tool approval option 2 should confirm");
+    assert_eq!(result.request_id, "shell-1");
+    assert_eq!(result.choice, ApprovalChoice::AlwaysApprove);
+}
+
+#[test]
 fn blocking_question_dialog_hides_composer_prompt() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.prompt_mut().apply_edit(PromptEdit::Insert("draft"));
@@ -871,4 +986,63 @@ fn overlay_message_renders_plain_line() {
     ));
 
     assert_eq!(app.focused_overlay_lines(80), vec!["hello".to_owned()]);
+}
+
+/// Regression: pasting a long API key then pressing Enter must submit.
+/// Previously the API Key dialog ignored `InputEvent::Paste` (Cmd+V / right-
+/// click paste) entirely, an over-long masked value crashed the renderer, and
+/// Enter submitted via `Action(SelectConfirm)` which the dialog never handled.
+/// This test drives the real chrome dialog dispatch path end-to-end.
+#[test]
+fn api_key_dialog_paste_then_submit_closes_overlay_with_result() {
+    use neo_tui::dialogs::{ApiKeyInputOptions, ApiKeyInputResult};
+    use neo_tui::input::{InputEvent, KeybindingAction};
+
+    let mut app = NeoChromeState::new("neo", "s", "m", "/tmp");
+    app.open_api_key_input(ApiKeyInputOptions {
+        title: "API Key".into(),
+        provider_name: "minimax-cn-coding-plan".into(),
+    });
+    assert!(app.focused_overlay_is_rich_dialog());
+
+    // Paste a long key (the scenario that used to crash / be ignored).
+    let result = app.handle_focused_dialog_input(InputEvent::Paste(
+        "sk-minimax-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
+    ));
+    assert_eq!(result, neo_tui::core::InputResult::Handled);
+
+    // Render at a narrow width to ensure the masked field does not overflow.
+    let _ = app.focused_overlay_lines(60);
+
+    // The keybinding layer delivers Enter as `Action(SelectConfirm)` for
+    // focused overlays (see `OVERLAY_ACTION_PRIORITY`). The dialog translate
+    // layer must normalize it back to Submit.
+    let result =
+        app.handle_focused_dialog_input(InputEvent::Action(KeybindingAction::SelectConfirm));
+    assert_eq!(
+        result,
+        neo_tui::core::InputResult::Submitted,
+        "SelectConfirm (Enter) must submit the API key dialog"
+    );
+
+    // The dialog must expose the submitted result while still focused.
+    match app.api_key_input_result() {
+        Some(ApiKeyInputResult::Submitted(v)) => {
+            assert_eq!(v, "sk-minimax-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        }
+        other => panic!("expected Submitted result, got {other:?}"),
+    }
+
+    // Likewise Esc arrives as `Action(SelectCancel)` and must cancel.
+    app.open_api_key_input(ApiKeyInputOptions {
+        title: "API Key".into(),
+        provider_name: "p".into(),
+    });
+    let result =
+        app.handle_focused_dialog_input(InputEvent::Action(KeybindingAction::SelectCancel));
+    assert_eq!(result, neo_tui::core::InputResult::Cancelled);
+    assert!(matches!(
+        app.api_key_input_result(),
+        Some(ApiKeyInputResult::Cancelled)
+    ));
 }

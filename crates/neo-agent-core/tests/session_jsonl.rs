@@ -239,7 +239,6 @@ async fn jsonl_session_replays_runtime_context_with_turns_and_terminal_state() {
         ]
     );
     assert_eq!(context.turns(), 2);
-    assert!(context.is_cancelled());
 
     let events = JsonlSessionReader::read_all(&path).await.expect("read all");
     assert_eq!(AgentContext::from_replay(events.iter()), context);

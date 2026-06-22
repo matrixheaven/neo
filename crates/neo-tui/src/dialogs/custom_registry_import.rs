@@ -49,7 +49,39 @@ impl CustomRegistryImportState {
     }
 
     fn masked_token(&self) -> String {
-        "•".repeat(self.token.len())
+        "•".repeat(self.token.chars().count())
+    }
+
+    /// Masked token, truncated to fit one line. Trailing `…` signals overflow.
+    /// The stored `token` is never shortened.
+    fn masked_token_capped(&self, max_chars: usize) -> String {
+        let count = self.token.chars().count();
+        if count <= max_chars {
+            return self.masked_token();
+        }
+        if max_chars == 0 {
+            return String::new();
+        }
+        let shown = max_chars.saturating_sub(1);
+        let mut s = "•".repeat(shown);
+        s.push('…');
+        s
+    }
+
+    /// Plain URL, truncated to fit one line with a trailing `…` when cut off.
+    /// The stored `url` is never shortened.
+    fn url_display_capped(&self, max_chars: usize) -> String {
+        let chars: Vec<char> = self.url.chars().collect();
+        if chars.len() <= max_chars {
+            return self.url.clone();
+        }
+        if max_chars == 0 {
+            return String::new();
+        }
+        let shown = max_chars.saturating_sub(1);
+        let mut s: String = chars[..shown].iter().collect();
+        s.push('…');
+        s
     }
 
     fn switch_field(&mut self, forward: bool) {
@@ -91,14 +123,20 @@ impl CustomRegistryImportState {
             "\x1b[38;2;{}m{url_marker} Registry URL:\x1b[0m",
             rgb(url_color),
         ));
-        lines.push(format!(
-            "  {}▏",
-            if self.url.is_empty() {
-                "\x1b[38;2;90;90;90m(https://...)\x1b[0m".to_owned()
-            } else {
-                self.url.clone()
-            }
-        ));
+        // Field line layout: "  <value>▏" — 2 prefix cells + 1 trailing cursor.
+        let max_value = inner_w.saturating_sub(3);
+        if self.url.is_empty() {
+            lines.push(format!(
+                "  \x1b[38;2;90;90;90m{}\x1b[0m▏",
+                if max_value >= "(https://...)".chars().count() {
+                    "(https://...)"
+                } else {
+                    ""
+                }
+            ));
+        } else {
+            lines.push(format!("  {}▏", self.url_display_capped(max_value)));
+        }
 
         lines.push(String::new());
 
@@ -117,10 +155,10 @@ impl CustomRegistryImportState {
             "\x1b[38;2;{}m{token_marker} Bearer Token:\x1b[0m",
             rgb(token_color),
         ));
-        let masked = self.masked_token();
+        let masked = self.masked_token_capped(max_value);
         lines.push(format!(
             "  {}▏",
-            if masked.is_empty() {
+            if self.token.is_empty() {
                 "\x1b[38;2;90;90;90m(optional)\x1b[0m".to_owned()
             } else {
                 masked
@@ -364,5 +402,65 @@ mod tests {
         state.handle_input(InputEvent::Insert('b'));
         state.handle_input(InputEvent::Backspace);
         assert_eq!(state.url, "a");
+    }
+
+    #[test]
+    fn long_url_is_truncated_to_fit_width() {
+        let mut state = CustomRegistryImportState::new(
+            CustomRegistryImportOptions {
+                title: "Import".into(),
+            },
+            theme(),
+        );
+        state.handle_input(InputEvent::Paste(
+            "https://example.com/".to_owned() + &"a".repeat(200),
+        ));
+        // Stored value preserved in full.
+        assert_eq!(
+            state.url.chars().count(),
+            200 + "https://example.com/".len()
+        );
+        let width = 50usize;
+        let lines = state.render_lines(width);
+        let combined: String = lines.join("\n");
+        assert!(combined.contains('…'));
+        let url_line = lines
+            .iter()
+            .find(|l| l.contains("example") || l.contains('•') || l.ends_with('▏'))
+            .expect("value line present");
+        assert!(
+            visible_width(url_line) <= width,
+            "url line visible width {} exceeds {}",
+            visible_width(url_line),
+            width
+        );
+    }
+
+    #[test]
+    fn long_token_is_masked_to_fit_width() {
+        let mut state = CustomRegistryImportState::new(
+            CustomRegistryImportOptions {
+                title: "Import".into(),
+            },
+            theme(),
+        );
+        state.switch_field(true); // token field
+        state.handle_input(InputEvent::Paste("x".repeat(300)));
+        assert_eq!(state.token.chars().count(), 300);
+        let width = 50usize;
+        let lines = state.render_lines(width);
+        let combined: String = lines.join("\n");
+        assert!(combined.contains('…'));
+        let token_line = lines
+            .iter()
+            .filter(|l| l.contains('•'))
+            .last()
+            .expect("masked token line present");
+        assert!(
+            visible_width(token_line) <= width,
+            "token line visible width {} exceeds {}",
+            visible_width(token_line),
+            width
+        );
     }
 }

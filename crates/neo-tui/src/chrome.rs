@@ -1140,6 +1140,15 @@ impl NeoChromeState {
                 "end" => InputEvent::MoveEnd,
                 _ => input,
             },
+            // The keybinding layer (see `keybinding_priority` /
+            // `OVERLAY_ACTION_PRIORITY`) rewrites `enter`→`SelectConfirm` and
+            // `escape`→`SelectCancel` before the dialog sees them. Normalize
+            // those back to `Submit`/`Cancel` so text-input dialogs (API key,
+            // custom registry import) that match on `Submit`/`Cancel` keep
+            // working. Picker-style dialogs handle these actions directly too,
+            // so they are unaffected.
+            InputEvent::Action(KeybindingAction::SelectConfirm) => InputEvent::Submit,
+            InputEvent::Action(KeybindingAction::SelectCancel) => InputEvent::Cancel,
             _ => input,
         }
     }
@@ -2688,7 +2697,7 @@ impl ApprovalRequestModal {
                 [
                     ApprovalOption::new(ApprovalChoice::Approve, "Approve"),
                     ApprovalOption::new(ApprovalChoice::Deny, "Reject"),
-                    ApprovalOption::new(ApprovalChoice::Revise, "Revise"),
+                    ApprovalOption::new(ApprovalChoice::Revise, "Reject with feedback"),
                 ],
             ),
         }
@@ -2831,13 +2840,40 @@ impl PromptState {
         self
     }
 
+    /// Snapshot of the in-memory history (oldest → newest). Used by callers
+    /// that seed history and by tests asserting on recalled entries.
+    #[must_use]
+    pub fn history_snapshot(&self) -> Vec<String> {
+        self.history.clone()
+    }
+
     pub fn remember_history(&mut self, entry: impl Into<String>) {
-        let entry = entry.into();
-        if entry.trim().is_empty() {
+        let entry = entry.into().trim().to_owned();
+        if entry.is_empty() {
+            return;
+        }
+        // Skip consecutive duplicates: a repeat right after the same prompt
+        // adds no recall value and would clutter both in-memory and persisted
+        // history. Non-consecutive repeats are kept.
+        if self.history.last().is_some_and(|last| last == &entry) {
+            self.stop_history_navigation();
             return;
         }
         self.history.push(entry);
         self.stop_history_navigation();
+    }
+
+    /// Replace the in-memory history with the provided entries. Entries are
+    /// trimmed and consecutive duplicates are collapsed via `remember_history`,
+    /// matching the semantics of a single submit. Use this to seed a fresh
+    /// controller with workspace-loaded prompt history.
+    pub fn set_history(&mut self, entries: impl IntoIterator<Item = String>) {
+        self.history.clear();
+        self.history_index = None;
+        self.history_draft = None;
+        for entry in entries {
+            self.remember_history(entry);
+        }
     }
 
     pub fn clear_after_submit(&mut self) {
@@ -2850,6 +2886,11 @@ impl PromptState {
 
     pub fn recall_previous_history(&mut self) -> bool {
         if self.history.is_empty() {
+            return false;
+        }
+        // Do not overwrite a non-empty draft on the first Up. Once navigation
+        // has started (history_index is set), Up keeps moving older as expected.
+        if self.history_index.is_none() && !self.text.is_empty() {
             return false;
         }
         let index = if let Some(index) = self.history_index {

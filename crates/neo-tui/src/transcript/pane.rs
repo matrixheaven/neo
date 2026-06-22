@@ -60,6 +60,7 @@ pub struct TranscriptPane {
     queued_approvals: VecDeque<ApprovalPromptData>,
     completed_tool_result_ids: Vec<String>,
     next_image_id: u64,
+    activity_frame: usize,
     /// Cache of the last composed body frame (ANSI strings, no chrome), so
     /// tests can inspect rendered output via [`frame_ansi_lines`] without
     /// recomposing unchanged rows.
@@ -86,6 +87,7 @@ impl TranscriptPane {
             queued_approvals: VecDeque::new(),
             completed_tool_result_ids: Vec::new(),
             next_image_id: 0,
+            activity_frame: 0,
             last_frame: Vec::new(),
             theme: TuiTheme::default(),
             skill_store: None,
@@ -850,6 +852,10 @@ impl TranscriptPane {
     }
 
     pub fn render_tick(&mut self) {
+        self.activity_frame = self.activity_frame.wrapping_add(1);
+        if self.has_streaming_thinking() {
+            self.mark_dirty();
+        }
         let _ = self.render_frame(self.width, self.height);
     }
 
@@ -1134,12 +1140,27 @@ impl TranscriptPane {
                 TranscriptEntry::ToolRun { component } => tool_run.push(component),
                 entry => {
                     append_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
-                    append_transcript_block(&mut rows, entry.render(width, &self.theme));
+                    append_transcript_block(
+                        &mut rows,
+                        entry.render_with_activity_frame(width, &self.theme, self.activity_frame),
+                    );
                 }
             }
         }
         append_transcript_block(&mut rows, self.flush_tool_run(&mut tool_run, width));
         rows
+    }
+
+    fn has_streaming_thinking(&self) -> bool {
+        self.transcript.entries().iter().any(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::ThinkingBlock {
+                    phase: crate::transcript::ThinkingPhase::Streaming,
+                    ..
+                }
+            )
+        })
     }
 
     fn flush_tool_run(&mut self, tool_run: &mut Vec<ToolCallComponent>, width: usize) -> Vec<Line> {
@@ -1485,7 +1506,8 @@ fn shell_finished_detail(
 fn run_finished_notice(turn: u32, stop_reason: neo_agent_core::StopReason) -> Option<String> {
     match stop_reason {
         neo_agent_core::StopReason::MaxTokens => Some(format!(
-            "Run stopped after turn {turn}: model token limit reached."
+            "Run stopped after turn {turn}: response hit the output length cap (max_tokens). \
+             Raise [models.<alias>].max_output_tokens or [runtime].max_tokens to continue."
         )),
         neo_agent_core::StopReason::Error => {
             Some(format!("Run stopped after turn {turn}: runtime error."))

@@ -368,9 +368,27 @@ impl CompactionSettings {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AgentContext {
+    // IMPORTANT: do not delete this comment unless the cancellation model is
+    // intentionally redesigned and the regression test below is replaced with
+    // an equivalent guard:
+    // `runtime_resumed_cancelled_turn_accepts_followup_prompt`.
+    //
+    // Bug background, 2026-06-22:
+    // `AgentContext` used to contain a persistent `cancelled: bool`. Replay of
+    // any historical `TurnFinished { stop_reason: Cancelled }` set that flag,
+    // and `run_turn_with_cancel` checked it before starting the next turn. That
+    // made a resumed session permanently poisoned: after a user interrupted one
+    // turn, every later prompt in that JSONL session immediately produced
+    // `RunFinished(Cancelled)` without calling the model. The observed failure
+    // was `neo resume session_0774471a-c613-40d3-b758-3ebfb3dc40d1`, where
+    // turns 321 and 322 were cancelled as soon as the recalled prompt was sent.
+    //
+    // Cancellation is a property of the currently executing turn, carried by
+    // that turn's `CancellationToken`. It is not durable session state. A
+    // replayed cancelled turn must remain visible in the transcript and must
+    // still advance the turn counter, but it must not affect future turns.
     messages: Vec<AgentMessage>,
     turns: u32,
-    cancelled: bool,
     steering_queue: Vec<AgentMessage>,
     follow_up_queue: Vec<AgentMessage>,
     /// Skill context injected before the next user message in the current turn.
@@ -472,15 +490,6 @@ impl AgentContext {
         &self.todos
     }
 
-    pub fn cancel(&mut self) {
-        self.cancelled = true;
-    }
-
-    #[must_use]
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled
-    }
-
     #[must_use]
     pub fn from_replay<'a>(events: impl IntoIterator<Item = &'a AgentEvent>) -> Self {
         let mut context = Self::new();
@@ -504,11 +513,11 @@ impl AgentContext {
     fn apply_replay_message_event(&mut self, event: &AgentEvent) -> bool {
         match event {
             AgentEvent::MessageAppended { message } => self.append_message(message.clone()),
-            AgentEvent::TurnFinished { turn, stop_reason } => {
+            AgentEvent::TurnFinished { turn, .. } => {
+                // See the invariant on `AgentContext`: replayed cancellation is
+                // historical transcript state only. Do not inspect
+                // `stop_reason` here or reintroduce durable cancellation.
                 self.turns = self.turns.max(*turn);
-                if matches!(stop_reason, StopReason::Cancelled) {
-                    self.cancel();
-                }
             }
             _ => return false,
         }
@@ -729,10 +738,6 @@ impl AgentRuntime {
         message: AgentMessage,
         cancel_token: CancellationToken,
     ) -> AgentEventStream<'a> {
-        if context.is_cancelled() {
-            let turn = context.turns.saturating_add(1);
-            return terminal_lifecycle_stream(turn, StopReason::Cancelled);
-        }
         if let Ok(mut todos) = self.config.todos.lock() {
             todos.clone_from(&context.todos);
         }
@@ -805,15 +810,6 @@ impl AgentRuntime {
         )
         .boxed()
     }
-}
-
-fn terminal_lifecycle_stream<'a>(turn: u32, stop_reason: StopReason) -> AgentEventStream<'a> {
-    stream::iter([
-        Ok(AgentEvent::RunStarted { turn }),
-        Ok(AgentEvent::TurnFinished { turn, stop_reason }),
-        Ok(AgentEvent::RunFinished { turn, stop_reason }),
-    ])
-    .boxed()
 }
 
 struct SpawnedRun<'a> {
@@ -999,11 +995,10 @@ impl EventEmitter {
     fn apply_to_context(context: &mut AgentContext, event: &AgentEvent) {
         match event {
             AgentEvent::MessageAppended { message } => context.append_message(message.clone()),
-            AgentEvent::TurnFinished { turn, stop_reason } => {
+            AgentEvent::TurnFinished { turn, .. } => {
+                // Same invariant as replay: even live cancelled turns must not
+                // poison the context used by subsequent user prompts.
                 context.turns = context.turns.max(*turn);
-                if matches!(stop_reason, StopReason::Cancelled) {
-                    context.cancel();
-                }
             }
             AgentEvent::SteeringQueued { message } => {
                 context.queue_steering_message(message.clone());
@@ -1481,7 +1476,7 @@ fn terminal_pre_model_stop(
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
 ) -> Option<(u32, StopReason)> {
-    if emitter.context.is_cancelled() || cancel_token.is_cancelled() {
+    if cancel_token.is_cancelled() {
         let turn = emitter.context.turns.saturating_add(1);
         emitter.emit(AgentEvent::TurnFinished {
             turn,
@@ -3022,7 +3017,7 @@ arguments:
     }
 
     fn skill_store(root: &std::path::Path) -> SkillStore {
-        SkillStore::load(None, &[], &[root.to_path_buf()], Vec::new()).expect("skill store")
+        SkillStore::load(&[], &[root.to_path_buf()], Vec::new()).expect("skill store")
     }
 
     #[test]

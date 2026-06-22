@@ -231,23 +231,43 @@ impl TranscriptEntry {
 
     #[must_use]
     pub fn render(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
+        self.render_with_activity_frame(width, theme, 0)
+    }
+
+    #[must_use]
+    pub fn render_with_activity_frame(
+        &self,
+        width: usize,
+        theme: &TuiTheme,
+        activity_frame: usize,
+    ) -> Vec<Line> {
         // Every `Line` returned here MUST map to exactly one terminal row:
         // content is split on `\n` and soft-wrapped to `width` so no line ever
         // carries an embedded newline. The renderer's diff/scroll math treats
         // each `Vec<String>` entry as one screen row, so an un-split long line
         // would corrupt the coordinate model and garble streaming output.
         let inner_width = width.max(1);
-        self.render_inner(inner_width, theme)
+        self.render_inner(inner_width, theme, activity_frame)
     }
 
-    fn render_inner(&self, inner_width: usize, theme: &TuiTheme) -> Vec<Line> {
-        if let Some(lines) = self.render_message_entry(inner_width, theme) {
+    fn render_inner(
+        &self,
+        inner_width: usize,
+        theme: &TuiTheme,
+        activity_frame: usize,
+    ) -> Vec<Line> {
+        if let Some(lines) = self.render_message_entry(inner_width, theme, activity_frame) {
             return lines;
         }
         self.render_structured_entry(inner_width, theme)
     }
 
-    fn render_message_entry(&self, inner_width: usize, theme: &TuiTheme) -> Option<Vec<Line>> {
+    fn render_message_entry(
+        &self,
+        inner_width: usize,
+        theme: &TuiTheme,
+        activity_frame: usize,
+    ) -> Option<Vec<Line>> {
         let lines = match self {
             Self::Banner(data) => render_welcome_banner(data, inner_width, theme),
             Self::UserMessage(content) => render_user_message(content, inner_width, theme),
@@ -259,7 +279,14 @@ impl TranscriptEntry {
                 content,
                 phase,
                 expanded,
-            } => render_thinking_block(content, *phase, *expanded, inner_width, theme),
+            } => render_thinking_block(
+                content,
+                *phase,
+                *expanded,
+                inner_width,
+                theme,
+                activity_frame,
+            ),
             _ => return None,
         };
         Some(lines)
@@ -451,9 +478,17 @@ pub struct InlineImageRender {
 /// to align under the body (prefix width of spaces). This is the Neo
 /// "bullet + indented continuation" layout used by user/assistant messages.
 fn bulleted_wrap(text: &str, width: usize, prefix: &str, style: Style) -> Vec<Line> {
-    let indent = " ".repeat(visible_width(prefix));
+    let prefix_width = visible_width(prefix);
+    // BUGFIX: previously this wrapped at the full `width` without subtracting
+    // the prefix, so the first rendered row was `prefix + width` columns wide
+    // and overflowed the terminal. Long CJK prompts (each char is 2 columns)
+    // hit this reliably and crashed the renderer's width invariant
+    // (`renderer.rs` `check_line_widths`). The body budget must reserve space
+    // for the prefix, mirroring `styled_wrap_with_prefix` and `render_markdown`.
+    let body_width = width.saturating_sub(prefix_width).max(1);
+    let indent = " ".repeat(prefix_width);
     let mut rows = Vec::new();
-    for (i, line) in wrap_width(text, width.max(1)).into_iter().enumerate() {
+    for (i, line) in wrap_width(text, body_width).into_iter().enumerate() {
         if i == 0 {
             rows.push(Line::styled(format!("{prefix}{line}"), style));
         } else {
@@ -505,6 +540,7 @@ fn render_thinking(
     phase: ThinkingPhase,
     expanded: bool,
     theme: &TuiTheme,
+    activity_frame: usize,
 ) -> Vec<Line> {
     let style = thinking_style(theme);
     let body_width = width.max(1).saturating_sub(2).max(1);
@@ -514,7 +550,10 @@ fn render_thinking(
 
     if phase == ThinkingPhase::Streaming && !expanded {
         // Streaming: spinner + tail window.
-        rows.push(Line::styled("⠋ thinking...", style));
+        rows.push(Line::styled(
+            format!("{} thinking...", thinking_spinner(activity_frame)),
+            style,
+        ));
         let start = total.saturating_sub(THINKING_PREVIEW_LINES);
         for line in &wrapped[start..] {
             rows.push(Line::styled(format!("  {line}"), style));
@@ -832,12 +871,18 @@ fn render_thinking_block(
     expanded: bool,
     width: usize,
     theme: &TuiTheme,
+    activity_frame: usize,
 ) -> Vec<Line> {
     if content.is_empty() {
         Vec::new()
     } else {
-        render_thinking(content, width, phase, expanded, theme)
+        render_thinking(content, width, phase, expanded, theme, activity_frame)
     }
+}
+
+fn thinking_spinner(activity_frame: usize) -> char {
+    const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    SPINNER[activity_frame % SPINNER.len()]
 }
 
 fn render_tool_run(component: &ToolCallComponent, width: usize, theme: &TuiTheme) -> Vec<Line> {

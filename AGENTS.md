@@ -651,11 +651,17 @@ icm topics
 
 Git mutations are forbidden unless the user gives explicit, message-level authorization for that exact operation. This applies to the main agent, subagents, background tasks, hooks, and scripts.
 
+The safety boundary is the worktree, not the Git index. Commands that discard,
+hide, rewrite, or switch worktree content remain forbidden as convenience
+operations. Index-only staging operations are allowed only after explicit
+per-command authorization, because they are sometimes necessary for
+fine-grained commits and can be undone without losing worktree edits.
+
 ### Never run these without explicit approval
 
-These commands can lose, hide, or rewrite work and are not allowed as convenience operations:
+These commands can lose, hide, rewrite, or switch worktree content and are not allowed as convenience operations:
 
-- `git reset` in any form.
+- `git reset --hard`, `git reset --merge`, `git reset --keep`, or any reset that changes worktree files.
 - `git checkout -- <path>`, `git checkout HEAD -- <path>`, `git restore <path>`, `git checkout .`, or any equivalent worktree revert.
 - `git checkout <commit> -- <path>`.
 - `git stash`, `git stash drop`, or `git stash clear`.
@@ -676,6 +682,20 @@ These commands can lose, hide, or rewrite work and are not allowed as convenienc
 - `git branch -d` / `git branch -D`
 - `git tag` / `git tag -d`
 - `git worktree add` / `git worktree remove`
+
+### Index-only operations allowed with explicit authorization
+
+These commands change only the Git index and are permitted when the user gives
+explicit authorization for that exact operation:
+
+- `git add -- <path>` or `git add -p` to stage selected worktree changes.
+- `git restore --staged -- <path>` to unstage without changing the worktree.
+- `git reset HEAD -- <path>` to unstage without changing the worktree.
+- `git apply --cached <patch>` or `git apply --cached --check <patch>` for
+  deterministic patch staging.
+
+When an index-only operation goes wrong, fix the index with another authorized
+index-only operation. Do not use worktree-discarding commands to recover.
 
 ### Allowed read-only git commands
 

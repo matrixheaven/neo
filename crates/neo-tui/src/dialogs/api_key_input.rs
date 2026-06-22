@@ -39,7 +39,28 @@ impl ApiKeyInputState {
     }
 
     fn masked_display(&self) -> String {
-        "•".repeat(self.value.len())
+        "•".repeat(self.value.chars().count())
+    }
+
+    /// Masked value, truncated to fit one line of the input field.
+    ///
+    /// The stored `value` is never shortened — only the masked glyphs shown to
+    /// the user are capped so a long pasted key does not overflow the fixed
+    /// dialog height. When truncation happens a trailing `…` signals that more
+    /// characters are held than are displayed.
+    fn masked_display_capped(&self, max_chars: usize) -> String {
+        let count = self.value.chars().count();
+        if count <= max_chars {
+            return self.masked_display();
+        }
+        if max_chars == 0 {
+            return String::new();
+        }
+        // Reserve one cell for the ellipsis indicator.
+        let shown = max_chars.saturating_sub(1);
+        let mut s = "•".repeat(shown);
+        s.push('…');
+        s
     }
 
     #[must_use]
@@ -64,8 +85,12 @@ impl ApiKeyInputState {
         ));
         lines.push(String::new());
 
-        // Input field
-        let masked = self.masked_display();
+        // Input field. The masked value is capped to the available width so a
+        // long pasted key does not blow past the fixed dialog height; the
+        // stored value itself is untouched.
+        // Layout: " API Key: <masked>▏" — 10 prefix cells + 1 trailing cursor.
+        let max_masked = inner_w.saturating_sub(11);
+        let masked = self.masked_display_capped(max_masked);
         lines.push(format!(
             "\x1b[38;2;{}m API Key: \x1b[0m{masked}▏",
             rgb(self.theme.text_primary)
@@ -96,6 +121,7 @@ impl ApiKeyInputState {
                 self.value.push(*ch);
                 InputResult::Handled
             }
+            InputEvent::Paste(text) => self.paste_text(text),
             InputEvent::Backspace => {
                 self.value.pop();
                 InputResult::Handled
@@ -114,6 +140,19 @@ impl ApiKeyInputState {
             }
             _ => InputResult::Ignored,
         }
+    }
+
+    fn paste_text(&mut self, text: &str) -> InputResult {
+        let trimmed = text.trim_matches(|c: char| c.is_whitespace());
+        if trimmed.is_empty() {
+            return InputResult::Ignored;
+        }
+        for ch in trimmed.chars() {
+            if ch.is_ascii_graphic() {
+                self.value.push(ch);
+            }
+        }
+        InputResult::Handled
     }
 
     #[must_use]
@@ -220,5 +259,108 @@ mod tests {
         );
         state.handle_input(&InputEvent::Submit);
         assert!(state.result.is_none());
+    }
+
+    #[test]
+    fn paste_inserts_trimmed_value() {
+        let mut state = ApiKeyInputState::new(
+            ApiKeyInputOptions {
+                title: "API Key".into(),
+                provider_name: "OpenAI".into(),
+            },
+            theme(),
+        );
+        state.handle_input(&InputEvent::Paste("  sk-abcd1234  \n".to_owned()));
+        match state.take_result() {
+            Some(_) => panic!("pasting should not submit"),
+            None => {}
+        }
+        // Verify the value got the trimmed, non-whitespace characters.
+        let mut submit_state = state;
+        submit_state.handle_input(&InputEvent::Submit);
+        match submit_state
+            .take_result()
+            .expect("should submit after paste")
+        {
+            ApiKeyInputResult::Submitted(v) => assert_eq!(v, "sk-abcd1234"),
+            ApiKeyInputResult::Cancelled => panic!("expected Submitted"),
+        }
+    }
+
+    #[test]
+    fn paste_strips_newlines_and_whitespace_only_ignored() {
+        let mut state = ApiKeyInputState::new(
+            ApiKeyInputOptions {
+                title: "T".into(),
+                provider_name: "P".into(),
+            },
+            theme(),
+        );
+        // Whitespace-only paste is ignored.
+        assert_eq!(
+            state.handle_input(&InputEvent::Paste("   \n\t".to_owned())),
+            InputResult::Ignored
+        );
+        // Paste with embedded newlines keeps only the ascii_graphic chars.
+        state.handle_input(&InputEvent::Paste("sk\n-secret".to_owned()));
+        let mut submit_state = state;
+        submit_state.handle_input(&InputEvent::Submit);
+        match submit_state.take_result().unwrap() {
+            ApiKeyInputResult::Submitted(v) => assert_eq!(v, "sk-secret"),
+            ApiKeyInputResult::Cancelled => panic!("expected Submitted"),
+        }
+    }
+
+    #[test]
+    fn long_pasted_value_is_masked_to_fit_width() {
+        let mut state = ApiKeyInputState::new(
+            ApiKeyInputOptions {
+                title: "API Key".into(),
+                provider_name: "OpenAI".into(),
+            },
+            theme(),
+        );
+        // Simulate pasting a 200-char key.
+        state.handle_input(&InputEvent::Paste("a".repeat(200)));
+        // Render at a narrow width: inner = width - 2, prefix " API Key: " = 10,
+        // trailing cursor = 1, so masked cap = width - 2 - 11.
+        let width = 40usize;
+        let lines = state.render_lines(width);
+        let combined: String = lines.join("\n");
+        // The value is preserved in full even though display is capped.
+        assert_eq!(state.value.chars().count(), 200);
+        // The displayed line contains an ellipsis indicator and never exceeds
+        // the inner width.
+        assert!(combined.contains('…'));
+        let field_line = lines
+            .iter()
+            .find(|l| l.contains("API Key:"))
+            .expect("field line present");
+        let visible = strip_ansi(field_line);
+        assert!(
+            visible_width(&visible) <= width,
+            "field line visible width {} exceeds terminal width {}",
+            visible_width(&visible),
+            width
+        );
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut in_esc = false;
+        for ch in s.chars() {
+            if in_esc {
+                if ch.is_alphabetic() {
+                    in_esc = false;
+                }
+                continue;
+            }
+            if ch == '\x1b' {
+                in_esc = true;
+                continue;
+            }
+            out.push(ch);
+        }
+        out
     }
 }

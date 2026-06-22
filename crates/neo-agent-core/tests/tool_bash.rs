@@ -506,7 +506,7 @@ async fn task_output_details_do_not_leak_output_past_max_output_bytes() {
 }
 
 #[tokio::test]
-async fn bash_foreground_kills_child_when_context_is_cancelled() {
+async fn bash_foreground_kills_child_when_cancel_token_is_cancelled() {
     let workspace = tempfile::tempdir().expect("workspace");
     let registry = ToolRegistry::with_builtin_tools();
     let cancel = CancellationToken::new();
