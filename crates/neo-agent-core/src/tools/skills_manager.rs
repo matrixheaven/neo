@@ -78,12 +78,28 @@ impl Tool for ListSkillsTool {
     }
 
     fn description(&self) -> &'static str {
-        "List all discoverable skills by tier (user, extra, builtin) with their names and filesystem paths.\n\n\
-         Use this tool to inspect which skills are available in the current environment before invoking one with the Skill tool or a slash command. Skills are discovered from:\n\
-         - user: ~/.neo/skills/\n\
-         - extra: directories listed in config\n\
-         - builtin: skills shipped with Neo (only when include_builtin=true)\n\n\
-         The output groups skills by tier and shows each skill's name and absolute path."
+        "List all discoverable skills by tier (user, extra, builtin) with their names and \
+         filesystem paths.\n\n\
+         Use this tool to inspect which skills are available in the current environment before \
+         invoking one with the Skill tool or a slash command.\n\n\
+         Skill discovery tiers (in priority order):\n\
+         1. user: Skills in ~/.neo/skills/ — created by the user or the CreateSkill tool. These \
+         take highest priority when multiple skills share a name.\n\
+         2. extra: Skills in directories listed in the config's extra_skill_dirs setting. Useful \
+         for team-shared skill directories.\n\
+         3. builtin: Skills shipped with Neo (e.g. sub-skill, self-evo). These are extracted into \
+         ~/.neo/skills/.builtin/ on startup. Only included in the listing when \
+         include_builtin=true.\n\n\
+         Output format:\n\
+         Skills are grouped by tier and each entry shows the skill name and its absolute \
+         filesystem path. Skills discovered at a higher tier shadow lower-tier skills with the \
+         same name.\n\n\
+         After identifying a skill, activate it via:\n\
+         - The Skill tool (programmatic invocation).\n\
+         - The /skill:<name> slash command (manual invocation in the TUI).\n\n\
+         Parameters:\n\
+         - include_builtin: When true, also list built-in skills shipped with Neo. Defaults to \
+         false to keep the listing focused on user-managed skills."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -145,10 +161,40 @@ impl Tool for CreateSkillTool {
     }
 
     fn description(&self) -> &'static str {
-        "Create a new skill under ~/.neo/skills/<name>/SKILL.md.\n\n\
-         The `body` must include valid YAML frontmatter followed by Markdown content. The frontmatter must at minimum declare `name`, `description`, and `type` (prompt, inline, or flow).\n\n\
-         If a skill with the same name already exists, the existing file is backed up under ~/.neo/backups/skills/<timestamp>/<name>/SKILL.md before being overwritten.\n\n\
-         After creation, the skill can be activated via the Skill tool or the /skill:<name> slash command."
+        "Create a new skill under ~/.neo/skills/<name>/SKILL.md for reuse in future sessions.\n\n\
+         When to use:\n\
+         - After completing a complex, multi-step task whose workflow should be preserved.\n\
+         - When the user explicitly asks to save a procedure as a skill.\n\
+         - When an error was overcome and the resolution should be recorded.\n\n\
+         When NOT to use:\n\
+         - For trivial one-off tasks that are unlikely to recur.\n\
+         - For information that is already documented in AGENTS.md or project docs.\n\n\
+         The skill file must include valid YAML frontmatter followed by Markdown content. Example:\n\n\
+         ---\n\
+         name: deploy-staging\n\
+         description: Deploys the app to staging. Use when the user asks to deploy or push to the staging environment.\n\
+         type: prompt\n\
+         whenToUse: When the user asks to deploy to staging, push to staging, or update the staging environment.\n\
+         ---\n\n\
+         # Deploy to Staging\n\n\
+         ## Steps\n\
+         1. Run `cargo build --release`\n\
+         2. ...\n\n\
+         Frontmatter fields:\n\
+         - name (required): Skill identifier, must match the directory name.\n\
+         - description (required): One-line summary of what the skill does.\n\
+         - type (required): One of \"prompt\" (injected as a context message before the user's \
+         message), \"inline\" (expanded directly into the prompt), or \"flow\" (multi-step \
+         interactive workflow).\n\
+         - whenToUse (recommended): Natural language trigger description for automatic skill selection.\n\n\
+         If a skill with the same name already exists, the existing file is backed up under \
+         ~/.neo/backups/skills/<timestamp>/<name>/SKILL.md before being overwritten.\n\n\
+         After creation, the skill can be activated via the Skill tool or the /skill:<name> slash command.\n\n\
+         Parameters:\n\
+         - name: Directory name for the skill under ~/.neo/skills/.\n\
+         - description: Short description of what the skill does.\n\
+         - skill_type: \"prompt\", \"inline\", or \"flow\". Defaults to \"prompt\".\n\
+         - body: Full Markdown content including YAML frontmatter and the skill body."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -240,9 +286,29 @@ impl Tool for MoveSkillTool {
     }
 
     fn description(&self) -> &'static str {
-        "Move a skill directory into a parent bundle, creating timestamped backups of every modified directory.\n\n\
-         The `source` path must be an absolute skill directory containing a SKILL.md file. The skill directory is moved under `destination_parent`, preserving its directory name.\n\n\
-         Before the move, a timestamped backup of the source directory is created under ~/.neo/backups/skills/<timestamp>/. If the destination already exists, the move is rejected and no changes are made."
+        "Move a skill directory into a parent bundle directory, creating timestamped backups of \
+         every affected directory.\n\n\
+         When to use:\n\
+         - To group related skills under a shared parent directory (a \"bundle\"). A bundle is \
+         simply a directory under ~/.neo/skills/ that contains multiple skill subdirectories, e.g. \
+         ~/.neo/skills/deploy-bundle/deploy-staging/ and \
+         ~/.neo/skills/deploy-bundle/deploy-prod/.\n\
+         - To reorganize skills after they have been created.\n\n\
+         When NOT to use:\n\
+         - To rename a skill (create a new one and delete the old one instead).\n\
+         - To move a skill to a different machine or workspace.\n\n\
+         Parameters:\n\
+         - source: Absolute path to the skill directory to move. Must contain a SKILL.md file.\n\
+         - destination_parent: Absolute path to the parent directory where the skill directory \
+         should be moved. The skill's directory name is preserved under this parent.\n\n\
+         Behavior:\n\
+         - Before the move, a timestamped backup of the source directory is created under \
+         ~/.neo/backups/skills/<timestamp>/.\n\
+         - If the destination already exists (a skill with the same name already lives under \
+         destination_parent), the move is rejected and no changes are made.\n\
+         - Returns the new absolute path of the moved skill directory.\n\n\
+         After the move, the skill is discovered from its new location on the next skill scan. No \
+         manual re-registration is needed."
     }
 
     fn input_schema(&self) -> serde_json::Value {

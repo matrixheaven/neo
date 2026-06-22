@@ -33,7 +33,33 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &'static str {
-        "Replace text in a UTF-8 workspace file."
+        "Replace text in a UTF-8 workspace file. Use Edit for targeted modifications to existing \
+         files — it finds the exact `old` text and replaces it with `new`. For creating new files \
+         or full content replacement, use Write instead.\n\n\
+         Parameters:\n\
+         - path: Path to the file to edit. Relative paths resolve against the working directory; \
+         paths outside the working directory must be absolute.\n\
+         - old: Exact existing text to find and replace. Must match the file content \
+         character-for-character, including whitespace and indentation.\n\
+         - new: The replacement text that will be inserted in place of old.\n\
+         - replace_all: When false (default), old must match exactly one location in the file; if it \
+         matches multiple locations, the edit fails with the match count so you can provide more \
+         context. When true, every occurrence of old is replaced.\n\n\
+         CRITICAL — unique match requirement:\n\
+         When replace_all is false, old must match exactly one location. If old matches zero \
+         locations, the edit fails and the file is unchanged — re-read the file and adjust old to \
+         match the current content. If old matches multiple locations, the edit fails with the \
+         count — either add more surrounding context to old to make it unique, or set replace_all \
+         to true.\n\n\
+         Output:\n\
+         Returns a unified diff showing the changes made, so you can verify the edit produced the \
+         intended result.\n\n\
+         Guidelines:\n\
+         - Always read the file first to confirm the exact current content of old.\n\
+         - Include enough surrounding context (imports, function signatures, closing braces) in old \
+         to ensure a unique match.\n\
+         - For renaming a variable or symbol across the entire file, use replace_all=true.\n\
+         - If an edit fails, do not guess — re-read the file and try again with corrected old text."
     }
 
     fn input_schema(&self) -> serde_json::Value {

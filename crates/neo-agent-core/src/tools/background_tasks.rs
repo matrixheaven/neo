@@ -591,7 +591,14 @@ impl Tool for TaskListTool {
          - Prefer the default `active_only=true`, which lists only non-terminal tasks. Pass `active_only=false` only when you specifically need to see tasks that have already finished.\n\
          - `limit` caps how many tasks are returned. It accepts a value between 1 and 100 and defaults to 20 when omitted.\n\
          - This tool only lists tasks; it does not return their output. Use it first to locate the task ID you need, then call `TaskOutput` with that ID to read the task's output and details.\n\
-         - This tool is read-only and does not change any state, so it is always safe to call, including in plan mode."
+         - This tool is read-only and does not change any state, so it is always safe to call, including in plan mode.\n\n\
+         Return format:\n\
+         Returns a list of background tasks. Each entry includes:\n\
+         - task_id: Unique identifier for the task (use this with TaskOutput/TaskStop).\n\
+         - status: \"running\", \"completed\", \"failed\", or \"stopped\".\n\
+         - kind: The type of background task (e.g. \"bash\", \"question\").\n\
+         - description: Short human-readable description provided at creation time.\n\
+         - elapsed: Time since the task was started (e.g. \"2m 30s\")."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -625,7 +632,14 @@ impl Tool for TaskOutputTool {
          - Use `block=true` only when you intentionally want to wait for completion or timeout.\n\
          - This tool returns structured task metadata and an output preview.\n\
          - For a terminal task, check `status` and `exit_code` to understand why it ended.\n\
-         - This tool works with the generic background task system and should remain the primary read path for future task types."
+         - This tool works with the generic background task system and should remain the primary read path for future task types.\n\n\
+         Return fields:\n\
+         - status: One of \"running\" (the task is still executing), \"completed\" (the task \
+         finished successfully), \"failed\" (the task exited with a non-zero exit code), or \
+         \"stopped\" (the task was cancelled via TaskStop).\n\
+         - exit_code: The process exit code for terminal tasks. 0 means success; non-zero means \
+         failure. Only present when status is \"completed\", \"failed\", or \"stopped\".\n\
+         - output: A preview of the task's stdout/stderr, capped at max_output_bytes."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -662,7 +676,11 @@ impl Tool for TaskStopTool {
          - This is a general-purpose stop capability for any background task. It is not a bash-specific kill.\n\
          - Stopping a task is destructive: it may leave partial side effects behind. Use it with care.\n\
          - If the task has already finished, this tool simply returns its current status.\n\
-         - Provide a short `reason` so the task history records why it was stopped."
+         - Provide a short `reason` so the task history records why it was stopped.\n\n\
+         Return format:\n\
+         Returns the task's final status after the stop attempt. If the task was still running, it \
+         is stopped and the output collected so far is included. If the task had already finished, \
+         the current status and output are returned without any action taken."
     }
 
     fn input_schema(&self) -> serde_json::Value {

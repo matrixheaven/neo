@@ -24,7 +24,26 @@ impl Tool for WriteTool {
     }
 
     fn description(&self) -> &'static str {
-        "Write a UTF-8 file inside the workspace."
+        "Write a UTF-8 file inside the workspace.\n\n\
+         Use Write to create new files or completely replace the contents of existing files. \
+         For targeted modifications to existing files (find-and-replace a specific block), use Edit \
+         instead — Edit returns a unified diff and preserves unchanged content.\n\n\
+         Parameters:\n\
+         - path: Path to the file to write. Relative paths resolve against the working directory; \
+         paths outside the working directory must be absolute.\n\
+         - content: Full UTF-8 text content to write to the file.\n\n\
+         Behavior:\n\
+         - Overwrites the file if it already exists; creates the file if it does not.\n\
+         - Creates parent directories as needed.\n\
+         - Returns a confirmation with the number of bytes written and a unified diff in the details.\n\
+         - Only UTF-8 text content is supported.\n\n\
+         Guidelines:\n\
+         - Prefer Edit for surgical changes to existing files; use Write when the entire file content \
+         is new or being fully replaced.\n\
+         - When writing code, ensure the content is complete and syntactically valid — partial writes \
+         can leave files in a broken state.\n\
+         - For large files, consider whether Edit (targeted replacement) would be more appropriate \
+         than rewriting the entire file."
     }
 
     fn input_schema(&self) -> serde_json::Value {

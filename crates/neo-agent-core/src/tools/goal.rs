@@ -162,8 +162,33 @@ impl Tool for ExitGoalModeTool {
 
     fn description(&self) -> &'static str {
         "Use this when goal mode has produced a reviewed goal draft and is ready for user approval. \
-         The user will review the objective, completion criterion, and phases in a blocking dialog. \
-         If approved, this tool starts the durable goal. If rejected or revised, goal mode remains for a corrected draft."
+         The user will review the objective, completion criterion, and phases in a blocking dialog.\n\n\
+         How this tool works:\n\
+         - This tool submits the drafted goal for user review. It does NOT start the goal directly — \
+         the user must approve it first.\n\
+         - If approved, the durable goal is created and the runtime begins autonomous turns to \
+         pursue it.\n\
+         - If rejected, goal mode remains active so you can revise the draft.\n\
+         - If the user requests revisions, update the objective/phases and call this tool again.\n\n\
+         Two paths to create a goal:\n\
+         1. Goal mode (this tool) — the AI drafts a structured goal through conversation, then \
+         submits it via ExitGoalMode for blocking review.\n\
+         2. Direct /goal command — the user authors the goal objective directly via the \
+         /goal <objective> slash command, bypassing the AI draft step.\n\n\
+         Parameters:\n\
+         - objective: The approved goal objective. Must have a verifiable end state.\n\
+         - completion_criterion: How to verify the goal is complete. Example: \"all integration \
+         tests pass\" or \"the API returns 200 for all documented endpoints\".\n\
+         - phases: Ordered list of phase descriptions. Each phase should be a self-contained \
+         milestone. Example: [\"Phase 1: Set up test fixtures and data models\", \"Phase 2: \
+         Implement core API endpoints\", \"Phase 3: Add error handling and integration tests\"].\n\n\
+         Permission mode notes:\n\
+         - In yolo and ask modes, the user reviews the goal in a blocking dialog.\n\
+         - In auto permission mode, the goal starts without user review.\n\n\
+         Before using:\n\
+         - Make sure the objective has a checkable completion condition.\n\
+         - If the user's request is vague, ask for the missing completion criterion before calling \
+         this tool."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -216,7 +241,15 @@ impl Tool for StartGoalTool {
          Do NOT create a goal for greetings, ordinary questions, or vague requests that lack a verifiable completion condition. A goal needs a checkable end state.\n\n\
          When the request is vague, ask the user for the missing completion criterion before creating the goal. If the user clearly insists after you warn them that the wording is vague or risky, respect that and create the goal.\n\n\
          Include a `completion_criterion` when the user provides one, or when it can be stated without inventing new requirements. Keep `objective` concise; reference long task descriptions by file path rather than pasting them.\n\n\
-         Use `replace: true` only when the user explicitly wants to abandon the current goal and start a new one."
+         Use `replace: true` only when the user explicitly wants to abandon the current goal and start a new one.\n\n\
+         Returns:\n\
+         On success, returns the created goal's ID and initial status (\"active\"). \
+         If an active goal already exists and replace is false, the call fails with an error \
+         identifying the existing goal.\n\n\
+         completion_criterion examples:\n\
+         - \"All integration tests in tests/api/ pass without errors\"\n\
+         - \"The README.md contains a quickstart section with a working code example\"\n\
+         - \"cargo clippy reports zero warnings across the workspace\""
     }
 
     fn input_schema(&self) -> serde_json::Value {
