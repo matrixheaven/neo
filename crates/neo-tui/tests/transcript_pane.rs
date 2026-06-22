@@ -110,6 +110,8 @@ fn transcript_pane_renders_inline_bash_approval_prompt() {
             "command": "echo hello",
             "cwd": "/Users/chenyuanhao/Workspace/neo"
         }),
+        session_scope: None,
+        prefix_rule: None,
     });
 
     let frame = plain_frame(&mut transcript_pane, 100, 16);
@@ -163,6 +165,8 @@ fn transcript_pane_only_renders_active_approval_and_queued_count() {
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: command.clone(),
             arguments: serde_json::json!({ "command": command }),
+            session_scope: None,
+            prefix_rule: None,
         });
     }
 
@@ -193,6 +197,8 @@ fn transcript_pane_renders_terminal_approval_prompt() {
             "cols": 80,
             "rows": 24
         }),
+        session_scope: None,
+        prefix_rule: None,
     });
 
     let frame = plain_frame(&mut transcript_pane, 100, 18);
@@ -218,6 +224,8 @@ fn transcript_pane_renders_task_stop_approval_prompt() {
             "task_id": "bash-1234",
             "reason": "no longer needed"
         }),
+        session_scope: None,
+        prefix_rule: None,
     });
 
     let frame = plain_frame(&mut transcript_pane, 100, 18);
@@ -247,6 +255,8 @@ fn transcript_pane_renders_write_approval_prompt() {
             "path": "src/lib.rs",
             "content": "pub fn demo() {}"
         }),
+        session_scope: None,
+        prefix_rule: None,
     });
 
     let frame = plain_frame(&mut transcript_pane, 100, 18);
@@ -266,6 +276,8 @@ fn transcript_pane_advances_next_queued_approval_after_resolution() {
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: command.clone(),
             arguments: serde_json::json!({ "command": command }),
+            session_scope: None,
+            prefix_rule: None,
         });
     }
     transcript_pane.resolve_approval("bash-1", "Approved");
@@ -298,6 +310,8 @@ fn transcript_pane_places_approval_after_matching_tool_and_renders_resolution_li
         operation: neo_agent_core::PermissionOperation::Shell,
         subject: "printf 1".to_owned(),
         arguments: serde_json::json!({ "command": "printf 1" }),
+        session_scope: None,
+        prefix_rule: None,
     });
 
     let frame = plain_frame(&mut transcript_pane, 100, 24);
