@@ -12,17 +12,37 @@ This repository is developed by many AI agents at the same time. Stay inside you
 
 Do not preserve the status quo by piling on compatibility branches, fallback paths, or duplicate models. Simplify the model, delete obsolete paths when possible, and avoid code that only appears safe because tests still pass.
 
-## Mandatory work loop: recall → scope → test → LCOV → CRAP → CI
+## Work loop: recall → scope → verify proportionally
 
-Every task must follow this loop:
+Every task follows this loop, but verification effort scales with task size.
+Do not run more tests than the task warrants, and never run tests outside the
+current task's scope.
 
 1. Recall project memory before work: `icm recall-context "<task>" --limit 5`.
-2. Scope your own work. Do not fix unrelated failures from other agents. FOCUS ON Test Driven Dev.
-3. Run focused verification through `cargo run -p xtask -- test ...`; never use
-   bare `cargo test` as completion evidence.
-4. Before claiming completion, generate LCOV with `cargo run -p xtask -- coverage`.
-5. Score production code with `cargo run -p xtask -- crap`.
-6. For a full local gate, run `cargo run -p xtask -- ci`.
+2. Scope your own work. Do not fix unrelated failures from other agents.
+3. Verify proportionally to the task (see tiers below). When you do run tests,
+   use `cargo run -p xtask -- test ...`; never use bare `cargo test` as
+   completion evidence.
+
+### Verification tiers
+
+Pick the tier that matches the task. Err toward less testing, not more.
+
+- **Trivial / small tasks** (typo, text fix, doc edit, rename, one-line tweak,
+  config-only change): **no tests required.** A build check is optional. Do not
+  run LCOV, CRAP, or CI for these.
+- **Medium tasks** (a single function, a localized bug fix, a small feature in
+  one module): run **focused** tests for the touched crate/target only, e.g.
+  `cargo run -p xtask -- test -p neo-agent-core runtime_turn`. Do not run the
+  whole workspace suite. LCOV/CRAP only if production behavior changed.
+- **Complex tasks** (cross-module refactor, architectural change, new
+  subsystem, behavior-affecting runtime change): run focused tests for the
+  affected crates, then generate LCOV with `cargo run -p xtask -- coverage`
+  and score production code with `cargo run -p xtask -- crap`. Use
+  `cargo run -p xtask -- ci` only as a final gate for large changes.
+
+Never widen the test scope to "make sure nothing broke" — that is CI's job, not
+the task loop's. If a change is outside your scope, its tests are too.
 
 CRAP policy is strict: production code under `crates/` must have no function
 with CRAP > 30 when scored from `target/llvm-cov/lcov.info`. Do not use
@@ -200,27 +220,35 @@ cargo run -p xtask -- test -p xtask
 
 - Tests live next to source in `src/` (`#[cfg(test)]`) and in `tests/` per
 crate.
-- **Hard rule: use `xtask` as the test entrypoint.** Do not claim verification
-  from direct `cargo test` commands. Use `cargo run -p xtask -- test ...`,
-  which runs `cargo nextest` with the repository configuration.
+- **When you run tests, use `xtask` as the entrypoint.** Do not claim
+  verification from direct `cargo test` commands. Use
+  `cargo run -p xtask -- test ...`, which runs `cargo nextest` with the
+  repository configuration.
+- **Run tests only at the scope the task needs** (see "Verification tiers"
+  above). Small tasks need no tests; medium tasks need focused crate/target
+  tests; only complex refactors warrant LCOV/CRAP/CI. Do not run the workspace
+  suite or `ci` for routine changes.
 - `cargo nextest` is the test runner for unit and integration tests. If
   `cargo nextest` is not installed, fail closed and install it; do not silently
   fall back to `cargo test`.
 - Local focused tests should be run through `xtask test`, for example
   `cargo run -p xtask -- test -p neo-agent-core runtime_turn` or
   `cargo run -p xtask -- test -p neo-tui --test tool_cards`.
-- Use `cargo run -p xtask -- test --no-run --workspace --all-features` for a
-  workspace compile-only test check, and `cargo run -p xtask -- test --list` for
-  test inventory.
+- Use `cargo run -p xtask -- test --no-run --workspace --all-features` only
+  when you genuinely need a workspace compile-only check, and
+  `cargo run -p xtask -- test --list` for test inventory.
 - Use `cargo run -p xtask -- coverage` to generate
-  `target/llvm-cov/lcov.info` with `cargo-llvm-cov` and `cargo-nextest`.
+  `target/llvm-cov/lcov.info` with `cargo-llvm-cov` and `cargo-nextest` — only
+  for complex tasks that changed production behavior.
 - Use `cargo run -p xtask -- crap` to generate
   `target/crap/crap-crates.md` and `target/crap/crap-crates.json`, then fail if
-  production code in `crates/` has CRAP > 30.
+  production code in `crates/` has CRAP > 30 — again, only for complex tasks
+  touching production code.
 - Use `cargo run -p xtask -- crap --workspace` only as an observation report for
   xtask/examples/tests; it is not the first-stage hard gate.
-- Use `cargo run -p xtask -- ci` for the full local CI workflow: workspace check,
-  LCOV, production CRAP gate, parity, and catalog check.
+- Use `cargo run -p xtask -- ci` for the full local CI workflow: workspace
+  check, LCOV, production CRAP gate, parity, and catalog check — reserve this
+  for large/complex changes, not every task.
 - New slow, PTY, MCP, provider-wire, real-process, fixed-port, shared-home, or
   resource-sensitive tests must be classified in `.config/nextest.toml` instead
   of reducing global parallelism or relying on accidental execution order.
