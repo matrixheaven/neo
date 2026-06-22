@@ -17,8 +17,13 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::goal::GoalManager;
+use crate::permissions::{
+    ApprovalRuleStore, FileWriteApprovalOperation, PrefixApprovalRule, SessionApprovalKey,
+    SessionApprovalScope, command_might_be_dangerous, is_known_safe_command,
+};
 use crate::skills::SkillStore;
 use crate::tools::BackgroundTaskManager;
+use crate::tools::normalize_path;
 use crate::{
     AgentEvent, AgentMessage, AgentToolCall, CompactionPhase, CompactionReason, CompactionSummary,
     Content, InjectionManager, PermissionApprovalDecision, PermissionMode, PermissionOperation,
@@ -52,6 +57,14 @@ pub struct ApprovalRequest {
     pub operation: PermissionOperation,
     pub subject: String,
     pub arguments: serde_json::Value,
+    /// Reusable session scope for this request, when safely derivable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_scope: Option<SessionApprovalScope>,
+    /// Proposed persistent prefix rule for this request (Layer 2), when the
+    /// command reduces to a stable argv prefix. `None` when no prefix option
+    /// should be offered (compound/opaque commands, non-shell tools).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_rule: Option<PrefixApprovalRule>,
 }
 
 enum PermissionPreparation {
@@ -59,6 +72,8 @@ enum PermissionPreparation {
     Ask {
         operation: PermissionOperation,
         subject: String,
+        session_scope: Option<SessionApprovalScope>,
+        prefix_rule: Option<PrefixApprovalRule>,
     },
     Deny(String),
 }
@@ -156,10 +171,27 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub plan_review_feedback: Arc<Mutex<std::collections::HashMap<String, String>>>,
-    /// Tool names approved for the current session via "Approve for this session".
+    /// Side-channel for the `ExitPlanMode` selected-option label, keyed by
+    /// `tool_call.id`. Populated by the approval handler when the user picks a
+    /// model-supplied option from the plan-review picker. Consumed by
+    /// `attach_exit_plan_details` to prefix the tool result with
+    /// "Selected approach: <label>" so the model runs only that branch.
     #[serde(skip)]
     #[schemars(skip)]
-    pub session_approvals: Arc<Mutex<std::collections::HashSet<String>>>,
+    pub plan_review_selected_label: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    /// Narrow reusable approval grants for this session. Keyed by
+    /// [`SessionApprovalKey`] (exact canonical command + cwd, exact file
+    /// write/edit path), never by tool name, so approving one command never
+    /// approves a different command on the same tool.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub session_approvals: Arc<Mutex<std::collections::HashSet<SessionApprovalKey>>>,
+    /// Persistent prefix approval rules (Layer 2). Loaded from
+    /// `~/.neo/approval_rules.json` on startup; a prefix match auto-approves
+    /// any shell command whose argv starts with the rule prefix.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub prefix_approval_rules: Arc<Mutex<ApprovalRuleStore>>,
     /// Home directory used for plan file creation (e.g. `~/.neo`).
     /// Falls back to `workspace_root` if unset.
     pub home_dir: Option<PathBuf>,
@@ -202,7 +234,9 @@ impl AgentConfig {
             plan_mode: Arc::new(RwLock::new(PlanMode::default())),
             goal_mode_authoring: false,
             plan_review_feedback: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            plan_review_selected_label: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_approvals: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            prefix_approval_rules: Arc::new(Mutex::new(ApprovalRuleStore::default())),
             home_dir: None,
             todos: Arc::new(Mutex::new(Vec::new())),
             background_tasks: BackgroundTaskManager::new(),
@@ -346,6 +380,62 @@ impl AgentConfig {
     pub fn with_home_dir(mut self, home_dir: impl Into<PathBuf>) -> Self {
         self.home_dir = Some(home_dir.into());
         self
+    }
+
+    /// Path to the persistent prefix-approval-rules file, when a home dir is set.
+    #[must_use]
+    pub fn approval_rules_path(&self) -> Option<PathBuf> {
+        self.home_dir
+            .as_ref()
+            .map(|home| home.join("approval_rules.json"))
+    }
+
+    /// Load persistent Layer-2 prefix rules from `<home>/approval_rules.json`.
+    /// Missing or malformed file is treated as an empty rule set (no error).
+    pub fn load_prefix_approval_rules(&mut self) {
+        let Some(path) = self.approval_rules_path() else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        match serde_json::from_str::<ApprovalRuleStore>(&text) {
+            Ok(store) => {
+                if let Ok(mut guard) = self.prefix_approval_rules.lock() {
+                    *guard = store;
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "ignoring malformed approval rules at {}: {err}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    /// Persist the current Layer-2 prefix rules to `<home>/approval_rules.json`.
+    /// Returns the path written, or `None` if no home dir is set or the write
+    /// failed (a failed write is logged but does not interrupt the turn).
+    pub fn save_prefix_approval_rules(&self) -> Option<PathBuf> {
+        let path = self.approval_rules_path()?;
+        let store = self
+            .prefix_approval_rules
+            .lock()
+            .ok()
+            .map(|guard| guard.clone())?;
+        let text = serde_json::to_string_pretty(&store).ok()?;
+        if let Some(parent) = path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                eprintln!("failed to create dir for approval rules");
+                return None;
+            }
+        }
+        if std::fs::write(&path, text).is_err() {
+            eprintln!("failed to write approval rules at {}", path.display());
+            return None;
+        }
+        Some(path)
     }
 
     /// Replace the shared plan-mode state. Useful when constructing from a
@@ -1317,12 +1407,29 @@ fn attach_exit_plan_details(
     let Some(plan_data) = pm.data().ok().flatten() else {
         return;
     };
+    let mut selected_labels = config.plan_review_selected_label.lock().ok();
     for (tool_call, result) in tool_results {
-        if tool_call.name == "ExitPlanMode" && result.details.is_none() {
-            result.details = Some(serde_json::json!({
-                "plan_content": plan_data.content,
-                "plan_path": plan_data.path.display().to_string(),
-            }));
+        if tool_call.name == "ExitPlanMode" {
+            if result.details.is_none() {
+                result.details = Some(serde_json::json!({
+                    "plan_content": plan_data.content,
+                    "plan_path": plan_data.path.display().to_string(),
+                }));
+            }
+            // When the user approved a specific model-supplied option from
+            // the plan-review picker, prefix the tool result so the model runs
+            // only the selected branch. The label is consumed once.
+            if !result.is_error
+                && let Some(labels) = selected_labels.as_mut()
+                && let Some(label) = labels.remove(&tool_call.id)
+                && !label.trim().is_empty()
+            {
+                result.content = format!(
+                    "Selected approach: {label}\n\
+                     Execute ONLY the selected approach. Do not execute any unselected alternatives.\n\n{}",
+                    result.content
+                );
+            }
         }
     }
 }
@@ -1823,9 +1930,21 @@ fn terminates_tool_batch(tool_results: &[(AgentToolCall, ToolResult)]) -> bool {
 }
 
 fn continues_after_terminating_batch(tool_results: &[(AgentToolCall, ToolResult)]) -> bool {
-    tool_results
-        .iter()
-        .any(|(call, result)| call.name == "EnterPlanMode" && !result.is_error)
+    tool_results.iter().any(|(call, result)| {
+        // Mode transitions terminate their batch (so the runtime can fire the
+        // mode-switch side effects keyed off `result.terminate`), but the loop
+        // generally keeps going so the model can act on the result: continue
+        // planning after EnterPlanMode, execute the approved plan after
+        // ExitPlanMode. Only the successful branch continues; a rejected/revised
+        // ExitPlanMode returns a non-terminating synthesized result and never
+        // reaches this predicate.
+        //
+        // ExitGoalMode is intentionally excluded: it starts the durable goal,
+        // and goal continuation (`goal_continuation_messages`) drives subsequent
+        // turns on the next `run_agent_turn` entry by design. Continuing inline
+        // here would re-feed the continuation message every turn and spin.
+        !result.is_error && matches!(call.name.as_str(), "EnterPlanMode" | "ExitPlanMode")
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2462,13 +2581,20 @@ async fn prepare_tool_call(
             scheduling,
             access: ToolAccess::none(),
         },
-        PermissionPreparation::Ask { operation, subject } => {
+        PermissionPreparation::Ask {
+            operation,
+            subject,
+            session_scope,
+            prefix_rule,
+        } => {
             match resolve_approval(
                 config,
                 turn,
                 tool_call,
                 operation,
                 subject,
+                session_scope,
+                prefix_rule,
                 emitter,
                 cancel_token,
             )
@@ -2542,23 +2668,46 @@ fn permission_preparation_for_mode(
         return PermissionPreparation::Run(access_for_tool(tool_call, true));
     }
 
-    // 6. Session approvals.
-    if config
-        .session_approvals
-        .lock()
-        .ok()
-        .is_some_and(|set| set.contains(&tool_call.name))
+    // 6. Derive the reusable scope + prefix rule for this call. Done once here
+    //    so every downstream branch (session cache, prefix store, prompt) sees
+    //    the same values. Review transitions force both to `None`.
+    let (session_scope, prefix_rule) = approval_scope_for_tool_call(config, tool_call);
+
+    // 7. Layer 2 — persistent prefix rules (loaded from disk). If the command's
+    //    canonical argv starts with a saved prefix, auto-approve without prompt.
+    if let Some(argv) = shell_argv_for_prefix_check(config, tool_call)
+        && config
+            .prefix_approval_rules
+            .lock()
+            .ok()
+            .is_some_and(|store| store.matches(&argv))
     {
         return PermissionPreparation::Run(access_for_tool(tool_call, true));
     }
 
-    // 7. ExitPlanMode review in ask/yolo when plan is non-empty.
-    //    These transitions must never become session-scoped wildcards.
+    // 8. Layer 1 — session approvals scoped by exact canonical command + cwd
+    //    (or exact file path + operation). NOT keyed by tool name, so approving
+    //    one Bash command never approves a different Bash command.
+    if let Some(scope) = &session_scope
+        && config
+            .session_approvals
+            .lock()
+            .ok()
+            .is_some_and(|set| scope.is_approved(&set))
+    {
+        return PermissionPreparation::Run(access_for_tool(tool_call, true));
+    }
+
+    // 9. ExitPlanMode review in ask/yolo when plan is non-empty.
+    //    These transitions must never become session-scoped wildcards, so scope
+    //    and prefix are forced to `None` in `approval_scope_for_tool_call`.
     if tool_call.name == "ExitPlanMode" {
         if exit_plan_mode_has_reviewable_plan(config) {
             return PermissionPreparation::Ask {
                 operation: PermissionOperation::PlanTransition,
                 subject: "Exit plan mode".to_owned(),
+                session_scope: None,
+                prefix_rule: None,
             };
         }
         return PermissionPreparation::Run(access_for_tool(tool_call, true));
@@ -2571,10 +2720,12 @@ fn permission_preparation_for_mode(
         return PermissionPreparation::Ask {
             operation: PermissionOperation::GoalTransition,
             subject: "Start reviewed goal".to_owned(),
+            session_scope: None,
+            prefix_rule: None,
         };
     }
 
-    // 8. Plan-mode helper approvals (e.g. writing the active plan file).
+    // 10. Plan-mode helper approvals (e.g. writing the active plan file).
     if matches!(tool_call.name.as_str(), "Write" | "Edit") {
         let Ok(plan_mode) = config.plan_mode.read() else {
             return PermissionPreparation::Deny("plan mode state is unavailable".to_owned());
@@ -2587,20 +2738,49 @@ fn permission_preparation_for_mode(
         }
     }
 
-    // 9. Yolo mode approves all remaining tools.
+    // 11. Yolo mode approves all remaining tools.
     if mode == PermissionMode::Yolo {
         return PermissionPreparation::Run(access_for_tool(tool_call, true));
     }
 
-    // 10. Default safe tools in ask mode.
+    // 12. Layer 3 — read-only safe commands skip the prompt in ask mode.
+    //     `git status`, `ls`, `cat`, `cargo test`, etc. are auto-approved when
+    //     they classify as known-safe. Dangerous commands bypass this and the
+    //     default-approved list below so they always prompt.
+    if let Some(argv) = shell_argv_for_prefix_check(config, tool_call) {
+        if command_might_be_dangerous(&argv) {
+            // Force a prompt; do NOT offer session/prefix scope for dangerous
+            // commands, so the user re-reviews every time.
+            let (operation, subject) = permission_operation_for_tool(tool_call)
+                .unwrap_or((PermissionOperation::Tool, tool_call.name.clone()));
+            return PermissionPreparation::Ask {
+                operation,
+                subject,
+                session_scope: None,
+                prefix_rule: None,
+            };
+        }
+        if is_known_safe_command(&argv) {
+            return PermissionPreparation::Run(access_for_tool(tool_call, true));
+        }
+    }
+
+    // 13. Default safe tools in ask mode.
     if is_default_approved_tool(tool_call) {
         return PermissionPreparation::Run(access_for_tool(tool_call, true));
     }
 
-    // 11. Ask fallback prompt.
+    // 14. Ask fallback prompt. The derived scope + prefix travel with the Ask
+    //     so the UI can show the exact saved target (or omit the option when
+    //     scope is `None`, e.g. dangerous commands).
     let (operation, subject) = permission_operation_for_tool(tool_call)
         .unwrap_or((PermissionOperation::Tool, tool_call.name.clone()));
-    PermissionPreparation::Ask { operation, subject }
+    PermissionPreparation::Ask {
+        operation,
+        subject,
+        session_scope,
+        prefix_rule,
+    }
 }
 
 /// Read the live permission mode. Falls back to the static snapshot only when
@@ -2661,6 +2841,8 @@ async fn resolve_approval(
     tool_call: &AgentToolCall,
     operation: PermissionOperation,
     subject: String,
+    session_scope: Option<SessionApprovalScope>,
+    prefix_rule: Option<PrefixApprovalRule>,
     emitter: &mut impl EventPublisher,
     cancel_token: &CancellationToken,
 ) -> Option<ToolResult> {
@@ -2670,6 +2852,8 @@ async fn resolve_approval(
         operation,
         subject: subject.clone(),
         arguments: tool_call.arguments.clone(),
+        session_scope: session_scope.clone(),
+        prefix_rule: prefix_rule.clone(),
     };
     emitter.emit(AgentEvent::ApprovalRequested {
         turn: request.turn,
@@ -2677,6 +2861,8 @@ async fn resolve_approval(
         operation: request.operation,
         subject: request.subject.clone(),
         arguments: request.arguments.clone(),
+        session_scope: request.session_scope.clone(),
+        prefix_rule: request.prefix_rule.clone(),
     });
     let decision = if let Some(handler) = &config.approval_handler {
         handler(&request)
@@ -2692,8 +2878,32 @@ async fn resolve_approval(
     match decision {
         PermissionApprovalDecision::AllowOnce => None,
         PermissionApprovalDecision::AllowForSession => {
-            if let Ok(mut set) = config.session_approvals.lock() {
-                set.insert(tool_call.name.clone());
+            // Layer 1: record each narrow key (exact canonical command/cwd,
+            // exact file path/op). With no derived scope this degrades to a
+            // no-op AllowOnce — it never creates a tool-name wildcard.
+            if let Some(scope) = &session_scope
+                && let Ok(mut set) = config.session_approvals.lock()
+            {
+                scope.record(&mut set);
+            }
+            // Layer 2: persist a prefix rule when one was proposed and the
+            // handler surfaced it via AllowForSession (the UI maps the prefix
+            // button to AllowForSession + a non-None prefix_rule). This is the
+            // only place prefix rules get written from a tool call. The store
+            // is persisted to disk so the rule survives restarts.
+            if let Some(rule) = &prefix_rule
+                && !ApprovalRuleStore::is_would_approve_all(&rule.prefix)
+            {
+                let should_save = if let Ok(mut store) = config.prefix_approval_rules.lock() {
+                    let was_new = !store.prefix_rules.iter().any(|r| r.prefix == rule.prefix);
+                    store.insert(rule.clone());
+                    was_new
+                } else {
+                    false
+                };
+                if should_save {
+                    config.save_prefix_approval_rules();
+                }
             }
             None
         }
@@ -2791,6 +3001,346 @@ fn path_subject(arguments: &serde_json::Value) -> Option<String> {
         .get("path")
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned)
+}
+
+// ---------------------------------------------------------------------------
+// Layer 1/2/3 — approval scope, prefix rule, and safety derivation helpers
+// ---------------------------------------------------------------------------
+
+/// Workspace root string used as part of every approval key. Stored on the key
+/// so a session store reused across workspaces never leaks an approval. Empty
+/// when the workspace root is unknown.
+fn workspace_key_root(config: &AgentConfig) -> String {
+    config
+        .workspace_root
+        .as_deref()
+        .map_or_else(String::new, |root| root.display().to_string())
+}
+
+/// Resolve the effective Bash cwd: if the caller passed `cwd`, resolve it
+/// through workspace containment, else use the workspace root. Returns `None`
+/// when the path escapes the workspace or the workspace root is unknown.
+fn resolve_bash_cwd(config: &AgentConfig, arguments: &serde_json::Value) -> Option<String> {
+    let workspace_root = config.workspace_root.as_deref()?;
+    let candidate = arguments
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .map(std::path::Path::new);
+    let resolved = match candidate {
+        Some(rel) if !rel.is_absolute() => workspace_root.join(rel),
+        Some(abs) => abs.to_path_buf(),
+        None => workspace_root.to_path_buf(),
+    };
+    let normalized = normalize_path(&resolved);
+    if !normalized.starts_with(workspace_root) {
+        return None;
+    }
+    Some(normalized.display().to_string())
+}
+
+/// Split a shell command string into argv tokens using POSIX-ish word rules.
+/// Handles single/double quotes and backslash escapes. Returns `None` when the
+/// string is empty or unparseable (e.g. unmatched quote).
+fn tokenize_shell_command(command: &str) -> Option<Vec<String>> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut has_token = false;
+    let mut chars = trimmed.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                in_double = false;
+            } else if ch == '\\' {
+                if let Some(&next) = chars.peek() {
+                    if matches!(next, '"' | '\\' | '$' | '`') {
+                        current.push(next);
+                        chars.next();
+                        continue;
+                    }
+                }
+                current.push(ch);
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_single = true;
+                has_token = true;
+            }
+            '"' => {
+                in_double = true;
+                has_token = true;
+            }
+            '\\' => {
+                if let Some(&next) = chars.peek() {
+                    current.push(next);
+                    chars.next();
+                    has_token = true;
+                }
+            }
+            c if c.is_whitespace() => {
+                if has_token {
+                    tokens.push(std::mem::take(&mut current));
+                    has_token = false;
+                }
+            }
+            c => {
+                current.push(c);
+                has_token = true;
+            }
+        }
+    }
+    if in_single || in_double {
+        return None; // unmatched quote
+    }
+    if has_token {
+        tokens.push(current);
+    }
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens)
+    }
+}
+
+/// True when a command string contains shell control operators that make it a
+/// compound/opaque script (`&&`, `||`, `;`, `|`, `>`, `<`, backticks, `$(...)`,
+/// `{...}`). Used to decide whether a stable argv prefix can be proposed.
+fn is_compound_or_opaque_command(command: &str) -> bool {
+    // Quick scan outside of quotes. Conservative: any of these operators marks
+    // the line as compound/opaque for prefix purposes.
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = command.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '&' if !in_single && !in_double => {
+                if chars.peek() == Some(&'&') {
+                    return true;
+                }
+            }
+            '|' if !in_single && !in_double => return true,
+            ';' if !in_single && !in_double => return true,
+            '>' if !in_single && !in_double => return true,
+            '<' if !in_single && !in_double => return true,
+            '`' if !in_single && !in_double => return true,
+            '$' if !in_single && !in_double => {
+                if chars.peek() == Some(&'(') {
+                    return true;
+                }
+            }
+            '{' if !in_single && !in_double => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Tokenize a Bash command for prefix-check / safety classification. Returns
+/// `None` when there is no `command` arg or it cannot be tokenized.
+fn shell_argv(config: &AgentConfig, tool_call: &AgentToolCall) -> Option<Vec<String>> {
+    if tool_call.name != "Bash" {
+        return None;
+    }
+    let background = tool_call
+        .arguments
+        .get("run_in_background")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if background {
+        return None;
+    }
+    let raw = tool_call
+        .arguments
+        .get("command")
+        .and_then(serde_json::Value::as_str)?;
+    let _ = config.workspace_root.as_deref()?;
+    tokenize_shell_command(raw)
+}
+
+/// Alias used in `permission_preparation_for_mode` for clarity.
+fn shell_argv_for_prefix_check(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+) -> Option<Vec<String>> {
+    shell_argv(config, tool_call)
+}
+
+/// Derive `(session_scope, prefix_rule)` for a tool call. Returns `(None, None)`
+/// for review transitions, dangerous commands, interactive tools, and anything
+/// where a reusable grant is unsafe.
+fn approval_scope_for_tool_call(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+) -> (Option<SessionApprovalScope>, Option<PrefixApprovalRule>) {
+    // Review transitions and dangerous commands never offer scope/prefix.
+    if matches!(tool_call.name.as_str(), "ExitPlanMode" | "ExitGoalMode") {
+        return (None, None);
+    }
+    match tool_call.name.as_str() {
+        "Bash" => bash_approval_scope(config, &tool_call.arguments),
+        "Write" => {
+            let (scope, _) = file_write_approval_scope(
+                config,
+                &tool_call.arguments,
+                FileWriteApprovalOperation::Write,
+            );
+            (scope, None)
+        }
+        "Edit" => {
+            let (scope, _) = file_write_approval_scope(
+                config,
+                &tool_call.arguments,
+                FileWriteApprovalOperation::Edit,
+            );
+            (scope, None)
+        }
+        _ => (None, None),
+    }
+}
+
+/// Build the session scope + optional prefix rule for a Bash call.
+fn bash_approval_scope(
+    config: &AgentConfig,
+    arguments: &serde_json::Value,
+) -> (Option<SessionApprovalScope>, Option<PrefixApprovalRule>) {
+    let background = arguments
+        .get("run_in_background")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if background {
+        return (None, None); // background bash has no safe reusable scope
+    }
+    let Some(raw_command) = arguments.get("command").and_then(serde_json::Value::as_str) else {
+        return (None, None);
+    };
+    let command = raw_command.trim();
+    if command.is_empty() {
+        return (None, None);
+    }
+    let workspace = workspace_key_root(config);
+    let cwd = resolve_bash_cwd(config, arguments).unwrap_or_else(|| workspace.clone());
+    // Dangerous commands get no scope (re-prompt every time).
+    if let Some(argv) = tokenize_shell_command(command) {
+        if command_might_be_dangerous(&argv) {
+            return (None, None);
+        }
+        // Layer 1: exact canonical argv key (only when not compound/opaque, so
+        // `git status && git push` does not get cached as if it were `git status`).
+        let key = if is_compound_or_opaque_command(command) {
+            SessionApprovalKey::Shell {
+                workspace: workspace.clone(),
+                cwd: cwd.clone(),
+                command: vec!["__shell_script__".to_owned(), command.to_owned()],
+            }
+        } else {
+            SessionApprovalKey::Shell {
+                workspace: workspace.clone(),
+                cwd: cwd.clone(),
+                command: argv.clone(),
+            }
+        };
+        let scope = SessionApprovalScope {
+            keys: vec![key],
+            label: "Approve this exact command for this session".to_owned(),
+            detail: format!("Exact command in {cwd}: {command}"),
+        };
+        // Layer 2: propose a prefix rule only for non-compound commands (so the
+        // prefix is a real argv prefix, not half of a `&&`). Use the first
+        // program token; refuse empty (would approve everything).
+        let prefix_rule = if !is_compound_or_opaque_command(command) && !argv.is_empty() {
+            let prefix = vec![argv[0].clone()];
+            if ApprovalRuleStore::is_would_approve_all(&prefix) {
+                None
+            } else {
+                Some(PrefixApprovalRule {
+                    label: argv[0].clone(),
+                    prefix,
+                })
+            }
+        } else {
+            None
+        };
+        (Some(scope), prefix_rule)
+    } else {
+        // Could not tokenize (unmatched quote etc.) — opaque exact-text key.
+        let key = SessionApprovalKey::Shell {
+            workspace: workspace.clone(),
+            cwd: cwd.clone(),
+            command: vec!["__shell_script__".to_owned(), command.to_owned()],
+        };
+        let scope = SessionApprovalScope {
+            keys: vec![key],
+            label: "Approve this exact command for this session".to_owned(),
+            detail: format!("Exact command in {cwd}: {command}"),
+        };
+        (Some(scope), None)
+    }
+}
+
+/// Build the session scope for a Write/Edit call. Returns no prefix rule.
+fn file_write_approval_scope(
+    config: &AgentConfig,
+    arguments: &serde_json::Value,
+    operation: FileWriteApprovalOperation,
+) -> (Option<SessionApprovalScope>, Option<PrefixApprovalRule>) {
+    let Some(raw_path) = arguments.get("path").and_then(serde_json::Value::as_str) else {
+        return (None, None);
+    };
+    if raw_path.trim().is_empty() {
+        return (None, None);
+    }
+    let workspace = workspace_key_root(config);
+    let Some(workspace_root) = config.workspace_root.as_deref() else {
+        return (None, None);
+    };
+    let resolved = if std::path::Path::new(raw_path).is_absolute() {
+        std::path::PathBuf::from(raw_path)
+    } else {
+        workspace_root.join(raw_path)
+    };
+    let normalized = normalize_path(&resolved);
+    if !normalized.starts_with(workspace_root) {
+        return (None, None);
+    }
+    let path = normalized.display().to_string();
+    let key = SessionApprovalKey::FileWrite {
+        workspace: workspace.clone(),
+        path: path.clone(),
+        operation,
+    };
+    let (verb, label) = match operation {
+        FileWriteApprovalOperation::Write => {
+            ("writes to", "Approve writes to this file for this session")
+        }
+        FileWriteApprovalOperation::Edit => {
+            ("edits to", "Approve edits to this file for this session")
+        }
+    };
+    let scope = SessionApprovalScope {
+        keys: vec![key],
+        label: label.to_owned(),
+        detail: format!("File ({verb}): {path}"),
+    };
+    (Some(scope), None)
 }
 
 fn emit_shell_started(
@@ -3117,6 +3667,21 @@ fn default_tool_context(
                 .with_cancel_token(cancel_token.clone())
                 .with_process_supervisor(process_supervisor)
                 .with_background_tasks(config.background_tasks.clone())
+        })
+        .map(|context| {
+            // The active plan file lives under the NEO_HOME sessions bucket
+            // (outside the workspace). Whitelist it so Write/Edit can resolve
+            // the path while plan mode is active; the plan-mode guard and the
+            // permission layer still restrict writes to *only* that path.
+            let plan_path = config
+                .plan_mode
+                .read()
+                .ok()
+                .and_then(|plan_mode| plan_mode.plan_file_path().map(PathBuf::from));
+            match plan_path {
+                Some(path) => context.with_allowed_external_write_paths([path]),
+                None => context,
+            }
         })
         .map_err(AgentRuntimeError::Tool)
 }
