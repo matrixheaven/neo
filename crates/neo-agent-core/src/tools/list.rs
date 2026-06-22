@@ -11,14 +11,15 @@ const LIST_DIR_CHILD_WIDTH: usize = 10;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ListInput {
-    /// Path to the directory to list. Relative paths resolve against the
-    /// working directory; paths outside the working directory must be absolute.
-    /// Defaults to the current working directory.
     #[serde(default = "default_path")]
+    #[schemars(
+        description = "Path to the directory to list. Relative paths resolve against the working directory; paths outside the working directory must be absolute. Defaults to the current working directory."
+    )]
     path: std::path::PathBuf,
-    /// When true, do not expand the children of hidden directories (names
-    /// starting with `.`). Defaults to false.
     #[serde(default)]
+    #[schemars(
+        description = "When true, do not expand the children of hidden directories (names starting with `.`). Defaults to false."
+    )]
     collapse_hidden_dirs: bool,
 }
 

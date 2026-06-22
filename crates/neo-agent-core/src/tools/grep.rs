@@ -21,6 +21,7 @@ enum OutputMode {
 #[serde(deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)]
 struct GrepInput {
+    #[schemars(description = "Regular expression to search for.")]
     pattern: String,
     #[serde(default = "default_path")]
     #[schemars(

@@ -25,25 +25,31 @@ use super::{
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct BashInput {
-    /// The shell command to execute.
+    #[schemars(description = "The shell command to execute.")]
     command: String,
-    /// The workspace-relative working directory in which to run the command.
-    /// When omitted, the command runs in the session working directory.
+    #[schemars(
+        description = "The workspace-relative working directory in which to run the command. When omitted, the command runs in the session working directory."
+    )]
     cwd: Option<String>,
-    /// Optional timeout in seconds for the command to execute.
-    /// Only applies to foreground commands; background commands run until they
-    /// finish or are stopped. Defaults to the runtime bash timeout.
+    #[schemars(
+        description = "Optional timeout in seconds for foreground commands. Background commands run until finished or stopped. Defaults to the runtime bash timeout."
+    )]
     timeout: Option<u64>,
-    /// Whether to run the command as a background task.
+    #[schemars(
+        description = "Whether to run the command as a background task. When true, you must provide a description."
+    )]
     run_in_background: Option<bool>,
-    /// A short description for the background task.
-    /// Required when `run_in_background` is true.
+    #[schemars(
+        description = "A short description for the background task. Required when run_in_background is true."
+    )]
     description: Option<String>,
-    /// If true, do not apply a timeout to the command.
-    /// Only applies when `run_in_background` is true.
+    #[schemars(
+        description = "If true, do not apply a timeout to the command. Only applies when run_in_background is true."
+    )]
     disable_timeout: Option<bool>,
-    /// Maximum number of bytes of combined stdout/stderr to return.
-    /// Defaults to the runtime output limit when omitted.
+    #[schemars(
+        description = "Maximum number of bytes of combined stdout/stderr to return. Defaults to the runtime output limit when omitted."
+    )]
     max_output_bytes: Option<usize>,
 }
 

@@ -10,12 +10,14 @@ use crate::TodoEventData;
 /// A single todo item tracked by the model.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct TodoItem {
-    /// Short, actionable title for the todo (e.g. "Read session-control.ts").
-    #[schemars(description = "Short, actionable title for the todo.")]
+    #[schemars(
+        description = "Short, actionable title for the todo. Example: \"Read session-control.ts\"."
+    )]
     pub title: String,
-    /// Current status of the task.
     #[serde(rename = "status")]
-    #[schemars(description = "Current status of the todo: pending, in_progress, or done.")]
+    #[schemars(
+        description = "Current status of the todo. Must be one of: `pending`, `in_progress`, `done`."
+    )]
     pub status: TodoStatus,
 }
 
@@ -70,10 +72,8 @@ impl From<&TodoItem> for TodoEventData {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TodoInput {
-    /// The complete set of todos. Omit to read the current list, pass an empty
-    /// array to clear it, or pass a non-empty array to replace it entirely.
     #[schemars(
-        description = "The updated todo list. Omit to read the current list without making changes. Pass an empty array to clear the list."
+        description = "The updated todo list. Each item must be an object with `title` (string) and `status` (`pending`, `in_progress`, or `done`). Omit to read the current list without making changes. Pass an empty array to clear the list."
     )]
     pub todos: Option<Vec<TodoItem>>,
 }

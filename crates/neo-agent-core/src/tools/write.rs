@@ -8,7 +8,11 @@ use super::{Tool, ToolContext, ToolFuture, ToolResult, parse_input, schema};
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct WriteInput {
+    #[schemars(
+        description = "Path to the file to write. Relative paths resolve against the working directory."
+    )]
     path: std::path::PathBuf,
+    #[schemars(description = "UTF-8 content to write to the file.")]
     content: String,
 }
 

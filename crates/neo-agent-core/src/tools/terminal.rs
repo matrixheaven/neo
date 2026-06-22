@@ -28,24 +28,33 @@ const TERMINAL_READ_POLL_INTERVAL: Duration = Duration::from_millis(10);
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TerminalInput {
-    /// The operation to perform: `start`, `write`, `read`, `resize`, or `stop`.
+    #[schemars(
+        description = "The operation to perform: `start`, `write`, `read`, `resize`, or `stop`."
+    )]
     mode: TerminalMode,
-    /// The shell command to launch in the PTY. Required when `mode` is `start`.
+    #[schemars(
+        description = "The shell command to launch in the PTY. Required when mode is `start`."
+    )]
     command: Option<String>,
-    /// The session handle returned by a previous `start` call.
-    /// Required for `write`, `read`, `resize`, and `stop`.
+    #[schemars(
+        description = "The session handle returned by a previous `start` call. Required for `write`, `read`, `resize`, and `stop`."
+    )]
     handle: Option<String>,
-    /// Text to send to the PTY. Required when `mode` is `write`.
-    /// Newlines are translated to carriage returns as needed.
+    #[schemars(
+        description = "Text to send to the PTY. Required when mode is `write`. Newlines are translated to carriage returns as needed."
+    )]
     input: Option<String>,
-    /// Terminal width in columns.
-    /// Required when `mode` is `resize`; optional when `mode` is `start` (default 80).
+    #[schemars(
+        description = "Terminal width in columns. Required when mode is `resize`; optional when mode is `start` (default 80)."
+    )]
     cols: Option<u16>,
-    /// Terminal height in rows.
-    /// Required when `mode` is `resize`; optional when `mode` is `start` (default 24).
+    #[schemars(
+        description = "Terminal height in rows. Required when mode is `resize`; optional when mode is `start` (default 24)."
+    )]
     rows: Option<u16>,
-    /// Maximum number of bytes of output to return for `read` and `stop`.
-    /// Defaults to the runtime output limit when omitted.
+    #[schemars(
+        description = "Maximum number of bytes of output to return for `read` and `stop`. Defaults to the runtime output limit when omitted."
+    )]
     max_output_bytes: Option<usize>,
 }
 

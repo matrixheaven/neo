@@ -9,6 +9,7 @@ const DEFAULT_LIMIT: usize = 100;
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct FindInput {
+    #[schemars(description = "Substring to search for in file and directory names.")]
     pattern: String,
     #[serde(default = "default_path")]
     #[schemars(

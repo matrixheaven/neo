@@ -10,11 +10,17 @@ const MAX_BYTES: usize = 100 * 1024;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReadInput {
+    #[schemars(
+        description = "Path to the text file. Relative paths resolve against the working directory; paths outside the working directory must be absolute."
+    )]
     path: std::path::PathBuf,
-    /// 1-based line number to start reading from. Omit to start at line 1.
-    /// Negative values read from the end of the file.
+    #[schemars(
+        description = "1-based line number to start reading from. Omit to start at line 1. Negative values read from the end of the file."
+    )]
     line_offset: Option<i64>,
-    /// Maximum number of lines to read. Omit to read up to the internal cap.
+    #[schemars(
+        description = "Maximum number of lines to read. Omit to read up to the internal cap."
+    )]
     n_lines: Option<usize>,
 }
 

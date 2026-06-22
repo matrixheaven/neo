@@ -8,23 +8,24 @@ use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, s
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct GlobInput {
-    /// Glob pattern to match files and/or directories.
-    ///
-    /// Supports `*`, `**`, and brace expansion such as `*.{rs,toml}` or
-    /// `{src,tests}/**/*.rs`.
+    #[schemars(
+        description = "Glob pattern to match files and/or directories. Supports `*`, `**`, and brace expansion such as `*.{rs,toml}` or `{src,tests}/**/*.rs`."
+    )]
     pattern: String,
-    /// Directory to search in. Relative paths resolve against the working
-    /// directory; paths outside the working directory must be absolute.
-    /// Defaults to the current working directory.
     #[serde(default = "default_path")]
+    #[schemars(
+        description = "Directory to search in. Relative paths resolve against the working directory; paths outside the working directory must be absolute. Defaults to the current working directory."
+    )]
     path: std::path::PathBuf,
-    /// Whether to include directories in results. Defaults to true. Set false
-    /// to return only files.
     #[serde(default = "default_include_dirs")]
+    #[schemars(
+        description = "Whether to include directories in results. Defaults to true. Set false to return only files."
+    )]
     include_dirs: bool,
-    /// Maximum number of matching paths to return. Defaults to 100. Lower this
-    /// only when you need a quick peek; refine the pattern when the cap is hit.
     #[serde(default = "default_max_matches")]
+    #[schemars(
+        description = "Maximum number of matching paths to return. Defaults to 100. Lower this only when you need a quick peek; refine the pattern when the cap is hit."
+    )]
     max_matches: usize,
 }
 

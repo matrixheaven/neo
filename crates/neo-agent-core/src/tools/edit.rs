@@ -8,10 +8,20 @@ use super::{Tool, ToolContext, ToolFuture, ToolResult, parse_input, schema};
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct EditInput {
+    #[schemars(
+        description = "Path to the file to edit. Relative paths resolve against the working directory."
+    )]
     path: std::path::PathBuf,
+    #[schemars(
+        description = "Exact existing text to replace. Must match uniquely unless replace_all is true."
+    )]
     old: String,
+    #[schemars(description = "New text to insert in place of old.")]
     new: String,
     #[serde(default)]
+    #[schemars(
+        description = "If true, replace every occurrence of old. Defaults to false (replace first occurrence only)."
+    )]
     replace_all: bool,
 }
 
