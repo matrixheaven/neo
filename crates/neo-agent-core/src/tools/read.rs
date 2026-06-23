@@ -1,21 +1,25 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tokio::io::{AsyncBufReadExt, BufReader};
 
-use super::{Tool, ToolContext, ToolError, ToolFuture, ToolResult, parse_input, schema};
+use super::{
+    Tool, ToolContext, ToolError, ToolFuture, ToolResult, normalize_path, parse_input, schema,
+};
 
 const MAX_LINES: usize = 1000;
 const MAX_LINE_LENGTH: usize = 2000;
 const MAX_BYTES: usize = 100 * 1024;
+const READ_CHUNK_SIZE: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReadInput {
     #[schemars(
-        description = "Path to the text file. Relative paths resolve against the working directory; paths outside the working directory must be absolute."
+        description = "Path to the text file. Relative paths resolve against the working directory; absolute paths are used as-is, including paths outside the working directory."
     )]
     path: std::path::PathBuf,
     #[schemars(
-        description = "1-based line number to start reading from. Omit to start at line 1. Negative values read from the end of the file."
+        description = "1-based line number to start reading from. Omit to start at line 1. Negative values read from the end of the file; the absolute value must not exceed 1000."
     )]
     line_offset: Option<i64>,
     #[schemars(
@@ -32,17 +36,17 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a UTF-8 text file from the workspace.\
+        "Read a UTF-8 text file.\
         \
         If the user provides a concrete file path, call Read directly. Do not use Glob, ls, or \
         other pre-checks for known text file paths; missing or invalid paths return errors you can \
         handle. Use Glob for pattern searches and Bash `ls` for directories.\
         \
         Parameters:\
-        - path: Path to the text file. Relative paths resolve against the working directory; paths \
-          outside the working directory must be absolute.\
+        - path: Path to the text file. Relative paths resolve against the working directory; \
+          absolute paths are used as-is, including paths outside the working directory.\
         - line_offset: 1-based line number to start reading from. Omit to start at line 1. Negative \
-          values read from the end (e.g. -100 reads the last 100 lines). The absolute value must \
+          values read from the end (e.g. -100 reads the last 100 lines); the absolute value must \
           not exceed 1000.\
         - n_lines: Maximum number of lines to read. Omit to read up to the internal cap of 1000 \
           lines.\
@@ -66,21 +70,69 @@ impl Tool for ReadTool {
         Box::pin(async move {
             ctx.ensure_file_read_allowed()?;
             let input: ReadInput = parse_input(self.name(), input)?;
-            let path = ctx.resolve_workspace_path(&input.path)?;
-            let content = tokio::fs::read_to_string(&path)
-                .await
-                .map_err(ToolError::Io)?;
+            let path = resolve_read_path(ctx, &input.path);
 
-            let result =
-                render_read(&content, input.line_offset, input.n_lines).map_err(|message| {
-                    ToolError::InvalidInput {
-                        tool: self.name().to_owned(),
-                        message,
-                    }
-                })?;
-
-            Ok(ToolResult::ok(result.finish_output()))
+            match run_read(&path, input.line_offset, input.n_lines).await {
+                Ok(result) => Ok(ToolResult::ok(result.finish_output())),
+                Err(ReadError::Io(source)) => Err(ToolError::Io(source)),
+                Err(ReadError::InvalidInput(message)) => Err(ToolError::InvalidInput {
+                    tool: self.name().to_owned(),
+                    message,
+                }),
+                // NotReadable and Missing are semantically distinct but both surface as a failed
+                // tool result to the model; keep them separate so callers can tell them apart.
+                #[allow(clippy::match_same_arms)]
+                Err(ReadError::NotReadable(message)) => Ok(ToolResult::error(message)),
+                Err(ReadError::Missing(message)) => Ok(ToolResult::error(message)),
+            }
         })
+    }
+}
+
+fn resolve_read_path(ctx: &ToolContext, path: &std::path::Path) -> std::path::PathBuf {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        ctx.workspace_root().join(path)
+    };
+    normalize_path(
+        &candidate
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.clone()),
+    )
+}
+
+#[derive(Debug)]
+enum ReadError {
+    Io(std::io::Error),
+    InvalidInput(String),
+    NotReadable(String),
+    Missing(String),
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(source) => write!(f, "io error: {source}"),
+            Self::InvalidInput(message) | Self::NotReadable(message) | Self::Missing(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(source) => Some(source),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for ReadError {
+    fn from(source: std::io::Error) -> Self {
+        Self::Io(source)
     }
 }
 
@@ -92,31 +144,38 @@ enum LineEndingStyle {
 }
 
 impl LineEndingStyle {
-    fn detect(text: &str) -> Self {
-        let mut has_crlf = false;
-        let mut has_lf = false;
-        let mut has_lone_cr = false;
+    fn from_flags(flags: LineEndingFlags) -> Self {
+        if flags.has_lone_cr || (flags.has_crlf && flags.has_lf) {
+            Self::Mixed
+        } else if flags.has_crlf {
+            Self::Crlf
+        } else {
+            Self::Lf
+        }
+    }
+}
 
+#[derive(Debug, Default, Clone, Copy)]
+struct LineEndingFlags {
+    has_crlf: bool,
+    has_lf: bool,
+    has_lone_cr: bool,
+}
+
+impl LineEndingFlags {
+    fn update(&mut self, text: &str) {
         let mut chars = text.chars().peekable();
         while let Some(ch) = chars.next() {
             if ch == '\r' {
                 if chars.peek() == Some(&'\n') {
-                    has_crlf = true;
+                    self.has_crlf = true;
                     chars.next();
                 } else {
-                    has_lone_cr = true;
+                    self.has_lone_cr = true;
                 }
             } else if ch == '\n' {
-                has_lf = true;
+                self.has_lf = true;
             }
-        }
-
-        if has_lone_cr || (has_crlf && has_lf) {
-            Self::Mixed
-        } else if has_crlf {
-            Self::Crlf
-        } else {
-            Self::Lf
         }
     }
 }
@@ -216,62 +275,182 @@ impl ReadRenderResult {
     }
 }
 
-fn render_read(
-    content: &str,
+async fn run_read(
+    path: &std::path::Path,
     line_offset: Option<i64>,
     n_lines: Option<usize>,
-) -> Result<ReadRenderResult, String> {
+) -> Result<ReadRenderResult, ReadError> {
     let line_offset = line_offset.unwrap_or(1);
     if line_offset == 0 {
-        return Err("line_offset must not be 0".to_owned());
+        return Err(ReadError::InvalidInput(
+            "line_offset must not be 0".to_owned(),
+        ));
     }
     let abs_offset = usize::try_from(line_offset.unsigned_abs()).unwrap_or(usize::MAX);
-    if abs_offset > MAX_LINES {
-        return Err(format!(
-            "absolute value of line_offset must not exceed {MAX_LINES}"
-        ));
+    if line_offset < 0 && abs_offset > MAX_LINES {
+        return Err(ReadError::InvalidInput(format!(
+            "absolute value of negative line_offset must not exceed {MAX_LINES}"
+        )));
     }
 
     let requested_lines = n_lines.unwrap_or(MAX_LINES);
     if requested_lines == 0 {
-        return Err("n_lines must be greater than 0".to_owned());
+        return Err(ReadError::InvalidInput(
+            "n_lines must be greater than 0".to_owned(),
+        ));
+    }
+    let effective_limit = requested_lines.min(MAX_LINES);
+
+    if !path.exists() {
+        return Err(ReadError::Missing(format!(
+            "\"{}\" does not exist.",
+            path.display()
+        )));
     }
 
-    let effective_limit = requested_lines.min(MAX_LINES);
-    let line_ending_style = LineEndingStyle::detect(content);
+    let metadata = tokio::fs::metadata(path).await?;
+    if !metadata.is_file() {
+        return Err(ReadError::Missing(format!(
+            "\"{}\" is not a file.",
+            path.display()
+        )));
+    }
 
-    let all_lines: Vec<(usize, &str)> = content
-        .split_inclusive('\n')
-        .map(strip_trailing_lf)
-        .enumerate()
-        .map(|(idx, line)| (idx + 1, line))
-        .collect();
+    if is_sensitive_path(path) {
+        return Err(ReadError::NotReadable(format!(
+            "\"{}\" matches a sensitive-file pattern and is refused to protect secrets.",
+            path.display()
+        )));
+    }
 
-    let total_lines = all_lines.len();
-
-    let start_idx = if line_offset < 0 {
-        total_lines.saturating_sub(abs_offset)
+    if line_offset < 0 {
+        read_tail(path, abs_offset, effective_limit, requested_lines).await
     } else {
-        abs_offset.saturating_sub(1)
-    };
+        read_forward(path, abs_offset, effective_limit, requested_lines).await
+    }
+}
 
-    let candidate_lines: Vec<(usize, &str)> = all_lines
-        .into_iter()
-        .skip(start_idx)
-        .take(effective_limit)
-        .collect();
+async fn read_forward(
+    path: &std::path::Path,
+    line_offset: usize,
+    effective_limit: usize,
+    requested_lines: usize,
+) -> Result<ReadRenderResult, ReadError> {
+    let file = tokio::fs::File::open(path).await?;
+    let mut reader = BufReader::with_capacity(READ_CHUNK_SIZE, file);
 
-    let max_lines_reached = effective_limit >= MAX_LINES
-        && candidate_lines.len() >= effective_limit
-        && start_idx + effective_limit < total_lines;
+    let mut flags = LineEndingFlags::default();
+    let mut current_line_no: usize = 0;
+    let mut selected: Vec<(usize, String)> = Vec::new();
+    let mut max_lines_reached = false;
+    let mut collection_closed = false;
 
+    loop {
+        let mut raw = String::new();
+        let bytes_read = reader.read_line(&mut raw).await?;
+        if bytes_read == 0 {
+            break;
+        }
+        if contains_nul(&raw) {
+            return Err(not_readable_error(path));
+        }
+        current_line_no += 1;
+        flags.update(&raw);
+
+        if collection_closed {
+            if effective_limit >= MAX_LINES && current_line_no >= line_offset {
+                max_lines_reached = true;
+            }
+            continue;
+        }
+
+        if current_line_no < line_offset {
+            continue;
+        }
+
+        if selected.len() >= effective_limit {
+            if effective_limit >= MAX_LINES {
+                max_lines_reached = true;
+            }
+            collection_closed = true;
+            continue;
+        }
+
+        selected.push((current_line_no, strip_trailing_lf(&raw).to_owned()));
+        if selected.len() >= effective_limit {
+            collection_closed = true;
+        }
+    }
+
+    render_entries(
+        selected,
+        flags,
+        max_lines_reached,
+        false,
+        current_line_no,
+        requested_lines,
+    )
+}
+
+async fn read_tail(
+    path: &std::path::Path,
+    tail_count: usize,
+    effective_limit: usize,
+    requested_lines: usize,
+) -> Result<ReadRenderResult, ReadError> {
+    let file = tokio::fs::File::open(path).await?;
+    let mut reader = BufReader::with_capacity(READ_CHUNK_SIZE, file);
+
+    let mut flags = LineEndingFlags::default();
+    let mut current_line_no: usize = 0;
+    let mut entries: std::collections::VecDeque<(usize, String)> =
+        std::collections::VecDeque::with_capacity(tail_count);
+
+    loop {
+        let mut raw = String::new();
+        let bytes_read = reader.read_line(&mut raw).await?;
+        if bytes_read == 0 {
+            break;
+        }
+        if contains_nul(&raw) {
+            return Err(not_readable_error(path));
+        }
+        current_line_no += 1;
+        flags.update(&raw);
+        entries.push_back((current_line_no, strip_trailing_lf(&raw).to_owned()));
+        if entries.len() > tail_count {
+            entries.pop_front();
+        }
+    }
+
+    let selected: Vec<(usize, String)> = entries.into_iter().take(effective_limit).collect();
+    render_entries(
+        selected,
+        flags,
+        false,
+        false,
+        current_line_no,
+        requested_lines,
+    )
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn render_entries(
+    entries: Vec<(usize, String)>,
+    flags: LineEndingFlags,
+    mut max_lines_reached: bool,
+    max_bytes_reached_input: bool,
+    total_lines: usize,
+    requested_lines: usize,
+) -> Result<ReadRenderResult, ReadError> {
+    let line_ending_style = LineEndingStyle::from_flags(flags);
     let mut rendered_lines = Vec::new();
     let mut truncated_line_numbers = Vec::new();
     let mut bytes_used: usize = 0;
-    let mut max_bytes_reached = false;
+    let mut max_bytes_reached = max_bytes_reached_input;
 
-    for (line_no, raw_line) in candidate_lines {
-        let (truncated, was_truncated) = truncate_line(raw_line, MAX_LINE_LENGTH);
+    for (line_no, raw_line) in entries {
+        let (truncated, was_truncated) = truncate_line(&raw_line, MAX_LINE_LENGTH);
         if was_truncated {
             truncated_line_numbers.push(line_no);
         }
@@ -286,6 +465,11 @@ fn render_read(
 
         bytes_used += line_bytes;
         rendered_lines.push(rendered);
+    }
+
+    // If we stopped early because of bytes, max_lines_reached is no longer accurate.
+    if max_bytes_reached {
+        max_lines_reached = false;
     }
 
     let start_line = rendered_lines
@@ -306,6 +490,57 @@ fn render_read(
     })
 }
 
+fn contains_nul(text: &str) -> bool {
+    text.contains('\0')
+}
+
+fn not_readable_error(path: &std::path::Path) -> ReadError {
+    ReadError::NotReadable(format!(
+        "\"{}\" is not readable as UTF-8 text. If it is an image or video, use ReadMediaFile. For other binary formats, use Bash or an MCP tool if available.",
+        path.display()
+    ))
+}
+
+const SENSITIVE_NAMES: &[&str] = &[
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+    ".envrc",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    ".git-credentials",
+    ".dockerconfigjson",
+    "id_rsa",
+    "id_rsa.pub",
+    "id_ed25519",
+    "id_ed25519.pub",
+    "id_ecdsa",
+    "id_ecdsa.pub",
+    "id_dsa",
+    "id_dsa.pub",
+    ".aws",
+    ".ssh",
+    "credentials.json",
+    "service-account.json",
+];
+
+const SENSITIVE_EXTENSIONS: &[&str] = &[".pem", ".key", ".p12", ".pfx", ".crt", ".cer", ".der"];
+
+fn is_sensitive_path(path: &std::path::Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+
+    if SENSITIVE_NAMES.contains(&name) {
+        return true;
+    }
+
+    let lower = name.to_lowercase();
+    SENSITIVE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,7 +548,7 @@ mod tests {
     #[test]
     fn reads_whole_small_file() {
         let content = "line one\nline two\nline three\n";
-        let result = render_read(content, None, None).unwrap();
+        let result = render_from_content(content, None, None).unwrap();
         assert_eq!(result.rendered_lines.len(), 3);
         assert_eq!(result.rendered_lines[0], "1\tline one");
         assert_eq!(result.rendered_lines[2], "3\tline three");
@@ -324,7 +559,7 @@ mod tests {
     #[test]
     fn reads_from_positive_offset() {
         let content = "a\nb\nc\nd\ne\n";
-        let result = render_read(content, Some(3), Some(2)).unwrap();
+        let result = render_from_content(content, Some(3), Some(2)).unwrap();
         assert_eq!(result.rendered_lines.len(), 2);
         assert_eq!(result.rendered_lines[0], "3\tc");
         assert_eq!(result.rendered_lines[1], "4\td");
@@ -334,7 +569,7 @@ mod tests {
     #[test]
     fn reads_from_negative_offset() {
         let content = "a\nb\nc\nd\ne\n";
-        let result = render_read(content, Some(-2), None).unwrap();
+        let result = render_from_content(content, Some(-2), None).unwrap();
         assert_eq!(result.rendered_lines.len(), 2);
         assert_eq!(result.rendered_lines[0], "4\td");
         assert_eq!(result.rendered_lines[1], "5\te");
@@ -342,20 +577,54 @@ mod tests {
 
     #[test]
     fn zero_line_offset_is_rejected() {
-        let err = render_read("x\n", Some(0), None).unwrap_err();
-        assert!(err.contains("line_offset must not be 0"));
+        let err = render_from_content("x\n", Some(0), None).unwrap_err();
+        assert!(err.to_string().contains("line_offset must not be 0"));
     }
 
     #[test]
     fn zero_n_lines_is_rejected() {
-        let err = render_read("x\n", None, Some(0)).unwrap_err();
-        assert!(err.contains("n_lines must be greater than 0"));
+        let err = render_from_content("x\n", None, Some(0)).unwrap_err();
+        assert!(err.to_string().contains("n_lines must be greater than 0"));
     }
 
     #[test]
-    fn line_offset_too_negative_is_rejected() {
-        let err = render_read("x\n", Some(-1001), None).unwrap_err();
-        assert!(err.contains("absolute value of line_offset"));
+    fn positive_line_offset_beyond_cap_is_allowed() {
+        let content = (1..=2500)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let result = render_from_content(&content, Some(1500), Some(5)).unwrap();
+        assert_eq!(result.rendered_lines.len(), 5);
+        assert_eq!(result.rendered_lines[0], "1500\tline 1500");
+        assert_eq!(result.rendered_lines[4], "1504\tline 1504");
+        assert!(
+            result
+                .finish_output()
+                .contains("Total lines in file: 2500.")
+        );
+    }
+
+    #[test]
+    fn negative_line_offset_beyond_cap_is_rejected() {
+        let err = render_from_content("x\n", Some(-1001), None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("absolute value of negative line_offset")
+        );
+    }
+
+    #[test]
+    fn reads_from_negative_offset_beyond_default_cap() {
+        let content = (1..=2500)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let result = render_from_content(&content, Some(-100), None).unwrap();
+        assert_eq!(result.rendered_lines.len(), 100);
+        assert_eq!(result.rendered_lines[0], "2401\tline 2401");
+        assert_eq!(result.rendered_lines[99], "2500\tline 2500");
     }
 
     #[test]
@@ -365,7 +634,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
-        let result = render_read(&content, None, None).unwrap();
+        let result = render_from_content(&content, None, None).unwrap();
         assert_eq!(result.rendered_lines.len(), MAX_LINES);
         assert!(
             result
@@ -378,7 +647,7 @@ mod tests {
     fn long_lines_are_truncated() {
         let long = "x".repeat(MAX_LINE_LENGTH + 10);
         let content = format!("{long}\n");
-        let result = render_read(&content, None, None).unwrap();
+        let result = render_from_content(&content, None, None).unwrap();
         assert_eq!(result.rendered_lines.len(), 1);
         assert!(result.rendered_lines[0].ends_with("..."));
         assert!(result.truncated_line_numbers.contains(&1));
@@ -388,7 +657,7 @@ mod tests {
     #[test]
     fn crlf_is_normalized() {
         let content = "one\r\ntwo\r\n";
-        let result = render_read(content, None, None).unwrap();
+        let result = render_from_content(content, None, None).unwrap();
         assert_eq!(result.rendered_lines[0], "1\tone");
         assert_eq!(result.rendered_lines[1], "2\ttwo");
     }
@@ -396,7 +665,7 @@ mod tests {
     #[test]
     fn mixed_line_endings_show_escape() {
         let content = "one\r\ntwo\rthree\n";
-        let result = render_read(content, None, None).unwrap();
+        let result = render_from_content(content, None, None).unwrap();
         assert_eq!(result.rendered_lines[0], "1\tone\\r");
         assert_eq!(result.rendered_lines[1], "2\ttwo\\rthree");
         assert!(
@@ -404,5 +673,199 @@ mod tests {
                 .finish_message()
                 .contains("Mixed or lone carriage-return line endings are shown as \\r")
         );
+    }
+
+    #[tokio::test]
+    async fn read_tool_allows_absolute_paths_outside_workspace() {
+        use super::{ReadTool, Tool};
+        use serde_json::json;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let external_dir = temp.path().join("external");
+        std::fs::create_dir_all(&external_dir).expect("external dir");
+        let external_file = external_dir.join("note.md");
+        std::fs::write(&external_file, "external content\n").expect("write external");
+
+        let ctx = crate::ToolContext::new(&workspace)
+            .expect("tool context")
+            .with_access(crate::ToolAccess {
+                file_read: true,
+                file_write: false,
+                shell: false,
+                tool: false,
+                user_question: false,
+            });
+
+        let tool = ReadTool;
+        let input = json!({
+            "path": external_file.to_str().unwrap(),
+        });
+        let result = tool.execute(&ctx, input).await.expect("execute");
+        assert!(!result.is_error);
+        assert!(result.content.contains("external content"));
+    }
+
+    #[tokio::test]
+    async fn read_tool_resolves_relative_paths_against_workspace() {
+        use super::{ReadTool, Tool};
+        use serde_json::json;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        std::fs::write(workspace.join("note.md"), "workspace content\n").expect("write note");
+
+        let ctx = crate::ToolContext::new(&workspace)
+            .expect("tool context")
+            .with_access(crate::ToolAccess {
+                file_read: true,
+                file_write: false,
+                shell: false,
+                tool: false,
+                user_question: false,
+            });
+
+        let tool = ReadTool;
+        let input = json!({"path": "note.md"});
+        let result = tool.execute(&ctx, input).await.expect("execute");
+        assert!(!result.is_error);
+        assert!(result.content.contains("workspace content"));
+    }
+
+    #[tokio::test]
+    async fn read_tool_rejects_missing_file() {
+        use super::{ReadTool, Tool};
+        use serde_json::json;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+
+        let ctx = crate::ToolContext::new(&workspace)
+            .expect("tool context")
+            .with_access(crate::ToolAccess {
+                file_read: true,
+                file_write: false,
+                shell: false,
+                tool: false,
+                user_question: false,
+            });
+
+        let tool = ReadTool;
+        let input = json!({"path": "missing.txt"});
+        let result = tool.execute(&ctx, input).await.expect("execute");
+        assert!(result.is_error);
+        assert!(result.content.contains("does not exist"));
+    }
+
+    #[tokio::test]
+    async fn read_tool_rejects_directories() {
+        use super::{ReadTool, Tool};
+        use serde_json::json;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        std::fs::create_dir_all(workspace.join("src")).expect("src dir");
+
+        let ctx = crate::ToolContext::new(&workspace)
+            .expect("tool context")
+            .with_access(crate::ToolAccess {
+                file_read: true,
+                file_write: false,
+                shell: false,
+                tool: false,
+                user_question: false,
+            });
+
+        let tool = ReadTool;
+        let input = json!({"path": "src"});
+        let result = tool.execute(&ctx, input).await.expect("execute");
+        assert!(result.is_error);
+        assert!(result.content.contains("is not a file"));
+    }
+
+    #[tokio::test]
+    async fn read_tool_rejects_sensitive_files() {
+        use super::{ReadTool, Tool};
+        use serde_json::json;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        std::fs::write(workspace.join(".env"), "SECRET=value\n").expect("write env");
+        std::fs::write(workspace.join("key.pem"), "secret key\n").expect("write pem");
+
+        let ctx = crate::ToolContext::new(&workspace)
+            .expect("tool context")
+            .with_access(crate::ToolAccess {
+                file_read: true,
+                file_write: false,
+                shell: false,
+                tool: false,
+                user_question: false,
+            });
+
+        let tool = ReadTool;
+
+        let dot_env = tool
+            .execute(&ctx, json!({"path": ".env"}))
+            .await
+            .expect("execute");
+        assert!(dot_env.is_error);
+        assert!(dot_env.content.contains("sensitive-file pattern"));
+
+        let pem = tool
+            .execute(&ctx, json!({"path": "key.pem"}))
+            .await
+            .expect("execute");
+        assert!(pem.is_error);
+        assert!(pem.content.contains("sensitive-file pattern"));
+    }
+
+    #[tokio::test]
+    async fn read_tool_rejects_nul_bytes() {
+        use super::{ReadTool, Tool};
+        use serde_json::json;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let mut bytes = b"text\n".to_vec();
+        bytes.push(0);
+        bytes.extend_from_slice(b"tail\n");
+        std::fs::write(workspace.join("blob.bin"), &bytes).expect("write binary");
+
+        let ctx = crate::ToolContext::new(&workspace)
+            .expect("tool context")
+            .with_access(crate::ToolAccess {
+                file_read: true,
+                file_write: false,
+                shell: false,
+                tool: false,
+                user_question: false,
+            });
+
+        let tool = ReadTool;
+        let input = json!({"path": "blob.bin"});
+        let result = tool.execute(&ctx, input).await.expect("execute");
+        assert!(result.is_error);
+        assert!(result.content.contains("not readable as UTF-8 text"));
+    }
+
+    fn render_from_content(
+        content: &str,
+        line_offset: Option<i64>,
+        n_lines: Option<usize>,
+    ) -> Result<ReadRenderResult, ReadError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let temp = tempfile::NamedTempFile::new().expect("tempfile");
+        std::fs::write(temp.path(), content).expect("write temp");
+        runtime.block_on(run_read(temp.path(), line_offset, n_lines))
     }
 }

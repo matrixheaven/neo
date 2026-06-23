@@ -619,8 +619,7 @@ project is trusted; trust is stored in `~/.neo/trust.json`.
 - **Secrets**: API keys can be stored inline in config (`api_key = "..."`) or
   referenced via environment variables (`api_key_env = "OPENAI_API_KEY"`).
   `neo config show` redacts `api_key`, MCP `env`, and `headers` values.
-- **Workspace containment**: built-in file tools resolve paths inside the
-  workspace and reject parent-dir escapes.
+- **Workspace containment**: write/execute tools (`Write`, `Edit`, `Bash`, `Terminal`) keep paths inside the workspace by default. The `Read` tool follows the `docs/kimi-code` design: relative paths resolve against the workspace, and absolute paths are used as-is, including paths outside the workspace. Parent-directory escapes via `..` in relative paths are still normalized within the workspace.
 - **Shell tool**: follows the active `permission_mode`. In `manual` mode it
   asks for approval; in `auto` and `yolo` it runs after hard safety policies.
 - **Trust**: project `AGENTS.md` / `CLAUDE.md` are gated by `neo trust

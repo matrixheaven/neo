@@ -31,11 +31,11 @@ async fn write_requires_mutation_permission() {
 }
 
 #[tokio::test]
-async fn read_rejects_paths_outside_workspace() {
+async fn read_allows_absolute_paths_outside_workspace() {
     let workspace = tempfile::tempdir().expect("workspace");
     let outside = tempfile::tempdir().expect("outside");
-    let outside_file = outside.path().join("secret.txt");
-    std::fs::write(&outside_file, "secret").expect("write outside file");
+    let outside_file = outside.path().join("note.txt");
+    std::fs::write(&outside_file, "external content").expect("write outside file");
 
     let registry = ToolRegistry::with_builtin_tools();
     let context = ToolContext::new(workspace.path())
@@ -48,21 +48,21 @@ async fn read_rejects_paths_outside_workspace() {
             user_question: false,
         });
 
-    let error = registry
+    let result = registry
         .run("Read", &context, json!({ "path": outside_file }))
         .await
-        .expect_err("outside read should be denied");
+        .expect("outside read should be allowed");
 
-    assert!(matches!(error, ToolError::PathOutsideWorkspace { .. }));
+    assert!(result.content.contains("external content"));
 }
 
 #[tokio::test]
-async fn read_rejects_symlink_escape_from_workspace() {
+async fn read_allows_symlink_to_external_file() {
     let workspace = tempfile::tempdir().expect("workspace");
     let outside = tempfile::tempdir().expect("outside");
-    let outside_file = outside.path().join("secret.txt");
-    let symlink = workspace.path().join("secret-link.txt");
-    std::fs::write(&outside_file, "secret").expect("write outside file");
+    let outside_file = outside.path().join("note.txt");
+    let symlink = workspace.path().join("external-link.txt");
+    std::fs::write(&outside_file, "external content").expect("write outside file");
     std::os::unix::fs::symlink(&outside_file, &symlink).expect("symlink");
 
     let registry = ToolRegistry::with_builtin_tools();
@@ -76,12 +76,12 @@ async fn read_rejects_symlink_escape_from_workspace() {
             user_question: false,
         });
 
-    let error = registry
-        .run("Read", &context, json!({ "path": "secret-link.txt" }))
+    let result = registry
+        .run("Read", &context, json!({ "path": "external-link.txt" }))
         .await
-        .expect_err("symlink escape should be denied");
+        .expect("symlink to external file should be allowed");
 
-    assert!(matches!(error, ToolError::PathOutsideWorkspace { .. }));
+    assert!(result.content.contains("external content"));
 }
 
 #[tokio::test]
