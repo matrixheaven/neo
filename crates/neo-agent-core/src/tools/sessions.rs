@@ -134,7 +134,7 @@ async fn find_session_path(neo_home: &Path, session_id: &str) -> Result<PathBuf,
                         tool: "SummarizeSessions".to_owned(),
                         message: "session index entry missing session_dir".to_owned(),
                     })?;
-            return Ok(PathBuf::from(session_dir).join(format!("{session_id}.jsonl")));
+            return Ok(PathBuf::from(session_dir).join("transcript.jsonl"));
         }
     }
     let available = if available.is_empty() {
@@ -198,7 +198,7 @@ fn recent_session_path(entry: &serde_json::Value, cutoff: u64) -> Option<PathBuf
     let session_dir = entry["session_dir"].as_str()?;
     validate_session_id(session_id)
         .is_ok()
-        .then(|| PathBuf::from(session_dir).join(format!("{session_id}.jsonl")))
+        .then(|| PathBuf::from(session_dir).join("transcript.jsonl"))
 }
 
 fn validate_tool_session_id(session_id: &str) -> Result<(), ToolError> {
@@ -264,10 +264,10 @@ mod tests {
     async fn summarize_sessions_by_id_returns_summary_and_status() {
         let temp = tempfile::tempdir().expect("tempdir");
         let session_id = "session_550e8400-e29b-41d4-a716-446655440000";
-        let session_dir = temp.path().join("wd_test_1234567890ab");
+        let session_dir = temp.path().join("wd_test_1234567890ab").join(session_id);
         fs::create_dir_all(&session_dir).await.expect("mkdir");
         fs::write(
-            session_dir.join(format!("{session_id}.jsonl")),
+            session_dir.join("transcript.jsonl"),
             json!({
                 "type": "user",
                 "content": {"text": "hello"}
@@ -333,12 +333,12 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let recent_id = "session_550e8400-e29b-41d4-a716-446655440001";
         let old_id = "session_550e8400-e29b-41d4-a716-446655440002";
-        let recent_dir = temp.path().join("wd_recent_1234567890ab");
-        let old_dir = temp.path().join("wd_old_1234567890ab");
+        let recent_dir = temp.path().join("wd_recent_1234567890ab").join(recent_id);
+        let old_dir = temp.path().join("wd_old_1234567890ab").join(old_id);
         fs::create_dir_all(&recent_dir).await.expect("mkdir recent");
         fs::create_dir_all(&old_dir).await.expect("mkdir old");
         fs::write(
-            recent_dir.join(format!("{recent_id}.jsonl")),
+            recent_dir.join("transcript.jsonl"),
             json!({
                 "type": "user",
                 "content": {"text": "recent"}
@@ -348,7 +348,7 @@ mod tests {
         .await
         .expect("write recent session");
         fs::write(
-            old_dir.join(format!("{old_id}.jsonl")),
+            old_dir.join("transcript.jsonl"),
             json!({
                 "type": "user",
                 "content": {"text": "old"}
@@ -405,7 +405,10 @@ mod tests {
     async fn summarize_missing_session_lists_available_session_ids() {
         let temp = tempfile::tempdir().expect("tempdir");
         let available_id = "session_550e8400-e29b-41d4-a716-446655440099";
-        let session_dir = temp.path().join("wd_available_1234567890ab");
+        let session_dir = temp
+            .path()
+            .join("wd_available_1234567890ab")
+            .join(available_id);
         fs::create_dir_all(&session_dir).await.expect("mkdir");
         fs::write(
             temp.path().join("session_index.jsonl"),

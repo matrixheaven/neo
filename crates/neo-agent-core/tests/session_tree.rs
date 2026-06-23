@@ -6,10 +6,16 @@ const SESSION_A: &str = "session_00000000-0000-4000-8000-000000000101";
 const SESSION_B: &str = "session_00000000-0000-4000-8000-000000000102";
 const SESSION_C: &str = "session_00000000-0000-4000-8000-000000000103";
 
+fn write_session_transcript(dir: &std::path::Path, session_id: &str) {
+    let session_dir = dir.join(session_id);
+    std::fs::create_dir_all(&session_dir).expect("create session dir");
+    std::fs::write(session_dir.join("transcript.jsonl"), "{}\n").expect("write transcript");
+}
+
 #[test]
 fn session_metadata_lists_existing_jsonl_sessions_with_names_and_children() {
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session");
+    write_session_transcript(dir.path(), SESSION_A);
 
     let store = SessionMetadataStore::new(dir.path());
     let child = store
@@ -68,7 +74,7 @@ fn session_metadata_lists_existing_jsonl_sessions_with_names_and_children() {
 #[test]
 fn session_metadata_stores_branch_summary_records() {
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session");
+    write_session_transcript(dir.path(), SESSION_A);
 
     let store = SessionMetadataStore::new(dir.path());
     let summarized = store
@@ -108,8 +114,8 @@ fn session_metadata_stores_branch_summary_records() {
 #[test]
 fn session_metadata_records_activity_title_and_orders_recent_first() {
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session a");
-    std::fs::write(dir.path().join(format!("{SESSION_B}.jsonl")), "{}\n").expect("write session b");
+    write_session_transcript(dir.path(), SESSION_A);
+    write_session_transcript(dir.path(), SESSION_B);
 
     let store = SessionMetadataStore::new(dir.path());
     store
@@ -155,9 +161,9 @@ fn session_metadata_records_activity_title_and_orders_recent_first() {
 #[test]
 fn session_metadata_title_falls_back_to_name_then_last_prompt_then_id() {
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session a");
-    std::fs::write(dir.path().join(format!("{SESSION_B}.jsonl")), "{}\n").expect("write session b");
-    std::fs::write(dir.path().join(format!("{SESSION_C}.jsonl")), "{}\n").expect("write session c");
+    write_session_transcript(dir.path(), SESSION_A);
+    write_session_transcript(dir.path(), SESSION_B);
+    write_session_transcript(dir.path(), SESSION_C);
 
     let store = SessionMetadataStore::new(dir.path());
     store
@@ -183,8 +189,7 @@ fn session_metadata_title_falls_back_to_name_then_last_prompt_then_id() {
 fn session_metadata_ignores_legacy_numeric_session_files() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("1781719048514.jsonl"), "{}\n").expect("write legacy session");
-    std::fs::write(dir.path().join(format!("{SESSION_A}.jsonl")), "{}\n")
-        .expect("write new session");
+    write_session_transcript(dir.path(), SESSION_A);
 
     let store = SessionMetadataStore::new(dir.path());
     let sessions = store.list().expect("list sessions");

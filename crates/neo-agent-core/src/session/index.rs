@@ -239,7 +239,7 @@ mod tests {
 
         let entry = SessionIndexEntry {
             session_id: session_id.to_owned(),
-            session_dir: tmp.path().join(format!("wd_neo_abc123/{session_id}.jsonl")),
+            session_dir: tmp.path().join(format!("wd_neo_abc123/{session_id}")),
             workdir: PathBuf::from("/home/user/neo"),
         };
         index.append(&entry).unwrap();
@@ -259,7 +259,7 @@ mod tests {
 
         let entry = SessionIndexEntry {
             session_id: "1234567890".to_owned(),
-            session_dir: tmp.path().join("wd_neo_abc123/1234567890.jsonl"),
+            session_dir: tmp.path().join("wd_neo_abc123/1234567890"),
             workdir: PathBuf::from("/home/user/neo"),
         };
 
@@ -300,7 +300,7 @@ mod tests {
         index
             .append(&SessionIndexEntry {
                 session_id: session_id.to_owned(),
-                session_dir: tmp.path().join(format!("{session_id}.jsonl")),
+                session_dir: tmp.path().join(session_id),
                 workdir: PathBuf::from("/old"),
             })
             .unwrap();
@@ -308,7 +308,7 @@ mod tests {
         index
             .append(&SessionIndexEntry {
                 session_id: session_id.to_owned(),
-                session_dir: tmp.path().join(format!("{session_id}.jsonl")),
+                session_dir: tmp.path().join(session_id),
                 workdir: PathBuf::from("/new"),
             })
             .unwrap();
@@ -325,8 +325,8 @@ mod tests {
         std::fs::write(
             &index_path,
             "{invalid json\n\
-             {\"session_id\":\"session_00000000-0000-4000-8000-000000000004\",\"session_dir\":\"/a.jsonl\",\"workdir\":\"/a\"}\n\
-             {\"session_id\":\"1234567890\",\"session_dir\":\"/old.jsonl\",\"workdir\":\"/old\"}\n",
+             {\"session_id\":\"session_00000000-0000-4000-8000-000000000004\",\"session_dir\":\"/a\",\"workdir\":\"/a\"}\n\
+             {\"session_id\":\"1234567890\",\"session_dir\":\"/old\",\"workdir\":\"/old\"}\n",
         )
         .unwrap();
 
@@ -356,8 +356,8 @@ mod tests {
             &index_path,
             "\n\
              {invalid json\n\
-             {\"session_id\":\"session_00000000-0000-4000-8000-000000000005\",\"session_dir\":\"/a.jsonl\",\"workdir\":\"/a\"}\n\
-             {\"session_id\":\"1234567890\",\"session_dir\":\"/old.jsonl\",\"workdir\":\"/old\"}\n",
+             {\"session_id\":\"session_00000000-0000-4000-8000-000000000005\",\"session_dir\":\"/a\",\"workdir\":\"/a\"}\n\
+             {\"session_id\":\"1234567890\",\"session_dir\":\"/old\",\"workdir\":\"/old\"}\n",
         )
         .await
         .unwrap();

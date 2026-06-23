@@ -506,7 +506,9 @@ impl SessionMetadataStore {
         std::fs::create_dir_all(&self.sessions_dir)?;
 
         let child_id = self.next_child_id()?;
-        std::fs::copy(self.session_path(parent_id), self.session_path(&child_id))?;
+        let parent_dir = self.session_dir(parent_id);
+        let child_dir = self.session_dir(&child_id);
+        copy_dir_all(&parent_dir, &child_dir).map_err(SessionError::Io)?;
 
         let mut metadata = self.read_metadata()?;
         metadata.sessions.entry(parent_id.to_owned()).or_default();
@@ -533,7 +535,11 @@ impl SessionMetadataStore {
     }
 
     fn session_path(&self, session_id: &str) -> PathBuf {
-        self.sessions_dir.join(format!("{session_id}.jsonl"))
+        self.sessions_dir.join(session_id).join("transcript.jsonl")
+    }
+
+    fn session_dir(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir.join(session_id)
     }
 
     fn ensure_session_exists(&self, session_id: &str) -> Result<(), SessionError> {
@@ -547,7 +553,7 @@ impl SessionMetadataStore {
     fn next_child_id(&self) -> Result<String, SessionError> {
         loop {
             let child_id = format!("{SESSION_ID_PREFIX}{}", Uuid::new_v4());
-            if !self.session_path(&child_id).exists() {
+            if !self.session_dir(&child_id).exists() {
                 return Ok(child_id);
             }
         }
@@ -574,17 +580,42 @@ impl SessionMetadataStore {
         let mut ids = BTreeSet::new();
         if self.sessions_dir.exists() {
             for entry in std::fs::read_dir(&self.sessions_dir)? {
-                let path = entry?.path();
-                if path.extension() == Some(OsStr::new("jsonl"))
-                    && let Some(id) = path.file_stem().and_then(OsStr::to_str)
-                    && validate_session_id(id).is_ok()
-                {
-                    ids.insert(id.to_owned());
+                let entry = entry?;
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+                    continue;
+                };
+                if !name.starts_with(SESSION_ID_PREFIX) {
+                    continue;
+                }
+                if !path.join("transcript.jsonl").is_file() {
+                    continue;
+                }
+                if validate_session_id(name).is_ok() {
+                    ids.insert(name.to_owned());
                 }
             }
         }
         Ok(ids)
     }
+}
+
+/// Recursively copy a directory tree.
+fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
+    std::fs::create_dir_all(&dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
+        } else {
+            std::fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
+        }
+    }
+    Ok(())
 }
 
 fn records_from_metadata(

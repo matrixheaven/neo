@@ -231,7 +231,7 @@ fn render_messages_html(title: String, messages: &[AgentMessage]) -> anyhow::Res
 pub fn session_path(session_ref: &str, config: &AppConfig) -> anyhow::Result<PathBuf> {
     let session_id = resolve_session_id(session_ref, config)?;
     let bucket_dir = workspace_sessions_dir(config);
-    Ok(bucket_dir.join(format!("{session_id}.jsonl")))
+    Ok(bucket_dir.join(&session_id).join("transcript.jsonl"))
 }
 
 pub fn resolve_session_id(session_ref: &str, config: &AppConfig) -> anyhow::Result<String> {
@@ -249,42 +249,43 @@ fn session_id_from_jsonl_path(
     config: &AppConfig,
 ) -> anyhow::Result<Option<String>> {
     let raw = Path::new(session_ref);
-    if raw.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-        return Ok(None);
-    }
 
+    // Determine the effective path to check.
     let path = if raw.is_absolute() {
         raw.to_path_buf()
     } else {
         env::current_dir()?.join(raw)
     };
 
-    // Extract session_id from file stem regardless of canonicalization.
-    let session_id = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .ok_or_else(|| anyhow::anyhow!("invalid session path {}", path.display()))?;
-
     // Try canonicalize for path-containment checks. If the file does not exist,
     // fall back to the un-canonicalized path for direct bucket paths.
     let canonical = path.canonicalize();
     let check_path = canonical.as_deref().unwrap_or(&path);
 
-    // Accept paths inside the workspace-scoped bucket directory.
     let bucket_dir = workspace_sessions_dir(config);
-    if let Ok(bucket_canonical) = bucket_dir.canonicalize()
-        && (check_path.starts_with(&bucket_canonical) || path.starts_with(&bucket_dir))
-    {
-        validate_session_id(session_id)
-            .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
-        return Ok(Some(session_id.to_owned()));
+    let in_bucket = if let Ok(bucket_canonical) = bucket_dir.canonicalize() {
+        check_path.starts_with(&bucket_canonical) || path.starts_with(&bucket_dir)
+    } else {
+        path.starts_with(&bucket_dir)
+    };
+    if !in_bucket {
+        return Ok(None);
     }
 
-    anyhow::bail!(
-        "session path {} is outside sessions dir {}",
-        path.display(),
-        bucket_dir.display()
-    );
+    // New layout: .../session_<uuid>/transcript.jsonl
+    if path.file_name().and_then(|n| n.to_str()) == Some("transcript.jsonl") {
+        if let Some(session_id) = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+        {
+            validate_session_id(session_id)
+                .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
+            return Ok(Some(session_id.to_owned()));
+        }
+    }
+
+    Ok(None)
 }
 
 #[derive(Debug, Clone, Serialize)]

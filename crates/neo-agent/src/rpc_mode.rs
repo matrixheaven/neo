@@ -194,7 +194,9 @@ async fn handle_sessions_get(
             );
         }
     };
-    let path = workspace_sessions_dir(config).join(format!("{session_id}.jsonl"));
+    let path = workspace_sessions_dir(config)
+        .join(&session_id)
+        .join("transcript.jsonl");
     if !path.exists() {
         return push_rpc_message(
             output,
@@ -300,7 +302,9 @@ async fn handle_sessions_export_html(
             );
         }
     };
-    let path = workspace_sessions_dir(config).join(format!("{session_id}.jsonl"));
+    let path = workspace_sessions_dir(config)
+        .join(&session_id)
+        .join("transcript.jsonl");
     if !path.exists() {
         return push_rpc_message(
             output,
@@ -432,7 +436,9 @@ fn handle_set_session_name(
             );
         }
     };
-    let path = workspace_sessions_dir(config).join(format!("{session_id}.jsonl"));
+    let path = workspace_sessions_dir(config)
+        .join(&session_id)
+        .join("transcript.jsonl");
     if !path.exists() {
         return push_rpc_message(
             output,
@@ -499,7 +505,9 @@ async fn handle_get_messages(
             );
         }
     };
-    let path = workspace_sessions_dir(config).join(format!("{session_id}.jsonl"));
+    let path = workspace_sessions_dir(config)
+        .join(&session_id)
+        .join("transcript.jsonl");
 
     if !path.exists() {
         return push_rpc_message(
@@ -642,11 +650,14 @@ fn session_count(config: &AppConfig) -> usize {
     entries
         .filter_map(Result::ok)
         .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension == "jsonl")
+            let path = entry.path();
+            if !path.is_dir() {
+                return false;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                return false;
+            };
+            name.starts_with("session_") && path.join("transcript.jsonl").is_file()
         })
         .count()
 }
