@@ -59,12 +59,16 @@ impl InputEvent {
 
     #[must_use]
     pub fn from_key_event(event: KeyEvent) -> Option<Self> {
-        if event.kind != KeyEventKind::Press {
+        if !is_key_activation(event.kind) {
             return None;
         }
 
         match (event.code, event.modifiers) {
-            (KeyCode::Char('c' | 'C'), KeyModifiers::CONTROL) => Some(Self::Interrupt),
+            (KeyCode::Char('c' | 'C'), KeyModifiers::CONTROL)
+                if event.kind == KeyEventKind::Press =>
+            {
+                Some(Self::Interrupt)
+            }
             (KeyCode::Char(character), KeyModifiers::NONE | KeyModifiers::SHIFT)
                 if !character.is_control() =>
             {
@@ -76,12 +80,18 @@ impl InputEvent {
             (KeyCode::Right, _) => Some(Self::MoveRight),
             (KeyCode::Home, _) => Some(Self::MoveHome),
             (KeyCode::End, _) => Some(Self::MoveEnd),
-            (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::ALT) => {
+            (KeyCode::Enter, modifiers)
+                if event.kind == KeyEventKind::Press && modifiers.contains(KeyModifiers::ALT) =>
+            {
                 Some(Self::NewLine)
             }
-            (KeyCode::Char('j' | 'J'), KeyModifiers::CONTROL) => Some(Self::NewLine),
-            (KeyCode::Enter, _) => Some(Self::Submit),
-            (KeyCode::Esc, _) => Some(Self::Cancel),
+            (KeyCode::Char('j' | 'J'), KeyModifiers::CONTROL)
+                if event.kind == KeyEventKind::Press =>
+            {
+                Some(Self::NewLine)
+            }
+            (KeyCode::Enter, _) if event.kind == KeyEventKind::Press => Some(Self::Submit),
+            (KeyCode::Esc, _) if event.kind == KeyEventKind::Press => Some(Self::Cancel),
             _ => None,
         }
     }
@@ -91,19 +101,26 @@ impl InputEvent {
         event: KeyEvent,
         keybindings: &KeybindingsManager,
     ) -> Option<Self> {
-        if event.kind != KeyEventKind::Press {
+        if !is_key_activation(event.kind) {
             return None;
         }
 
         // Explicit intercept for newline keys — works regardless of keybinding
         // configuration and survives crossterm parsing quirks.
-        if event.code == KeyCode::Enter && event.modifiers.contains(KeyModifiers::ALT) {
+        if event.kind == KeyEventKind::Press
+            && event.code == KeyCode::Enter
+            && event.modifiers.contains(KeyModifiers::ALT)
+        {
             return Some(Self::NewLine);
         }
-        if event.code == KeyCode::Enter && event.modifiers.contains(KeyModifiers::SHIFT) {
+        if event.kind == KeyEventKind::Press
+            && event.code == KeyCode::Enter
+            && event.modifiers.contains(KeyModifiers::SHIFT)
+        {
             return Some(Self::NewLine);
         }
-        if matches!(event.code, KeyCode::Char('j' | 'J'))
+        if event.kind == KeyEventKind::Press
+            && matches!(event.code, KeyCode::Char('j' | 'J'))
             && event.modifiers.contains(KeyModifiers::CONTROL)
         {
             return Some(Self::NewLine);
@@ -117,7 +134,8 @@ impl InputEvent {
         }
 
         let key = KeyId::from_key_event(event)?;
-        if keybindings.matching_actions(&key).is_empty() {
+        let actions = keybindings.matching_actions(&key);
+        if actions.is_empty() || actions_are_repeat_blocked(event.kind, &actions) {
             return None;
         }
         Some(Self::Key(key))
@@ -159,7 +177,7 @@ impl InputParser {
     pub fn feed_crossterm_event(&mut self, event: &Event) -> Vec<InputEvent> {
         match event {
             Event::Paste(text) => vec![InputEvent::Paste(text.clone())],
-            Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+            Event::Key(key_event) if is_key_activation(key_event.kind) => {
                 self.feed_key_event(*key_event)
             }
             Event::Resize(columns, rows) => vec![InputEvent::Resize {
@@ -363,7 +381,7 @@ impl KeyId {
 
     #[must_use]
     pub fn from_key_event(event: KeyEvent) -> Option<Self> {
-        if event.kind != KeyEventKind::Press {
+        if !is_key_activation(event.kind) {
             return None;
         }
 
@@ -388,6 +406,14 @@ impl KeyId {
         parts.push(base.as_str());
         Self::new(parts.join("+")).ok()
     }
+}
+
+const fn is_key_activation(kind: KeyEventKind) -> bool {
+    matches!(kind, KeyEventKind::Press | KeyEventKind::Repeat)
+}
+
+fn actions_are_repeat_blocked(kind: KeyEventKind, actions: &[KeybindingAction]) -> bool {
+    kind == KeyEventKind::Repeat && actions.iter().any(|action| action.blocks_repeat())
 }
 
 fn key_id_from_ascii_control(character: char) -> Option<KeyId> {
@@ -609,6 +635,36 @@ impl KeybindingAction {
         KEYBINDING_ACTION_IDS
             .iter()
             .find_map(|(action, action_id)| (*action_id == id).then_some(*action))
+    }
+
+    const fn blocks_repeat(self) -> bool {
+        !matches!(
+            self,
+            Self::EditorCursorUp
+                | Self::EditorCursorDown
+                | Self::EditorCursorLeft
+                | Self::EditorCursorRight
+                | Self::EditorCursorWordLeft
+                | Self::EditorCursorWordRight
+                | Self::EditorCursorLineStart
+                | Self::EditorCursorLineEnd
+                | Self::EditorPageUp
+                | Self::EditorPageDown
+                | Self::EditorDeleteCharBackward
+                | Self::EditorDeleteCharForward
+                | Self::EditorDeleteWordBackward
+                | Self::EditorDeleteWordForward
+                | Self::EditorDeleteToLineStart
+                | Self::EditorDeleteToLineEnd
+                | Self::SelectUp
+                | Self::SelectDown
+                | Self::SelectPageUp
+                | Self::SelectPageDown
+                | Self::TranscriptSelectionExtendUp
+                | Self::TranscriptSelectionExtendDown
+                | Self::TranscriptSelectionExtendPageUp
+                | Self::TranscriptSelectionExtendPageDown
+        )
     }
 }
 

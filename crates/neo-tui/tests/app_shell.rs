@@ -7,6 +7,18 @@ use neo_tui::image::{ImageProtocolPreference, ImageRenderPolicy, TerminalImageCa
 use neo_tui::transcript::{TranscriptPane, render_chrome_lines};
 use std::path::PathBuf;
 
+fn write_session_scope() -> neo_agent_core::SessionApprovalScope {
+    neo_agent_core::SessionApprovalScope {
+        keys: vec![neo_agent_core::SessionApprovalKey::FileWrite {
+            workspace: "/tmp/neo-ws".to_owned(),
+            path: "/tmp/neo-ws/approved.txt".to_owned(),
+            operation: neo_agent_core::FileWriteApprovalOperation::Write,
+        }],
+        label: "Approve writes to this file for this session".to_owned(),
+        detail: "/tmp/neo-ws/approved.txt".to_owned(),
+    }
+}
+
 fn render_app(width: u16, app: &NeoChromeState) -> Vec<String> {
     render_chrome_lines(app, usize::from(width), 30)
         .lines
@@ -483,7 +495,7 @@ fn plan_review_reject_does_not_surface_a_selected_label() {
 }
 
 #[test]
-fn tool_approval_number_two_is_approve_for_session_in_four_option_modal() {
+fn scope_less_tool_approval_omits_approve_for_session_option() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
         turn: 1,
@@ -495,13 +507,55 @@ fn tool_approval_number_two_is_approve_for_session_in_four_option_modal() {
         prefix_rule: None,
     });
 
-    // Ordinary tool approvals keep 4 options: number 2 = Approve for this
-    // session (AlwaysApprove), which IS meaningful for repeating tools.
     let result = app
         .choose_approval_number(2)
         .expect("tool approval option 2 should confirm");
     assert_eq!(result.request_id, "shell-1");
+    assert_eq!(result.choice, ApprovalChoice::Deny);
+}
+
+#[test]
+fn scoped_tool_approval_number_two_is_approve_for_session() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "write-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::FileWrite,
+        subject: "Write".to_owned(),
+        arguments: serde_json::json!({ "path": "approved.txt" }),
+        session_scope: Some(write_session_scope()),
+        prefix_rule: None,
+    });
+
+    let result = app
+        .choose_approval_number(2)
+        .expect("scoped approval option 2 should confirm");
+    assert_eq!(result.request_id, "write-1");
     assert_eq!(result.choice, ApprovalChoice::AlwaysApprove);
+    assert!(!result.picked_prefix);
+}
+
+#[test]
+fn prefix_tool_approval_marks_prefix_choice() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.apply_agent_event(neo_agent_core::AgentEvent::ApprovalRequested {
+        turn: 1,
+        id: "shell-1".to_owned(),
+        operation: neo_agent_core::PermissionOperation::Shell,
+        subject: "cargo test".to_owned(),
+        arguments: serde_json::json!({ "command": "cargo test" }),
+        session_scope: Some(write_session_scope()),
+        prefix_rule: Some(neo_agent_core::PrefixApprovalRule {
+            prefix: vec!["cargo".to_owned(), "test".to_owned()],
+            label: "cargo test".to_owned(),
+        }),
+    });
+
+    let result = app
+        .choose_approval_number(3)
+        .expect("prefix approval option should confirm");
+    assert_eq!(result.choice, ApprovalChoice::AlwaysApprove);
+    assert!(result.picked_prefix);
 }
 
 #[test]

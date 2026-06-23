@@ -6032,32 +6032,18 @@ impl ModelClient for DelayedModelClient {
 
 #[tokio::test]
 async fn runtime_drains_live_steer_input_at_step_boundary() {
-    let harness = FakeHarness::from_turns([
-        vec![
-            AiStreamEvent::MessageStart {
-                id: "msg_1".to_owned(),
-            },
-            AiStreamEvent::TextDelta {
-                text: "first".to_owned(),
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: neo_ai::StopReason::EndTurn,
-                usage: None,
-            },
-        ],
-        vec![
-            AiStreamEvent::MessageStart {
-                id: "msg_2".to_owned(),
-            },
-            AiStreamEvent::TextDelta {
-                text: "second".to_owned(),
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: neo_ai::StopReason::EndTurn,
-                usage: None,
-            },
-        ],
-    ]);
+    let harness = FakeHarness::from_turns([vec![
+        AiStreamEvent::MessageStart {
+            id: "msg_1".to_owned(),
+        },
+        AiStreamEvent::TextDelta {
+            text: "first".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::EndTurn,
+            usage: None,
+        },
+    ]]);
     let steer_input = neo_agent_core::SteerInputHandle::new();
     steer_input.push(neo_agent_core::ActiveTurnInput::SteerNow(
         AgentMessage::user_text("live steer"),
@@ -6165,6 +6151,85 @@ async fn runtime_drains_live_follow_up_input_as_new_turn() {
     assert_eq!(steer_input.pending(), 0);
 }
 
+#[tokio::test]
+async fn runtime_reclassifies_promoted_follow_up_as_steer_without_running_follow_up() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "first".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_2".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "second".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ],
+    ]);
+    let steer_input = neo_agent_core::SteerInputHandle::new();
+    steer_input.push(neo_agent_core::ActiveTurnInput::PromoteFollowUpToSteer);
+    let runtime = AgentRuntime::new(
+        AgentConfig::for_model(harness.model())
+            .with_queue_modes(QueueMode::OneAtATime, QueueMode::All),
+        harness.client(),
+    )
+    .with_steer_input(steer_input.clone());
+    let mut context = AgentContext::new();
+    context.queue_follow_up_message(AgentMessage::user_text("queued follow"));
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("start"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("promoted follow-up run should succeed");
+
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::FollowUpQueued { message }
+            if message == &AgentMessage::user_text("queued follow")
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::QueueDrained { kind, count: 1 }
+            if *kind == neo_agent_core::QueueKind::FollowUp
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::SteeringQueued { message }
+            if message == &AgentMessage::user_text("queued follow")
+    )));
+    assert_eq!(
+        harness.requests().len(),
+        1,
+        "promoted follow-up should run once as a steer, not again as a follow-up"
+    );
+    assert!(matches!(
+        harness.requests()[0].messages.last(),
+        Some(neo_ai::ChatMessage::User { content }) if matches!(
+            content.first(),
+            Some(neo_ai::ContentPart::Text { text }) if text == "queued follow"
+        )
+    ));
+    assert_eq!(context.pending_follow_up_len(), 0);
+    assert_eq!(context.pending_steering_len(), 0);
+    assert_eq!(steer_input.pending(), 0);
+}
+
 // ---------------------------------------------------------------------------
 // NEO-30 Layer 1/2/3: approval key scoping, prefix rules, safety classification
 // ---------------------------------------------------------------------------
@@ -6208,7 +6273,7 @@ async fn layer1_bash_session_approval_exact_command_only() {
             },
             AiStreamEvent::ToolCallEnd {
                 id: "tool_2".to_owned(),
-                arguments: json!({ "command": "git log --oneline -20" }),
+                arguments: json!({ "command": "python script.py" }),
             },
             AiStreamEvent::MessageEnd {
                 stop_reason: neo_ai::StopReason::ToolUse,
@@ -6250,6 +6315,115 @@ async fn layer1_bash_session_approval_exact_command_only() {
     assert!(
         count_approval_requests(&events) <= 1,
         "git status (safe) auto-approves; git log is a different command and must not inherit"
+    );
+}
+
+#[tokio::test]
+async fn allow_for_session_does_not_persist_prefix_rule() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "Bash".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "command": "python script.py" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let config = AgentConfig::for_model(harness.model())
+        .with_permission_mode(PermissionMode::Ask)
+        .with_workspace_root(workspace.path())
+        .expect("workspace root")
+        .with_approval_handler(|_request| PermissionApprovalDecision::AllowForSession);
+    let prefix_store = Arc::clone(&config.prefix_approval_rules);
+    let runtime =
+        AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("python script"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ApprovalRequested { prefix_rule: Some(rule), .. }
+            if rule.prefix == vec!["python".to_owned()]
+    )));
+    assert!(
+        prefix_store
+            .lock()
+            .expect("prefix store")
+            .prefix_rules
+            .is_empty(),
+        "AllowForSession must not persist prefix approval rules"
+    );
+}
+
+#[tokio::test]
+async fn allow_for_prefix_persists_prefix_rule() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "msg_1".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_1".to_owned(),
+                name: "Bash".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_1".to_owned(),
+                arguments: json!({ "command": "python script.py" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        final_done_turn(),
+    ]);
+    let config = AgentConfig::for_model(harness.model())
+        .with_permission_mode(PermissionMode::Ask)
+        .with_workspace_root(workspace.path())
+        .expect("workspace root")
+        .with_approval_handler(|_request| PermissionApprovalDecision::AllowForPrefix);
+    let prefix_store = Arc::clone(&config.prefix_approval_rules);
+    let runtime =
+        AgentRuntime::with_tools(config, harness.client(), ToolRegistry::with_builtin_tools());
+    let mut context = AgentContext::new();
+
+    runtime
+        .run_turn(&mut context, AgentMessage::user_text("python script"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    assert_eq!(
+        prefix_store
+            .lock()
+            .expect("prefix store")
+            .prefix_rules
+            .iter()
+            .map(|rule| rule.prefix.clone())
+            .collect::<Vec<_>>(),
+        vec![vec!["python".to_owned()]]
     );
 }
 

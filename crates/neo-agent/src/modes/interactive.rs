@@ -437,7 +437,7 @@ struct PendingCatalogFetch {
 
 struct PendingMcpProbe {
     server_id: String,
-    handle: tokio::task::JoinHandle<anyhow::Result<Vec<String>>>,
+    handle: tokio::task::JoinHandle<anyhow::Result<neo_agent_core::McpServerSnapshot>>,
 }
 
 #[derive(Debug, Clone)]
@@ -480,6 +480,7 @@ pub(crate) struct InteractiveController {
     active_session_id: Option<String>,
     local_config: Option<AppConfig>,
     active_model: Option<SelectedModel>,
+    session_messages: Vec<AgentMessage>,
     current_thinking: bool,
     active_turn: Option<RunningTurn>,
     btw_runner: Option<crate::modes::btw::BtwRunner>,
@@ -595,7 +596,7 @@ pub(crate) struct PickerCatalogs {
     model_items: Vec<PickerItem>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct TurnRequest {
     pub prompt: Vec<String>,
     pub session_id: Option<String>,
@@ -616,6 +617,7 @@ pub(crate) struct TurnRequest {
     /// the runtime. The production driver is responsible for forwarding this to
     /// the runtime's plan-review side-channel when possible.
     pub plan_review_feedback: std::collections::BTreeMap<String, String>,
+    pub mcp_manager: Option<McpConnectionManager>,
     /// Live config snapshot at dispatch time. Lets the turn driver pick up
     /// providers/models added at runtime (e.g. via `/provider`) instead of the
     /// stale snapshot captured when the controller was built. `None` for test
@@ -642,6 +644,7 @@ impl TurnRequest {
             plan_mode: Arc::new(RwLock::new(PlanMode::default())),
             goal_mode_authoring: false,
             plan_review_feedback: BTreeMap::new(),
+            mcp_manager: None,
             base_config: None,
         }
     }
@@ -790,6 +793,7 @@ impl InteractiveController {
             active_session_id: None,
             local_config: None,
             active_model: None,
+            session_messages: Vec::new(),
             current_thinking: false,
             active_turn: None,
             btw_runner: None,
@@ -2696,10 +2700,6 @@ impl InteractiveController {
             return;
         }
         let message = AgentMessage::user_text(prompt.to_owned());
-        self.tui
-            .chrome_mut()
-            .pending_input_mut()
-            .queue_follow_up(prompt);
         self.tui.chrome_mut().prompt_mut().clear_after_submit();
         let Some(turn) = &self.active_turn else {
             return;
@@ -2721,7 +2721,6 @@ impl InteractiveController {
         if !text.is_empty() {
             if self.active_turn.is_some() {
                 let message = AgentMessage::user_text(text.clone());
-                self.tui.chrome_mut().pending_input_mut().queue_steer(text);
                 if let Some(turn) = &self.active_turn {
                     turn.steer_input
                         .push(neo_agent_core::ActiveTurnInput::SteerNow(message));
@@ -2732,17 +2731,21 @@ impl InteractiveController {
             // Idle: behave like a normal submit.
             return self.submit_current_prompt().await;
         }
-        // Empty composer: promote the oldest queued follow-up to a steer.
-        if let Some(text) = self
+        let Some(turn) = &self.active_turn else {
+            self.push_status("No active turn to steer");
+            return Ok(());
+        };
+        if self
             .tui
-            .chrome_mut()
-            .pending_input_mut()
-            .promote_oldest_follow_up_to_steer()
-            && let Some(turn) = &self.active_turn
+            .chrome()
+            .pending_input()
+            .queued_follow_ups()
+            .is_empty()
         {
-            let message = AgentMessage::user_text(text);
+            self.push_status("No queued follow-up to steer");
+        } else {
             turn.steer_input
-                .push(neo_agent_core::ActiveTurnInput::SteerNow(message));
+                .push(neo_agent_core::ActiveTurnInput::PromoteFollowUpToSteer);
         }
         Ok(())
     }
@@ -2792,6 +2795,7 @@ impl InteractiveController {
             DevelopmentMode::Goal(GoalModeStatus::Pending)
         );
         request.plan_review_feedback = std::mem::take(&mut self.pending_plan_review_feedback);
+        request.mcp_manager.clone_from(&self.mcp_manager);
         request.base_config.clone_from(&self.local_config);
         let request = if let Some(skill_context) = self.pending_skill_context.take() {
             request.with_skill_context(skill_context)
@@ -2922,40 +2926,47 @@ impl InteractiveController {
         self.btw_receiver = None;
     }
 
-    /// Open the `/btw` sidecar panel, cancelling any existing sidecar first.
+    /// Open or focus the `/btw` sidecar panel.
     ///
     /// If `initial_prompt` is `Some`, a sidecar turn is started immediately using
-    /// a projected snapshot of the active session's messages. The main turn is
-    /// never touched.
+    /// the sidecar runner's in-memory conversation. The main turn is never
+    /// touched.
     async fn open_btw_panel(&mut self, initial_prompt: Option<String>) {
-        self.cancel_btw_sidecar();
+        if self.tui.chrome().has_btw_panel() {
+            if initial_prompt.is_none() {
+                self.update_btw_panel_error("BTW sidecar is already open.");
+                return;
+            }
+            if self.tui.chrome().btw_panel_state().is_some_and(|state| {
+                state.sidecar.phase == neo_tui::widgets::btw_panel::BtwPhase::Running
+            }) {
+                self.update_btw_panel_error(
+                    "Wait for /btw to finish before sending another question.",
+                );
+                return;
+            }
+        } else {
+            let sidecar_id = uuid::Uuid::new_v4().to_string();
+            let state = neo_tui::widgets::btw_panel::BtwPanelState::new(
+                neo_tui::widgets::btw_panel::BtwSidecar::new(sidecar_id)
+                    .with_parent_session_id(self.active_session_id.clone().unwrap_or_default()),
+            );
+            self.tui.chrome_mut().set_btw_panel_state(Some(state));
+        }
 
-        let sidecar_id = uuid::Uuid::new_v4().to_string();
-        let state = neo_tui::widgets::btw_panel::BtwPanelState::new(
-            neo_tui::widgets::btw_panel::BtwSidecar::new(sidecar_id)
-                .with_parent_session_id(self.active_session_id.clone().unwrap_or_default()),
-        );
-        self.tui.chrome_mut().set_btw_panel_state(Some(state));
-
-        let Some(config) = self.local_config.clone() else {
-            self.push_status("BTW requires a loaded config");
-            return;
-        };
-
-        let inherited_messages = self.load_btw_inherited_messages(&config).await;
-        let Some(model) = self.resolve_btw_model(&config) else {
-            return;
-        };
-        let Some(client) = self.resolve_btw_client(&config, &model) else {
-            return;
-        };
-
-        let runner = crate::modes::btw::BtwRunner::new(model, client, config, inherited_messages);
+        if self.btw_runner.is_none() {
+            let Some(runner) = self.create_btw_runner().await else {
+                return;
+            };
+            self.btw_runner = Some(runner);
+        }
 
         if let Some(prompt) = initial_prompt {
+            let Some(runner) = self.btw_runner.as_ref() else {
+                return;
+            };
             match runner.run(prompt).await {
                 Ok(receiver) => {
-                    self.btw_runner = Some(runner);
                     self.btw_receiver = Some(receiver);
                 }
                 Err(error) => {
@@ -2963,24 +2974,45 @@ impl InteractiveController {
                     self.update_btw_panel_error(&error.to_string());
                 }
             }
-        } else {
-            self.btw_runner = Some(runner);
         }
+    }
+
+    async fn create_btw_runner(&mut self) -> Option<crate::modes::btw::BtwRunner> {
+        let Some(config) = self.local_config.clone() else {
+            self.push_status("BTW requires a loaded config");
+            return None;
+        };
+
+        let inherited_messages = self.load_btw_inherited_messages(&config).await;
+        let Some(model) = self.resolve_btw_model(&config) else {
+            return None;
+        };
+        let Some(client) = self.resolve_btw_client(&config, &model) else {
+            return None;
+        };
+
+        Some(crate::modes::btw::BtwRunner::new(
+            model,
+            client,
+            config,
+            inherited_messages,
+        ))
     }
 
     async fn load_btw_inherited_messages(
         &self,
         config: &crate::config::AppConfig,
     ) -> Vec<AgentMessage> {
+        if !self.session_messages.is_empty() {
+            return self.session_messages.clone();
+        }
         let Some(session_id) = self.active_session_id.as_ref() else {
             return Vec::new();
         };
         match crate::modes::sessions::session_path(session_id, config) {
             Ok(path) => {
                 match neo_agent_core::session::JsonlSessionReader::replay_context(&path).await {
-                    Ok(context) => {
-                        neo_agent_core::sidecar::sidecar_projected_messages(context.messages())
-                    }
+                    Ok(context) => context.messages().to_vec(),
                     Err(error) => {
                         tracing::warn!(?error, "failed to replay session for /btw context");
                         Vec::new()
@@ -3074,8 +3106,6 @@ impl InteractiveController {
             return Ok(());
         }
 
-        self.open_btw_panel(None).await;
-
         let Some(prompt) = self.tui.chrome_mut().submit_prompt() else {
             return Ok(());
         };
@@ -3084,10 +3114,16 @@ impl InteractiveController {
             return Ok(());
         }
 
+        if self.btw_runner.is_none() {
+            let Some(runner) = self.create_btw_runner().await else {
+                return Ok(());
+            };
+            self.btw_runner = Some(runner);
+        }
+
         let Some(runner) = self.btw_runner.as_ref() else {
             return Ok(());
         };
-
         match runner.run(prompt.to_owned()).await {
             Ok(receiver) => {
                 self.btw_receiver = Some(receiver);
@@ -3163,6 +3199,11 @@ impl InteractiveController {
 
     fn apply_turn_event(&mut self, event: AgentEvent) {
         let should_refresh_git_status = event_should_refresh_git_status(&event);
+        if let AgentEvent::MessageAppended { message } = &event {
+            if self.session_messages.last() != Some(message) {
+                self.session_messages.push(message.clone());
+            }
+        }
         if let AgentEvent::ToolExecutionFinished { name, result, .. } = &event
             && name == "TaskStop"
             && let Some(details) = &result.details
@@ -3208,8 +3249,8 @@ impl InteractiveController {
                     decision_tx: approval.decision_tx,
                     feedback_tx: approval.feedback_tx,
                     selected_label_tx: approval.selected_label_tx,
-                    session_option_label: None,
-                    prefix_option_label: None,
+                    session_option_label: approval.session_option_label,
+                    prefix_option_label: approval.prefix_option_label,
                 },
             );
         }
@@ -3238,15 +3279,18 @@ impl InteractiveController {
         self.tui
             .transcript_mut()
             .resolve_approval(&result.request_id, label);
-        let decision = Self::approval_decision(result.choice);
+        let decision = Self::approval_decision(result);
         let feedback = Self::approval_feedback(result);
         self.push_revision_feedback_status(feedback.as_deref());
         self.dispatch_approval_response(result, decision, feedback);
     }
 
-    fn approval_decision(choice: ApprovalChoice) -> PermissionApprovalDecision {
-        match choice {
+    fn approval_decision(result: &ApprovalResult) -> PermissionApprovalDecision {
+        match result.choice {
             ApprovalChoice::Approve => PermissionApprovalDecision::AllowOnce,
+            ApprovalChoice::AlwaysApprove if result.picked_prefix => {
+                PermissionApprovalDecision::AllowForPrefix
+            }
             ApprovalChoice::AlwaysApprove => PermissionApprovalDecision::AllowForSession,
             ApprovalChoice::Deny | ApprovalChoice::Revise => PermissionApprovalDecision::Reject,
         }
@@ -3487,6 +3531,7 @@ impl InteractiveController {
             self.push_status("No config available");
             return;
         };
+        self.sync_mcp_manager_from_config().await;
         let summaries = if let Some(manager) = &self.mcp_manager {
             let snapshots = manager.snapshots().await;
             mcp_ops::summarize_mcp_servers_from_snapshots(&config, &snapshots)
@@ -3499,6 +3544,18 @@ impl InteractiveController {
             servers: rows,
             theme,
         });
+    }
+
+    async fn sync_mcp_manager_from_config(&mut self) {
+        let Some(config) = self.local_config.clone() else {
+            return;
+        };
+        let Some(manager) = self.mcp_manager.clone() else {
+            return;
+        };
+        if let Err(error) = mcp_ops::reload_mcp_manager_from_config(&config, &manager).await {
+            self.push_status(format!("MCP manager sync failed: {error}"));
+        }
     }
 
     fn mcp_rows_from_summaries(summaries: Vec<mcp_ops::McpServerSummary>) -> Vec<McpServerRow> {
@@ -3634,6 +3691,7 @@ impl InteractiveController {
             None,
         );
         replay_session_into_transcript(&mut transcript, loaded);
+        self.session_messages.clone_from(&loaded.messages);
         *self.tui.transcript_mut() = transcript;
     }
 
@@ -3675,6 +3733,7 @@ impl InteractiveController {
         self.tui.chrome_mut().clear_todos();
         self.tui.chrome_mut().prompt_mut().clear_after_submit();
         self.active_session_id = None;
+        self.session_messages.clear();
         self.tui.chrome_mut().set_session_label("new");
         self.rebuild_empty_welcome_transcript();
     }
@@ -3896,9 +3955,11 @@ impl InteractiveController {
                 self.tui.chrome_mut().close_focused_overlay();
                 self.open_add_mcp_transport_picker();
             }
-            neo_tui::dialogs::McpManagerAction::Test(id)
-            | neo_tui::dialogs::McpManagerAction::Refresh(id) => {
-                self.start_mcp_probe(&id);
+            neo_tui::dialogs::McpManagerAction::Test(id) => {
+                self.start_mcp_probe(&id, true);
+            }
+            neo_tui::dialogs::McpManagerAction::Refresh(id) => {
+                self.start_mcp_probe(&id, false);
             }
             neo_tui::dialogs::McpManagerAction::ToggleEnabled(id) => {
                 self.toggle_mcp_server_enabled(&id).await;
@@ -4021,23 +4082,26 @@ impl InteractiveController {
         }
         self.push_status(format!("MCP server {} saved", config.id));
         self.refresh_config();
+        self.sync_mcp_manager_from_config().await;
         self.open_mcp_manager().await;
     }
 
-    fn start_mcp_probe(&mut self, id: &str) {
-        let Some(config) = self.local_config.clone() else {
-            return;
-        };
-        let Some(server) = config.mcp.servers.iter().find(|s| s.id == id).cloned() else {
-            self.push_status(format!("MCP server '{id}' not found"));
+    fn start_mcp_probe(&mut self, id: &str, reconnect: bool) {
+        let Some(manager) = self.mcp_manager.clone() else {
+            self.push_status("MCP manager unavailable");
             return;
         };
         self.tui
             .chrome_mut()
             .set_custom_working_label(Some(format!("Testing MCP server {id}...")));
         let id = id.to_owned();
+        let probe_id = id.clone();
         let handle = tokio::spawn(async move {
-            mcp_ops::probe_mcp_server(&server, server.startup_timeout_ms).await
+            if reconnect {
+                manager.reconnect_now(&probe_id).await
+            } else {
+                manager.refresh_tools(&probe_id).await
+            }
         });
         self.pending_mcp_probe = Some(PendingMcpProbe {
             server_id: id,
@@ -4055,11 +4119,10 @@ impl InteractiveController {
         }
         self.tui.chrome_mut().set_custom_working_label(None);
         match pending.handle.await {
-            Ok(Ok(tools)) => {
+            Ok(Ok(snapshot)) => {
                 self.push_status(format!(
                     "MCP {} connected ({} tools)",
-                    pending.server_id,
-                    tools.len()
+                    pending.server_id, snapshot.tool_count
                 ));
             }
             Ok(Err(err)) => {
@@ -4072,6 +4135,7 @@ impl InteractiveController {
                 ));
             }
         }
+        self.open_mcp_manager().await;
     }
 
     async fn toggle_mcp_server_enabled(&mut self, id: &str) {
@@ -4094,6 +4158,7 @@ impl InteractiveController {
             if new_enabled { "enabled" } else { "disabled" }
         ));
         self.refresh_config();
+        self.sync_mcp_manager_from_config().await;
         self.open_mcp_manager().await;
     }
 
@@ -4107,6 +4172,7 @@ impl InteractiveController {
         }
         self.push_status(format!("MCP server {id} removed"));
         self.refresh_config();
+        self.sync_mcp_manager_from_config().await;
         self.open_mcp_manager().await;
     }
 
@@ -5616,6 +5682,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     Some(Arc::clone(&request.plan_mode)),
                     request.goal_mode_authoring,
                     channels.steer_input,
+                    request.mcp_manager.clone(),
                 )
                 .await?;
                 Ok(TurnOutcome::session(turn.session_id))
@@ -5633,6 +5700,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     Some(Arc::clone(&request.plan_mode)),
                     request.goal_mode_authoring,
                     channels.steer_input,
+                    request.mcp_manager.clone(),
                 )
                 .await?;
                 Ok(TurnOutcome::session(turn.session_id))
@@ -9299,13 +9367,33 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Tool,
             subject: "Write".to_owned(),
             arguments: serde_json::json!({"path": "approved.txt"}),
-            session_scope: None,
+            session_scope: Some(neo_agent_core::SessionApprovalScope {
+                keys: vec![neo_agent_core::SessionApprovalKey::FileWrite {
+                    workspace: test_workspace_root().display().to_string(),
+                    path: test_workspace_root()
+                        .join("approved.txt")
+                        .display()
+                        .to_string(),
+                    operation: neo_agent_core::FileWriteApprovalOperation::Write,
+                }],
+                label: "Approve writes to this file for this session".to_owned(),
+                detail: "approved.txt".to_owned(),
+            }),
             prefix_rule: None,
         });
         let (decision_tx, decision_rx) = oneshot::channel();
-        controller
-            .pending_approvals
-            .insert("tool-1".to_owned(), pending_approval_response(decision_tx));
+        controller.pending_approvals.insert(
+            "tool-1".to_owned(),
+            PendingApprovalResponse {
+                decision_tx,
+                feedback_tx: None,
+                selected_label_tx: None,
+                session_option_label: Some(
+                    "Approve writes to this file for this session".to_owned(),
+                ),
+                prefix_option_label: None,
+            },
+        );
 
         controller
             .handle_input_event(InputEvent::Insert('2'))
@@ -9320,7 +9408,66 @@ command = "python3"
         assert!(
             controller
                 .render_snapshot()
-                .contains("Approved for this session")
+                .contains("Approved writes to this file for this session")
+        );
+    }
+
+    #[tokio::test]
+    async fn prefix_approval_choice_dispatches_prefix_decision() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.apply_turn_event(AgentEvent::ApprovalRequested {
+            turn: 1,
+            id: "tool-1".to_owned(),
+            operation: neo_agent_core::PermissionOperation::Shell,
+            subject: "cargo test".to_owned(),
+            arguments: serde_json::json!({"command": "cargo test"}),
+            session_scope: Some(neo_agent_core::SessionApprovalScope {
+                keys: vec![neo_agent_core::SessionApprovalKey::Shell {
+                    workspace: test_workspace_root().display().to_string(),
+                    cwd: test_workspace_root().display().to_string(),
+                    command: vec!["cargo".to_owned(), "test".to_owned()],
+                }],
+                label: "Approve this exact command for this session".to_owned(),
+                detail: test_workspace_root().display().to_string(),
+            }),
+            prefix_rule: Some(neo_agent_core::PrefixApprovalRule {
+                prefix: vec!["cargo".to_owned(), "test".to_owned()],
+                label: "cargo test".to_owned(),
+            }),
+        });
+        let (decision_tx, decision_rx) = oneshot::channel();
+        controller.pending_approvals.insert(
+            "tool-1".to_owned(),
+            PendingApprovalResponse {
+                decision_tx,
+                feedback_tx: None,
+                selected_label_tx: None,
+                session_option_label: Some(
+                    "Approve this exact command for this session".to_owned(),
+                ),
+                prefix_option_label: Some("Approve commands starting with cargo test".to_owned()),
+            },
+        );
+
+        controller
+            .handle_input_event(InputEvent::Insert('3'))
+            .await
+            .expect("number shortcut handles prefix approval");
+
+        assert_eq!(
+            decision_rx.await.expect("approval decision"),
+            PermissionApprovalDecision::AllowForPrefix
+        );
+        assert!(
+            controller
+                .render_snapshot()
+                .contains("Approved commands starting with cargo test")
         );
     }
 
@@ -9701,7 +9848,15 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: "printf one".to_owned(),
             arguments: serde_json::json!({"command": "printf one"}),
-            session_scope: None,
+            session_scope: Some(neo_agent_core::SessionApprovalScope {
+                keys: vec![neo_agent_core::SessionApprovalKey::Shell {
+                    workspace: test_workspace_root().display().to_string(),
+                    cwd: test_workspace_root().display().to_string(),
+                    command: vec!["printf".to_owned(), "one".to_owned()],
+                }],
+                label: "Approve this exact command for this session".to_owned(),
+                detail: test_workspace_root().display().to_string(),
+            }),
             prefix_rule: None,
         });
         controller.apply_turn_event(AgentEvent::ApprovalRequested {
@@ -9757,7 +9912,15 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: "printf one".to_owned(),
             arguments: serde_json::json!({"command": "printf one"}),
-            session_scope: None,
+            session_scope: Some(neo_agent_core::SessionApprovalScope {
+                keys: vec![neo_agent_core::SessionApprovalKey::Shell {
+                    workspace: test_workspace_root().display().to_string(),
+                    cwd: test_workspace_root().display().to_string(),
+                    command: vec!["printf".to_owned(), "one".to_owned()],
+                }],
+                label: "Approve this exact command for this session".to_owned(),
+                detail: test_workspace_root().display().to_string(),
+            }),
             prefix_rule: None,
         });
         controller.apply_turn_event(AgentEvent::ApprovalRequested {
@@ -9791,7 +9954,15 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: "printf one".to_owned(),
             arguments: serde_json::json!({"command": "printf one"}),
-            session_scope: None,
+            session_scope: Some(neo_agent_core::SessionApprovalScope {
+                keys: vec![neo_agent_core::SessionApprovalKey::Shell {
+                    workspace: test_workspace_root().display().to_string(),
+                    cwd: test_workspace_root().display().to_string(),
+                    command: vec!["printf".to_owned(), "one".to_owned()],
+                }],
+                label: "Approve this exact command for this session".to_owned(),
+                detail: test_workspace_root().display().to_string(),
+            }),
             prefix_rule: None,
         });
         controller.apply_turn_event(AgentEvent::ApprovalRequested {
@@ -11114,7 +11285,7 @@ command = "python3"
             .expect("opens permission picker");
         assert!(controller.chrome().focused_overlay().is_some());
 
-        // Move from Manual (index 0) to Auto (index 1) and confirm.
+        // Move from Ask (index 0) to Auto (index 1) and confirm.
         controller
             .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
             .await
@@ -11397,13 +11568,30 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Shell,
             subject: "printf one".to_owned(),
             arguments: serde_json::json!({"command": "printf one"}),
-            session_scope: None,
+            session_scope: Some(neo_agent_core::SessionApprovalScope {
+                keys: vec![neo_agent_core::SessionApprovalKey::Shell {
+                    workspace: test_workspace_root().display().to_string(),
+                    cwd: test_workspace_root().display().to_string(),
+                    command: vec!["printf".to_owned(), "one".to_owned()],
+                }],
+                label: "Approve this exact command for this session".to_owned(),
+                detail: test_workspace_root().display().to_string(),
+            }),
             prefix_rule: None,
         });
         let (first_tx, first_rx) = oneshot::channel();
-        controller
-            .pending_approvals
-            .insert("tool-1".to_owned(), pending_approval_response(first_tx));
+        controller.pending_approvals.insert(
+            "tool-1".to_owned(),
+            PendingApprovalResponse {
+                decision_tx: first_tx,
+                feedback_tx: None,
+                selected_label_tx: None,
+                session_option_label: Some(
+                    "Approve this exact command for this session".to_owned(),
+                ),
+                prefix_option_label: None,
+            },
+        );
 
         // Select "Approve for this session" (index 1) and confirm.
         controller
@@ -12524,6 +12712,79 @@ command = "python3"
     }
 
     #[tokio::test]
+    async fn active_turn_enter_waits_for_runtime_event_before_pending_preview() {
+        let captured_steer = Arc::new(std::sync::Mutex::new(
+            neo_agent_core::SteerInputHandle::new(),
+        ));
+        let observed_steer = Arc::clone(&captured_steer);
+        let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+            let observed_steer = Arc::clone(&observed_steer);
+            *observed_steer.lock().expect("steer lock") = channels.steer_input.clone();
+            Box::pin(async move {
+                channels.cancel_token.cancelled().await;
+                Ok(TurnOutcome::default())
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            run_turn,
+            PickerCatalogs::default(),
+            Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        );
+
+        controller.type_text("first prompt");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("first prompt starts turn");
+
+        controller.type_text("queued follow up");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("enter while busy enqueues");
+
+        assert!(
+            controller
+                .chrome()
+                .pending_input()
+                .queued_follow_ups()
+                .is_empty(),
+            "local submit path must not duplicate the runtime FollowUpQueued event"
+        );
+
+        controller.apply_turn_event(AgentEvent::FollowUpQueued {
+            message: AgentMessage::user_text("queued follow up"),
+        });
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .queued_follow_ups()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["queued follow up"]
+        );
+        controller.apply_turn_event(AgentEvent::QueueDrained {
+            kind: neo_agent_core::QueueKind::FollowUp,
+            count: 1,
+        });
+        assert!(
+            controller
+                .chrome()
+                .pending_input()
+                .queued_follow_ups()
+                .is_empty(),
+            "one runtime drain should clear one queued preview item"
+        );
+    }
+
+    #[tokio::test]
     async fn active_turn_ctrl_s_steers_running_turn() {
         let captured_steer = Arc::new(std::sync::Mutex::new(
             neo_agent_core::SteerInputHandle::new(),
@@ -12570,6 +12831,193 @@ command = "python3"
         assert_eq!(steer_handle.pending(), 1, "steer should be pushed");
         // Composer cleared after steering.
         assert_eq!(controller.chrome().prompt().text, "");
+    }
+
+    #[tokio::test]
+    async fn active_turn_ctrl_s_waits_for_runtime_event_before_pending_preview() {
+        let captured_steer = Arc::new(std::sync::Mutex::new(
+            neo_agent_core::SteerInputHandle::new(),
+        ));
+        let observed_steer = Arc::clone(&captured_steer);
+        let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+            let observed_steer = Arc::clone(&observed_steer);
+            *observed_steer.lock().expect("steer lock") = channels.steer_input.clone();
+            Box::pin(async move {
+                channels.cancel_token.cancelled().await;
+                Ok(TurnOutcome::default())
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            run_turn,
+            PickerCatalogs::default(),
+            Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        );
+
+        controller.type_text("first prompt");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("first prompt starts turn");
+
+        controller.type_text("steer this");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+            .await
+            .expect("ctrl+s steers");
+
+        assert!(
+            controller
+                .chrome()
+                .pending_input()
+                .pending_steers()
+                .is_empty(),
+            "local Ctrl+S path must not duplicate the runtime SteeringQueued event"
+        );
+        controller.apply_turn_event(AgentEvent::SteeringQueued {
+            message: AgentMessage::user_text("steer this"),
+        });
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .pending_steers()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["steer this"]
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_ctrl_s_promotes_oldest_follow_up_fifo_without_local_duplication() {
+        let captured_steer = Arc::new(std::sync::Mutex::new(
+            neo_agent_core::SteerInputHandle::new(),
+        ));
+        let observed_steer = Arc::clone(&captured_steer);
+        let run_turn: TurnDriver = Arc::new(move |_request, channels| {
+            let observed_steer = Arc::clone(&observed_steer);
+            *observed_steer.lock().expect("steer lock") = channels.steer_input.clone();
+            Box::pin(async move {
+                channels.cancel_token.cancelled().await;
+                Ok(TurnOutcome::default())
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            run_turn,
+            PickerCatalogs::default(),
+            Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        );
+
+        controller.type_text("first prompt");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("first prompt starts turn");
+        controller.apply_turn_event(AgentEvent::FollowUpQueued {
+            message: AgentMessage::user_text("queued one"),
+        });
+        controller.apply_turn_event(AgentEvent::FollowUpQueued {
+            message: AgentMessage::user_text("queued two"),
+        });
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+            .await
+            .expect("empty ctrl+s promotes oldest queued follow-up");
+
+        let steer_handle = captured_steer.lock().expect("steer lock").clone();
+        assert_eq!(
+            steer_handle.pending(),
+            1,
+            "promoted follow-up is sent as steer"
+        );
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .queued_follow_ups()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["queued one", "queued two"],
+            "local promotion intent must wait for runtime drain before changing follow-up preview"
+        );
+        assert!(
+            controller
+                .chrome()
+                .pending_input()
+                .pending_steers()
+                .is_empty(),
+            "local promotion must wait for the runtime SteeringQueued event before showing steer preview"
+        );
+
+        controller.apply_turn_event(AgentEvent::QueueDrained {
+            kind: neo_agent_core::QueueKind::FollowUp,
+            count: 1,
+        });
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .queued_follow_ups()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["queued two"],
+            "runtime follow-up drain removes the promoted FIFO item"
+        );
+        controller.apply_turn_event(AgentEvent::SteeringQueued {
+            message: AgentMessage::user_text("queued one"),
+        });
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .pending_steers()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["queued one"]
+        );
+        controller.apply_turn_event(AgentEvent::QueueDrained {
+            kind: neo_agent_core::QueueKind::Steering,
+            count: 1,
+        });
+        assert!(
+            controller
+                .chrome()
+                .pending_input()
+                .pending_steers()
+                .is_empty(),
+            "one runtime steer drain should clear the promoted preview"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_ctrl_s_with_no_queue_reports_noop_status() {
+        let mut controller = running_turn_controller().await;
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+            .await
+            .expect("empty ctrl+s with no queue is handled");
+
+        assert!(
+            transcript_has_status(&controller, "No queued follow-up to steer"),
+            "empty Ctrl+S with no queue should be visible feedback"
+        );
+
+        controller.cancel_active_turn().await.expect("cancel turn");
     }
 
     #[tokio::test]
@@ -12862,6 +13310,23 @@ command = "python3"
         ]))
     }
 
+    fn chat_message_text(message: &neo_ai::ChatMessage) -> String {
+        let content = match message {
+            neo_ai::ChatMessage::System { content }
+            | neo_ai::ChatMessage::User { content }
+            | neo_ai::ChatMessage::Assistant { content, .. }
+            | neo_ai::ChatMessage::ToolResult { content, .. } => content,
+        };
+        content
+            .iter()
+            .filter_map(|part| match part {
+                neo_ai::ContentPart::Text { text } => Some(text.as_str()),
+                neo_ai::ContentPart::Thinking { .. } | neo_ai::ContentPart::Image { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
     #[tokio::test]
     async fn slash_btw_opens_empty_sidecar_panel_without_starting_main_turn() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -12923,6 +13388,112 @@ command = "python3"
         assert_eq!(state.sidecar.turns.len(), 1);
         assert_eq!(state.sidecar.turns[0].prompt, "what is 2+2?");
         assert_eq!(state.sidecar.turns[0].answer, "42");
+    }
+
+    #[tokio::test]
+    async fn slash_btw_inherits_main_context_with_single_sidecar_projection() {
+        use neo_ai::{AiStreamEvent, StopReason};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.local_config = Some(btw_test_config(&project_dir));
+        controller.active_session_id = Some("session-current".to_owned());
+        controller.apply_turn_event(AgentEvent::MessageAppended {
+            message: AgentMessage::user_text("main context in memory"),
+        });
+        let fake = neo_ai::providers::fake::FakeModelClient::new(vec![
+            AiStreamEvent::MessageStart {
+                id: "msg-1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "side".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]);
+        controller.set_btw_client(Arc::new(fake.clone()));
+
+        controller
+            .handle_slash_command("/btw inspect context")
+            .await;
+        for _ in 0..20 {
+            controller.drain_btw_sidecar();
+            tokio::task::yield_now().await;
+        }
+
+        let requests = fake.requests();
+        assert_eq!(requests.len(), 1);
+        let contents: Vec<String> = requests[0].messages.iter().map(chat_message_text).collect();
+        assert!(
+            contents
+                .iter()
+                .any(|content| content == "main context in memory"),
+            "sidecar should inherit current in-memory main transcript: {contents:?}"
+        );
+        assert_eq!(
+            contents
+                .iter()
+                .filter(|content| content.contains("side-channel conversation"))
+                .count(),
+            1,
+            "sidecar reminder should be projected exactly once: {contents:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bare_slash_btw_while_sidecar_running_keeps_existing_panel() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.local_config = Some(btw_test_config(&project_dir));
+        controller.set_btw_client(btw_fake_client(""));
+
+        controller.handle_slash_command("/btw").await;
+        {
+            let state = controller
+                .tui
+                .chrome_mut()
+                .btw_panel_state_mut()
+                .expect("panel state");
+            state.sidecar.phase = neo_tui::widgets::btw_panel::BtwPhase::Running;
+        }
+        let original_id = controller
+            .chrome()
+            .btw_panel_state()
+            .expect("panel state")
+            .sidecar
+            .id
+            .0
+            .clone();
+
+        controller.handle_slash_command("/btw").await;
+
+        let state = controller.chrome().btw_panel_state().expect("panel state");
+        assert_eq!(state.sidecar.id.0, original_id);
+        assert_eq!(
+            state.sidecar.phase,
+            neo_tui::widgets::btw_panel::BtwPhase::Running
+        );
+        assert!(state.status_message.as_deref().is_some_and(|message| {
+            message.contains("already open") || message.contains("Wait for /btw")
+        }));
     }
 
     #[tokio::test]

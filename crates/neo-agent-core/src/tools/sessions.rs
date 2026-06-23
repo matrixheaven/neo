@@ -8,27 +8,17 @@ use crate::session::validate_session_id;
 use crate::{Tool, ToolContext, ToolError, ToolFuture, ToolResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
-pub enum SummarizeScope {
-    /// Summarize a single session by its ID.
-    SessionId {
-        /// The session ID to summarize.
-        #[schemars(description = "The session ID to summarize.")]
-        session_id: String,
-    },
-    /// Summarize sessions from the last N days.
-    Days {
-        /// Number of days to look back from now.
-        #[schemars(description = "Number of days to look back from now.")]
-        days: u32,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SummarizeSessionsArgs {
-    /// Scope of the summarization: either a specific `session_id` or a number of days.
-    #[serde(flatten)]
-    pub scope: SummarizeScope,
+    /// The session ID to summarize. Mutually exclusive with `days`.
+    #[serde(default)]
+    #[schemars(description = "The session ID to summarize. Mutually exclusive with days.")]
+    pub session_id: Option<String>,
+    /// Number of days to look back from now. Mutually exclusive with `session_id`.
+    #[serde(default)]
+    #[schemars(
+        description = "Number of days to look back from now. Mutually exclusive with session_id."
+    )]
+    pub days: Option<u32>,
 }
 
 pub struct SummarizeSessionsTool {
@@ -82,12 +72,12 @@ impl Tool for SummarizeSessionsTool {
         Box::pin(async move {
             let args = args?;
             let mut summaries = Vec::new();
-            match args.scope {
-                SummarizeScope::SessionId { session_id } => {
+            match (args.session_id, args.days) {
+                (Some(session_id), None) => {
                     let path = find_session_path(&neo_home, &session_id).await?;
                     summaries.push(summarize_session(&path).await?);
                 }
-                SummarizeScope::Days { days } => {
+                (None, Some(days)) => {
                     let paths = list_recent_sessions(&neo_home, days).await?;
                     if paths.is_empty() {
                         return Ok(ToolResult::ok(
@@ -97,6 +87,12 @@ impl Tool for SummarizeSessionsTool {
                     for path in paths {
                         summaries.push(summarize_session(&path).await?);
                     }
+                }
+                _ => {
+                    return Err(ToolError::InvalidInput {
+                        tool: "SummarizeSessions".to_owned(),
+                        message: "provide exactly one of session_id or days".to_owned(),
+                    });
                 }
             }
             let count = summaries.len();
@@ -115,19 +111,22 @@ async fn find_session_path(neo_home: &Path, session_id: &str) -> Result<PathBuf,
     if !index_path.exists() {
         return Err(ToolError::InvalidInput {
             tool: "SummarizeSessions".to_owned(),
-            message: "session index not found".to_owned(),
+            message: "session index not found. Available session IDs: none".to_owned(),
         });
     }
     let content = fs::read_to_string(&index_path)
         .await
         .map_err(ToolError::Io)?;
+    let mut available = Vec::new();
     for line in content.lines() {
-        let entry: serde_json::Value =
-            serde_json::from_str(line).map_err(|err| ToolError::InvalidInput {
-                tool: "SummarizeSessions".to_owned(),
-                message: err.to_string(),
-            })?;
-        if entry["session_id"].as_str() == Some(session_id) {
+        let entry = parse_session_index_line(line)?;
+        let Some(index_session_id) = entry["session_id"].as_str() else {
+            continue;
+        };
+        if validate_session_id(index_session_id).is_ok() {
+            available.push(index_session_id.to_owned());
+        }
+        if index_session_id == session_id {
             let session_dir =
                 entry["session_dir"]
                     .as_str()
@@ -138,9 +137,16 @@ async fn find_session_path(neo_home: &Path, session_id: &str) -> Result<PathBuf,
             return Ok(PathBuf::from(session_dir).join(format!("{session_id}.jsonl")));
         }
     }
+    let available = if available.is_empty() {
+        "none".to_owned()
+    } else {
+        available.join(", ")
+    };
     Err(ToolError::InvalidInput {
         tool: "SummarizeSessions".to_owned(),
-        message: format!("session {session_id} not found in index"),
+        message: format!(
+            "session {session_id} not found in index. Available session IDs: {available}"
+        ),
     })
 }
 
@@ -393,6 +399,38 @@ mod tests {
                 .content
                 .contains("<system>Summarized 1 session(s).</system>")
         );
+    }
+
+    #[tokio::test]
+    async fn summarize_missing_session_lists_available_session_ids() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let available_id = "session_550e8400-e29b-41d4-a716-446655440099";
+        let session_dir = temp.path().join("wd_available_1234567890ab");
+        fs::create_dir_all(&session_dir).await.expect("mkdir");
+        fs::write(
+            temp.path().join("session_index.jsonl"),
+            json!({
+                "session_id": available_id,
+                "session_dir": session_dir.to_str().unwrap(),
+                "timestamp_ms": current_time_ms(),
+            })
+            .to_string(),
+        )
+        .await
+        .expect("write index");
+
+        let tool = SummarizeSessionsTool::new(temp.path());
+        let err = tool
+            .execute(
+                &make_ctx(),
+                json!({"session_id": "session_550e8400-e29b-41d4-a716-446655440088"}),
+            )
+            .await
+            .expect_err("missing session should be invalid input");
+        let message = err.to_string();
+
+        assert!(message.contains("Available session IDs:"));
+        assert!(message.contains(available_id));
     }
 
     #[test]

@@ -120,6 +120,7 @@ pub struct McpServerSnapshot {
     pub transport: String,
     pub status: McpServerStatus,
     pub tool_count: usize,
+    pub tool_names: Vec<String>,
     pub resource_count: Option<usize>,
     pub error: Option<McpDiagnostic>,
     pub reconnect_attempt: u32,
@@ -249,11 +250,23 @@ impl McpConnectionManager {
 
     /// Add or update a single server.
     pub async fn upsert_server(&self, server: ManagedMcpServerConfig) -> McpServerSnapshot {
-        self.apply_config(vec![server])
+        let mut servers = {
+            let state = self.inner.read().await;
+            state
+                .entries
+                .values()
+                .map(|entry| entry.config.clone())
+                .collect::<Vec<_>>()
+        };
+        if let Some(existing) = servers.iter_mut().find(|existing| existing.id == server.id) {
+            *existing = server.clone();
+        } else {
+            servers.push(server.clone());
+        }
+        self.apply_config(servers).await;
+        self.snapshot(&server.id)
             .await
-            .into_iter()
-            .next()
-            .expect("one entry")
+            .expect("upserted MCP server should have a snapshot")
     }
 
     /// Remove a server. Returns `true` if it existed.
@@ -716,6 +729,7 @@ fn snapshot_for_entry(entry: &ManagedMcpEntry) -> McpServerSnapshot {
         transport: entry.config.transport.label().to_owned(),
         status: entry.status,
         tool_count: entry.tools.len(),
+        tool_names: entry.tools.iter().map(|tool| tool.name.clone()).collect(),
         resource_count: Some(entry.resources.len()),
         error: entry.error.clone(),
         reconnect_attempt: entry.reconnect_attempt,
@@ -796,6 +810,24 @@ impl super::Tool for ManagedMcpTool {
 mod tests {
     use super::*;
 
+    fn disabled_server(id: &str) -> ManagedMcpServerConfig {
+        ManagedMcpServerConfig {
+            id: id.to_owned(),
+            enabled: false,
+            transport: ManagedMcpTransport::Stdio {
+                command: "noop".to_owned(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                cwd: None,
+            },
+            enabled_tools: Vec::new(),
+            disabled_tools: Vec::new(),
+            startup_timeout_ms: None,
+            tool_timeout_ms: None,
+            reconnect: McpReconnectPolicy::default(),
+        }
+    }
+
     #[test]
     fn reconnect_delay_is_capped() {
         let policy = McpReconnectPolicy {
@@ -821,5 +853,22 @@ mod tests {
             namespaced_tool_name("filesystem", "read_file"),
             "mcp__filesystem__read_file"
         );
+    }
+
+    #[tokio::test]
+    async fn upsert_server_preserves_other_entries() {
+        let manager = McpConnectionManager::new(ProcessSupervisor::default());
+        manager
+            .apply_config(vec![disabled_server("one"), disabled_server("two")])
+            .await;
+
+        manager.upsert_server(disabled_server("three")).await;
+
+        let snapshots = manager.snapshots().await;
+        let ids = snapshots
+            .into_iter()
+            .map(|snapshot| snapshot.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["one", "three", "two"]);
     }
 }

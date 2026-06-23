@@ -13,10 +13,11 @@ use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionMet
 use neo_agent_core::skills::SkillStore;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool,
-    CompactionSettings, Content, CreateSkillTool, ListSkillsTool, McpHttpConfig,
-    McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter, McpToolProvider,
-    MoveSkillTool, PendingQuestion, PermissionApprovalDecision, PermissionOperation,
-    SteerInputHandle, SummarizeSessionsTool, ToolRegistry, mode::PlanMode,
+    CompactionSettings, Content, CreateSkillTool, ListSkillsTool, McpConnectionManager,
+    McpHttpConfig, McpHttpToolAdapter, McpServerStatus, McpStdioConfig, McpStdioToolAdapter,
+    McpToolAdapter, McpToolProvider, MoveSkillTool, PendingQuestion, PermissionApprovalDecision,
+    PermissionOperation, ProcessSupervisor, SteerInputHandle, SummarizeSessionsTool, ToolRegistry,
+    mode::PlanMode,
 };
 use neo_ai::{
     ChatMessage, ContentPart, CredentialResolver, ModelClient, ModelRegistry, ModelSpec,
@@ -1000,6 +1001,7 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
         None,
         false,
         SteerInputHandle::new(),
+        None,
     )
     .await?;
     let turn = finish_prompt_turn(
@@ -1030,6 +1032,7 @@ pub async fn run_prompt_ephemeral(
         None,
         false,
         SteerInputHandle::new(),
+        None,
     )
     .await?;
     finish_prompt_turn(
@@ -1067,6 +1070,7 @@ pub async fn run_prompt_in_session(
         None,
         false,
         SteerInputHandle::new(),
+        None,
     )
     .await?;
     runtime.restore_plan_mode(&context);
@@ -1095,6 +1099,7 @@ pub async fn run_prompt_streaming(
     plan_mode: Option<Arc<RwLock<PlanMode>>>,
     goal_mode_authoring: bool,
     steer_input: SteerInputHandle,
+    mcp_manager: Option<McpConnectionManager>,
 ) -> anyhow::Result<PromptTurn> {
     let prepared = prepare_new_streaming_turn(prompt, config, session_id_tx, skill_context).await?;
     let prompt = prepared.prompt.clone();
@@ -1106,6 +1111,7 @@ pub async fn run_prompt_streaming(
         plan_mode.clone(),
         goal_mode_authoring,
         steer_input,
+        mcp_manager,
     )
     .await?;
     let turn = run_prepared_streaming_turn(prepared, runtime, event_tx, cancel_token).await?;
@@ -1128,6 +1134,7 @@ pub async fn run_prompt_in_session_streaming(
     plan_mode: Option<Arc<RwLock<PlanMode>>>,
     goal_mode_authoring: bool,
     steer_input: SteerInputHandle,
+    mcp_manager: Option<McpConnectionManager>,
 ) -> anyhow::Result<PromptTurn> {
     let prepared =
         prepare_existing_streaming_turn(session_id, prompt, config, session_id_tx, skill_context)
@@ -1140,6 +1147,7 @@ pub async fn run_prompt_in_session_streaming(
         plan_mode.clone(),
         goal_mode_authoring,
         steer_input,
+        mcp_manager,
     )
     .await?;
     runtime.restore_plan_mode(&prepared.context);
@@ -1261,6 +1269,7 @@ async fn runtime_for_config(
     plan_mode: Option<Arc<RwLock<PlanMode>>>,
     goal_mode_authoring: bool,
     steer_input: SteerInputHandle,
+    mcp_manager: Option<McpConnectionManager>,
 ) -> anyhow::Result<AgentRuntime> {
     let model = resolve_model(config)?;
     let client = resolve_model_client(config, &model)?;
@@ -1280,17 +1289,18 @@ async fn runtime_for_config(
         agent_config.plan_review_feedback =
             Arc::new(std::sync::Mutex::new(feedback.into_iter().collect()));
     }
-    let mut tools =
-        tool_registry_for_config(config, std::sync::Arc::clone(&agent_config.todos)).await?;
+    let mut tools = tool_registry_for_config(
+        config,
+        std::sync::Arc::clone(&agent_config.todos),
+        mcp_manager.as_ref(),
+    )
+    .await?;
     if let Some(question_tx) = question_tx {
         tools.register(AskUserTool::new(question_tx));
     }
     let extra_skill_paths: Vec<PathBuf> =
         config.extra_skill_dirs.iter().map(PathBuf::from).collect();
-    tools.register(ListSkillsTool::new(
-        neo_home().map(|home| home.join("skills")),
-        extra_skill_paths,
-    ));
+    tools.register(ListSkillsTool::new(neo_home(), extra_skill_paths));
     if let Some(home) = neo_home() {
         tools.register(MoveSkillTool::new(home.clone()));
         tools.register(CreateSkillTool::new(home.clone()));
@@ -1697,6 +1707,7 @@ fn effective_compaction_max_estimated_tokens(
 pub(crate) async fn tool_registry_for_config(
     config: &AppConfig,
     todos: std::sync::Arc<std::sync::Mutex<Vec<neo_agent_core::TodoEventData>>>,
+    mcp_manager: Option<&McpConnectionManager>,
 ) -> anyhow::Result<ToolRegistry> {
     let mut registry = ToolRegistry::with_builtin_tools_and_todos(todos);
     let extension_home =
@@ -1707,23 +1718,64 @@ pub(crate) async fn tool_registry_for_config(
         &neo_agent_core::tools::extensions::default_extension_state_path(&extension_home),
     )
     .await?;
-    for server in config.mcp.servers.iter().filter(|server| server.enabled) {
-        register_mcp_server(&mut registry, server).await?;
+    let manager;
+    let manager_ref = if let Some(manager) = mcp_manager {
+        manager
+    } else {
+        manager = McpConnectionManager::new(ProcessSupervisor::default());
+        &manager
+    };
+    if let Err(error) = crate::mcp_ops::reload_mcp_manager_from_config(config, manager_ref).await {
+        tracing::warn!(?error, "failed to load MCP manager config");
+    } else {
+        wait_for_mcp_manager_probe(manager_ref, config).await;
+        for diagnostic in manager_ref
+            .register_connected_tools_into(&mut registry)
+            .await
+        {
+            tracing::warn!(
+                server_id = %diagnostic.server_id,
+                message = %diagnostic.message,
+                "MCP server unavailable"
+            );
+        }
     }
     Ok(registry)
 }
 
-async fn register_mcp_server(
-    registry: &mut ToolRegistry,
-    server: &McpServerConfig,
-) -> anyhow::Result<()> {
-    let adapter = mcp_adapter_for_server(server)?;
-    let provider = McpToolProvider::discover_dyn(&server.id, adapter)
-        .await
-        .with_context(|| format!("failed to discover MCP tools from {}", server.id))?
-        .with_tool_filter(&server.enabled_tools, &server.disabled_tools);
-    provider.register_into(registry);
-    Ok(())
+async fn wait_for_mcp_manager_probe(manager: &McpConnectionManager, config: &AppConfig) {
+    let enabled_count = config
+        .mcp
+        .servers
+        .iter()
+        .filter(|server| server.enabled)
+        .count();
+    if enabled_count == 0 {
+        return;
+    }
+    let max_configured_timeout = config
+        .mcp
+        .servers
+        .iter()
+        .filter(|server| server.enabled)
+        .filter_map(|server| server.startup_timeout_ms)
+        .max()
+        .unwrap_or(500);
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_millis(max_configured_timeout.min(1_000));
+    loop {
+        let snapshots = manager.snapshots().await;
+        let settled = snapshots.iter().all(|snapshot| {
+            !matches!(
+                snapshot.status,
+                McpServerStatus::Pending | McpServerStatus::Reconnecting
+            )
+        });
+        if settled || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 fn mcp_adapter_for_server(server: &McpServerConfig) -> anyhow::Result<Arc<dyn McpToolAdapter>> {
@@ -2129,7 +2181,7 @@ mod tests {
     use super::{
         PromptApprovalRequest, StableJsonState, agent_config_for_app, create_session_path,
         list_configured_models, model_registry_for_config, run_prompt_with_runtime,
-        select_config_model,
+        select_config_model, tool_registry_for_config,
     };
     use crate::config::{
         AppConfig, Defaults, McpConfig, ModelConfig, ProviderConfig, RuntimeCompactionConfig,
@@ -2906,5 +2958,39 @@ mod tests {
             project_dir: project_dir.to_path_buf(),
             config_path: project_dir.join(".neo/config.toml"),
         }
+    }
+
+    #[tokio::test]
+    async fn tool_registry_ignores_failed_mcp_server_startup() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(temp.path());
+        config.mcp.servers.push(crate::config::McpServerConfig {
+            id: "bad".to_owned(),
+            enabled: true,
+            transport: "stdio".to_owned(),
+            command: Some("neo-missing-mcp-binary-for-test".to_owned()),
+            url: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            cwd: None,
+            enabled_tools: Vec::new(),
+            disabled_tools: Vec::new(),
+            startup_timeout_ms: Some(50),
+            tool_timeout_ms: None,
+        });
+
+        let registry =
+            tool_registry_for_config(&config, Arc::new(std::sync::Mutex::new(Vec::new())), None)
+                .await
+                .expect("bad MCP server should not abort registry construction");
+
+        assert!(
+            registry
+                .specs()
+                .iter()
+                .all(|spec| !spec.name.starts_with("mcp__bad__")),
+            "failed MCP tools must not be exposed"
+        );
     }
 }

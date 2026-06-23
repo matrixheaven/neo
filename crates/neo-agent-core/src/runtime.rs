@@ -764,6 +764,8 @@ pub enum ActiveTurnInput {
     SteerNow(AgentMessage),
     /// Queue as a follow-up turn after the current turn completes (FIFO).
     FollowUp(AgentMessage),
+    /// Reclassify the oldest queued follow-up as steering input.
+    PromoteFollowUpToSteer,
 }
 
 /// Shared handle used to push live input into a running turn.
@@ -1650,6 +1652,16 @@ fn drain_live_steer_input(handle: &SteerInputHandle, emitter: &mut EventEmitter)
             }
             ActiveTurnInput::FollowUp(message) => {
                 emitter.emit(AgentEvent::FollowUpQueued { message });
+            }
+            ActiveTurnInput::PromoteFollowUpToSteer => {
+                let Some(message) = emitter.context.follow_up_queue.first().cloned() else {
+                    continue;
+                };
+                emitter.emit(AgentEvent::QueueDrained {
+                    kind: QueueKind::FollowUp,
+                    count: 1,
+                });
+                emitter.emit(AgentEvent::SteeringQueued { message });
             }
         }
     }
@@ -2891,11 +2903,9 @@ async fn resolve_approval(
             {
                 scope.record(&mut set);
             }
-            // Layer 2: persist a prefix rule when one was proposed and the
-            // handler surfaced it via AllowForSession (the UI maps the prefix
-            // button to AllowForSession + a non-None prefix_rule). This is the
-            // only place prefix rules get written from a tool call. The store
-            // is persisted to disk so the rule survives restarts.
+            None
+        }
+        PermissionApprovalDecision::AllowForPrefix => {
             if let Some(rule) = &prefix_rule
                 && !ApprovalRuleStore::is_would_approve_all(&rule.prefix)
             {

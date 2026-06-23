@@ -1,15 +1,13 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::PathBuf,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
 use anyhow::Context;
 use neo_agent_core::{
-    ManagedMcpTransport, McpConnectionManager, McpHttpConfig, McpHttpToolAdapter,
-    McpReconnectPolicy, McpResourceListEntry, McpResourceRead, McpServerSnapshot, McpServerStatus,
-    McpStdioConfig, McpStdioToolAdapter, McpToolAdapter, ProcessSupervisor,
+    ManagedMcpTransport, McpConnectionManager, McpReconnectPolicy, McpResourceListEntry,
+    McpResourceRead, McpServerSnapshot, McpServerStatus, ProcessSupervisor,
 };
 
 use crate::config::McpServerConfig;
@@ -155,22 +153,6 @@ pub fn validate_mcp_server_config(server: &McpServerConfig) -> anyhow::Result<()
     Ok(())
 }
 
-/// Apply enabled/disabled tool filters to a list of tool names.
-pub fn apply_tool_filter(
-    tools: &mut Vec<String>,
-    enabled_tools: &[String],
-    disabled_tools: &[String],
-) {
-    if !enabled_tools.is_empty() {
-        let allow: BTreeSet<_> = enabled_tools.iter().cloned().collect();
-        tools.retain(|name| allow.contains(name));
-    }
-    if !disabled_tools.is_empty() {
-        let deny: BTreeSet<_> = disabled_tools.iter().cloned().collect();
-        tools.retain(|name| !deny.contains(name));
-    }
-}
-
 /// Build a persisted `McpServerConfig` from user input.
 pub fn build_mcp_server_config(input: AddMcpServerInput) -> anyhow::Result<McpServerConfig> {
     let transport = parse_mcp_kind(&input.cli_type)?;
@@ -275,57 +257,6 @@ pub fn to_managed_configs(
     servers.iter().map(to_managed_config).collect()
 }
 
-/// Build an unsupervised adapter for short-lived CLI probe/list operations.
-pub fn mcp_adapter_for_server(server: &McpServerConfig) -> anyhow::Result<Arc<dyn McpToolAdapter>> {
-    match server.transport.as_str() {
-        "stdio" => {
-            let command = server
-                .command
-                .clone()
-                .with_context(|| format!("missing MCP command for {}", server.id))?;
-            Ok(Arc::new(McpStdioToolAdapter::new(McpStdioConfig {
-                command,
-                args: server.args.clone(),
-                env: server.env.clone(),
-                cwd: server.cwd.clone(),
-                tool_timeout_ms: server.tool_timeout_ms,
-            })))
-        }
-        "http" | "sse" => {
-            let url = server
-                .url
-                .clone()
-                .with_context(|| format!("missing MCP url for {}", server.id))?;
-            Ok(Arc::new(McpHttpToolAdapter::new(McpHttpConfig {
-                url,
-                headers: server.headers.clone(),
-                tool_timeout_ms: server.tool_timeout_ms,
-            })))
-        }
-        other => anyhow::bail!("unsupported MCP transport for {}: {other}", server.id),
-    }
-}
-
-/// Probe a server by listing its tools with an optional timeout.
-pub async fn probe_mcp_server(
-    server: &McpServerConfig,
-    timeout_ms: Option<u64>,
-) -> anyhow::Result<Vec<String>> {
-    let adapter = mcp_adapter_for_server(server)?;
-    let fut = adapter.list_tools();
-    let tools = if let Some(ms) = timeout_ms {
-        tokio::time::timeout(Duration::from_millis(ms), fut)
-            .await
-            .with_context(|| format!("timeout connecting to MCP server {}", server.id))??
-    } else {
-        fut.await
-            .with_context(|| format!("failed to list tools from {}", server.id))?
-    };
-    let mut names: Vec<String> = tools.into_iter().map(|t| t.name).collect();
-    apply_tool_filter(&mut names, &server.enabled_tools, &server.disabled_tools);
-    Ok(names)
-}
-
 /// Summarize configured servers without starting any connections.
 #[must_use]
 pub fn summarize_mcp_servers_without_discovery(
@@ -383,11 +314,7 @@ pub fn summarize_mcp_servers_from_snapshots(
             continue;
         };
         summary.tools = match snapshot.status {
-            McpServerStatus::Connected => McpToolDiscovery::Success(
-                (0..snapshot.tool_count)
-                    .map(|i| format!("tool-{i}"))
-                    .collect(),
-            ),
+            McpServerStatus::Connected => McpToolDiscovery::Success(snapshot.tool_names.clone()),
             McpServerStatus::Failed => McpToolDiscovery::Failed(
                 snapshot
                     .error
@@ -567,17 +494,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_tool_filter_allows_and_blocks() {
-        let mut tools = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
-        apply_tool_filter(&mut tools, &["a".to_owned(), "c".to_owned()], &[]);
-        assert_eq!(tools, vec!["a", "c"]);
-
-        let mut tools = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
-        apply_tool_filter(&mut tools, &[], &["b".to_owned()]);
-        assert_eq!(tools, vec!["a", "c"]);
-    }
-
-    #[test]
     fn build_mcp_server_config_stdio_requires_command() {
         let input = AddMcpServerInput {
             id: "fs".to_owned(),
@@ -656,5 +572,73 @@ mod tests {
         assert_eq!(managed.disabled_tools, vec!["write"]);
         assert_eq!(managed.startup_timeout_ms, Some(5_000));
         assert_eq!(managed.tool_timeout_ms, Some(10_000));
+    }
+
+    #[test]
+    fn snapshot_summary_uses_real_tool_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        let config = crate::config::AppConfig {
+            default_model: "gpt-4.1".to_owned(),
+            default_provider: "openai".to_owned(),
+            api_key_env: None,
+            providers: BTreeMap::new(),
+            models: BTreeMap::new(),
+            model_scope: Vec::new(),
+            sessions_dir: project_dir.join(".neo/sessions"),
+            permission_mode: neo_agent_core::PermissionMode::Ask,
+            live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
+                neo_agent_core::PermissionMode::Ask,
+            )),
+            defaults: crate::config::Defaults {
+                mode: "interactive".to_owned(),
+            },
+            runtime: crate::config::RuntimeConfig::default(),
+            tui: crate::config::TuiConfig::default(),
+            theme: crate::themes::ResolvedTheme::default(),
+            mcp: crate::config::McpConfig {
+                servers: vec![McpServerConfig {
+                    id: "docs".to_owned(),
+                    enabled: true,
+                    transport: "stdio".to_owned(),
+                    command: Some("docs-mcp".to_owned()),
+                    url: None,
+                    args: Vec::new(),
+                    env: BTreeMap::new(),
+                    headers: BTreeMap::new(),
+                    cwd: None,
+                    enabled_tools: Vec::new(),
+                    disabled_tools: Vec::new(),
+                    startup_timeout_ms: None,
+                    tool_timeout_ms: None,
+                }],
+            },
+            prompt_templates: Vec::new(),
+            extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
+            project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
+            project_dir,
+            config_path: temp.path().join("config.toml"),
+        };
+        let summaries = summarize_mcp_servers_from_snapshots(
+            &config,
+            &[McpServerSnapshot {
+                id: "docs".to_owned(),
+                transport: "stdio".to_owned(),
+                status: McpServerStatus::Connected,
+                tool_count: 2,
+                tool_names: vec!["read_doc".to_owned(), "search_doc".to_owned()],
+                resource_count: Some(0),
+                error: None,
+                reconnect_attempt: 0,
+                next_retry_ms: None,
+            }],
+        );
+
+        assert_eq!(
+            summaries[0].tools,
+            McpToolDiscovery::Success(vec!["read_doc".to_owned(), "search_doc".to_owned()])
+        );
     }
 }

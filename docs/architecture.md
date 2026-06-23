@@ -61,7 +61,7 @@ individual crate docs in `docs/` for module-by-module status.
 - Keep provider-specific code behind `ModelClient`.
 - Keep model-facing tool schemas small and stable.
 - Treat permissions and session persistence as runtime policy, not provider behavior.
-- Keep permission modes (`manual`, `auto`, `yolo`) separate from development
+- Keep permission modes (`ask`, `auto`, `yolo`) separate from development
   modes (`normal`, `plan`, `goal`).
 - Prefer typed Rust interfaces first; add wire protocols such as MCP at the boundary.
 - Keep hosted/cloud distribution, profile sync, and managed collaboration out

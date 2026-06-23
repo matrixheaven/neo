@@ -33,6 +33,7 @@ impl Default for PermissionMode {
 pub enum PermissionApprovalDecision {
     AllowOnce,
     AllowForSession,
+    AllowForPrefix,
     Reject,
 }
 

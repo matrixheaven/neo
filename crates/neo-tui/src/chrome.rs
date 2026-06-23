@@ -933,7 +933,7 @@ impl NeoChromeState {
                 // Derive the dynamic option labels. Review transitions and
                 // scope-less prompts omit both; prefix is offered only when the
                 // runtime proposed a persistent rule.
-                let mut session_label = if is_review {
+                let session_label = if is_review {
                     None
                 } else {
                     session_scope
@@ -941,14 +941,6 @@ impl NeoChromeState {
                         .filter(|scope| !scope.is_empty())
                         .map(|scope| scope.label.clone())
                 };
-                if session_label.is_none()
-                    && matches!(
-                        operation,
-                        PermissionOperation::Tool | PermissionOperation::Shell
-                    )
-                {
-                    session_label = Some("Approve for this session".to_owned());
-                }
                 let prefix_label = if is_review {
                     None
                 } else {

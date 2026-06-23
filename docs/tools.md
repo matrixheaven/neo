@@ -105,7 +105,7 @@ visible in the tool card.
 The `neo-agent-core` tool layer separates:
 
 - `ToolRegistry`: lists available tools and their schemas.
-- `PermissionMode`: the active `manual`, `auto`, or `yolo` mode that decides
+- `PermissionMode`: the active `ask`, `auto`, or `yolo` mode that decides
   whether risky tool calls require user approval. Development modes are
   separate: plan mode adds a hard guard that cannot be bypassed by `auto` or
   `yolo`, while goal mode is a goal-authoring workflow.
@@ -117,7 +117,7 @@ are converted into `ToolResult::error` records and appended as model-visible
 tool-result messages. Runtime setup failures, cancellation, and max-turn
 boundaries still remain runtime errors or terminal lifecycle events.
 
-In `manual` mode, the runtime emits `AgentEvent::ApprovalRequested` before
+In `ask` mode, the runtime emits `AgentEvent::ApprovalRequested` before
 risky operations and executes only if the configured approval handler returns
 allow. Without a handler, the operation returns an approval-required tool
 result instead of executing silently. `auto` mode approves tool actions

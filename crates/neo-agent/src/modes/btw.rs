@@ -15,7 +15,7 @@ use neo_agent_core::skills::SkillStore;
 use neo_agent_core::{AgentContext, AgentEvent, AgentMessage, AgentRuntime, StopReason};
 use neo_ai::{ModelClient, ModelSpec};
 use neo_tui::widgets::btw_panel::{BtwPanelState, BtwPhase, BtwTurn};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -57,7 +57,7 @@ pub struct BtwRunner {
     model: ModelSpec,
     client: Arc<dyn ModelClient>,
     config: AppConfig,
-    inherited_messages: Vec<AgentMessage>,
+    context: Arc<Mutex<AgentContext>>,
     cancel_token: std::sync::Mutex<Option<CancellationToken>>,
 }
 
@@ -70,11 +70,16 @@ impl BtwRunner {
         config: AppConfig,
         inherited_messages: Vec<AgentMessage>,
     ) -> Self {
+        let mut context = AgentContext::new();
+        for message in sidecar_projected_messages(&inherited_messages) {
+            context.append_message(message);
+        }
+
         Self {
             model,
             client,
             config,
-            inherited_messages,
+            context: Arc::new(Mutex::new(context)),
             cancel_token: std::sync::Mutex::new(None),
         }
     }
@@ -108,7 +113,7 @@ impl BtwRunner {
             agent_config_for_app(self.model.clone(), &self.config, None, &skill_store)
                 .context("failed to build agent config for sidecar")?
                 .with_before_tool_call(deny_sidecar_tool_call);
-        let tools = tool_registry_for_config(&self.config, Arc::clone(&agent_config.todos))
+        let tools = tool_registry_for_config(&self.config, Arc::clone(&agent_config.todos), None)
             .await
             .context("failed to build tool registry for sidecar")?;
         let runtime = AgentRuntime::with_tools_and_skills(
@@ -117,11 +122,6 @@ impl BtwRunner {
             tools,
             skill_store,
         );
-
-        let mut context = AgentContext::new();
-        for message in sidecar_projected_messages(&self.inherited_messages) {
-            context.append_message(message);
-        }
 
         let cancel_token = CancellationToken::new();
         if let Ok(mut guard) = self.cancel_token.lock() {
@@ -133,8 +133,10 @@ impl BtwRunner {
             prompt: prompt.clone(),
         });
 
+        let context = Arc::clone(&self.context);
         tokio::spawn(async move {
             let user_message = AgentMessage::user_text(prompt);
+            let mut context = context.lock().await;
             let mut stream = runtime.run_turn_with_cancel(&mut context, user_message, cancel_token);
 
             let mut terminal_sent = false;
@@ -431,6 +433,55 @@ mod tests {
         assert!(first_idx < second_idx);
         assert!(second_idx < reminder_idx);
         assert!(reminder_idx < prompt_idx);
+    }
+
+    #[tokio::test]
+    async fn follow_up_reuses_sidecar_conversation_context() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = test_config(temp.path());
+        let fake = FakeModelClient::new(vec![
+            AiStreamEvent::MessageStart {
+                id: "msg-1".to_owned(),
+            },
+            AiStreamEvent::TextDelta {
+                text: "side answer".to_owned(),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            },
+        ]);
+        let runner = BtwRunner::new(fake_model(), Arc::new(fake.clone()), config, Vec::new());
+
+        let mut first = runner
+            .run("first side question".to_owned())
+            .await
+            .expect("run");
+        while first.recv().await.is_some() {}
+        let mut second = runner
+            .run("second side question".to_owned())
+            .await
+            .expect("run");
+        while second.recv().await.is_some() {}
+
+        let requests = fake.requests();
+        assert_eq!(requests.len(), 2);
+        let contents: Vec<String> = requests[1].messages.iter().map(chat_message_text).collect();
+        let first_prompt_idx = contents
+            .iter()
+            .position(|content| content == "first side question")
+            .expect("first prompt");
+        let first_answer_idx = contents
+            .iter()
+            .position(|content| content == "side answer")
+            .expect("first answer");
+        let second_prompt_idx = contents
+            .iter()
+            .position(|content| content == "second side question")
+            .expect("second prompt");
+
+        assert!(first_prompt_idx < first_answer_idx);
+        assert!(first_answer_idx < second_prompt_idx);
     }
 
     #[tokio::test(flavor = "current_thread")]

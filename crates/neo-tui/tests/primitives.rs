@@ -63,6 +63,63 @@ fn input_event_maps_printable_submit_escape_and_ctrl_c() {
 }
 
 #[test]
+fn repeated_key_events_map_like_pressed_keys() {
+    let backspace =
+        KeyEvent::new_with_kind(KeyCode::Backspace, KeyModifiers::NONE, KeyEventKind::Repeat);
+    let delete = KeyEvent::new_with_kind(KeyCode::Delete, KeyModifiers::NONE, KeyEventKind::Repeat);
+    let left = KeyEvent::new_with_kind(KeyCode::Left, KeyModifiers::NONE, KeyEventKind::Repeat);
+    let printable =
+        KeyEvent::new_with_kind(KeyCode::Char('a'), KeyModifiers::NONE, KeyEventKind::Repeat);
+
+    assert_eq!(
+        InputEvent::from_key_event(backspace),
+        Some(InputEvent::Backspace)
+    );
+    assert_eq!(InputEvent::from_key_event(delete), Some(InputEvent::Delete));
+    assert_eq!(InputEvent::from_key_event(left), Some(InputEvent::MoveLeft));
+    assert_eq!(
+        InputEvent::from_key_event(printable),
+        Some(InputEvent::Insert('a'))
+    );
+}
+
+#[test]
+fn parser_forwards_repeated_navigation_and_edit_keys() {
+    let mut parser = InputParser::new();
+    let parsed = parser.feed_crossterm_event(&Event::Key(KeyEvent::new_with_kind(
+        KeyCode::Backspace,
+        KeyModifiers::NONE,
+        KeyEventKind::Repeat,
+    )));
+
+    assert_eq!(parsed, vec![InputEvent::Backspace]);
+}
+
+#[test]
+fn repeat_enter_is_not_mapped_to_submit() {
+    let event = KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Repeat);
+
+    assert_eq!(
+        InputEvent::from_key_event_with_keybindings(event, &KeybindingsManager::default()),
+        None
+    );
+}
+
+#[test]
+fn repeat_prompt_steer_keybinding_is_ignored() {
+    let event = KeyEvent::new_with_kind(
+        KeyCode::Char('s'),
+        KeyModifiers::CONTROL,
+        KeyEventKind::Repeat,
+    );
+
+    assert_eq!(
+        InputEvent::from_key_event_with_keybindings(event, &KeybindingsManager::default()),
+        None
+    );
+}
+
+#[test]
 fn input_event_with_keybindings_keeps_bare_printable_chars_as_text() {
     let mut keybindings = KeybindingsManager::default();
     keybindings.set_user_bindings([(
