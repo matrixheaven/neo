@@ -1,6 +1,7 @@
 use crate::ansi::Style;
 use crate::chrome::ToolStatusKind;
 use crate::chrome::TuiTheme;
+use crate::components::wrap_width;
 use crate::core::{Component, Expandable, Finalization, Line};
 
 use super::plan_box::PlanBoxComponent;
@@ -230,23 +231,28 @@ impl ToolCallComponent {
         ));
         if self.state.status == ToolStatusKind::Running {
             let live_style = Style::default().fg(theme.text_muted);
-            rows.extend(
-                self.progress_lines
-                    .iter()
-                    .map(|line| Line::styled(format!("  {line}"), live_style)),
-            );
+            rows.extend(wrap_live_rows(&self.progress_lines, width, live_style));
             if self.dropped_live_output_lines > 0 {
                 rows.push(Line::styled(
                     format!("  ... ({} earlier lines)", self.dropped_live_output_lines),
                     Style::default().fg(theme.text_muted),
                 ));
             }
-            rows.extend(
-                self.live_output
-                    .iter()
-                    .map(|line| Line::styled(format!("  {line}"), live_style)),
-            );
+            rows.extend(wrap_live_rows(&self.live_output, width, live_style));
         }
         rows
     }
+}
+
+fn wrap_live_rows(lines: &[String], width: usize, style: Style) -> Vec<Line> {
+    const PREFIX: &str = "  ";
+    let body_width = width.saturating_sub(PREFIX.len()).max(1);
+    lines
+        .iter()
+        .flat_map(|line| {
+            wrap_width(line, body_width)
+                .into_iter()
+                .map(move |segment| Line::styled(format!("{PREFIX}{segment}"), style))
+        })
+        .collect()
 }

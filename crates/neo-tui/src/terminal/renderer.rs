@@ -32,6 +32,7 @@ use crossterm::{
 };
 
 use crate::ansi::visible_width;
+use crate::components::{truncate_width, wrap_width};
 
 const KITTY_SEQUENCE_PREFIX: &str = "\x1b_G";
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
@@ -492,6 +493,7 @@ impl TuiRenderer {
         let dimensions = RenderDimensions::new(width, height_u16);
         self.log_render_start(dimensions, &new_lines);
 
+        new_lines = constrain_frame_lines(width, new_lines);
         check_line_widths(width, &new_lines)?;
 
         let width_changed = self.previous_width != 0 && self.previous_width != width;
@@ -980,6 +982,28 @@ fn apply_line_resets(mut lines: Vec<String>) -> Vec<String> {
     lines
 }
 
+fn constrain_frame_lines(width: u16, lines: Vec<String>) -> Vec<String> {
+    let width = usize::from(width).max(1);
+    let mut constrained = Vec::with_capacity(lines.len());
+    for mut line in lines {
+        if is_image_line(&line) {
+            constrained.push(line);
+            continue;
+        }
+        normalize_terminal_output(&mut line);
+        if visible_width(&line) <= width {
+            constrained.push(line);
+            continue;
+        }
+        constrained.extend(
+            wrap_width(&line, width)
+                .into_iter()
+                .map(|line| truncate_width(&line, width, "", false)),
+        );
+    }
+    constrained
+}
+
 fn normalize_terminal_output(line: &mut String) {
     if line.contains('\n') || line.contains('\r') {
         *line = line.replace(['\n', '\r'], "");
@@ -1385,6 +1409,35 @@ mod tests {
             "should emit the whole frame: {output:?}"
         );
         assert_eq!(renderer.previous_viewport_top, 76);
+    }
+
+    #[test]
+    fn renderer_wraps_oversized_lines_instead_of_crashing() {
+        let mut renderer = test_renderer(Vec::new());
+        let mut buf: Vec<u8> = Vec::new();
+        renderer
+            .render_to_with_size(
+                &mut buf,
+                20,
+                10,
+                vec![format!("\x1b[31m{}\x1b[0m", "abcdef".repeat(8))],
+                None,
+            )
+            .expect("oversized line should render");
+
+        assert!(
+            renderer
+                .previous_lines
+                .iter()
+                .all(|line| visible_width(line) <= 20),
+            "renderer stored oversized lines: {:?}",
+            renderer.previous_lines
+        );
+        let output = String::from_utf8_lossy(&buf);
+        assert!(
+            output.contains("abcdef"),
+            "wrapped render should still include content: {output:?}"
+        );
     }
 
     #[test]

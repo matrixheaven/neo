@@ -401,6 +401,84 @@ fn long_user_message_with_wide_chars_never_exceeds_terminal_width() {
 }
 
 #[test]
+fn long_shell_result_lines_never_exceed_terminal_width() {
+    let mut transcript_pane = TranscriptPane::new(80, 30);
+    let long_memory_row = format!(
+        "    0.563,01KVG2WP5FW4GXDQK93WZYFTA9,context-neo,high,0.927,\"{}\"",
+        "Fixed clippy warnings in crates/neo-tui ".repeat(20)
+    );
+
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: serde_json::json!({
+            "command": "icm recall \"compact\"",
+            "cwd": "/Users/chenyuanhao/Workspace/neo"
+        }),
+    });
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionFinished {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        name: "Bash".to_owned(),
+        result: neo_agent_core::ToolResult::ok(long_memory_row),
+    });
+
+    let width = 80_u16;
+    let frame = transcript_pane
+        .render_frame(usize::from(width), 30)
+        .expect("render frame");
+
+    for (i, line) in frame.iter().enumerate() {
+        let w = visible_width(line);
+        assert!(
+            w <= usize::from(width),
+            "line {i} visible width {w} exceeds terminal width {width}: {}",
+            strip_ansi(line)
+        );
+    }
+}
+
+#[test]
+fn long_live_tool_output_lines_never_exceed_terminal_width() {
+    let mut transcript_pane = TranscriptPane::new(80, 30);
+    let long_memory_row = format!(
+        "    0.563,01KVG2WP5FW4GXDQK93WZYFTA9,context-neo,high,0.927,\"{}\"",
+        "Fixed clippy warnings in crates/neo-tui ".repeat(20)
+    );
+
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionStarted {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: serde_json::json!({
+            "command": "icm recall \"compact\"",
+            "cwd": "/Users/chenyuanhao/Workspace/neo"
+        }),
+    });
+    transcript_pane.apply_agent_event(neo_agent_core::AgentEvent::ToolExecutionUpdate {
+        turn: 1,
+        id: "bash-1".to_owned(),
+        name: "Bash".to_owned(),
+        partial_result: neo_agent_core::ToolResult::ok(long_memory_row),
+    });
+
+    let width = 80_u16;
+    let frame = transcript_pane
+        .render_frame(usize::from(width), 30)
+        .expect("render frame");
+
+    for (i, line) in frame.iter().enumerate() {
+        let w = visible_width(line);
+        assert!(
+            w <= usize::from(width),
+            "line {i} visible width {w} exceeds terminal width {width}: {}",
+            strip_ansi(line)
+        );
+    }
+}
+
+#[test]
 fn persisted_message_events_do_not_duplicate_live_transcript() {
     let mut transcript_pane = TranscriptPane::new(80, 12);
 
