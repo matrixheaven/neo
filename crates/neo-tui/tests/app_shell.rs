@@ -948,6 +948,7 @@ fn transcript_pane_maps_queue_notice_and_compaction_boundary() {
         summary: neo_agent_core::CompactionSummary {
             summary: "Older context summarized.".to_owned(),
             tokens_before: 12_345,
+            tokens_after: 6_000,
             first_kept_message_index: 4,
         },
     });

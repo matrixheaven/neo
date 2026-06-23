@@ -272,6 +272,11 @@ pub struct RuntimeCompactionConfig {
     pub enabled: bool,
     pub max_estimated_tokens: usize,
     pub keep_recent_messages: usize,
+    pub trigger_ratio: f64,
+    pub reserved_context_tokens: usize,
+    pub max_recent_messages: usize,
+    pub micro_enabled: bool,
+    pub micro_keep_recent: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -290,6 +295,11 @@ impl Default for RuntimeCompactionConfig {
             enabled: true,
             max_estimated_tokens: default_runtime_compaction_max_estimated_tokens(),
             keep_recent_messages: default_runtime_compaction_keep_recent_messages(),
+            trigger_ratio: 0.85,
+            reserved_context_tokens: 50_000,
+            max_recent_messages: 4,
+            micro_enabled: false,
+            micro_keep_recent: 20,
         }
     }
 }
@@ -432,6 +442,16 @@ pub(crate) struct FileRuntimeCompactionConfig {
     pub(crate) max_estimated_tokens: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) keep_recent_messages: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) trigger_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reserved_context_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_recent_messages: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) micro_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) micro_keep_recent: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -713,6 +733,11 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
                 keep_recent_messages: compaction
                     .keep_recent_messages
                     .unwrap_or_else(default_runtime_compaction_keep_recent_messages),
+                trigger_ratio: compaction.trigger_ratio.unwrap_or(0.85),
+                reserved_context_tokens: compaction.reserved_context_tokens.unwrap_or(50_000),
+                max_recent_messages: compaction.max_recent_messages.unwrap_or(4),
+                micro_enabled: compaction.micro_enabled.unwrap_or(false),
+                micro_keep_recent: compaction.micro_keep_recent.unwrap_or(20),
             }),
     }
 }

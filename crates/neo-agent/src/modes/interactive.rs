@@ -528,6 +528,10 @@ pub(crate) struct InteractiveController {
     /// Optional trust store override for tests. Production controllers created
     /// via `controller_for_config` initialize this from `~/.neo/trust.json`.
     trust_store: Option<crate::trust::ProjectTrustStore>,
+    /// Shared manual-compaction flag. Set by `/compact`, passed to each turn's
+    /// `AgentConfig` so the runtime can read it at the top of every loop
+    /// iteration.
+    manual_compact_requested: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(crate) struct TurnChannels {
@@ -623,6 +627,9 @@ pub(crate) struct TurnRequest {
     /// stale snapshot captured when the controller was built. `None` for test
     /// drivers that don't depend on config.
     pub base_config: Option<crate::config::AppConfig>,
+    /// Shared manual-compaction flag. Set by `/compact`, read by the runtime
+    /// at the top of each turn loop iteration via `AgentConfig`.
+    pub manual_compact_requested: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TurnRequest {
@@ -646,6 +653,7 @@ impl TurnRequest {
             plan_review_feedback: BTreeMap::new(),
             mcp_manager: None,
             base_config: None,
+            manual_compact_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -828,6 +836,7 @@ impl InteractiveController {
             pending_plan_review_feedback: BTreeMap::new(),
             prompt_history: None,
             trust_store: None,
+            manual_compact_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -2269,6 +2278,7 @@ impl InteractiveController {
             "/resume" => self.open_session_picker(),
             "/provider" => self.open_provider_picker(),
             "/mcp" => self.open_mcp_manager().await,
+            "/compact" => self.request_manual_compaction(),
             _ => return false,
         }
         self.clear_submitted_prompt();
@@ -2797,6 +2807,7 @@ impl InteractiveController {
         request.plan_review_feedback = std::mem::take(&mut self.pending_plan_review_feedback);
         request.mcp_manager.clone_from(&self.mcp_manager);
         request.base_config.clone_from(&self.local_config);
+        request.manual_compact_requested = Arc::clone(&self.manual_compact_requested);
         let request = if let Some(skill_context) = self.pending_skill_context.take() {
             request.with_skill_context(skill_context)
         } else {
@@ -3751,6 +3762,30 @@ impl InteractiveController {
         self.close_inline_prompt_completion();
         self.reset_for_new_session();
         self.push_status("Started fresh session");
+    }
+
+    /// Handle `/compact` — request a manual LLM-driven context compaction.
+    ///
+    /// If a turn is running, the compaction fires at the next loop iteration
+    /// (the runtime checks `manual_compact_requested` at the top of every
+    /// step). If the session is idle, we start a minimal turn that will
+    /// immediately compact and then finish.
+    fn request_manual_compaction(&mut self) {
+        self.manual_compact_requested
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if self.active_turn.is_some() {
+            self.push_status("Compaction requested — will run after the current step");
+        } else {
+            // Idle: start a no-op turn so the runtime loop can execute the
+            // compaction. The prompt is a system-level marker that won't
+            // appear as a user message in the transcript.
+            self.push_status("Compacting context…");
+            self.start_turn_with_prompt(
+                "[compaction requested]".to_owned(),
+                None,
+                false, // don't show as user message
+            );
+        }
     }
 
     fn apply_selected_model(&mut self) {
@@ -5683,6 +5718,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     request.goal_mode_authoring,
                     channels.steer_input,
                     request.mcp_manager.clone(),
+                    Arc::clone(&request.manual_compact_requested),
                 )
                 .await?;
                 Ok(TurnOutcome::session(turn.session_id))
@@ -5701,6 +5737,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     request.goal_mode_authoring,
                     channels.steer_input,
                     request.mcp_manager.clone(),
+                    Arc::clone(&request.manual_compact_requested),
                 )
                 .await?;
                 Ok(TurnOutcome::session(turn.session_id))

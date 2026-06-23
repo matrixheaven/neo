@@ -230,6 +230,7 @@ pub async fn compact_jsonl_session(
     let summary = CompactionSummary {
         summary: summarize_transcript(compacted_messages),
         tokens_before: estimate_messages_tokens(messages),
+        tokens_after: estimate_messages_tokens(&messages[first_kept_message_index..]),
         first_kept_message_index,
     };
 
