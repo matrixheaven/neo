@@ -544,6 +544,7 @@ fn stable_stop_reason(stop_reason: neo_agent_core::StopReason) -> &'static str {
 fn stable_compaction_reason(reason: neo_agent_core::CompactionReason) -> &'static str {
     match reason {
         neo_agent_core::CompactionReason::Threshold => "threshold",
+        neo_agent_core::CompactionReason::Manual => "manual",
     }
 }
 
@@ -1002,6 +1003,7 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
         false,
         SteerInputHandle::new(),
         None,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )
     .await?;
     let turn = finish_prompt_turn(
@@ -1033,6 +1035,7 @@ pub async fn run_prompt_ephemeral(
         false,
         SteerInputHandle::new(),
         None,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )
     .await?;
     finish_prompt_turn(
@@ -1071,6 +1074,7 @@ pub async fn run_prompt_in_session(
         false,
         SteerInputHandle::new(),
         None,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )
     .await?;
     runtime.restore_plan_mode(&context);
@@ -1100,6 +1104,7 @@ pub async fn run_prompt_streaming(
     goal_mode_authoring: bool,
     steer_input: SteerInputHandle,
     mcp_manager: Option<McpConnectionManager>,
+    manual_compact_requested: Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<PromptTurn> {
     let prepared = prepare_new_streaming_turn(prompt, config, session_id_tx, skill_context).await?;
     let prompt = prepared.prompt.clone();
@@ -1112,6 +1117,7 @@ pub async fn run_prompt_streaming(
         goal_mode_authoring,
         steer_input,
         mcp_manager,
+        manual_compact_requested,
     )
     .await?;
     let turn = run_prepared_streaming_turn(prepared, runtime, event_tx, cancel_token).await?;
@@ -1135,6 +1141,7 @@ pub async fn run_prompt_in_session_streaming(
     goal_mode_authoring: bool,
     steer_input: SteerInputHandle,
     mcp_manager: Option<McpConnectionManager>,
+    manual_compact_requested: Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<PromptTurn> {
     let prepared =
         prepare_existing_streaming_turn(session_id, prompt, config, session_id_tx, skill_context)
@@ -1148,6 +1155,7 @@ pub async fn run_prompt_in_session_streaming(
         goal_mode_authoring,
         steer_input,
         mcp_manager,
+        manual_compact_requested,
     )
     .await?;
     runtime.restore_plan_mode(&prepared.context);
@@ -1270,6 +1278,7 @@ async fn runtime_for_config(
     goal_mode_authoring: bool,
     steer_input: SteerInputHandle,
     mcp_manager: Option<McpConnectionManager>,
+    manual_compact_requested: Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<AgentRuntime> {
     let model = resolve_model(config)?;
     let client = resolve_model_client(config, &model)?;
@@ -1279,6 +1288,7 @@ async fn runtime_for_config(
         &config.skill_path,
     )?;
     let mut agent_config = agent_config_for_app(model, config, approval_tx, &skill_store)?;
+    agent_config.manual_compact_requested = manual_compact_requested;
     if let Some(plan_mode) = plan_mode {
         agent_config = agent_config.with_plan_mode(plan_mode);
     }
@@ -1606,6 +1616,11 @@ pub(crate) fn agent_config_for_app(
                 model_max_context_tokens,
             ),
             keep_recent_messages: compaction.keep_recent_messages,
+            trigger_ratio: compaction.trigger_ratio,
+            reserved_context_tokens: compaction.reserved_context_tokens,
+            max_recent_messages: compaction.max_recent_messages,
+            micro_enabled: compaction.micro_enabled,
+            micro_keep_recent: compaction.micro_keep_recent,
         });
     }
     if let Some(approval_tx) = approval_tx {
@@ -2218,6 +2233,11 @@ mod tests {
                     enabled: true,
                     max_estimated_tokens: 16_000,
                     keep_recent_messages: 24,
+                    trigger_ratio: 0.85,
+                    reserved_context_tokens: 50_000,
+                    max_recent_messages: 4,
+                    micro_enabled: false,
+                    micro_keep_recent: 20,
                 }),
             },
             tui: TuiConfig::default(),
@@ -2260,6 +2280,11 @@ mod tests {
                 enabled: true,
                 max_estimated_tokens: 16_000,
                 keep_recent_messages: 24,
+                trigger_ratio: 0.85,
+                reserved_context_tokens: 50_000,
+                max_recent_messages: 4,
+                micro_enabled: false,
+                micro_keep_recent: 20,
             })
         );
         assert!(agent_config.workspace_root.is_some());
@@ -2396,6 +2421,7 @@ mod tests {
                 summary: neo_agent_core::CompactionSummary {
                     summary: "Older context summarized.".to_owned(),
                     tokens_before: 12_345,
+                    tokens_after: 6_000,
                     first_kept_message_index: 4,
                 },
             }),
@@ -2405,6 +2431,7 @@ mod tests {
                 "result": {
                     "summary": "Older context summarized.",
                     "tokens_before": 12_345,
+                    "tokens_after": 6_000,
                     "first_kept_message_index": 4,
                 },
                 "aborted": false,
@@ -2443,6 +2470,11 @@ mod tests {
                     enabled: true,
                     max_estimated_tokens: 32_000,
                     keep_recent_messages: 20,
+                    trigger_ratio: 0.85,
+                    reserved_context_tokens: 50_000,
+                    max_recent_messages: 4,
+                    micro_enabled: false,
+                    micro_keep_recent: 20,
                 }),
             },
             tui: TuiConfig::default(),
@@ -2473,6 +2505,11 @@ mod tests {
                 enabled: true,
                 max_estimated_tokens: 800_000,
                 keep_recent_messages: 20,
+                trigger_ratio: 0.85,
+                reserved_context_tokens: 50_000,
+                max_recent_messages: 4,
+                micro_enabled: false,
+                micro_keep_recent: 20,
             })
         );
     }
@@ -2507,6 +2544,11 @@ mod tests {
                     enabled: true,
                     max_estimated_tokens: 12_000,
                     keep_recent_messages: 16,
+                    trigger_ratio: 0.85,
+                    reserved_context_tokens: 50_000,
+                    max_recent_messages: 4,
+                    micro_enabled: false,
+                    micro_keep_recent: 20,
                 }),
             },
             tui: TuiConfig::default(),
@@ -2537,6 +2579,11 @@ mod tests {
                 enabled: true,
                 max_estimated_tokens: 12_000,
                 keep_recent_messages: 16,
+                trigger_ratio: 0.85,
+                reserved_context_tokens: 50_000,
+                max_recent_messages: 4,
+                micro_enabled: false,
+                micro_keep_recent: 20,
             })
         );
     }

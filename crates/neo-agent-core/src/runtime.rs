@@ -25,11 +25,13 @@ use crate::skills::SkillStore;
 use crate::tools::BackgroundTaskManager;
 use crate::tools::normalize_path;
 use crate::{
-    AgentEvent, AgentMessage, AgentToolCall, CompactionPhase, CompactionReason, CompactionSummary,
-    Content, InjectionManager, PermissionApprovalDecision, PermissionMode, PermissionOperation,
-    PlanMode, PlanModeGuard, ProcessSupervisor, QueueKind, StopReason, TodoEventData, ToolAccess,
+    AgentEvent, AgentMessage, AgentToolCall, CompactionPhase, CompactionReason, CompactionSource,
+    CompactionSummary, Content, InjectionManager, PermissionApprovalDecision, PermissionMode,
+    PermissionOperation, PlanMode, PlanModeGuard, ProcessSupervisor, QueueKind, StopReason,
+    TodoEventData, ToolAccess,
     ToolContext, ToolError, ToolRegistry, ToolResult, ToolUpdateCallback, check_plan_mode_guard,
     is_active_plan_file_path,
+    compaction::{self, CompactionStrategy},
 };
 
 pub type ContextTransform = Arc<dyn Fn(&[AgentMessage]) -> Vec<AgentMessage> + Send + Sync>;
@@ -204,6 +206,11 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub background_tasks: BackgroundTaskManager,
+    /// Shared flag for manual `/compact` requests. Set by the TUI, cleared by
+    /// `maybe_compact` after consuming the request.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub manual_compact_requested: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AgentConfig {
@@ -240,6 +247,7 @@ impl AgentConfig {
             home_dir: None,
             todos: Arc::new(Mutex::new(Vec::new())),
             background_tasks: BackgroundTaskManager::new(),
+            manual_compact_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -468,11 +476,22 @@ impl AgentConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CompactionSettings {
     pub enabled: bool,
     pub max_estimated_tokens: usize,
     pub keep_recent_messages: usize,
+    /// Fraction of `max_context_tokens` at which auto-compaction triggers.
+    pub trigger_ratio: f64,
+    /// Reserved headroom in tokens that forces compaction when
+    /// `used + reserved >= max_context_tokens`.
+    pub reserved_context_tokens: usize,
+    /// Maximum recent messages to keep during auto-compaction.
+    pub max_recent_messages: usize,
+    /// Whether experimental micro compaction (old tool-result truncation) is on.
+    pub micro_enabled: bool,
+    /// Number of recent messages exempt from micro compaction.
+    pub micro_keep_recent: usize,
 }
 
 impl CompactionSettings {
@@ -482,6 +501,11 @@ impl CompactionSettings {
             enabled: true,
             max_estimated_tokens,
             keep_recent_messages,
+            trigger_ratio: 0.85,
+            reserved_context_tokens: 50_000,
+            max_recent_messages: 4,
+            micro_enabled: false,
+            micro_keep_recent: 20,
         }
     }
 }
@@ -572,7 +596,15 @@ impl AgentContext {
 
     pub fn apply_compaction(&mut self, summary: CompactionSummary) {
         let keep_from = summary.first_kept_message_index.min(self.messages.len());
-        let kept = self.messages.split_off(keep_from);
+        let mut kept = self.messages.split_off(keep_from);
+        // Inject the LLM-generated summary as a system message so the model
+        // has the compacted context when continuing the conversation.
+        let summary_msg = AgentMessage::system_text(format!(
+            "<compaction_summary>\nThe following is a summary of the earlier conversation, \
+             compacted to preserve essential context:\n\n{}\n</compaction_summary>",
+            summary.summary
+        ));
+        kept.insert(0, summary_msg);
         self.messages = kept;
         self.compaction_summary = Some(summary);
     }
@@ -746,6 +778,8 @@ pub enum AgentRuntimeError {
     Tool(#[from] ToolError),
     #[error("runtime I/O failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error("compaction failed: {0}")]
+    Compaction(#[from] compaction::CompactionError),
     #[error("turn cancelled")]
     Cancelled,
 }
@@ -1036,6 +1070,20 @@ async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatReque
     } else {
         context.messages.clone()
     };
+    // Apply micro compaction (experimental): truncate old, large tool results
+    // to reclaim context tokens without a full LLM-driven compaction.
+    let context_messages = if config.compaction.is_some_and(|settings| settings.micro_enabled) {
+        let settings = config.compaction.expect("checked above");
+        crate::compaction::micro::apply_micro_compaction(
+            &context_messages,
+            &crate::compaction::micro::MicroCompactionConfig {
+                keep_recent_messages: settings.micro_keep_recent,
+                ..crate::compaction::micro::MicroCompactionConfig::default()
+            },
+        )
+    } else {
+        context_messages
+    };
     messages.extend(context_messages.iter().map(|message| {
         if config.replay_reasoning {
             message.to_chat_message()
@@ -1281,7 +1329,7 @@ async fn run_agent_turn(
             append_queued_messages(emitter, pending_messages);
         }
 
-        maybe_compact(&config, emitter).await;
+        maybe_compact(&model, &config, emitter, &cancel_token).await;
 
         if let Some((turn, stop_reason)) = terminal_pre_model_stop(emitter, &cancel_token) {
             final_turn = turn;
@@ -1741,36 +1789,98 @@ fn append_queued_messages(emitter: &mut EventEmitter, messages: Vec<AgentMessage
     }
 }
 
-async fn maybe_compact(config: &AgentConfig, emitter: &mut EventEmitter) {
+/// Run compaction if needed.  Replaces the old counter-based logic with an
+/// LLM-driven structured summary (see `compaction` module).
+///
+/// Compaction is triggered when:
+/// - `manual_compact_requested` flag is set (from `/compact`), or
+/// - the token estimate exceeds the strategy threshold.
+///
+/// The LLM call runs inline (blocking the turn) and hard-fails on any error.
+async fn maybe_compact(
+    model: &Arc<dyn ModelClient>,
+    config: &AgentConfig,
+    emitter: &mut EventEmitter,
+    cancel_token: &CancellationToken,
+) {
     let Some(settings) = config.compaction else {
         return;
     };
     if !settings.enabled {
         return;
     }
-    let estimated_tokens = estimate_messages_tokens(emitter.context.messages());
-    if estimated_tokens <= settings.max_estimated_tokens {
+
+    let force = config
+        .manual_compact_requested
+        .swap(false, std::sync::atomic::Ordering::SeqCst);
+    let source = if force {
+        CompactionSource::Manual
+    } else {
+        CompactionSource::Auto
+    };
+
+    // Clone the messages out of the context so we can borrow `emitter` mutably
+    // for event emission while still referencing the pre-compaction history.
+    let messages = emitter.context.messages().to_vec();
+    let max_context_tokens = config.model.capabilities.max_context_tokens.unwrap_or(0) as usize;
+    let used_tokens = compaction::estimate_messages_tokens(&messages);
+
+    let strategy = CompactionStrategy {
+        trigger_ratio: settings.trigger_ratio,
+        // Use keep_recent_messages as the auto-compaction retention limit so
+        // the configured value directly controls how many messages survive.
+        max_recent_messages: settings.keep_recent_messages.min(settings.max_recent_messages),
+        max_recent_size_ratio: 0.2,
+        reserved_context_tokens: settings.reserved_context_tokens,
+    };
+
+    // Trigger compaction when:
+    // 1. Manually requested via `/compact`, OR
+    // 2. Token estimate exceeds the configured absolute threshold, OR
+    // 3. Token estimate exceeds the ratio-based threshold of max_context_tokens.
+    let ratio_triggered = strategy.should_compact(used_tokens, max_context_tokens);
+    let absolute_triggered = used_tokens > settings.max_estimated_tokens;
+    if !force && !ratio_triggered && !absolute_triggered {
         return;
     }
+
+    let compacted_count = compaction::compute_compact_count(
+        &messages,
+        source,
+        &strategy,
+        // Only apply the fit-to-window constraint when the model actually
+        // advertises a context window. The trigger threshold
+        // (max_estimated_tokens) is NOT the window — it's the compaction
+        // trigger point — so passing it as the fit window would shrink
+        // compaction to near-zero.
+        max_context_tokens,
+    );
+    if compacted_count == 0 {
+        if force {
+            let _ = emitter.send_error(AgentRuntimeError::Compaction(
+                compaction::CompactionError::NoBoundary,
+            ));
+        }
+        return;
+    }
+
+    let reason = if force {
+        CompactionReason::Manual
+    } else {
+        CompactionReason::Threshold
+    };
+    let message_count = messages.len();
     emitter.emit(AgentEvent::CompactionStarted {
-        reason: CompactionReason::Threshold,
-        tokens_before: estimated_tokens,
-        message_count: emitter.context.messages().len(),
+        reason,
+        tokens_before: used_tokens,
+        message_count,
     });
     emitter.emit(AgentEvent::CompactionProgress {
         phase: CompactionPhase::Estimating,
         percent: 15,
     });
-    let keep_recent = settings
-        .keep_recent_messages
-        .min(emitter.context.messages().len());
-    let first_kept_message_index = compact_keep_boundary(
-        emitter.context.messages(),
-        emitter.context.messages().len().saturating_sub(keep_recent),
-    );
-    if first_kept_message_index == 0 {
-        return;
-    }
+
+    let messages_to_compact = messages[..compacted_count].to_vec();
     emitter.emit(AgentEvent::CompactionProgress {
         phase: CompactionPhase::SelectingBoundary,
         percent: 35,
@@ -1779,68 +1889,42 @@ async fn maybe_compact(config: &AgentConfig, emitter: &mut EventEmitter) {
         phase: CompactionPhase::Summarizing,
         percent: 70,
     });
-    let summary_text = summarize_messages(&emitter.context.messages()[..first_kept_message_index]);
+
+    let summary_text = match compaction::generate_compaction_summary(
+        model,
+        config,
+        &messages_to_compact,
+        None,
+        cancel_token,
+    )
+    .await
+    {
+        Ok(text) => text,
+        Err(err) => {
+            // Hard-fail: surface the error instead of degrading to a counter.
+            let _ = emitter.send_error(AgentRuntimeError::Compaction(err));
+            return;
+        }
+    };
+
+    let kept_messages = &messages[compacted_count..];
+    let tokens_after =
+        summary_text.len().div_ceil(4) + compaction::estimate_messages_tokens(kept_messages);
+
     let summary = CompactionSummary {
         summary: summary_text,
-        tokens_before: estimated_tokens,
-        first_kept_message_index,
+        tokens_before: used_tokens,
+        tokens_after,
+        first_kept_message_index: compacted_count,
     };
     emitter.emit(AgentEvent::CompactionProgress {
         phase: CompactionPhase::Applying,
         percent: 90,
     });
     emitter.emit(AgentEvent::CompactionApplied { summary });
+
     let turn = emitter.context.turns.saturating_add(1);
     emit_effective_context_window(config, emitter, turn).await;
-}
-
-fn compact_keep_boundary(messages: &[AgentMessage], proposed_index: usize) -> usize {
-    let mut index = proposed_index.min(messages.len());
-    while index < messages.len() && matches!(messages[index], AgentMessage::ToolResult { .. }) {
-        index += 1;
-    }
-
-    if let Some(AgentMessage::Assistant {
-        tool_calls,
-        stop_reason: StopReason::ToolUse,
-        ..
-    }) = index
-        .checked_sub(1)
-        .and_then(|previous| messages.get(previous))
-    {
-        let result_count = count_following_tool_results(messages, index);
-        if result_count < tool_calls.len() {
-            index = next_turn_boundary(messages, index);
-        }
-    }
-
-    index
-}
-
-fn count_following_tool_results(messages: &[AgentMessage], index: usize) -> usize {
-    let mut result_count = 0;
-    for message in &messages[index..] {
-        match message {
-            AgentMessage::ToolResult { .. } => result_count += 1,
-            AgentMessage::User { .. } | AgentMessage::Assistant { .. } => break,
-            AgentMessage::System { .. } => {}
-        }
-    }
-    result_count
-}
-
-fn next_turn_boundary(messages: &[AgentMessage], mut index: usize) -> usize {
-    while index < messages.len() && !is_turn_boundary_message(&messages[index]) {
-        index += 1;
-    }
-    index
-}
-
-fn is_turn_boundary_message(message: &AgentMessage) -> bool {
-    matches!(
-        message,
-        AgentMessage::User { .. } | AgentMessage::Assistant { .. }
-    )
 }
 
 fn estimate_messages_tokens(messages: &[AgentMessage]) -> usize {
@@ -1912,25 +1996,6 @@ fn estimate_content_chars(content: &[Content]) -> usize {
             Content::Image { .. } => 4800,
         })
         .sum()
-}
-
-fn summarize_messages(messages: &[AgentMessage]) -> String {
-    let user_messages = messages
-        .iter()
-        .filter(|message| matches!(message, AgentMessage::User { .. }))
-        .count();
-    let assistant_messages = messages
-        .iter()
-        .filter(|message| matches!(message, AgentMessage::Assistant { .. }))
-        .count();
-    let tool_results = messages
-        .iter()
-        .filter(|message| matches!(message, AgentMessage::ToolResult { .. }))
-        .count();
-    format!(
-        "Compacted {count} messages: {user_messages} user, {assistant_messages} assistant, {tool_results} tool result.",
-        count = messages.len()
-    )
 }
 
 fn take_messages(queue: &[AgentMessage], mode: QueueMode) -> Vec<AgentMessage> {

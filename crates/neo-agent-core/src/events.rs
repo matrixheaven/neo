@@ -314,6 +314,15 @@ pub enum QueueKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum CompactionReason {
     Threshold,
+    Manual,
+}
+
+/// Whether compaction was triggered by the user (`/compact`) or automatically
+/// by the threshold strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum CompactionSource {
+    Manual,
+    Auto,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -328,6 +337,8 @@ pub enum CompactionPhase {
 pub struct CompactionSummary {
     pub summary: String,
     pub tokens_before: usize,
+    /// Estimated token count *after* compaction (summary + retained messages).
+    pub tokens_after: usize,
     pub first_kept_message_index: usize,
 }
 

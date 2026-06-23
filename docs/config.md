@@ -182,6 +182,7 @@ In interactive mode:
 - `/model` — Open the model picker
 - `/provider` — Open the provider list
 - `/resume` — Open session picker
+- `/compact` — Manually trigger LLM-driven context compaction (summarizes older messages into a structured summary and injects it as context)
 - `/new`, `/clear` — Start a fresh unsaved session in the current workspace (preserves model, permission, and development mode; the old session remains in `/resume`)
 
 ## Themes

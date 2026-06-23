@@ -394,6 +394,7 @@ async fn jsonl_session_replays_queues_and_compaction_summary() {
     let summary = CompactionSummary {
         summary: "Older work summarized".to_owned(),
         tokens_before: 4096,
+        tokens_after: 2048,
         first_kept_message_index: 2,
     };
     for event in [
@@ -497,10 +498,17 @@ async fn jsonl_session_compaction_appends_algorithmic_summary_and_replays_kept_c
     let context = JsonlSessionReader::replay_context(&path)
         .await
         .expect("replay compacted context");
-    assert_eq!(
-        context.messages(),
-        &[AgentMessage::user_text("Keep the final request")]
-    );
+    // The compaction summary is now injected as a system message at the start
+    // of the kept messages, so the model has context after compaction.
+    assert_eq!(context.messages().len(), 2);
+    assert!(matches!(
+        context.messages().first(),
+        Some(AgentMessage::System { content }) if content.iter().any(|c| c.as_text().is_some_and(|t| t.contains("compaction_summary")))
+    ));
+    assert!(matches!(
+        context.messages().get(1),
+        Some(AgentMessage::User { .. })
+    ));
     assert_eq!(context.compaction_summary(), Some(&result.summary));
 }
 
