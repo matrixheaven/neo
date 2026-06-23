@@ -340,6 +340,19 @@ impl TranscriptPane {
                     None,
                 )
             }
+            ImageRef::Blob(sha256) => {
+                // Blobs should be resolved to base64 before rendering. If a
+                // blob reference reaches the transcript, render a placeholder.
+                TranscriptEntry::image(
+                    id,
+                    mime_type.to_owned(),
+                    None,
+                    Some(format!("[image blob {}]", sha256)),
+                    ImageSource::Base64,
+                    format!("blob:{sha256}"),
+                    None,
+                )
+            }
         };
         self.push_transcript(entry);
     }
@@ -658,6 +671,7 @@ impl TranscriptPane {
                     0,
                     *message_count,
                     *tokens_before,
+                    0,
                 );
                 true
             }
@@ -671,6 +685,7 @@ impl TranscriptPane {
                     100,
                     summary.first_kept_message_index,
                     summary.tokens_before,
+                    summary.tokens_after,
                 );
                 true
             }
@@ -1155,12 +1170,14 @@ impl TranscriptPane {
         percent: u8,
         compacted_message_count: usize,
         tokens_before: usize,
+        tokens_after: usize,
     ) {
         if let Some(TranscriptEntry::Compaction {
             phase: existing_phase,
             percent: existing_percent,
             compacted_message_count: existing_count,
             tokens_before: existing_tokens,
+            tokens_after: existing_tokens_after,
         }) = self
             .transcript
             .entries_mut()
@@ -1172,12 +1189,14 @@ impl TranscriptPane {
             *existing_percent = percent;
             *existing_count = compacted_message_count;
             *existing_tokens = tokens_before;
+            *existing_tokens_after = tokens_after;
         } else {
             self.transcript.push(TranscriptEntry::Compaction {
                 phase,
                 percent,
                 compacted_message_count,
                 tokens_before,
+                tokens_after,
             });
         }
         self.mark_dirty();
@@ -1198,7 +1217,7 @@ impl TranscriptPane {
             *existing_phase = Some(phase);
             *existing_percent = percent;
         } else {
-            self.upsert_compaction(Some(phase), percent, 0, 0);
+            self.upsert_compaction(Some(phase), percent, 0, 0, 0);
             return;
         }
         self.mark_dirty();
@@ -1504,6 +1523,7 @@ fn image_summary(mime_type: &str, data: &ImageRef) -> String {
     match data {
         ImageRef::Url(url) => format!("[image: {mime_type} url={}]", sanitized_image_url(url)),
         ImageRef::Base64(data) => format!("[image: {mime_type} data={} bytes]", data.len()),
+        ImageRef::Blob(sha256) => format!("[image: {mime_type} blob={sha256}]"),
     }
 }
 
@@ -1814,11 +1834,45 @@ fn render_prompt_lines(app: &NeoChromeState, width: usize) -> (Vec<String>, Opti
 /// cursor marker on the active line. Each returned string is the body text
 /// (without the `  > `/`    ` prefix, which is added by the caller).
 fn build_prompt_logical_lines(prompt: &PromptState, body_width: usize) -> Vec<String> {
-    let chars: Vec<char> = prompt.text.chars().collect();
-    let cursor = prompt.cursor.min(chars.len());
-    let before: String = chars[..cursor].iter().collect();
-    let after: String = chars[cursor..].iter().collect();
-    let marked = expand_prompt_tabs(&format!("{before}{CURSOR_MARKER}{after}"));
+    let text = &prompt.text;
+    let cursor = prompt.cursor.min(prompt.char_len());
+
+    // Highlight selected marker before inserting the cursor marker.
+    let styled_text = if let Some((start_byte, end_byte)) = prompt.selected_marker() {
+        let start_char = text[..start_byte].chars().count();
+        let end_char = text[..end_byte].chars().count();
+        let before = &text[..start_byte];
+        let selected = &text[start_byte..end_byte];
+        let after = &text[end_byte..];
+        let highlighted = paint(selected, Style::default().bg(Color::Rgb(60, 60, 60)));
+        let mut styled = String::with_capacity(text.len() + highlighted.len() - selected.len());
+        styled.push_str(before);
+        styled.push_str(&highlighted);
+        styled.push_str(after);
+
+        // Insert the cursor marker at the correct position in the styled text.
+        let cursor_byte = if cursor <= start_char {
+            prompt.byte_index(cursor)
+        } else if cursor >= end_char {
+            prompt.byte_index(cursor) + highlighted.len() - selected.len()
+        } else {
+            // Cursor inside the selected range: place it at the start of the
+            // highlighted region.
+            start_byte
+        };
+        let mut with_cursor = String::with_capacity(styled.len() + CURSOR_MARKER.len());
+        with_cursor.push_str(&styled[..cursor_byte]);
+        with_cursor.push_str(CURSOR_MARKER);
+        with_cursor.push_str(&styled[cursor_byte..]);
+        with_cursor
+    } else {
+        let chars: Vec<char> = text.chars().collect();
+        let before: String = chars[..cursor].iter().collect();
+        let after: String = chars[cursor..].iter().collect();
+        format!("{before}{CURSOR_MARKER}{after}")
+    };
+
+    let marked = expand_prompt_tabs(&styled_text);
     let mut all_lines = Vec::new();
     for logical in marked.split('\n') {
         let wrapped = wrap_width(logical, body_width);

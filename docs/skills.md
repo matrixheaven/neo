@@ -134,8 +134,7 @@ prompt. The model may call:
 ```
 
 The runtime expands the skill body and returns it as a tool result. The model
-can then continue with the expanded prompt. Nested skill invocations within a
-single turn are rejected.
+can then continue with the expanded prompt.
 
 ## Manual invocation
 

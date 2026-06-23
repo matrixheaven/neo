@@ -7,6 +7,7 @@ pub mod image;
 pub mod input;
 pub mod markdown;
 pub mod neo_tui;
+pub mod paste;
 pub mod searchable_list;
 pub mod terminal;
 pub mod tool_diff;

@@ -489,6 +489,7 @@ pub enum KeybindingAction {
     TranscriptSelectionExtendPageDown,
     TranscriptCopySelection,
     ToolOutputToggle,
+    PasteImage,
     AppClear,
     AppExit,
     AppSuspend,
@@ -597,6 +598,7 @@ const KEYBINDING_ACTION_IDS: &[(KeybindingAction, &str)] = &[
         "tui.transcript.copySelection",
     ),
     (KeybindingAction::ToolOutputToggle, "tui.tool.toggleOutput"),
+    (KeybindingAction::PasteImage, "tui.input.pasteImage"),
     (KeybindingAction::AppClear, "app.clear"),
     (KeybindingAction::AppExit, "app.exit"),
     (KeybindingAction::AppSuspend, "app.suspend"),
@@ -899,6 +901,14 @@ fn input_keybinding_definitions() -> Vec<KeybindingDefinition> {
             Action::CycleDevelopmentMode,
             &["shift+tab"],
             "Cycle normal/plan/goal mode",
+        ),
+        #[cfg(target_os = "windows")]
+        definition(Action::PasteImage, &["alt+v"], "Paste image from clipboard"),
+        #[cfg(not(target_os = "windows"))]
+        definition(
+            Action::PasteImage,
+            &["ctrl+v"],
+            "Paste image from clipboard",
         ),
     ]
 }

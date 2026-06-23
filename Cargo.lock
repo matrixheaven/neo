@@ -1175,6 +1175,7 @@ dependencies = [
  "shell-words",
  "tar",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "toml",
@@ -1189,6 +1190,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "futures",
  "globset",
  "ignore",
@@ -1248,6 +1250,7 @@ dependencies = [
  "crossterm",
  "neo-agent-core",
  "pulldown-cmark",
+ "regex",
  "serde",
  "serde_json",
  "syntect",

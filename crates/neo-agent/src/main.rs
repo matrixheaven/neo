@@ -1,10 +1,13 @@
 mod cli;
+mod clipboard;
 mod config;
 mod config_ops;
 mod extension_commands;
+mod image_blob;
 mod mcp_ops;
 mod modes;
 mod prompt_history;
+mod prompt_parts;
 mod prompt_templates;
 mod resources;
 mod rpc_mode;

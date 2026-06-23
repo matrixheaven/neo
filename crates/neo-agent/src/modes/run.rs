@@ -3,7 +3,7 @@ use std::{
     env,
     fmt::Write as _,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use anyhow::Context;
@@ -985,17 +985,19 @@ pub struct PromptApprovalRequest {
 }
 
 pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result<PromptTurn> {
-    let prompt = prompt.join(" ");
+    let prompt_text = prompt.join(" ");
+    let content = vec![Content::text(&prompt_text)];
     let session_path = create_session_path(config).await?;
     let session_id = session_id_from_path(&session_path)?;
     let mut writer = JsonlSessionWriter::create(&session_path)
         .await
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
     let mut writer = SessionEventWriter::jsonl(&mut writer);
-    let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
-    record_session_activity(config, &session_id, &prompt);
+    let (user_message, events) = append_user_event(content, &mut writer).await?;
+    record_session_activity(config, &session_id, &prompt_text);
     let runtime = runtime_for_config(
         config,
+        session_path.parent().map(Path::to_path_buf),
         None,
         None,
         None,
@@ -1003,7 +1005,7 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
         false,
         SteerInputHandle::new(),
         None,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(Mutex::new(None)),
     )
     .await?;
     let turn = finish_prompt_turn(
@@ -1015,7 +1017,7 @@ pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result
         session_id,
     )
     .await?;
-    record_initial_session_title(config, &turn, &prompt).await;
+    record_initial_session_title(config, &turn, &prompt_text).await;
     Ok(turn)
 }
 
@@ -1023,11 +1025,13 @@ pub async fn run_prompt_ephemeral(
     prompt: &[String],
     config: &AppConfig,
 ) -> anyhow::Result<PromptTurn> {
-    let prompt = prompt.join(" ");
+    let prompt_text = prompt.join(" ");
+    let content = vec![Content::text(&prompt_text)];
     let mut writer = SessionEventWriter::memory();
-    let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
+    let (user_message, events) = append_user_event(content, &mut writer).await?;
     let runtime = runtime_for_config(
         config,
+        None,
         None,
         None,
         None,
@@ -1035,7 +1039,7 @@ pub async fn run_prompt_ephemeral(
         false,
         SteerInputHandle::new(),
         None,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(Mutex::new(None)),
     )
     .await?;
     finish_prompt_turn(
@@ -1054,7 +1058,8 @@ pub async fn run_prompt_in_session(
     prompt: &[String],
     config: &AppConfig,
 ) -> anyhow::Result<PromptTurn> {
-    let prompt = prompt.join(" ");
+    let prompt_text = prompt.join(" ");
+    let content = vec![Content::text(&prompt_text)];
     let session_path = sessions::session_path(session_id, config)?;
     let context = JsonlSessionReader::replay_context(&session_path)
         .await
@@ -1063,10 +1068,11 @@ pub async fn run_prompt_in_session(
         .await
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
     let mut writer = SessionEventWriter::jsonl(&mut writer);
-    let (user_message, events) = append_user_event(prompt.clone(), &mut writer).await?;
-    record_session_activity(config, session_id, &prompt);
+    let (user_message, events) = append_user_event(content, &mut writer).await?;
+    record_session_activity(config, session_id, &prompt_text);
     let runtime = runtime_for_config(
         config,
+        session_path.parent().map(Path::to_path_buf),
         None,
         None,
         None,
@@ -1074,7 +1080,7 @@ pub async fn run_prompt_in_session(
         false,
         SteerInputHandle::new(),
         None,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(Mutex::new(None)),
     )
     .await?;
     runtime.restore_plan_mode(&context);
@@ -1091,7 +1097,7 @@ pub async fn run_prompt_in_session(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_prompt_streaming(
-    prompt: &[String],
+    prompt: &[Content],
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
     approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
@@ -1104,12 +1110,14 @@ pub async fn run_prompt_streaming(
     goal_mode_authoring: bool,
     steer_input: SteerInputHandle,
     mcp_manager: Option<McpConnectionManager>,
-    manual_compact_requested: Arc<std::sync::atomic::AtomicBool>,
+    manual_compact_request: Arc<Mutex<Option<String>>>,
+    compaction_only: bool,
 ) -> anyhow::Result<PromptTurn> {
     let prepared = prepare_new_streaming_turn(prompt, config, session_id_tx, skill_context).await?;
     let prompt = prepared.prompt.clone();
     let runtime = runtime_for_config(
         config,
+        Some(prepared.session_directory.clone()),
         Some(approval_tx),
         question_tx,
         plan_review_feedback.clone(),
@@ -1117,10 +1125,12 @@ pub async fn run_prompt_streaming(
         goal_mode_authoring,
         steer_input,
         mcp_manager,
-        manual_compact_requested,
+        manual_compact_request,
     )
     .await?;
-    let turn = run_prepared_streaming_turn(prepared, runtime, event_tx, cancel_token).await?;
+    let turn =
+        run_prepared_streaming_turn(prepared, runtime, event_tx, cancel_token, compaction_only)
+            .await?;
     record_initial_session_title(config, &turn, &prompt).await;
     Ok(turn)
 }
@@ -1128,7 +1138,7 @@ pub async fn run_prompt_streaming(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_prompt_in_session_streaming(
     session_id: &str,
-    prompt: &[String],
+    prompt: &[Content],
     config: &AppConfig,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
     approval_tx: mpsc::UnboundedSender<PromptApprovalRequest>,
@@ -1141,13 +1151,15 @@ pub async fn run_prompt_in_session_streaming(
     goal_mode_authoring: bool,
     steer_input: SteerInputHandle,
     mcp_manager: Option<McpConnectionManager>,
-    manual_compact_requested: Arc<std::sync::atomic::AtomicBool>,
+    manual_compact_request: Arc<Mutex<Option<String>>>,
+    compaction_only: bool,
 ) -> anyhow::Result<PromptTurn> {
     let prepared =
         prepare_existing_streaming_turn(session_id, prompt, config, session_id_tx, skill_context)
             .await?;
     let runtime = runtime_for_config(
         config,
+        Some(prepared.session_directory.clone()),
         Some(approval_tx),
         question_tx,
         plan_review_feedback.clone(),
@@ -1155,20 +1167,24 @@ pub async fn run_prompt_in_session_streaming(
         goal_mode_authoring,
         steer_input,
         mcp_manager,
-        manual_compact_requested,
+        manual_compact_request,
     )
     .await?;
     runtime.restore_plan_mode(&prepared.context);
-    run_prepared_streaming_turn(prepared, runtime, event_tx, cancel_token).await
+    run_prepared_streaming_turn(prepared, runtime, event_tx, cancel_token, compaction_only).await
 }
 
 async fn prepare_new_streaming_turn(
-    prompt: &[String],
+    prompt: &[Content],
     config: &AppConfig,
     session_id_tx: Option<mpsc::UnboundedSender<String>>,
     skill_context: Option<String>,
 ) -> anyhow::Result<PreparedStreamingTurn> {
-    let prompt = prompt.join(" ");
+    let prompt_text = prompt
+        .iter()
+        .filter_map(|c| c.as_text())
+        .collect::<Vec<_>>()
+        .join(" ");
     let session_path = create_session_path(config).await?;
     let session_id = session_id_from_path(&session_path)?;
     let mut writer = JsonlSessionWriter::create(&session_path)
@@ -1176,11 +1192,16 @@ async fn prepare_new_streaming_turn(
         .with_context(|| format!("failed to create session {}", session_path.display()))?;
     send_streaming_session_id(session_id_tx, &session_id);
     let (user_message, initial_events) =
-        append_user_event_jsonl(prompt.clone(), &mut writer).await?;
-    record_session_activity(config, &session_id, &prompt);
+        append_user_event_jsonl(prompt.to_vec(), &mut writer).await?;
+    record_session_activity(config, &session_id, &prompt_text);
+    let session_directory = session_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace_sessions_dir(config).join(&session_id));
     Ok(PreparedStreamingTurn {
-        prompt,
+        prompt: prompt_text,
         session_id,
+        session_directory,
         context: streaming_context(skill_context),
         writer,
         user_message,
@@ -1190,13 +1211,21 @@ async fn prepare_new_streaming_turn(
 
 async fn prepare_existing_streaming_turn(
     session_id: &str,
-    prompt: &[String],
+    prompt: &[Content],
     config: &AppConfig,
     session_id_tx: Option<mpsc::UnboundedSender<String>>,
     skill_context: Option<String>,
 ) -> anyhow::Result<PreparedStreamingTurn> {
-    let prompt = prompt.join(" ");
+    let prompt_text = prompt
+        .iter()
+        .filter_map(|c| c.as_text())
+        .collect::<Vec<_>>()
+        .join(" ");
     let session_path = sessions::session_path(session_id, config)?;
+    let session_directory = session_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace_sessions_dir(config).join(session_id));
     let mut context = JsonlSessionReader::replay_context(&session_path)
         .await
         .with_context(|| format!("failed to replay session {}", session_path.display()))?;
@@ -1206,11 +1235,12 @@ async fn prepare_existing_streaming_turn(
         .with_context(|| format!("failed to append session {}", session_path.display()))?;
     send_streaming_session_id(session_id_tx, session_id);
     let (user_message, initial_events) =
-        append_user_event_jsonl(prompt.clone(), &mut writer).await?;
-    record_session_activity(config, session_id, &prompt);
+        append_user_event_jsonl(prompt.to_vec(), &mut writer).await?;
+    record_session_activity(config, session_id, &prompt_text);
     Ok(PreparedStreamingTurn {
-        prompt,
+        prompt: prompt_text,
         session_id: session_id.to_owned(),
+        session_directory,
         context,
         writer,
         user_message,
@@ -1244,9 +1274,11 @@ async fn run_prepared_streaming_turn(
     runtime: AgentRuntime,
     event_tx: mpsc::UnboundedSender<anyhow::Result<AgentEvent>>,
     cancel_token: CancellationToken,
+    compaction_only: bool,
 ) -> anyhow::Result<PromptTurn> {
     let PreparedStreamingTurn {
         session_id,
+        session_directory: _,
         context,
         mut writer,
         user_message,
@@ -1258,19 +1290,25 @@ async fn run_prepared_streaming_turn(
         session_id,
         cancel_token,
     };
-    finish_prompt_turn_streaming(
-        user_message,
-        context,
-        &mut writer,
-        runtime,
-        initial_events,
-        streaming,
-    )
-    .await
+    if compaction_only {
+        finish_compaction_turn_streaming(context, &mut writer, runtime, initial_events, streaming)
+            .await
+    } else {
+        finish_prompt_turn_streaming(
+            user_message,
+            context,
+            &mut writer,
+            runtime,
+            initial_events,
+            streaming,
+        )
+        .await
+    }
 }
 
 async fn runtime_for_config(
     config: &AppConfig,
+    session_directory: Option<PathBuf>,
     approval_tx: Option<mpsc::UnboundedSender<PromptApprovalRequest>>,
     question_tx: Option<mpsc::UnboundedSender<PendingQuestion>>,
     plan_review_feedback: Option<std::collections::BTreeMap<String, String>>,
@@ -1278,7 +1316,7 @@ async fn runtime_for_config(
     goal_mode_authoring: bool,
     steer_input: SteerInputHandle,
     mcp_manager: Option<McpConnectionManager>,
-    manual_compact_requested: Arc<std::sync::atomic::AtomicBool>,
+    manual_compact_request: Arc<Mutex<Option<String>>>,
 ) -> anyhow::Result<AgentRuntime> {
     let model = resolve_model(config)?;
     let client = resolve_model_client(config, &model)?;
@@ -1288,7 +1326,10 @@ async fn runtime_for_config(
         &config.skill_path,
     )?;
     let mut agent_config = agent_config_for_app(model, config, approval_tx, &skill_store)?;
-    agent_config.manual_compact_requested = manual_compact_requested;
+    if let Some(session_directory) = session_directory {
+        agent_config = agent_config.with_session_directory(session_directory);
+    }
+    agent_config.manual_compact_request = manual_compact_request;
     if let Some(plan_mode) = plan_mode {
         agent_config = agent_config.with_plan_mode(plan_mode);
     }
@@ -1338,7 +1379,8 @@ async fn run_prompt_with_runtime(
     runtime: AgentRuntime,
 ) -> anyhow::Result<PromptTurn> {
     let mut writer = SessionEventWriter::jsonl(writer);
-    let (user_message, events) = append_user_event(prompt, &mut writer).await?;
+    let (user_message, events) =
+        append_user_event(vec![Content::text(prompt)], &mut writer).await?;
     finish_prompt_turn(
         user_message,
         context,
@@ -1351,10 +1393,10 @@ async fn run_prompt_with_runtime(
 }
 
 async fn append_user_event(
-    prompt: String,
+    content: Vec<Content>,
     writer: &mut SessionEventWriter<'_>,
 ) -> anyhow::Result<(AgentMessage, Vec<AgentEvent>)> {
-    let user_message = AgentMessage::user_text(prompt);
+    let user_message = AgentMessage::User { content };
     let user_event = AgentEvent::MessageAppended {
         message: user_message.clone(),
     };
@@ -1364,11 +1406,11 @@ async fn append_user_event(
 }
 
 async fn append_user_event_jsonl(
-    prompt: String,
+    content: Vec<Content>,
     writer: &mut JsonlSessionWriter,
 ) -> anyhow::Result<(AgentMessage, Vec<AgentEvent>)> {
     let mut writer = SessionEventWriter::jsonl(writer);
-    append_user_event(prompt, &mut writer).await
+    append_user_event(content, &mut writer).await
 }
 
 async fn finish_prompt_turn(
@@ -1454,6 +1496,7 @@ struct StreamingTurnIo {
 struct PreparedStreamingTurn {
     prompt: String,
     session_id: String,
+    session_directory: PathBuf,
     context: AgentContext,
     writer: JsonlSessionWriter,
     user_message: AgentMessage,
@@ -1496,6 +1539,30 @@ async fn finish_prompt_turn_streaming(
         session_id: streaming.session_id,
         events,
         assistant_text,
+    })
+}
+
+async fn finish_compaction_turn_streaming(
+    mut context: AgentContext,
+    writer: &mut JsonlSessionWriter,
+    runtime: AgentRuntime,
+    initial_events: Vec<AgentEvent>,
+    streaming: StreamingTurnIo,
+) -> anyhow::Result<PromptTurn> {
+    let mut events = forward_initial_streaming_events(&streaming.event_tx, initial_events);
+    let mut stream = runtime.run_compaction_turn_with_cancel(&mut context, streaming.cancel_token);
+    while let Some(event) = stream.next().await {
+        let event = streaming_event_or_bail(event, &streaming.event_tx)?;
+        writer.append_event(&event).await?;
+        let _ = streaming.event_tx.send(Ok(event.clone()));
+        events.push(event);
+    }
+    writer.flush().await?;
+
+    Ok(PromptTurn {
+        session_id: streaming.session_id,
+        events,
+        assistant_text: String::new(),
     })
 }
 
@@ -1848,18 +1915,47 @@ async fn create_session_path(config: &AppConfig) -> anyhow::Result<std::path::Pa
         })?;
 
     loop {
-        let path = bucket_dir.join(format!("session_{}.jsonl", Uuid::new_v4()));
-        if tokio::fs::metadata(&path).await.is_err() {
-            return Ok(path);
+        let session_id = format!("session_{}", Uuid::new_v4());
+        let session_dir = bucket_dir.join(&session_id);
+        if tokio::fs::metadata(&session_dir).await.is_err() {
+            tokio::fs::create_dir_all(&session_dir)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to create session directory {}",
+                        session_dir.display()
+                    )
+                })?;
+            return Ok(session_dir.join("transcript.jsonl"));
         }
     }
 }
 
 fn session_id_from_path(path: &Path) -> anyhow::Result<String> {
-    path.file_stem()
+    let file_name = path
+        .file_name()
         .and_then(std::ffi::OsStr::to_str)
-        .map(str::to_owned)
-        .with_context(|| format!("invalid session path {}", path.display()))
+        .with_context(|| format!("invalid session path {}", path.display()))?;
+
+    if file_name != "transcript.jsonl" {
+        anyhow::bail!("invalid session path {}", path.display());
+    }
+
+    let session_dir = path.parent().with_context(|| {
+        format!(
+            "session transcript has no parent directory {}",
+            path.display()
+        )
+    })?;
+    let dir_name = session_dir
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .with_context(|| format!("invalid session directory name {}", session_dir.display()))?;
+    if dir_name.starts_with("session_") {
+        return Ok(dir_name.to_owned());
+    }
+
+    anyhow::bail!("invalid session path {}", path.display())
 }
 
 pub(crate) fn latest_session_id(config: &AppConfig) -> anyhow::Result<String> {
@@ -1871,17 +1967,27 @@ pub(crate) fn latest_session_id(config: &AppConfig) -> anyhow::Result<String> {
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().and_then(std::ffi::OsStr::to_str) != Some("jsonl") {
+        if !path.is_dir() {
             continue;
         }
-        let Ok(session_id) = session_id_from_path(&path) else {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("session_") {
+            continue;
+        }
+        let transcript = path.join("transcript.jsonl");
+        if !transcript.exists() {
+            continue;
+        }
+        let Ok(session_id) = session_id_from_path(&transcript) else {
             continue;
         };
         if neo_agent_core::session::validate_session_id(&session_id).is_err() {
             continue;
         }
-        let modified = entry
-            .metadata()
+        let modified = std::fs::metadata(&transcript)
             .and_then(|metadata| metadata.modified())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
         let should_replace = latest.as_ref().is_none_or(|(latest_modified, latest_id)| {
@@ -2378,14 +2484,16 @@ mod tests {
         let path = create_session_path(&config)
             .await
             .expect("session path is created");
-        let session_id = path
-            .file_stem()
+        let session_dir = path.parent().expect("session directory");
+        let session_id = session_dir
+            .file_name()
             .and_then(std::ffi::OsStr::to_str)
             .expect("session id");
 
         assert!(session_id.starts_with("session_"));
         assert_eq!(session_id.len(), "session_".len() + 36);
         assert!(neo_agent_core::session::validate_session_id(session_id).is_ok());
+        assert!(path.ends_with("transcript.jsonl"));
     }
 
     #[test]
@@ -2666,9 +2774,13 @@ mod tests {
     #[tokio::test]
     async fn run_prompt_with_runtime_appends_continuation_to_existing_session_context() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let session_path = temp
+        let session_dir = temp
             .path()
-            .join("session_00000000-0000-4000-8000-000000000501.jsonl");
+            .join("session_00000000-0000-4000-8000-000000000501");
+        let session_path = session_dir.join("transcript.jsonl");
+        tokio::fs::create_dir_all(&session_dir)
+            .await
+            .expect("create session dir");
         let mut seed = JsonlSessionWriter::create(&session_path)
             .await
             .expect("create session");

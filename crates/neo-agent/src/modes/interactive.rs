@@ -27,8 +27,9 @@ use std::{
 use anyhow::{Context, Result};
 use crossterm::{event, terminal::size};
 use neo_agent_core::{
-    AgentEvent, AgentMessage, McpConnectionManager, PendingQuestion, PermissionApprovalDecision,
-    PermissionMode, ProcessSupervisor, QuestionResponse, format_collected_answers,
+    AgentEvent, AgentMessage, Content, McpConnectionManager, PendingQuestion,
+    PermissionApprovalDecision, PermissionMode, ProcessSupervisor, QuestionResponse,
+    format_collected_answers,
     goal::GoalManager,
     mode::PlanMode,
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
@@ -528,10 +529,17 @@ pub(crate) struct InteractiveController {
     /// Optional trust store override for tests. Production controllers created
     /// via `controller_for_config` initialize this from `~/.neo/trust.json`.
     trust_store: Option<crate::trust::ProjectTrustStore>,
-    /// Shared manual-compaction flag. Set by `/compact`, passed to each turn's
+    /// Shared manual-compaction request. Set by `/compact`, passed to each turn's
     /// `AgentConfig` so the runtime can read it at the top of every loop
     /// iteration.
-    manual_compact_requested: Arc<std::sync::atomic::AtomicBool>,
+    manual_compact_request: Arc<std::sync::Mutex<Option<String>>>,
+    /// Stored text pastes referenced by composer `[paste ...]` placeholders.
+    paste_store: std::collections::HashMap<usize, String>,
+    next_paste_id: usize,
+    /// Stored image attachments referenced by composer `[image #N ...]` placeholders.
+    image_attachment_store: neo_tui::paste::ImageAttachmentStore,
+    /// Cached model capabilities for the active workspace/model scope.
+    model_capabilities: std::collections::HashMap<String, neo_ai::ModelCapabilities>,
 }
 
 pub(crate) struct TurnChannels {
@@ -602,7 +610,7 @@ pub(crate) struct PickerCatalogs {
 
 #[derive(Clone)]
 pub(crate) struct TurnRequest {
-    pub prompt: Vec<String>,
+    pub prompt: Vec<Content>,
     pub session_id: Option<String>,
     pub model: Option<SelectedModel>,
     pub reasoning_effort: Option<neo_ai::ReasoningEffort>,
@@ -627,15 +635,19 @@ pub(crate) struct TurnRequest {
     /// stale snapshot captured when the controller was built. `None` for test
     /// drivers that don't depend on config.
     pub base_config: Option<crate::config::AppConfig>,
-    /// Shared manual-compaction flag. Set by `/compact`, read by the runtime
-    /// at the top of each turn loop iteration via `AgentConfig`.
-    pub manual_compact_requested: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared manual-compaction request. `Some(instruction)` means a manual
+    /// compaction was requested with an optional custom instruction; `None`
+    /// means no request is pending. Set by `/compact`, taken by the runtime.
+    pub manual_compact_request: Arc<std::sync::Mutex<Option<String>>>,
+    /// When true, the turn should only run compaction and then finish without
+    /// sending anything to the model. Used by the idle `/compact` path.
+    pub compaction_only: bool,
 }
 
 impl TurnRequest {
     #[must_use]
     pub(crate) fn new(
-        prompt: Vec<String>,
+        prompt: Vec<Content>,
         session_id: Option<String>,
         model: Option<SelectedModel>,
         reasoning_effort: Option<neo_ai::ReasoningEffort>,
@@ -653,7 +665,8 @@ impl TurnRequest {
             plan_review_feedback: BTreeMap::new(),
             mcp_manager: None,
             base_config: None,
-            manual_compact_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
+            compaction_only: false,
         }
     }
 
@@ -772,6 +785,20 @@ impl ForkedSessionTranscript {
     }
 }
 
+/// Produce a short display text for a mixed content vector. Used for prompt
+/// history and transcript summaries.
+fn content_to_display_text(content: &[Content]) -> String {
+    let mut out = String::new();
+    for part in content {
+        match part {
+            Content::Text { text } => out.push_str(text),
+            Content::Image { .. } => out.push_str("[image]"),
+            Content::Thinking { .. } => {}
+        }
+    }
+    out
+}
+
 impl InteractiveController {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -836,7 +863,11 @@ impl InteractiveController {
             pending_plan_review_feedback: BTreeMap::new(),
             prompt_history: None,
             trust_store: None,
-            manual_compact_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
+            paste_store: std::collections::HashMap::new(),
+            next_paste_id: 1,
+            image_attachment_store: neo_tui::paste::ImageAttachmentStore::new(),
+            model_capabilities: std::collections::HashMap::new(),
         }
     }
 
@@ -1357,7 +1388,7 @@ impl InteractiveController {
                 self.handle_insert_prompt_event(*character);
             }
             InputEvent::Paste(text) => {
-                self.apply_prompt_edit(PromptEdit::Insert(text));
+                self.handle_paste_text(text);
             }
             InputEvent::Backspace => self.apply_prompt_edit(PromptEdit::Backspace),
             InputEvent::Delete => self.apply_prompt_edit(PromptEdit::Delete),
@@ -1446,6 +1477,111 @@ impl InteractiveController {
         Ok(true)
     }
 
+    fn handle_paste_text(&mut self, text: &str) {
+        let cleaned = Self::clean_pasted_text(text);
+        let line_count = cleaned.split('\n').count();
+        if line_count > 10 || cleaned.len() > 1000 {
+            let id = self.next_paste_id;
+            self.next_paste_id += 1;
+            self.paste_store.insert(id, cleaned);
+            let marker = if line_count > 10 {
+                format!("[paste +{} lines]", line_count)
+            } else {
+                format!("[paste {id} chars]")
+            };
+            self.apply_prompt_edit(PromptEdit::Insert(&marker));
+        } else {
+            self.apply_prompt_edit(PromptEdit::Insert(&cleaned));
+        }
+    }
+
+    /// Expand a marker at the cursor back to its original text. Returns true
+    /// if a marker was expanded.
+    fn expand_marker_at_cursor(&mut self) -> bool {
+        let prompt = self.tui.chrome().prompt();
+        let text = prompt.text.clone();
+        let cursor_byte = prompt.byte_index(prompt.cursor);
+        for cap in neo_tui::paste::marker_regex().captures_iter(&text) {
+            let m = cap.get(0).expect("regex match has group 0");
+            if m.start() <= cursor_byte && m.end() >= cursor_byte {
+                let id = cap
+                    .get(2)
+                    .or_else(|| cap.get(3))
+                    .or_else(|| cap.get(5))
+                    .and_then(|m| m.as_str().parse::<usize>().ok());
+                if let Some((id, original)) = id.and_then(|id| {
+                    self.paste_store
+                        .get(&id)
+                        .cloned()
+                        .map(|original| (id, original))
+                }) {
+                    let before = &text[..m.start()];
+                    let after = &text[m.end()..];
+                    let new_text = format!("{before}{original}{after}");
+                    self.tui.chrome_mut().prompt_mut().set_text(new_text);
+                    self.paste_store.remove(&id);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    async fn handle_paste_image(&mut self) -> Result<()> {
+        if !self.model_supports_images() {
+            self.push_status("当前模型不支持图片识别");
+            return Ok(());
+        }
+
+        if self.expand_marker_at_cursor() {
+            return Ok(());
+        }
+
+        let image = match crate::clipboard::read_clipboard_image() {
+            Ok(img) => img,
+            Err(crate::clipboard::ClipboardError::NoImage) => {
+                self.push_status("剪贴板中没有图片");
+                return Ok(());
+            }
+            Err(err) => {
+                self.push_status(format!("读取剪贴板图片失败: {err}"));
+                return Ok(());
+            }
+        };
+
+        let (width, height) =
+            crate::image_blob::detect_image_dimensions(&image.bytes, &image.mime_type)
+                .unwrap_or((0, 0));
+
+        let Some(session_dir) = self.active_session_directory() else {
+            self.push_status("没有活跃会话，无法保存图片");
+            return Ok(());
+        };
+        let sha256 =
+            crate::image_blob::save_image_blob(&session_dir, &image.bytes, &image.mime_type)?;
+
+        let id = self
+            .image_attachment_store
+            .add(sha256, image.mime_type, width, height);
+        let placeholder = format!("[image #{} ({}x{})]", id, width, height);
+        self.apply_prompt_edit(PromptEdit::Insert(&placeholder));
+        Ok(())
+    }
+
+    fn model_supports_images(&self) -> bool {
+        self.active_model
+            .as_ref()
+            .and_then(|m| self.model_capabilities.get(&m.alias))
+            .map(|c| c.images)
+            .unwrap_or(false)
+    }
+
+    fn active_session_directory(&self) -> Option<PathBuf> {
+        let session_id = self.active_session_id.as_ref()?;
+        let config = self.local_config.as_ref()?;
+        Some(crate::config::workspace_sessions_dir(config).join(session_id))
+    }
+
     fn apply_prompt_edit(&mut self, edit: PromptEdit<'_>) {
         self.clear_pending_exit_confirmation();
         let body_width = Self::prompt_body_width();
@@ -1454,6 +1590,14 @@ impl InteractiveController {
             .prompt_mut()
             .apply_edit_with_width(edit, body_width);
         self.sync_inline_prompt_completion();
+    }
+
+    /// Sanitize pasted text: strip CR and drop control characters except newline.
+    fn clean_pasted_text(text: &str) -> String {
+        text.replace('\r', "")
+            .chars()
+            .filter(|c| *c == '\n' || !c.is_control())
+            .collect()
     }
 
     async fn handle_cancel_input(&mut self) -> Result<bool> {
@@ -1541,6 +1685,10 @@ impl InteractiveController {
     }
 
     async fn handle_keybinding_action(&mut self, action: KeybindingAction) -> Result<bool> {
+        if action == KeybindingAction::PasteImage {
+            self.handle_paste_image().await?;
+            return Ok(false);
+        }
         if self.handle_prompt_keybinding_action(action) {
             return Ok(false);
         }
@@ -2278,7 +2426,16 @@ impl InteractiveController {
             "/resume" => self.open_session_picker(),
             "/provider" => self.open_provider_picker(),
             "/mcp" => self.open_mcp_manager().await,
-            "/compact" => self.request_manual_compaction(),
+            "/compact" => {
+                let instruction = slash_arg(prompt, "/compact").map(|arg| {
+                    if arg.is_empty() {
+                        None
+                    } else {
+                        Some(arg.to_owned())
+                    }
+                });
+                self.request_manual_compaction(instruction.flatten());
+            }
             _ => return false,
         }
         self.clear_submitted_prompt();
@@ -2686,11 +2843,16 @@ impl InteractiveController {
             self.local_config.as_ref(),
             &self.completion_root,
         )?;
+        let content = crate::prompt_parts::expand_prompt_markers(
+            &prompt,
+            &self.paste_store,
+            &self.image_attachment_store,
+        );
         // Persist the resolved user prompt (after @model/prompt-template
         // expansion) to the workspace history. Slash commands already returned
         // above, so they never reach this point. Append failures are non-fatal.
-        self.append_prompt_history(&prompt);
-        self.start_turn_with_prompt(prompt, model_override, true);
+        self.append_prompt_history(&content_to_display_text(&content));
+        self.start_turn_with_prompt(content, model_override, true);
         self.drain_active_turn().await?;
         self.start_pending_background_question_followups().await
     }
@@ -2709,7 +2871,12 @@ impl InteractiveController {
             self.push_status("Slash commands can't be queued — wait for the turn to finish");
             return;
         }
-        let message = AgentMessage::user_text(prompt.to_owned());
+        let content = crate::prompt_parts::expand_prompt_markers(
+            prompt,
+            &self.paste_store,
+            &self.image_attachment_store,
+        );
+        let message = AgentMessage::User { content };
         self.tui.chrome_mut().prompt_mut().clear_after_submit();
         let Some(turn) = &self.active_turn else {
             return;
@@ -2730,7 +2897,12 @@ impl InteractiveController {
         let text = self.tui.chrome().prompt().text.trim().to_owned();
         if !text.is_empty() {
             if self.active_turn.is_some() {
-                let message = AgentMessage::user_text(text.clone());
+                let content = crate::prompt_parts::expand_prompt_markers(
+                    &text,
+                    &self.paste_store,
+                    &self.image_attachment_store,
+                );
+                let message = AgentMessage::User { content };
                 if let Some(turn) = &self.active_turn {
                     turn.steer_input
                         .push(neo_agent_core::ActiveTurnInput::SteerNow(message));
@@ -2762,7 +2934,7 @@ impl InteractiveController {
 
     fn start_turn_with_prompt(
         &mut self,
-        prompt: String,
+        prompt: Vec<Content>,
         model_override: Option<SelectedModel>,
         show_user_message: bool,
     ) {
@@ -2771,7 +2943,9 @@ impl InteractiveController {
             return;
         }
         if show_user_message {
-            self.tui.transcript_mut().push_user_message(prompt.clone());
+            self.tui
+                .transcript_mut()
+                .push_user_message(content_to_display_text(&prompt));
         }
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (approval_tx, approval_rx) = mpsc::unbounded_channel();
@@ -2788,7 +2962,7 @@ impl InteractiveController {
             steer_input: steer_input.clone(),
         };
         let mut request = TurnRequest::new(
-            vec![prompt],
+            prompt,
             self.active_session_id.clone(),
             model_override.or_else(|| self.active_model.clone()),
             if self.current_thinking {
@@ -2807,7 +2981,7 @@ impl InteractiveController {
         request.plan_review_feedback = std::mem::take(&mut self.pending_plan_review_feedback);
         request.mcp_manager.clone_from(&self.mcp_manager);
         request.base_config.clone_from(&self.local_config);
-        request.manual_compact_requested = Arc::clone(&self.manual_compact_requested);
+        request.manual_compact_request = Arc::clone(&self.manual_compact_request);
         let request = if let Some(skill_context) = self.pending_skill_context.take() {
             request.with_skill_context(skill_context)
         } else {
@@ -3385,7 +3559,7 @@ impl InteractiveController {
             let Some(prompt) = self.pending_background_question_followups.pop_front() else {
                 break;
             };
-            self.start_turn_with_prompt(prompt, None, false);
+            self.start_turn_with_prompt(vec![Content::text(prompt)], None, false);
             self.drain_active_turn().await?;
         }
         Ok(())
@@ -3767,24 +3941,62 @@ impl InteractiveController {
     /// Handle `/compact` — request a manual LLM-driven context compaction.
     ///
     /// If a turn is running, the compaction fires at the next loop iteration
-    /// (the runtime checks `manual_compact_requested` at the top of every
-    /// step). If the session is idle, we start a minimal turn that will
-    /// immediately compact and then finish.
-    fn request_manual_compaction(&mut self) {
-        self.manual_compact_requested
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    /// (the runtime checks `manual_compact_request` at the top of every
+    /// step). If the session is idle, we start a compaction-only turn that
+    /// runs the compaction and finishes without sending anything to the model.
+    fn request_manual_compaction(&mut self, instruction: Option<String>) {
+        if let Ok(mut request) = self.manual_compact_request.lock() {
+            *request = Some(instruction.unwrap_or_default());
+        }
         if self.active_turn.is_some() {
             self.push_status("Compaction requested — will run after the current step");
         } else {
-            // Idle: start a no-op turn so the runtime loop can execute the
-            // compaction. The prompt is a system-level marker that won't
-            // appear as a user message in the transcript.
+            // Idle: run a turn that only compacts and then finishes. It does not
+            // append a user message and does not call the model afterwards.
             self.push_status("Compacting context…");
-            self.start_turn_with_prompt(
-                "[compaction requested]".to_owned(),
+            let (event_tx, event_rx) = mpsc::unbounded_channel();
+            let (approval_tx, approval_rx) = mpsc::unbounded_channel();
+            let (session_id_tx, session_id_rx) = mpsc::unbounded_channel();
+            let (question_tx, question_rx) = mpsc::unbounded_channel::<PendingQuestion>();
+            let cancel_token = CancellationToken::new();
+            let steer_input = neo_agent_core::SteerInputHandle::new();
+            let channels = TurnChannels {
+                events: event_tx.clone(),
+                approvals: approval_tx,
+                session_ids: session_id_tx,
+                cancel_token: cancel_token.clone(),
+                questions: question_tx,
+                steer_input: steer_input.clone(),
+            };
+            let mut request = TurnRequest::new(
+                Vec::new(),
+                self.active_session_id.clone(),
+                self.active_model.clone(),
                 None,
-                false, // don't show as user message
             );
+            request.permission_mode = self.permission_mode;
+            request.live_permission_mode = Arc::clone(&self.live_permission_mode);
+            request.plan_mode = Arc::clone(&self.plan_mode);
+            request.base_config.clone_from(&self.local_config);
+            request.manual_compact_request = Arc::clone(&self.manual_compact_request);
+            request.compaction_only = true;
+            let future = (self.run_turn)(request, channels);
+            let task = tokio::spawn(async move {
+                let result = future.await;
+                if let Err(error) = &result {
+                    let _ = event_tx.send(Err(anyhow::anyhow!(error.to_string())));
+                }
+                result
+            });
+            self.active_turn = Some(RunningTurn {
+                events: event_rx,
+                approvals: approval_rx,
+                session_ids: session_id_rx,
+                task,
+                cancel_token,
+                questions: question_rx,
+                steer_input,
+            });
         }
     }
 
@@ -4770,6 +4982,12 @@ static STATIC_SLASH_COMMANDS: &[(&str, &str, Option<&str>, Option<&str>)] = &[
         Some("local"),
     ),
     (
+        "/compact",
+        "Request manual context compaction",
+        Some("session"),
+        Some("local"),
+    ),
+    (
         "/permissions",
         "select permission mode",
         Some("permission mode"),
@@ -5680,9 +5898,21 @@ impl NeoTerminal {
 #[allow(clippy::too_many_lines)]
 pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     let catalogs = picker_catalogs_for_config(config);
-    let selected_model = crate::modes::run::model_registry_for_config(config)
-        .and_then(|registry| crate::modes::run::select_config_model(&registry, config))
-        .ok();
+    let registry = crate::modes::run::model_registry_for_config(config).ok();
+    let selected_model = registry
+        .as_ref()
+        .and_then(|r| crate::modes::run::select_config_model(r, config).ok());
+    let model_capabilities: std::collections::HashMap<String, neo_ai::ModelCapabilities> = registry
+        .map(|r| {
+            r.list()
+                .into_iter()
+                .map(|spec| {
+                    let alias = format!("{}/{}", spec.provider.0, spec.model);
+                    (alias, spec.capabilities)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let mut config = config.clone();
     if let Some(model) = &selected_model {
         config.default_provider.clone_from(&model.provider.0);
@@ -5718,7 +5948,8 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     request.goal_mode_authoring,
                     channels.steer_input,
                     request.mcp_manager.clone(),
-                    Arc::clone(&request.manual_compact_requested),
+                    Arc::clone(&request.manual_compact_request),
+                    request.compaction_only,
                 )
                 .await?;
                 Ok(TurnOutcome::session(turn.session_id))
@@ -5737,7 +5968,8 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
                     request.goal_mode_authoring,
                     channels.steer_input,
                     request.mcp_manager.clone(),
-                    Arc::clone(&request.manual_compact_requested),
+                    Arc::clone(&request.manual_compact_request),
+                    request.compaction_only,
                 )
                 .await?;
                 Ok(TurnOutcome::session(turn.session_id))
@@ -5811,6 +6043,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
             .set_skill_store(store.clone());
     }
     controller.skill_store = skill_store;
+    controller.model_capabilities = model_capabilities;
     // Seed the composer's in-memory history from the workspace bucket so Up/Down
     // can recall prompts submitted in earlier TUI sessions for this workspace.
     controller.prompt_history = Some(crate::prompt_history::PromptHistoryStore::for_config(
@@ -6700,8 +6933,18 @@ mod tests {
         let requests = requests.lock().expect("requests");
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].session_id.as_deref(), None);
-        assert!(requests[0].prompt[0].contains("Background question `question-1`"));
-        assert!(requests[0].prompt[0].contains("TaskOutput"));
+        assert!(
+            requests[0].prompt[0]
+                .as_text()
+                .unwrap()
+                .contains("Background question `question-1`")
+        );
+        assert!(
+            requests[0].prompt[0]
+                .as_text()
+                .unwrap()
+                .contains("TaskOutput")
+        );
     }
 
     #[test]
@@ -6893,7 +7136,7 @@ mod tests {
             "openai/gpt-4.1",
             test_workspace_root(),
             |request| async move {
-                assert_eq!(request.prompt, vec!["hello neo".to_owned()]);
+                assert_eq!(request.prompt, vec![Content::text("hello neo")]);
                 assert_eq!(request.session_id, None);
                 assert_eq!(request.model, None);
                 Ok(vec![
@@ -6950,7 +7193,7 @@ mod tests {
             "openai/gpt-4.1",
             test_workspace_root(),
             |request| async move {
-                assert_eq!(request.prompt, vec!["hi".to_owned()]);
+                assert_eq!(request.prompt, vec![Content::text("hi")]);
                 assert_eq!(request.session_id, None);
                 assert_eq!(request.model, None);
                 Ok(vec![
@@ -7075,7 +7318,7 @@ mod tests {
             "openai/gpt-4.1",
             test_workspace_root(),
             |request| async move {
-                assert_eq!(request.prompt, vec!["alpha\nbeta".to_owned()]);
+                assert_eq!(request.prompt, vec![Content::text("alpha\nbeta")]);
                 Ok(vec![AgentEvent::TurnFinished {
                     turn: 1,
                     stop_reason: StopReason::EndTurn,
@@ -8446,7 +8689,7 @@ command = "python3"
 
         let requests = requests.lock().expect("recorded requests");
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].prompt, vec!["explain this file".to_owned()]);
+        assert_eq!(requests[0].prompt, vec![Content::text("explain this file")]);
         let selected = requests[0].model.as_ref().expect("inline model");
         assert_eq!(selected.provider, "anthropic");
         assert_eq!(selected.model, "claude-sonnet");
@@ -8502,7 +8745,7 @@ command = "python3"
         let requests = requests.lock().expect("recorded requests");
         assert_eq!(
             requests[0].prompt,
-            vec!["@src/main.rs explain this file".to_owned()]
+            vec![Content::text("@src/main.rs explain this file")]
         );
         assert_eq!(requests[0].model, None);
     }
@@ -8557,7 +8800,7 @@ command = "python3"
         let requests = requests.lock().expect("recorded requests");
         assert_eq!(
             requests[0].prompt,
-            vec!["@anthropic/claude-sonnet".to_owned()]
+            vec![Content::text("@anthropic/claude-sonnet")]
         );
         assert_eq!(requests[0].model, None);
     }
@@ -9047,7 +9290,10 @@ command = "python3"
 
         let requests = requests.lock().expect("recorded requests");
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].prompt, vec!["Review src/lib.rs.".to_owned()]);
+        assert_eq!(
+            requests[0].prompt,
+            vec![Content::text("Review src/lib.rs.")]
+        );
     }
 
     #[tokio::test]
@@ -9057,8 +9303,9 @@ command = "python3"
         let config = test_config(temp.path(), sessions_dir.clone());
         let bucket_dir = workspace_sessions_dir(&config);
         fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
+        fs::create_dir_all(bucket_dir.join(SESSION_A)).expect("create session dir");
         fs::write(
-            bucket_dir.join(format!("{SESSION_A}.jsonl")),
+            bucket_dir.join(SESSION_A).join("transcript.jsonl"),
             concat!(
                 "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello <script>alert(1)</script>\"}}]}}}}\n",
                 "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"use **bold** safely\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
@@ -9107,7 +9354,7 @@ command = "python3"
             .await
             .expect("export command runs");
 
-        let export_path = bucket_dir.join(format!("{SESSION_A}.html"));
+        let export_path = bucket_dir.join(SESSION_A).join("transcript.html");
         let html = fs::read_to_string(&export_path).expect("read exported html");
         assert!(html.contains(&format!("<title>neo session {SESSION_A}</title>")));
         assert!(html.contains("<strong>bold</strong>"));
@@ -9740,7 +9987,8 @@ command = "python3"
                     workspace: test_workspace_root().display().to_string(),
                     path: test_workspace_root()
                         .join("approved.txt")
-                        .display().to_string(),
+                        .display()
+                        .to_string(),
                     operation: neo_agent_core::FileWriteApprovalOperation::Write,
                 }],
                 label: "Approve writes to this file for this session".to_owned(),
@@ -10382,7 +10630,8 @@ command = "python3"
         let config = test_config(temp.path(), sessions_dir);
         let bucket_dir = workspace_sessions_dir(&config);
         fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
-        let session_path = bucket_dir.join(format!("{SESSION_A}.jsonl"));
+        fs::create_dir_all(bucket_dir.join(SESSION_A)).expect("create session dir");
+        let session_path = bucket_dir.join(SESSION_A).join("transcript.jsonl");
         let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
             .await
             .expect("create session");
@@ -10502,7 +10751,7 @@ command = "python3"
             .expect("continued turn completes");
         let requests = requests.lock().expect("recorded requests");
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].prompt, vec!["continue".to_owned()]);
+        assert_eq!(requests[0].prompt, vec![Content::text("continue")]);
         assert_eq!(requests[0].session_id.as_deref(), Some(SESSION_A));
         assert_eq!(requests[0].model, None);
         assert!(transcript_entries(&controller).iter().any(|entry| {
@@ -10574,9 +10823,9 @@ command = "python3"
 
         let requests = requests.lock().expect("recorded requests");
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].prompt, vec!["read project".to_owned()]);
+        assert_eq!(requests[0].prompt, vec![Content::text("read project")]);
         assert_eq!(requests[0].session_id, None);
-        assert_eq!(requests[1].prompt, vec!["continue".to_owned()]);
+        assert_eq!(requests[1].prompt, vec![Content::text("continue")]);
         assert_eq!(requests[1].session_id.as_deref(), Some(SESSION_NEW));
         assert_eq!(controller.chrome().session_label(), SESSION_NEW);
     }
@@ -10664,9 +10913,9 @@ command = "python3"
 
         let requests = requests.lock().expect("recorded requests");
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].prompt, vec!["read project".to_owned()]);
+        assert_eq!(requests[0].prompt, vec![Content::text("read project")]);
         assert_eq!(requests[0].session_id, None);
-        assert_eq!(requests[1].prompt, vec!["continue".to_owned()]);
+        assert_eq!(requests[1].prompt, vec![Content::text("continue")]);
         assert_eq!(requests[1].session_id.as_deref(), Some(SESSION_NEW));
     }
 
@@ -10767,7 +11016,7 @@ command = "python3"
             .expect("continued fork turn completes");
         let requests = requests.lock().expect("recorded requests");
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].prompt, vec!["continue fork".to_owned()]);
+        assert_eq!(requests[0].prompt, vec![Content::text("continue fork")]);
         assert_eq!(requests[0].session_id.as_deref(), Some(SESSION_CHILD));
         assert_eq!(requests[0].model, None);
     }
@@ -10969,8 +11218,9 @@ command = "python3"
         // Compute the workspace-scoped bucket directory that the code will use.
         let bucket_dir = workspace_sessions_dir(&test_config(temp.path(), sessions_dir.clone()));
         fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
+        fs::create_dir_all(bucket_dir.join(SESSION_A)).expect("create session dir");
         fs::write(
-            bucket_dir.join(format!("{SESSION_A}.jsonl")),
+            bucket_dir.join(SESSION_A).join("transcript.jsonl"),
             concat!(
                 "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
                 "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi back\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
@@ -11052,8 +11302,9 @@ command = "python3"
         let config = test_config(temp.path(), sessions_dir.clone());
         let bucket_dir = workspace_sessions_dir(&config);
         fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
+        fs::create_dir_all(bucket_dir.join(SESSION_A)).expect("create session dir");
         fs::write(
-            bucket_dir.join(format!("{SESSION_A}.jsonl")),
+            bucket_dir.join(SESSION_A).join("transcript.jsonl"),
             concat!(
                 "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
                 "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi back\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
@@ -11074,7 +11325,8 @@ command = "python3"
         assert_eq!(forked.transcript.messages.len(), 2);
         assert!(
             bucket_dir
-                .join(format!("{}.jsonl", forked.session_id))
+                .join(&forked.session_id)
+                .join("transcript.jsonl")
                 .is_file()
         );
 
@@ -11106,8 +11358,9 @@ command = "python3"
         let config_a = test_config(&project_a, sessions_dir.clone());
         let bucket_a = workspace_sessions_dir(&config_a);
         fs::create_dir_all(&bucket_a).expect("create bucket_a");
+        fs::create_dir_all(bucket_a.join(SESSION_A)).expect("create session_a dir");
         fs::write(
-            bucket_a.join(format!("{SESSION_A}.jsonl")),
+            bucket_a.join(SESSION_A).join("transcript.jsonl"),
             r#"{"MessageAppended":{"message":{"User":{"content":[{"Text":{"text":"hello"}}]}}}}"#,
         )
         .expect("write alpha jsonl");
@@ -11126,8 +11379,9 @@ command = "python3"
         let config_b = test_config(&project_b, sessions_dir.clone());
         let bucket_b = workspace_sessions_dir(&config_b);
         fs::create_dir_all(&bucket_b).expect("create bucket_b");
+        fs::create_dir_all(bucket_b.join(SESSION_B)).expect("create session_b dir");
         fs::write(
-            bucket_b.join(format!("{SESSION_B}.jsonl")),
+            bucket_b.join(SESSION_B).join("transcript.jsonl"),
             r#"{"MessageAppended":{"message":{"User":{"content":[{"Text":{"text":"hello"}}]}}}}"#,
         )
         .expect("write beta jsonl");
@@ -11355,6 +11609,14 @@ command = "python3"
         assert!(values.contains(&"/ask"), "missing /ask: {values:?}");
         assert!(values.contains(&"/auto"), "missing /auto: {values:?}");
         assert!(values.contains(&"/yolo"), "missing /yolo: {values:?}");
+    }
+
+    #[test]
+    fn slash_completions_include_compact_command() {
+        let completions = prompt_completions(&test_workspace_root(), "/", &[], None, true)
+            .expect("completions resolve");
+        let values: Vec<_> = completions.iter().map(|item| item.value.as_str()).collect();
+        assert!(values.contains(&"/compact"), "missing /compact: {values:?}");
     }
 
     #[tokio::test]
@@ -12278,7 +12540,7 @@ command = "python3"
         assert_eq!(requests.len(), 1);
         assert_eq!(
             requests[0].prompt,
-            vec!["hello new session".to_owned()],
+            vec![Content::text("hello new session")],
             "next prompt text is forwarded"
         );
         assert_eq!(
@@ -13102,7 +13364,7 @@ command = "python3"
         let seen = prompt_seen.lock().expect("prompt lock").clone();
         assert_eq!(
             seen,
-            Some(vec!["submit via ctrl+s".to_owned()]),
+            Some(vec![Content::text("submit via ctrl+s")]),
             "idle Ctrl+S should behave like a normal submit"
         );
     }
@@ -13762,7 +14024,9 @@ command = "python3"
         fs::create_dir_all(&sessions_dir).expect("create sessions dir");
 
         let session_id = "session_00000000-0000-4000-8000-000000000901";
-        let session_path = sessions_dir.join(format!("{session_id}.jsonl"));
+        let session_path = sessions_dir.join(session_id).join("transcript.jsonl");
+        fs::create_dir_all(session_path.parent().expect("session dir"))
+            .expect("create session dir");
         let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
             .await
             .expect("create session");

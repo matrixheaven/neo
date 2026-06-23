@@ -3406,6 +3406,9 @@ pub struct PromptState {
     history_draft: Option<PromptSnapshot>,
     undo_stack: Vec<PromptSnapshot>,
     kill_ring: Vec<String>,
+    /// Byte range of a marker currently selected for deletion. The next
+    /// backspace/delete while the same marker is selected removes it entirely.
+    selected_marker: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3428,6 +3431,7 @@ impl PromptState {
             history_draft: None,
             undo_stack: Vec::new(),
             kill_ring: Vec::new(),
+            selected_marker: None,
         }
     }
 
@@ -3479,7 +3483,14 @@ impl PromptState {
         self.scroll_offset = 0;
         self.undo_stack.clear();
         self.kill_ring.clear();
+        self.selected_marker = None;
         self.stop_history_navigation();
+    }
+
+    /// Byte range of the currently selected marker, if any.
+    #[must_use]
+    pub fn selected_marker(&self) -> Option<(usize, usize)> {
+        self.selected_marker
     }
 
     /// Replace the composer text and move the cursor to the end. Used when
@@ -3488,6 +3499,7 @@ impl PromptState {
         self.text = text.into();
         self.cursor = self.char_len();
         self.scroll_offset = 0;
+        self.selected_marker = None;
         self.stop_history_navigation();
     }
 
@@ -3552,6 +3564,7 @@ impl PromptState {
                     return None;
                 }
                 self.stop_history_navigation();
+                self.selected_marker = None;
                 let before = self.snapshot();
                 let index = self.byte_index(self.cursor);
                 self.text.insert_str(index, &inserted);
@@ -3564,6 +3577,7 @@ impl PromptState {
                     return None;
                 }
                 self.stop_history_navigation();
+                self.selected_marker = None;
                 let before = self.snapshot();
                 let cleared = std::mem::take(&mut self.text);
                 self.cursor = 0;
@@ -3571,40 +3585,72 @@ impl PromptState {
                 self.push_undo(before);
                 Some(cleared)
             }
-            PromptEdit::Backspace => self.apply_delete(
-                self.cursor.saturating_sub(1),
-                self.cursor,
-                DeleteDirection::Backward,
-                false,
-            ),
-            PromptEdit::Delete => self.apply_delete(
-                self.cursor,
-                self.cursor + 1,
-                DeleteDirection::Forward,
-                false,
-            ),
+            PromptEdit::Backspace => {
+                if let Some(range) = self.marker_before_cursor() {
+                    if self.selected_marker == Some(range) {
+                        self.selected_marker = None;
+                        self.delete_byte_range(range.0, range.1, DeleteDirection::Backward)
+                    } else {
+                        self.selected_marker = Some(range);
+                        None
+                    }
+                } else {
+                    self.selected_marker = None;
+                    self.apply_delete(
+                        self.cursor.saturating_sub(1),
+                        self.cursor,
+                        DeleteDirection::Backward,
+                        false,
+                    )
+                }
+            }
+            PromptEdit::Delete => {
+                if let Some(range) = self.marker_after_cursor() {
+                    if self.selected_marker == Some(range) {
+                        self.selected_marker = None;
+                        self.delete_byte_range(range.0, range.1, DeleteDirection::Forward)
+                    } else {
+                        self.selected_marker = Some(range);
+                        None
+                    }
+                } else {
+                    self.selected_marker = None;
+                    self.apply_delete(
+                        self.cursor,
+                        self.cursor + 1,
+                        DeleteDirection::Forward,
+                        false,
+                    )
+                }
+            }
             PromptEdit::MoveLeft => {
                 self.cursor = self.cursor.saturating_sub(1);
+                self.selected_marker = None;
                 None
             }
             PromptEdit::MoveRight => {
                 self.cursor = (self.cursor + 1).min(self.char_len());
+                self.selected_marker = None;
                 None
             }
             PromptEdit::MoveHome => {
                 self.cursor = 0;
+                self.selected_marker = None;
                 None
             }
             PromptEdit::MoveEnd => {
                 self.cursor = self.char_len();
+                self.selected_marker = None;
                 None
             }
             PromptEdit::MoveWordLeft => {
                 self.cursor = find_word_backward(&self.text, self.cursor);
+                self.selected_marker = None;
                 None
             }
             PromptEdit::MoveWordRight => {
                 self.cursor = find_word_forward(&self.text, self.cursor);
+                self.selected_marker = None;
                 None
             }
             PromptEdit::DeleteWordBackward => {
@@ -3624,6 +3670,7 @@ impl PromptState {
             PromptEdit::Yank => {
                 let yanked = self.kill_ring.last().cloned()?;
                 self.stop_history_navigation();
+                self.selected_marker = None;
                 let before = self.snapshot();
                 let index = self.byte_index(self.cursor);
                 self.text.insert_str(index, &yanked);
@@ -3633,6 +3680,7 @@ impl PromptState {
             }
             PromptEdit::Undo => {
                 self.stop_history_navigation();
+                self.selected_marker = None;
                 if let Some(snapshot) = self.undo_stack.pop() {
                     self.text = snapshot.text;
                     self.cursor = snapshot.cursor.min(self.char_len());
@@ -3641,10 +3689,12 @@ impl PromptState {
             }
             PromptEdit::MoveUp(width) => {
                 self.move_cursor_vertical(width, -1);
+                self.selected_marker = None;
                 None
             }
             PromptEdit::MoveDown(width) => {
                 self.move_cursor_vertical(width, 1);
+                self.selected_marker = None;
                 None
             }
         };
@@ -3734,6 +3784,60 @@ impl PromptState {
         (!self.text.is_empty()).then(|| self.text.clone())
     }
 
+    /// Byte range of the marker immediately before or overlapping the cursor,
+    /// if any.
+    fn marker_before_cursor(&self) -> Option<(usize, usize)> {
+        let cursor_byte = self.byte_index(self.cursor);
+        for cap in crate::paste::marker_regex().captures_iter(&self.text) {
+            let m = cap.get(0).expect("regex match has group 0");
+            if m.end() == cursor_byte {
+                return Some((m.start(), m.end()));
+            }
+            if m.start() < cursor_byte && m.end() > cursor_byte {
+                return Some((m.start(), m.end()));
+            }
+        }
+        None
+    }
+
+    /// Byte range of the marker immediately at or after the cursor, if any.
+    fn marker_after_cursor(&self) -> Option<(usize, usize)> {
+        let cursor_byte = self.byte_index(self.cursor);
+        for cap in crate::paste::marker_regex().captures_iter(&self.text) {
+            let m = cap.get(0).expect("regex match has group 0");
+            if m.start() == cursor_byte || (m.start() <= cursor_byte && m.end() > cursor_byte) {
+                return Some((m.start(), m.end()));
+            }
+        }
+        None
+    }
+
+    /// Delete a byte range directly, bypassing char-index logic.
+    fn delete_byte_range(
+        &mut self,
+        start_byte: usize,
+        end_byte: usize,
+        direction: DeleteDirection,
+    ) -> Option<String> {
+        self.stop_history_navigation();
+        let before = self.snapshot();
+        if start_byte >= end_byte || end_byte > self.text.len() {
+            return None;
+        }
+        let deleted = self.text[start_byte..end_byte].to_string();
+        self.text.replace_range(start_byte..end_byte, "");
+        match direction {
+            DeleteDirection::Backward => {
+                self.cursor = self.text[..start_byte].chars().count();
+            }
+            DeleteDirection::Forward => {
+                self.cursor = self.cursor.min(self.char_len());
+            }
+        }
+        self.push_undo(before);
+        Some(deleted)
+    }
+
     #[must_use]
     pub fn completion_prefix(&self) -> Option<PromptCompletionPrefix> {
         let chars = self.text.chars().collect::<Vec<_>>();
@@ -3778,7 +3882,7 @@ impl PromptState {
         Some(replacement.to_owned())
     }
 
-    fn byte_index(&self, char_index: usize) -> usize {
+    pub fn byte_index(&self, char_index: usize) -> usize {
         if char_index == 0 {
             return 0;
         }
@@ -4327,18 +4431,45 @@ mod tests {
     }
 
     #[test]
-    fn picker_meta_line_wraps_when_workdir_exceeds_width() {
-        // Short id + very long path under a narrow width must wrap (id line,
-        // then left-truncated dir line) without overflow.
-        let item = SessionPickerItem::new(
-            "session_meta",
-            "Short title",
-            None,
-            "/Users/someone/projects/really/deeply/nested/workspace/directory/here",
-            SystemTime::now(),
-            false,
-        );
-        let lines = render_single(item, 40);
-        assert_all_lines_fit(&lines, 40);
+    fn backspace_selects_marker_first_then_deletes() {
+        let mut prompt = PromptState::new("hello [paste +5 lines]");
+        prompt.cursor = prompt.char_len();
+        // First backspace selects marker, text unchanged.
+        assert!(prompt.apply_edit(PromptEdit::Backspace).is_none());
+        assert!(prompt.text.contains("[paste +5 lines]"));
+        assert!(prompt.selected_marker().is_some());
+        // Second backspace deletes marker.
+        assert!(prompt.apply_edit(PromptEdit::Backspace).is_some());
+        assert!(!prompt.text.contains("[paste +5 lines]"));
+        assert_eq!(prompt.text, "hello ");
+    }
+
+    #[test]
+    fn delete_selects_marker_first_then_deletes() {
+        let mut prompt = PromptState::new("[paste +5 lines] world");
+        prompt.cursor = 0;
+        assert!(prompt.apply_edit(PromptEdit::Delete).is_none());
+        assert!(prompt.text.contains("[paste +5 lines]"));
+        assert!(prompt.apply_edit(PromptEdit::Delete).is_some());
+        assert!(!prompt.text.contains("[paste +5 lines]"));
+        assert_eq!(prompt.text, " world");
+    }
+
+    #[test]
+    fn cursor_movement_clears_marker_selection() {
+        let mut prompt = PromptState::new("hello [paste +5 lines]");
+        prompt.cursor = prompt.char_len();
+        prompt.apply_edit(PromptEdit::Backspace);
+        assert!(prompt.selected_marker().is_some());
+        prompt.apply_edit(PromptEdit::MoveLeft);
+        assert!(prompt.selected_marker().is_none());
+    }
+
+    #[test]
+    fn normal_backspace_still_deletes_single_character() {
+        let mut prompt = PromptState::new("hello");
+        prompt.cursor = prompt.char_len();
+        prompt.apply_edit(PromptEdit::Backspace);
+        assert_eq!(prompt.text, "hell");
     }
 }

@@ -137,6 +137,12 @@ fn session_bucket(project_dir: &Path) -> PathBuf {
     neo_agent_core::session::workspace_sessions_dir(&sessions_root, project_dir)
 }
 
+fn write_session_transcript(sessions: &Path, session_id: &str, content: &str) {
+    let session_dir = sessions.join(session_id);
+    fs::create_dir_all(&session_dir).expect("create session dir");
+    fs::write(session_dir.join("transcript.jsonl"), content).expect("write transcript");
+}
+
 #[test]
 fn root_command_reports_interactive_entrypoint_without_placeholders() {
     let command = neo();
@@ -236,11 +242,11 @@ fn root_resume_flag_opens_real_local_session_picker() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
-    fs::write(
-        sessions.join(format!("{SESSION_A}.jsonl")),
+    write_session_transcript(
+        &sessions,
+        SESSION_A,
         "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
-    )
-    .expect("write session");
+    );
 
     let mut command = neo();
     command.current_dir(temp.path()).arg("-r");
@@ -332,7 +338,7 @@ fn sessions_list_uses_workspace_session_bucket() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
-    fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session");
+    write_session_transcript(&sessions, SESSION_A, "{}\n");
 
     let mut command = neo();
     command.current_dir(temp.path()).args(["sessions", "list"]);
@@ -347,7 +353,7 @@ fn sessions_rename_and_fork_surface_flat_metadata_without_tree_command() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
-    fs::write(sessions.join(format!("{SESSION_A}.jsonl")), "{}\n").expect("write session");
+    write_session_transcript(&sessions, SESSION_A, "{}\n");
 
     let mut rename = neo();
     rename
@@ -421,14 +427,14 @@ fn sessions_show_and_resume_read_jsonl_transcripts() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
-    fs::write(
-        sessions.join(format!("{SESSION_A}.jsonl")),
+    write_session_transcript(
+        &sessions,
+        SESSION_A,
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"hi back\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
         ),
-    )
-    .expect("write session");
+    );
 
     let mut show = neo();
     show.current_dir(temp.path())
@@ -451,16 +457,16 @@ fn sessions_accept_exact_workspace_bucket_ids() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
-    fs::write(
-        sessions.join(format!("{SESSION_A}.jsonl")),
+    write_session_transcript(
+        &sessions,
+        SESSION_A,
         "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"alpha prompt\"}}]}}}}\n",
-    )
-    .expect("write alpha session");
-    fs::write(
-        sessions.join(format!("{SESSION_B}.jsonl")),
+    );
+    write_session_transcript(
+        &sessions,
+        SESSION_B,
         "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"beta prompt\"}}]}}}}\n",
-    )
-    .expect("write beta session");
+    );
 
     let mut show = neo();
     show.current_dir(temp.path())
@@ -525,7 +531,7 @@ fn sessions_reject_invalid_session_ids() {
         let sessions = session_bucket(temp.path());
         fs::create_dir_all(&sessions).expect("create sessions");
         for session_id in case.existing_sessions {
-            fs::write(sessions.join(format!("{session_id}.jsonl")), "{}\n").expect("write session");
+            write_session_transcript(&sessions, session_id, "{}\n");
         }
         fs::write(temp.path().join("escape.jsonl"), "{}\n").expect("write escape target");
         assert_session_command_rejects(&temp, case.args, case.expected);
@@ -537,15 +543,15 @@ fn sessions_compact_stores_algorithmic_summary_and_resume_replays_kept_context()
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
-    fs::write(
-        sessions.join(format!("{SESSION_A}.jsonl")),
+    write_session_transcript(
+        &sessions,
+        SESSION_A,
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"first task\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"first answer\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"latest task\"}}]}}}}\n"
         ),
-    )
-    .expect("write session");
+    );
 
     let mut compact = neo();
     compact
@@ -584,14 +590,14 @@ fn sessions_export_html_renders_replayed_messages() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
-    fs::write(
-        sessions.join(format!("{SESSION_A}.jsonl")),
+    write_session_transcript(
+        &sessions,
+        SESSION_A,
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello <neo>\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"use **bold**\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
         ),
-    )
-    .expect("write session");
+    );
 
     let mut export = neo();
     export
@@ -610,16 +616,15 @@ fn sessions_export_json_returns_sanitized_replayed_session_artifact() {
     let temp = TempDir::new().expect("tempdir");
     let sessions = session_bucket(temp.path());
     fs::create_dir_all(&sessions).expect("create sessions");
-    fs::write(
-        sessions.join(format!("{SESSION_A}.jsonl")),
+    write_session_transcript(
+        &sessions,
+        SESSION_A,
         concat!(
             "{\"MessageAppended\":{\"message\":{\"User\":{\"content\":[{\"Text\":{\"text\":\"hello json export\"}}]}}}}\n",
             "{\"MessageAppended\":{\"message\":{\"Assistant\":{\"content\":[{\"Text\":{\"text\":\"portable local reply\"}}],\"tool_calls\":[],\"stop_reason\":\"EndTurn\"}}}}\n"
         ),
-    )
-    .expect("write session");
-    fs::write(sessions.join(format!("{SESSION_CHILD}.jsonl")), "{}\n")
-        .expect("write child session");
+    );
+    write_session_transcript(&sessions, SESSION_CHILD, "{}\n");
     fs::write(
         sessions.join("sessions.metadata.json"),
         sessions_metadata_json(&[

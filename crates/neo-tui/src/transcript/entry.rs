@@ -69,6 +69,7 @@ pub enum TranscriptEntry {
         percent: u8,
         compacted_message_count: usize,
         tokens_before: usize,
+        tokens_after: usize,
     },
     Status {
         text: String,
@@ -193,12 +194,17 @@ impl TranscriptEntry {
     }
 
     #[must_use]
-    pub const fn compaction(compacted_message_count: usize, tokens_before: usize) -> Self {
+    pub const fn compaction(
+        compacted_message_count: usize,
+        tokens_before: usize,
+        tokens_after: usize,
+    ) -> Self {
         Self::Compaction {
             phase: Some(neo_agent_core::CompactionPhase::Applying),
             percent: 100,
             compacted_message_count,
             tokens_before,
+            tokens_after,
         }
     }
 
@@ -284,7 +290,7 @@ impl TranscriptEntry {
         if let Some(lines) = self.render_message_entry(inner_width, theme, activity_frame) {
             return lines;
         }
-        self.render_structured_entry(inner_width, theme)
+        self.render_structured_entry(inner_width, theme, activity_frame)
     }
 
     fn render_message_entry(
@@ -320,22 +326,31 @@ impl TranscriptEntry {
         Some(lines)
     }
 
-    fn render_structured_entry(&self, inner_width: usize, theme: &TuiTheme) -> Vec<Line> {
+    fn render_structured_entry(
+        &self,
+        inner_width: usize,
+        theme: &TuiTheme,
+        activity_frame: usize,
+    ) -> Vec<Line> {
         match self {
             Self::ToolRun { component } => render_tool_run(component, inner_width, theme),
             Self::ApprovalPrompt(data) => render_approval_prompt(data, inner_width, theme),
             Self::Image { metadata, .. } => styled_wrap(metadata, inner_width, status_style(theme)),
             Self::Compaction {
+                phase,
+                percent,
                 compacted_message_count,
                 tokens_before,
-                ..
-            } => styled_wrap(
-                &format!(
-                    "Compacted {compacted_message_count} messages · {} tokens before",
-                    format_token_count_usize(*tokens_before)
-                ),
+                tokens_after,
+            } => render_compaction(
+                *phase,
+                *percent,
+                *compacted_message_count,
+                *tokens_before,
+                *tokens_after,
                 inner_width,
-                status_style(theme),
+                theme,
+                activity_frame,
             ),
             Self::GoalCard {
                 kind,
@@ -427,10 +442,11 @@ fn utility_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str, String)>
         TranscriptEntry::Compaction {
             compacted_message_count,
             tokens_before,
+            tokens_after,
             ..
         } => Some((
             "Compact",
-            copy_compaction(*compacted_message_count, *tokens_before),
+            copy_compaction(*compacted_message_count, *tokens_before, *tokens_after),
         )),
         _ => None,
     }
@@ -942,6 +958,45 @@ fn render_tool_run(component: &ToolCallComponent, width: usize, theme: &TuiTheme
     component.render_with_theme(width, theme)
 }
 
+fn render_compaction(
+    phase: Option<neo_agent_core::CompactionPhase>,
+    percent: u8,
+    compacted_message_count: usize,
+    tokens_before: usize,
+    tokens_after: usize,
+    width: usize,
+    theme: &TuiTheme,
+    activity_frame: usize,
+) -> Vec<Line> {
+    let is_complete = percent >= 100 && phase == Some(neo_agent_core::CompactionPhase::Applying);
+    if is_complete {
+        let text = format!(
+            "✔ Compaction complete: {compacted_message_count} messages · {} → {} tokens",
+            format_token_count_usize(tokens_before),
+            format_token_count_usize(tokens_after),
+        );
+        return styled_wrap(&text, width, Style::default().fg(theme.status_ok).bold());
+    }
+    let spinner = thinking_spinner(activity_frame);
+    let phase_label = phase.map_or_else(
+        || "compacting".to_owned(),
+        |phase| match phase {
+            neo_agent_core::CompactionPhase::Estimating => "Estimating".to_owned(),
+            neo_agent_core::CompactionPhase::SelectingBoundary => "Selecting boundary".to_owned(),
+            neo_agent_core::CompactionPhase::Summarizing => "Summarizing".to_owned(),
+            neo_agent_core::CompactionPhase::Applying => "Applying".to_owned(),
+        },
+    );
+    let filled = (percent as usize).min(100) / 10;
+    let bar = format!(
+        "[{}{}]",
+        "█".repeat(filled),
+        "░".repeat(10_usize.saturating_sub(filled))
+    );
+    let text = format!("{spinner} Compacting context… ({phase_label}) {bar} {percent}%",);
+    styled_wrap(&text, width, Style::default().fg(theme.status_pending))
+}
+
 fn copy_banner(data: &BannerData) -> String {
     format!(
         "{}\nSession: {}\nModel: {}\nWorkspace: {}",
@@ -966,10 +1021,15 @@ fn copy_tool(component: &ToolCallComponent) -> String {
     format!("{} {} ({detail})", state.status.marker(), state.name)
 }
 
-fn copy_compaction(compacted_message_count: usize, tokens_before: usize) -> String {
+fn copy_compaction(
+    compacted_message_count: usize,
+    tokens_before: usize,
+    tokens_after: usize,
+) -> String {
     format!(
-        "Compacted {compacted_message_count} messages · {} tokens before",
-        format_token_count_usize(tokens_before)
+        "Compacted {compacted_message_count} messages · {} → {} tokens",
+        format_token_count_usize(tokens_before),
+        format_token_count_usize(tokens_after),
     )
 }
 
@@ -1343,5 +1403,47 @@ mod tests {
                 .any(|l| l.contains("Execute a plan task-by-task."))
         );
         assert!(!lines.iter().any(|l| l.contains("args:")));
+    }
+
+    #[test]
+    fn compaction_in_progress_renders_spinner_phase_and_progress_bar() {
+        let entry = TranscriptEntry::Compaction {
+            phase: Some(neo_agent_core::CompactionPhase::Summarizing),
+            percent: 70,
+            compacted_message_count: 0,
+            tokens_before: 0,
+            tokens_after: 0,
+        };
+        let lines = entry
+            .render_with_activity_frame(80, &TuiTheme::default(), 0)
+            .into_iter()
+            .map(|l| l.text().clone())
+            .collect::<Vec<_>>();
+        let text = lines.join("");
+        assert!(text.contains("Compacting context"), "{text}");
+        assert!(text.contains("Summarizing"), "{text}");
+        assert!(text.contains("70%"), "{text}");
+        assert!(text.contains('█'), "{text}");
+    }
+
+    #[test]
+    fn compaction_complete_renders_token_reduction() {
+        let entry = TranscriptEntry::Compaction {
+            phase: Some(neo_agent_core::CompactionPhase::Applying),
+            percent: 100,
+            compacted_message_count: 852,
+            tokens_before: 192_000,
+            tokens_after: 24_000,
+        };
+        let lines = entry
+            .render_with_activity_frame(80, &TuiTheme::default(), 0)
+            .into_iter()
+            .map(|l| l.text().clone())
+            .collect::<Vec<_>>();
+        let text = lines.join("");
+        assert!(text.contains("Compaction complete"), "{text}");
+        assert!(text.contains("852"), "{text}");
+        assert!(text.contains("192k"), "{text}");
+        assert!(text.contains("24k"), "{text}");
     }
 }
