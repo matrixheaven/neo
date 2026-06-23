@@ -1149,19 +1149,41 @@ async fn runtime_emits_compaction_lifecycle_events_before_applying_summary() {
         })
         .collect::<Vec<_>>();
 
+    // Verify the lifecycle starts at 0%, goes through the visible phases, and
+    // finishes smoothly at 100% instead of jumping from ~80% to done.
+    assert_eq!(lifecycle.first(), Some(&"start:Threshold:24:3".to_owned()));
+    assert!(lifecycle.contains(&"progress:Estimating:0".to_owned()));
+    assert!(lifecycle.contains(&"progress:SelectingBoundary:15".to_owned()));
+    assert!(lifecycle.contains(&"progress:Summarizing:15".to_owned()));
+    assert!(
+        lifecycle
+            .iter()
+            .any(|e| e.starts_with("progress:Summarizing:") && e != "progress:Summarizing:15"),
+        "Summarizing should make progress beyond its starting percent: {lifecycle:?}"
+    );
     assert_eq!(
-        lifecycle,
-        vec![
-            "start:Threshold:24:3",
-            "progress:Estimating:15",
-            "progress:SelectingBoundary:35",
-            "progress:Summarizing:70",
-            "progress:Applying:90",
-            "applied:2:24",
-            // Context window now includes the injected compaction summary system message.
-            "context:58",
-            "context:62",
-        ]
+        lifecycle
+            .iter()
+            .filter(|e| e.starts_with("progress:"))
+            .last(),
+        Some(&"progress:Applying:100".to_owned()),
+        "last progress should reach 100%: {lifecycle:?}"
+    );
+    assert!(lifecycle.contains(&"applied:2:24".to_owned()));
+
+    // Percentages must be non-decreasing across CompactionProgress events.
+    let percents: Vec<u8> = lifecycle
+        .iter()
+        .filter_map(|e| {
+            e.strip_prefix("progress:").and_then(|rest| {
+                let parts: Vec<&str> = rest.split(':').collect();
+                parts.last().and_then(|p| p.parse().ok())
+            })
+        })
+        .collect();
+    assert!(
+        percents.windows(2).all(|w| w[0] <= w[1]),
+        "progress percents should be monotonic: {percents:?}"
     );
 }
 

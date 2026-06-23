@@ -413,17 +413,25 @@ fn indent_block(value: &str, spaces: usize) -> String {
 /// whose conversation is the rendered messages plus the compaction instruction,
 /// streams the response, and returns the concatenated text.
 ///
+/// `on_progress` is called periodically with the current summary length (in
+/// characters) so callers can drive a progress bar based on the streaming
+/// output, similar to kimi-code's swarm progress estimator.
+///
 /// # Hard-fail policy
 /// Any LLM error, empty response, or cancellation is returned as
 /// [`CompactionError`] — callers must surface it rather than degrading to a
 /// counter summary.
-pub async fn generate_compaction_summary(
+pub async fn generate_compaction_summary<F>(
     model: &Arc<dyn ModelClient>,
     config: &AgentConfig,
     messages_to_compact: &[AgentMessage],
     custom_instruction: Option<&str>,
     cancel_token: &CancellationToken,
-) -> Result<String, CompactionError> {
+    mut on_progress: F,
+) -> Result<String, CompactionError>
+where
+    F: FnMut(usize) + Send,
+{
     let rendered = render_messages_to_text(messages_to_compact);
     let instruction = render_instruction(custom_instruction);
     let user_prompt = format!("{rendered}\n\n{instruction}");
@@ -452,19 +460,34 @@ pub async fn generate_compaction_summary(
 
     let mut stream = model.stream_chat(request);
     let mut summary = String::new();
+    let mut last_progress_chars = 0_usize;
 
     while let Some(event) = stream.next().await {
         if cancel_token.is_cancelled() {
             return Err(CompactionError::Cancelled);
         }
         match event {
-            Ok(AiStreamEvent::TextDelta { text }) => summary.push_str(&text),
+            Ok(AiStreamEvent::TextDelta { text }) => {
+                summary.push_str(&text);
+                // Throttle progress callbacks to roughly every 200 characters
+                // so we do not flood the event channel.
+                if summary.len().saturating_sub(last_progress_chars) >= 200 {
+                    on_progress(summary.len());
+                    last_progress_chars = summary.len();
+                }
+            }
             Ok(AiStreamEvent::Error { message }) => {
                 return Err(CompactionError::Llm(message));
             }
             Ok(_) => {}
             Err(err) => return Err(CompactionError::Llm(err.to_string())),
         }
+    }
+
+    // Final progress update so the bar reaches the estimated cap before the
+    // caller switches to the Applying phase.
+    if summary.len() > last_progress_chars {
+        on_progress(summary.len());
     }
 
     if summary.trim().is_empty() {
@@ -590,8 +613,15 @@ pub async fn run_compaction(
         percent: 70,
     });
 
-    let summary_text =
-        generate_compaction_summary(model, config, messages_to_compact, None, cancel_token).await?;
+    let summary_text = generate_compaction_summary(
+        model,
+        config,
+        messages_to_compact,
+        None,
+        cancel_token,
+        |_| {},
+    )
+    .await?;
 
     let kept_messages = &messages[compacted_count..];
     let tokens_after =

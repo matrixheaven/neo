@@ -3,6 +3,7 @@ use std::{
     future::Future,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
+    time::Duration,
 };
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream, stream::FuturesUnordered};
@@ -2005,35 +2006,128 @@ async fn maybe_compact(
     });
     emitter.emit(AgentEvent::CompactionProgress {
         phase: CompactionPhase::Estimating,
-        percent: 15,
+        percent: 0,
     });
+
+    // Brief pause so the near-instant Estimating phase is visible in the TUI.
+    tokio::time::sleep(Duration::from_millis(120)).await;
 
     let messages_to_compact = messages[..compacted_count].to_vec();
     emitter.emit(AgentEvent::CompactionProgress {
         phase: CompactionPhase::SelectingBoundary,
-        percent: 35,
-    });
-    emitter.emit(AgentEvent::CompactionProgress {
-        phase: CompactionPhase::Summarizing,
-        percent: 70,
+        percent: 15,
     });
 
-    let summary_text = match compaction::generate_compaction_summary(
-        model,
-        config,
-        &messages_to_compact,
-        custom_instruction.as_deref(),
-        cancel_token,
-    )
-    .await
-    {
-        Ok(text) => text,
-        Err(err) => {
-            // Hard-fail: surface the error instead of degrading to a counter.
-            let _ = emitter.send_error(AgentRuntimeError::Compaction(err));
-            return;
+    // Brief pause so SelectingBoundary is visible too.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    emitter.emit(AgentEvent::CompactionProgress {
+        phase: CompactionPhase::Summarizing,
+        percent: 15,
+    });
+
+    // Estimate the target summary size from the rendered input so the progress
+    // bar can advance proportionally to the streaming LLM output, similar to
+    // kimi-code's swarm progress estimator.
+    let rendered_input_chars = compaction::render_messages_to_text(&messages_to_compact).len();
+    let target_summary_chars = (rendered_input_chars / 10).max(500);
+
+    // Run the summary LLM in its own task and stream length updates back so the
+    // main loop can drive the progress bar without borrowing `emitter` across
+    // the streaming future.
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<usize>();
+    let (summary_tx, mut summary_rx) =
+        oneshot::channel::<Result<String, compaction::CompactionError>>();
+    let summary_model = Arc::clone(model);
+    let summary_config = config.clone();
+    let summary_messages = messages_to_compact.clone();
+    let summary_instruction = custom_instruction.clone();
+    let summary_cancel = cancel_token.child_token();
+    tokio::spawn(async move {
+        let result = compaction::generate_compaction_summary(
+            &summary_model,
+            &summary_config,
+            &summary_messages,
+            summary_instruction.as_deref(),
+            &summary_cancel,
+            |summary_chars| {
+                let _ = progress_tx.send(summary_chars);
+            },
+        )
+        .await;
+        let _ = summary_tx.send(result);
+    });
+
+    let mut progress_percent = 15;
+    let mut last_emitted_percent = progress_percent;
+    let mut progress_tick = tokio::time::interval(Duration::from_millis(200));
+    progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Skip the immediate first tick.
+    let _ = progress_tick.tick().await;
+    let summary_text: String;
+    loop {
+        tokio::select! {
+            _ = progress_tick.tick() => {
+                // Keep the bar inching forward even if the model stalls.
+                if progress_percent < 84 {
+                    progress_percent += 1;
+                    if progress_percent != last_emitted_percent {
+                        last_emitted_percent = progress_percent;
+                        emitter.emit(AgentEvent::CompactionProgress {
+                            phase: CompactionPhase::Summarizing,
+                            percent: progress_percent,
+                        });
+                    }
+                }
+            }
+            Some(summary_chars) = progress_rx.recv() => {
+                // Map growing summary length to 15..=85%.
+                let stream_percent = 15 + ((summary_chars.min(target_summary_chars) * 70)
+                    .div_ceil(target_summary_chars))
+                    .min(70);
+                progress_percent = progress_percent.max(stream_percent as u8);
+                if progress_percent != last_emitted_percent {
+                    last_emitted_percent = progress_percent;
+                    emitter.emit(AgentEvent::CompactionProgress {
+                        phase: CompactionPhase::Summarizing,
+                        percent: progress_percent,
+                    });
+                }
+            }
+            result = &mut summary_rx => {
+                match result {
+                    Ok(Ok(text)) => summary_text = text,
+                    Ok(Err(err)) => {
+                        let _ = emitter.send_error(AgentRuntimeError::Compaction(err));
+                        return;
+                    }
+                    Err(_) => {
+                        let _ = emitter.send_error(AgentRuntimeError::Compaction(
+                            compaction::CompactionError::Llm("summary task aborted".to_owned()),
+                        ));
+                        return;
+                    }
+                }
+                break;
+            }
         }
-    };
+    }
+
+    // Drain any progress update that arrived just before the summary completed
+    // so the bar reaches its streamed cap before switching to Applying.
+    while let Ok(summary_chars) = progress_rx.try_recv() {
+        let stream_percent = 15
+            + ((summary_chars.min(target_summary_chars) * 70).div_ceil(target_summary_chars))
+                .min(70);
+        progress_percent = progress_percent.max(stream_percent as u8);
+        if progress_percent != last_emitted_percent {
+            last_emitted_percent = progress_percent;
+            emitter.emit(AgentEvent::CompactionProgress {
+                phase: CompactionPhase::Summarizing,
+                percent: progress_percent,
+            });
+        }
+    }
 
     let kept_messages = &messages[compacted_count..];
     let tokens_after =
@@ -2045,10 +2139,23 @@ async fn maybe_compact(
         tokens_after,
         first_kept_message_index: compacted_count,
     };
-    emitter.emit(AgentEvent::CompactionProgress {
-        phase: CompactionPhase::Applying,
-        percent: 90,
-    });
+
+    // Smoothly animate from the streamed cap to 100% so the user does not see
+    // a frozen bar followed by an abrupt jump to complete.
+    let animation_steps: u8 = 15;
+    let step = ((100 - progress_percent) as f32 / f32::from(animation_steps)).ceil() as u8;
+    for _ in 0..animation_steps {
+        if progress_percent >= 100 {
+            break;
+        }
+        progress_percent = (progress_percent + step).min(100);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        emitter.emit(AgentEvent::CompactionProgress {
+            phase: CompactionPhase::Applying,
+            percent: progress_percent,
+        });
+    }
+
     emitter.emit(AgentEvent::CompactionApplied { summary });
 
     let turn = emitter.context.turns.saturating_add(1);

@@ -183,8 +183,8 @@ impl AgentMessage {
 /// call. Any incomplete exchange is dropped, as are orphaned `ToolResult`
 /// messages that do not belong to the immediately preceding assistant turn.
 /// This prevents provider 400 errors such as "an assistant message with
-/// 'tool_calls' must be followed by tool messages responding to each
-/// 'tool_call_id'".
+/// `tool_calls` must be followed by tool messages responding to each
+/// `tool_call_id`".
 #[must_use]
 pub fn sanitize_tool_exchange_messages(messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
     let mut out = Vec::with_capacity(messages.len());

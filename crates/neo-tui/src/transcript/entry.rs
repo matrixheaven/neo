@@ -1,7 +1,7 @@
 use crate::ansi::{Color, Style, paint, visible_width};
 use crate::chrome::TuiTheme;
 use crate::components::wrap_width;
-use crate::core::Line;
+use crate::core::{Line, Span};
 use crate::image::{ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities};
 use crate::transcript::ToolCallComponent;
 use crate::widgets::box_draw;
@@ -953,6 +953,12 @@ fn thinking_spinner(activity_frame: usize) -> char {
     SPINNER[activity_frame % SPINNER.len()]
 }
 
+fn compaction_pulse_char(activity_frame: usize) -> char {
+    // A subtle shimmer on the leading edge of the filled bar.
+    const PULSE: &[char] = &['▓', '▒', '▓', '█'];
+    PULSE[activity_frame % PULSE.len()]
+}
+
 fn render_tool_run(component: &ToolCallComponent, width: usize, theme: &TuiTheme) -> Vec<Line> {
     let mut component = component.clone();
     component.render_with_theme(width, theme)
@@ -977,9 +983,9 @@ fn render_compaction(
         );
         return styled_wrap(&text, width, Style::default().fg(theme.status_ok).bold());
     }
-    let spinner = thinking_spinner(activity_frame);
+
     let phase_label = phase.map_or_else(
-        || "compacting".to_owned(),
+        || "Compacting".to_owned(),
         |phase| match phase {
             neo_agent_core::CompactionPhase::Estimating => "Estimating".to_owned(),
             neo_agent_core::CompactionPhase::SelectingBoundary => "Selecting boundary".to_owned(),
@@ -987,14 +993,65 @@ fn render_compaction(
             neo_agent_core::CompactionPhase::Applying => "Applying".to_owned(),
         },
     );
-    let filled = (percent as usize).min(100) / 10;
-    let bar = format!(
-        "[{}{}]",
-        "█".repeat(filled),
-        "░".repeat(10_usize.saturating_sub(filled))
+
+    // Warm-up -> working -> almost done colour progression.
+    let (label_color, bar_color) = match percent {
+        0..=29 => (theme.status_warn, theme.status_warn),
+        30..=69 => (theme.brand, theme.brand),
+        _ => (theme.status_ok, theme.status_ok),
+    };
+
+    let bar_width = 12;
+    let filled = ((percent as usize).min(100) * bar_width).div_ceil(100);
+    let empty = bar_width.saturating_sub(filled);
+
+    // Header: neutral product colour for context, bold for visibility.
+    let mut lines = Vec::new();
+    let header = format!(
+        "◈ Compacting context… {compacted_message_count} messages · {} tokens",
+        format_token_count_usize(tokens_before)
     );
-    let text = format!("{spinner} Compacting context… ({phase_label}) {bar} {percent}%",);
-    styled_wrap(&text, width, Style::default().fg(theme.status_pending))
+    lines.extend(styled_wrap(
+        &header,
+        width,
+        Style::default().fg(theme.text_primary).bold(),
+    ));
+
+    // Progress line: fixed ◈ icon, phase label, animated bar, percentage.
+    let mut spans = vec![
+        Span::styled("◈ ", Style::default().fg(theme.brand).bold()),
+        Span::styled(
+            format!("{phase_label} "),
+            Style::default().fg(label_color).bold(),
+        ),
+        Span::styled("[", Style::default().fg(theme.text_muted)),
+    ];
+
+    // Filled portion with a subtle pulse on the leading edge.
+    if filled > 0 {
+        let pulse_char = compaction_pulse_char(activity_frame);
+        for i in 0..filled {
+            let ch = if i == filled - 1 { pulse_char } else { '█' };
+            spans.push(Span::styled(
+                ch.to_string(),
+                Style::default().fg(bar_color).bold(),
+            ));
+        }
+    }
+
+    // Empty portion.
+    for _ in 0..empty {
+        spans.push(Span::styled("░", Style::default().fg(theme.text_muted)));
+    }
+
+    spans.push(Span::styled("]", Style::default().fg(theme.text_muted)));
+    spans.push(Span::styled(
+        format!(" {percent}%"),
+        Style::default().fg(label_color).bold(),
+    ));
+    lines.push(Line::from_spans(spans));
+
+    lines
 }
 
 fn copy_banner(data: &BannerData) -> String {
