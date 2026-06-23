@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use neo_ai::{ChatMessage, ContentPart, ImageData, ToolCall};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -48,6 +50,8 @@ impl Content {
 pub enum ImageRef {
     Base64(String),
     Url(String),
+    /// SHA-256 reference to a blob file stored in the session directory.
+    Blob(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -172,6 +176,59 @@ impl AgentMessage {
     }
 }
 
+/// Validate and repair tool-call/tool-result exchanges.
+///
+/// Every `Assistant` message with non-empty `tool_calls` must be immediately
+/// followed by `ToolResult` messages whose `tool_call_id`s cover every tool
+/// call. Any incomplete exchange is dropped, as are orphaned `ToolResult`
+/// messages that do not belong to the immediately preceding assistant turn.
+/// This prevents provider 400 errors such as "an assistant message with
+/// 'tool_calls' must be followed by tool messages responding to each
+/// 'tool_call_id'".
+#[must_use]
+pub fn sanitize_tool_exchange_messages(messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
+    let mut out = Vec::with_capacity(messages.len());
+    let mut i = 0;
+    while i < messages.len() {
+        match &messages[i] {
+            AgentMessage::Assistant { tool_calls, .. } if !tool_calls.is_empty() => {
+                let ids: HashSet<&str> = tool_calls
+                    .iter()
+                    .map(|tool_call| tool_call.id.as_str())
+                    .collect();
+                let mut j = i + 1;
+                let mut seen = HashSet::new();
+                while j < messages.len() {
+                    if let AgentMessage::ToolResult { tool_call_id, .. } = &messages[j] {
+                        if ids.contains(tool_call_id.as_str()) {
+                            seen.insert(tool_call_id.as_str());
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                if seen.len() == ids.len() {
+                    out.extend_from_slice(&messages[i..j]);
+                }
+                i = j;
+            }
+            AgentMessage::ToolResult { .. } => {
+                // Orphaned tool result without a valid preceding assistant
+                // exchange; drop it.
+                i += 1;
+            }
+            _ => {
+                out.push(messages[i].clone());
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 fn to_content_part(content: &Content) -> ContentPart {
     match content {
         Content::Text { text } => ContentPart::Text { text: text.clone() },
@@ -189,7 +246,119 @@ fn to_content_part(content: &Content) -> ContentPart {
             data: match data {
                 ImageRef::Base64(value) => ImageData::Base64(value.clone()),
                 ImageRef::Url(value) => ImageData::Url(value.clone()),
+                // Blob references must be resolved to base64 before converting
+                // to provider-facing ContentPart. This arm is a fallback.
+                ImageRef::Blob(_) => ImageData::Base64(String::new()),
             },
         },
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_keeps_complete_tool_exchange() {
+        let messages = vec![
+            AgentMessage::user_text("hi"),
+            AgentMessage::assistant(
+                vec![],
+                vec![AgentToolCall {
+                    id: "tc1".to_owned(),
+                    name: "Bash".to_owned(),
+                    arguments: serde_json::Value::Null,
+                }],
+                StopReason::ToolUse,
+            ),
+            AgentMessage::tool_result("tc1", "Bash", vec![Content::text("ok")], false),
+            AgentMessage::user_text("thanks"),
+        ];
+        let out = sanitize_tool_exchange_messages(messages.clone());
+        assert_eq!(out.len(), 4);
+        assert!(matches!(&out[1], AgentMessage::Assistant { .. }));
+    }
+
+    #[test]
+    fn sanitize_drops_orphan_assistant_with_tool_calls() {
+        let messages = vec![
+            AgentMessage::user_text("hi"),
+            AgentMessage::assistant(
+                vec![],
+                vec![AgentToolCall {
+                    id: "tc1".to_owned(),
+                    name: "Bash".to_owned(),
+                    arguments: serde_json::Value::Null,
+                }],
+                StopReason::ToolUse,
+            ),
+            AgentMessage::user_text("never mind"),
+        ];
+        let out = sanitize_tool_exchange_messages(messages);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(&out[0], AgentMessage::User { .. }));
+        assert!(matches!(&out[1], AgentMessage::User { .. }));
+    }
+
+    #[test]
+    fn sanitize_drops_incomplete_exchange_even_with_partial_result() {
+        let messages = vec![
+            AgentMessage::assistant(
+                vec![],
+                vec![
+                    AgentToolCall {
+                        id: "tc1".to_owned(),
+                        name: "Bash".to_owned(),
+                        arguments: serde_json::Value::Null,
+                    },
+                    AgentToolCall {
+                        id: "tc2".to_owned(),
+                        name: "Bash".to_owned(),
+                        arguments: serde_json::Value::Null,
+                    },
+                ],
+                StopReason::ToolUse,
+            ),
+            AgentMessage::tool_result("tc1", "Bash", vec![Content::text("ok")], false),
+            AgentMessage::user_text("stop"),
+        ];
+        let out = sanitize_tool_exchange_messages(messages);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(&out[0], AgentMessage::User { .. }));
+    }
+
+    #[test]
+    fn sanitize_drops_orphan_tool_result() {
+        let messages = vec![
+            AgentMessage::user_text("hi"),
+            AgentMessage::tool_result("tc1", "Bash", vec![Content::text("ok")], false),
+            AgentMessage::user_text("bye"),
+        ];
+        let out = sanitize_tool_exchange_messages(messages);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(&out[0], AgentMessage::User { .. }));
+        assert!(matches!(&out[1], AgentMessage::User { .. }));
+    }
+
+    #[test]
+    fn sanitize_drops_unknown_tool_result_id_in_exchange() {
+        let messages = vec![
+            AgentMessage::assistant(
+                vec![],
+                vec![AgentToolCall {
+                    id: "tc1".to_owned(),
+                    name: "Bash".to_owned(),
+                    arguments: serde_json::Value::Null,
+                }],
+                StopReason::ToolUse,
+            ),
+            AgentMessage::tool_result("tc1", "Bash", vec![Content::text("ok")], false),
+            AgentMessage::tool_result("tc2", "Bash", vec![Content::text("orphan")], false),
+            AgentMessage::user_text("next"),
+        ];
+        let out = sanitize_tool_exchange_messages(messages);
+        assert_eq!(out.len(), 3);
+        assert!(matches!(&out[0], AgentMessage::Assistant { .. }));
+        assert!(matches!(&out[1], AgentMessage::ToolResult { .. }));
+        assert!(matches!(&out[2], AgentMessage::User { .. }));
     }
 }

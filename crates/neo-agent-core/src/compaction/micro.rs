@@ -118,10 +118,7 @@ mod tests {
     #[test]
     fn does_not_truncate_below_keep_recent() {
         let config = MicroCompactionConfig::default();
-        let messages = vec![
-            large_tool_result("t1", 200),
-            AgentMessage::user_text("hi"),
-        ];
+        let messages = vec![large_tool_result("t1", 200), AgentMessage::user_text("hi")];
         let result = apply_micro_compaction(&messages, &config);
         assert_eq!(result, messages);
     }
@@ -140,7 +137,10 @@ mod tests {
         // First message (index 0 < cutoff=1) should be truncated
         if let AgentMessage::ToolResult { content, .. } = &result[0] {
             assert_eq!(content.len(), 1);
-            assert_eq!(content[0].as_text(), Some("[Old tool result content cleared]"));
+            assert_eq!(
+                content[0].as_text(),
+                Some("[Old tool result content cleared]")
+            );
         } else {
             panic!("expected tool result");
         }

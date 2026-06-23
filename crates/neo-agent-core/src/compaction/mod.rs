@@ -116,16 +116,48 @@ pub fn can_split_after(messages: &[AgentMessage], index: usize) -> bool {
     if matches!(message, AgentMessage::User { .. }) {
         return false;
     }
-    if let AgentMessage::Assistant { tool_calls, .. } = message {
-        if !tool_calls.is_empty() {
-            return false;
-        }
+    if let AgentMessage::Assistant { tool_calls, .. } = message
+        && !tool_calls.is_empty()
+    {
+        return false;
     }
-    if matches!(messages.get(index + 1), Some(AgentMessage::ToolResult { .. })) {
+    if matches!(
+        messages.get(index + 1),
+        Some(AgentMessage::ToolResult { .. })
+    ) {
         return false;
     }
     if prefix_ends_with_open_tool_exchange(messages, index) {
         return false;
+    }
+    if suffix_starts_with_unresolved_tool_calls(messages, index) {
+        return false;
+    }
+    true
+}
+
+/// Whether the retained suffix `messages[index+1..]` starts with an assistant
+/// message whose tool calls are not all followed by matching tool results.
+/// Splitting before such an assistant would leave an invalid assistant-with-
+/// tool-calls message in the context without the required tool results.
+fn suffix_starts_with_unresolved_tool_calls(messages: &[AgentMessage], index: usize) -> bool {
+    let Some(AgentMessage::Assistant { tool_calls, .. }) = messages.get(index + 1) else {
+        return false;
+    };
+    if tool_calls.is_empty() {
+        return false;
+    }
+    let needed = tool_calls.len();
+    let mut found = 0usize;
+    for message in messages.iter().skip(index + 2) {
+        if matches!(message, AgentMessage::ToolResult { .. }) {
+            found += 1;
+            if found >= needed {
+                return false;
+            }
+        } else {
+            break;
+        }
     }
     true
 }
@@ -190,7 +222,8 @@ pub fn compute_compact_count(
                 let reaches_max = recent_messages >= strategy.max_recent_messages
                     || (max_context_tokens > 0
                         && recent_size
-                            >= (max_context_tokens as f64 * strategy.max_recent_size_ratio) as usize);
+                            >= (max_context_tokens as f64 * strategy.max_recent_size_ratio)
+                                as usize);
                 if reaches_max && best_n.is_some() {
                     break;
                 }
@@ -288,7 +321,10 @@ pub fn render_messages_to_text(messages: &[AgentMessage]) -> String {
 
 fn render_single_message(message: &AgentMessage, index: usize) -> String {
     let role = message_role_label(message);
-    let mut lines = vec![format!("--- message {pos} role={role} ---", pos = index + 1)];
+    let mut lines = vec![format!(
+        "--- message {pos} role={role} ---",
+        pos = index + 1
+    )];
 
     match message {
         AgentMessage::System { content }
@@ -306,7 +342,10 @@ fn render_single_message(message: &AgentMessage, index: usize) -> String {
                 lines.push("tool calls:".to_owned());
                 for call in tool_calls {
                     lines.push(format!("  - {}: {}", call.id, call.name));
-                    lines.push(format!("    arguments:\n{}", indent_block(&call.arguments.to_string(), 6)));
+                    lines.push(format!(
+                        "    arguments:\n{}",
+                        indent_block(&call.arguments.to_string(), 6)
+                    ));
                 }
             }
         }
@@ -497,10 +536,9 @@ pub async fn run_compaction(
     source: CompactionSource,
     cancel_token: &CancellationToken,
 ) -> Result<bool, CompactionError> {
-    let Some(settings) = &config.compaction
-        else {
-            return Ok(false);
-        };
+    let Some(settings) = &config.compaction else {
+        return Ok(false);
+    };
     if !settings.enabled {
         return Ok(false);
     }
@@ -552,14 +590,8 @@ pub async fn run_compaction(
         percent: 70,
     });
 
-    let summary_text = generate_compaction_summary(
-        model,
-        config,
-        messages_to_compact,
-        None,
-        cancel_token,
-    )
-    .await?;
+    let summary_text =
+        generate_compaction_summary(model, config, messages_to_compact, None, cancel_token).await?;
 
     let kept_messages = &messages[compacted_count..];
     let tokens_after =
@@ -806,5 +838,60 @@ mod tests {
         let short = user_msg("hi");
         let long = user_msg(&"x".repeat(1000));
         assert!(estimate_message_tokens(&long) > estimate_message_tokens(&short));
+    }
+
+    #[test]
+    fn can_split_after_rejects_suffix_starting_with_unresolved_assistant_tool_calls() {
+        // A previous exchange is fully resolved, but the next assistant has no results yet.
+        let messages = vec![
+            user_msg("run"),
+            assistant_with_tools(vec![tool_call("tc0")]),
+            tool_result("tc0"),
+            assistant_with_tools(vec![tool_call("tc1")]),
+        ];
+        // Splitting after the resolved tc0 result would leave an orphan assistant with tool calls.
+        assert!(!can_split_after(&messages, 2));
+    }
+
+    #[test]
+    fn can_split_after_allows_suffix_starting_with_resolved_assistant_tool_calls() {
+        let messages = vec![
+            user_msg("run"),
+            assistant_with_tools(vec![tool_call("tc0")]),
+            tool_result("tc0"),
+            assistant_with_tools(vec![tool_call("tc1")]),
+            tool_result("tc1"),
+        ];
+        // Splitting after tc0 result is fine because the next assistant already has its result.
+        assert!(can_split_after(&messages, 2));
+    }
+
+    #[test]
+    fn can_split_after_rejects_partial_parallel_tool_results_in_suffix() {
+        let messages = vec![
+            user_msg("run"),
+            assistant_with_tools(vec![tool_call("tc0")]),
+            tool_result("tc0"),
+            assistant_with_tools(vec![tool_call("tc1"), tool_call("tc2")]),
+            tool_result("tc1"),
+        ];
+        // suffix would start with assistant that still needs tc2 result
+        assert!(!can_split_after(&messages, 2));
+    }
+
+    #[test]
+    fn compute_compact_count_manual_after_dropping_incomplete_trailing_tool_turn() {
+        let messages = vec![
+            user_msg("task 1"),
+            assistant_text("done 1"),
+            user_msg("task 2"),
+            assistant_with_tools(vec![tool_call("tc1")]),
+        ];
+        let messages = crate::sanitize_tool_exchange_messages(messages);
+        let strategy = CompactionStrategy::default();
+        let count = compute_compact_count(&messages, CompactionSource::Manual, &strategy, 0);
+        // After dropping the unresolved trailing assistant, manual compaction can
+        // safely compact the prefix up to the previous safe boundary.
+        assert_eq!(count, 2);
     }
 }

@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     future::Future,
     path::PathBuf,
-    sync::{Arc, Mutex, RwLock, atomic::AtomicBool},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream, stream::FuturesUnordered};
@@ -26,12 +26,12 @@ use crate::tools::BackgroundTaskManager;
 use crate::tools::normalize_path;
 use crate::{
     AgentEvent, AgentMessage, AgentToolCall, CompactionPhase, CompactionReason, CompactionSource,
-    CompactionSummary, Content, InjectionManager, PermissionApprovalDecision, PermissionMode,
-    PermissionOperation, PlanMode, PlanModeGuard, ProcessSupervisor, QueueKind, StopReason,
-    TodoEventData, ToolAccess,
-    ToolContext, ToolError, ToolRegistry, ToolResult, ToolUpdateCallback, check_plan_mode_guard,
-    is_active_plan_file_path,
+    CompactionSummary, Content, ImageRef, InjectionManager, PermissionApprovalDecision,
+    PermissionMode, PermissionOperation, PlanMode, PlanModeGuard, ProcessSupervisor, QueueKind,
+    StopReason, TodoEventData, ToolAccess, ToolContext, ToolError, ToolRegistry, ToolResult,
+    ToolUpdateCallback, check_plan_mode_guard,
     compaction::{self, CompactionStrategy},
+    is_active_plan_file_path, sanitize_tool_exchange_messages,
 };
 
 pub type ContextTransform = Arc<dyn Fn(&[AgentMessage]) -> Vec<AgentMessage> + Send + Sync>;
@@ -197,6 +197,11 @@ pub struct AgentConfig {
     /// Home directory used for plan file creation (e.g. `~/.neo`).
     /// Falls back to `workspace_root` if unset.
     pub home_dir: Option<PathBuf>,
+    /// Session directory for this turn. Used to store plan files and image blobs
+    /// scoped to the active session.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub session_directory: Option<PathBuf>,
     /// Shared todo list state. Used by `TodoTool` read mode and kept in sync
     /// with replayed/runtime `TodoUpdated` events.
     #[serde(skip)]
@@ -206,11 +211,12 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub background_tasks: BackgroundTaskManager,
-    /// Shared flag for manual `/compact` requests. Set by the TUI, cleared by
-    /// `maybe_compact` after consuming the request.
+    /// Shared manual `/compact` request. `Some(instruction)` means a manual
+    /// compaction was requested with an optional custom instruction; `None`
+    /// means no request is pending. Set by the TUI and taken by `maybe_compact`.
     #[serde(skip)]
     #[schemars(skip)]
-    pub manual_compact_requested: Arc<std::sync::atomic::AtomicBool>,
+    pub manual_compact_request: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl AgentConfig {
@@ -245,9 +251,10 @@ impl AgentConfig {
             session_approvals: Arc::new(Mutex::new(std::collections::HashSet::new())),
             prefix_approval_rules: Arc::new(Mutex::new(ApprovalRuleStore::default())),
             home_dir: None,
+            session_directory: None,
             todos: Arc::new(Mutex::new(Vec::new())),
             background_tasks: BackgroundTaskManager::new(),
-            manual_compact_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -387,6 +394,13 @@ impl AgentConfig {
     #[must_use]
     pub fn with_home_dir(mut self, home_dir: impl Into<PathBuf>) -> Self {
         self.home_dir = Some(home_dir.into());
+        self
+    }
+
+    /// Set the session directory used for plan files and image blobs.
+    #[must_use]
+    pub fn with_session_directory(mut self, session_directory: impl Into<PathBuf>) -> Self {
+        self.session_directory = Some(session_directory.into());
         self
     }
 
@@ -597,6 +611,9 @@ impl AgentContext {
     pub fn apply_compaction(&mut self, summary: CompactionSummary) {
         let keep_from = summary.first_kept_message_index.min(self.messages.len());
         let mut kept = self.messages.split_off(keep_from);
+        // Drop any trailing assistant-with-tool-calls whose results were
+        // compacted away, so the retained tail is always provider-valid.
+        kept = sanitize_tool_exchange_messages(kept);
         // Inject the LLM-generated summary as a system message so the model
         // has the compacted context when continuing the conversation.
         let summary_msg = AgentMessage::system_text(format!(
@@ -648,7 +665,7 @@ impl AgentContext {
         for event in events {
             context.apply_replay_event(event);
         }
-        context.messages = drop_incomplete_trailing_tool_turn(context.messages);
+        context.messages = sanitize_tool_exchange_messages(context.messages);
         context
     }
 
@@ -719,54 +736,6 @@ impl AgentContext {
             AgentEvent::TodoUpdated { todos, .. } => self.todos.clone_from(todos),
             _ => {}
         }
-    }
-}
-
-fn drop_incomplete_trailing_tool_turn(messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
-    let Some(assistant_index) = messages.iter().rposition(|message| {
-        matches!(
-            message,
-            AgentMessage::Assistant {
-                tool_calls,
-                stop_reason: StopReason::ToolUse,
-                ..
-            } if !tool_calls.is_empty()
-        )
-    }) else {
-        return messages;
-    };
-
-    if messages[assistant_index + 1..].iter().any(|message| {
-        matches!(
-            message,
-            AgentMessage::User { .. } | AgentMessage::Assistant { .. }
-        )
-    }) {
-        return messages;
-    }
-
-    let AgentMessage::Assistant { tool_calls, .. } = &messages[assistant_index] else {
-        return messages;
-    };
-    let mut missing_tool_result_ids = tool_calls
-        .iter()
-        .map(|tool_call| tool_call.id.as_str())
-        .collect::<Vec<_>>();
-    for message in &messages[assistant_index + 1..] {
-        let AgentMessage::ToolResult { tool_call_id, .. } = message else {
-            continue;
-        };
-        if let Some(index) = missing_tool_result_ids
-            .iter()
-            .position(|id| *id == tool_call_id)
-        {
-            missing_tool_result_ids.remove(index);
-        }
-    }
-    if missing_tool_result_ids.is_empty() {
-        messages
-    } else {
-        messages[..assistant_index].to_vec()
     }
 }
 
@@ -849,7 +818,6 @@ pub struct AgentRuntime {
     model: Arc<dyn ModelClient>,
     tools: Option<Arc<ToolRegistry>>,
     skills: Option<Arc<SkillStore>>,
-    skill_invocation_active: Arc<AtomicBool>,
     goal_manager: Option<Arc<GoalManager>>,
     steer_input: SteerInputHandle,
 }
@@ -862,7 +830,6 @@ impl AgentRuntime {
             model,
             tools: None,
             skills: None,
-            skill_invocation_active: Arc::new(AtomicBool::new(false)),
             goal_manager: None,
             steer_input: SteerInputHandle::new(),
         }
@@ -881,7 +848,6 @@ impl AgentRuntime {
             model,
             tools: Some(Arc::new(tools)),
             skills: None,
-            skill_invocation_active: Arc::new(AtomicBool::new(false)),
             goal_manager: None,
             steer_input: SteerInputHandle::new(),
         }
@@ -902,7 +868,6 @@ impl AgentRuntime {
             model,
             tools: Some(Arc::new(tools)),
             skills: Some(Arc::new(skills)),
-            skill_invocation_active: Arc::new(AtomicBool::new(false)),
             goal_manager: None,
             steer_input: SteerInputHandle::new(),
         }
@@ -970,7 +935,6 @@ impl AgentRuntime {
         let model = Arc::clone(&self.model);
         let tools = self.tools.clone();
         let skills = self.skills.clone();
-        let skill_invocation_active = Arc::clone(&self.skill_invocation_active);
         let goal_manager = self.goal_manager.clone();
         let config = self.config.clone();
         let steer_input = self.steer_input.clone();
@@ -994,7 +958,6 @@ impl AgentRuntime {
                 config,
                 tools,
                 skills,
-                skill_invocation_active,
                 goal_manager,
                 steer_input,
                 &mut emitter,
@@ -1036,6 +999,64 @@ impl AgentRuntime {
         )
         .boxed()
     }
+
+    /// Run a compaction-only turn.  This does not append a user message and does
+    /// not call the model afterwards; it simply executes any pending compaction
+    /// (manual or automatic) and finishes.  Used by the TUI's `/compact` slash
+    /// command when the session is idle.
+    pub fn run_compaction_turn<'a>(
+        &'a self,
+        context: &'a mut AgentContext,
+    ) -> AgentEventStream<'a> {
+        self.run_compaction_turn_with_cancel(context, CancellationToken::new())
+    }
+
+    /// Run a compaction-only turn with an external cancellation token.
+    pub fn run_compaction_turn_with_cancel<'a>(
+        &'a self,
+        context: &'a mut AgentContext,
+        cancel_token: CancellationToken,
+    ) -> AgentEventStream<'a> {
+        let live_context = context.clone();
+        let model = Arc::clone(&self.model);
+        let config = self.config.clone();
+        let process_supervisor = ProcessSupervisor::default();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let (final_sender, final_receiver) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let mut emitter = EventEmitter::new(sender, live_context);
+            let turn = emitter.context.turns.saturating_add(1);
+            emitter.emit(AgentEvent::RunStarted { turn });
+            maybe_compact(&model, &config, &mut emitter, &cancel_token).await;
+            process_supervisor.cleanup_all().await;
+            emit_run_finished(&config, &mut emitter, turn, StopReason::EndTurn).await;
+            let _ = final_sender.send(emitter.context);
+        });
+
+        stream::unfold(
+            SpawnedRun {
+                receiver,
+                final_receiver: Some(final_receiver),
+                context,
+            },
+            |mut state| async move {
+                if let Some(event) = state.receiver.recv().await {
+                    if let Ok(event) = &event {
+                        EventEmitter::apply_to_context(state.context, event);
+                    }
+                    return Some((event, state));
+                }
+                if let Some(final_receiver) = state.final_receiver.take()
+                    && let Ok(final_context) = final_receiver.await
+                {
+                    *state.context = final_context;
+                }
+                None
+            },
+        )
+        .boxed()
+    }
 }
 
 struct SpawnedRun<'a> {
@@ -1044,8 +1065,95 @@ struct SpawnedRun<'a> {
     context: &'a mut AgentContext,
 }
 
+/// Recursively replace `ImageRef::Blob` with `ImageRef::Base64` by reading
+/// `<session_dir>/blobs/<sha256>.*`. If the blob file is missing or the
+/// session directory is unknown, the blob is replaced with an empty base64.
+async fn resolve_image_blobs(
+    messages: Vec<AgentMessage>,
+    session_dir: Option<&std::path::Path>,
+) -> Vec<AgentMessage> {
+    let mut out = Vec::with_capacity(messages.len());
+    for message in messages {
+        out.push(match message {
+            AgentMessage::User { content } => AgentMessage::User {
+                content: resolve_content_blobs(content, session_dir).await,
+            },
+            AgentMessage::Assistant {
+                content,
+                tool_calls,
+                stop_reason,
+            } => AgentMessage::Assistant {
+                content: resolve_content_blobs(content, session_dir).await,
+                tool_calls,
+                stop_reason,
+            },
+            AgentMessage::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                is_error,
+            } => AgentMessage::ToolResult {
+                tool_call_id,
+                tool_name,
+                content: resolve_content_blobs(content, session_dir).await,
+                is_error,
+            },
+            AgentMessage::System { content } => AgentMessage::System {
+                content: resolve_content_blobs(content, session_dir).await,
+            },
+        });
+    }
+    out
+}
+
+async fn resolve_content_blobs(
+    content: Vec<Content>,
+    session_dir: Option<&std::path::Path>,
+) -> Vec<Content> {
+    let mut out = Vec::with_capacity(content.len());
+    for part in content {
+        out.push(match part {
+            Content::Image {
+                mime_type,
+                data: ImageRef::Blob(sha256),
+            } => {
+                let bytes = if let Some(dir) = session_dir {
+                    read_blob_bytes(dir, &sha256).await.unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                Content::Image {
+                    mime_type,
+                    data: ImageRef::Base64(base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &bytes,
+                    )),
+                }
+            }
+            other => other,
+        });
+    }
+    out
+}
+
+async fn read_blob_bytes(session_dir: &std::path::Path, sha256: &str) -> Option<Vec<u8>> {
+    let blob_dir = session_dir.join("blobs");
+    let mut entries = tokio::fs::read_dir(&blob_dir).await.ok()?;
+    while let Some(entry) = entries.next_entry().await.ok()? {
+        let name = entry.file_name();
+        let name = name.to_str()?;
+        if name.starts_with(sha256) {
+            return tokio::fs::read(entry.path()).await.ok();
+        }
+    }
+    None
+}
+
 /// Compute the workspace-scoped plans directory.
 fn plan_mode_plans_dir(config: &AgentConfig) -> Option<PathBuf> {
+    if let Some(session_dir) = config.session_directory.as_deref() {
+        return Some(session_dir.join("plans"));
+    }
     let home = config.home_dir.as_deref()?;
     if let Some(workdir) = config.workspace_root.as_deref() {
         Some(crate::session::workspace_sessions_dir(&home.join("sessions"), workdir).join("plans"))
@@ -1070,9 +1178,15 @@ async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatReque
     } else {
         context.messages.clone()
     };
+    // Resolve blob references to inline base64 before sending to the provider.
+    let context_messages =
+        resolve_image_blobs(context_messages, config.session_directory.as_deref()).await;
     // Apply micro compaction (experimental): truncate old, large tool results
     // to reclaim context tokens without a full LLM-driven compaction.
-    let context_messages = if config.compaction.is_some_and(|settings| settings.micro_enabled) {
+    let context_messages = if config
+        .compaction
+        .is_some_and(|settings| settings.micro_enabled)
+    {
         let settings = config.compaction.expect("checked above");
         crate::compaction::micro::apply_micro_compaction(
             &context_messages,
@@ -1084,6 +1198,11 @@ async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatReque
     } else {
         context_messages
     };
+    // Never send a provider request with an assistant message that has pending
+    // tool_calls but no matching tool results.  This guards against incomplete
+    // trailing tool turns and against compaction boundaries that accidentally
+    // orphan such a message.
+    let context_messages = sanitize_tool_exchange_messages(context_messages);
     messages.extend(context_messages.iter().map(|message| {
         if config.replay_reasoning {
             message.to_chat_message()
@@ -1311,14 +1430,12 @@ async fn run_agent_turn(
     config: AgentConfig,
     tools: Option<Arc<ToolRegistry>>,
     skills: Option<Arc<SkillStore>>,
-    skill_invocation_active: Arc<AtomicBool>,
     goal_manager: Option<Arc<GoalManager>>,
     steer_input: SteerInputHandle,
     emitter: &mut EventEmitter,
     cancel_token: CancellationToken,
     process_supervisor: ProcessSupervisor,
 ) -> Result<(), AgentRuntimeError> {
-    skill_invocation_active.store(false, std::sync::atomic::Ordering::SeqCst);
     let mut final_turn: u32;
     let mut final_stop_reason = StopReason::EndTurn;
     drain_live_steer_input(&steer_input, emitter);
@@ -1383,7 +1500,6 @@ async fn run_agent_turn(
             &config,
             registry,
             skills.as_deref(),
-            &skill_invocation_active,
             turn,
             &tool_calls,
             emitter,
@@ -1793,10 +1909,11 @@ fn append_queued_messages(emitter: &mut EventEmitter, messages: Vec<AgentMessage
 /// LLM-driven structured summary (see `compaction` module).
 ///
 /// Compaction is triggered when:
-/// - `manual_compact_requested` flag is set (from `/compact`), or
+/// - `manual_compact_request` is set (from `/compact`), or
 /// - the token estimate exceeds the strategy threshold.
 ///
 /// The LLM call runs inline (blocking the turn) and hard-fails on any error.
+#[allow(clippy::too_many_lines)]
 async fn maybe_compact(
     model: &Arc<dyn ModelClient>,
     config: &AgentConfig,
@@ -1810,9 +1927,16 @@ async fn maybe_compact(
         return;
     }
 
-    let force = config
-        .manual_compact_requested
-        .swap(false, std::sync::atomic::Ordering::SeqCst);
+    let (force, custom_instruction) = match config.manual_compact_request.lock() {
+        Ok(mut request) => {
+            let instruction = request.take();
+            (instruction.is_some(), instruction)
+        }
+        Err(poisoned) => {
+            let instruction = poisoned.into_inner().take();
+            (instruction.is_some(), instruction)
+        }
+    };
     let source = if force {
         CompactionSource::Manual
     } else {
@@ -1821,7 +1945,9 @@ async fn maybe_compact(
 
     // Clone the messages out of the context so we can borrow `emitter` mutably
     // for event emission while still referencing the pre-compaction history.
-    let messages = emitter.context.messages().to_vec();
+    // Drop any trailing incomplete tool turn first so it is not treated as a
+    // safe suffix boundary.
+    let messages = sanitize_tool_exchange_messages(emitter.context.messages().to_vec());
     let max_context_tokens = config.model.capabilities.max_context_tokens.unwrap_or(0) as usize;
     let used_tokens = compaction::estimate_messages_tokens(&messages);
 
@@ -1829,7 +1955,9 @@ async fn maybe_compact(
         trigger_ratio: settings.trigger_ratio,
         // Use keep_recent_messages as the auto-compaction retention limit so
         // the configured value directly controls how many messages survive.
-        max_recent_messages: settings.keep_recent_messages.min(settings.max_recent_messages),
+        max_recent_messages: settings
+            .keep_recent_messages
+            .min(settings.max_recent_messages),
         max_recent_size_ratio: 0.2,
         reserved_context_tokens: settings.reserved_context_tokens,
     };
@@ -1894,7 +2022,7 @@ async fn maybe_compact(
         model,
         config,
         &messages_to_compact,
-        None,
+        custom_instruction.as_deref(),
         cancel_token,
     )
     .await
@@ -2033,7 +2161,6 @@ async fn execute_tool_calls(
     config: &AgentConfig,
     registry: &ToolRegistry,
     skills: Option<&SkillStore>,
-    skill_invocation_active: &AtomicBool,
     turn: u32,
     tool_calls: &[AgentToolCall],
     emitter: &mut EventEmitter,
@@ -2045,7 +2172,6 @@ async fn execute_tool_calls(
             config,
             registry,
             skills,
-            skill_invocation_active,
             turn,
             tool_calls,
             emitter,
@@ -2063,7 +2189,6 @@ async fn execute_tool_calls(
             config,
             registry,
             skills,
-            skill_invocation_active,
             turn,
             tool_calls,
             emitter,
@@ -2081,7 +2206,6 @@ async fn execute_tool_calls(
             config,
             registry,
             skills,
-            skill_invocation_active,
             turn,
             tool_calls,
             emitter,
@@ -2095,7 +2219,6 @@ async fn execute_tool_calls(
         config,
         registry,
         skills,
-        skill_invocation_active,
         turn,
         tool_calls,
         emitter,
@@ -2160,7 +2283,6 @@ async fn execute_tool_calls_sequential(
     config: &AgentConfig,
     registry: &ToolRegistry,
     skills: Option<&SkillStore>,
-    skill_invocation_active: &AtomicBool,
     turn: u32,
     tool_calls: &[AgentToolCall],
     emitter: &mut EventEmitter,
@@ -2184,7 +2306,6 @@ async fn execute_tool_calls_sequential(
                     config,
                     registry,
                     skills,
-                    skill_invocation_active,
                     &tool_context,
                     turn,
                     tool_call,
@@ -2217,7 +2338,6 @@ async fn execute_tool_calls_parallel(
     config: &AgentConfig,
     registry: &ToolRegistry,
     skills: Option<&SkillStore>,
-    skill_invocation_active: &AtomicBool,
     turn: u32,
     tool_calls: &[AgentToolCall],
     emitter: &mut EventEmitter,
@@ -2282,15 +2402,9 @@ async fn execute_tool_calls_parallel(
                 tool_call.id.clone(),
                 tool_call.name.clone(),
             ));
-            let mut result = run_tool_with_cancel(
-                skills,
-                skill_invocation_active,
-                registry,
-                &tool_call,
-                &tool_context,
-                &cancel_token,
-            )
-            .await;
+            let mut result =
+                run_tool_with_cancel(skills, registry, &tool_call, &tool_context, &cancel_token)
+                    .await;
             if !cancel_token.is_cancelled() {
                 result = after_tool_result(&config, &tool_call, result, &cancel_token).await;
             }
@@ -2591,7 +2705,6 @@ async fn prepare_and_run_tool(
     config: &AgentConfig,
     registry: &ToolRegistry,
     skills: Option<&SkillStore>,
-    skill_invocation_active: &AtomicBool,
     tool_context: &ToolContext,
     turn: u32,
     tool_call: &AgentToolCall,
@@ -2614,15 +2727,8 @@ async fn prepare_and_run_tool(
             if tool_call.name == "Bash" {
                 emit_shell_started(turn, tool_call, &context, emitter);
             }
-            let result = run_tool_with_cancel(
-                skills,
-                skill_invocation_active,
-                registry,
-                tool_call,
-                &context,
-                cancel_token,
-            )
-            .await;
+            let result =
+                run_tool_with_cancel(skills, registry, tool_call, &context, cancel_token).await;
             if tool_call.name == "Skill" && !result.is_error {
                 emitter.emit(AgentEvent::SkillActivated {
                     turn,
@@ -3597,14 +3703,13 @@ fn make_tool_update_callback(
 
 async fn run_tool_with_cancel(
     skills: Option<&SkillStore>,
-    skill_invocation_active: &AtomicBool,
     registry: &ToolRegistry,
     tool_call: &AgentToolCall,
     tool_context: &ToolContext,
     cancel_token: &CancellationToken,
 ) -> ToolResult {
     if tool_call.name == "Skill" {
-        return execute_invoke_skill(skills, skill_invocation_active, tool_call);
+        return execute_invoke_skill(skills, tool_call);
     }
     tokio::select! {
         biased;
@@ -3640,17 +3745,10 @@ fn invoke_skill_tool_spec() -> ToolSpec {
     }
 }
 
-fn execute_invoke_skill(
-    skills: Option<&SkillStore>,
-    skill_invocation_active: &AtomicBool,
-    tool_call: &AgentToolCall,
-) -> ToolResult {
+fn execute_invoke_skill(skills: Option<&SkillStore>, tool_call: &AgentToolCall) -> ToolResult {
     let Some(skills) = skills else {
         return ToolResult::error("skill system is not enabled");
     };
-    if skill_invocation_active.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return ToolResult::error("nested skill invocation is not allowed");
-    }
     let request = match skill_tool_request(&tool_call.arguments) {
         Ok(request) => request,
         Err(message) => return ToolResult::error(message),
@@ -3761,8 +3859,8 @@ fn default_tool_context(
 mod tests {
     use super::*;
     use crate::skills::{SkillArgument, SkillManifest, SkillSource, SkillType};
+    use futures::TryStreamExt;
     use serde_json::json;
-    use std::sync::atomic::Ordering;
 
     fn write_skill(root: &std::path::Path, name: &str, skill_type: &str, body: &str) {
         let skill_dir = root.join(name);
@@ -3802,11 +3900,9 @@ arguments:
         let temp = tempfile::tempdir().expect("tempdir");
         write_skill(temp.path(), "review", "prompt", "Review $target.");
         let store = skill_store(temp.path());
-        let active = AtomicBool::new(false);
 
         let result = execute_invoke_skill(
             Some(&store),
-            &active,
             &skill_tool_call(json!({
                 "skill": "review",
                 "arguments": {
@@ -3817,56 +3913,63 @@ arguments:
         );
 
         assert_eq!(result, ToolResult::ok("Review src/lib.rs.\n"));
-        assert!(active.load(Ordering::SeqCst));
     }
 
     #[test]
-    fn execute_invoke_skill_rejects_disabled_missing_nested_and_flow_cases() {
+    fn execute_invoke_skill_rejects_disabled_missing_and_flow_cases() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_skill(temp.path(), "manual-flow", "flow", "Manual only.");
         let store = skill_store(temp.path());
 
-        let no_store = execute_invoke_skill(
-            None,
-            &AtomicBool::new(false),
-            &skill_tool_call(json!({"skill": "review"})),
-        );
+        let no_store = execute_invoke_skill(None, &skill_tool_call(json!({"skill": "review"})));
         assert_eq!(no_store.content, "skill system is not enabled");
         assert!(no_store.is_error);
 
-        let missing_name = execute_invoke_skill(
-            Some(&store),
-            &AtomicBool::new(false),
-            &skill_tool_call(json!({"arguments": {}})),
-        );
+        let missing_name =
+            execute_invoke_skill(Some(&store), &skill_tool_call(json!({"arguments": {}})));
         assert_eq!(
             missing_name.content,
             "Skill requires a `skill` string argument"
         );
 
-        let missing_skill = execute_invoke_skill(
-            Some(&store),
-            &AtomicBool::new(false),
-            &skill_tool_call(json!({"skill": "review"})),
-        );
+        let missing_skill =
+            execute_invoke_skill(Some(&store), &skill_tool_call(json!({"skill": "review"})));
         assert_eq!(missing_skill.content, "skill `review` is not available");
 
         let flow = execute_invoke_skill(
             Some(&store),
-            &AtomicBool::new(false),
             &skill_tool_call(json!({"skill": "manual-flow"})),
         );
         assert_eq!(
             flow.content,
             "skill `manual-flow` is type `flow` and can only be invoked manually via /skill:manual-flow"
         );
+    }
 
-        let nested = execute_invoke_skill(
+    #[test]
+    fn execute_invoke_skill_allows_multiple_invocations_in_same_turn() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_skill(temp.path(), "review", "prompt", "Review $target.");
+        write_skill(temp.path(), "summarize", "prompt", "Summarize $target.");
+        let store = skill_store(temp.path());
+
+        let first = execute_invoke_skill(
             Some(&store),
-            &AtomicBool::new(true),
-            &skill_tool_call(json!({"skill": "manual-flow"})),
+            &skill_tool_call(json!({
+                "skill": "review",
+                "arguments": {"target": "src/lib.rs"}
+            })),
         );
-        assert_eq!(nested.content, "nested skill invocation is not allowed");
+        let second = execute_invoke_skill(
+            Some(&store),
+            &skill_tool_call(json!({
+                "skill": "summarize",
+                "arguments": {"target": "src/main.rs"}
+            })),
+        );
+
+        assert_eq!(first, ToolResult::ok("Review src/lib.rs.\n"));
+        assert_eq!(second, ToolResult::ok("Summarize src/main.rs.\n"));
     }
 
     #[test]
@@ -3922,5 +4025,145 @@ arguments:
 
         assert!(!skill_is_manual_only(&prompt));
         assert!(skill_is_manual_only(&flow));
+    }
+
+    fn fake_compaction_config() -> AgentConfig {
+        let mut config = AgentConfig::for_model(neo_ai::ModelSpec {
+            provider: neo_ai::ProviderId("fake".to_owned()),
+            model: "fake".to_owned(),
+            api: neo_ai::ApiKind::OpenAiChatCompletions,
+            capabilities: neo_ai::ModelCapabilities::chat()
+                .with_max_context_tokens(100_000)
+                .with_max_output_tokens(4_096),
+        });
+        config = config.with_compaction(CompactionSettings {
+            enabled: true,
+            max_estimated_tokens: 100_000,
+            keep_recent_messages: 4,
+            trigger_ratio: 0.85,
+            reserved_context_tokens: 50_000,
+            max_recent_messages: 4,
+            micro_enabled: false,
+            micro_keep_recent: 20,
+        });
+        config
+    }
+
+    #[tokio::test]
+    async fn compaction_only_turn_runs_compaction_without_model_reply() {
+        let fake = neo_ai::providers::fake::FakeModelClient::new(vec![
+            neo_ai::AiStreamEvent::TextDelta {
+                text: "summary".to_owned(),
+            },
+            neo_ai::AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ]);
+        let mut config = fake_compaction_config();
+        config.manual_compact_request = Arc::new(std::sync::Mutex::new(Some(String::new())));
+        let runtime = AgentRuntime::new(config, Arc::new(fake));
+        let mut context = AgentContext::new();
+        context.append_message(AgentMessage::user_text("hello"));
+        context.append_message(AgentMessage::assistant(
+            vec![Content::text("hi")],
+            Vec::new(),
+            StopReason::EndTurn,
+        ));
+        context.append_message(AgentMessage::user_text("world"));
+        context.append_message(AgentMessage::assistant(
+            vec![Content::text("yes")],
+            Vec::new(),
+            StopReason::EndTurn,
+        ));
+
+        let events: Vec<AgentEvent> = runtime
+            .run_compaction_turn(&mut context)
+            .try_collect()
+            .await
+            .expect("compaction turn succeeds");
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::CompactionStarted { .. })),
+            "missing CompactionStarted"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::CompactionApplied { .. })),
+            "missing CompactionApplied"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                AgentEvent::MessageAppended {
+                    message: AgentMessage::Assistant { .. },
+                    ..
+                }
+            )),
+            "compaction-only turn must not produce an assistant reply"
+        );
+        assert!(context.compaction_summary().is_some());
+    }
+
+    #[tokio::test]
+    async fn compaction_turn_passes_custom_instruction_to_summary_llm() {
+        let fake = neo_ai::providers::fake::FakeModelClient::new(vec![
+            neo_ai::AiStreamEvent::TextDelta {
+                text: "summary".to_owned(),
+            },
+            neo_ai::AiStreamEvent::MessageEnd {
+                stop_reason: neo_ai::StopReason::EndTurn,
+                usage: None,
+            },
+        ]);
+        let mut config = fake_compaction_config();
+        config.manual_compact_request =
+            Arc::new(std::sync::Mutex::new(Some("keep the todo list".to_owned())));
+        let runtime = AgentRuntime::new(config, Arc::new(fake.clone()));
+        let mut context = AgentContext::new();
+        context.append_message(AgentMessage::user_text("hello"));
+        context.append_message(AgentMessage::assistant(
+            vec![Content::text("hi")],
+            Vec::new(),
+            StopReason::EndTurn,
+        ));
+        context.append_message(AgentMessage::user_text("world"));
+        context.append_message(AgentMessage::assistant(
+            vec![Content::text("yes")],
+            Vec::new(),
+            StopReason::EndTurn,
+        ));
+
+        let _events: Vec<AgentEvent> = runtime
+            .run_compaction_turn(&mut context)
+            .try_collect()
+            .await
+            .expect("compaction turn succeeds");
+
+        let requests = fake.requests();
+        let request = requests.first().expect("summary LLM was called");
+        let last_message_text = request
+            .messages
+            .last()
+            .and_then(|message| match message {
+                neo_ai::ChatMessage::User { content } => Some(
+                    content
+                        .iter()
+                        .filter_map(|part| match part {
+                            neo_ai::ContentPart::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert!(
+            last_message_text.contains("keep the todo list"),
+            "instruction not in compaction prompt: {last_message_text}"
+        );
     }
 }

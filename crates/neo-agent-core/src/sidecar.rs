@@ -5,7 +5,7 @@
 //! telling the model to answer with text only and provides a deny-all hook
 //! that can be installed as a `BeforeToolCallHook`.
 
-use crate::{AgentMessage, AgentToolCall, StopReason, ToolResult};
+use crate::{AgentMessage, AgentToolCall, ToolResult, sanitize_tool_exchange_messages};
 
 /// System reminder appended to sidecar projections.
 ///
@@ -27,64 +27,9 @@ pub const SIDE_QUESTION_SYSTEM_REMINDER: &str = "This is a side-channel conversa
 /// slice is never mutated.
 #[must_use]
 pub fn sidecar_projected_messages(parent: &[AgentMessage]) -> Vec<AgentMessage> {
-    let mut messages = drop_incomplete_trailing_tool_turn(parent.to_vec());
+    let mut messages = sanitize_tool_exchange_messages(parent.to_vec());
     messages.push(AgentMessage::system_text(SIDE_QUESTION_SYSTEM_REMINDER));
     messages
-}
-
-/// Drop an incomplete trailing assistant tool-call turn from a message list.
-///
-/// If the last assistant message stopped for tool use and not all of its tool
-/// calls have matching `ToolResult` messages after it, that assistant turn and
-/// any following tool results are removed. This keeps the sidecar projection
-/// from presenting a tool call that the side model can never answer.
-#[must_use]
-pub fn drop_incomplete_trailing_tool_turn(messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
-    let Some(assistant_index) = messages.iter().rposition(|message| {
-        matches!(
-            message,
-            AgentMessage::Assistant {
-                tool_calls,
-                stop_reason: StopReason::ToolUse,
-                ..
-            } if !tool_calls.is_empty()
-        )
-    }) else {
-        return messages;
-    };
-
-    if messages[assistant_index + 1..].iter().any(|message| {
-        matches!(
-            message,
-            AgentMessage::User { .. } | AgentMessage::Assistant { .. }
-        )
-    }) {
-        return messages;
-    }
-
-    let AgentMessage::Assistant { tool_calls, .. } = &messages[assistant_index] else {
-        return messages;
-    };
-    let mut missing_tool_result_ids = tool_calls
-        .iter()
-        .map(|tool_call| tool_call.id.as_str())
-        .collect::<Vec<_>>();
-    for message in &messages[assistant_index + 1..] {
-        let AgentMessage::ToolResult { tool_call_id, .. } = message else {
-            continue;
-        };
-        if let Some(index) = missing_tool_result_ids
-            .iter()
-            .position(|id| *id == tool_call_id)
-        {
-            missing_tool_result_ids.remove(index);
-        }
-    }
-    if missing_tool_result_ids.is_empty() {
-        messages
-    } else {
-        messages[..assistant_index].to_vec()
-    }
 }
 
 /// Deny-all hook suitable for use as a `BeforeToolCallHook` in a sidecar.
@@ -100,6 +45,7 @@ pub fn deny_sidecar_tool_call(_call: &AgentToolCall) -> Option<ToolResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::StopReason;
 
     fn message_text(message: &AgentMessage) -> String {
         let content = match message {
