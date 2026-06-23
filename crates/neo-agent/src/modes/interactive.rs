@@ -9735,7 +9735,17 @@ command = "python3"
             operation: neo_agent_core::PermissionOperation::Tool,
             subject: "Write".to_owned(),
             arguments: serde_json::json!({"path": "approved.txt"}),
-            session_scope: None,
+            session_scope: Some(neo_agent_core::SessionApprovalScope {
+                keys: vec![neo_agent_core::SessionApprovalKey::FileWrite {
+                    workspace: test_workspace_root().display().to_string(),
+                    path: test_workspace_root()
+                        .join("approved.txt")
+                        .display().to_string(),
+                    operation: neo_agent_core::FileWriteApprovalOperation::Write,
+                }],
+                label: "Approve writes to this file for this session".to_owned(),
+                detail: "approved.txt".to_owned(),
+            }),
             prefix_rule: None,
         });
         let (decision_tx, decision_rx) = oneshot::channel();
@@ -9792,11 +9802,7 @@ command = "python3"
         controller
             .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
             .await
-            .expect("down selects approval option");
-        controller
-            .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
-            .await
-            .expect("down selects approval option");
+            .expect("down selects deny option");
         controller
             .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
             .await
