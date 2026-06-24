@@ -2,11 +2,11 @@ use rmcp::model::{CallToolResult, ReadResourceResult, Resource, Tool as RmcpTool
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub mod client;
-pub mod http;
-pub mod legacy;
-pub mod oauth;
-pub mod stdio;
+mod client;
+mod http;
+mod legacy;
+mod oauth;
+mod stdio;
 
 pub use legacy::{
     McpHttpConfig, McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter,
@@ -103,21 +103,15 @@ impl From<CallToolResult> for McpToolResponse {
     fn from(result: CallToolResult) -> Self {
         let is_error = result.is_error.unwrap_or(false);
         let mut texts = Vec::new();
-        let mut details: Option<serde_json::Value> = None;
+        let mut extra = Vec::new();
         for content in result.content {
             if let Some(text) = content.as_text() {
                 texts.push(text.text.clone());
-            } else if let Some(image) = content.as_image() {
-                details = Some(serde_json::json!({
-                    "type": "image",
-                    "data": image.data,
-                    "mime_type": image.mime_type,
-                }));
-            } else if let Some(resource) = content.as_resource() {
-                details = Some(serde_json::json!({
-                    "type": "resource",
-                    "resource": resource,
-                }));
+            } else {
+                extra.push(
+                    serde_json::to_value(&content)
+                        .unwrap_or_else(|_| serde_json::json!({"type": "unknown"})),
+                );
             }
         }
         let content = texts.join("\n");
@@ -126,6 +120,17 @@ impl From<CallToolResult> for McpToolResponse {
         } else {
             Self::ok(content)
         };
+        let mut details = None;
+        if !extra.is_empty() || result.structured_content.is_some() {
+            let mut map = serde_json::Map::new();
+            if !extra.is_empty() {
+                map.insert("content".to_string(), serde_json::Value::Array(extra));
+            }
+            if let Some(structured_content) = result.structured_content {
+                map.insert("structured_content".to_string(), structured_content);
+            }
+            details = Some(serde_json::Value::Object(map));
+        }
         if let Some(details) = details {
             response = response.with_details(details);
         }
@@ -172,7 +177,7 @@ pub struct McpResourceDefinition {
 impl From<Resource> for McpResourceDefinition {
     fn from(resource: Resource) -> Self {
         Self {
-            uri: resource.uri.to_string(),
+            uri: resource.uri.clone(),
             name: resource.name.clone(),
             description: resource.description.clone(),
             mime_type: resource.mime_type.clone(),
@@ -194,14 +199,24 @@ pub struct McpResourceContent {
 impl From<rmcp::model::ResourceContents> for McpResourceContent {
     fn from(contents: rmcp::model::ResourceContents) -> Self {
         match contents {
-            rmcp::model::ResourceContents::TextResourceContents { uri, mime_type, text, .. } => Self {
-                uri: uri.to_string(),
+            rmcp::model::ResourceContents::TextResourceContents {
+                uri,
+                mime_type,
+                text,
+                ..
+            } => Self {
+                uri,
                 mime_type,
                 text: Some(text),
                 blob: None,
             },
-            rmcp::model::ResourceContents::BlobResourceContents { uri, mime_type, blob, .. } => Self {
-                uri: uri.to_string(),
+            rmcp::model::ResourceContents::BlobResourceContents {
+                uri,
+                mime_type,
+                blob,
+                ..
+            } => Self {
+                uri,
                 mime_type,
                 text: None,
                 blob: Some(blob),
@@ -232,7 +247,7 @@ impl From<rmcp::model::CallToolRequestParams> for McpToolCall {
     fn from(param: rmcp::model::CallToolRequestParams) -> Self {
         Self {
             name: param.name.to_string(),
-            arguments: param.arguments.map_or(serde_json::Value::Object(Default::default()), |obj| serde_json::Value::Object(obj)),
+            arguments: serde_json::Value::Object(param.arguments.unwrap_or_default()),
         }
     }
 }
@@ -240,7 +255,7 @@ impl From<rmcp::model::CallToolRequestParams> for McpToolCall {
 impl From<rmcp::model::ResourceUpdatedNotificationParam> for McpResourceUpdate {
     fn from(param: rmcp::model::ResourceUpdatedNotificationParam) -> Self {
         Self {
-            uri: param.uri.to_string(),
+            uri: param.uri.clone(),
         }
     }
 }

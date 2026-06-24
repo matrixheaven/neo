@@ -1,3 +1,4 @@
+// TODO(mcp-rmcp): remove this temporary shim once stdio/http adapters are migrated (Tasks 2.x/4.4).
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
@@ -12,8 +13,14 @@ use tokio::{
     task::JoinHandle,
 };
 
-use super::*;
-use super::super::{ProcessKind, ProcessSupervisor, Tool, ToolContext, ToolError, ToolFuture, ToolRegistry, ToolResult};
+use super::super::{
+    ProcessKind, ProcessSupervisor, Tool, ToolContext, ToolError, ToolFuture, ToolRegistry,
+    ToolResult,
+};
+use super::{
+    McpError, McpResourceDefinition, McpResourceRead, McpResourceUpdate, McpToolDefinition,
+    McpToolResponse,
+};
 use crate::oauth::{OAuthProvider, OAuthProviderRegistry, OAuthStore, refresh_access_token};
 
 #[async_trait]
