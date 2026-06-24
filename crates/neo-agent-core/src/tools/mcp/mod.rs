@@ -269,10 +269,9 @@ mod tests {
     use super::*;
 
     fn sample_schema() -> Arc<serde_json::Map<String, serde_json::Value>> {
-        let schema: serde_json::Value = serde_json::from_str(
-            r#"{"type":"object","properties":{"x":{"type":"string"}}}"#,
-        )
-        .unwrap();
+        let schema: serde_json::Value =
+            serde_json::from_str(r#"{"type":"object","properties":{"x":{"type":"string"}}}"#)
+                .unwrap();
         Arc::new(schema.as_object().unwrap().clone())
     }
 
