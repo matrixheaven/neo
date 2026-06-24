@@ -1425,6 +1425,7 @@ dependencies = [
  "chrono",
  "futures",
  "globset",
+ "http",
  "ignore",
  "neo-ai",
  "portable-pty",

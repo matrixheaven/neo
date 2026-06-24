@@ -6,8 +6,7 @@ use http::{HeaderName, HeaderValue};
 use rmcp::{
     ServiceExt,
     transport::{
-        StreamableHttpClientTransport,
-        streamable_http_client::StreamableHttpClientTransportConfig,
+        StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
     },
 };
 
@@ -15,7 +14,7 @@ use super::{McpError, client::McpClient};
 
 // TODO: `HttpConfig` is currently unused while the rmcp migration is in
 // progress. It will be wired up through `McpConnectionManager` in Task 4.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize, Default)]
 #[allow(dead_code)]
 pub struct HttpConfig {
     pub url: String,
@@ -52,7 +51,10 @@ pub async fn build_http_client(config: HttpConfig) -> Result<Arc<dyn McpClient>,
         None => ().serve(transport).await.map_err(|e| McpError::protocol(e.to_string()))?,
     };
 
-    Ok(Arc::new(super::client::RmcpClient::new(service, request_timeout)))
+    Ok(Arc::new(super::client::RmcpClient::new(
+        service,
+        request_timeout,
+    )))
 }
 
 #[cfg(test)]
