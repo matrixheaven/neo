@@ -524,7 +524,7 @@ pub async fn authenticate_mcp_server_oauth(
     let store_path = neo_home.join("oauth.json");
     let token_key = format!("mcp:{server_id}");
     let mut store = OAuthStore::load(&store_path)?;
-    store.set_token(&token_key, token.clone());
+    store.set_token(&token_key, &token);
     store.save(&store_path)?;
 
     Ok(token)

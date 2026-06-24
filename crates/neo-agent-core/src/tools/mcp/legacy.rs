@@ -163,7 +163,7 @@ impl McpHttpToolAdapter {
 
         let token_key = format!("mcp:{server_id}");
         let mut store_guard = store.write().await;
-        let token = store_guard.get_token(&token_key).cloned();
+        let token = store_guard.get_token(&token_key);
 
         let Some(token) = token else {
             return Ok(request);
@@ -180,7 +180,7 @@ impl McpHttpToolAdapter {
             };
             match refresh_access_token(&provider, refresh_token).await {
                 Ok(new_token) => {
-                    store_guard.set_token(&token_key, new_token.clone());
+                    store_guard.set_token(&token_key, &new_token);
                     if let Some(path) = self.config.oauth_store_path.as_ref() {
                         let _ = store_guard.save(path);
                     }
@@ -1420,7 +1420,7 @@ mod tests {
     #[tokio::test]
     async fn oauth_token_is_injected_when_store_has_token() {
         let mut store = OAuthStore::default();
-        store.set_token("mcp:linear", valid_token_set());
+        store.set_token("mcp:linear", &valid_token_set());
         let config = McpHttpConfig {
             url: "https://linear.app/mcp".to_owned(),
             headers: BTreeMap::new(),
@@ -1452,7 +1452,7 @@ mod tests {
     #[tokio::test]
     async fn config_authorization_header_is_not_overridden() {
         let mut store = OAuthStore::default();
-        store.set_token("mcp:linear", valid_token_set());
+        store.set_token("mcp:linear", &valid_token_set());
         let mut headers = BTreeMap::new();
         headers.insert("Authorization".to_owned(), "Bearer config-token".to_owned());
         let config = McpHttpConfig {
@@ -1521,7 +1521,7 @@ mod tests {
         let mut store = OAuthStore::default();
         store.set_token(
             "mcp:linear",
-            OAuthTokenSet {
+            &OAuthTokenSet {
                 access_token: "expired-token".to_owned(),
                 token_type: "Bearer".to_owned(),
                 refresh_token: Some("refresh-456".to_owned()),
@@ -1571,7 +1571,7 @@ mod tests {
         let mut store = OAuthStore::default();
         store.set_token(
             "mcp:linear",
-            OAuthTokenSet {
+            &OAuthTokenSet {
                 access_token: "expired-token".to_owned(),
                 token_type: "Bearer".to_owned(),
                 refresh_token: Some("refresh-456".to_owned()),
