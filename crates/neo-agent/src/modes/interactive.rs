@@ -4252,7 +4252,7 @@ impl InteractiveController {
         };
 
         self.push_status("Waiting for browser authorization...");
-        match authenticate_mcp_server_oauth(&server_id, server, &neo_home).await {
+        match authenticate_mcp_server_oauth(&server_id, server, &config.oauth, &neo_home).await {
             Ok(_) => self.push_status("OAuth token saved"),
             Err(neo_agent_core::oauth::OAuthError::ProviderDetection) => {
                 self.push_status("No OAuth provider configured for this server");
@@ -12005,6 +12005,7 @@ command = "python3"
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
+            oauth: crate::config::OAuthConfig::default(),
             prompt_templates: Vec::new(),
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),

@@ -11,7 +11,7 @@ use rand::Rng;
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
 pub mod callback_server;
@@ -38,6 +38,91 @@ pub struct OAuthProvider {
     pub token_url: String,
     pub scopes: Vec<String>,
     pub default_callback_port: u16,
+}
+
+impl OAuthProvider {
+    /// Return the configured `client_id`, allowing an environment variable
+    /// override of the form `NEO_OAUTH_<PROVIDER_ID_UPPER>_CLIENT_ID`.
+    #[must_use]
+    pub fn client_id_or_env(&self) -> String {
+        self.client_id_with_env_lookup(|key| std::env::var(key).ok())
+    }
+
+    fn client_id_with_env_lookup<F>(&self, lookup: F) -> String
+    where
+        F: FnOnce(&str) -> Option<String>,
+    {
+        let key = format!("NEO_OAUTH_{}_CLIENT_ID", self.id.to_uppercase());
+        lookup(&key).unwrap_or_else(|| self.client_id.clone())
+    }
+}
+
+/// Built-in OAuth provider definitions shipped with Neo.
+///
+/// The list starts with Linear; additional providers can be added here or via
+/// user config (`[oauth.providers.<id>]`).
+#[must_use]
+pub fn builtin_oauth_providers() -> Vec<OAuthProvider> {
+    vec![OAuthProvider {
+        id: "linear".to_owned(),
+        client_id: "neo".to_owned(),
+        auth_url: "https://api.linear.app/oauth/authorize".to_owned(),
+        token_url: "https://api.linear.app/oauth/token".to_owned(),
+        scopes: vec!["write".to_owned()],
+        default_callback_port: 0,
+    }]
+}
+
+/// Registry of OAuth providers keyed by provider id.
+///
+/// Built-in providers can be seeded with [`OAuthProviderRegistry::with_builtin_providers`];
+/// custom providers from config are registered via [`OAuthProviderRegistry::register`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OAuthProviderRegistry {
+    providers: BTreeMap<String, OAuthProvider>,
+}
+
+impl OAuthProviderRegistry {
+    /// Create an empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            providers: BTreeMap::new(),
+        }
+    }
+
+    /// Create a registry seeded with [`builtin_oauth_providers`].
+    #[must_use]
+    pub fn with_builtin_providers() -> Self {
+        let mut registry = Self::new();
+        for provider in builtin_oauth_providers() {
+            registry.register(provider);
+        }
+        registry
+    }
+
+    /// Register (or replace) a provider in the registry.
+    pub fn register(&mut self, provider: OAuthProvider) {
+        self.providers.insert(provider.id.clone(), provider);
+    }
+
+    /// Look up a provider by its id.
+    #[must_use]
+    pub fn get(&self, id: &str) -> Option<&OAuthProvider> {
+        self.providers.get(id)
+    }
+
+    /// Find a provider whose id or URL pattern matches the given server URL.
+    ///
+    /// For the MVP the matching is intentionally simple: a provider matches if
+    /// its id is contained in the URL. Custom providers registered later take
+    /// precedence because they can replace built-ins with the same id.
+    #[must_use]
+    pub fn resolve_for_url(&self, url: &str) -> Option<&OAuthProvider> {
+        self.providers
+            .values()
+            .find(|provider| url.contains(&provider.id))
+    }
 }
 
 /// Errors that can occur during OAuth operations.
@@ -126,10 +211,11 @@ pub fn build_authorization_url(
         .map_err(|err| OAuthError::AuthorizationUrl(err.to_string()))?;
 
     {
+        let client_id = provider.client_id_or_env();
         let mut query = url.query_pairs_mut();
         query
             .append_pair("response_type", "code")
-            .append_pair("client_id", &provider.client_id)
+            .append_pair("client_id", &client_id)
             .append_pair("redirect_uri", &redirect_uri)
             .append_pair("scope", &provider.scopes.join(" "))
             .append_pair("state", state)
@@ -168,11 +254,12 @@ pub async fn exchange_code_for_token(
     verifier: &str,
 ) -> Result<OAuthTokenSet, OAuthError> {
     let redirect_uri = callback_uri(provider.default_callback_port);
+    let client_id = provider.client_id_or_env();
     let mut params = HashMap::new();
     params.insert("grant_type", "authorization_code");
     params.insert("code", code);
     params.insert("redirect_uri", &redirect_uri);
-    params.insert("client_id", &provider.client_id);
+    params.insert("client_id", &client_id);
     params.insert("code_verifier", verifier);
 
     post_token_request(&provider.token_url, params).await
@@ -184,33 +271,25 @@ pub async fn exchange_code_for_token(
 /// can narrow or preserve the originally granted scopes.
 /// Detect a known OAuth provider for an HTTP/SSE MCP server URL.
 ///
-/// This is intentionally simple for the local OAuth authenticator MVP: only
-/// Linear is recognized.
+/// Convenience wrapper that uses a registry seeded with the built-in providers.
+/// For custom providers, build an [`OAuthProviderRegistry`] and call
+/// [`OAuthProviderRegistry::resolve_for_url`] directly.
 #[must_use]
 pub fn provider_for_url(url: &str) -> Option<OAuthProvider> {
-    if url.contains("linear.app") {
-        Some(OAuthProvider {
-            id: "linear".to_owned(),
-            client_id: std::env::var("NEO_OAUTH_LINEAR_CLIENT_ID")
-                .unwrap_or_else(|_| "neo".to_owned()),
-            auth_url: "https://api.linear.app/oauth/authorize".to_owned(),
-            token_url: "https://api.linear.app/oauth/token".to_owned(),
-            scopes: vec!["write".to_owned()],
-            default_callback_port: 0,
-        })
-    } else {
-        None
-    }
+    OAuthProviderRegistry::with_builtin_providers()
+        .resolve_for_url(url)
+        .cloned()
 }
 
 pub async fn refresh_access_token(
     provider: &OAuthProvider,
     refresh_token: &str,
 ) -> Result<OAuthTokenSet, OAuthError> {
+    let client_id = provider.client_id_or_env();
     let mut params = HashMap::new();
     params.insert("grant_type", "refresh_token");
     params.insert("refresh_token", refresh_token);
-    params.insert("client_id", &provider.client_id);
+    params.insert("client_id", &client_id);
     let scope = provider.scopes.join(" ");
     if !scope.is_empty() {
         params.insert("scope", &scope);
@@ -354,5 +433,81 @@ mod tests {
 
     fn is_base64_url_char(b: u8) -> bool {
         b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+    }
+
+    #[test]
+    fn registry_seeds_builtin_linear_provider() {
+        let registry = OAuthProviderRegistry::with_builtin_providers();
+        let provider = registry.get("linear").expect("linear should be registered");
+        assert_eq!(provider.id, "linear");
+        assert_eq!(provider.auth_url, "https://api.linear.app/oauth/authorize");
+        assert_eq!(provider.token_url, "https://api.linear.app/oauth/token");
+        assert_eq!(provider.scopes, vec!["write"]);
+    }
+
+    #[test]
+    fn registry_resolve_for_url_finds_linear() {
+        let registry = OAuthProviderRegistry::with_builtin_providers();
+        let provider = registry
+            .resolve_for_url("https://api.linear.app/oauth/authorize")
+            .expect("linear URL should resolve");
+        assert_eq!(provider.id, "linear");
+    }
+
+    #[test]
+    fn registry_resolve_for_url_returns_none_for_unknown() {
+        let registry = OAuthProviderRegistry::with_builtin_providers();
+        assert!(
+            registry
+                .resolve_for_url("https://api.unknown-provider.example")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn registry_register_overrides_builtin() {
+        let mut registry = OAuthProviderRegistry::with_builtin_providers();
+        let custom = OAuthProvider {
+            id: "linear".to_owned(),
+            client_id: "custom-client".to_owned(),
+            auth_url: "https://custom.example/authorize".to_owned(),
+            token_url: "https://custom.example/token".to_owned(),
+            scopes: vec!["read".to_owned()],
+            default_callback_port: 0,
+        };
+        registry.register(custom.clone());
+        let provider = registry.get("linear").expect("linear should exist");
+        assert_eq!(provider.client_id, "custom-client");
+        assert_eq!(provider.auth_url, "https://custom.example/authorize");
+    }
+
+    #[test]
+    fn client_id_or_env_prefers_environment_variable() {
+        let provider = OAuthProvider {
+            id: "linear".to_owned(),
+            client_id: "fallback".to_owned(),
+            auth_url: "https://example.com/authorize".to_owned(),
+            token_url: "https://example.com/token".to_owned(),
+            scopes: Vec::new(),
+            default_callback_port: 0,
+        };
+        temp_env::with_var("NEO_OAUTH_LINEAR_CLIENT_ID", Some("env-client-id"), || {
+            assert_eq!(provider.client_id_or_env(), "env-client-id");
+        });
+    }
+
+    #[test]
+    fn client_id_or_env_falls_back_to_configured_client_id() {
+        let provider = OAuthProvider {
+            id: "foo".to_owned(),
+            client_id: "configured".to_owned(),
+            auth_url: "https://example.com/authorize".to_owned(),
+            token_url: "https://example.com/token".to_owned(),
+            scopes: Vec::new(),
+            default_callback_port: 0,
+        };
+        temp_env::with_var_unset("NEO_OAUTH_FOO_CLIENT_ID", || {
+            assert_eq!(provider.client_id_or_env(), "configured");
+        });
     }
 }

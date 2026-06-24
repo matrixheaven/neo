@@ -15,7 +15,7 @@ use super::{
         McpStdioConfig, McpStdioToolAdapter, McpToolAdapter, McpToolDefinition,
     },
 };
-use crate::oauth::{OAuthStore, provider_for_url};
+use crate::oauth::{OAuthProviderRegistry, OAuthStore};
 
 /// Runtime configuration for an MCP server managed by [`McpConnectionManager`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +157,7 @@ struct McpConnectionManagerState {
     next_attempt_id: u64,
     oauth_store: Arc<RwLock<OAuthStore>>,
     oauth_store_path: Option<PathBuf>,
+    oauth_provider_registry: Arc<OAuthProviderRegistry>,
 }
 
 /// Owns configured MCP server state and exposes snapshots, resource operations,
@@ -176,6 +177,7 @@ impl McpConnectionManager {
                 next_attempt_id: 1,
                 oauth_store: Arc::new(RwLock::new(OAuthStore::default())),
                 oauth_store_path: None,
+                oauth_provider_registry: Arc::new(OAuthProviderRegistry::with_builtin_providers()),
             })),
         }
     }
@@ -193,6 +195,7 @@ impl McpConnectionManager {
                 next_attempt_id: 1,
                 oauth_store,
                 oauth_store_path,
+                oauth_provider_registry: Arc::new(OAuthProviderRegistry::with_builtin_providers()),
             })),
         }
     }
@@ -207,6 +210,15 @@ impl McpConnectionManager {
         let mut state = self.inner.write().await;
         state.oauth_store = oauth_store;
         state.oauth_store_path = oauth_store_path;
+    }
+
+    /// Replace the OAuth provider registry used for managed HTTP/SSE adapters.
+    ///
+    /// Custom providers from config can override built-in providers by
+    /// registering under the same provider id.
+    pub async fn set_oauth_provider_registry(&self, registry: OAuthProviderRegistry) {
+        let mut state = self.inner.write().await;
+        state.oauth_provider_registry = Arc::new(registry);
     }
 
     /// Apply a new set of server configurations. Removed servers are shut down,
@@ -273,11 +285,13 @@ impl McpConnectionManager {
             if server.enabled {
                 let oauth_store = Arc::clone(&state.oauth_store);
                 let oauth_store_path = state.oauth_store_path.clone();
+                let oauth_provider_registry = Arc::clone(&state.oauth_provider_registry);
                 let handle = spawn_connect(
                     server.clone(),
                     state.supervisor.clone(),
                     oauth_store,
                     oauth_store_path,
+                    oauth_provider_registry,
                 );
                 entry.connect_task = Some(handle);
             } else {
@@ -322,7 +336,7 @@ impl McpConnectionManager {
 
     /// Force an immediate reconnect for the given server.
     pub async fn reconnect_now(&self, id: &str) -> anyhow::Result<McpServerSnapshot> {
-        let (config, supervisor, oauth_store, oauth_store_path) = {
+        let (config, supervisor, oauth_store, oauth_store_path, oauth_provider_registry) = {
             let mut state = self.inner.write().await;
             let Some(mut entry) = state.entries.remove(id) else {
                 anyhow::bail!("MCP server '{id}' not found");
@@ -345,12 +359,25 @@ impl McpConnectionManager {
             let supervisor = state.supervisor.clone();
             let oauth_store = Arc::clone(&state.oauth_store);
             let oauth_store_path = state.oauth_store_path.clone();
+            let oauth_provider_registry = Arc::clone(&state.oauth_provider_registry);
             let config = entry.config.clone();
             state.entries.insert(id.to_owned(), entry);
-            (config, supervisor, oauth_store, oauth_store_path)
+            (
+                config,
+                supervisor,
+                oauth_store,
+                oauth_store_path,
+                oauth_provider_registry,
+            )
         };
 
-        let handle = spawn_connect(config.clone(), supervisor, oauth_store, oauth_store_path);
+        let handle = spawn_connect(
+            config.clone(),
+            supervisor,
+            oauth_store,
+            oauth_store_path,
+            oauth_provider_registry,
+        );
         {
             let mut state = self.inner.write().await;
             if let Some(entry) = state.entries.get_mut(id) {
@@ -617,10 +644,18 @@ fn spawn_connect(
     supervisor: ProcessSupervisor,
     oauth_store: Arc<RwLock<OAuthStore>>,
     oauth_store_path: Option<PathBuf>,
+    oauth_provider_registry: Arc<OAuthProviderRegistry>,
 ) -> JoinHandle<Result<ConnectOutcome, McpError>> {
-    tokio::spawn(
-        async move { connect_one(config, supervisor, oauth_store, oauth_store_path).await },
-    )
+    tokio::spawn(async move {
+        connect_one(
+            config,
+            supervisor,
+            oauth_store,
+            oauth_store_path,
+            oauth_provider_registry,
+        )
+        .await
+    })
 }
 
 struct ConnectOutcome {
@@ -634,8 +669,15 @@ async fn connect_one(
     supervisor: ProcessSupervisor,
     oauth_store: Arc<RwLock<OAuthStore>>,
     oauth_store_path: Option<PathBuf>,
+    oauth_provider_registry: Arc<OAuthProviderRegistry>,
 ) -> Result<ConnectOutcome, McpError> {
-    let adapter = adapter_for_config(&config, supervisor, oauth_store, oauth_store_path);
+    let adapter = adapter_for_config(
+        &config,
+        supervisor,
+        oauth_store,
+        oauth_store_path,
+        oauth_provider_registry,
+    );
     let timeout_ms = config.startup_timeout_ms.unwrap_or(5_000);
     let (tools, resources) = tokio::time::timeout(
         Duration::from_millis(timeout_ms),
@@ -675,6 +717,7 @@ fn adapter_for_config(
     supervisor: ProcessSupervisor,
     oauth_store: Arc<RwLock<OAuthStore>>,
     oauth_store_path: Option<PathBuf>,
+    oauth_provider_registry: Arc<OAuthProviderRegistry>,
 ) -> Arc<dyn McpToolAdapter> {
     match &config.transport {
         ManagedMcpTransport::Stdio {
@@ -700,7 +743,8 @@ fn adapter_for_config(
                 tool_timeout_ms: config.tool_timeout_ms,
                 server_id: Some(config.id.clone()),
                 oauth_store: Some(oauth_store),
-                oauth_provider: provider_for_url(url),
+                oauth_provider: None,
+                oauth_provider_registry: Some(oauth_provider_registry),
                 oauth_store_path,
             }))
         }

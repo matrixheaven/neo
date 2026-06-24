@@ -38,6 +38,7 @@ sha2.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+temp-env = "0.3"
 base64.workspace = true
 ed25519-dalek.workspace = true
 sha2.workspace = true

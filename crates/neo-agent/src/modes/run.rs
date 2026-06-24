@@ -815,7 +815,7 @@ pub async fn list_mcp(config: &AppConfig) -> String {
             continue;
         }
 
-        match list_mcp_tools_for_server(server).await {
+        match list_mcp_tools_for_server(server, &config.oauth).await {
             Ok(tools) => {
                 let map: serde_json::Map<String, serde_json::Value> = tools
                     .into_iter()
@@ -836,8 +836,11 @@ pub async fn list_mcp(config: &AppConfig) -> String {
     out
 }
 
-async fn list_mcp_tools_for_server(server: &McpServerConfig) -> anyhow::Result<Vec<String>> {
-    let adapter = mcp_adapter_for_server(server)?;
+async fn list_mcp_tools_for_server(
+    server: &McpServerConfig,
+    oauth: &crate::config::OAuthConfig,
+) -> anyhow::Result<Vec<String>> {
+    let adapter = mcp_adapter_for_server(server, oauth)?;
     let provider = McpToolProvider::discover_dyn(&server.id, adapter)
         .await
         .with_context(|| format!("failed to discover MCP tools from {}", server.id))?;
@@ -918,7 +921,7 @@ pub async fn add_mcp_server(
         return Ok(format!("{saved}{mcp_name} added (disabled)\n"));
     }
 
-    let probe_result = probe_mcp_server(&server, startup_timeout_ms).await;
+    let probe_result = probe_mcp_server(&server, startup_timeout_ms, &config.oauth).await;
     let probe_msg = match probe_result {
         Ok(()) => format!("{mcp_name} successfully connected!\n"),
         Err(_) => format!("{mcp_name} connect failed\n"),
@@ -941,13 +944,17 @@ pub async fn auth_mcp_server(server_id: String, config: &AppConfig) -> anyhow::R
     }
 
     let neo_home = neo_home().context("failed to resolve neo home directory")?;
-    authenticate_mcp_server_oauth(&server_id, server, &neo_home).await?;
+    authenticate_mcp_server_oauth(&server_id, server, &config.oauth, &neo_home).await?;
 
     Ok(format!("OAuth token saved for MCP server {server_id}\n"))
 }
 
-async fn probe_mcp_server(server: &McpServerConfig, timeout_ms: Option<u64>) -> anyhow::Result<()> {
-    let adapter = mcp_adapter_for_server(server)?;
+async fn probe_mcp_server(
+    server: &McpServerConfig,
+    timeout_ms: Option<u64>,
+    oauth: &crate::config::OAuthConfig,
+) -> anyhow::Result<()> {
+    let adapter = mcp_adapter_for_server(server, oauth)?;
     let fut = adapter.list_tools();
     let tools = if let Some(ms) = timeout_ms {
         tokio::time::timeout(std::time::Duration::from_millis(ms), fut)
@@ -1881,7 +1888,10 @@ async fn wait_for_mcp_manager_probe(manager: &McpConnectionManager, config: &App
     }
 }
 
-fn mcp_adapter_for_server(server: &McpServerConfig) -> anyhow::Result<Arc<dyn McpToolAdapter>> {
+fn mcp_adapter_for_server(
+    server: &McpServerConfig,
+    oauth: &crate::config::OAuthConfig,
+) -> anyhow::Result<Arc<dyn McpToolAdapter>> {
     match server.transport.as_str() {
         "stdio" => {
             let command = server
@@ -1901,7 +1911,8 @@ fn mcp_adapter_for_server(server: &McpServerConfig) -> anyhow::Result<Arc<dyn Mc
                 .url
                 .clone()
                 .with_context(|| format!("missing MCP url for {}", server.id))?;
-            let oauth_provider = neo_agent_core::oauth::provider_for_url(&url);
+            let registry = crate::mcp_ops::oauth_provider_registry(oauth);
+            let oauth_provider = registry.resolve_for_url(&url).cloned();
             let oauth_store_and_path = neo_home().and_then(|home| {
                 let path = home.join("oauth.json");
                 OAuthStore::load(&path)
@@ -1919,6 +1930,7 @@ fn mcp_adapter_for_server(server: &McpServerConfig) -> anyhow::Result<Arc<dyn Mc
                 server_id: Some(server.id.clone()),
                 oauth_store,
                 oauth_provider,
+                oauth_provider_registry: None,
                 oauth_store_path,
             })))
         }
@@ -2342,9 +2354,10 @@ mod tests {
         run_prompt_with_runtime, select_config_model, tool_registry_for_config,
     };
     use crate::config::{
-        AppConfig, Defaults, McpConfig, ModelConfig, ProviderConfig, RuntimeCompactionConfig,
-        RuntimeConfig, TuiConfig,
+        AppConfig, Defaults, McpConfig, ModelConfig, OAuthConfig, OAuthProviderConfig,
+        ProviderConfig, RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
     };
+    use crate::mcp_ops::oauth_provider_registry;
 
     #[test]
     fn agent_config_for_app_applies_runtime_config() {
@@ -2386,6 +2399,7 @@ mod tests {
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
+            oauth: OAuthConfig::default(),
             prompt_templates: Vec::new(),
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
@@ -2464,6 +2478,7 @@ mod tests {
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
+            oauth: OAuthConfig::default(),
             prompt_templates: Vec::new(),
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
@@ -2509,6 +2524,7 @@ mod tests {
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
+            oauth: OAuthConfig::default(),
             prompt_templates: Vec::new(),
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
@@ -2625,6 +2641,7 @@ mod tests {
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
+            oauth: OAuthConfig::default(),
             prompt_templates: Vec::new(),
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
@@ -2699,6 +2716,7 @@ mod tests {
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
+            oauth: OAuthConfig::default(),
             prompt_templates: Vec::new(),
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
@@ -2755,6 +2773,7 @@ mod tests {
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
+            oauth: OAuthConfig::default(),
             prompt_templates: Vec::new(),
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
@@ -3146,6 +3165,7 @@ mod tests {
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
+            oauth: OAuthConfig::default(),
             prompt_templates: Vec::new(),
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),
@@ -3214,41 +3234,77 @@ mod tests {
 
     #[test]
     fn detect_oauth_provider_requires_http_or_sse_transport() {
+        let registry = oauth_provider_registry(&OAuthConfig::default());
         assert!(
-            detect_oauth_provider_for_server(&test_mcp_server(
-                "fs",
-                "stdio",
-                Some("https://linear.app/oauth")
-            ))
+            detect_oauth_provider_for_server(
+                &test_mcp_server("fs", "stdio", Some("https://linear.app/oauth")),
+                &registry
+            )
             .is_none()
         );
         assert!(
-            detect_oauth_provider_for_server(&test_mcp_server(
-                "linear",
-                "http",
-                Some("https://api.linear.app/oauth")
-            ))
+            detect_oauth_provider_for_server(
+                &test_mcp_server("linear", "http", Some("https://api.linear.app/oauth")),
+                &registry
+            )
             .is_some()
         );
         assert!(
-            detect_oauth_provider_for_server(&test_mcp_server(
-                "linear",
-                "sse",
-                Some("https://api.linear.app/oauth")
-            ))
+            detect_oauth_provider_for_server(
+                &test_mcp_server("linear", "sse", Some("https://api.linear.app/oauth")),
+                &registry
+            )
             .is_some()
         );
     }
 
     #[test]
     fn detect_oauth_provider_matches_linear_url() {
+        let registry = oauth_provider_registry(&OAuthConfig::default());
         let linear = test_mcp_server("linear", "http", Some("https://api.linear.app/mcp"));
-        let provider = detect_oauth_provider_for_server(&linear);
+        let provider = detect_oauth_provider_for_server(&linear, &registry);
         assert!(provider.is_some());
         assert_eq!(provider.unwrap().id, "linear");
 
         let unknown = test_mcp_server("other", "http", Some("https://example.com/mcp"));
-        assert!(detect_oauth_provider_for_server(&unknown).is_none());
+        assert!(detect_oauth_provider_for_server(&unknown, &registry).is_none());
+    }
+
+    #[test]
+    fn detect_oauth_provider_custom_provider_overrides_builtin() {
+        let mut oauth = OAuthConfig::default();
+        oauth.providers.insert(
+            "linear".to_owned(),
+            OAuthProviderConfig {
+                client_id: "custom-linear-client".to_owned(),
+                auth_url: "https://custom.example.com/authorize".to_owned(),
+                token_url: "https://custom.example.com/token".to_owned(),
+                scopes: vec!["read".to_owned()],
+                default_callback_port: 0,
+            },
+        );
+        let registry = oauth_provider_registry(&oauth);
+        let linear = test_mcp_server("linear", "http", Some("https://api.linear.app/mcp"));
+        let provider = detect_oauth_provider_for_server(&linear, &registry).expect("provider");
+        assert_eq!(provider.id, "linear");
+        assert_eq!(provider.client_id, "custom-linear-client");
+        assert_eq!(provider.auth_url, "https://custom.example.com/authorize");
+        assert_eq!(provider.scopes, vec!["read"]);
+    }
+
+    #[test]
+    fn detect_oauth_provider_env_var_overrides_client_id() {
+        temp_env::with_var(
+            "NEO_OAUTH_LINEAR_CLIENT_ID",
+            Some("env-linear-client"),
+            || {
+                let registry = oauth_provider_registry(&OAuthConfig::default());
+                let linear = test_mcp_server("linear", "http", Some("https://api.linear.app/mcp"));
+                let provider =
+                    detect_oauth_provider_for_server(&linear, &registry).expect("provider");
+                assert_eq!(provider.client_id, "env-linear-client");
+            },
+        );
     }
 
     #[tokio::test]

@@ -10,9 +10,8 @@ use neo_agent_core::{
     ManagedMcpTransport, McpConnectionManager, McpReconnectPolicy, McpResourceListEntry,
     McpResourceRead, McpServerSnapshot, McpServerStatus, ProcessSupervisor,
     oauth::{
-        OAuthError, OAuthProvider, OAuthTokenSet, build_authorization_url,
-        callback_server::CallbackServer, exchange_code_for_token, generate_pkce, provider_for_url,
-        store::OAuthStore,
+        OAuthError, OAuthProvider, OAuthProviderRegistry, OAuthTokenSet, build_authorization_url,
+        callback_server::CallbackServer, exchange_code_for_token, generate_pkce, store::OAuthStore,
     },
 };
 use tokio::sync::RwLock;
@@ -305,6 +304,9 @@ pub async fn reload_mcp_manager_from_config(
         let store = Arc::new(RwLock::new(OAuthStore::load(&store_path)?));
         manager.set_oauth_store(store, Some(store_path)).await;
     }
+    manager
+        .set_oauth_provider_registry(oauth_provider_registry(&config.oauth))
+        .await;
     let managed_configs = to_managed_configs(&config.mcp.servers)?;
     Ok(manager.apply_config(managed_configs).await)
 }
@@ -460,15 +462,35 @@ fn endpoint_summary(server: &McpServerConfig) -> String {
     server.url.clone().unwrap_or_default()
 }
 
+/// Build an OAuth provider registry from built-in providers plus any custom
+/// providers defined in the application config.
+#[must_use]
+pub fn oauth_provider_registry(oauth: &crate::config::OAuthConfig) -> OAuthProviderRegistry {
+    let mut registry = OAuthProviderRegistry::with_builtin_providers();
+    for (id, provider_config) in &oauth.providers {
+        registry.register(provider_config.to_core_provider(id));
+    }
+    registry
+}
+
 /// Pick an OAuth provider for an MCP server based on its transport and URL.
 ///
 /// Returns `None` for non-remote transports or when no provider is known for
 /// the server's URL.
-pub fn detect_oauth_provider_for_server(server: &McpServerConfig) -> Option<OAuthProvider> {
+pub fn detect_oauth_provider_for_server(
+    server: &McpServerConfig,
+    registry: &OAuthProviderRegistry,
+) -> Option<OAuthProvider> {
     if server.transport != "http" && server.transport != "sse" {
         return None;
     }
-    server.url.as_deref().and_then(provider_for_url)
+    server.url.as_deref().and_then(|url| {
+        registry.resolve_for_url(url).map(|provider| {
+            let mut provider = provider.clone();
+            provider.client_id = provider.client_id_or_env();
+            provider
+        })
+    })
 }
 
 /// Run the OAuth authorization-code flow for a configured MCP server, save the
@@ -480,10 +502,12 @@ pub fn detect_oauth_provider_for_server(server: &McpServerConfig) -> Option<OAut
 pub async fn authenticate_mcp_server_oauth(
     server_id: &str,
     server: &McpServerConfig,
+    oauth: &crate::config::OAuthConfig,
     neo_home: &Path,
 ) -> Result<OAuthTokenSet, OAuthError> {
+    let registry = oauth_provider_registry(oauth);
     let mut provider =
-        detect_oauth_provider_for_server(server).ok_or(OAuthError::ProviderDetection)?;
+        detect_oauth_provider_for_server(server, &registry).ok_or(OAuthError::ProviderDetection)?;
 
     let (verifier, challenge) = generate_pkce();
     let state = uuid::Uuid::new_v4().to_string();
@@ -654,6 +678,7 @@ mod tests {
             runtime: crate::config::RuntimeConfig::default(),
             tui: crate::config::TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
+            oauth: crate::config::OAuthConfig::default(),
             mcp: crate::config::McpConfig {
                 servers: vec![McpServerConfig {
                     id: "docs".to_owned(),
@@ -698,5 +723,65 @@ mod tests {
             summaries[0].tools,
             McpToolDiscovery::Success(vec!["read_doc".to_owned(), "search_doc".to_owned()])
         );
+    }
+
+    fn test_mcp_server(
+        id: &str,
+        transport: &str,
+        url: Option<&str>,
+    ) -> crate::config::McpServerConfig {
+        crate::config::McpServerConfig {
+            id: id.to_owned(),
+            enabled: true,
+            transport: transport.to_owned(),
+            command: None,
+            url: url.map(str::to_owned),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            cwd: None,
+            enabled_tools: Vec::new(),
+            disabled_tools: Vec::new(),
+            startup_timeout_ms: None,
+            tool_timeout_ms: None,
+        }
+    }
+
+    #[test]
+    fn oauth_provider_registry_seeds_builtins() {
+        let oauth = crate::config::OAuthConfig::default();
+        let registry = oauth_provider_registry(&oauth);
+        assert!(registry.get("linear").is_some());
+    }
+
+    #[test]
+    fn oauth_provider_registry_custom_overrides_builtin() {
+        let mut oauth = crate::config::OAuthConfig::default();
+        oauth.providers.insert(
+            "linear".to_owned(),
+            crate::config::OAuthProviderConfig {
+                client_id: "custom-client".to_owned(),
+                auth_url: "https://custom.example.com/authorize".to_owned(),
+                token_url: "https://custom.example.com/token".to_owned(),
+                scopes: vec!["read".to_owned()],
+                default_callback_port: 0,
+            },
+        );
+        let registry = oauth_provider_registry(&oauth);
+        let server = test_mcp_server("linear", "http", Some("https://api.linear.app/mcp"));
+        let provider = detect_oauth_provider_for_server(&server, &registry).expect("provider");
+        assert_eq!(provider.client_id, "custom-client");
+        assert_eq!(provider.auth_url, "https://custom.example.com/authorize");
+    }
+
+    #[test]
+    fn oauth_provider_registry_uses_env_var_client_id() {
+        temp_env::with_var("NEO_OAUTH_LINEAR_CLIENT_ID", Some("env-client-id"), || {
+            let oauth = crate::config::OAuthConfig::default();
+            let registry = oauth_provider_registry(&oauth);
+            let server = test_mcp_server("linear", "http", Some("https://api.linear.app/mcp"));
+            let provider = detect_oauth_provider_for_server(&server, &registry).expect("provider");
+            assert_eq!(provider.client_id, "env-client-id");
+        });
     }
 }

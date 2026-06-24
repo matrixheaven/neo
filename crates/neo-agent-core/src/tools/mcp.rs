@@ -15,7 +15,7 @@ use tokio::{
 
 use super::{ProcessKind, ProcessSupervisor};
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolRegistry, ToolResult};
-use crate::oauth::{OAuthProvider, OAuthStore, refresh_access_token};
+use crate::oauth::{OAuthProvider, OAuthProviderRegistry, OAuthStore, refresh_access_token};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpToolDefinition {
@@ -212,6 +212,8 @@ pub struct McpHttpConfig {
     #[serde(skip)]
     pub oauth_provider: Option<OAuthProvider>,
     #[serde(skip)]
+    pub oauth_provider_registry: Option<Arc<OAuthProviderRegistry>>,
+    #[serde(skip)]
     pub oauth_store_path: Option<PathBuf>,
 }
 
@@ -257,7 +259,23 @@ impl McpHttpToolAdapter {
         let Some(server_id) = self.config.server_id.as_ref() else {
             return Ok(request);
         };
-        let Some(provider) = self.config.oauth_provider.as_ref() else {
+        let provider = self
+            .config
+            .oauth_provider
+            .clone()
+            .or_else(|| {
+                self.config
+                    .oauth_provider_registry
+                    .as_ref()
+                    .and_then(|registry| registry.resolve_for_url(&self.config.url))
+                    .cloned()
+            })
+            .or_else(|| {
+                OAuthProviderRegistry::with_builtin_providers()
+                    .resolve_for_url(&self.config.url)
+                    .cloned()
+            });
+        let Some(provider) = provider else {
             return Ok(request);
         };
         let Some(store) = self.config.oauth_store.as_ref() else {
@@ -281,7 +299,7 @@ impl McpHttpToolAdapter {
                     request.header("Authorization", format!("Bearer {}", token.access_token))
                 );
             };
-            match refresh_access_token(provider, refresh_token).await {
+            match refresh_access_token(&provider, refresh_token).await {
                 Ok(new_token) => {
                     store_guard.set_token(&token_key, new_token.clone());
                     if let Some(path) = self.config.oauth_store_path.as_ref() {

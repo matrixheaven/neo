@@ -219,6 +219,8 @@ pub struct AppConfig {
     #[serde(skip)]
     pub theme: ResolvedTheme,
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub oauth: OAuthConfig,
     #[serde(skip)]
     pub prompt_templates: Vec<String>,
     #[serde(skip)]
@@ -233,6 +235,41 @@ pub struct AppConfig {
 
     #[serde(skip)]
     pub config_path: PathBuf,
+}
+
+/// OAuth configuration section in `~/.neo/config.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthConfig {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub providers: BTreeMap<String, OAuthProviderConfig>,
+}
+
+/// Custom OAuth provider definition in `[oauth.providers.<id>]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthProviderConfig {
+    pub client_id: String,
+    pub auth_url: String,
+    pub token_url: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub default_callback_port: u16,
+}
+
+impl OAuthProviderConfig {
+    /// Convert this config entry into a core [`OAuthProvider`] using the config
+    /// table key as the provider id.
+    #[must_use]
+    pub fn to_core_provider(&self, id: &str) -> neo_agent_core::oauth::OAuthProvider {
+        neo_agent_core::oauth::OAuthProvider {
+            id: id.to_owned(),
+            client_id: self.client_id.clone(),
+            auth_url: self.auth_url.clone(),
+            token_url: self.token_url.clone(),
+            scopes: self.scopes.clone(),
+            default_callback_port: self.default_callback_port,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,6 +444,7 @@ pub(crate) struct FileConfig {
     pub(crate) runtime: Option<FileRuntimeConfig>,
     pub(crate) tui: Option<FileTuiConfig>,
     pub(crate) mcp: Option<McpConfig>,
+    pub(crate) oauth: Option<OAuthConfig>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -522,6 +560,7 @@ impl AppConfig {
         validate_tui_config(&tui)?;
         let theme = themes::resolve_theme()?;
         let mcp = file_config.mcp.unwrap_or_default();
+        let oauth = file_config.oauth.unwrap_or_default();
         let mode = file_config
             .defaults
             .and_then(|defaults| defaults.mode)
@@ -542,6 +581,7 @@ impl AppConfig {
             tui,
             theme,
             mcp,
+            oauth,
             prompt_templates,
             extra_skill_dirs,
             skill_path,
@@ -1021,6 +1061,41 @@ mod tests {
         let (_temp, config_path, project_dir) = temp_project_config("");
         let config = load_config(config_path, project_dir);
         assert_eq!(config.permission_mode, PermissionMode::Ask);
+    }
+
+    #[test]
+    fn config_parses_oauth_providers() {
+        let (_temp, config_path, project_dir) = temp_project_config(
+            r#"
+[oauth.providers.custom]
+client_id = "custom-client-id"
+auth_url = "https://custom.example.com/oauth/authorize"
+token_url = "https://custom.example.com/oauth/token"
+scopes = ["read", "write"]
+default_callback_port = 8765
+"#,
+        );
+        let config = load_config(config_path, project_dir);
+        let provider = config
+            .oauth
+            .providers
+            .get("custom")
+            .expect("custom OAuth provider should be parsed");
+        assert_eq!(provider.client_id, "custom-client-id");
+        assert_eq!(
+            provider.auth_url,
+            "https://custom.example.com/oauth/authorize"
+        );
+        assert_eq!(provider.token_url, "https://custom.example.com/oauth/token");
+        assert_eq!(provider.scopes, vec!["read", "write"]);
+        assert_eq!(provider.default_callback_port, 8765);
+    }
+
+    #[test]
+    fn config_oauth_providers_default_to_empty() {
+        let (_temp, config_path, project_dir) = temp_project_config("");
+        let config = load_config(config_path, project_dir);
+        assert!(config.oauth.providers.is_empty());
     }
 
     /// Regression: the model display label must never stitch the provider onto
