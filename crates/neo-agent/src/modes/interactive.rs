@@ -4252,32 +4252,14 @@ impl InteractiveController {
         };
 
         self.push_status("Waiting for browser authorization...");
-        let token = match authenticate_mcp_server_oauth(&server_id, server, &neo_home).await {
-            Ok(token) => token,
+        match authenticate_mcp_server_oauth(&server_id, server, &neo_home).await {
+            Ok(_) => self.push_status("OAuth token saved"),
             Err(neo_agent_core::oauth::OAuthError::ProviderDetection) => {
                 self.push_status("No OAuth provider configured for this server");
-                return;
             }
             Err(err) => {
                 self.push_status(format!("OAuth flow failed: {err}"));
-                return;
             }
-        };
-        self.push_status("OAuth token saved");
-
-        let mut server = server.clone();
-        server.headers.insert(
-            "Authorization".to_owned(),
-            format!("Bearer {}", token.access_token),
-        );
-        if let Some(config_path) = self.config_path() {
-            if let Err(err) = config::upsert_mcp_server(&server, &config_path) {
-                self.push_status(format!("Failed to update MCP server headers: {err}"));
-                return;
-            }
-            self.push_status("MCP server Authorization header updated");
-            self.refresh_config();
-            self.sync_mcp_manager_from_config().await;
         }
     }
 

@@ -941,14 +941,7 @@ pub async fn auth_mcp_server(server_id: String, config: &AppConfig) -> anyhow::R
     }
 
     let neo_home = neo_home().context("failed to resolve neo home directory")?;
-    let token = authenticate_mcp_server_oauth(&server_id, server, &neo_home).await?;
-
-    let mut server = server.clone();
-    server.headers.insert(
-        "Authorization".to_owned(),
-        format!("Bearer {}", token.access_token),
-    );
-    config::upsert_mcp_server(&server, &config.config_path)?;
+    authenticate_mcp_server_oauth(&server_id, server, &neo_home).await?;
 
     Ok(format!("OAuth token saved for MCP server {server_id}\n"))
 }
