@@ -269,6 +269,23 @@ pub async fn exchange_code_for_token(
 ///
 /// The provider's scopes are sent along with the request so the token endpoint
 /// can narrow or preserve the originally granted scopes.
+pub async fn refresh_access_token(
+    provider: &OAuthProvider,
+    refresh_token: &str,
+) -> Result<OAuthTokenSet, OAuthError> {
+    let client_id = provider.client_id_or_env();
+    let scope = provider.scopes.join(" ");
+    let mut params = HashMap::new();
+    params.insert("grant_type", "refresh_token");
+    params.insert("refresh_token", refresh_token);
+    params.insert("client_id", &client_id);
+    if !scope.is_empty() {
+        params.insert("scope", &scope);
+    }
+
+    post_token_request(&provider.token_url, params).await
+}
+
 /// Detect a known OAuth provider for an HTTP/SSE MCP server URL.
 ///
 /// Convenience wrapper that uses a registry seeded with the built-in providers.
@@ -279,23 +296,6 @@ pub fn provider_for_url(url: &str) -> Option<OAuthProvider> {
     OAuthProviderRegistry::with_builtin_providers()
         .resolve_for_url(url)
         .cloned()
-}
-
-pub async fn refresh_access_token(
-    provider: &OAuthProvider,
-    refresh_token: &str,
-) -> Result<OAuthTokenSet, OAuthError> {
-    let client_id = provider.client_id_or_env();
-    let mut params = HashMap::new();
-    params.insert("grant_type", "refresh_token");
-    params.insert("refresh_token", refresh_token);
-    params.insert("client_id", &client_id);
-    let scope = provider.scopes.join(" ");
-    if !scope.is_empty() {
-        params.insert("scope", &scope);
-    }
-
-    post_token_request(&provider.token_url, params).await
 }
 
 async fn post_token_request(
