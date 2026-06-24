@@ -7,13 +7,16 @@ use std::{
 
 use anyhow::Context;
 use rmcp::transport::auth::AuthorizationManager;
-use tokio::{sync::{Mutex, RwLock}, task::JoinHandle};
+use tokio::{
+    sync::{Mutex, RwLock},
+    task::JoinHandle,
+};
 
 use super::{
     ProcessSupervisor, ToolRegistry,
     mcp::{
-        McpError, McpResourceDefinition, McpResourceRead, McpToolDefinition,
-        McpClient, http, stdio, oauth, HttpConfig, StdioConfig,
+        HttpConfig, McpClient, McpError, McpResourceDefinition, McpResourceRead, McpToolDefinition,
+        StdioConfig, http, oauth, stdio,
     },
 };
 use crate::oauth::{OAuthProviderRegistry, OAuthStore};
@@ -698,7 +701,7 @@ async fn connect_one(
         &config,
         &supervisor,
         &oauth_store,
-        &oauth_store_path,
+        oauth_store_path.as_ref(),
         &oauth_provider_registry,
     )
     .await?;
@@ -741,7 +744,7 @@ async fn build_client_for_config(
     config: &ManagedMcpServerConfig,
     supervisor: &ProcessSupervisor,
     _oauth_store: &Arc<RwLock<OAuthStore>>,
-    oauth_store_path: &Option<PathBuf>,
+    oauth_store_path: Option<&PathBuf>,
     _oauth_provider_registry: &Arc<OAuthProviderRegistry>,
 ) -> Result<(Arc<dyn McpClient>, Option<Arc<Mutex<AuthorizationManager>>>), McpError> {
     match &config.transport {

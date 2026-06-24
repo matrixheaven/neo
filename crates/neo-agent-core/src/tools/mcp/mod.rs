@@ -8,13 +8,14 @@ pub mod legacy;
 pub mod oauth;
 pub mod stdio;
 
+#[allow(unused_imports)]
 pub use client::{McpClient, RmcpClient};
 pub use http::HttpConfig;
-pub use stdio::StdioConfig;
 pub use legacy::{
     McpHttpConfig, McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter,
     McpToolProvider,
 };
+pub use stdio::StdioConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpToolDefinition {
