@@ -218,7 +218,7 @@ Neo ships with one built-in OAuth provider:
 
 | Provider | Server URL pattern | Authorization URL | Scopes |
 |----------|-------------------|-------------------|--------|
-| `linear` | URL containing `linear` | `https://api.linear.app/oauth/authorize` | `write` |
+| `linear` | URL containing `linear` | `https://linear.app/oauth/authorize` | `write` |
 
 For Linear MCP servers (for example `https://mcp.linear.app/mcp`):
 

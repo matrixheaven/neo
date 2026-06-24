@@ -66,7 +66,7 @@ pub fn builtin_oauth_providers() -> Vec<OAuthProvider> {
     vec![OAuthProvider {
         id: "linear".to_owned(),
         client_id: "neo".to_owned(),
-        auth_url: "https://api.linear.app/oauth/authorize".to_owned(),
+        auth_url: "https://linear.app/oauth/authorize".to_owned(),
         token_url: "https://api.linear.app/oauth/token".to_owned(),
         scopes: vec!["write".to_owned()],
         default_callback_port: 0,
@@ -440,7 +440,7 @@ mod tests {
         let registry = OAuthProviderRegistry::with_builtin_providers();
         let provider = registry.get("linear").expect("linear should be registered");
         assert_eq!(provider.id, "linear");
-        assert_eq!(provider.auth_url, "https://api.linear.app/oauth/authorize");
+        assert_eq!(provider.auth_url, "https://linear.app/oauth/authorize");
         assert_eq!(provider.token_url, "https://api.linear.app/oauth/token");
         assert_eq!(provider.scopes, vec!["write"]);
     }
@@ -449,7 +449,7 @@ mod tests {
     fn registry_resolve_for_url_finds_linear() {
         let registry = OAuthProviderRegistry::with_builtin_providers();
         let provider = registry
-            .resolve_for_url("https://api.linear.app/oauth/authorize")
+            .resolve_for_url("https://mcp.linear.app/mcp")
             .expect("linear URL should resolve");
         assert_eq!(provider.id, "linear");
     }
