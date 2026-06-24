@@ -41,7 +41,11 @@ use crate::goal::GoalManager;
 
 pub const DEFAULT_BASH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-pub use mcp::*;
+pub use mcp::{
+    McpError, McpHttpConfig, McpHttpToolAdapter, McpResourceContent, McpResourceDefinition,
+    McpResourceRead, McpResourceUpdate, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter,
+    McpToolCall, McpToolDefinition, McpToolProvider, McpToolResponse,
+};
 pub use mcp_manager::*;
 pub use process_supervisor::{ProcessKind, ProcessSupervisor};
 
