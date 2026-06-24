@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use thiserror::Error;
 
+pub mod callback_server;
+
 /// A set of OAuth tokens returned by the token endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthTokenSet {
@@ -49,6 +51,14 @@ pub enum OAuthError {
     },
     #[error("failed to parse token response: {0}")]
     TokenParse(#[from] serde_json::Error),
+    #[error("callback server error: {0}")]
+    CallbackServer(String),
+    #[error("callback timed out after {0:?}")]
+    CallbackTimeout(std::time::Duration),
+    #[error("callback state mismatch: expected {expected}, got {got}")]
+    CallbackStateMismatch { expected: String, got: String },
+    #[error("callback request missing authorization code")]
+    CallbackMissingCode,
 }
 
 /// Raw token response from a standard OAuth 2.0 token endpoint.
