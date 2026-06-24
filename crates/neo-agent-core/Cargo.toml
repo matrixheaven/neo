@@ -13,6 +13,7 @@ base64.workspace = true
 chrono.workspace = true
 futures.workspace = true
 globset.workspace = true
+http = "1"
 ignore.workspace = true
 neo-ai = { path = "../neo-ai" }
 portable-pty = "0.9.0"
