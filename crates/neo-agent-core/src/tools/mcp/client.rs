@@ -11,10 +11,14 @@ use rmcp::{
     service::{RoleClient, RunningService},
 };
 use serde_json::Value;
-use tokio::time::timeout;
+use tokio::{sync::Mutex, time::timeout};
 
 use super::{McpError, McpResourceDefinition, McpResourceRead, McpToolDefinition, McpToolResponse};
 
+// TODO: `McpClient` and `RmcpClient` are currently unused while the rmcp
+// migration is in progress. They will be wired up through `McpConnectionManager`
+// in Task 4.
+#[allow(dead_code)]
 #[async_trait]
 pub trait McpClient: Send + Sync {
     async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError>;
@@ -24,27 +28,30 @@ pub trait McpClient: Send + Sync {
     async fn shutdown(&self) -> Result<(), McpError>;
 }
 
+#[allow(dead_code)]
+#[derive(Debug)]
 pub struct RmcpClient {
-    service: RunningService<RoleClient, ()>,
-    tool_timeout: Option<Duration>,
+    service: Mutex<Option<RunningService<RoleClient, ()>>>,
+    request_timeout: Option<Duration>,
 }
 
+#[allow(dead_code)]
 impl RmcpClient {
-    pub fn new(service: RunningService<RoleClient, ()>, tool_timeout: Option<Duration>) -> Self {
+    pub fn new(service: RunningService<RoleClient, ()>, request_timeout: Option<Duration>) -> Self {
         Self {
-            service,
-            tool_timeout,
+            service: Mutex::new(Some(service)),
+            request_timeout,
         }
     }
 
-    async fn with_tool_timeout<T, F>(&self, fut: F) -> Result<T, McpError>
+    async fn with_request_timeout<T, F>(&self, fut: F) -> Result<T, McpError>
     where
         F: std::future::Future<Output = Result<T, rmcp::service::ServiceError>> + Send,
     {
-        match self.tool_timeout {
+        match self.request_timeout {
             Some(d) => timeout(d, fut)
                 .await
-                .map_err(|_| McpError::protocol("tool call timed out"))?
+                .map_err(|_| McpError::protocol("request timed out"))?
                 .map_err(|e| McpError::protocol(e.to_string())),
             None => fut.await.map_err(|e| McpError::protocol(e.to_string())),
         }
@@ -56,11 +63,16 @@ impl McpClient for RmcpClient {
     async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError> {
         let request = ClientRequest::from(ListToolsRequest::default());
         let result = self
-            .service
-            .peer()
-            .send_request(request)
-            .await
-            .map_err(|e| McpError::protocol(e.to_string()))?;
+            .with_request_timeout(
+                self.service
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .peer()
+                    .send_request(request),
+            )
+            .await?;
         match result {
             ServerResult::ListToolsResult(result) => {
                 Ok(result.tools.into_iter().map(Into::into).collect())
@@ -71,19 +83,23 @@ impl McpClient for RmcpClient {
         }
     }
 
-    async fn call_tool(
-        &self,
-        name: &str,
-        arguments: Value,
-    ) -> Result<McpToolResponse, McpError> {
-        let args = arguments
-            .as_object()
-            .cloned()
-            .unwrap_or_else(serde_json::Map::new);
+    async fn call_tool(&self, name: &str, arguments: Value) -> Result<McpToolResponse, McpError> {
+        let args = match arguments {
+            Value::Object(map) => map,
+            _ => serde_json::Map::new(),
+        };
         let params = CallToolRequestParams::new(name.to_owned()).with_arguments(args);
         let request = ClientRequest::from(CallToolRequest::new(params));
         let result = self
-            .with_tool_timeout(self.service.peer().send_request(request))
+            .with_request_timeout(
+                self.service
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .peer()
+                    .send_request(request),
+            )
             .await?;
         match result {
             ServerResult::CallToolResult(result) => Ok(result.into()),
@@ -96,11 +112,16 @@ impl McpClient for RmcpClient {
     async fn list_resources(&self) -> Result<Vec<McpResourceDefinition>, McpError> {
         let request = ClientRequest::from(ListResourcesRequest::default());
         let result = self
-            .service
-            .peer()
-            .send_request(request)
-            .await
-            .map_err(|e| McpError::protocol(e.to_string()))?;
+            .with_request_timeout(
+                self.service
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .peer()
+                    .send_request(request),
+            )
+            .await?;
         match result {
             ServerResult::ListResourcesResult(result) => {
                 Ok(result.resources.into_iter().map(Into::into).collect())
@@ -116,11 +137,16 @@ impl McpClient for RmcpClient {
             ReadResourceRequestParams::new(uri),
         ));
         let result = self
-            .service
-            .peer()
-            .send_request(request)
-            .await
-            .map_err(|e| McpError::protocol(e.to_string()))?;
+            .with_request_timeout(
+                self.service
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .peer()
+                    .send_request(request),
+            )
+            .await?;
         match result {
             ServerResult::ReadResourceResult(result) => Ok(result.into()),
             other => Err(McpError::protocol(format!(
@@ -130,7 +156,12 @@ impl McpClient for RmcpClient {
     }
 
     async fn shutdown(&self) -> Result<(), McpError> {
-        self.service.cancellation_token().cancel();
+        if let Some(service) = self.service.lock().await.take() {
+            service
+                .cancel()
+                .await
+                .map_err(|e| McpError::protocol(e.to_string()))?;
+        }
         Ok(())
     }
 }
