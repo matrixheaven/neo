@@ -227,3 +227,20 @@ impl From<ReadResourceResult> for McpResourceRead {
 pub struct McpResourceUpdate {
     pub uri: String,
 }
+
+impl From<rmcp::model::CallToolRequestParams> for McpToolCall {
+    fn from(param: rmcp::model::CallToolRequestParams) -> Self {
+        Self {
+            name: param.name.to_string(),
+            arguments: param.arguments.map_or(serde_json::Value::Object(Default::default()), |obj| serde_json::Value::Object(obj)),
+        }
+    }
+}
+
+impl From<rmcp::model::ResourceUpdatedNotificationParam> for McpResourceUpdate {
+    fn from(param: rmcp::model::ResourceUpdatedNotificationParam) -> Self {
+        Self {
+            uri: param.uri.to_string(),
+        }
+    }
+}
