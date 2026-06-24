@@ -71,19 +71,19 @@ impl OAuthStore {
 
     /// Returns a reference to the token set for `key`, if any.
     #[must_use]
-    pub fn get(&self, key: &str) -> Option<&OAuthTokenSet> {
+    pub fn get_token(&self, key: &str) -> Option<&OAuthTokenSet> {
         self.entries.get(key)
     }
 
     /// Inserts or replaces the token set for `key`.
-    pub fn set(&mut self, key: &str, token_set: OAuthTokenSet) {
+    pub fn set_token(&mut self, key: &str, token_set: OAuthTokenSet) {
         self.entries.insert(key.to_string(), token_set);
     }
 
     /// Removes the token set for `key`.
     ///
     /// Returns `true` if a value was present and removed.
-    pub fn remove(&mut self, key: &str) -> bool {
+    pub fn remove_token(&mut self, key: &str) -> bool {
         self.entries.remove(key).is_some()
     }
 }
@@ -156,7 +156,7 @@ mod tests {
         let path = dir.path().join("nested").join("oauth.json");
 
         let mut store = OAuthStore::default();
-        store.set("linear", sample_token_set());
+        store.set_token("linear", sample_token_set());
         store.save(&path).unwrap();
 
         assert!(path.exists());
@@ -168,7 +168,7 @@ mod tests {
         let path = dir.path().join("oauth.json");
 
         let mut store = OAuthStore::default();
-        store.set("linear", sample_token_set());
+        store.set_token("linear", sample_token_set());
         store.save(&path).unwrap();
 
         let loaded = OAuthStore::load(&path).unwrap();
@@ -180,20 +180,20 @@ mod tests {
         let mut store = OAuthStore::default();
         let tokens = sample_token_set();
 
-        assert!(store.get("linear").is_none());
+        assert!(store.get_token("linear").is_none());
 
-        store.set("linear", tokens.clone());
-        assert_eq!(store.get("linear"), Some(&tokens));
+        store.set_token("linear", tokens.clone());
+        assert_eq!(store.get_token("linear"), Some(&tokens));
 
-        assert!(store.remove("linear"));
-        assert!(store.get("linear").is_none());
-        assert!(!store.remove("linear"));
+        assert!(store.remove_token("linear"));
+        assert!(store.get_token("linear").is_none());
+        assert!(!store.remove_token("linear"));
     }
 
     #[test]
     fn remove_returns_false_when_key_missing() {
         let mut store = OAuthStore::default();
-        assert!(!store.remove("nonexistent"));
+        assert!(!store.remove_token("nonexistent"));
     }
 
     #[test]
@@ -205,7 +205,7 @@ mod tests {
         let path = dir.path().join("oauth.json");
 
         let mut store = OAuthStore::default();
-        store.set("linear", sample_token_set());
+        store.set_token("linear", sample_token_set());
         store.save(&path).unwrap();
 
         let metadata = std::fs::metadata(&path).unwrap();
@@ -216,13 +216,13 @@ mod tests {
     #[test]
     fn overwrite_existing_entry() {
         let mut store = OAuthStore::default();
-        store.set("linear", sample_token_set());
+        store.set_token("linear", sample_token_set());
 
         let mut second = sample_token_set();
         second.access_token = "access-789".to_string();
-        store.set("linear", second.clone());
+        store.set_token("linear", second.clone());
 
-        assert_eq!(store.get("linear"), Some(&second));
+        assert_eq!(store.get_token("linear"), Some(&second));
         assert_eq!(store.entries.len(), 1);
     }
 }
