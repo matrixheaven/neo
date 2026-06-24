@@ -5,6 +5,7 @@ pub mod harness;
 pub mod injection;
 pub mod messages;
 pub mod mode;
+pub mod oauth;
 pub mod permissions;
 pub mod rpc;
 pub mod runtime;
