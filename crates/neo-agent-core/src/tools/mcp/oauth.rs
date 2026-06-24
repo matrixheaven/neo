@@ -5,14 +5,74 @@
 //! persistent credentials and an in-memory store for transient OAuth state.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rmcp::transport::auth::{AuthError, StateStore, StoredAuthorizationState, StoredCredentials};
-use tokio::sync::RwLock;
+use rmcp::transport::auth::{AuthError, AuthorizationManager, StateStore, StoredAuthorizationState, StoredCredentials};
+use tokio::sync::{Mutex, RwLock};
 
 use crate::oauth::OAuthStore;
+
+/// Build an `AuthorizationManager` configured with Neo's persistent credential and state stores.
+///
+/// This function creates an `AuthorizationManager` with a `FileCredentialStore` and
+/// `InMemoryStateStore`, which can be used to perform OAuth authorization flows for
+/// MCP servers.
+///
+/// # Arguments
+///
+/// * `base_url` - The base URL of the MCP server to authorize.
+/// * `oauth_store_path` - Path to Neo's `oauth.json` file for persistent credential storage.
+/// * `server_id` - Identifier for the MCP server (used as the credential key prefix).
+///
+/// # Returns
+///
+/// * `Arc<Mutex<AuthorizationManager>>` - The configured authorization manager.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::path::Path;
+/// use tokio::sync::Arc;
+/// use rmcp::transport::auth::AuthorizationManager;
+///
+/// let manager = build_authorization_manager(
+///     "https://example.com/mcp",
+///     Path::new("/home/user/.neo/oauth.json"),
+///     "my-server",
+/// )?;
+/// ```
+#[allow(dead_code)] // TODO: unlink from MCP tool on Task 3.4
+pub async fn build_authorization_manager(
+    base_url: &str,
+    oauth_store_path: &Path,
+    server_id: &str,
+) -> Result<Arc<Mutex<AuthorizationManager>>, AuthError> {
+    // Create file-backed credential store
+    let credential_store = FileCredentialStore::new(
+        oauth_store_path.to_path_buf(),
+        server_id.to_string(),
+    );
+
+    // Create in-memory state store
+    let state_store = InMemoryStateStore::new();
+
+    // Build AuthorizationManager with base URL
+    let mut manager = AuthorizationManager::new(base_url)
+        .await
+        .map_err(|e| {
+            AuthError::InternalError(format!("failed to build authorization manager: {e}"))
+        })?;
+
+    // Replace default credential store with file-backed store
+    manager.set_credential_store(credential_store);
+
+    // Replace default state store with in-memory store
+    manager.set_state_store(state_store);
+
+    Ok(Arc::new(Mutex::new(manager)))
+}
 
 /// Helper function to generate the storage key for an MCP server.
 ///
