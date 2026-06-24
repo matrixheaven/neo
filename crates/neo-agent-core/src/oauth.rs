@@ -17,6 +17,8 @@ use thiserror::Error;
 pub mod callback_server;
 pub mod store;
 
+pub use store::OAuthStore;
+
 /// A set of OAuth tokens returned by the token endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthTokenSet {
@@ -180,6 +182,27 @@ pub async fn exchange_code_for_token(
 ///
 /// The provider's scopes are sent along with the request so the token endpoint
 /// can narrow or preserve the originally granted scopes.
+/// Detect a known OAuth provider for an HTTP/SSE MCP server URL.
+///
+/// This is intentionally simple for the local OAuth authenticator MVP: only
+/// Linear is recognized.
+#[must_use]
+pub fn provider_for_url(url: &str) -> Option<OAuthProvider> {
+    if url.contains("linear.app") {
+        Some(OAuthProvider {
+            id: "linear".to_owned(),
+            client_id: std::env::var("NEO_OAUTH_LINEAR_CLIENT_ID")
+                .unwrap_or_else(|_| "neo".to_owned()),
+            auth_url: "https://api.linear.app/oauth/authorize".to_owned(),
+            token_url: "https://api.linear.app/oauth/token".to_owned(),
+            scopes: vec!["write".to_owned()],
+            default_callback_port: 0,
+        })
+    } else {
+        None
+    }
+}
+
 pub async fn refresh_access_token(
     provider: &OAuthProvider,
     refresh_token: &str,

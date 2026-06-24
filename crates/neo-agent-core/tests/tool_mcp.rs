@@ -556,6 +556,7 @@ async fn mcp_http_adapter_subscribes_to_sse_resource_updates() {
         url: server.url.clone(),
         headers: BTreeMap::new(),
         tool_timeout_ms: None,
+        ..Default::default()
     });
 
     adapter
@@ -598,6 +599,7 @@ async fn mcp_http_adapter_reads_resource_updates_from_event_channel_after_json_s
         url: server.url.clone(),
         headers: BTreeMap::new(),
         tool_timeout_ms: None,
+        ..Default::default()
     });
 
     adapter
@@ -656,6 +658,7 @@ async fn mcp_http_adapter_uses_event_stream_url_from_json_subscribe_ack() {
         url: server.url.clone(),
         headers: BTreeMap::new(),
         tool_timeout_ms: None,
+        ..Default::default()
     });
 
     adapter
@@ -711,6 +714,7 @@ async fn mcp_http_adapter_requires_sse_event_channel_after_json_subscribe_ack() 
         url: server.url.clone(),
         headers: BTreeMap::new(),
         tool_timeout_ms: None,
+        ..Default::default()
     });
 
     let error = adapter
@@ -755,6 +759,7 @@ async fn mcp_http_adapter_rejects_non_http_event_stream_url_from_json_subscribe_
         url: server.url.clone(),
         headers: BTreeMap::new(),
         tool_timeout_ms: None,
+        ..Default::default()
     });
 
     let error = adapter
@@ -797,6 +802,7 @@ async fn mcp_http_adapter_reports_sse_stream_end_after_subscribe_response() {
         url: server.url.clone(),
         headers: BTreeMap::new(),
         tool_timeout_ms: None,
+        ..Default::default()
     });
 
     adapter
@@ -842,6 +848,7 @@ async fn mcp_http_adapter_discovers_and_calls_json_rpc_tools() {
         url: server.url.clone(),
         headers: BTreeMap::from([("x-neo-test".to_owned(), "mcp-http".to_owned())]),
         tool_timeout_ms: None,
+        ..Default::default()
     }));
 
     let provider = McpToolProvider::discover("remote-docs", Arc::clone(&adapter))
@@ -905,6 +912,7 @@ async fn mcp_http_adapter_accepts_sse_json_rpc_responses() {
         url: server.url.clone(),
         headers: BTreeMap::new(),
         tool_timeout_ms: None,
+        ..Default::default()
     });
 
     let tools = adapter
@@ -949,6 +957,7 @@ async fn mcp_http_adapter_lists_and_reads_resources() {
         url: server.url.clone(),
         headers: BTreeMap::new(),
         tool_timeout_ms: None,
+        ..Default::default()
     });
 
     let resources = adapter.list_resources().await.expect("list MCP resources");

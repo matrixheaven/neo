@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -10,11 +11,13 @@ use neo_agent_core::{
     McpResourceRead, McpServerSnapshot, McpServerStatus, ProcessSupervisor,
     oauth::{
         OAuthError, OAuthProvider, OAuthTokenSet, build_authorization_url,
-        callback_server::CallbackServer, exchange_code_for_token, generate_pkce, store::OAuthStore,
+        callback_server::CallbackServer, exchange_code_for_token, generate_pkce, provider_for_url,
+        store::OAuthStore,
     },
 };
+use tokio::sync::RwLock;
 
-use crate::config::McpServerConfig;
+use crate::config::{McpServerConfig, neo_home};
 
 pub use neo_agent_core::ManagedMcpServerConfig;
 
@@ -297,6 +300,11 @@ pub async fn reload_mcp_manager_from_config(
     config: &crate::config::AppConfig,
     manager: &McpConnectionManager,
 ) -> anyhow::Result<Vec<McpServerSnapshot>> {
+    if let Some(home) = neo_home() {
+        let store_path = home.join("oauth.json");
+        let store = Arc::new(RwLock::new(OAuthStore::load(&store_path)?));
+        manager.set_oauth_store(store, Some(store_path)).await;
+    }
     let managed_configs = to_managed_configs(&config.mcp.servers)?;
     Ok(manager.apply_config(managed_configs).await)
 }
@@ -452,18 +460,6 @@ fn endpoint_summary(server: &McpServerConfig) -> String {
     server.url.clone().unwrap_or_default()
 }
 
-/// Hardcoded Linear OAuth provider for the local OAuth authenticator MVP.
-pub fn linear_oauth_provider() -> OAuthProvider {
-    OAuthProvider {
-        id: "linear".to_owned(),
-        client_id: std::env::var("NEO_OAUTH_LINEAR_CLIENT_ID").unwrap_or_else(|_| "neo".to_owned()),
-        auth_url: "https://api.linear.app/oauth/authorize".to_owned(),
-        token_url: "https://api.linear.app/oauth/token".to_owned(),
-        scopes: vec!["write".to_owned()],
-        default_callback_port: 0,
-    }
-}
-
 /// Pick an OAuth provider for an MCP server based on its transport and URL.
 ///
 /// Returns `None` for non-remote transports or when no provider is known for
@@ -472,11 +468,7 @@ pub fn detect_oauth_provider_for_server(server: &McpServerConfig) -> Option<OAut
     if server.transport != "http" && server.transport != "sse" {
         return None;
     }
-    server
-        .url
-        .as_deref()
-        .filter(|url| url.contains("linear.app"))
-        .map(|_| linear_oauth_provider())
+    server.url.as_deref().and_then(provider_for_url)
 }
 
 /// Run the OAuth authorization-code flow for a configured MCP server, save the

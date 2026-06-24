@@ -32,6 +32,7 @@ use neo_agent_core::{
     format_collected_answers,
     goal::GoalManager,
     mode::PlanMode,
+    oauth::OAuthStore,
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
     skills::SkillStore,
 };
@@ -65,6 +66,29 @@ type ClipboardWriter = Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
 type GitStatusProvider = Arc<dyn Fn(&Path) -> Option<String> + Send + Sync>;
 
 const GIT_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
+fn mcp_manager_with_oauth_store() -> McpConnectionManager {
+    let supervisor = ProcessSupervisor::default();
+    if let Some(home) = neo_home() {
+        let path = home.join("oauth.json");
+        match OAuthStore::load(&path) {
+            Ok(store) => {
+                return McpConnectionManager::with_oauth_store(
+                    supervisor,
+                    Arc::new(tokio::sync::RwLock::new(store)),
+                    Some(path),
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to load OAuth store; continuing with empty store"
+                );
+            }
+        }
+    }
+    McpConnectionManager::new(supervisor)
+}
 
 fn approval_number(character: char) -> Option<usize> {
     match character {
@@ -839,7 +863,7 @@ impl InteractiveController {
             pending_catalog_fetch: None,
             pending_mcp_probe: None,
             pending_mcp_add_transport: None,
-            mcp_manager: Some(McpConnectionManager::new(ProcessSupervisor::default())),
+            mcp_manager: Some(mcp_manager_with_oauth_store()),
             skill_store: None,
             pending_skill_context: None,
             goal_manager: None,

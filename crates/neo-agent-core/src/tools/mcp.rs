@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
+use chrono::Utc;
 use futures::StreamExt;
 use neo_ai::ToolSpec;
 use serde::{Deserialize, Serialize};
@@ -8,12 +9,13 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
-    sync::{Mutex, mpsc, oneshot},
+    sync::{Mutex, RwLock, mpsc, oneshot},
     task::JoinHandle,
 };
 
 use super::{ProcessKind, ProcessSupervisor};
 use super::{Tool, ToolContext, ToolError, ToolFuture, ToolRegistry, ToolResult};
+use crate::oauth::{OAuthProvider, OAuthStore, refresh_access_token};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpToolDefinition {
@@ -196,13 +198,21 @@ pub struct McpStdioConfig {
     pub tool_timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct McpHttpConfig {
     pub url: String,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_timeout_ms: Option<u64>,
+    #[serde(skip)]
+    pub server_id: Option<String>,
+    #[serde(skip)]
+    pub oauth_store: Option<Arc<RwLock<OAuthStore>>>,
+    #[serde(skip)]
+    pub oauth_provider: Option<OAuthProvider>,
+    #[serde(skip)]
+    pub oauth_store_path: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -229,6 +239,67 @@ impl McpHttpToolAdapter {
             resource_update_rx: Arc::new(Mutex::new(resource_update_rx)),
             resource_sse_reader: Arc::new(Mutex::new(None)),
         }
+    }
+
+    async fn apply_oauth_header(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, McpError> {
+        if self
+            .config
+            .headers
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case("authorization"))
+        {
+            return Ok(request);
+        }
+
+        let Some(server_id) = self.config.server_id.as_ref() else {
+            return Ok(request);
+        };
+        let Some(provider) = self.config.oauth_provider.as_ref() else {
+            return Ok(request);
+        };
+        let Some(store) = self.config.oauth_store.as_ref() else {
+            return Ok(request);
+        };
+
+        let token_key = format!("mcp:{server_id}");
+        let mut store_guard = store.write().await;
+        let token = store_guard.get_token(&token_key).cloned();
+
+        let Some(token) = token else {
+            return Ok(request);
+        };
+
+        let token = if token
+            .expires_at
+            .is_some_and(|expires_at| expires_at < Utc::now())
+        {
+            let Some(refresh_token) = token.refresh_token.as_ref() else {
+                return Ok(
+                    request.header("Authorization", format!("Bearer {}", token.access_token))
+                );
+            };
+            match refresh_access_token(provider, refresh_token).await {
+                Ok(new_token) => {
+                    store_guard.set_token(&token_key, new_token.clone());
+                    if let Some(path) = self.config.oauth_store_path.as_ref() {
+                        let _ = store_guard.save(path);
+                    }
+                    new_token
+                }
+                Err(err) => {
+                    return Err(McpError::protocol(format!(
+                        "failed to refresh OAuth token: {err}"
+                    )));
+                }
+            }
+        } else {
+            token
+        };
+
+        Ok(request.header("Authorization", format!("Bearer {}", token.access_token)))
     }
 
     async fn ensure_initialized(&self) -> Result<(), McpError> {
@@ -318,6 +389,7 @@ impl McpHttpToolAdapter {
         for (key, value) in &self.config.headers {
             request = request.header(key, value);
         }
+        request = self.apply_oauth_header(request).await?;
         let response = request
             .send()
             .await
@@ -344,6 +416,7 @@ impl McpHttpToolAdapter {
         for (key, value) in &self.config.headers {
             request = request.header(key, value);
         }
+        request = self.apply_oauth_header(request).await?;
         let response = request.send().await.map_err(|err| {
             McpError::protocol(format!("failed to open MCP HTTP event stream: {err}"))
         })?;
@@ -1373,7 +1446,62 @@ fn resource_event_stream_url(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use chrono::{DateTime, Duration, Utc};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+
     use super::*;
+    use crate::oauth::OAuthTokenSet;
+
+    fn test_oauth_provider(token_url: impl Into<String>) -> OAuthProvider {
+        OAuthProvider {
+            id: "linear".to_owned(),
+            client_id: "test-client-id".to_owned(),
+            auth_url: "https://auth.example.com/authorize".to_owned(),
+            token_url: token_url.into(),
+            scopes: vec!["write".to_owned()],
+            default_callback_port: 0,
+        }
+    }
+
+    fn valid_token_set() -> OAuthTokenSet {
+        OAuthTokenSet {
+            access_token: "access-123".to_owned(),
+            token_type: "Bearer".to_owned(),
+            refresh_token: Some("refresh-456".to_owned()),
+            expires_at: Some(Utc::now() + Duration::seconds(3600)),
+            scopes: vec!["write".to_owned()],
+        }
+    }
+
+    async fn spawn_token_server(response_body: String) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                if line.trim().is_empty() {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            writer.write_all(response.as_bytes()).await.unwrap();
+        });
+        (format!("http://127.0.0.1:{port}/token"), handle)
+    }
 
     #[test]
     fn sse_event_byte_buffer_waits_for_complete_utf8_event() {
@@ -1390,5 +1518,191 @@ mod tests {
             "data: {\"uri\":\"file://docs/雪.md\"}"
         );
         assert!(buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn oauth_token_is_injected_when_store_has_token() {
+        let mut store = OAuthStore::default();
+        store.set_token("mcp:linear", valid_token_set());
+        let config = McpHttpConfig {
+            url: "https://linear.app/mcp".to_owned(),
+            headers: BTreeMap::new(),
+            server_id: Some("linear".to_owned()),
+            oauth_store: Some(Arc::new(RwLock::new(store))),
+            oauth_provider: Some(test_oauth_provider("https://token.example.com/token")),
+            ..Default::default()
+        };
+        let adapter = McpHttpToolAdapter::new(config);
+
+        let request = adapter
+            .apply_oauth_header(adapter.client.get("https://linear.app/mcp"))
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request
+                .headers()
+                .get("Authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer access-123"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_authorization_header_is_not_overridden() {
+        let mut store = OAuthStore::default();
+        store.set_token("mcp:linear", valid_token_set());
+        let mut headers = BTreeMap::new();
+        headers.insert("Authorization".to_owned(), "Bearer config-token".to_owned());
+        let config = McpHttpConfig {
+            url: "https://linear.app/mcp".to_owned(),
+            headers,
+            server_id: Some("linear".to_owned()),
+            oauth_store: Some(Arc::new(RwLock::new(store))),
+            oauth_provider: Some(test_oauth_provider("https://token.example.com/token")),
+            ..Default::default()
+        };
+        let adapter = McpHttpToolAdapter::new(config);
+
+        let request = adapter
+            .apply_oauth_header(
+                adapter
+                    .client
+                    .get("https://linear.app/mcp")
+                    .header("Authorization", "Bearer config-token"),
+            )
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request
+                .headers()
+                .get("Authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer config-token"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_oauth_token_leaves_request_unchanged() {
+        let config = McpHttpConfig {
+            url: "https://linear.app/mcp".to_owned(),
+            headers: BTreeMap::new(),
+            server_id: Some("linear".to_owned()),
+            oauth_store: Some(Arc::new(RwLock::new(OAuthStore::default()))),
+            oauth_provider: Some(test_oauth_provider("https://token.example.com/token")),
+            ..Default::default()
+        };
+        let adapter = McpHttpToolAdapter::new(config);
+
+        let request = adapter
+            .apply_oauth_header(adapter.client.get("https://linear.app/mcp"))
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(request.headers().get("Authorization").is_none());
+    }
+
+    #[tokio::test]
+    async fn expired_token_with_refresh_token_updates_header() {
+        let (token_url, server) = spawn_token_server(
+            r#"{"access_token":"refreshed-token","token_type":"Bearer","expires_in":3600}"#
+                .to_owned(),
+        )
+        .await;
+
+        let mut store = OAuthStore::default();
+        store.set_token(
+            "mcp:linear",
+            OAuthTokenSet {
+                access_token: "expired-token".to_owned(),
+                token_type: "Bearer".to_owned(),
+                refresh_token: Some("refresh-456".to_owned()),
+                expires_at: Some(Utc::now() - Duration::seconds(1)),
+                scopes: vec!["write".to_owned()],
+            },
+        );
+        let config = McpHttpConfig {
+            url: "https://linear.app/mcp".to_owned(),
+            headers: BTreeMap::new(),
+            server_id: Some("linear".to_owned()),
+            oauth_store: Some(Arc::new(RwLock::new(store))),
+            oauth_provider: Some(test_oauth_provider(token_url)),
+            ..Default::default()
+        };
+        let adapter = McpHttpToolAdapter::new(config);
+
+        let request = adapter
+            .apply_oauth_header(adapter.client.get("https://linear.app/mcp"))
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request
+                .headers()
+                .get("Authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer refreshed-token"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refreshed_token_is_persisted_when_store_path_provided() {
+        let (token_url, server) = spawn_token_server(
+            r#"{"access_token":"refreshed-token","token_type":"Bearer","expires_in":3600}"#
+                .to_owned(),
+        )
+        .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("oauth.json");
+        let mut store = OAuthStore::default();
+        store.set_token(
+            "mcp:linear",
+            OAuthTokenSet {
+                access_token: "expired-token".to_owned(),
+                token_type: "Bearer".to_owned(),
+                refresh_token: Some("refresh-456".to_owned()),
+                expires_at: Some(DateTime::UNIX_EPOCH),
+                scopes: vec!["write".to_owned()],
+            },
+        );
+        let config = McpHttpConfig {
+            url: "https://linear.app/mcp".to_owned(),
+            headers: BTreeMap::new(),
+            server_id: Some("linear".to_owned()),
+            oauth_store: Some(Arc::new(RwLock::new(store))),
+            oauth_provider: Some(test_oauth_provider(token_url)),
+            oauth_store_path: Some(store_path.clone()),
+            ..Default::default()
+        };
+        let adapter = McpHttpToolAdapter::new(config);
+
+        let _request = adapter
+            .apply_oauth_header(adapter.client.get("https://linear.app/mcp"))
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let persisted = OAuthStore::load(&store_path).unwrap();
+        let token = persisted.get_token("mcp:linear").unwrap();
+        assert_eq!(token.access_token, "refreshed-token");
+        server.abort();
     }
 }

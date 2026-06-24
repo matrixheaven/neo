@@ -17,7 +17,7 @@ use neo_agent_core::{
     McpHttpConfig, McpHttpToolAdapter, McpServerStatus, McpStdioConfig, McpStdioToolAdapter,
     McpToolAdapter, McpToolProvider, MoveSkillTool, PendingQuestion, PermissionApprovalDecision,
     PermissionOperation, ProcessSupervisor, SteerInputHandle, SummarizeSessionsTool, ToolRegistry,
-    mode::PlanMode,
+    mode::PlanMode, oauth::OAuthStore,
 };
 use neo_ai::{
     ChatMessage, ContentPart, CredentialResolver, ModelClient, ModelRegistry, ModelSpec,
@@ -1908,10 +1908,25 @@ fn mcp_adapter_for_server(server: &McpServerConfig) -> anyhow::Result<Arc<dyn Mc
                 .url
                 .clone()
                 .with_context(|| format!("missing MCP url for {}", server.id))?;
+            let oauth_provider = neo_agent_core::oauth::provider_for_url(&url);
+            let oauth_store_and_path = neo_home().and_then(|home| {
+                let path = home.join("oauth.json");
+                OAuthStore::load(&path)
+                    .ok()
+                    .map(|store| (Arc::new(tokio::sync::RwLock::new(store)), path))
+            });
+            let oauth_store = oauth_store_and_path
+                .as_ref()
+                .map(|(store, _)| Arc::clone(store));
+            let oauth_store_path = oauth_store_and_path.map(|(_, path)| path);
             Ok(Arc::new(McpHttpToolAdapter::new(McpHttpConfig {
                 url,
                 headers: server.headers.clone(),
                 tool_timeout_ms: server.tool_timeout_ms,
+                server_id: Some(server.id.clone()),
+                oauth_store,
+                oauth_provider,
+                oauth_store_path,
             })))
         }
         other => anyhow::bail!("unsupported MCP transport for {}: {other}", server.id),
