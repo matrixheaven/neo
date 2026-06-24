@@ -10,6 +10,7 @@ use crate::tools::ProcessSupervisor;
 
 // TODO: `StdioConfig` is currently unused while the rmcp migration is in
 // progress. It will be wired up through `McpConnectionManager` in Task 4.
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct StdioConfig {
     pub command: String,
@@ -77,7 +78,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stdio_config_roundtrips_fields() {
+    fn stdio_config_holds_values() {
         let config = StdioConfig {
             command: "npx".into(),
             args: vec!["-y".into(), "server".into()],
