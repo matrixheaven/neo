@@ -1509,6 +1509,13 @@ impl NeoChromeState {
         state.action()
     }
 
+    pub fn take_mcp_manager_action(&mut self) -> Option<crate::dialogs::McpManagerAction> {
+        let OverlayKind::McpManager(state) = &mut self.focused_overlay_mut()?.kind else {
+            return None;
+        };
+        state.take_action()
+    }
+
     #[must_use]
     pub fn choice_picker_result(&self) -> Option<&crate::dialogs::ChoiceResult> {
         let OverlayKind::ChoicePicker(state) = &self.focused_overlay()?.kind else {

@@ -389,6 +389,11 @@ impl McpManagerState {
         self.action.clone()
     }
 
+    /// Take the pending action, clearing it from the dialog state.
+    pub fn take_action(&mut self) -> Option<McpManagerAction> {
+        self.action.take()
+    }
+
     fn move_up(&mut self) {
         if self.selected_index > 0 {
             self.selected_index -= 1;
@@ -739,6 +744,34 @@ mod tests {
             true,
             McpToolStatus::NotDiscovered,
         )]);
+        let result = state.handle_input(&InputEvent::Cancel);
+        assert!(matches!(result, InputResult::Cancelled));
+        assert!(matches!(state.action(), Some(McpManagerAction::Close)));
+    }
+
+    #[test]
+    fn action_is_cleared_after_take() {
+        let mut state = manager(vec![row(
+            "fs",
+            "remote-http",
+            true,
+            McpToolStatus::NotDiscovered,
+        )]);
+        let result = state.handle_input(&InputEvent::Submit);
+        assert!(matches!(result, InputResult::Submitted));
+        assert!(matches!(
+            state.action(),
+            Some(McpManagerAction::Test(id)) if id == "fs"
+        ));
+
+        assert!(matches!(
+            state.take_action(),
+            Some(McpManagerAction::Test(id)) if id == "fs"
+        ));
+        assert!(state.action().is_none());
+
+        // After the action is consumed, Esc should close rather than re-issue
+        // the previous action.
         let result = state.handle_input(&InputEvent::Cancel);
         assert!(matches!(result, InputResult::Cancelled));
         assert!(matches!(state.action(), Some(McpManagerAction::Close)));

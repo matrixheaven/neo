@@ -4202,7 +4202,7 @@ impl InteractiveController {
     }
 
     async fn handle_mcp_manager_action(&mut self) {
-        let action = self.tui.chrome_mut().mcp_manager_action();
+        let action = self.tui.chrome_mut().take_mcp_manager_action();
         let Some(action) = action else {
             return;
         };
