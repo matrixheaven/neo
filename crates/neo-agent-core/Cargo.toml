@@ -20,6 +20,7 @@ pulldown-cmark.workspace = true
 rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
+rmcp = { version = "1.8.0", features = ["client", "auth", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 rustix.workspace = true
 schemars.workspace = true
 serde.workspace = true
