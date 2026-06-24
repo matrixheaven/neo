@@ -4,7 +4,6 @@ use std::{
     fmt::Write as _,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
-    time::Duration,
 };
 
 use anyhow::Context;
@@ -19,9 +18,6 @@ use neo_agent_core::{
     McpToolAdapter, McpToolProvider, MoveSkillTool, PendingQuestion, PermissionApprovalDecision,
     PermissionOperation, ProcessSupervisor, SteerInputHandle, SummarizeSessionsTool, ToolRegistry,
     mode::PlanMode,
-    oauth::callback_server::CallbackServer,
-    oauth::store::OAuthStore,
-    oauth::{OAuthProvider, build_authorization_url, exchange_code_for_token, generate_pkce},
 };
 use neo_ai::{
     ChatMessage, ContentPart, CredentialResolver, ModelClient, ModelRegistry, ModelSpec,
@@ -32,6 +28,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::mcp_ops::authenticate_mcp_server_oauth;
 use crate::{
     cli::RunOutput,
     config::{self, AppConfig, McpServerConfig, ModelConfig, neo_home, workspace_sessions_dir},
@@ -929,33 +926,6 @@ pub async fn add_mcp_server(
     Ok(format!("{saved}{probe_msg}"))
 }
 
-/// Hardcoded Linear OAuth provider for the local OAuth authenticator MVP.
-pub(crate) fn linear_oauth_provider() -> OAuthProvider {
-    OAuthProvider {
-        id: "linear".to_owned(),
-        client_id: std::env::var("NEO_OAUTH_LINEAR_CLIENT_ID").unwrap_or_else(|_| "neo".to_owned()),
-        auth_url: "https://api.linear.app/oauth/authorize".to_owned(),
-        token_url: "https://api.linear.app/oauth/token".to_owned(),
-        scopes: vec!["write".to_owned()],
-        default_callback_port: 0,
-    }
-}
-
-/// Pick an OAuth provider for an MCP server based on its transport and URL.
-///
-/// Returns `None` for non-remote transports or when no provider is known for
-/// the server's URL.
-pub(crate) fn detect_oauth_provider_for_server(server: &McpServerConfig) -> Option<OAuthProvider> {
-    if server.transport != "http" && server.transport != "sse" {
-        return None;
-    }
-    server
-        .url
-        .as_deref()
-        .filter(|url| url.contains("linear.app"))
-        .map(|_| linear_oauth_provider())
-}
-
 /// Run the OAuth authorization-code flow for a configured MCP server and save
 /// the resulting token to `~/.neo/oauth.json`.
 pub async fn auth_mcp_server(server_id: String, config: &AppConfig) -> anyhow::Result<String> {
@@ -970,34 +940,14 @@ pub async fn auth_mcp_server(server_id: String, config: &AppConfig) -> anyhow::R
         anyhow::bail!("OAuth only supported for HTTP/SSE servers");
     }
 
-    let mut provider = detect_oauth_provider_for_server(server)
-        .context("No OAuth provider configured for this server")?;
-
-    let (verifier, challenge) = generate_pkce();
-    let state = Uuid::new_v4().to_string();
-
-    build_authorization_url(&provider, &state, &challenge)?;
-    let callback_server = CallbackServer::start(state.clone(), Duration::from_secs(300)).await?;
-    provider.default_callback_port = callback_server.local_port;
-    let auth_url = build_authorization_url(&provider, &state, &challenge)?;
-
-    let _ = webbrowser::open(auth_url.as_str());
-
-    let code = callback_server.wait_for_code().await?;
-    let token = exchange_code_for_token(&provider, &code.code, &verifier).await?;
-
     let neo_home = neo_home().context("failed to resolve neo home directory")?;
-    let store_path = neo_home.join("oauth.json");
-    let token_key = format!("mcp:{server_id}");
-    let access_token = token.access_token.clone();
-    let mut store = OAuthStore::load(&store_path)?;
-    store.set_token(&token_key, token);
-    store.save(&store_path)?;
+    let token = authenticate_mcp_server_oauth(&server_id, server, &neo_home).await?;
 
     let mut server = server.clone();
-    server
-        .headers
-        .insert("Authorization".to_owned(), format!("Bearer {access_token}"));
+    server.headers.insert(
+        "Authorization".to_owned(),
+        format!("Bearer {}", token.access_token),
+    );
     config::upsert_mcp_server(&server, &config.config_path)?;
 
     Ok(format!("OAuth token saved for MCP server {server_id}\n"))
@@ -2365,6 +2315,7 @@ fn message_text(message: &AgentMessage) -> String {
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
+    use crate::mcp_ops::detect_oauth_provider_for_server;
     use neo_agent_core::{
         AgentConfig, AgentEvent, AgentMessage, ApprovalRequest, CompactionSettings, Content,
         PermissionApprovalDecision, PermissionMode, PermissionOperation, QueueMode,
@@ -2379,9 +2330,8 @@ mod tests {
 
     use super::{
         PromptApprovalRequest, StableJsonState, agent_config_for_app, auth_mcp_server,
-        create_session_path, detect_oauth_provider_for_server, list_configured_models,
-        model_registry_for_config, run_prompt_with_runtime, select_config_model,
-        tool_registry_for_config,
+        create_session_path, list_configured_models, model_registry_for_config,
+        run_prompt_with_runtime, select_config_model, tool_registry_for_config,
     };
     use crate::config::{
         AppConfig, Defaults, McpConfig, ModelConfig, ProviderConfig, RuntimeCompactionConfig,

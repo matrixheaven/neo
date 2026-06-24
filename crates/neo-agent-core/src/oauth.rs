@@ -60,6 +60,8 @@ pub enum OAuthError {
     CallbackStateMismatch { expected: String, got: String },
     #[error("callback request missing authorization code")]
     CallbackMissingCode,
+    #[error("no OAuth provider configured for this server")]
+    ProviderDetection,
     #[error("failed to load token store: {0}")]
     StoreLoad(std::io::Error),
     #[error("failed to save token store: {0}")]

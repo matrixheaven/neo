@@ -1,7 +1,6 @@
 use crate::{
     config::{self, AppConfig, neo_home, workspace_sessions_dir},
-    mcp_ops,
-    modes::run::detect_oauth_provider_for_server,
+    mcp_ops::{self, authenticate_mcp_server_oauth},
     modes::sessions::{SessionPickerScope as SessionDataScope, session_summaries},
     prompt_templates::{
         PromptTemplateLocation, discover_prompt_template_commands, expand_prompt_template_args,
@@ -33,9 +32,6 @@ use neo_agent_core::{
     format_collected_answers,
     goal::GoalManager,
     mode::PlanMode,
-    oauth::callback_server::CallbackServer,
-    oauth::store::OAuthStore,
-    oauth::{build_authorization_url, exchange_code_for_token, generate_pkce},
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
     skills::SkillStore,
 };
@@ -58,7 +54,6 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 type BoxedTurnFuture = Pin<Box<dyn Future<Output = Result<TurnOutcome>> + Send + 'static>>;
 type BoxedSessionFuture = Pin<Box<dyn Future<Output = Result<LoadedSessionTranscript>> + Send>>;
@@ -4226,81 +4221,31 @@ impl InteractiveController {
             self.push_status("OAuth only supported for HTTP/SSE servers");
             return;
         }
-        let Some(mut provider) = detect_oauth_provider_for_server(server) else {
-            self.push_status("No OAuth provider configured for this server");
-            return;
-        };
-
-        let (verifier, challenge) = generate_pkce();
-        let state = Uuid::new_v4().to_string();
-
-        if let Err(err) = build_authorization_url(&provider, &state, &challenge) {
-            self.push_status(format!("Failed to build authorization URL: {err}"));
-            return;
-        }
-
-        let callback_server =
-            match CallbackServer::start(state.clone(), Duration::from_secs(300)).await {
-                Ok(server) => server,
-                Err(err) => {
-                    self.push_status(format!("Failed to start OAuth callback server: {err}"));
-                    return;
-                }
-            };
-        provider.default_callback_port = callback_server.local_port;
-
-        let auth_url = match build_authorization_url(&provider, &state, &challenge) {
-            Ok(url) => url,
-            Err(err) => {
-                self.push_status(format!("Failed to build authorization URL: {err}"));
-                return;
-            }
-        };
-
-        let _ = webbrowser::open(auth_url.as_str());
-        self.push_status("Waiting for browser authorization...");
-
-        let code = match callback_server.wait_for_code().await {
-            Ok(code) => code,
-            Err(err) => {
-                self.push_status(format!("OAuth callback failed: {err}"));
-                return;
-            }
-        };
-
-        let token = match exchange_code_for_token(&provider, &code.code, &verifier).await {
-            Ok(token) => token,
-            Err(err) => {
-                self.push_status(format!("OAuth token exchange failed: {err}"));
-                return;
-            }
-        };
 
         let Some(neo_home) = neo_home() else {
             self.push_status("Failed to resolve neo home directory");
             return;
         };
-        let store_path = neo_home.join("oauth.json");
-        let mut store = match OAuthStore::load(&store_path) {
-            Ok(store) => store,
+
+        self.push_status("Waiting for browser authorization...");
+        let token = match authenticate_mcp_server_oauth(&server_id, server, &neo_home).await {
+            Ok(token) => token,
+            Err(neo_agent_core::oauth::OAuthError::ProviderDetection) => {
+                self.push_status("No OAuth provider configured for this server");
+                return;
+            }
             Err(err) => {
-                self.push_status(format!("Failed to load OAuth store: {err}"));
+                self.push_status(format!("OAuth flow failed: {err}"));
                 return;
             }
         };
-        let token_key = format!("mcp:{server_id}");
-        let access_token = token.access_token.clone();
-        store.set_token(&token_key, token);
-        if let Err(err) = store.save(&store_path) {
-            self.push_status(format!("Failed to save OAuth store: {err}"));
-            return;
-        }
         self.push_status("OAuth token saved");
 
         let mut server = server.clone();
-        server
-            .headers
-            .insert("Authorization".to_owned(), format!("Bearer {access_token}"));
+        server.headers.insert(
+            "Authorization".to_owned(),
+            format!("Bearer {}", token.access_token),
+        );
         if let Some(config_path) = self.config_path() {
             if let Err(err) = config::upsert_mcp_server(&server, &config_path) {
                 self.push_status(format!("Failed to update MCP server headers: {err}"));

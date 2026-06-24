@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -8,6 +8,10 @@ use anyhow::Context;
 use neo_agent_core::{
     ManagedMcpTransport, McpConnectionManager, McpReconnectPolicy, McpResourceListEntry,
     McpResourceRead, McpServerSnapshot, McpServerStatus, ProcessSupervisor,
+    oauth::{
+        OAuthError, OAuthProvider, OAuthTokenSet, build_authorization_url,
+        callback_server::CallbackServer, exchange_code_for_token, generate_pkce, store::OAuthStore,
+    },
 };
 
 use crate::config::McpServerConfig;
@@ -446,6 +450,68 @@ fn endpoint_summary(server: &McpServerConfig) -> String {
         return summary;
     }
     server.url.clone().unwrap_or_default()
+}
+
+/// Hardcoded Linear OAuth provider for the local OAuth authenticator MVP.
+pub fn linear_oauth_provider() -> OAuthProvider {
+    OAuthProvider {
+        id: "linear".to_owned(),
+        client_id: std::env::var("NEO_OAUTH_LINEAR_CLIENT_ID").unwrap_or_else(|_| "neo".to_owned()),
+        auth_url: "https://api.linear.app/oauth/authorize".to_owned(),
+        token_url: "https://api.linear.app/oauth/token".to_owned(),
+        scopes: vec!["write".to_owned()],
+        default_callback_port: 0,
+    }
+}
+
+/// Pick an OAuth provider for an MCP server based on its transport and URL.
+///
+/// Returns `None` for non-remote transports or when no provider is known for
+/// the server's URL.
+pub fn detect_oauth_provider_for_server(server: &McpServerConfig) -> Option<OAuthProvider> {
+    if server.transport != "http" && server.transport != "sse" {
+        return None;
+    }
+    server
+        .url
+        .as_deref()
+        .filter(|url| url.contains("linear.app"))
+        .map(|_| linear_oauth_provider())
+}
+
+/// Run the OAuth authorization-code flow for a configured MCP server, save the
+/// resulting token to `~/.neo/oauth.json`, and return it.
+///
+/// The caller is responsible for opening a browser and surfacing status to the
+/// user. This helper performs PKCE generation, callback-server setup, token
+/// exchange, and persistent storage.
+pub async fn authenticate_mcp_server_oauth(
+    server_id: &str,
+    server: &McpServerConfig,
+    neo_home: &Path,
+) -> Result<OAuthTokenSet, OAuthError> {
+    let mut provider =
+        detect_oauth_provider_for_server(server).ok_or(OAuthError::ProviderDetection)?;
+
+    let (verifier, challenge) = generate_pkce();
+    let state = uuid::Uuid::new_v4().to_string();
+
+    let callback_server = CallbackServer::start(state.clone(), Duration::from_secs(300)).await?;
+    provider.default_callback_port = callback_server.local_port;
+
+    let auth_url = build_authorization_url(&provider, &state, &challenge)?;
+    let _ = webbrowser::open(auth_url.as_str());
+
+    let code = callback_server.wait_for_code().await?;
+    let token = exchange_code_for_token(&provider, &code.code, &verifier).await?;
+
+    let store_path = neo_home.join("oauth.json");
+    let token_key = format!("mcp:{server_id}");
+    let mut store = OAuthStore::load(&store_path)?;
+    store.set_token(&token_key, token.clone());
+    store.save(&store_path)?;
+
+    Ok(token)
 }
 
 #[cfg(test)]
