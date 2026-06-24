@@ -259,3 +259,50 @@ impl From<rmcp::model::ResourceUpdatedNotificationParam> for McpResourceUpdate {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use rmcp::model::{AnnotateAble, CallToolResult, Content, Resource, Tool};
+
+    use super::*;
+
+    fn sample_schema() -> Arc<serde_json::Map<String, serde_json::Value>> {
+        let schema: serde_json::Value = serde_json::from_str(
+            r#"{"type":"object","properties":{"x":{"type":"string"}}}"#,
+        )
+        .unwrap();
+        Arc::new(schema.as_object().unwrap().clone())
+    }
+
+    #[test]
+    fn converts_rmcp_tool_to_definition() {
+        let tool = Tool::new("echo", "echoes input", sample_schema());
+        let def = McpToolDefinition::from(tool);
+        assert_eq!(def.name, "echo");
+        assert_eq!(def.description, "echoes input");
+        assert!(def.input_schema.get("properties").is_some());
+    }
+
+    #[test]
+    fn converts_rmcp_call_tool_result_to_response() {
+        let result = CallToolResult::success(vec![Content::text("hello")]);
+        let response = McpToolResponse::from(result);
+        assert!(!response.is_error);
+        assert_eq!(response.content, "hello");
+    }
+
+    #[test]
+    fn converts_rmcp_resource_to_definition() {
+        let resource: Resource = rmcp::model::RawResource::new("file:///tmp/foo", "foo")
+            .with_description("a file")
+            .with_mime_type("text/plain")
+            .no_annotation();
+        let def = McpResourceDefinition::from(resource);
+        assert_eq!(def.uri, "file:///tmp/foo");
+        assert_eq!(def.name, "foo");
+        assert_eq!(def.description, Some("a file".to_string()));
+        assert_eq!(def.mime_type, Some("text/plain".to_string()));
+    }
+}
