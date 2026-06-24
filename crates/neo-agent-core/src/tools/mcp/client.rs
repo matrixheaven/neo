@@ -62,16 +62,12 @@ impl RmcpClient {
 impl McpClient for RmcpClient {
     async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError> {
         let request = ClientRequest::from(ListToolsRequest::default());
+        let service = self.service.lock().await;
+        let service = service
+            .as_ref()
+            .ok_or_else(|| McpError::protocol("MCP client already shut down"))?;
         let result = self
-            .with_request_timeout(
-                self.service
-                    .lock()
-                    .await
-                    .as_ref()
-                    .unwrap()
-                    .peer()
-                    .send_request(request),
-            )
+            .with_request_timeout(service.peer().send_request(request))
             .await?;
         match result {
             ServerResult::ListToolsResult(result) => {
@@ -90,16 +86,12 @@ impl McpClient for RmcpClient {
         };
         let params = CallToolRequestParams::new(name.to_owned()).with_arguments(args);
         let request = ClientRequest::from(CallToolRequest::new(params));
+        let service = self.service.lock().await;
+        let service = service
+            .as_ref()
+            .ok_or_else(|| McpError::protocol("MCP client already shut down"))?;
         let result = self
-            .with_request_timeout(
-                self.service
-                    .lock()
-                    .await
-                    .as_ref()
-                    .unwrap()
-                    .peer()
-                    .send_request(request),
-            )
+            .with_request_timeout(service.peer().send_request(request))
             .await?;
         match result {
             ServerResult::CallToolResult(result) => Ok(result.into()),
@@ -111,16 +103,12 @@ impl McpClient for RmcpClient {
 
     async fn list_resources(&self) -> Result<Vec<McpResourceDefinition>, McpError> {
         let request = ClientRequest::from(ListResourcesRequest::default());
+        let service = self.service.lock().await;
+        let service = service
+            .as_ref()
+            .ok_or_else(|| McpError::protocol("MCP client already shut down"))?;
         let result = self
-            .with_request_timeout(
-                self.service
-                    .lock()
-                    .await
-                    .as_ref()
-                    .unwrap()
-                    .peer()
-                    .send_request(request),
-            )
+            .with_request_timeout(service.peer().send_request(request))
             .await?;
         match result {
             ServerResult::ListResourcesResult(result) => {
@@ -136,16 +124,12 @@ impl McpClient for RmcpClient {
         let request = ClientRequest::from(ReadResourceRequest::new(
             ReadResourceRequestParams::new(uri),
         ));
+        let service = self.service.lock().await;
+        let service = service
+            .as_ref()
+            .ok_or_else(|| McpError::protocol("MCP client already shut down"))?;
         let result = self
-            .with_request_timeout(
-                self.service
-                    .lock()
-                    .await
-                    .as_ref()
-                    .unwrap()
-                    .peer()
-                    .send_request(request),
-            )
+            .with_request_timeout(service.peer().send_request(request))
             .await?;
         match result {
             ServerResult::ReadResourceResult(result) => Ok(result.into()),
@@ -156,10 +140,15 @@ impl McpClient for RmcpClient {
     }
 
     async fn shutdown(&self) -> Result<(), McpError> {
-        if let Some(service) = self.service.lock().await.take() {
-            service
-                .cancel()
+        let service = {
+            let mut guard = self.service.lock().await;
+            guard.take()
+        };
+        if let Some(service) = service {
+            let duration = self.request_timeout.unwrap_or(Duration::from_secs(30));
+            timeout(duration, service.cancel())
                 .await
+                .map_err(|_| McpError::protocol("MCP client shutdown timed out"))?
                 .map_err(|e| McpError::protocol(e.to_string()))?;
         }
         Ok(())
