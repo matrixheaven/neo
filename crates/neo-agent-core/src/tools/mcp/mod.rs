@@ -1,6 +1,4 @@
-use rmcp::model::{
-    CallToolResult, Content, ReadResourceResult, Resource, Tool as RmcpTool,
-};
+use rmcp::model::{CallToolResult, ReadResourceResult, Resource, Tool as RmcpTool};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -40,9 +38,9 @@ impl McpToolDefinition {
 impl From<RmcpTool> for McpToolDefinition {
     fn from(tool: RmcpTool) -> Self {
         Self {
-            name: tool.name,
-            description: tool.description.unwrap_or_default(),
-            input_schema: tool.input_schema,
+            name: tool.name.to_string(),
+            description: tool.description.unwrap_or_default().to_string(),
+            input_schema: serde_json::Value::Object((*tool.input_schema).clone()),
         }
     }
 }
@@ -107,22 +105,19 @@ impl From<CallToolResult> for McpToolResponse {
         let mut texts = Vec::new();
         let mut details: Option<serde_json::Value> = None;
         for content in result.content {
-            match content {
-                Content::Text(text) => texts.push(text.text),
-                Content::Image(image) => {
-                    details = Some(serde_json::json!({
-                        "type": "image",
-                        "data": image.data,
-                        "mime_type": image.mime_type,
-                    }));
-                }
-                Content::Resource(resource) => {
-                    details = Some(serde_json::json!({
-                        "type": "resource",
-                        "resource": resource,
-                    }));
-                }
-                _ => {}
+            if let Some(text) = content.as_text() {
+                texts.push(text.text.clone());
+            } else if let Some(image) = content.as_image() {
+                details = Some(serde_json::json!({
+                    "type": "image",
+                    "data": image.data,
+                    "mime_type": image.mime_type,
+                }));
+            } else if let Some(resource) = content.as_resource() {
+                details = Some(serde_json::json!({
+                    "type": "resource",
+                    "resource": resource,
+                }));
             }
         }
         let content = texts.join("\n");
@@ -158,8 +153,8 @@ impl McpError {
     }
 }
 
-impl From<rmcp::Error> for McpError {
-    fn from(err: rmcp::Error) -> Self {
+impl From<rmcp::ErrorData> for McpError {
+    fn from(err: rmcp::ErrorData) -> Self {
         Self::protocol(err.to_string())
     }
 }
@@ -178,9 +173,9 @@ impl From<Resource> for McpResourceDefinition {
     fn from(resource: Resource) -> Self {
         Self {
             uri: resource.uri.to_string(),
-            name: resource.name,
-            description: resource.description,
-            mime_type: resource.mime_type,
+            name: resource.name.clone(),
+            description: resource.description.clone(),
+            mime_type: resource.mime_type.clone(),
         }
     }
 }
@@ -199,13 +194,13 @@ pub struct McpResourceContent {
 impl From<rmcp::model::ResourceContents> for McpResourceContent {
     fn from(contents: rmcp::model::ResourceContents) -> Self {
         match contents {
-            rmcp::model::ResourceContents::TextResourceContents { uri, mime_type, text } => Self {
+            rmcp::model::ResourceContents::TextResourceContents { uri, mime_type, text, .. } => Self {
                 uri: uri.to_string(),
                 mime_type,
                 text: Some(text),
                 blob: None,
             },
-            rmcp::model::ResourceContents::BlobResourceContents { uri, mime_type, blob } => Self {
+            rmcp::model::ResourceContents::BlobResourceContents { uri, mime_type, blob, .. } => Self {
                 uri: uri.to_string(),
                 mime_type,
                 text: None,
