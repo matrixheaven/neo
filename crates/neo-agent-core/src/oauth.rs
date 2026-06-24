@@ -9,15 +9,16 @@ use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use rand::Rng;
 use reqwest::header::CONTENT_TYPE;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use thiserror::Error;
 
 pub mod callback_server;
+pub mod store;
 
 /// A set of OAuth tokens returned by the token endpoint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthTokenSet {
     pub access_token: String,
     pub token_type: String,
@@ -59,6 +60,12 @@ pub enum OAuthError {
     CallbackStateMismatch { expected: String, got: String },
     #[error("callback request missing authorization code")]
     CallbackMissingCode,
+    #[error("failed to load token store: {0}")]
+    StoreLoad(std::io::Error),
+    #[error("failed to save token store: {0}")]
+    StoreSave(std::io::Error),
+    #[error("failed to parse token store: {0}")]
+    StoreParse(serde_json::Error),
 }
 
 /// Raw token response from a standard OAuth 2.0 token endpoint.
