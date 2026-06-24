@@ -4242,7 +4242,7 @@ impl InteractiveController {
             return;
         };
         if server.transport != "http" && server.transport != "sse" {
-            self.push_status("OAuth only supported for HTTP/SSE servers");
+            self.push_status("OAuth is limited to HTTP/SSE servers");
             return;
         }
 

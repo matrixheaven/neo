@@ -940,7 +940,7 @@ pub async fn auth_mcp_server(server_id: String, config: &AppConfig) -> anyhow::R
         .context("MCP server not found")?;
 
     if server.transport != "http" && server.transport != "sse" {
-        anyhow::bail!("OAuth only supported for HTTP/SSE servers");
+        anyhow::bail!("OAuth is limited to HTTP/SSE servers");
     }
 
     let neo_home = neo_home().context("failed to resolve neo home directory")?;

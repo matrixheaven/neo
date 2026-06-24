@@ -75,7 +75,7 @@ pub fn builtin_oauth_providers() -> Vec<OAuthProvider> {
 
 /// Registry of OAuth providers keyed by provider id.
 ///
-/// Built-in providers can be seeded with [`OAuthProviderRegistry::with_builtin_providers`];
+/// Built-in providers are seeded with [`OAuthProviderRegistry::with_builtin_providers`];
 /// custom providers from config are registered via [`OAuthProviderRegistry::register`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OAuthProviderRegistry {
@@ -125,7 +125,7 @@ impl OAuthProviderRegistry {
     }
 }
 
-/// Errors that can occur during OAuth operations.
+/// Errors that may occur during OAuth operations.
 #[derive(Debug, Error)]
 pub enum OAuthError {
     #[error("failed to build authorization URL: {0}")]

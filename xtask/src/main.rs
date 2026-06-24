@@ -1513,6 +1513,12 @@ fn hosted_or_oauth_overclaim(normalized: &str) -> bool {
         || normalized.contains("package account"))
         && positive_claim_statement(normalized)
         && !honest_gap_or_rejection_statement(normalized)
+        && !is_local_oauth_statement(normalized)
+}
+
+/// Local-only OAuth is an intentional Neo feature, not a hosted/OAuth overclaim.
+fn is_local_oauth_statement(normalized: &str) -> bool {
+    normalized.contains("oauth") && normalized.contains("local")
 }
 
 fn self_hosted_or_local_first_overclaim(relative_file: &Path, normalized: &str) -> bool {

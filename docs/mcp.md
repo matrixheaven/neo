@@ -170,9 +170,9 @@ startup timeout (`--startup-timeout-ms`), and per-tool call timeout
 
 ## OAuth Authentication
 
-Remote HTTP and SSE MCP servers can require OAuth 2.0 bearer tokens. Neo
-implements a local, provider-agnostic OAuth authenticator so tokens can be
-obtained without leaving the command line.
+Remote HTTP and SSE MCP servers may use OAuth 2.0 bearer tokens. Neo includes
+a local, provider-agnostic OAuth authenticator for obtaining tokens without
+leaving the command line.
 
 ### Flow overview
 
@@ -228,7 +228,7 @@ For Linear MCP servers (for example `https://mcp.linear.app/mcp`):
 
 ### Custom providers
 
-Add an `[oauth.providers.<id>]` table to `~/.neo/config.toml` to support any
+Add an `[oauth.providers.<id>]` table to `~/.neo/config.toml` for any
 OAuth 2.0 provider that uses authorization-code with PKCE:
 
 ```toml
