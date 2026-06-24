@@ -261,7 +261,7 @@ mod tests {
         let (verifier, _) = generate_pkce();
         // 32 bytes base64-url encoded without padding => ceil(32 / 3) * 4 - padding = 43.
         assert_eq!(verifier.len(), 43);
-        assert!(verifier.bytes().all(|b| is_base64_url_char(b)));
+        assert!(verifier.bytes().all(is_base64_url_char));
     }
 
     #[test]
