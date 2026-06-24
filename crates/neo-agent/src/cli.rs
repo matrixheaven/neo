@@ -299,6 +299,11 @@ pub enum McpCommand {
         /// 资源 URI
         uri: String,
     },
+    /// 为 MCP 服务器启动 OAuth 授权流程
+    Auth {
+        /// MCP 服务器名称
+        server_id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

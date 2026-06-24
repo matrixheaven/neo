@@ -53,6 +53,7 @@ pub enum McpManagerAction {
     Refresh(String),
     ToggleEnabled(String),
     Delete(String),
+    Auth(String),
     Close,
 }
 
@@ -81,8 +82,9 @@ struct ConfirmState {
 
 const ADD_ROW_LABEL: &str = "+ Add MCP server";
 const HEADER_HINT: &str =
-    "↑↓ navigate · Enter test · A add · E toggle · D delete · R refresh · Esc close";
-const NARROW_HINT: &str = "↑↓ · Enter test · A add · E toggle · D delete · R refresh · Esc";
+    "↑↓ navigate · Enter test · A add · E toggle · D delete · R refresh · O auth · Esc close";
+const NARROW_HINT: &str =
+    "↑↓ · Enter test · A add · E toggle · D delete · R refresh · O auth · Esc";
 
 impl McpManagerState {
     /// Create a new MCP manager with the given options.
@@ -273,6 +275,7 @@ impl McpManagerState {
             'a' | 'A' => self.add(),
             'e' | 'E' => self.toggle_enabled(),
             'r' | 'R' => self.refresh(),
+            'o' | 'O' => self.auth(),
             'd' | 'D' => {
                 self.arm_delete();
                 InputResult::Handled
@@ -332,6 +335,17 @@ impl McpManagerState {
             return InputResult::Handled;
         };
         self.action = Some(McpManagerAction::ToggleEnabled(row.id.clone()));
+        InputResult::Submitted
+    }
+
+    fn auth(&mut self) -> InputResult {
+        let Some(Row::Server { row }) = self.rows.get(self.selected_index) else {
+            return InputResult::Handled;
+        };
+        if row.transport_label != "remote-http" && row.transport_label != "remote-sse" {
+            return InputResult::Handled;
+        }
+        self.action = Some(McpManagerAction::Auth(row.id.clone()));
         InputResult::Submitted
     }
 
@@ -549,9 +563,15 @@ mod tests {
     }
 
     fn row(id: &str, transport: &str, enabled: bool, tool_status: McpToolStatus) -> McpServerRow {
+        let transport_label = match transport {
+            "stdio" => "studio",
+            "http" => "remote-http",
+            "sse" => "remote-sse",
+            other => other,
+        };
         McpServerRow {
             id: id.to_owned(),
-            transport_label: transport.to_owned(),
+            transport_label: transport_label.to_owned(),
             enabled,
             endpoint_summary: format!("endpoint-{id}"),
             cwd_summary: None,
@@ -769,5 +789,57 @@ mod tests {
         let visible = visible_lines(&state, 80);
         let joined = visible.join("\n");
         assert!(joined.contains("old"), "row missing: {joined}");
+    }
+
+    #[test]
+    fn action_auth_on_key_o_for_remote_http() {
+        let mut state = manager(vec![row(
+            "linear",
+            "remote-http",
+            true,
+            McpToolStatus::NotDiscovered,
+        )]);
+        let result = state.handle_input(&InputEvent::Insert('O'));
+        assert!(matches!(result, InputResult::Submitted));
+        assert!(matches!(state.action(), Some(McpManagerAction::Auth(id)) if id == "linear"));
+    }
+
+    #[test]
+    fn action_auth_on_key_o_for_remote_sse() {
+        let mut state = manager(vec![row(
+            "linear",
+            "remote-sse",
+            true,
+            McpToolStatus::NotDiscovered,
+        )]);
+        let result = state.handle_input(&InputEvent::Insert('O'));
+        assert!(matches!(result, InputResult::Submitted));
+        assert!(matches!(state.action(), Some(McpManagerAction::Auth(id)) if id == "linear"));
+    }
+
+    #[test]
+    fn action_auth_ignored_for_stdio() {
+        let mut state = manager(vec![row(
+            "fs",
+            "studio",
+            true,
+            McpToolStatus::NotDiscovered,
+        )]);
+        let result = state.handle_input(&InputEvent::Insert('O'));
+        assert!(matches!(result, InputResult::Handled));
+        assert!(state.action().is_none());
+    }
+
+    #[test]
+    fn render_hint_includes_auth_key() {
+        let state = manager(vec![row(
+            "linear",
+            "remote-http",
+            true,
+            McpToolStatus::NotDiscovered,
+        )]);
+        let visible = visible_lines(&state, 100);
+        let joined = visible.join("\n");
+        assert!(joined.contains("O auth"), "auth hint missing: {joined}");
     }
 }

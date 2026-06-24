@@ -372,6 +372,7 @@ async fn dispatch_mcp_command(config: &AppConfig, command: McpCommand) -> anyhow
             }
             Ok(out.join("\n"))
         }
+        McpCommand::Auth { server_id } => modes::run::auth_mcp_server(server_id, config).await,
     }
 }
 

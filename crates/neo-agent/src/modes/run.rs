@@ -4,6 +4,7 @@ use std::{
     fmt::Write as _,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -18,6 +19,9 @@ use neo_agent_core::{
     McpToolAdapter, McpToolProvider, MoveSkillTool, PendingQuestion, PermissionApprovalDecision,
     PermissionOperation, ProcessSupervisor, SteerInputHandle, SummarizeSessionsTool, ToolRegistry,
     mode::PlanMode,
+    oauth::callback_server::CallbackServer,
+    oauth::store::OAuthStore,
+    oauth::{OAuthProvider, build_authorization_url, exchange_code_for_token, generate_pkce},
 };
 use neo_ai::{
     ChatMessage, ContentPart, CredentialResolver, ModelClient, ModelRegistry, ModelSpec,
@@ -923,6 +927,80 @@ pub async fn add_mcp_server(
         Err(_) => format!("{mcp_name} connect failed\n"),
     };
     Ok(format!("{saved}{probe_msg}"))
+}
+
+/// Hardcoded Linear OAuth provider for the local OAuth authenticator MVP.
+pub(crate) fn linear_oauth_provider() -> OAuthProvider {
+    OAuthProvider {
+        id: "linear".to_owned(),
+        client_id: std::env::var("NEO_OAUTH_LINEAR_CLIENT_ID").unwrap_or_else(|_| "neo".to_owned()),
+        auth_url: "https://api.linear.app/oauth/authorize".to_owned(),
+        token_url: "https://api.linear.app/oauth/token".to_owned(),
+        scopes: vec!["write".to_owned()],
+        default_callback_port: 0,
+    }
+}
+
+/// Pick an OAuth provider for an MCP server based on its transport and URL.
+///
+/// Returns `None` for non-remote transports or when no provider is known for
+/// the server's URL.
+pub(crate) fn detect_oauth_provider_for_server(server: &McpServerConfig) -> Option<OAuthProvider> {
+    if server.transport != "http" && server.transport != "sse" {
+        return None;
+    }
+    server
+        .url
+        .as_deref()
+        .filter(|url| url.contains("linear.app"))
+        .map(|_| linear_oauth_provider())
+}
+
+/// Run the OAuth authorization-code flow for a configured MCP server and save
+/// the resulting token to `~/.neo/oauth.json`.
+pub async fn auth_mcp_server(server_id: String, config: &AppConfig) -> anyhow::Result<String> {
+    let server = config
+        .mcp
+        .servers
+        .iter()
+        .find(|server| server.id == server_id)
+        .context("MCP server not found")?;
+
+    if server.transport != "http" && server.transport != "sse" {
+        anyhow::bail!("OAuth only supported for HTTP/SSE servers");
+    }
+
+    let mut provider = detect_oauth_provider_for_server(server)
+        .context("No OAuth provider configured for this server")?;
+
+    let (verifier, challenge) = generate_pkce();
+    let state = Uuid::new_v4().to_string();
+
+    build_authorization_url(&provider, &state, &challenge)?;
+    let callback_server = CallbackServer::start(state.clone(), Duration::from_secs(300)).await?;
+    provider.default_callback_port = callback_server.local_port;
+    let auth_url = build_authorization_url(&provider, &state, &challenge)?;
+
+    let _ = webbrowser::open(auth_url.as_str());
+
+    let code = callback_server.wait_for_code().await?;
+    let token = exchange_code_for_token(&provider, &code.code, &verifier).await?;
+
+    let neo_home = neo_home().context("failed to resolve neo home directory")?;
+    let store_path = neo_home.join("oauth.json");
+    let token_key = format!("mcp:{server_id}");
+    let access_token = token.access_token.clone();
+    let mut store = OAuthStore::load(&store_path)?;
+    store.set_token(&token_key, token);
+    store.save(&store_path)?;
+
+    let mut server = server.clone();
+    server
+        .headers
+        .insert("Authorization".to_owned(), format!("Bearer {access_token}"));
+    config::upsert_mcp_server(&server, &config.config_path)?;
+
+    Ok(format!("OAuth token saved for MCP server {server_id}\n"))
 }
 
 async fn probe_mcp_server(server: &McpServerConfig, timeout_ms: Option<u64>) -> anyhow::Result<()> {
@@ -2300,9 +2378,10 @@ mod tests {
     };
 
     use super::{
-        PromptApprovalRequest, StableJsonState, agent_config_for_app, create_session_path,
-        list_configured_models, model_registry_for_config, run_prompt_with_runtime,
-        select_config_model, tool_registry_for_config,
+        PromptApprovalRequest, StableJsonState, agent_config_for_app, auth_mcp_server,
+        create_session_path, detect_oauth_provider_for_server, list_configured_models,
+        model_registry_for_config, run_prompt_with_runtime, select_config_model,
+        tool_registry_for_config,
     };
     use crate::config::{
         AppConfig, Defaults, McpConfig, ModelConfig, ProviderConfig, RuntimeCompactionConfig,
@@ -3151,5 +3230,89 @@ mod tests {
                 .all(|spec| !spec.name.starts_with("mcp__bad__")),
             "failed MCP tools must not be exposed"
         );
+    }
+
+    fn test_mcp_server(
+        id: &str,
+        transport: &str,
+        url: Option<&str>,
+    ) -> crate::config::McpServerConfig {
+        crate::config::McpServerConfig {
+            id: id.to_owned(),
+            enabled: true,
+            transport: transport.to_owned(),
+            command: None,
+            url: url.map(str::to_owned),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            cwd: None,
+            enabled_tools: Vec::new(),
+            disabled_tools: Vec::new(),
+            startup_timeout_ms: None,
+            tool_timeout_ms: None,
+        }
+    }
+
+    #[test]
+    fn detect_oauth_provider_requires_http_or_sse_transport() {
+        assert!(
+            detect_oauth_provider_for_server(&test_mcp_server(
+                "fs",
+                "stdio",
+                Some("https://linear.app/oauth")
+            ))
+            .is_none()
+        );
+        assert!(
+            detect_oauth_provider_for_server(&test_mcp_server(
+                "linear",
+                "http",
+                Some("https://api.linear.app/oauth")
+            ))
+            .is_some()
+        );
+        assert!(
+            detect_oauth_provider_for_server(&test_mcp_server(
+                "linear",
+                "sse",
+                Some("https://api.linear.app/oauth")
+            ))
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn detect_oauth_provider_matches_linear_url() {
+        let linear = test_mcp_server("linear", "http", Some("https://api.linear.app/mcp"));
+        let provider = detect_oauth_provider_for_server(&linear);
+        assert!(provider.is_some());
+        assert_eq!(provider.unwrap().id, "linear");
+
+        let unknown = test_mcp_server("other", "http", Some("https://example.com/mcp"));
+        assert!(detect_oauth_provider_for_server(&unknown).is_none());
+    }
+
+    #[tokio::test]
+    async fn auth_mcp_server_errors_for_missing_server() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = test_config(temp.path());
+        let result = auth_mcp_server("missing".to_owned(), &config).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn auth_mcp_server_errors_for_non_remote_transport() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = test_config(temp.path());
+        config
+            .mcp
+            .servers
+            .push(test_mcp_server("fs", "stdio", None));
+        let result = auth_mcp_server("fs".to_owned(), &config).await;
+        assert!(result.is_err());
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("HTTP/SSE"), "unexpected error: {message}");
     }
 }

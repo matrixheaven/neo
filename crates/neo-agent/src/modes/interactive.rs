@@ -1,6 +1,7 @@
 use crate::{
     config::{self, AppConfig, neo_home, workspace_sessions_dir},
     mcp_ops,
+    modes::run::detect_oauth_provider_for_server,
     modes::sessions::{SessionPickerScope as SessionDataScope, session_summaries},
     prompt_templates::{
         PromptTemplateLocation, discover_prompt_template_commands, expand_prompt_template_args,
@@ -32,6 +33,9 @@ use neo_agent_core::{
     format_collected_answers,
     goal::GoalManager,
     mode::PlanMode,
+    oauth::callback_server::CallbackServer,
+    oauth::store::OAuthStore,
+    oauth::{build_authorization_url, exchange_code_for_token, generate_pkce},
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
     skills::SkillStore,
 };
@@ -54,6 +58,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 type BoxedTurnFuture = Pin<Box<dyn Future<Output = Result<TurnOutcome>> + Send + 'static>>;
 type BoxedSessionFuture = Pin<Box<dyn Future<Output = Result<LoadedSessionTranscript>> + Send>>;
@@ -4202,6 +4207,108 @@ impl InteractiveController {
             neo_tui::dialogs::McpManagerAction::Delete(id) => {
                 self.delete_mcp_server(&id).await;
             }
+            neo_tui::dialogs::McpManagerAction::Auth(id) => {
+                self.start_mcp_oauth_flow(id).await;
+            }
+        }
+    }
+
+    async fn start_mcp_oauth_flow(&mut self, server_id: String) {
+        let Some(config) = self.local_config.clone() else {
+            self.push_status("No config available");
+            return;
+        };
+        let Some(server) = config.mcp.servers.iter().find(|s| s.id == server_id) else {
+            self.push_status("MCP server not found");
+            return;
+        };
+        if server.transport != "http" && server.transport != "sse" {
+            self.push_status("OAuth only supported for HTTP/SSE servers");
+            return;
+        }
+        let Some(mut provider) = detect_oauth_provider_for_server(server) else {
+            self.push_status("No OAuth provider configured for this server");
+            return;
+        };
+
+        let (verifier, challenge) = generate_pkce();
+        let state = Uuid::new_v4().to_string();
+
+        if let Err(err) = build_authorization_url(&provider, &state, &challenge) {
+            self.push_status(format!("Failed to build authorization URL: {err}"));
+            return;
+        }
+
+        let callback_server =
+            match CallbackServer::start(state.clone(), Duration::from_secs(300)).await {
+                Ok(server) => server,
+                Err(err) => {
+                    self.push_status(format!("Failed to start OAuth callback server: {err}"));
+                    return;
+                }
+            };
+        provider.default_callback_port = callback_server.local_port;
+
+        let auth_url = match build_authorization_url(&provider, &state, &challenge) {
+            Ok(url) => url,
+            Err(err) => {
+                self.push_status(format!("Failed to build authorization URL: {err}"));
+                return;
+            }
+        };
+
+        let _ = webbrowser::open(auth_url.as_str());
+        self.push_status("Waiting for browser authorization...");
+
+        let code = match callback_server.wait_for_code().await {
+            Ok(code) => code,
+            Err(err) => {
+                self.push_status(format!("OAuth callback failed: {err}"));
+                return;
+            }
+        };
+
+        let token = match exchange_code_for_token(&provider, &code.code, &verifier).await {
+            Ok(token) => token,
+            Err(err) => {
+                self.push_status(format!("OAuth token exchange failed: {err}"));
+                return;
+            }
+        };
+
+        let Some(neo_home) = neo_home() else {
+            self.push_status("Failed to resolve neo home directory");
+            return;
+        };
+        let store_path = neo_home.join("oauth.json");
+        let mut store = match OAuthStore::load(&store_path) {
+            Ok(store) => store,
+            Err(err) => {
+                self.push_status(format!("Failed to load OAuth store: {err}"));
+                return;
+            }
+        };
+        let token_key = format!("mcp:{server_id}");
+        let access_token = token.access_token.clone();
+        store.set_token(&token_key, token);
+        if let Err(err) = store.save(&store_path) {
+            self.push_status(format!("Failed to save OAuth store: {err}"));
+            return;
+        }
+        self.push_status("OAuth token saved");
+
+        let mut server = server.clone();
+        server
+            .headers
+            .insert("Authorization".to_owned(), format!("Bearer {access_token}"));
+        if let Some(config_path) = self.config_path() {
+            if let Err(err) = config::upsert_mcp_server(&server, &config_path) {
+                self.push_status(format!("Failed to update MCP server headers: {err}"));
+                return;
+            }
+            self.push_status("MCP server Authorization header updated");
+            self.refresh_config();
+            self.sync_mcp_manager_from_config().await;
         }
     }
 
@@ -12778,6 +12885,92 @@ command = "python3"
             joined.contains("MCP Servers"),
             "rendered frame should contain MCP manager title: {joined}"
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_manager_auth_action_shows_status_for_unknown_provider() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async { Ok(vec![]) },
+        );
+        let temp = tempfile::tempdir().expect("temp dir");
+        let project_dir = temp.path().to_path_buf();
+        let mut config = test_config(&project_dir, project_dir.join(".neo/sessions"));
+        config.mcp.servers.push(crate::config::McpServerConfig {
+            id: "example".to_owned(),
+            enabled: true,
+            transport: "http".to_owned(),
+            command: None,
+            url: Some("https://example.com/mcp".to_owned()),
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            headers: std::collections::BTreeMap::new(),
+            cwd: None,
+            enabled_tools: Vec::new(),
+            disabled_tools: Vec::new(),
+            startup_timeout_ms: None,
+            tool_timeout_ms: None,
+        });
+        controller.local_config = Some(config);
+        controller.type_text("/mcp");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("open /mcp");
+        controller
+            .handle_input_event(InputEvent::Insert('O'))
+            .await
+            .expect("auth key");
+        assert!(transcript_has_status(
+            &controller,
+            "No OAuth provider configured for this server"
+        ));
+    }
+
+    #[tokio::test]
+    async fn mcp_manager_auth_action_ignored_for_stdio_server() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async { Ok(vec![]) },
+        );
+        let temp = tempfile::tempdir().expect("temp dir");
+        let project_dir = temp.path().to_path_buf();
+        let mut config = test_config(&project_dir, project_dir.join(".neo/sessions"));
+        config.mcp.servers.push(crate::config::McpServerConfig {
+            id: "fs".to_owned(),
+            enabled: true,
+            transport: "stdio".to_owned(),
+            command: Some("mcp-server".to_owned()),
+            url: None,
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            headers: std::collections::BTreeMap::new(),
+            cwd: None,
+            enabled_tools: Vec::new(),
+            disabled_tools: Vec::new(),
+            startup_timeout_ms: None,
+            tool_timeout_ms: None,
+        });
+        controller.local_config = Some(config);
+        controller.type_text("/mcp");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("open /mcp");
+        controller
+            .handle_input_event(InputEvent::Insert('O'))
+            .await
+            .expect("auth key");
+        assert!(!transcript_has_status(
+            &controller,
+            "No OAuth provider configured"
+        ));
     }
 
     #[tokio::test]
