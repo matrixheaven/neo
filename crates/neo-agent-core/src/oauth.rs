@@ -154,7 +154,7 @@ pub enum OAuthError {
     #[error("failed to save token store: {0}")]
     StoreSave(std::io::Error),
     #[error("failed to parse token store: {0}")]
-    StoreParse(serde_json::Error),
+    StoreParse(String),
 }
 
 /// Raw token response from a standard OAuth 2.0 token endpoint.

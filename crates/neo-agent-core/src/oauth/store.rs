@@ -23,6 +23,8 @@ use serde_json::{Value, json};
 use super::{OAuthError, OAuthTokenSet};
 
 /// On-disk layout for the OAuth token store.
+// `PartialEq`/`Eq` are not derived because `rmcp::transport::auth::StoredCredentials`
+// does not implement those traits.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OAuthStore {
     pub entries: BTreeMap<String, StoredCredentials>,
@@ -58,7 +60,7 @@ impl OAuthStore {
         let reader = BufReader::new(file);
         match serde_json::from_reader(reader) {
             Ok(store) => Ok(store),
-            Err(_) => Self::migrate_legacy(path),
+            Err(parse_err) => Self::migrate_legacy(path, &parse_err),
         }
     }
 
@@ -76,6 +78,19 @@ impl OAuthStore {
             fs::create_dir_all(parent).map_err(OAuthError::StoreSave)?;
         }
 
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(OAuthError::StoreSave)?
+        };
+
+        #[cfg(not(unix))]
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -83,14 +98,9 @@ impl OAuthStore {
             .open(path)
             .map_err(OAuthError::StoreSave)?;
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
-        }
-
         let writer = BufWriter::new(&file);
-        serde_json::to_writer_pretty(writer, self).map_err(OAuthError::StoreParse)?;
+        serde_json::to_writer_pretty(writer, self)
+            .map_err(|err| OAuthError::StoreParse(err.to_string()))?;
         file.flush().map_err(OAuthError::StoreSave)?;
         Ok(())
     }
@@ -123,10 +133,15 @@ impl OAuthStore {
 
     /// Compatibility setter that stores an [`OAuthTokenSet`] as
     /// [`StoredCredentials`] under `key`.
-    pub fn set_token(&mut self, key: &str, token_set: &OAuthTokenSet) {
-        if let Ok(credentials) = credentials_from_token_set(token_set) {
-            self.set(key, credentials);
-        }
+    ///
+    /// # Errors
+    ///
+    /// Returns `OAuthError::StoreParse` if `token_set` cannot be converted to
+    /// rmcp [`StoredCredentials`].
+    pub fn set_token(&mut self, key: &str, token_set: &OAuthTokenSet) -> Result<(), OAuthError> {
+        let credentials = credentials_from_token_set(token_set)?;
+        self.set(key, credentials);
+        Ok(())
     }
 
     /// Compatibility remover for the credentials stored under `key`.
@@ -138,13 +153,18 @@ impl OAuthStore {
     }
 
     /// Migrate a legacy store at `path` to the current format.
-    fn migrate_legacy(path: &Path) -> Result<Self, OAuthError> {
+    fn migrate_legacy(path: &Path, parse_err: &serde_json::Error) -> Result<Self, OAuthError> {
         let file = OpenOptions::new()
             .read(true)
             .open(path)
             .map_err(OAuthError::StoreLoad)?;
-        let legacy: LegacyOAuthStore =
-            serde_json::from_reader(BufReader::new(file)).map_err(OAuthError::StoreParse)?;
+        let legacy: LegacyOAuthStore = serde_json::from_reader(BufReader::new(file)).map_err(
+            |legacy_err| {
+                OAuthError::StoreParse(format!(
+                    "file is neither current OAuth store format nor legacy format: {parse_err}; legacy parse error: {legacy_err}"
+                ))
+            },
+        )?;
         let mut store = Self::default();
         for (key, token_set) in legacy.entries {
             store.set(&key, credentials_from_token_set(&token_set)?);
@@ -173,8 +193,8 @@ fn credentials_from_token_set(token_set: &OAuthTokenSet) -> Result<StoredCredent
         value.insert("scope".to_owned(), json!(token_set.scopes.join(" ")));
     }
 
-    let token_response: OAuthTokenResponse =
-        serde_json::from_value(Value::Object(value)).map_err(OAuthError::StoreParse)?;
+    let token_response: OAuthTokenResponse = serde_json::from_value(Value::Object(value))
+        .map_err(|err| OAuthError::StoreParse(err.to_string()))?;
 
     // Preserve the original expiration moment by backdating the receive time.
     let token_received_at = if let Some((expires_at, secs)) = token_set.expires_at.zip(expires_in) {
@@ -254,7 +274,7 @@ mod tests {
             String::new(),
             Some(sample_token_response()),
             vec!["read".to_owned(), "write".to_owned()],
-            Some(Utc::now().timestamp() as u64),
+            Some(u64::try_from(Utc::now().timestamp()).unwrap_or(0)),
         )
     }
 
@@ -408,7 +428,7 @@ mod tests {
     #[test]
     fn compatibility_get_token_returns_oauth_token_set() {
         let mut store = OAuthStore::default();
-        store.set_token("linear", &sample_token_set());
+        store.set_token("linear", &sample_token_set()).unwrap();
 
         let token = store.get_token("linear").unwrap();
         assert_eq!(token.access_token, "access-123");

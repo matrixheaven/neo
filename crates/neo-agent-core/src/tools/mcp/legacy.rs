@@ -180,7 +180,9 @@ impl McpHttpToolAdapter {
             };
             match refresh_access_token(&provider, refresh_token).await {
                 Ok(new_token) => {
-                    store_guard.set_token(&token_key, &new_token);
+                    store_guard
+                        .set_token(&token_key, &new_token)
+                        .map_err(|err| McpError::protocol(err.to_string()))?;
                     if let Some(path) = self.config.oauth_store_path.as_ref() {
                         let _ = store_guard.save(path);
                     }
@@ -1420,7 +1422,7 @@ mod tests {
     #[tokio::test]
     async fn oauth_token_is_injected_when_store_has_token() {
         let mut store = OAuthStore::default();
-        store.set_token("mcp:linear", &valid_token_set());
+        store.set_token("mcp:linear", &valid_token_set()).unwrap();
         let config = McpHttpConfig {
             url: "https://linear.app/mcp".to_owned(),
             headers: BTreeMap::new(),
@@ -1452,7 +1454,7 @@ mod tests {
     #[tokio::test]
     async fn config_authorization_header_is_not_overridden() {
         let mut store = OAuthStore::default();
-        store.set_token("mcp:linear", &valid_token_set());
+        store.set_token("mcp:linear", &valid_token_set()).unwrap();
         let mut headers = BTreeMap::new();
         headers.insert("Authorization".to_owned(), "Bearer config-token".to_owned());
         let config = McpHttpConfig {
@@ -1519,16 +1521,18 @@ mod tests {
         .await;
 
         let mut store = OAuthStore::default();
-        store.set_token(
-            "mcp:linear",
-            &OAuthTokenSet {
-                access_token: "expired-token".to_owned(),
-                token_type: "Bearer".to_owned(),
-                refresh_token: Some("refresh-456".to_owned()),
-                expires_at: Some(Utc::now() - Duration::seconds(1)),
-                scopes: vec!["write".to_owned()],
-            },
-        );
+        store
+            .set_token(
+                "mcp:linear",
+                &OAuthTokenSet {
+                    access_token: "expired-token".to_owned(),
+                    token_type: "Bearer".to_owned(),
+                    refresh_token: Some("refresh-456".to_owned()),
+                    expires_at: Some(Utc::now() - Duration::seconds(1)),
+                    scopes: vec!["write".to_owned()],
+                },
+            )
+            .unwrap();
         let config = McpHttpConfig {
             url: "https://linear.app/mcp".to_owned(),
             headers: BTreeMap::new(),
@@ -1569,16 +1573,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store_path = dir.path().join("oauth.json");
         let mut store = OAuthStore::default();
-        store.set_token(
-            "mcp:linear",
-            &OAuthTokenSet {
-                access_token: "expired-token".to_owned(),
-                token_type: "Bearer".to_owned(),
-                refresh_token: Some("refresh-456".to_owned()),
-                expires_at: Some(DateTime::UNIX_EPOCH),
-                scopes: vec!["write".to_owned()],
-            },
-        );
+        store
+            .set_token(
+                "mcp:linear",
+                &OAuthTokenSet {
+                    access_token: "expired-token".to_owned(),
+                    token_type: "Bearer".to_owned(),
+                    refresh_token: Some("refresh-456".to_owned()),
+                    expires_at: Some(DateTime::UNIX_EPOCH),
+                    scopes: vec!["write".to_owned()],
+                },
+            )
+            .unwrap();
         let config = McpHttpConfig {
             url: "https://linear.app/mcp".to_owned(),
             headers: BTreeMap::new(),
