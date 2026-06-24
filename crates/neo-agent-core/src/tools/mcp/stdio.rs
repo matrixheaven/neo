@@ -8,6 +8,9 @@ use tokio::process::Command;
 use super::{McpError, client::McpClient};
 use crate::tools::ProcessSupervisor;
 
+// TODO: `StdioConfig` is currently unused while the rmcp migration is in
+// progress. It will be wired up through `McpConnectionManager` in Task 4.
+#[allow(dead_code)]
 pub struct StdioConfig {
     pub command: String,
     pub args: Vec<String>,
@@ -17,6 +20,9 @@ pub struct StdioConfig {
     pub request_timeout_ms: Option<u64>,
 }
 
+// TODO: `build_stdio_client` is currently unused while the rmcp migration is in
+// progress. It will be wired up through `McpConnectionManager` in Task 4.
+#[allow(dead_code)]
 pub async fn build_stdio_client(
     server_id: &str,
     config: StdioConfig,
@@ -45,7 +51,8 @@ pub async fn build_stdio_client(
         None => ().serve(transport).await.map_err(|e| McpError::protocol(e.to_string()))?,
     };
 
-    let client: Arc<dyn McpClient> = Arc::new(super::client::RmcpClient::new(service, request_timeout));
+    let client: Arc<dyn McpClient> =
+        Arc::new(super::client::RmcpClient::new(service, request_timeout));
 
     let handle = format!("mcp_stdio_{server_id}");
     let client_for_cleanup = Arc::clone(&client);
