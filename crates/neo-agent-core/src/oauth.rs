@@ -510,4 +510,83 @@ mod tests {
             assert_eq!(provider.client_id_or_env(), "configured");
         });
     }
+
+    async fn spawn_mock_token_server(
+        response_body: String,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut headers = Vec::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                if line.trim().is_empty() {
+                    break;
+                }
+                headers.push(line.clone());
+            }
+            let content_length = headers
+                .iter()
+                .find_map(|h| {
+                    h.to_lowercase()
+                        .strip_prefix("content-length:")
+                        .and_then(|s| s.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            let mut body = vec![0u8; content_length];
+            if content_length > 0 {
+                reader.read_exact(&mut body).await.unwrap();
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            writer.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(body).unwrap()
+        });
+        (format!("http://127.0.0.1:{port}/token"), handle)
+    }
+
+    #[tokio::test]
+    async fn exchange_code_for_token_hits_mock_token_endpoint() {
+        let response_body = r#"{"access_token":"mock-access","token_type":"Bearer","refresh_token":"mock-refresh","expires_in":3600,"scope":"read write"}"#;
+        let (token_url, server) = spawn_mock_token_server(response_body.to_owned()).await;
+
+        let provider = OAuthProvider {
+            id: "linear".to_owned(),
+            client_id: "test-client-id".to_owned(),
+            auth_url: "https://auth.example.com/authorize".to_owned(),
+            token_url,
+            scopes: vec!["write".to_owned()],
+            default_callback_port: 0,
+        };
+
+        let token = exchange_code_for_token(&provider, "auth-code-123", "verifier-xyz")
+            .await
+            .unwrap();
+
+        assert_eq!(token.access_token, "mock-access");
+        assert_eq!(token.token_type, "Bearer");
+        assert_eq!(token.refresh_token, Some("mock-refresh".to_owned()));
+        assert!(token.expires_at.is_some());
+        assert_eq!(token.scopes, vec!["read", "write"]);
+
+        let request_body = server.await.unwrap();
+        assert!(request_body.contains("grant_type=authorization_code"));
+        assert!(request_body.contains("code=auth-code-123"));
+        assert!(request_body.contains("code_verifier=verifier-xyz"));
+        assert!(request_body.contains("client_id=test-client-id"));
+        assert!(request_body.contains("redirect_uri="));
+    }
 }
