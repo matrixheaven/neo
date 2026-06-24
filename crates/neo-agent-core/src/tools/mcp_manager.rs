@@ -6,13 +6,14 @@ use std::{
 };
 
 use anyhow::Context;
-use tokio::{sync::RwLock, task::JoinHandle};
+use rmcp::transport::auth::AuthorizationManager;
+use tokio::{sync::{Mutex, RwLock}, task::JoinHandle};
 
 use super::{
     ProcessSupervisor, ToolRegistry,
     mcp::{
-        McpError, McpHttpConfig, McpHttpToolAdapter, McpResourceDefinition, McpResourceRead,
-        McpStdioConfig, McpStdioToolAdapter, McpToolAdapter, McpToolDefinition,
+        McpError, McpResourceDefinition, McpResourceRead, McpToolDefinition,
+        McpClient, http, stdio, oauth, HttpConfig, StdioConfig,
     },
 };
 use crate::oauth::{OAuthProviderRegistry, OAuthStore};
@@ -141,7 +142,8 @@ struct ManagedMcpEntry {
     config: ManagedMcpServerConfig,
     attempt_id: u64,
     status: McpServerStatus,
-    adapter: Option<Arc<dyn McpToolAdapter>>,
+    client: Option<Arc<dyn McpClient>>,
+    auth_manager: Option<Arc<Mutex<AuthorizationManager>>>,
     tools: Vec<McpToolDefinition>,
     resources: Vec<McpResourceDefinition>,
     error: Option<McpDiagnostic>,
@@ -254,7 +256,8 @@ impl McpConnectionManager {
                 existing.config = server.clone();
                 existing.attempt_id = attempt_id;
                 existing.status = McpServerStatus::Pending;
-                existing.adapter = None;
+                existing.client = None;
+                existing.auth_manager = None;
                 existing.tools.clear();
                 existing.resources.clear();
                 existing.error = None;
@@ -271,7 +274,8 @@ impl McpConnectionManager {
                     config: server.clone(),
                     attempt_id,
                     status,
-                    adapter: None,
+                    client: None,
+                    auth_manager: None,
                     tools: Vec::new(),
                     resources: Vec::new(),
                     error: None,
@@ -350,7 +354,8 @@ impl McpConnectionManager {
             state.next_attempt_id += 1;
             entry.attempt_id = attempt_id;
             entry.status = McpServerStatus::Pending;
-            entry.adapter = None;
+            entry.client = None;
+            entry.auth_manager = None;
             entry.tools.clear();
             entry.resources.clear();
             entry.error = None;
@@ -395,19 +400,19 @@ impl McpConnectionManager {
 
     /// Refresh the tool list for a connected server.
     pub async fn refresh_tools(&self, id: &str) -> anyhow::Result<McpServerSnapshot> {
-        let (adapter, config) = {
+        let (client, config) = {
             let mut state = self.inner.write().await;
             let Some(entry) = state.entries.get_mut(id) else {
                 anyhow::bail!("MCP server '{id}' not found");
             };
-            let Some(adapter) = entry.adapter.clone() else {
+            let Some(client) = entry.client.clone() else {
                 anyhow::bail!("MCP server '{id}' is not connected");
             };
             entry.status = McpServerStatus::Pending;
-            (adapter, entry.config.clone())
+            (client, entry.config.clone())
         };
 
-        let result = discover_tools(&adapter, &config).await;
+        let result = discover_tools(&client, &config).await;
 
         let mut state = self.inner.write().await;
         let Some(entry) = state.entries.get_mut(id) else {
@@ -462,7 +467,7 @@ impl McpConnectionManager {
                 }
                 continue;
             }
-            let Some(adapter) = entry.adapter.clone() else {
+            let Some(client) = entry.client.clone() else {
                 continue;
             };
             for tool in &entry.tools {
@@ -488,7 +493,7 @@ impl McpConnectionManager {
                     remote_name: tool.name.clone(),
                     description: tool.description.clone(),
                     input_schema: tool.input_schema.clone(),
-                    adapter: Arc::clone(&adapter),
+                    client: Arc::clone(&client),
                 });
             }
         }
@@ -533,7 +538,7 @@ impl McpConnectionManager {
         uri: &str,
     ) -> anyhow::Result<McpResourceRead> {
         self.poll_finished_connections().await;
-        let adapter = {
+        let client = {
             let state = self.inner.read().await;
             let Some(entry) = state.entries.get(server_id) else {
                 anyhow::bail!("MCP server '{server_id}' not found");
@@ -542,12 +547,12 @@ impl McpConnectionManager {
                 anyhow::bail!("MCP server '{server_id}' is not connected");
             }
             entry
-                .adapter
+                .client
                 .clone()
-                .context("MCP server '{server_id}' has no active adapter")?
+                .context("MCP server '{server_id}' has no active client")?
         };
 
-        adapter
+        client
             .read_resource(uri)
             .await
             .map_err(|err| anyhow::anyhow!("{}", err.message()))
@@ -558,7 +563,8 @@ impl McpConnectionManager {
         let mut state = self.inner.write().await;
         for entry in state.entries.values_mut() {
             abort_tasks(entry);
-            entry.adapter = None;
+            entry.client = None;
+            entry.auth_manager = None;
             entry.status = McpServerStatus::Disabled;
         }
         state.supervisor.cleanup_all().await;
@@ -598,7 +604,8 @@ impl McpConnectionManager {
                     if entry.attempt_id != attempt_id {
                         continue;
                     }
-                    entry.adapter = Some(outcome.adapter);
+                    entry.client = Some(outcome.client);
+                    entry.auth_manager = outcome.auth_manager;
                     entry.tools = outcome.tools;
                     entry.resources = outcome.resources;
                     entry.status = McpServerStatus::Connected;
@@ -659,7 +666,8 @@ fn spawn_connect(
 }
 
 struct ConnectOutcome {
-    adapter: Arc<dyn McpToolAdapter>,
+    client: Arc<dyn McpClient>,
+    auth_manager: Option<Arc<tokio::sync::Mutex<AuthorizationManager>>>,
     tools: Vec<McpToolDefinition>,
     resources: Vec<McpResourceDefinition>,
 }
@@ -671,32 +679,34 @@ async fn connect_one(
     oauth_store_path: Option<PathBuf>,
     oauth_provider_registry: Arc<OAuthProviderRegistry>,
 ) -> Result<ConnectOutcome, McpError> {
-    let adapter = adapter_for_config(
+    let (client, auth_manager) = build_client_for_config(
         &config,
-        supervisor,
-        oauth_store,
-        oauth_store_path,
-        oauth_provider_registry,
-    );
+        &supervisor,
+        &oauth_store,
+        &oauth_store_path,
+        &oauth_provider_registry,
+    )
+    .await?;
     let timeout_ms = config.startup_timeout_ms.unwrap_or(5_000);
     let (tools, resources) = tokio::time::timeout(
         Duration::from_millis(timeout_ms),
-        discover_tools(&adapter, &config),
+        discover_tools(&client, &config),
     )
     .await
     .map_err(|_| McpError::protocol(format!("timeout connecting to MCP server {}", config.id)))??;
     Ok(ConnectOutcome {
-        adapter,
+        client,
+        auth_manager,
         tools,
         resources,
     })
 }
 
 async fn discover_tools(
-    adapter: &Arc<dyn McpToolAdapter>,
+    client: &Arc<dyn McpClient>,
     config: &ManagedMcpServerConfig,
 ) -> Result<(Vec<McpToolDefinition>, Vec<McpResourceDefinition>), McpError> {
-    let tools = adapter.list_tools().await?;
+    let tools = client.list_tools().await?;
     let mut filtered: Vec<McpToolDefinition> = tools;
     if !config.enabled_tools.is_empty() {
         let allow: BTreeSet<String> = config.enabled_tools.iter().cloned().collect();
@@ -708,45 +718,57 @@ async fn discover_tools(
     }
 
     // Resource list is best-effort; failure does not mark the server failed.
-    let resources = adapter.list_resources().await.unwrap_or_default();
+    let resources = client.list_resources().await.unwrap_or_default();
     Ok((filtered, resources))
 }
 
-fn adapter_for_config(
+async fn build_client_for_config(
     config: &ManagedMcpServerConfig,
-    supervisor: ProcessSupervisor,
-    oauth_store: Arc<RwLock<OAuthStore>>,
-    oauth_store_path: Option<PathBuf>,
-    oauth_provider_registry: Arc<OAuthProviderRegistry>,
-) -> Arc<dyn McpToolAdapter> {
+    supervisor: &ProcessSupervisor,
+    _oauth_store: &Arc<RwLock<OAuthStore>>,
+    oauth_store_path: &Option<PathBuf>,
+    _oauth_provider_registry: &Arc<OAuthProviderRegistry>,
+) -> Result<(Arc<dyn McpClient>, Option<Arc<Mutex<AuthorizationManager>>>), McpError> {
     match &config.transport {
         ManagedMcpTransport::Stdio {
             command,
             args,
             env,
             cwd,
-        } => Arc::new(McpStdioToolAdapter::new_supervised(
-            McpStdioConfig {
-                command: command.clone(),
-                args: args.clone(),
-                env: env.clone(),
-                cwd: cwd.clone(),
-                tool_timeout_ms: config.tool_timeout_ms,
-            },
-            supervisor,
-            config.id.clone(),
-        )),
+        } => {
+            let client = stdio::build_stdio_client(
+                &config.id,
+                StdioConfig {
+                    command: command.clone(),
+                    args: args.clone(),
+                    env: env.clone(),
+                    cwd: cwd.clone(),
+                    startup_timeout_ms: config.startup_timeout_ms,
+                    request_timeout_ms: config.tool_timeout_ms,
+                },
+                supervisor,
+            )
+            .await?;
+            Ok((client, None))
+        }
         ManagedMcpTransport::Http { url, headers } | ManagedMcpTransport::Sse { url, headers } => {
-            Arc::new(McpHttpToolAdapter::new(McpHttpConfig {
+            // Try to build an AuthorizationManager for OAuth support.
+            let auth_manager = match oauth_store_path {
+                Some(path) => oauth::build_authorization_manager(url, path, &config.id)
+                    .await
+                    .ok(),
+                None => None,
+            };
+
+            let client = http::build_http_client(HttpConfig {
                 url: url.clone(),
                 headers: headers.clone(),
-                tool_timeout_ms: config.tool_timeout_ms,
-                server_id: Some(config.id.clone()),
-                oauth_store: Some(oauth_store),
-                oauth_provider: None,
-                oauth_provider_registry: Some(oauth_provider_registry),
-                oauth_store_path,
-            }))
+                startup_timeout_ms: config.startup_timeout_ms,
+                request_timeout_ms: config.tool_timeout_ms,
+                auth_manager: auth_manager.clone(),
+            })
+            .await?;
+            Ok((client, auth_manager))
         }
     }
 }
@@ -788,7 +810,8 @@ fn diagnostic_hint(message: &str, config: &ManagedMcpServerConfig) -> Option<Str
 fn set_failed(entry: &mut ManagedMcpEntry, diagnostic: McpDiagnostic) {
     entry.status = McpServerStatus::Failed;
     entry.error = Some(diagnostic);
-    entry.adapter = None;
+    entry.client = None;
+    entry.auth_manager = None;
     entry.tools.clear();
     entry.resources.clear();
 
@@ -867,7 +890,7 @@ struct ManagedMcpTool {
     remote_name: String,
     description: String,
     input_schema: serde_json::Value,
-    adapter: Arc<dyn McpToolAdapter>,
+    client: Arc<dyn McpClient>,
 }
 
 impl super::Tool for ManagedMcpTool {
@@ -888,11 +911,11 @@ impl super::Tool for ManagedMcpTool {
         _ctx: &'a super::ToolContext,
         input: serde_json::Value,
     ) -> super::ToolFuture<'a> {
-        let adapter = Arc::clone(&self.adapter);
+        let client = Arc::clone(&self.client);
         let server_id = self.server_id.clone();
         let remote_name = self.remote_name.clone();
         Box::pin(async move {
-            adapter
+            client
                 .call_tool(&remote_name, input)
                 .await
                 .map(super::ToolResult::from)

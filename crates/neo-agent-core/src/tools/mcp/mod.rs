@@ -2,12 +2,15 @@ use rmcp::model::{CallToolResult, ReadResourceResult, Resource, Tool as RmcpTool
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-mod client;
-mod http;
-mod legacy;
-mod oauth;
-mod stdio;
+pub mod client;
+pub mod http;
+pub mod legacy;
+pub mod oauth;
+pub mod stdio;
 
+pub use client::{McpClient, RmcpClient};
+pub use http::HttpConfig;
+pub use stdio::StdioConfig;
 pub use legacy::{
     McpHttpConfig, McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter,
     McpToolProvider,
