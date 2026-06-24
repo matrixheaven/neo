@@ -38,6 +38,7 @@ tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+oauth2 = { version = "5.0", default-features = false }
 rmcp = { version = "1.8.0", default-features = false, features = ["server", "macros"] }
 temp-env = "0.3"
 tempfile.workspace = true
