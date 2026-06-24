@@ -20,7 +20,7 @@ pulldown-cmark.workspace = true
 rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
-rmcp = { version = "1.8.0", features = ["client", "auth", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "1.8.0", default-features = false, features = ["client", "auth", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 rustix.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -36,6 +36,7 @@ tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+rmcp = { version = "1.8.0", default-features = false, features = ["server", "macros"] }
 temp-env = "0.3"
 tempfile.workspace = true
 
