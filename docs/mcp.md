@@ -120,10 +120,24 @@ discovery status. Keys:
 
 - `↑` / `↓` — navigate.
 - `Enter` — test/refresh the selected server.
-- `a` — add a new server (choose stdio / HTTP / SSE, then fill the fields).
+- `a` — add a new server. First choose the transport (`stdio`, `HTTP`, or
+  `SSE`), then fill the single-page form.
 - `e` — toggle enablement.
 - `d` — delete (confirm with `y`).
 - `Esc` — close.
+
+The add form collects all fields for the selected transport on one screen:
+
+| Transport | Fields |
+|-----------|--------|
+| Local stdio | Name · Command · Env (optional) |
+| Remote HTTP | Name · URL · Bearer Token (optional) · Headers (optional) |
+| Remote SSE  | Name · URL · Bearer Token (optional) · Headers (optional) |
+
+Use `Tab` or `↑` / `↓` to switch fields, `Enter` to submit, and `Esc` to cancel.
+`Env` and `Headers` accept multiple `KEY=value` entries separated by commas or
+newlines. A bearer token, if provided, is stored as an `Authorization: Bearer`
+header.
 
 The overlay reflects the connection manager's live snapshots when the manager is
 available; otherwise it falls back to static config summaries.

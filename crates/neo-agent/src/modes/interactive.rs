@@ -441,22 +441,6 @@ struct PendingMcpProbe {
     handle: tokio::task::JoinHandle<anyhow::Result<neo_agent_core::McpServerSnapshot>>,
 }
 
-#[derive(Debug, Clone)]
-struct PendingMcpAdd {
-    transport: &'static str,
-    step: McpAddStep,
-    id: String,
-    command: Option<String>,
-    url: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum McpAddStep {
-    Id,
-    Command,
-    Url,
-}
-
 struct PendingApprovalResponse {
     decision_tx: oneshot::Sender<PermissionApprovalDecision>,
     feedback_tx: Option<oneshot::Sender<Option<String>>>,
@@ -506,7 +490,9 @@ pub(crate) struct InteractiveController {
     pending_catalog_provider_id: Option<String>,
     pending_catalog_fetch: Option<PendingCatalogFetch>,
     pending_mcp_probe: Option<PendingMcpProbe>,
-    pending_mcp_add: Option<PendingMcpAdd>,
+    /// Transport selected in the MCP add transport picker, kept while the
+    /// single-page add form is open so submission can build the right input.
+    pending_mcp_add_transport: Option<&'static str>,
     mcp_manager: Option<McpConnectionManager>,
     skill_store: Option<neo_agent_core::skills::SkillStore>,
     /// Expanded skill body waiting to be injected as context for the next turn.
@@ -852,7 +838,7 @@ impl InteractiveController {
             pending_catalog_provider_id: None,
             pending_catalog_fetch: None,
             pending_mcp_probe: None,
-            pending_mcp_add: None,
+            pending_mcp_add_transport: None,
             mcp_manager: Some(McpConnectionManager::new(ProcessSupervisor::default())),
             skill_store: None,
             pending_skill_context: None,
@@ -4060,9 +4046,9 @@ impl InteractiveController {
         } else if self.tui.chrome_mut().choice_picker_result().is_some() {
             self.handle_choice_picker_result();
         } else if self.tui.chrome_mut().text_input_result().is_some() {
-            self.handle_text_input_result().await;
+            self.handle_text_input_result();
         } else if self.tui.chrome_mut().api_key_input_result().is_some() {
-            self.handle_api_key_input_result().await;
+            self.handle_api_key_input_result();
         } else if self
             .tui
             .chrome_mut()
@@ -4070,6 +4056,8 @@ impl InteractiveController {
             .is_some()
         {
             self.handle_custom_registry_import_result();
+        } else if self.tui.chrome_mut().mcp_add_form_result().is_some() {
+            self.handle_mcp_add_form_result().await;
         } else {
             return false;
         }
@@ -4239,74 +4227,66 @@ impl InteractiveController {
     }
 
     fn handle_mcp_choice_item(&mut self, id: &str) -> bool {
-        let (transport, transport_label) = match id {
-            "mcp:add:stdio" => ("stdio", "Local stdio"),
-            "mcp:add:http" => ("http", "Remote HTTP"),
-            "mcp:add:sse" => ("sse", "Remote SSE"),
+        let transport = match id {
+            "mcp:add:stdio" => "stdio",
+            "mcp:add:http" => "http",
+            "mcp:add:sse" => "sse",
             _ => return false,
         };
-        self.pending_mcp_add = Some(PendingMcpAdd {
-            transport,
-            step: McpAddStep::Id,
-            id: String::new(),
-            command: None,
-            url: None,
-        });
-        self.open_mcp_input(&format!("Server id ({transport_label})"));
+        self.pending_mcp_add_transport = Some(transport);
+        let title = match transport {
+            "stdio" => "Add Local stdio MCP Server",
+            "http" => "Add Remote HTTP MCP Server",
+            "sse" => "Add Remote SSE MCP Server",
+            _ => "Add MCP Server",
+        };
+        self.tui
+            .chrome_mut()
+            .open_mcp_add_form(neo_tui::dialogs::McpAddFormOptions {
+                title: title.to_owned(),
+                transport: transport.to_owned(),
+            });
         true
     }
 
-    fn open_mcp_input(&mut self, label: &str) {
-        self.tui
-            .chrome_mut()
-            .open_text_input(neo_tui::dialogs::TextInputOptions {
-                title: label.to_owned(),
-                prompt: label.to_owned(),
-                submit_label: "Enter".to_owned(),
-            });
-    }
-
-    async fn continue_mcp_add(&mut self, value: String) {
-        let Some(mut pending) = self.pending_mcp_add.take() else {
+    async fn handle_mcp_add_form_result(&mut self) {
+        let Some(result) = self.tui.chrome_mut().mcp_add_form_result().cloned() else {
             return;
         };
-        match pending.step {
-            McpAddStep::Id => {
-                pending.id = value;
-                let server_id = pending.id.clone();
-                let next_step = if pending.transport == "stdio" {
-                    McpAddStep::Command
-                } else {
-                    McpAddStep::Url
-                };
-                let (label, transport_label) = if pending.transport == "stdio" {
-                    ("Command", "stdio")
-                } else {
-                    ("URL", pending.transport)
-                };
-                pending.step = next_step;
-                self.pending_mcp_add = Some(pending);
-                self.open_mcp_input(&format!("{label} ({transport_label}: {server_id})"));
+        self.tui.chrome_mut().close_focused_overlay();
+        let transport = self.pending_mcp_add_transport.take().unwrap_or("stdio");
+        match result {
+            neo_tui::dialogs::McpAddFormResult::Submitted(data) => {
+                self.save_mcp_form_server(data, transport).await;
             }
-            McpAddStep::Command => {
-                pending.command = Some(value);
-                self.save_pending_mcp_server(pending).await;
-            }
-            McpAddStep::Url => {
-                pending.url = Some(value);
-                self.save_pending_mcp_server(pending).await;
+            neo_tui::dialogs::McpAddFormResult::Cancelled => {
+                self.open_mcp_manager().await;
             }
         }
     }
 
-    async fn save_pending_mcp_server(&mut self, pending: PendingMcpAdd) {
+    async fn save_mcp_form_server(
+        &mut self,
+        data: neo_tui::dialogs::McpAddFormData,
+        transport: &'static str,
+    ) {
+        let cli_type = match transport {
+            "stdio" => "studio",
+            "http" => "remote-http",
+            "sse" => "remote-sse",
+            _ => transport,
+        };
+        let mut headers = data.headers;
+        if let Some(token) = data.bearer_token {
+            headers.push(format!("Authorization=Bearer {token}"));
+        }
         let input = mcp_ops::AddMcpServerInput {
-            id: pending.id,
-            cli_type: pending.transport.to_owned(),
-            command: pending.command,
-            url: pending.url,
-            env: vec![],
-            headers: vec![],
+            id: data.name,
+            cli_type: cli_type.to_owned(),
+            command: data.command,
+            url: data.url,
+            env: data.env,
+            headers,
             cwd: None,
             enabled_tools: vec![],
             disabled_tools: vec![],
@@ -4574,44 +4554,33 @@ impl InteractiveController {
     }
 
     /// Handle an API key input result.
-    async fn handle_api_key_input_result(&mut self) {
+    fn handle_api_key_input_result(&mut self) {
         let Some(result) = self.tui.chrome_mut().api_key_input_result().cloned() else {
             return;
         };
         self.tui.chrome_mut().close_focused_overlay();
         match result {
             neo_tui::dialogs::ApiKeyInputResult::Submitted(key) => {
-                self.handle_api_key_submitted(&key).await;
+                self.handle_api_key_submitted(&key);
             }
             neo_tui::dialogs::ApiKeyInputResult::Cancelled => {
                 self.pending_catalog_provider_id = None;
-                self.pending_mcp_add = None;
             }
         }
     }
 
-    async fn handle_text_input_result(&mut self) {
+    fn handle_text_input_result(&mut self) {
         let Some(result) = self.tui.chrome_mut().text_input_result().cloned() else {
             return;
         };
         self.tui.chrome_mut().close_focused_overlay();
         match result {
-            neo_tui::dialogs::TextInputResult::Submitted(value) => {
-                if self.pending_mcp_add.is_some() {
-                    self.continue_mcp_add(value).await;
-                }
-            }
-            neo_tui::dialogs::TextInputResult::Cancelled => {
-                self.pending_mcp_add = None;
-            }
+            neo_tui::dialogs::TextInputResult::Submitted(_value) => {}
+            neo_tui::dialogs::TextInputResult::Cancelled => {}
         }
     }
 
-    async fn handle_api_key_submitted(&mut self, key: &str) {
-        if self.pending_mcp_add.is_some() {
-            self.continue_mcp_add(key.to_owned()).await;
-            return;
-        }
+    fn handle_api_key_submitted(&mut self, key: &str) {
         let Some(provider_id) = self.pending_catalog_provider_id.take() else {
             self.push_status("API key saved.");
             return;
@@ -12812,7 +12781,7 @@ command = "python3"
     }
 
     #[tokio::test]
-    async fn mcp_add_transport_opens_text_input() {
+    async fn mcp_add_transport_opens_form() {
         let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
@@ -12861,21 +12830,342 @@ command = "python3"
             .focused_overlay()
             .expect("selecting a transport should open the next overlay");
         assert!(
-            matches!(overlay.kind, OverlayKind::TextInput(_)),
-            "expected text input overlay after selecting transport, got {:?}",
+            matches!(overlay.kind, OverlayKind::McpAddForm(_)),
+            "expected MCP add form overlay after selecting transport, got {:?}",
             overlay.kind
         );
 
-        // The text input must actually be rendered in the composed frame,
+        // The form must actually be rendered in a single composed frame,
         // and the title should reflect the selected transport so the user
-        // knows the subsequent step will ask for transport-specific params.
+        // knows which transport-specific params are being collected.
         let mut transcript = controller.tui.transcript().clone();
         let lines = compose_tui_frame(controller.chrome(), &mut transcript, 80, 24)
             .expect("frame composes");
         let joined = lines.join("\n");
         assert!(
-            joined.contains("Server id (Local stdio)"),
-            "rendered frame should contain contextual text input title: {joined}"
+            joined.contains("Add Local stdio MCP Server"),
+            "rendered frame should contain contextual form title: {joined}"
+        );
+        assert!(
+            joined.contains("▸ Name:") && joined.contains("Command:"),
+            "rendered frame should show Name and Command fields for stdio: {joined}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_add_form_stdio_submits_to_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async { Ok(vec![]) },
+        );
+        controller.local_config =
+            Some(test_config(&project_dir, project_dir.join(".neo/sessions")));
+
+        // Open manager, start add, select stdio.
+        controller.type_text("/mcp");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("open manager");
+        controller
+            .handle_input_event(InputEvent::Insert('A'))
+            .await
+            .expect("start add");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("enter").expect("valid key")))
+            .await
+            .expect("select stdio");
+        assert!(
+            matches!(
+                controller.chrome().focused_overlay().map(|o| &o.kind),
+                Some(OverlayKind::McpAddForm(_))
+            ),
+            "form should be focused"
+        );
+
+        // Fill Name, Command, and Env.
+        controller
+            .handle_input_event(InputEvent::Paste("fs".to_owned()))
+            .await
+            .expect("type name");
+        controller
+            .handle_input_event(InputEvent::Insert('\t'))
+            .await
+            .expect("switch to command");
+        controller
+            .handle_input_event(InputEvent::Paste(
+                "npx -y @server/filesystem /repo".to_owned(),
+            ))
+            .await
+            .expect("type command");
+        controller
+            .handle_input_event(InputEvent::Insert('\t'))
+            .await
+            .expect("switch to env");
+        controller
+            .handle_input_event(InputEvent::Paste("KEY=value".to_owned()))
+            .await
+            .expect("type env");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("submit form");
+
+        // The MCP manager overlay should be reopened after a successful add.
+        assert!(
+            matches!(
+                controller.chrome().focused_overlay().map(|o| &o.kind),
+                Some(OverlayKind::McpManager(_))
+            ),
+            "MCP manager should be reopened after submit"
+        );
+
+        let config = crate::config::read_file_config(&project_dir.join(".neo/config.toml"))
+            .expect("read saved config");
+        let servers = config.mcp.expect("mcp section").servers;
+        assert_eq!(servers.len(), 1, "expected one saved MCP server");
+        assert_eq!(servers[0].id, "fs");
+        assert_eq!(servers[0].transport, "stdio");
+        assert_eq!(
+            servers[0].command,
+            Some("npx".to_owned()),
+            "command is parsed into program"
+        );
+        assert_eq!(
+            servers[0].args,
+            vec![
+                "-y".to_owned(),
+                "@server/filesystem".to_owned(),
+                "/repo".to_owned()
+            ]
+        );
+        assert_eq!(
+            servers[0].env.get("KEY"),
+            Some(&"value".to_owned()),
+            "env key is parsed"
+        );
+        assert!(servers[0].enabled);
+    }
+
+    #[tokio::test]
+    async fn mcp_add_form_http_submits_to_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async { Ok(vec![]) },
+        );
+        controller.local_config =
+            Some(test_config(&project_dir, project_dir.join(".neo/sessions")));
+
+        // Open manager, start add, select HTTP (second item -> one Down + Enter).
+        controller.type_text("/mcp");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("open manager");
+        controller
+            .handle_input_event(InputEvent::Insert('A'))
+            .await
+            .expect("start add");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+            .await
+            .expect("move to HTTP");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("enter").expect("valid key")))
+            .await
+            .expect("select http");
+
+        // Fill Name, URL, Bearer Token, and Headers.
+        controller
+            .handle_input_event(InputEvent::Paste("linear".to_owned()))
+            .await
+            .expect("type name");
+        controller
+            .handle_input_event(InputEvent::Insert('\t'))
+            .await
+            .expect("switch to url");
+        controller
+            .handle_input_event(InputEvent::Paste("https://example.invalid/mcp".to_owned()))
+            .await
+            .expect("type url");
+        controller
+            .handle_input_event(InputEvent::Insert('\t'))
+            .await
+            .expect("switch to token");
+        controller
+            .handle_input_event(InputEvent::Paste("secret".to_owned()))
+            .await
+            .expect("type token");
+        controller
+            .handle_input_event(InputEvent::Insert('\t'))
+            .await
+            .expect("switch to headers");
+        controller
+            .handle_input_event(InputEvent::Paste("X-Custom=foo".to_owned()))
+            .await
+            .expect("type headers");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("submit form");
+
+        let config = crate::config::read_file_config(&project_dir.join(".neo/config.toml"))
+            .expect("read saved config");
+        let servers = config.mcp.expect("mcp section").servers;
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].id, "linear");
+        assert_eq!(servers[0].transport, "http");
+        assert_eq!(
+            servers[0].url,
+            Some("https://example.invalid/mcp".to_owned())
+        );
+        assert_eq!(
+            servers[0].headers.get("Authorization"),
+            Some(&"Bearer secret".to_owned()),
+            "bearer token is prepended as Authorization header"
+        );
+        assert_eq!(servers[0].headers.get("X-Custom"), Some(&"foo".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn mcp_add_form_sse_submits_to_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async { Ok(vec![]) },
+        );
+        controller.local_config =
+            Some(test_config(&project_dir, project_dir.join(".neo/sessions")));
+
+        // Open manager, start add, select SSE (third item -> two Down + Enter).
+        controller.type_text("/mcp");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("open manager");
+        controller
+            .handle_input_event(InputEvent::Insert('A'))
+            .await
+            .expect("start add");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+            .await
+            .expect("move to HTTP");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::SelectDown))
+            .await
+            .expect("move to SSE");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("enter").expect("valid key")))
+            .await
+            .expect("select sse");
+
+        // Fill Name and URL only; leave optional fields empty.
+        controller
+            .handle_input_event(InputEvent::Paste("events".to_owned()))
+            .await
+            .expect("type name");
+        controller
+            .handle_input_event(InputEvent::Insert('\t'))
+            .await
+            .expect("switch to url");
+        controller
+            .handle_input_event(InputEvent::Paste("https://events.invalid/sse".to_owned()))
+            .await
+            .expect("type url");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("submit form");
+
+        let config = crate::config::read_file_config(&project_dir.join(".neo/config.toml"))
+            .expect("read saved config");
+        let servers = config.mcp.expect("mcp section").servers;
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].id, "events");
+        assert_eq!(servers[0].transport, "sse");
+        assert_eq!(
+            servers[0].url,
+            Some("https://events.invalid/sse".to_owned())
+        );
+        assert!(servers[0].headers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mcp_add_form_cancel_returns_to_manager() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            &project_dir,
+            |_request| async { Ok(vec![]) },
+        );
+        controller.local_config =
+            Some(test_config(&project_dir, project_dir.join(".neo/sessions")));
+
+        controller.type_text("/mcp");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("open manager");
+        controller
+            .handle_input_event(InputEvent::Insert('A'))
+            .await
+            .expect("start add");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("enter").expect("valid key")))
+            .await
+            .expect("select stdio");
+        assert!(
+            matches!(
+                controller.chrome().focused_overlay().map(|o| &o.kind),
+                Some(OverlayKind::McpAddForm(_))
+            ),
+            "form should be focused"
+        );
+
+        controller
+            .handle_input_event(InputEvent::Cancel)
+            .await
+            .expect("cancel form");
+
+        assert!(
+            matches!(
+                controller.chrome().focused_overlay().map(|o| &o.kind),
+                Some(OverlayKind::McpManager(_))
+            ),
+            "MCP manager should be reopened after cancel"
+        );
+
+        let config = crate::config::read_file_config(&project_dir.join(".neo/config.toml"))
+            .expect("read config");
+        assert!(
+            config.mcp.is_none() || config.mcp.unwrap().servers.is_empty(),
+            "no server should be saved on cancel"
         );
     }
 

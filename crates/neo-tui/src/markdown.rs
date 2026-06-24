@@ -822,7 +822,6 @@ fn syntect_style_to_style(st: &syntect::highlighting::Style, theme: &TuiTheme) -
     }
 }
 
-
 #[cfg(test)]
 mod highlight_tests {
     use super::*;

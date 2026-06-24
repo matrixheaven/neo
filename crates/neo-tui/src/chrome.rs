@@ -13,8 +13,9 @@ use crate::{
     components::{truncate_width, visible_width},
     core::InputResult,
     dialogs::{
-        ApiKeyInputState, ChoicePickerState, CustomRegistryImportState, McpManagerState,
-        ModelSelectorState, ProviderManagerState, TabbedModelSelectorState, TextInputState,
+        ApiKeyInputState, ChoicePickerState, CustomRegistryImportState, McpAddFormState,
+        McpManagerState, ModelSelectorState, ProviderManagerState, TabbedModelSelectorState,
+        TextInputState,
     },
     image::{ImageRenderPolicy, TerminalImageCapabilities},
     input::{InputEvent, KeybindingAction},
@@ -1337,6 +1338,11 @@ impl NeoChromeState {
         ))
     }
 
+    pub fn open_mcp_add_form(&mut self, opts: crate::dialogs::McpAddFormOptions) -> OverlayId {
+        let state = crate::dialogs::McpAddFormState::new(opts, self.theme);
+        self.push_overlay(Overlay::new("mcp-add", OverlayKind::McpAddForm(state)))
+    }
+
     pub fn open_trust_dialog(&mut self, data: crate::dialogs::TrustDialogData) -> OverlayId {
         let state = crate::dialogs::TrustDialogState::new(data, self.theme);
         self.push_overlay(Overlay::new("trust", OverlayKind::TrustDialog(state)))
@@ -1387,6 +1393,7 @@ impl NeoChromeState {
                 | OverlayKind::TabbedModelSelector(_)
                 | OverlayKind::ProviderManager(_)
                 | OverlayKind::McpManager(_)
+                | OverlayKind::McpAddForm(_)
                 | OverlayKind::ChoicePicker(_)
                 | OverlayKind::ApiKeyInput(_)
                 | OverlayKind::TextInput(_)
@@ -1415,6 +1422,7 @@ impl NeoChromeState {
             OverlayKind::ApiKeyInput(state) => state.handle_input(&input),
             OverlayKind::TextInput(state) => state.handle_input(&input),
             OverlayKind::CustomRegistryImport(state) => state.handle_input(input),
+            OverlayKind::McpAddForm(state) => state.handle_input(input),
             OverlayKind::QuestionDialog(state) => {
                 let result = state.handle_input(&input);
                 if matches!(result, InputResult::Submitted | InputResult::Cancelled) {
@@ -1530,6 +1538,14 @@ impl NeoChromeState {
         &self,
     ) -> Option<&crate::dialogs::CustomRegistryImportResult> {
         let OverlayKind::CustomRegistryImport(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        state.result()
+    }
+
+    #[must_use]
+    pub fn mcp_add_form_result(&self) -> Option<&crate::dialogs::McpAddFormResult> {
+        let OverlayKind::McpAddForm(state) = &self.focused_overlay()?.kind else {
             return None;
         };
         state.result()
@@ -1881,6 +1897,7 @@ impl NeoChromeState {
                 | OverlayKind::TabbedModelSelector(_)
                 | OverlayKind::ProviderManager(_)
                 | OverlayKind::McpManager(_)
+                | OverlayKind::McpAddForm(_)
                 | OverlayKind::ChoicePicker(_)
                 | OverlayKind::ApiKeyInput(_)
                 | OverlayKind::TextInput(_)
@@ -2060,6 +2077,7 @@ pub enum OverlayKind {
     TabbedModelSelector(crate::dialogs::TabbedModelSelectorState),
     ProviderManager(crate::dialogs::ProviderManagerState),
     McpManager(crate::dialogs::McpManagerState),
+    McpAddForm(crate::dialogs::McpAddFormState),
     ChoicePicker(crate::dialogs::ChoicePickerState),
     ApiKeyInput(crate::dialogs::ApiKeyInputState),
     TextInput(crate::dialogs::TextInputState),
@@ -2121,6 +2139,7 @@ impl OverlayKind {
             Self::ApiKeyInput(state) => Some(state.render_lines(width)),
             Self::TextInput(state) => Some(state.render_lines(width)),
             Self::CustomRegistryImport(state) => Some(state.render_lines(width)),
+            Self::McpAddForm(state) => Some(state.render_lines(width)),
             Self::TrustDialog(state) => Some(state.render_lines(width)),
             _ => None,
         }
@@ -2155,6 +2174,7 @@ impl OverlayKind {
             | Self::TabbedModelSelector(_)
             | Self::ProviderManager(_)
             | Self::McpManager(_)
+            | Self::McpAddForm(_)
             | Self::ChoicePicker(_)
             | Self::TrustDialog(_) => Some(16),
             _ => None,
@@ -2245,6 +2265,7 @@ fn handle_input_dialog_selection(kind: &mut OverlayKind, input: InputEvent) {
     match kind {
         OverlayKind::ApiKeyInput(state) => handle_input_ref(state, &input),
         OverlayKind::CustomRegistryImport(state) => handle_input_owned(state, input),
+        OverlayKind::McpAddForm(state) => handle_input_owned(state, input),
         _ => {}
     }
 }
@@ -2308,6 +2329,12 @@ impl DialogInputRef for TextInputState {
 }
 
 impl DialogInputOwned for CustomRegistryImportState {
+    fn handle_dialog_input(&mut self, input: InputEvent) {
+        let _ = self.handle_input(input);
+    }
+}
+
+impl DialogInputOwned for McpAddFormState {
     fn handle_dialog_input(&mut self, input: InputEvent) {
         let _ = self.handle_input(input);
     }
@@ -4472,5 +4499,26 @@ mod tests {
         prompt.cursor = prompt.char_len();
         prompt.apply_edit(PromptEdit::Backspace);
         assert_eq!(prompt.text, "hell");
+    }
+
+    #[test]
+    fn mcp_add_form_overlay_opens_and_has_no_result_initially() {
+        let mut chrome = NeoChromeState::new("title", "session", "model", "/tmp");
+        let opts = crate::dialogs::McpAddFormOptions {
+            title: "Add MCP Server".into(),
+            transport: "stdio".into(),
+        };
+        let id = chrome.open_mcp_add_form(opts);
+
+        assert_eq!(chrome.focused_overlay_id(), Some(id));
+        assert!(chrome.focused_overlay_is_rich_dialog());
+        assert!(chrome.focused_overlay_blocks_prompt());
+        assert!(chrome.mcp_add_form_result().is_none());
+
+        let lines = chrome.focused_overlay_lines(80);
+        assert!(!lines.is_empty());
+        // The dialog reserves 16 rows so the larger http/sse form fits; the
+        // actual rendered lines may be fewer (e.g. 11 for stdio).
+        assert_eq!(chrome.focused_overlay_height(), 16);
     }
 }
