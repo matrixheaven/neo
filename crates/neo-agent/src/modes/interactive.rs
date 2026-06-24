@@ -4239,10 +4239,10 @@ impl InteractiveController {
     }
 
     fn handle_mcp_choice_item(&mut self, id: &str) -> bool {
-        let transport = match id {
-            "mcp:add:stdio" => "stdio",
-            "mcp:add:http" => "http",
-            "mcp:add:sse" => "sse",
+        let (transport, transport_label) = match id {
+            "mcp:add:stdio" => ("stdio", "Local stdio"),
+            "mcp:add:http" => ("http", "Remote HTTP"),
+            "mcp:add:sse" => ("sse", "Remote SSE"),
             _ => return false,
         };
         self.pending_mcp_add = Some(PendingMcpAdd {
@@ -4252,7 +4252,7 @@ impl InteractiveController {
             command: None,
             url: None,
         });
-        self.open_mcp_input("Server id");
+        self.open_mcp_input(&format!("Server id ({transport_label})"));
         true
     }
 
@@ -4273,19 +4273,20 @@ impl InteractiveController {
         match pending.step {
             McpAddStep::Id => {
                 pending.id = value;
+                let server_id = pending.id.clone();
                 let next_step = if pending.transport == "stdio" {
                     McpAddStep::Command
                 } else {
                     McpAddStep::Url
                 };
-                let label = if pending.transport == "stdio" {
-                    "Command"
+                let (label, transport_label) = if pending.transport == "stdio" {
+                    ("Command", "stdio")
                 } else {
-                    "URL"
+                    ("URL", pending.transport)
                 };
                 pending.step = next_step;
                 self.pending_mcp_add = Some(pending);
-                self.open_mcp_input(label);
+                self.open_mcp_input(&format!("{label} ({transport_label}: {server_id})"));
             }
             McpAddStep::Command => {
                 pending.command = Some(value);
@@ -12807,6 +12808,74 @@ command = "python3"
         assert!(
             joined.contains("MCP Servers"),
             "rendered frame should contain MCP manager title: {joined}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_add_transport_opens_text_input() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async { Ok(vec![]) },
+        );
+        let project_dir = test_workspace_root();
+        controller.local_config =
+            Some(test_config(&project_dir, project_dir.join(".neo/sessions")));
+
+        // Open the MCP manager.
+        controller.type_text("/mcp");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputSubmit))
+            .await
+            .expect("slash command handled");
+        assert!(
+            matches!(
+                controller.chrome().focused_overlay().map(|o| &o.kind),
+                Some(OverlayKind::McpManager(_))
+            ),
+            "MCP manager should be focused"
+        );
+
+        // Press 'A' to add a server.
+        controller
+            .handle_input_event(InputEvent::Insert('A'))
+            .await
+            .expect("add key handled");
+        assert!(
+            matches!(
+                controller.chrome().focused_overlay().map(|o| &o.kind),
+                Some(OverlayKind::ChoicePicker(_))
+            ),
+            "transport choice picker should be focused"
+        );
+
+        // Press Enter to select the first transport (real TUI sends Key("enter")).
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("enter").expect("valid key")))
+            .await
+            .expect("select handled");
+        let overlay = controller
+            .chrome()
+            .focused_overlay()
+            .expect("selecting a transport should open the next overlay");
+        assert!(
+            matches!(overlay.kind, OverlayKind::TextInput(_)),
+            "expected text input overlay after selecting transport, got {:?}",
+            overlay.kind
+        );
+
+        // The text input must actually be rendered in the composed frame,
+        // and the title should reflect the selected transport so the user
+        // knows the subsequent step will ask for transport-specific params.
+        let mut transcript = controller.tui.transcript().clone();
+        let lines = compose_tui_frame(controller.chrome(), &mut transcript, 80, 24)
+            .expect("frame composes");
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("Server id (Local stdio)"),
+            "rendered frame should contain contextual text input title: {joined}"
         );
     }
 

@@ -1,6 +1,7 @@
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
 use neo_agent_core::{
     AgentEvent, AgentMessage, AgentToolCall, Content, ImageRef, PermissionOperation, ToolResult,
@@ -63,6 +64,7 @@ pub struct TranscriptPane {
     completed_tool_result_ids: Vec<String>,
     next_image_id: u64,
     activity_frame: usize,
+    workspace_root: Option<PathBuf>,
     /// Cache of the last composed body frame (ANSI strings, no chrome), so
     /// tests can inspect rendered output via [`frame_ansi_lines`] without
     /// recomposing unchanged rows.
@@ -90,6 +92,7 @@ impl TranscriptPane {
             completed_tool_result_ids: Vec::new(),
             next_image_id: 0,
             activity_frame: 0,
+            workspace_root: None,
             last_frame: Vec::new(),
             theme: TuiTheme::default(),
             skill_store: None,
@@ -109,6 +112,20 @@ impl TranscriptPane {
             return;
         }
         self.theme = theme;
+        self.mark_dirty();
+    }
+
+    pub fn set_workspace_root(&mut self, workspace_root: impl Into<PathBuf>) {
+        let path = workspace_root.into();
+        if self.workspace_root.as_deref() == Some(&path) {
+            return;
+        }
+        self.workspace_root = Some(path);
+        for entry in self.transcript.entries_mut() {
+            if let TranscriptEntry::ToolRun { component } = entry {
+                component.set_workspace_dir(self.workspace_root.clone().unwrap_or_default());
+            }
+        }
         self.mark_dirty();
     }
 
@@ -1061,6 +1078,9 @@ impl TranscriptPane {
             exit_code: None,
         });
         component.set_expanded(self.tool_output_expanded);
+        if let Some(workspace_root) = &self.workspace_root {
+            component.set_workspace_dir(workspace_root.clone());
+        }
         self.transcript.push(TranscriptEntry::tool_run(component));
     }
 

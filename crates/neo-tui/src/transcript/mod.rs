@@ -1,6 +1,7 @@
 pub mod diff_preview;
 pub mod entry;
 pub mod pane;
+pub mod partial_json;
 pub mod plan_box;
 pub mod store;
 pub mod tool_call;

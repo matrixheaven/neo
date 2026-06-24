@@ -29,8 +29,8 @@ fn running_tool_header_uses_finished_status_color() {
     };
 
     assert_eq!(
-        tool_header_spans(&running, &theme)[0].to_ansi(),
-        tool_header_spans(&used, &theme)[0].to_ansi()
+        tool_header_spans(&running, &theme, None)[0].to_ansi(),
+        tool_header_spans(&used, &theme, None)[0].to_ansi()
     );
 }
 
@@ -219,12 +219,13 @@ fn write_tool_card_renders_finalized_diff_from_details() {
             .any(|line| line.contains("Used Write (src/generated.rs) · +20 -0"))
     );
     assert!(rows.iter().any(|line| line.contains("ctrl+o to expand")));
-    assert!(rows.iter().any(|line| line.contains(" 1 + line 1")));
-    assert!(!rows.iter().any(|line| line.contains("20 + line 20")));
+    // New files show a syntax-highlighted preview, not an all-green diff.
+    assert!(rows.iter().any(|line| line.contains(" 1 line 1")));
+    assert!(!rows.iter().any(|line| line.contains("20 line 20")));
 
     card.set_expanded(true);
     let expanded = plain(card.render(80));
-    assert!(expanded.iter().any(|line| line.contains("20 + line 20")));
+    assert!(expanded.iter().any(|line| line.contains("20 line 20")));
 }
 
 #[test]
@@ -582,4 +583,148 @@ fn grouped_read_lines_do_not_exceed_terminal_width_after_gutter() {
             "grouped tool line reaches terminal autowrap column ({w} >= {WIDTH}): {line:?}"
         );
     }
+}
+
+#[test]
+fn long_command_header_keeps_closing_paren() {
+    let theme = TuiTheme::default();
+    let state = ToolCallState {
+        id: "bash-1".to_owned(),
+        name: "Bash".to_owned(),
+        arguments: Some(
+            serde_json::json!({
+                "command": "cargo run -p xtask -- test -p neo-agent-core runtime_turn_and_then_some_more_stuff",
+            })
+            .to_string(),
+        ),
+        result: None,
+        details: None,
+        status: ToolStatusKind::Running,
+        exit_code: None,
+    };
+    let rows = plain(vec![Line::from_spans(tool_header_spans(
+        &state, &theme, None,
+    ))]);
+    let header = &rows[0];
+    assert!(
+        header.contains(')'),
+        "closing parenthesis should survive truncation: {header:?}"
+    );
+    assert!(
+        header.contains("..."),
+        "long argument should be truncated: {header:?}"
+    );
+}
+
+#[test]
+fn long_path_header_preserves_tail() {
+    let theme = TuiTheme::default();
+    let state = ToolCallState {
+        id: "read-1".to_owned(),
+        name: "Read".to_owned(),
+        arguments: Some(
+            serde_json::json!({
+                "path": "crates/neo-agent-core/src/tools/something/very/deep/terminal.rs",
+            })
+            .to_string(),
+        ),
+        result: None,
+        details: None,
+        status: ToolStatusKind::Running,
+        exit_code: None,
+    };
+    let rows = plain(vec![Line::from_spans(tool_header_spans(
+        &state, &theme, None,
+    ))]);
+    let header = &rows[0];
+    assert!(
+        header.contains("…"),
+        "long path should be truncated: {header:?}"
+    );
+    assert!(
+        header.contains("terminal.rs"),
+        "filename tail should be preserved: {header:?}"
+    );
+    assert!(
+        header.contains(')'),
+        "closing parenthesis should be visible: {header:?}"
+    );
+}
+
+#[test]
+fn write_streaming_preview_shows_progress_and_content() {
+    use neo_agent_core::AgentEvent;
+    use neo_tui::ansi::strip_ansi;
+
+    let mut runtime = TranscriptPane::new(80, 20);
+    runtime.apply_agent_event(AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "write-1".to_owned(),
+        name: "Write".to_owned(),
+    });
+    runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
+        turn: 1,
+        id: "write-1".to_owned(),
+        json_fragment: r#"{"path":"src/foo.rs","content":"use std::collections::HashMap;\n\npub f""#.to_owned(),
+    });
+
+    let frame = runtime
+        .render_frame(80, 20)
+        .expect("frame renders")
+        .iter()
+        .map(|line| strip_ansi(line).clone())
+        .collect::<Vec<_>>();
+
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("Preparing changes for src/foo.rs")),
+        "progress line should show path: {frame:?}"
+    );
+    assert!(
+        frame.iter().any(|line| line.contains("tok")),
+        "progress line should show token count: {frame:?}"
+    );
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("use std::collections::HashMap")),
+        "streaming content should be visible: {frame:?}"
+    );
+}
+
+#[test]
+fn edit_streaming_preview_shows_progress() {
+    use neo_agent_core::AgentEvent;
+    use neo_tui::ansi::strip_ansi;
+
+    let mut runtime = TranscriptPane::new(80, 20);
+    runtime.apply_agent_event(AgentEvent::ToolCallStarted {
+        turn: 1,
+        id: "edit-1".to_owned(),
+        name: "Edit".to_owned(),
+    });
+    runtime.apply_agent_event(AgentEvent::ToolCallArgumentsDelta {
+        turn: 1,
+        id: "edit-1".to_owned(),
+        json_fragment: r#"{"path":"src/foo.rs","old_string":"foo","new_string":"bar"}"#.to_owned(),
+    });
+
+    let frame = runtime
+        .render_frame(80, 20)
+        .expect("frame renders")
+        .iter()
+        .map(|line| strip_ansi(line).clone())
+        .collect::<Vec<_>>();
+
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("Preparing changes for src/foo.rs")),
+        "Edit progress line should show path: {frame:?}"
+    );
+    assert!(
+        frame.iter().any(|line| line.contains("elapsed")),
+        "Edit progress line should show elapsed time: {frame:?}"
+    );
 }

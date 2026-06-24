@@ -4,6 +4,7 @@
 //! emits styled [`Line`]s. Code blocks are syntax-highlighted with
 //! [`syntect`]. Styling mirrors the Neo markdown theme.
 
+use std::path::Path;
 use std::sync::OnceLock;
 
 use crate::ansi::{Color, Style, clip_plain_to_width, visible_width};
@@ -724,4 +725,158 @@ fn truncate_visible(s: &str, width: usize) -> String {
     let mut out = clip_plain_to_width(s, width.saturating_sub(1));
     out.push('…');
     out
+}
+
+// ---------------------------------------------------------------------------
+// Syntax highlighting helpers for tool cards
+// ---------------------------------------------------------------------------
+
+/// Map a file path to a syntect language name.
+#[must_use]
+pub fn lang_from_path(path: &str) -> Option<&'static str> {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)?
+        .to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "rs" => "rust",
+        "ts" | "tsx" => "typescript",
+        "js" | "jsx" => "javascript",
+        "py" => "python",
+        "go" => "go",
+        "java" => "java",
+        "sh" | "bash" | "zsh" => "bash",
+        "json" => "json",
+        "yaml" | "yml" => "yaml",
+        "toml" => "toml",
+        "md" | "markdown" => "markdown",
+        "css" => "css",
+        "html" | "htm" => "html",
+        "sql" => "sql",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" => "cpp",
+        _ => return None,
+    })
+}
+
+/// Highlight a block of code into per-line spans, using the language inferred
+/// from `path`. Falls back to plain text if the language is unknown.
+#[must_use]
+pub fn highlight_code_lines(content: &str, path: &str, theme: &TuiTheme) -> Vec<Vec<Span>> {
+    let ss = syntax_set();
+    let ts = theme_set();
+    let syntax = lang_from_path(path).and_then(|lang| {
+        ss.find_syntax_by_token(lang)
+            .or_else(|| ss.find_syntax_by_extension(lang))
+    });
+    let Some(syntax_theme) = ts.themes.get("base16-ocean.dark") else {
+        return plain_code_lines(content, theme);
+    };
+    let Some(syntax) = syntax else {
+        return plain_code_lines(content, theme);
+    };
+
+    let mut h = syntect::easy::HighlightLines::new(syntax, syntax_theme);
+    content
+        .trim_end_matches('\n')
+        .lines()
+        .map(|line| match h.highlight_line(line, ss) {
+            Ok(ranges) => ranges
+                .into_iter()
+                .map(|(st, text)| Span::styled(text.to_owned(), syntect_style_to_style(&st, theme)))
+                .collect(),
+            Err(_) => vec![Span::styled(
+                line.to_owned(),
+                Style::default().fg(theme.text_primary),
+            )],
+        })
+        .collect()
+}
+
+fn plain_code_lines(content: &str, theme: &TuiTheme) -> Vec<Vec<Span>> {
+    content
+        .trim_end_matches('\n')
+        .lines()
+        .map(|line| {
+            vec![Span::styled(
+                line.to_owned(),
+                Style::default().fg(theme.text_primary),
+            )]
+        })
+        .collect()
+}
+
+fn syntect_style_to_style(st: &syntect::highlighting::Style, theme: &TuiTheme) -> Style {
+    Style {
+        fg: syntect_color(st.foreground).or(Some(theme.text_primary)),
+        bold: st
+            .font_style
+            .contains(syntect::highlighting::FontStyle::BOLD),
+        italic: st
+            .font_style
+            .contains(syntect::highlighting::FontStyle::ITALIC),
+        underline: st
+            .font_style
+            .contains(syntect::highlighting::FontStyle::UNDERLINE),
+        ..Style::default()
+    }
+}
+
+
+#[cfg(test)]
+mod highlight_tests {
+    use super::*;
+
+    #[test]
+    fn lang_from_path_maps_common_extensions() {
+        let cases = [
+            ("main.rs", Some("rust")),
+            ("lib.ts", Some("typescript")),
+            ("app.tsx", Some("typescript")),
+            ("index.js", Some("javascript")),
+            ("page.jsx", Some("javascript")),
+            ("script.py", Some("python")),
+            ("main.go", Some("go")),
+            ("Foo.java", Some("java")),
+            ("deploy.sh", Some("bash")),
+            ("config.json", Some("json")),
+            ("values.yaml", Some("yaml")),
+            ("values.yml", Some("yaml")),
+            ("Cargo.toml", Some("toml")),
+            ("README.md", Some("markdown")),
+            ("style.css", Some("css")),
+            ("index.html", Some("html")),
+            ("query.sql", Some("sql")),
+            ("foo.c", Some("c")),
+            ("foo.h", Some("c")),
+            ("foo.cpp", Some("cpp")),
+            ("foo.hpp", Some("cpp")),
+            ("no_extension", None),
+            ("file.unknown", None),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(
+                lang_from_path(path),
+                expected,
+                "extension mismatch for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn highlight_code_lines_returns_lines_for_known_lang() {
+        let theme = TuiTheme::default();
+        let lines = highlight_code_lines("fn main() {}", "main.rs", &theme);
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].is_empty());
+    }
+
+    #[test]
+    fn highlight_code_lines_falls_back_for_unknown_lang() {
+        let theme = TuiTheme::default();
+        let lines = highlight_code_lines("hello world", "file.unknown", &theme);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].len(), 1);
+        assert_eq!(lines[0][0].text(), "hello world");
+    }
 }

@@ -65,6 +65,8 @@ impl NeoTui {
             self.transcript.set_live_chrome_height(chrome_height);
         }
         self.transcript.set_theme(self.chrome.theme());
+        self.transcript
+            .set_workspace_root(self.chrome.workspace_root());
         self.transcript.resize(width, height);
         let mut lines = self
             .transcript

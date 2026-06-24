@@ -1883,6 +1883,7 @@ impl NeoChromeState {
                 | OverlayKind::McpManager(_)
                 | OverlayKind::ChoicePicker(_)
                 | OverlayKind::ApiKeyInput(_)
+                | OverlayKind::TextInput(_)
                 | OverlayKind::CustomRegistryImport(_)
                 | OverlayKind::QuestionDialog(_)
                 | OverlayKind::Approval(_)

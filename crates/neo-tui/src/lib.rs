@@ -10,6 +10,7 @@ pub mod neo_tui;
 pub mod paste;
 pub mod searchable_list;
 pub mod terminal;
+pub mod token_estimate;
 pub mod tool_diff;
 pub mod transcript;
 pub mod widgets;

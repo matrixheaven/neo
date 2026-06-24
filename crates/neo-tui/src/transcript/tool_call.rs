@@ -5,7 +5,12 @@ use crate::components::wrap_width;
 use crate::core::{Component, Expandable, Finalization, Line};
 
 use super::plan_box::PlanBoxComponent;
-use super::tool_renderers::{render_tool_body_themed, tool_header_spans};
+use super::tool_renderers::{
+    is_file_write_tool, is_pending_or_running, render_streaming_preview, render_tool_body_themed,
+    tool_header_spans,
+};
+
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallState {
@@ -26,6 +31,8 @@ pub struct ToolCallComponent {
     live_output: Vec<String>,
     dropped_live_output_lines: usize,
     live_output_chars: usize,
+    workspace_dir: Option<PathBuf>,
+    streaming_started_at: Option<std::time::Instant>,
 }
 
 const MAX_PROGRESS_LINES: usize = 24;
@@ -42,10 +49,17 @@ impl ToolCallComponent {
             live_output: Vec::new(),
             dropped_live_output_lines: 0,
             live_output_chars: 0,
+            workspace_dir: None,
+            streaming_started_at: None,
         }
     }
 
     pub fn update_call(&mut self, arguments: Option<String>) {
+        if let Some(args) = &arguments {
+            if !args.is_empty() && self.streaming_started_at.is_none() {
+                self.streaming_started_at = Some(std::time::Instant::now());
+            }
+        }
         self.state.arguments = arguments;
     }
 
@@ -60,6 +74,9 @@ impl ToolCallComponent {
             self.state.arguments = arguments;
         }
         self.state.status = status;
+        if status == ToolStatusKind::Running && self.streaming_started_at.is_none() {
+            self.streaming_started_at = Some(std::time::Instant::now());
+        }
     }
 
     pub fn append_progress(&mut self, line: impl Into<String>) {
@@ -111,6 +128,7 @@ impl ToolCallComponent {
         self.live_output.clear();
         self.dropped_live_output_lines = 0;
         self.live_output_chars = 0;
+        self.streaming_started_at = None;
     }
 
     #[must_use]
@@ -132,6 +150,10 @@ impl ToolCallComponent {
     #[must_use]
     pub fn arguments(&self) -> Option<&str> {
         self.state.arguments.as_deref()
+    }
+
+    pub fn set_workspace_dir(&mut self, workspace_dir: impl Into<PathBuf>) {
+        self.workspace_dir = Some(workspace_dir.into());
     }
 
     /// Borrow the underlying tool state (for grouping/rendering snapshots).
@@ -198,7 +220,7 @@ impl ToolCallComponent {
     /// + tool name + key arg + chip) and the body as weak preview lines.
     #[must_use]
     pub fn render_with_theme(&mut self, width: usize, theme: &TuiTheme) -> Vec<Line> {
-        let header_spans = tool_header_spans(&self.state, theme);
+        let header_spans = tool_header_spans(&self.state, theme, self.workspace_dir.as_deref());
         let header_width = width.saturating_sub(2).max(1);
         let mut rows = vec![Line::from_spans(header_spans).truncate_to_width(header_width)];
 
@@ -223,12 +245,22 @@ impl ToolCallComponent {
             rows.extend(plan_box.render(width, theme));
         }
 
-        rows.extend(render_tool_body_themed(
-            &self.state,
-            self.expanded,
-            width,
-            theme,
-        ));
+        if is_pending_or_running(self.state.status) && is_file_write_tool(&self.state.name) {
+            rows.extend(render_streaming_preview(
+                &self.state,
+                self.expanded,
+                width,
+                theme,
+                self.streaming_started_at,
+            ));
+        } else {
+            rows.extend(render_tool_body_themed(
+                &self.state,
+                self.expanded,
+                width,
+                theme,
+            ));
+        }
         if self.state.status == ToolStatusKind::Running {
             let live_style = Style::default().fg(theme.text_muted);
             rows.extend(wrap_live_rows(&self.progress_lines, width, live_style));

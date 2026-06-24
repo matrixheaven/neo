@@ -1,25 +1,29 @@
-use crate::ansi::{Color, Style};
+use std::path::Path;
+
+use crate::ansi::{Color, Style, clip_plain_to_width};
 use crate::chrome::ToolStatusKind;
 use crate::chrome::TuiTheme;
 use crate::core::{Line, Span, Text};
+use crate::markdown::{highlight_code_lines, lang_from_path};
+use crate::token_estimate::{estimate_tokens, format_elapsed, format_token_count};
 use crate::tool_diff::{DiffModel, DiffRenderLine, DiffRenderLineKind, DiffRenderState};
 
+use super::partial_json::extract_partial_string_field;
 use super::tool_call::ToolCallState;
 
 const RESULT_PREVIEW_LINES: usize = 3;
 const COMMAND_PREVIEW_LINES: usize = 10;
+/// Maximum visible length of the key argument shown in a tool header.
+/// Borrowed from Kimi Code: the argument is capped so the closing `)` can
+/// always be rendered, regardless of terminal width.
+const MAX_ARG_LENGTH: usize = 60;
 
 #[must_use]
 pub fn tool_header(state: &ToolCallState) -> String {
-    let symbol = tool_symbol(state.status);
-    let verb = tool_verb(state.status);
-    let key = key_argument(state.arguments.as_deref());
-    let chip = result_chip(state);
-    if key.is_empty() {
-        format!("{symbol} {verb} {}{chip}", state.name)
-    } else {
-        format!("{symbol} {verb} {} ({key}){chip}", state.name)
-    }
+    tool_header_spans(state, &TuiTheme::default(), None)
+        .iter()
+        .map(Span::text)
+        .collect()
 }
 
 /// Build the tool header as styled spans: `{symbol} {verb} {name} ({key}){chip}`.
@@ -30,7 +34,11 @@ pub fn tool_header(state: &ToolCallState) -> String {
 /// - `(key arg)` → weak text
 /// - chip (`· N lines`) → weak text
 #[must_use]
-pub fn tool_header_spans(state: &ToolCallState, theme: &TuiTheme) -> Vec<Span> {
+pub fn tool_header_spans(
+    state: &ToolCallState,
+    theme: &TuiTheme,
+    workspace_dir: Option<&Path>,
+) -> Vec<Span> {
     let symbol = tool_symbol(state.status);
     let verb = tool_verb(state.status);
     let status_color = tool_status_color(state.status, theme);
@@ -42,12 +50,11 @@ pub fn tool_header_spans(state: &ToolCallState, theme: &TuiTheme) -> Vec<Span> {
         Span::styled(format!("{verb} "), Style::default().fg(status_color)),
         Span::styled(state.name.clone(), Style::default().fg(name_color).bold()),
     ];
-    let key = key_argument(state.arguments.as_deref());
-    if !key.is_empty() {
-        spans.push(Span::styled(
-            format!(" ({key})"),
-            Style::default().fg(meta_color),
-        ));
+    if let Some((key, is_path)) = extract_key_argument(state.arguments.as_deref()) {
+        let key_text = format_key_argument(&state.name, &key, is_path, workspace_dir);
+        spans.push(Span::styled(" (", Style::default().fg(meta_color)));
+        spans.push(Span::styled(key_text, Style::default().fg(meta_color)));
+        spans.push(Span::styled(")", Style::default().fg(meta_color)));
     }
     let chip = result_chip(state);
     if !chip.is_empty() {
@@ -165,11 +172,23 @@ fn render_diff_details(
     width: usize,
     palette: ToolBodyPalette<'_>,
 ) -> Option<Vec<Line>> {
-    if is_file_write_tool(&state.name)
-        && let Some(model) = state
-            .details
-            .as_ref()
-            .and_then(DiffModel::from_tool_details)
+    if !is_file_write_tool(&state.name) {
+        return None;
+    }
+    // For newly created files, prefer a syntax-highlighted file preview over
+    // an all-green unified diff.
+    if let Some("created") = state
+        .details
+        .as_ref()
+        .and_then(|d| d.get("operation"))
+        .and_then(serde_json::Value::as_str)
+    {
+        return None;
+    }
+    if let Some(model) = state
+        .details
+        .as_ref()
+        .and_then(DiffModel::from_tool_details)
     {
         return Some(render_diff_model_lines(
             &model,
@@ -191,10 +210,6 @@ fn render_write_body(
     }
 
     let (path, content) = parse_write_arguments(state.arguments.as_deref())?;
-    if is_pending_or_running(state.status) {
-        return Some(vec![palette.weak_line(format!("  {path}"))]);
-    }
-
     Some(render_write_preview(&path, &content, expanded, palette))
 }
 
@@ -208,8 +223,26 @@ fn render_write_preview(
     let total = lines.len();
     let limit = preview_limit(total, expanded, COMMAND_PREVIEW_LINES);
     let mut rows = vec![palette.weak_line(format!("  {path} · {total} lines"))];
+
+    let highlighted = palette
+        .theme
+        .map(|theme| highlight_code_lines(content, path, theme))
+        .unwrap_or_default();
+    let use_highlight = !highlighted.is_empty() && lang_from_path(path).is_some();
+
     for (index, line) in lines.iter().take(limit).enumerate() {
-        rows.push(palette.body_line(format!("  {:>4} {line}", index + 1)));
+        let line_num = format!("  {:>4} ", index + 1);
+        if use_highlight {
+            let theme = palette.theme.expect("theme present when highlighted");
+            let mut spans = vec![Span::styled(
+                line_num,
+                Style::default().fg(theme.text_muted),
+            )];
+            spans.extend(highlighted[index].clone());
+            rows.push(Line::from_spans(spans));
+        } else {
+            rows.push(palette.body_line(format!("{line_num}{line}")));
+        }
     }
     if limit < total {
         rows.push(palette.weak_line(format!(
@@ -230,10 +263,6 @@ fn render_edit_body(
     }
 
     let arguments = state.arguments.as_deref().and_then(parse_edit_arguments)?;
-    if is_pending_or_running(state.status) {
-        return Some(vec![palette.weak_line(format!("  {}", arguments.path))]);
-    }
-
     Some(render_edit_preview(&arguments, expanded, palette))
 }
 
@@ -297,7 +326,7 @@ fn render_result_preview(
     rows
 }
 
-const fn is_pending_or_running(status: ToolStatusKind) -> bool {
+pub(crate) const fn is_pending_or_running(status: ToolStatusKind) -> bool {
     matches!(status, ToolStatusKind::Pending | ToolStatusKind::Running)
 }
 
@@ -313,7 +342,7 @@ fn hides_successful_todo_list_body(state: &ToolCallState) -> bool {
     state.name == "TodoList" && state.status == ToolStatusKind::Succeeded
 }
 
-fn is_file_write_tool(name: &str) -> bool {
+pub(crate) fn is_file_write_tool(name: &str) -> bool {
     matches!(name, "Write" | "Edit")
 }
 
@@ -409,11 +438,9 @@ fn string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
         .map(std::borrow::ToOwned::to_owned)
 }
 
-#[must_use]
-pub fn key_argument(arguments: Option<&str>) -> String {
-    let Some(arguments) = arguments.map(str::trim).filter(|value| !value.is_empty()) else {
-        return String::new();
-    };
+/// Extract the key argument value and whether it came from a path-like key.
+fn extract_key_argument(arguments: Option<&str>) -> Option<(String, bool)> {
+    let arguments = arguments.map(str::trim).filter(|value| !value.is_empty())?;
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) {
         for key in [
             "path",
@@ -424,8 +451,9 @@ pub fn key_argument(arguments: Option<&str>) -> String {
             "url",
             "description",
         ] {
-            if let Some(text) = value.get(key).and_then(|value| value.as_str()) {
-                return one_line(text);
+            if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
+                let is_path = PATH_KEYS.contains(&key);
+                return Some((one_line(text), is_path));
             }
         }
     }
@@ -433,9 +461,86 @@ pub fn key_argument(arguments: Option<&str>) -> String {
         .strip_prefix(r#"{"path":"#)
         .and_then(|rest| rest.strip_suffix(r#""}"#))
     {
-        return one_line(path);
+        return Some((one_line(path), true));
     }
-    one_line(arguments)
+    Some((one_line(arguments), false))
+}
+
+#[must_use]
+pub fn key_argument(arguments: Option<&str>) -> String {
+    extract_key_argument(arguments)
+        .map(|(value, _)| value)
+        .unwrap_or_default()
+}
+
+/// Format a key argument for display in a tool header: workspace-relative for
+/// paths, truncated to [`MAX_ARG_LENGTH`], with path keys preserving the tail.
+fn format_key_argument(
+    _tool_name: &str,
+    value: &str,
+    is_path: bool,
+    workspace_dir: Option<&Path>,
+) -> String {
+    let value = if is_path {
+        make_workspace_relative(value, workspace_dir)
+    } else {
+        value.to_owned()
+    };
+    truncate_arg_value(is_path, &value)
+}
+
+fn make_workspace_relative(path: &str, workspace_dir: Option<&Path>) -> String {
+    let Some(workspace_dir) = workspace_dir else {
+        return path.to_owned();
+    };
+    let Ok(canonical_workspace) = std::fs::canonicalize(workspace_dir) else {
+        return path.to_owned();
+    };
+    let path_obj = Path::new(path);
+    // Only relativize absolute paths that exist or at least start with the workspace prefix.
+    if !path_obj.is_absolute() {
+        return path.to_owned();
+    }
+    let Ok(canonical_path) = std::fs::canonicalize(path_obj) else {
+        // Fall back to a simple prefix strip for paths that may not exist yet.
+        return path
+            .strip_prefix(&format!("{}/", canonical_workspace.display()))
+            .unwrap_or(path)
+            .to_owned();
+    };
+    canonical_path
+        .strip_prefix(&canonical_workspace)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_owned())
+}
+
+fn truncate_arg_value(is_path: bool, value: &str) -> String {
+    let len = value.chars().count();
+    if len <= MAX_ARG_LENGTH {
+        return value.to_owned();
+    }
+    if is_path {
+        // Preserve the tail (filename / deepest dirs) so the user can still
+        // tell which file is being touched.
+        format!("…{}", tail_chars(value, MAX_ARG_LENGTH - 1))
+    } else {
+        // Drop the tail for non-path arguments (e.g. long commands).
+        format!("{}...", prefix_chars(value, MAX_ARG_LENGTH - 3))
+    }
+}
+
+fn tail_chars(s: &str, n: usize) -> String {
+    s.chars()
+        .rev()
+        .take(n)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn prefix_chars(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
 }
 
 fn result_chip(state: &ToolCallState) -> String {
@@ -458,4 +563,141 @@ fn result_chip(state: &ToolCallState) -> String {
 
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+// ---------------------------------------------------------------------------
+// Streaming preview for Write/Edit tool arguments
+// ---------------------------------------------------------------------------
+
+/// Render a live preview while a tool's arguments are still streaming from the
+/// model. Returns a progress line and, for `Write`, the tail of the partial
+/// content with syntax highlighting.
+#[must_use]
+pub fn render_streaming_preview(
+    state: &ToolCallState,
+    _expanded: bool,
+    width: usize,
+    theme: &TuiTheme,
+    started_at: Option<std::time::Instant>,
+) -> Vec<Line> {
+    let mut rows = Vec::new();
+    let args = state.arguments.as_deref().unwrap_or("");
+    let tokens = estimate_tokens(args);
+    let elapsed = started_at.map_or(0, |start| start.elapsed().as_secs());
+
+    if state.name == "Write" {
+        let path = extract_partial_string_field(args, "file_path")
+            .or_else(|| extract_partial_string_field(args, "path"))
+            .or_else(|| Some(key_argument(Some(args))))
+            .filter(|p| !p.is_empty());
+        let progress = format_progress_line(path.as_deref(), tokens, elapsed);
+        rows.push(Line::styled(
+            progress,
+            Style::default().fg(theme.text_muted),
+        ));
+
+        if let Some(content) = extract_partial_string_field(args, "content") {
+            if !content.is_empty() {
+                rows.extend(render_write_streaming_content(
+                    &content,
+                    path.as_deref().unwrap_or(""),
+                    width,
+                    theme,
+                ));
+            }
+        }
+        return rows;
+    }
+
+    if state.name == "Edit" {
+        let path = extract_partial_string_field(args, "file_path")
+            .or_else(|| extract_partial_string_field(args, "path"))
+            .or_else(|| Some(key_argument(Some(args))))
+            .filter(|p| !p.is_empty());
+        let progress = format_progress_line(path.as_deref(), tokens, elapsed);
+        rows.push(Line::styled(
+            progress,
+            Style::default().fg(theme.text_muted),
+        ));
+    }
+
+    rows
+}
+
+fn format_progress_line(path: Option<&str>, tokens: usize, elapsed: u64) -> String {
+    let target = path.map_or_else(String::new, |p| format!(" for {p}"));
+    format!(
+        "  Preparing changes{target}... ~{} tok · {} elapsed",
+        format_token_count(tokens),
+        format_elapsed(elapsed)
+    )
+}
+
+fn render_write_streaming_content(
+    content: &str,
+    path: &str,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    let start = total.saturating_sub(COMMAND_PREVIEW_LINES);
+    let highlighted = if lang_from_path(path).is_some() {
+        highlight_code_lines(content, path, theme)
+    } else {
+        Vec::new()
+    };
+    let use_highlight = !highlighted.is_empty();
+
+    let mut rows = Vec::new();
+    for (offset, line) in lines.iter().skip(start).enumerate() {
+        let original_number = start + offset + 1;
+        let line_num = format!("  {:>4} ", original_number);
+        let body_width = width.saturating_sub(line_num.chars().count()).max(1);
+        let mut spans = vec![Span::styled(
+            line_num,
+            Style::default().fg(theme.text_muted),
+        )];
+        if use_highlight {
+            let line_spans = highlighted
+                .get(original_number - 1)
+                .cloned()
+                .unwrap_or_else(|| {
+                    vec![Span::styled(
+                        line.to_string(),
+                        Style::default().fg(theme.text_primary),
+                    )]
+                });
+            spans.extend(truncate_spans_to_width(&line_spans, body_width));
+        } else {
+            spans.push(Span::styled(
+                clip_plain_to_width(line, body_width),
+                Style::default().fg(theme.text_primary),
+            ));
+        }
+        rows.push(Line::from_spans(spans));
+    }
+    rows
+}
+
+fn truncate_spans_to_width(spans: &[Span], width: usize) -> Vec<Span> {
+    let mut used = 0usize;
+    let mut out = Vec::new();
+    for span in spans {
+        let span_width = span.visible_width();
+        if used + span_width <= width {
+            out.push(span.clone());
+            used += span_width;
+        } else {
+            let remaining = width.saturating_sub(used);
+            if remaining > 0 {
+                let text = clip_plain_to_width(span.text(), remaining);
+                if !text.is_empty() {
+                    out.push(Span::styled(text, span.style()));
+                }
+            }
+            break;
+        }
+    }
+    out
 }
