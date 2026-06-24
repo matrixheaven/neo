@@ -449,6 +449,21 @@ impl McpConnectionManager {
         state.entries.get(id).map(snapshot_for_entry)
     }
 
+    /// Get the MCP client for a connected server.
+    ///
+    /// Returns an error if the server is not found or has no active client.
+    pub async fn get_client(&self, server_id: &str) -> Result<Arc<dyn McpClient>, McpError> {
+        self.poll_finished_connections().await;
+        let state = self.inner.read().await;
+        let entry = state
+            .entries
+            .get(server_id)
+            .ok_or_else(|| McpError::protocol(format!("MCP server '{server_id}' not found")))?;
+        entry.client.clone().ok_or_else(|| {
+            McpError::protocol(format!("MCP server '{server_id}' has no active client"))
+        })
+    }
+
     /// Register tools from connected servers into the given registry.
     /// Returns diagnostics for any failures or collisions.
     pub async fn register_connected_tools_into(
