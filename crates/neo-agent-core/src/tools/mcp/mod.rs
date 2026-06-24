@@ -6,8 +6,14 @@ use thiserror::Error;
 
 pub mod client;
 pub mod http;
+pub mod legacy;
 pub mod oauth;
 pub mod stdio;
+
+pub use legacy::{
+    McpHttpConfig, McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter,
+    McpToolProvider,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpToolDefinition {
