@@ -1,14 +1,12 @@
 //! OAuth-aware streamable HTTP MCP client (Task 2.5).
 
-#![allow(dead_code)]
-
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use http::{HeaderName, HeaderValue};
 use rmcp::{
     ServiceExt,
     transport::{
-        auth::AuthorizationManager,
+        auth::{AuthError, AuthorizationManager},
         streamable_http_client::{
             SseError, StreamableHttpClient, StreamableHttpClientTransport,
             StreamableHttpClientTransportConfig, StreamableHttpError, StreamableHttpPostResponse,
@@ -85,15 +83,33 @@ impl OAuthStreamableHttpClient {
         }
         match &self.auth_manager {
             Some(manager) => {
-                // If no token is available the server may not require auth,
-                // so return Ok(None) instead of failing the connection.
-                manager
-                    .lock()
-                    .await
-                    .get_access_token()
-                    .await
-                    .map(Some)
-                    .or(Ok(None))
+                let mgr = manager.lock().await;
+                match mgr.get_access_token().await {
+                    Ok(token) => Ok(Some(token)),
+                    Err(AuthError::AuthorizationRequired) => {
+                        // AuthorizationRequired can mean either "never
+                        // authorized" or "token expired and refresh failed".
+                        // Use get_credentials() to distinguish: if the OAuth
+                        // client is configured and a token was previously
+                        // stored, this is a refresh failure that must be
+                        // surfaced instead of silently sending the request
+                        // unauthenticated.
+                        match mgr.get_credentials().await {
+                            Ok((_, Some(_))) => Err(OAuthHttpError::Auth(
+                                "OAuth token expired. \
+                                 Run `neo mcp auth <server_id>` to re-authenticate."
+                                    .into(),
+                            )),
+                            // No stored credentials (or client not yet
+                            // configured) — the server may not require auth,
+                            // so let the request go out without an auth header.
+                            _ => Ok(None),
+                        }
+                    }
+                    // Any other error (refresh failure, network error, etc.)
+                    // must be propagated so the user gets a clear message.
+                    Err(e) => Err(OAuthHttpError::Auth(e.to_string())),
+                }
             }
             None => Ok(None),
         }
