@@ -50,9 +50,16 @@ pub async fn build_authorization_manager(
     oauth_store_path: &Path,
     server_id: &str,
 ) -> Result<Arc<Mutex<AuthorizationManager>>, AuthError> {
-    // Create file-backed credential store
-    let credential_store =
-        FileCredentialStore::new(oauth_store_path.to_path_buf(), server_id.to_string());
+    // Create a shared credential store so all FileCredentialStore instances
+    // derived from it coordinate writes through a single mutex.
+    let shared_store = Arc::new(Mutex::new(OAuthStore::default()));
+
+    // Create file-backed credential store backed by the shared store
+    let credential_store = FileCredentialStore::with_shared_store(
+        oauth_store_path.to_path_buf(),
+        server_id.to_string(),
+        Arc::clone(&shared_store),
+    );
 
     // Create in-memory state store
     let state_store = InMemoryStateStore::new();
@@ -85,12 +92,23 @@ pub fn key_for_server(server_id: &str) -> String {
 /// This adapter wraps Neo's [`OAuthStore`] to implement the rmcp
 /// `CredentialStore` trait. Credentials are persisted to a JSON file
 /// (typically `~/.neo/oauth.json`) under keys of the form `mcp:<server_id>`.
+///
+/// All instances that share the same `Arc<Mutex<OAuthStore>>` coordinate
+/// file access through that mutex, eliminating load-modify-write races when
+/// multiple MCP servers connect simultaneously.
 #[derive(Debug, Clone)]
 pub struct FileCredentialStore {
     /// Path to the `oauth.json` file.
     path: PathBuf,
     /// Server identifier used as the storage key prefix.
     server_id: String,
+    /// Shared mutex protecting the OAuth store file.
+    ///
+    /// All `FileCredentialStore` instances created from the same shared store
+    /// serialize their load-modify-write cycles through this mutex. The
+    /// `OAuthStore` inside is used as scratch space — it is re-read from disk
+    /// on every operation to reflect the latest on-disk state.
+    store: Arc<Mutex<OAuthStore>>,
 }
 
 impl FileCredentialStore {
@@ -98,9 +116,34 @@ impl FileCredentialStore {
     ///
     /// The `path` should point to the OAuth store file (e.g., `~/.neo/oauth.json`).
     /// The `server_id` is used to construct the storage key via [`key_for_server`].
+    ///
+    /// Each call to `new` creates an independent mutex. To share coordination
+    /// across stores, use [`FileCredentialStore::with_shared_store`].
     #[must_use]
     pub fn new(path: PathBuf, server_id: String) -> Self {
-        Self { path, server_id }
+        Self {
+            path,
+            server_id,
+            store: Arc::new(Mutex::new(OAuthStore::default())),
+        }
+    }
+
+    /// Create a file-backed credential store that shares a mutex with other stores.
+    ///
+    /// All stores created with the same `shared_store` `Arc<Mutex<OAuthStore>>`
+    /// will serialize their file reads and writes, preventing concurrent
+    /// load-modify-write races.
+    #[must_use]
+    pub fn with_shared_store(
+        path: PathBuf,
+        server_id: String,
+        store: Arc<Mutex<OAuthStore>>,
+    ) -> Self {
+        Self {
+            path,
+            server_id,
+            store,
+        }
     }
 
     /// Returns the storage key for this server.
@@ -112,53 +155,41 @@ impl FileCredentialStore {
 #[async_trait]
 impl rmcp::transport::auth::CredentialStore for FileCredentialStore {
     async fn load(&self) -> Result<Option<StoredCredentials>, AuthError> {
-        let path = self.path.clone();
+        let mut store = self.store.lock().await;
+        let path = &self.path;
         let key = self.key();
 
-        tokio::task::spawn_blocking(move || {
-            let store = OAuthStore::load(&path).map_err(|e| {
-                AuthError::InternalError(format!("failed to load OAuth store: {e}"))
-            })?;
-            Ok(store.get(&key).cloned())
-        })
-        .await
-        .map_err(|e| AuthError::InternalError(format!("blocking task failed: {e}")))?
+        *store = OAuthStore::load(path)
+            .map_err(|e| AuthError::InternalError(format!("failed to load OAuth store: {e}")))?;
+        Ok(store.get(&key).cloned())
     }
 
     async fn save(&self, credentials: StoredCredentials) -> Result<(), AuthError> {
+        let mut store = self.store.lock().await;
         let path = self.path.clone();
         let key = self.key();
 
-        tokio::task::spawn_blocking(move || {
-            let mut store = OAuthStore::load(&path).map_err(|e| {
-                AuthError::InternalError(format!("failed to load OAuth store: {e}"))
-            })?;
-            store.set(&key, credentials);
-            store.save(&path).map_err(|e| {
-                AuthError::InternalError(format!("failed to save OAuth store: {e}"))
-            })?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| AuthError::InternalError(format!("blocking task failed: {e}")))?
+        *store = OAuthStore::load(&path)
+            .map_err(|e| AuthError::InternalError(format!("failed to load OAuth store: {e}")))?;
+        store.set(&key, credentials);
+        store.save(&path).map_err(|e| {
+            AuthError::InternalError(format!("failed to save OAuth store: {e}"))
+        })?;
+        Ok(())
     }
 
     async fn clear(&self) -> Result<(), AuthError> {
+        let mut store = self.store.lock().await;
         let path = self.path.clone();
         let key = self.key();
 
-        tokio::task::spawn_blocking(move || {
-            let mut store = OAuthStore::load(&path).map_err(|e| {
-                AuthError::InternalError(format!("failed to load OAuth store: {e}"))
-            })?;
-            let _ = store.remove(&key);
-            store.save(&path).map_err(|e| {
-                AuthError::InternalError(format!("failed to save OAuth store: {e}"))
-            })?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| AuthError::InternalError(format!("blocking task failed: {e}")))?
+        *store = OAuthStore::load(&path)
+            .map_err(|e| AuthError::InternalError(format!("failed to load OAuth store: {e}")))?;
+        let _ = store.remove(&key);
+        store.save(&path).map_err(|e| {
+            AuthError::InternalError(format!("failed to save OAuth store: {e}"))
+        })?;
+        Ok(())
     }
 }
 

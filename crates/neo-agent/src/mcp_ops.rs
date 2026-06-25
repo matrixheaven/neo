@@ -687,7 +687,6 @@ mod tests {
             runtime: crate::config::RuntimeConfig::default(),
             tui: crate::config::TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
-            oauth: crate::config::OAuthConfig::default(),
             mcp: crate::config::McpConfig {
                 servers: vec![McpServerConfig {
                     id: "docs".to_owned(),

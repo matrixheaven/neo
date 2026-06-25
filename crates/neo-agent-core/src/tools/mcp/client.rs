@@ -15,10 +15,6 @@ use tokio::{sync::Mutex, time::timeout};
 
 use super::{McpError, McpResourceDefinition, McpResourceRead, McpToolDefinition, McpToolResponse};
 
-// TODO: `McpClient` and `RmcpClient` are currently unused while the rmcp
-// migration is in progress. They will be wired up through `McpConnectionManager`
-// in Task 4.
-#[allow(dead_code)]
 #[async_trait]
 pub trait McpClient: Send + Sync {
     async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError>;
@@ -28,14 +24,12 @@ pub trait McpClient: Send + Sync {
     async fn shutdown(&self) -> Result<(), McpError>;
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct RmcpClient {
     service: Mutex<Option<RunningService<RoleClient, ()>>>,
     request_timeout: Option<Duration>,
 }
 
-#[allow(dead_code)]
 impl RmcpClient {
     pub fn new(service: RunningService<RoleClient, ()>, request_timeout: Option<Duration>) -> Self {
         Self {

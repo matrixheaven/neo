@@ -11,7 +11,6 @@ use crate::tools::ProcessSupervisor;
 // TODO: `StdioConfig` is currently unused while the rmcp migration is in
 // progress. It will be wired up through `McpConnectionManager` in Task 4.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct StdioConfig {
     pub command: String,
     pub args: Vec<String>,
@@ -23,7 +22,6 @@ pub struct StdioConfig {
 
 // TODO: `build_stdio_client` is currently unused while the rmcp migration is in
 // progress. It will be wired up through `McpConnectionManager` in Task 4.
-#[allow(dead_code)]
 pub async fn build_stdio_client(
     server_id: &str,
     config: StdioConfig,

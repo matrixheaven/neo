@@ -12002,7 +12002,6 @@ command = "python3"
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
-            oauth: crate::config::OAuthConfig::default(),
             prompt_templates: Vec::new(),
             extra_skill_dirs: Vec::new(),
             skill_path: Vec::new(),

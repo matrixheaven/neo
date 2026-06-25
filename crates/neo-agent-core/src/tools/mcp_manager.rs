@@ -19,7 +19,7 @@ use super::{
         StdioConfig, http, oauth, stdio,
     },
 };
-use crate::oauth::{OAuthProviderRegistry, OAuthStore};
+use crate::oauth::OAuthStore;
 
 /// Runtime configuration for an MCP server managed by [`McpConnectionManager`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,7 +162,6 @@ struct McpConnectionManagerState {
     next_attempt_id: u64,
     oauth_store: Arc<RwLock<OAuthStore>>,
     oauth_store_path: Option<PathBuf>,
-    oauth_provider_registry: Arc<OAuthProviderRegistry>,
 }
 
 /// Owns configured MCP server state and exposes snapshots, resource operations,
@@ -182,7 +181,6 @@ impl McpConnectionManager {
                 next_attempt_id: 1,
                 oauth_store: Arc::new(RwLock::new(OAuthStore::default())),
                 oauth_store_path: None,
-                oauth_provider_registry: Arc::new(OAuthProviderRegistry::with_builtin_providers()),
             })),
         }
     }
@@ -200,7 +198,6 @@ impl McpConnectionManager {
                 next_attempt_id: 1,
                 oauth_store,
                 oauth_store_path,
-                oauth_provider_registry: Arc::new(OAuthProviderRegistry::with_builtin_providers()),
             })),
         }
     }
@@ -215,15 +212,6 @@ impl McpConnectionManager {
         let mut state = self.inner.write().await;
         state.oauth_store = oauth_store;
         state.oauth_store_path = oauth_store_path;
-    }
-
-    /// Replace the OAuth provider registry used for managed HTTP/SSE adapters.
-    ///
-    /// Custom providers from config can override built-in providers by
-    /// registering under the same provider id.
-    pub async fn set_oauth_provider_registry(&self, registry: OAuthProviderRegistry) {
-        let mut state = self.inner.write().await;
-        state.oauth_provider_registry = Arc::new(registry);
     }
 
     /// Apply a new set of server configurations. Removed servers are shut down,
