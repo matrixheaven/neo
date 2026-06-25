@@ -1085,6 +1085,18 @@ impl NeoChromeState {
         id
     }
 
+    /// Search `self.overlays` for an existing overlay whose kind matches `predicate`.
+    /// If found, returns its `OverlayId`; otherwise `None`.
+    pub fn find_overlay_by_kind(
+        &self,
+        predicate: impl Fn(&OverlayKind) -> bool,
+    ) -> Option<OverlayId> {
+        self.overlays
+            .iter()
+            .find(|o| predicate(&o.kind))
+            .map(|o| o.id)
+    }
+
     pub fn focus_overlay(&mut self, id: OverlayId) -> bool {
         if self.overlays.iter().any(|overlay| overlay.id == id) {
             self.focused_overlay = Some(id);
@@ -1300,6 +1312,19 @@ impl NeoChromeState {
         &mut self,
         opts: &crate::dialogs::ProviderManagerOptions,
     ) -> OverlayId {
+        // Try to find existing provider manager overlay and update in place
+        let existing_id =
+            self.find_overlay_by_kind(|kind| matches!(kind, OverlayKind::ProviderManager(_)));
+        if let Some(id) = existing_id {
+            if let Some(overlay) = self.overlays.iter_mut().find(|o| o.id == id) {
+                if let OverlayKind::ProviderManager(state) = &mut overlay.kind {
+                    state.set_options(opts);
+                }
+            }
+            self.focus_overlay(id);
+            return id;
+        }
+        // No existing overlay — create new one
         let state = crate::dialogs::ProviderManagerState::new(opts);
         self.push_overlay(Overlay::new(
             "providers",
@@ -1308,6 +1333,19 @@ impl NeoChromeState {
     }
 
     pub fn open_mcp_manager(&mut self, opts: &crate::dialogs::McpManagerOptions) -> OverlayId {
+        // Try to find existing MCP manager overlay and update in place
+        let existing_id =
+            self.find_overlay_by_kind(|kind| matches!(kind, OverlayKind::McpManager(_)));
+        if let Some(id) = existing_id {
+            if let Some(overlay) = self.overlays.iter_mut().find(|o| o.id == id) {
+                if let OverlayKind::McpManager(state) = &mut overlay.kind {
+                    state.set_options(opts);
+                }
+            }
+            self.focus_overlay(id);
+            return id;
+        }
+        // No existing overlay — create new one
         let state = crate::dialogs::McpManagerState::new(opts);
         self.push_overlay(Overlay::new("mcp", OverlayKind::McpManager(state)))
     }
