@@ -358,12 +358,7 @@ impl McpConnectionManager {
             (config, supervisor, oauth_store, oauth_store_path)
         };
 
-        let handle = spawn_connect(
-            config.clone(),
-            supervisor,
-            oauth_store,
-            oauth_store_path,
-        );
+        let handle = spawn_connect(config.clone(), supervisor, oauth_store, oauth_store_path);
         {
             let mut state = self.inner.write().await;
             if let Some(entry) = state.entries.get_mut(id) {
@@ -648,15 +643,9 @@ fn spawn_connect(
     oauth_store: Arc<RwLock<OAuthStore>>,
     oauth_store_path: Option<PathBuf>,
 ) -> JoinHandle<Result<ConnectOutcome, McpError>> {
-    tokio::spawn(async move {
-        connect_one(
-            config,
-            supervisor,
-            oauth_store,
-            oauth_store_path,
-        )
-        .await
-    })
+    tokio::spawn(
+        async move { connect_one(config, supervisor, oauth_store, oauth_store_path).await },
+    )
 }
 
 struct ConnectOutcome {
@@ -735,7 +724,7 @@ async fn build_client_for_config(
                     env: env.clone(),
                     cwd: cwd.clone(),
                     startup_timeout_ms: config.startup_timeout_ms,
-                    request_timeout_ms: config.tool_timeout_ms,
+                    tool_timeout_ms: config.tool_timeout_ms,
                 },
                 supervisor,
             )
@@ -788,9 +777,13 @@ fn diagnostic_hint(message: &str, config: &ManagedMcpServerConfig) -> Option<Str
         || lower.contains("unauthorized")
         || lower.contains("invalid_token")
     {
-        if matches!(config.transport, ManagedMcpTransport::Http { .. } | ManagedMcpTransport::Sse { .. }) {
+        if matches!(
+            config.transport,
+            ManagedMcpTransport::Http { .. } | ManagedMcpTransport::Sse { .. }
+        ) {
             return Some(
-                "This server requires OAuth. Run `neo mcp auth <server_id>` to authorize.".to_owned(),
+                "This server requires OAuth. Run `neo mcp auth <server_id>` to authorize."
+                    .to_owned(),
             );
         }
         return Some("Check remote MCP authorization headers or disable this server.".to_owned());

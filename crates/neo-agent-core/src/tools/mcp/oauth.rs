@@ -36,14 +36,19 @@ use crate::oauth::OAuthStore;
 ///
 /// ```no_run
 /// use std::path::Path;
-/// use tokio::sync::Arc;
+/// use std::sync::Arc;
+/// use tokio::sync::Mutex;
 /// use rmcp::transport::auth::AuthorizationManager;
 ///
-/// let manager = build_authorization_manager(
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let manager: Arc<Mutex<AuthorizationManager>> = build_authorization_manager(
 ///     "https://example.com/mcp",
 ///     Path::new("/home/user/.neo/oauth.json"),
 ///     "my-server",
-/// )?;
+/// )
+/// .await?;
+/// # Ok(())
+/// # }
 /// ```
 pub async fn build_authorization_manager(
     base_url: &str,
@@ -172,9 +177,9 @@ impl rmcp::transport::auth::CredentialStore for FileCredentialStore {
         *store = OAuthStore::load(&path)
             .map_err(|e| AuthError::InternalError(format!("failed to load OAuth store: {e}")))?;
         store.set(&key, credentials);
-        store.save(&path).map_err(|e| {
-            AuthError::InternalError(format!("failed to save OAuth store: {e}"))
-        })?;
+        store
+            .save(&path)
+            .map_err(|e| AuthError::InternalError(format!("failed to save OAuth store: {e}")))?;
         Ok(())
     }
 
@@ -186,9 +191,9 @@ impl rmcp::transport::auth::CredentialStore for FileCredentialStore {
         *store = OAuthStore::load(&path)
             .map_err(|e| AuthError::InternalError(format!("failed to load OAuth store: {e}")))?;
         let _ = store.remove(&key);
-        store.save(&path).map_err(|e| {
-            AuthError::InternalError(format!("failed to save OAuth store: {e}"))
-        })?;
+        store
+            .save(&path)
+            .map_err(|e| AuthError::InternalError(format!("failed to save OAuth store: {e}")))?;
         Ok(())
     }
 }

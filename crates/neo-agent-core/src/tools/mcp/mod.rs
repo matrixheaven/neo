@@ -74,12 +74,6 @@ impl From<RmcpTool> for McpToolDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct McpToolCall {
-    pub name: String,
-    pub arguments: serde_json::Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpToolResponse {
     pub content: String,
     pub is_error: bool,
@@ -262,28 +256,6 @@ impl From<ReadResourceResult> for McpResourceRead {
     fn from(result: ReadResourceResult) -> Self {
         Self {
             contents: result.contents.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct McpResourceUpdate {
-    pub uri: String,
-}
-
-impl From<rmcp::model::CallToolRequestParams> for McpToolCall {
-    fn from(param: rmcp::model::CallToolRequestParams) -> Self {
-        Self {
-            name: param.name.to_string(),
-            arguments: serde_json::Value::Object(param.arguments.unwrap_or_default()),
-        }
-    }
-}
-
-impl From<rmcp::model::ResourceUpdatedNotificationParam> for McpResourceUpdate {
-    fn from(param: rmcp::model::ResourceUpdatedNotificationParam) -> Self {
-        Self {
-            uri: param.uri.clone(),
         }
     }
 }

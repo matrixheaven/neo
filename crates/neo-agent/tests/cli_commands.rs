@@ -1534,10 +1534,7 @@ fn run_text_registers_enabled_http_mcp_tools_from_project_config() {
                 ]
             }),
         ),
-        mcp_json_response(
-            2,
-            &json!({"resources": []}),
-        ),
+        mcp_json_response(2, &json!({"resources": []})),
     ]);
     write_home_config(&format!(
         r#"{}
@@ -1577,11 +1574,7 @@ url = "{}"
     let mcp_requests = mcp_server.requests();
     let methods: Vec<_> = mcp_requests
         .iter()
-        .map(|request| {
-            request.body["method"]
-                .as_str()
-                .unwrap_or("(none)")
-        })
+        .map(|request| request.body["method"].as_str().unwrap_or("(none)"))
         .collect();
     assert!(
         methods.contains(&"initialize"),

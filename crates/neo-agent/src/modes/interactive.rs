@@ -12872,10 +12872,7 @@ command = "python3"
             .handle_input_event(InputEvent::Insert('O'))
             .await
             .expect("auth key");
-        assert!(transcript_has_status(
-            &controller,
-            "OAuth flow failed"
-        ));
+        assert!(transcript_has_status(&controller, "OAuth flow failed"));
     }
 
     #[tokio::test]

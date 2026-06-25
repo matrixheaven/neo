@@ -1903,7 +1903,7 @@ async fn build_mcp_client(
                     env: server.env.clone(),
                     cwd: server.cwd.clone(),
                     startup_timeout_ms: server.startup_timeout_ms,
-                    request_timeout_ms: server.tool_timeout_ms,
+                    tool_timeout_ms: server.tool_timeout_ms,
                 },
                 supervisor,
             )
@@ -2348,8 +2348,8 @@ mod tests {
         run_prompt_with_runtime, select_config_model, tool_registry_for_config,
     };
     use crate::config::{
-        AppConfig, Defaults, McpConfig, ModelConfig, ProviderConfig,
-        RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
+        AppConfig, Defaults, McpConfig, ModelConfig, ProviderConfig, RuntimeCompactionConfig,
+        RuntimeConfig, TuiConfig,
     };
 
     #[test]

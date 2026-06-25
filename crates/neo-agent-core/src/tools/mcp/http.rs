@@ -149,7 +149,9 @@ fn map_error(e: StreamableHttpError<reqwest::Error>) -> StreamableHttpError<OAut
             StreamableHttpError::ReservedHeaderConflict(name)
         }
         StreamableHttpError::SessionExpired => StreamableHttpError::SessionExpired,
-        _ => StreamableHttpError::UnexpectedServerResponse("unknown streamable HTTP error".into()),
+        other => StreamableHttpError::UnexpectedServerResponse(
+            format!("unknown streamable HTTP error: {other:?}").into(),
+        ),
     }
 }
 
@@ -265,9 +267,7 @@ pub async fn build_http_client(config: HttpConfig) -> Result<Arc<dyn McpClient>,
             .await
             .map_err(|_| McpError::protocol("HTTP MCP server initialization timed out"))?
             .map_err(friendly_http_init_error)?,
-        None => ().serve(transport)
-            .await
-            .map_err(friendly_http_init_error)?,
+        None => ().serve(transport).await.map_err(friendly_http_init_error)?,
     };
 
     Ok(Arc::new(super::client::RmcpClient::new(

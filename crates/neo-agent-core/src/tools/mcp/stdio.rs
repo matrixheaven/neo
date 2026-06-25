@@ -16,8 +16,11 @@ pub struct StdioConfig {
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub cwd: Option<PathBuf>,
+    /// Kept for API compatibility; the actual startup timeout is owned by
+    /// `connect_one` in `mcp_manager.rs` so that serve + list_tools share a
+    /// single deadline.
     pub startup_timeout_ms: Option<u64>,
-    pub request_timeout_ms: Option<u64>,
+    pub tool_timeout_ms: Option<u64>,
 }
 
 // TODO: `build_stdio_client` is currently unused while the rmcp migration is in
@@ -39,16 +42,12 @@ pub async fn build_stdio_client(
     let transport = TokioChildProcess::new(cmd)
         .map_err(|e| McpError::protocol(format!("failed to spawn stdio MCP server: {e}")))?;
 
-    let startup_timeout = config.startup_timeout_ms.map(Duration::from_millis);
-    let request_timeout = config.request_timeout_ms.map(Duration::from_millis);
+    let request_timeout = config.tool_timeout_ms.map(Duration::from_millis);
 
-    let service = match startup_timeout {
-        Some(d) => tokio::time::timeout(d, ().serve(transport))
-            .await
-            .map_err(|_| McpError::protocol("stdio MCP server initialization timed out"))?
-            .map_err(|e| McpError::protocol(e.to_string()))?,
-        None => ().serve(transport).await.map_err(|e| McpError::protocol(e.to_string()))?,
-    };
+    // Note: no internal startup timeout here. The caller (`connect_one` in
+    // `mcp_manager.rs`) wraps the entire serve + discover_tools sequence in a
+    // single timeout so the deadline is not double-counted.
+    let service = ().serve(transport).await.map_err(|e| McpError::protocol(e.to_string()))?;
 
     let client: Arc<dyn McpClient> =
         Arc::new(super::client::RmcpClient::new(service, request_timeout));
@@ -83,7 +82,7 @@ mod tests {
             env: [("K".into(), "V".into())].into_iter().collect(),
             cwd: Some(PathBuf::from("/tmp")),
             startup_timeout_ms: Some(5000),
-            request_timeout_ms: Some(30000),
+            tool_timeout_ms: Some(30000),
         };
         assert_eq!(config.command, "npx");
         assert_eq!(config.args.len(), 2);
