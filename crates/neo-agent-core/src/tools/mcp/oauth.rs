@@ -45,7 +45,6 @@ use crate::oauth::OAuthStore;
 ///     "my-server",
 /// )?;
 /// ```
-#[allow(dead_code)] // TODO: unlink from MCP tool on Task 3.4
 pub async fn build_authorization_manager(
     base_url: &str,
     oauth_store_path: &Path,

@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -9,10 +9,8 @@ use anyhow::Context;
 use neo_agent_core::{
     ManagedMcpTransport, McpConnectionManager, McpReconnectPolicy, McpResourceListEntry,
     McpResourceRead, McpServerSnapshot, McpServerStatus, ProcessSupervisor,
-    oauth::{
-        OAuthError, OAuthProvider, OAuthProviderRegistry, OAuthTokenSet, build_authorization_url,
-        callback_server::CallbackServer, exchange_code_for_token, generate_pkce, store::OAuthStore,
-    },
+    build_authorization_manager,
+    oauth::{callback_server::CallbackServer, store::OAuthStore},
 };
 use tokio::sync::RwLock;
 
@@ -304,9 +302,6 @@ pub async fn reload_mcp_manager_from_config(
         let store = Arc::new(RwLock::new(OAuthStore::load(&store_path)?));
         manager.set_oauth_store(store, Some(store_path)).await;
     }
-    manager
-        .set_oauth_provider_registry(oauth_provider_registry(&config.oauth))
-        .await;
     let managed_configs = to_managed_configs(&config.mcp.servers)?;
     Ok(manager.apply_config(managed_configs).await)
 }
@@ -462,72 +457,70 @@ fn endpoint_summary(server: &McpServerConfig) -> String {
     server.url.clone().unwrap_or_default()
 }
 
-/// Build an OAuth provider registry from built-in providers plus any custom
-/// providers defined in the application config.
-#[must_use]
-pub fn oauth_provider_registry(oauth: &crate::config::OAuthConfig) -> OAuthProviderRegistry {
-    let mut registry = OAuthProviderRegistry::with_builtin_providers();
-    for (id, provider_config) in &oauth.providers {
-        registry.register(provider_config.to_core_provider(id));
-    }
-    registry
-}
-
-/// Pick an OAuth provider for an MCP server based on its transport and URL.
+/// Run the OAuth authorization-code flow for a configured MCP server using
+/// rmcp's discovery-based authorization (RFC 8414 / RFC 7591).
 ///
-/// Returns `None` for non-remote transports or when no provider is known for
-/// the server's URL.
-pub fn detect_oauth_provider_for_server(
-    server: &McpServerConfig,
-    registry: &OAuthProviderRegistry,
-) -> Option<OAuthProvider> {
-    if server.transport != "http" && server.transport != "sse" {
-        return None;
-    }
-    server.url.as_deref().and_then(|url| {
-        registry.resolve_for_url(url).map(|provider| {
-            let mut provider = provider.clone();
-            provider.client_id = provider.client_id_or_env();
-            provider
-        })
-    })
-}
-
-/// Run the OAuth authorization-code flow for a configured MCP server, save the
-/// resulting token to `~/.neo/oauth.json`, and return it.
-///
-/// The caller is responsible for opening a browser and surfacing status to the
-/// user. This helper performs PKCE generation, callback-server setup, token
-/// exchange, and persistent storage.
+/// This discovers OAuth metadata from the MCP server URL, dynamically registers
+/// a client, and performs a browser-based PKCE authorization-code flow. The
+/// resulting token is persisted to `~/.neo/oauth.json` via rmcp's credential
+/// store.
 pub async fn authenticate_mcp_server_oauth(
     server_id: &str,
     server: &McpServerConfig,
-    oauth: &crate::config::OAuthConfig,
-    neo_home: &Path,
-) -> Result<OAuthTokenSet, OAuthError> {
-    let registry = oauth_provider_registry(oauth);
-    let mut provider =
-        detect_oauth_provider_for_server(server, &registry).ok_or(OAuthError::ProviderDetection)?;
+    neo_home: &std::path::Path,
+) -> Result<(), anyhow::Error> {
+    let url = server
+        .url
+        .as_deref()
+        .with_context(|| format!("missing MCP server url for {server_id}"))?;
 
-    let (verifier, challenge) = generate_pkce();
-    let state = uuid::Uuid::new_v4().to_string();
+    let oauth_store_path = neo_home.join("oauth.json");
 
-    let callback_server = CallbackServer::start(state.clone(), Duration::from_secs(300)).await?;
-    provider.default_callback_port = callback_server.local_port;
+    // Build rmcp AuthorizationManager (performs discovery from server URL).
+    let manager = build_authorization_manager(url, &oauth_store_path, server_id)
+        .await
+        .context("failed to initialize OAuth authorization manager")?;
 
-    let auth_url = build_authorization_url(&provider, &state, &challenge)?;
-    let _ = webbrowser::open(auth_url.as_str());
+    // Start callback server (rmcp validates state during token exchange, so we
+    // skip state validation here).
+    let callback_server = CallbackServer::start_unvalidated(Duration::from_secs(300))
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let port = callback_server.local_port;
+    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
 
-    let code = callback_server.wait_for_code().await?;
-    let token = exchange_code_for_token(&provider, &code.code, &verifier).await?;
+    {
+        let mut mgr = manager.lock().await;
 
-    let store_path = neo_home.join("oauth.json");
-    let token_key = format!("mcp:{server_id}");
-    let mut store = OAuthStore::load(&store_path)?;
-    store.set_token(&token_key, &token)?;
-    store.save(&store_path)?;
+        // Dynamically register the client with the redirect URI.
+        mgr.register_client("neo", &redirect_uri, &[])
+            .await
+            .context("OAuth dynamic client registration failed")?;
 
-    Ok(token)
+        // Get the authorization URL (PKCE + CSRF state are generated internally).
+        let auth_url = mgr
+            .get_authorization_url(&[])
+            .await
+            .context("failed to build OAuth authorization URL")?;
+
+        let _ = webbrowser::open(&auth_url);
+    }
+
+    // Wait for the browser callback.
+    let code = callback_server
+        .wait_for_code()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Exchange the code for a token (rmcp validates state and persists credentials).
+    {
+        let mgr = manager.lock().await;
+        mgr.exchange_code_for_token(&code.code, &code.state)
+            .await
+            .context("failed to exchange authorization code for token")?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -723,65 +716,5 @@ mod tests {
             summaries[0].tools,
             McpToolDiscovery::Success(vec!["read_doc".to_owned(), "search_doc".to_owned()])
         );
-    }
-
-    fn test_mcp_server(
-        id: &str,
-        transport: &str,
-        url: Option<&str>,
-    ) -> crate::config::McpServerConfig {
-        crate::config::McpServerConfig {
-            id: id.to_owned(),
-            enabled: true,
-            transport: transport.to_owned(),
-            command: None,
-            url: url.map(str::to_owned),
-            args: Vec::new(),
-            env: BTreeMap::new(),
-            headers: BTreeMap::new(),
-            cwd: None,
-            enabled_tools: Vec::new(),
-            disabled_tools: Vec::new(),
-            startup_timeout_ms: None,
-            tool_timeout_ms: None,
-        }
-    }
-
-    #[test]
-    fn oauth_provider_registry_seeds_builtins() {
-        let oauth = crate::config::OAuthConfig::default();
-        let registry = oauth_provider_registry(&oauth);
-        assert!(registry.get("linear").is_some());
-    }
-
-    #[test]
-    fn oauth_provider_registry_custom_overrides_builtin() {
-        let mut oauth = crate::config::OAuthConfig::default();
-        oauth.providers.insert(
-            "linear".to_owned(),
-            crate::config::OAuthProviderConfig {
-                client_id: "custom-client".to_owned(),
-                auth_url: "https://custom.example.com/authorize".to_owned(),
-                token_url: "https://custom.example.com/token".to_owned(),
-                scopes: vec!["read".to_owned()],
-                default_callback_port: 0,
-            },
-        );
-        let registry = oauth_provider_registry(&oauth);
-        let server = test_mcp_server("linear", "http", Some("https://api.linear.app/mcp"));
-        let provider = detect_oauth_provider_for_server(&server, &registry).expect("provider");
-        assert_eq!(provider.client_id, "custom-client");
-        assert_eq!(provider.auth_url, "https://custom.example.com/authorize");
-    }
-
-    #[test]
-    fn oauth_provider_registry_uses_env_var_client_id() {
-        temp_env::with_var("NEO_OAUTH_LINEAR_CLIENT_ID", Some("env-client-id"), || {
-            let oauth = crate::config::OAuthConfig::default();
-            let registry = oauth_provider_registry(&oauth);
-            let server = test_mcp_server("linear", "http", Some("https://api.linear.app/mcp"));
-            let provider = detect_oauth_provider_for_server(&server, &registry).expect("provider");
-            assert_eq!(provider.client_id, "env-client-id");
-        });
     }
 }

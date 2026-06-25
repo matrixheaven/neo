@@ -42,6 +42,21 @@ impl CallbackServer {
     /// The server binds to `127.0.0.1:0` and reports the chosen port in
     /// [`Self::local_port`].
     pub async fn start(expected_state: String, timeout: Duration) -> Result<Self, OAuthError> {
+        Self::start_inner(Some(expected_state), timeout).await
+    }
+
+    /// Start a callback server that accepts any `state` parameter.
+    ///
+    /// This is useful when the caller validates the state itself (e.g. rmcp's
+    /// `AuthorizationManager` validates state during token exchange).
+    pub async fn start_unvalidated(timeout: Duration) -> Result<Self, OAuthError> {
+        Self::start_inner(None, timeout).await
+    }
+
+    async fn start_inner(
+        expected_state: Option<String>,
+        timeout: Duration,
+    ) -> Result<Self, OAuthError> {
         let addr = SocketAddr::from(([127, 0, 0, 1], 0));
         let listener = TcpListener::bind(addr)
             .await
@@ -93,7 +108,7 @@ impl CallbackServer {
 async fn run_server(
     listener: TcpListener,
     local_port: u16,
-    expected_state: String,
+    expected_state: Option<String>,
     result_tx: ResultSender,
     mut shutdown_rx: Receiver<()>,
 ) {
@@ -142,7 +157,7 @@ async fn run_server(
 async fn handle_connection(
     stream: TcpStream,
     local_port: u16,
-    expected_state: String,
+    expected_state: Option<String>,
     result_tx: SharedResultSender,
 ) {
     let (reader, mut writer) = stream.into_split();
@@ -197,8 +212,10 @@ async fn handle_connection(
     };
 
     let got_state = state.unwrap_or_default();
-    if got_state != expected_state {
-        let reason = format!("State mismatch: expected {expected_state}, got {got_state}.");
+    if let Some(ref expected) = expected_state
+        && got_state != *expected
+    {
+        let reason = format!("State mismatch: expected {expected}, got {got_state}.");
         let body = error_html(&reason);
         let _ = writer
             .write_all(response_bytes(400, "Bad Request", &body).as_bytes())
@@ -206,7 +223,7 @@ async fn handle_connection(
         send_result(
             &result_tx,
             Err(OAuthError::CallbackStateMismatch {
-                expected: expected_state,
+                expected: expected.clone(),
                 got: got_state,
             }),
         )
@@ -231,7 +248,7 @@ async fn handle_connection(
         &result_tx,
         Ok(CallbackCode {
             code,
-            state: expected_state,
+            state: got_state,
         }),
     )
     .await;

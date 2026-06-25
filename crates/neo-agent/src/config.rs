@@ -256,22 +256,6 @@ pub struct OAuthProviderConfig {
     pub default_callback_port: u16,
 }
 
-impl OAuthProviderConfig {
-    /// Convert this config entry into a core [`OAuthProvider`] using the config
-    /// table key as the provider id.
-    #[must_use]
-    pub fn to_core_provider(&self, id: &str) -> neo_agent_core::oauth::OAuthProvider {
-        neo_agent_core::oauth::OAuthProvider {
-            id: id.to_owned(),
-            client_id: self.client_id.clone(),
-            auth_url: self.auth_url.clone(),
-            token_url: self.token_url.clone(),
-            scopes: self.scopes.clone(),
-            default_callback_port: self.default_callback_port,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Defaults {
     pub mode: String,

@@ -942,7 +942,7 @@ pub async fn auth_mcp_server(server_id: String, config: &AppConfig) -> anyhow::R
     }
 
     let neo_home = neo_home().context("failed to resolve neo home directory")?;
-    authenticate_mcp_server_oauth(&server_id, server, &config.oauth, &neo_home).await?;
+    authenticate_mcp_server_oauth(&server_id, server, &neo_home).await?;
 
     Ok(format!("OAuth token saved for MCP server {server_id}\n"))
 }
@@ -2330,7 +2330,6 @@ fn message_text(message: &AgentMessage) -> String {
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
-    use crate::mcp_ops::detect_oauth_provider_for_server;
     use neo_agent_core::{
         AgentConfig, AgentEvent, AgentMessage, ApprovalRequest, CompactionSettings, Content,
         PermissionApprovalDecision, PermissionMode, PermissionOperation, QueueMode,
@@ -2349,10 +2348,9 @@ mod tests {
         run_prompt_with_runtime, select_config_model, tool_registry_for_config,
     };
     use crate::config::{
-        AppConfig, Defaults, McpConfig, ModelConfig, OAuthConfig, OAuthProviderConfig,
-        ProviderConfig, RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
+        AppConfig, Defaults, McpConfig, ModelConfig, OAuthConfig, ProviderConfig,
+        RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
     };
-    use crate::mcp_ops::oauth_provider_registry;
 
     #[test]
     fn agent_config_for_app_applies_runtime_config() {
@@ -3225,81 +3223,6 @@ mod tests {
             startup_timeout_ms: None,
             tool_timeout_ms: None,
         }
-    }
-
-    #[test]
-    fn detect_oauth_provider_requires_http_or_sse_transport() {
-        let registry = oauth_provider_registry(&OAuthConfig::default());
-        assert!(
-            detect_oauth_provider_for_server(
-                &test_mcp_server("fs", "stdio", Some("https://linear.app/oauth")),
-                &registry
-            )
-            .is_none()
-        );
-        assert!(
-            detect_oauth_provider_for_server(
-                &test_mcp_server("linear", "http", Some("https://api.linear.app/oauth")),
-                &registry
-            )
-            .is_some()
-        );
-        assert!(
-            detect_oauth_provider_for_server(
-                &test_mcp_server("linear", "sse", Some("https://api.linear.app/oauth")),
-                &registry
-            )
-            .is_some()
-        );
-    }
-
-    #[test]
-    fn detect_oauth_provider_matches_linear_url() {
-        let registry = oauth_provider_registry(&OAuthConfig::default());
-        let linear = test_mcp_server("linear", "http", Some("https://api.linear.app/mcp"));
-        let provider = detect_oauth_provider_for_server(&linear, &registry);
-        assert!(provider.is_some());
-        assert_eq!(provider.unwrap().id, "linear");
-
-        let unknown = test_mcp_server("other", "http", Some("https://example.com/mcp"));
-        assert!(detect_oauth_provider_for_server(&unknown, &registry).is_none());
-    }
-
-    #[test]
-    fn detect_oauth_provider_custom_provider_overrides_builtin() {
-        let mut oauth = OAuthConfig::default();
-        oauth.providers.insert(
-            "linear".to_owned(),
-            OAuthProviderConfig {
-                client_id: "custom-linear-client".to_owned(),
-                auth_url: "https://custom.example.com/authorize".to_owned(),
-                token_url: "https://custom.example.com/token".to_owned(),
-                scopes: vec!["read".to_owned()],
-                default_callback_port: 0,
-            },
-        );
-        let registry = oauth_provider_registry(&oauth);
-        let linear = test_mcp_server("linear", "http", Some("https://api.linear.app/mcp"));
-        let provider = detect_oauth_provider_for_server(&linear, &registry).expect("provider");
-        assert_eq!(provider.id, "linear");
-        assert_eq!(provider.client_id, "custom-linear-client");
-        assert_eq!(provider.auth_url, "https://custom.example.com/authorize");
-        assert_eq!(provider.scopes, vec!["read"]);
-    }
-
-    #[test]
-    fn detect_oauth_provider_env_var_overrides_client_id() {
-        temp_env::with_var(
-            "NEO_OAUTH_LINEAR_CLIENT_ID",
-            Some("env-linear-client"),
-            || {
-                let registry = oauth_provider_registry(&OAuthConfig::default());
-                let linear = test_mcp_server("linear", "http", Some("https://api.linear.app/mcp"));
-                let provider =
-                    detect_oauth_provider_for_server(&linear, &registry).expect("provider");
-                assert_eq!(provider.client_id, "env-linear-client");
-            },
-        );
     }
 
     #[tokio::test]

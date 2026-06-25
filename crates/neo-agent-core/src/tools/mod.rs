@@ -44,7 +44,8 @@ pub const DEFAULT_BASH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 pub use mcp::{
     HttpConfig, McpClient, McpError, McpResourceContent, McpResourceDefinition, McpResourceRead,
     McpResourceUpdate, McpToolCall, McpToolDefinition, McpToolResponse, StdioConfig,
-    build_http_client, build_http_client_with_oauth, build_stdio_client,
+    build_authorization_manager, build_http_client, build_http_client_with_oauth,
+    build_stdio_client,
 };
 pub use mcp_manager::*;
 pub use process_supervisor::{ProcessKind, ProcessSupervisor};

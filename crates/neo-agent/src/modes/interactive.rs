@@ -4252,11 +4252,8 @@ impl InteractiveController {
         };
 
         self.push_status("Waiting for browser authorization...");
-        match authenticate_mcp_server_oauth(&server_id, server, &config.oauth, &neo_home).await {
+        match authenticate_mcp_server_oauth(&server_id, server, &neo_home).await {
             Ok(_) => self.push_status("OAuth token saved"),
-            Err(neo_agent_core::oauth::OAuthError::ProviderDetection) => {
-                self.push_status("No OAuth provider configured for this server");
-            }
             Err(err) => {
                 self.push_status(format!("OAuth flow failed: {err}"));
             }
@@ -12840,7 +12837,7 @@ command = "python3"
     }
 
     #[tokio::test]
-    async fn mcp_manager_auth_action_shows_status_for_unknown_provider() {
+    async fn mcp_manager_auth_action_shows_status_on_oauth_failure() {
         let mut controller = InteractiveController::new_for_test(
             "neo",
             "test-session",
@@ -12878,7 +12875,7 @@ command = "python3"
             .expect("auth key");
         assert!(transcript_has_status(
             &controller,
-            "No OAuth provider configured for this server"
+            "OAuth flow failed"
         ));
     }
 
