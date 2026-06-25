@@ -13,11 +13,10 @@ use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionMet
 use neo_agent_core::skills::SkillStore;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool,
-    CompactionSettings, Content, CreateSkillTool, ListSkillsTool, McpClient,
-    McpConnectionManager, McpServerStatus, MoveSkillTool, PendingQuestion,
-    PermissionApprovalDecision, PermissionOperation, ProcessSupervisor, StdioConfig,
-    SteerInputHandle, SummarizeSessionsTool, ToolRegistry, build_http_client_with_oauth,
-    build_stdio_client, mode::PlanMode,
+    CompactionSettings, Content, CreateSkillTool, ListSkillsTool, McpClient, McpConnectionManager,
+    McpServerStatus, MoveSkillTool, PendingQuestion, PermissionApprovalDecision,
+    PermissionOperation, ProcessSupervisor, StdioConfig, SteerInputHandle, SummarizeSessionsTool,
+    ToolRegistry, build_http_client_with_oauth, build_stdio_client, mode::PlanMode,
 };
 use neo_ai::{
     ChatMessage, ContentPart, CredentialResolver, ModelClient, ModelRegistry, ModelSpec,
@@ -815,7 +814,7 @@ pub async fn list_mcp(config: &AppConfig) -> String {
             continue;
         }
 
-        match list_mcp_tools_for_server(server, &config.oauth).await {
+        match list_mcp_tools_for_server(server).await {
             Ok(tools) => {
                 let map: serde_json::Map<String, serde_json::Value> = tools
                     .into_iter()
@@ -836,13 +835,13 @@ pub async fn list_mcp(config: &AppConfig) -> String {
     out
 }
 
-async fn list_mcp_tools_for_server(
-    server: &McpServerConfig,
-    oauth: &crate::config::OAuthConfig,
-) -> anyhow::Result<Vec<String>> {
+async fn list_mcp_tools_for_server(server: &McpServerConfig) -> anyhow::Result<Vec<String>> {
     let supervisor = ProcessSupervisor::default();
-    let client = build_mcp_client(server, oauth, &supervisor).await?;
-    let tools = client.list_tools().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    let client = build_mcp_client(server, &supervisor).await?;
+    let tools = client
+        .list_tools()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut tools: Vec<String> = tools.into_iter().map(|t| t.name).collect();
     apply_tool_filter(&mut tools, &server.enabled_tools, &server.disabled_tools);
     Ok(tools)
@@ -920,7 +919,7 @@ pub async fn add_mcp_server(
         return Ok(format!("{saved}{mcp_name} added (disabled)\n"));
     }
 
-    let probe_result = probe_mcp_server(&server, startup_timeout_ms, &config.oauth).await;
+    let probe_result = probe_mcp_server(&server, startup_timeout_ms).await;
     let probe_msg = match probe_result {
         Ok(()) => format!("{mcp_name} successfully connected!\n"),
         Err(_) => format!("{mcp_name} connect failed\n"),
@@ -948,13 +947,9 @@ pub async fn auth_mcp_server(server_id: String, config: &AppConfig) -> anyhow::R
     Ok(format!("OAuth token saved for MCP server {server_id}\n"))
 }
 
-async fn probe_mcp_server(
-    server: &McpServerConfig,
-    timeout_ms: Option<u64>,
-    oauth: &crate::config::OAuthConfig,
-) -> anyhow::Result<()> {
+async fn probe_mcp_server(server: &McpServerConfig, timeout_ms: Option<u64>) -> anyhow::Result<()> {
     let supervisor = ProcessSupervisor::default();
-    let client = build_mcp_client(server, oauth, &supervisor).await?;
+    let client = build_mcp_client(server, &supervisor).await?;
     let fut = client.list_tools();
     let tools = if let Some(ms) = timeout_ms {
         tokio::time::timeout(std::time::Duration::from_millis(ms), fut)
@@ -1892,7 +1887,6 @@ async fn wait_for_mcp_manager_probe(manager: &McpConnectionManager, config: &App
 
 async fn build_mcp_client(
     server: &McpServerConfig,
-    _oauth: &crate::config::OAuthConfig,
     supervisor: &ProcessSupervisor,
 ) -> anyhow::Result<Arc<dyn McpClient>> {
     match server.transport.as_str() {

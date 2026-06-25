@@ -7,7 +7,7 @@ pub mod http;
 pub mod oauth;
 pub mod stdio;
 
-pub use client::{McpClient, RmcpClient};
+pub use client::McpClient;
 pub use http::{HttpConfig, build_http_client};
 pub use stdio::{StdioConfig, build_stdio_client};
 

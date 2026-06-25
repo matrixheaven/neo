@@ -1,15 +1,8 @@
-//! OAuth adapters and flow helpers for rmcp (Task 3.2, 3.4).
+//! OAuth adapters for rmcp (Task 3.2, 3.4).
 //!
 //! This module provides implementations of the rmcp `CredentialStore` and
 //! `StateStore` traits that integrate with Neo's file-backed `OAuthStore` for
 //! persistent credentials and an in-memory store for transient OAuth state.
-//!
-//! ## OAuth Flow Helpers
-//!
-//! The [`start_mcp_oauth_flow`] and [`complete_mcp_oauth_flow`] functions provide
-//! high-level helpers for implementing the synthetic `mcp__<server>__authenticate`
-//! tool. They wrap rmcp's `OAuthState` state machine and return the authorization
-//! URL for the user to visit.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -17,12 +10,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rmcp::transport::auth::{
-    AuthError, AuthorizationManager, OAuthState, StateStore, StoredAuthorizationState,
-    StoredCredentials,
+    AuthError, AuthorizationManager, StateStore, StoredAuthorizationState, StoredCredentials,
 };
 use tokio::sync::{Mutex, RwLock};
 
-use super::McpError;
 use crate::oauth::OAuthStore;
 
 /// Build an `AuthorizationManager` configured with Neo's persistent credential and state stores.
@@ -79,157 +70,6 @@ pub async fn build_authorization_manager(
     manager.set_state_store(state_store);
 
     Ok(Arc::new(Mutex::new(manager)))
-}
-
-/// Start an OAuth authorization flow for an MCP server.
-///
-/// This function creates an `OAuthState`, configures it with Neo's persistent
-/// credential and state stores, and starts the authorization session. It returns
-/// the authorization URL that the user must visit in their browser to grant access.
-///
-/// The returned `OAuthState` (wrapped in `Arc<Mutex<>>`) is in the `Session`
-/// state after this call and must be passed to [`complete_mcp_oauth_flow`] when
-/// the user has completed the redirect.
-///
-/// # Arguments
-///
-/// * `base_url` - The base URL of the MCP server to authorize.
-/// * `oauth_store_path` - Path to Neo's `oauth.json` file for persistent credential storage.
-/// * `server_id` - Identifier for the MCP server (used as the credential key prefix).
-/// * `redirect_uri` - The redirect URI registered for the OAuth client (e.g. `http://localhost:3000/callback`).
-/// * `scopes` - Optional OAuth scopes to request. If empty, the server's advertised scopes are used.
-/// * `client_name` - Optional client name for dynamic registration.
-///
-/// # Returns
-///
-/// A tuple of `(authorization_url, oauth_state)` where `authorization_url` is
-/// the URL the user should visit, and `oauth_state` is the state machine that
-/// must be passed to [`complete_mcp_oauth_flow`].
-///
-/// # Example
-///
-/// ```no_run
-/// use std::path::Path;
-/// use neo_agent_core::tools::mcp::oauth::start_mcp_oauth_flow;
-///
-/// let (url, state) = start_mcp_oauth_flow(
-///     "https://example.com/mcp",
-///     Path::new("/home/user/.neo/oauth.json"),
-///     "my-server",
-///     "http://localhost:3000/callback",
-///     Some(&["read", "write"]),
-///     Some("neo-agent"),
-/// ).await?;
-/// println!("Visit: {url}");
-/// ```
-pub async fn start_mcp_oauth_flow(
-    base_url: &str,
-    oauth_store_path: &Path,
-    server_id: &str,
-    redirect_uri: &str,
-    scopes: Option<&[&str]>,
-    client_name: Option<&str>,
-) -> Result<(String, Arc<Mutex<OAuthState>>), McpError> {
-    // Create a fresh OAuthState. OAuthState::new creates its own
-    // AuthorizationManager internally, which handles discovery and registration.
-    let mut oauth_state = OAuthState::new(base_url, None).await.map_err(|e| {
-        McpError::protocol(format!("failed to create OAuth state for {base_url}: {e}"))
-    })?;
-
-    // Replace the default stores with Neo's persistent credential store and
-    // in-memory state store before starting the flow, so that credentials are
-    // persisted and any in-flight PKCE/CSRF state survives across the flow.
-    if let OAuthState::Unauthorized(ref mut manager) = oauth_state {
-        manager.set_credential_store(FileCredentialStore::new(
-            oauth_store_path.to_path_buf(),
-            server_id.to_string(),
-        ));
-        manager.set_state_store(InMemoryStateStore::new());
-
-        // Try to reuse stored credentials — if we already have a valid token,
-        // we can skip the interactive flow entirely.
-        if manager.initialize_from_store().await.map_err(|e| {
-            McpError::protocol(format!("failed to initialize from stored credentials: {e}"))
-        })? {
-            // Already authorized — transition to Authorized state and return a marker.
-            let creds = manager.get_credentials().await.map_err(|e| {
-                McpError::protocol(format!("failed to read stored credentials: {e}"))
-            })?;
-            if let (client_id, Some(token_response)) = creds {
-                oauth_state
-                    .set_credentials(&client_id, token_response)
-                    .await
-                    .map_err(|e| McpError::protocol(format!("failed to set credentials: {e}")))?;
-                return Ok((
-                    "already-authorized".to_string(),
-                    Arc::new(Mutex::new(oauth_state)),
-                ));
-            }
-        }
-    }
-
-    // Determine scopes: use caller-provided scopes, or let the manager select
-    // from the server's advertised scopes.
-    let scope_refs: Vec<String> = scopes
-        .map(|s| s.iter().map(|sc| (*sc).to_string()).collect())
-        .unwrap_or_default();
-
-    // start_authorization handles: metadata discovery → client registration →
-    // PKCE generation → authorization URL construction → transition to Session state.
-    oauth_state
-        .start_authorization(
-            &scope_refs.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            redirect_uri,
-            client_name,
-        )
-        .await
-        .map_err(|e| McpError::protocol(format!("failed to start OAuth authorization: {e}")))?;
-
-    // Extract the authorization URL from the Session state.
-    let auth_url = oauth_state
-        .get_authorization_url()
-        .await
-        .map_err(|e| McpError::protocol(format!("failed to get authorization URL: {e}")))?;
-
-    Ok((auth_url, Arc::new(Mutex::new(oauth_state))))
-}
-
-/// Complete an OAuth authorization flow for an MCP server.
-///
-/// After the user visits the authorization URL returned by [`start_mcp_oauth_flow`]
-/// and is redirected back, call this function with the callback URL to exchange
-/// the authorization code for an access token and complete the flow.
-///
-/// On success, the credentials are persisted to the OAuth store and the
-/// `OAuthState` transitions to the `Authorized` state.
-///
-/// # Arguments
-///
-/// * `oauth_state` - The shared OAuth state machine returned by [`start_mcp_oauth_flow`].
-/// * `callback_url` - The full callback URL received from the OAuth redirect
-///   (containing `code` and `state` query parameters).
-///
-/// # Example
-///
-/// ```no_run
-/// use neo_agent_core::tools::mcp::oauth::complete_mcp_oauth_flow;
-///
-/// complete_mcp_oauth_flow(&oauth_state, "http://localhost:3000/callback?code=abc&state=xyz")
-///     .await?;
-/// ```
-pub async fn complete_mcp_oauth_flow(
-    oauth_state: &Arc<Mutex<OAuthState>>,
-    callback_url: &str,
-) -> Result<(), McpError> {
-    let mut state = oauth_state.lock().await;
-    state
-        .handle_callback_url(callback_url)
-        .await
-        .map_err(|e| McpError::protocol(format!("OAuth callback handling failed: {e}")))?;
-
-    // handle_callback_url on OAuthState already calls complete_authorization internally
-    // (it transitions Session → Authorized via handle_callback_with_issuer → complete_authorization)
-    Ok(())
 }
 
 /// Helper function to generate the storage key for an MCP server.

@@ -1427,6 +1427,7 @@ dependencies = [
  "http",
  "ignore",
  "neo-ai",
+ "oauth2",
  "portable-pty",
  "pulldown-cmark",
  "rand 0.9.4",
