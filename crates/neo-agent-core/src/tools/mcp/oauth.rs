@@ -124,6 +124,7 @@ impl FileCredentialStore {
     ///
     /// Each call to `new` creates an independent mutex. To share coordination
     /// across stores, use [`FileCredentialStore::with_shared_store`].
+    #[cfg(test)]
     #[must_use]
     pub fn new(path: PathBuf, server_id: String) -> Self {
         Self {
