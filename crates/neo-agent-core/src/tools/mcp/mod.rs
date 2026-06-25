@@ -12,7 +12,7 @@ pub use http::{HttpConfig, build_http_client};
 pub use oauth::build_authorization_manager;
 pub use stdio::{StdioConfig, build_stdio_client};
 
-/// Build an HTTP/SSE MCP client with OAuth support from the persisted OAuth store.
+/// Build an HTTP/SSE MCP client with local OAuth integration from the persisted local OAuth store.
 ///
 /// This is a convenience wrapper around [`build_http_client`] that automatically
 /// creates an [`AuthorizationManager`](rmcp::transport::auth::AuthorizationManager)

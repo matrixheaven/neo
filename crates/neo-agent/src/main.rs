@@ -39,7 +39,11 @@ use crate::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     color_eyre::install().ok();
-    tracing_subscriber::fmt().with_target(false).try_init().ok();
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .try_init()
+        .ok();
 
     let cli = Cli::parse_from(std::env::args_os());
     let output = dispatch(cli).await?;

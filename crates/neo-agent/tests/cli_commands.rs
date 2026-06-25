@@ -1248,15 +1248,16 @@ fn mcp_add_remote_http_probes_and_reports_success() {
     let temp = TempDir::new().expect("tempdir");
     let mcp_server = MockSseServer::start(vec![
         mcp_json_response(
-            1,
+            0,
             &json!({
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {"name": "remote-docs", "version": "0.1.0"},
                 "capabilities": {"tools": {}}
             }),
         ),
+        mcp_http_accept(),
         mcp_json_response(
-            2,
+            1,
             &json!({
                 "tools": [
                     {
@@ -1376,15 +1377,16 @@ fn mcp_add_with_enabled_tools_filters_tool_list() {
     let mcp_server = MockSseServer::start(vec![
         // first connection for `add` probe
         mcp_json_response(
-            1,
+            0,
             &json!({
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {"name": "remote-docs", "version": "0.1.0"},
                 "capabilities": {"tools": {}}
             }),
         ),
+        mcp_http_accept(),
         mcp_json_response(
-            2,
+            1,
             &json!({
                 "tools": [
                     {
@@ -1402,15 +1404,16 @@ fn mcp_add_with_enabled_tools_filters_tool_list() {
         ),
         // second connection for `list`
         mcp_json_response(
-            1,
+            0,
             &json!({
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {"name": "remote-docs", "version": "0.1.0"},
                 "capabilities": {"tools": {}}
             }),
         ),
+        mcp_http_accept(),
         mcp_json_response(
-            2,
+            1,
             &json!({
                 "tools": [
                     {
@@ -1507,15 +1510,16 @@ fn run_text_registers_enabled_http_mcp_tools_from_project_config() {
     )]);
     let mcp_server = MockSseServer::start(vec![
         mcp_json_response(
-            1,
+            0,
             &json!({
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {"name": "remote-docs", "version": "0.1.0"},
                 "capabilities": {"tools": {}}
             }),
         ),
+        mcp_http_accept(),
         mcp_json_response(
-            2,
+            1,
             &json!({
                 "tools": [
                     {
@@ -1529,6 +1533,10 @@ fn run_text_registers_enabled_http_mcp_tools_from_project_config() {
                     }
                 ]
             }),
+        ),
+        mcp_json_response(
+            2,
+            &json!({"resources": []}),
         ),
     ]);
     write_home_config(&format!(
@@ -1567,16 +1575,28 @@ url = "{}"
         "model tools should include configured MCP HTTP tools: {tool_names:?}"
     );
     let mcp_requests = mcp_server.requests();
-    assert_eq!(
-        mcp_requests
-            .iter()
-            .map(|request| request.body["method"].as_str().expect("method"))
-            .collect::<Vec<_>>(),
-        vec!["initialize", "tools/list"]
+    let methods: Vec<_> = mcp_requests
+        .iter()
+        .map(|request| {
+            request.body["method"]
+                .as_str()
+                .unwrap_or("(none)")
+        })
+        .collect();
+    assert!(
+        methods.contains(&"initialize"),
+        "expected initialize request, got {methods:?}"
     );
-    assert!(mcp_requests.iter().all(
-        |request| request.headers.get("x-neo-test").map(String::as_str) == Some("remote-mcp")
-    ));
+    assert!(
+        methods.contains(&"tools/list"),
+        "expected tools/list request, got {methods:?}"
+    );
+    assert!(
+        mcp_requests.iter().all(|request| {
+            request.headers.get("x-neo-test").map(String::as_str) == Some("remote-mcp")
+        }),
+        "custom header missing from some requests: {mcp_requests:?}"
+    );
 }
 
 #[test]
@@ -1694,6 +1714,12 @@ fn mcp_json_response(id: u64, result: &Value) -> String {
         body.len(),
         body
     )
+}
+
+/// HTTP 202 response consumed by rmcp for the `notifications/initialized` POST.
+/// rmcp's `expect_accepted_or_json` accepts either a 202 or any JSON body.
+fn mcp_http_accept() -> String {
+    "HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_owned()
 }
 
 fn sse_response(events: &[Value]) -> String {

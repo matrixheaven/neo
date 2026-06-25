@@ -4,64 +4,39 @@ MCP support is intended to expose external tools and resources to Neo without co
 
 ## Agent-Core Interface
 
-`neo-agent-core` exposes the production adapter boundary in `tools::mcp`:
+`neo-agent-core` exposes the client boundary in `tools::mcp`:
 
 ```rust
 #[async_trait::async_trait]
-pub trait McpToolAdapter: Send + Sync {
+pub trait McpClient: Send + Sync {
     async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError>;
-
-    async fn call_tool(
-        &self,
-        name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<McpToolResponse, McpError>;
-
+    async fn call_tool(&self, name: &str, arguments: serde_json::Value) -> Result<McpToolResponse, McpError>;
     async fn list_resources(&self) -> Result<Vec<McpResourceDefinition>, McpError>;
-
     async fn read_resource(&self, uri: &str) -> Result<McpResourceRead, McpError>;
-
-    async fn subscribe_resource(&self, uri: &str) -> Result<(), McpError>;
-
-    async fn unsubscribe_resource(&self, uri: &str) -> Result<(), McpError>;
-
-    async fn next_resource_update(&self) -> Result<McpResourceUpdate, McpError>;
+    async fn shutdown(&self) -> Result<(), McpError>;
 }
 ```
 
-`McpToolProvider::discover(server_id, adapter)` calls `list_tools`, converts
-the returned definitions to normal `ToolSpec` values, and can register those
-tools into `ToolRegistry`. Registered MCP tools execute by delegating to
-`adapter.call_tool`; production code must provide a real adapter implementation.
+The production implementation `RmcpClient` wraps an `rmcp::service::RunningService<RoleClient, ()>`,
+delegating `list_tools`, `call_tool`, `list_resources`, and `read_resource` to the rmcp peer with
+configurable request timeouts.
 
-Tool names are exposed to the model as `mcp__<server_id>__<tool_name>` and call
-the remote MCP tool by its original unprefixed name. Non-alphanumeric
-characters in server and tool ids are converted to `_` so model provider
-function-name validators can accept the advertised tools.
+Transport-specific builders create the rmcp service:
 
-`McpStdioToolAdapter` is the production stdio JSON-RPC adapter. It starts the
-configured command with arguments and environment, performs the MCP
-`initialize` handshake once per adapter session, calls `tools/list`, invokes
-remote tools with `tools/call`, lists/reads resources, and sends
-`resources/subscribe` / `resources/unsubscribe` over the same stdio JSON-RPC
-process until that process or request stream fails. A background stdout reader
-routes JSON-RPC responses by request id and queues real
-`notifications/resources/updated` messages as `McpResourceUpdate` values. It
-does not provide local fallback behavior.
+- **`build_stdio_client`** (`mcp/stdio.rs`) — spawns the configured command via
+  `rmcp::transport::TokioChildProcess`, registers the child with `ProcessSupervisor`, and performs
+  the MCP `initialize` handshake over stdin/stdout JSON-RPC.
+- **`build_http_client`** (`mcp/http.rs`) — creates an `OAuthStreamableHttpClient` (local OAuth integration) backed by
+  `rmcp::transport::StreamableHttpClientTransport` for both `"http"` and `"sse"` transport types.
+  The client applies configured custom headers and an optional `AuthorizationManager` for OAuth.
 
-`McpHttpToolAdapter` is the production remote JSON-RPC adapter for
-`transport = "http"` and `transport = "sse"` server entries. It sends one
-JSON-RPC POST per MCP request, applies configured headers, performs the
-`initialize` handshake before tool/resource requests, accepts JSON responses
-and SSE `data:` JSON-RPC responses, and surfaces HTTP/protocol errors without
-local fallback behavior. `resources/subscribe` and `resources/unsubscribe` use
-the same JSON-RPC transport. A JSON subscribe response is acknowledged as the
-server's result; when the subscribe response is a live SSE stream, the adapter
-keeps reading it in the background and queues real
-`notifications/resources/updated` messages as `McpResourceUpdate` values. When
-the subscribe response is a JSON acknowledgement, the adapter opens the same
-HTTP endpoint as an SSE event channel and reads resource update notifications
-from that stream.
+`McpConnectionManager` calls `register_connected_tools_into` to convert discovered MCP tools into
+normal `ToolSpec` values and register them in `ToolRegistry`. Registered MCP tools execute by
+delegating to the rmcp peer's `call_tool` method.
+
+Tool names are exposed to the model as `mcp__<server_id>__<tool_name>` and call the remote MCP tool
+by its original unprefixed name. Non-alphanumeric characters in server and tool ids are converted to
+`_` so model provider function-name validators can accept the advertised tools.
 
 ## Runtime Placement
 
@@ -69,7 +44,9 @@ MCP belongs at the `neo-agent-core` boundary:
 
 ```text
 MCP server
-  <-> MCP client adapter
+  <-> rmcp transport (TokioChildProcess / StreamableHttpClient)
+  <-> RmcpClient (McpClient impl)
+  <-> McpConnectionManager
   <-> ToolRegistry and ToolExecutor
   <-> Agent loop
   <-> ModelClient
@@ -83,17 +60,16 @@ The model should only see normal `ToolSpec` values. It should not know whether a
 - Tool names are namespaced by server id and use provider-safe characters.
 - MCP tool calls pass through the same permission policy as built-in tools.
 - MCP resources are not silently injected into model context.
-- Resource update notifications are host/runtime state; they are not exposed as
-  model tools or silently appended to the transcript.
 - Server stderr and protocol logs are developer diagnostics, not model context.
 - Secrets enter through environment variables, not session logs.
 
 ## Current Status
 
-`neo-agent-core` has the MCP tool adapter abstraction, stdio JSON-RPC process
-adapter, HTTP/SSE JSON-RPC adapter, discovery-to-`ToolSpec` bridge, namespaced
-`ToolRegistry` registration, persistent initialized stdio session reuse, and
-async call delegation.
+`neo-agent-core` uses the official `rmcp` Rust SDK for all MCP transports (stdio, HTTP, SSE).
+The `RmcpClient` wrapper provides a uniform interface over rmcp's `RunningService`, with
+configurable request timeouts. `McpConnectionManager` manages connection lifecycle, snapshots,
+reconnect/backoff, and tool discovery.
+
 `neo-agent print` and `neo-agent run` load enabled `transport = "stdio"`,
 `transport = "http"`, and `transport = "sse"` servers from the single Neo config and
 advertise their tools to the configured model.
@@ -170,25 +146,24 @@ startup timeout (`--startup-timeout-ms`), and per-tool call timeout
 
 ## OAuth Authentication
 
-Remote HTTP and SSE MCP servers may use OAuth 2.0 bearer tokens. Neo includes
-a local, provider-agnostic OAuth authenticator for obtaining tokens without
-leaving the command line.
+Remote HTTP and SSE MCP servers may use OAuth 2.0 bearer tokens. Neo uses the
+`rmcp` SDK's `AuthorizationManager` with file-backed credential and in-memory
+state stores for OAuth flows.
 
 ### Flow overview
 
-For each configured HTTP/SSE server, Neo looks up a matching OAuth provider
-(either built-in or defined in config) by the server URL. When authentication
-starts:
+OAuth uses dynamic discovery and dynamic client registration (DCR) per
+SEP-985 / RFC 8414 / RFC 7591:
 
 1. Neo generates a PKCE code verifier/challenge and a random state value.
 2. It starts a temporary callback server on a free local port
    (`127.0.0.1:<port>/callback`).
-3. It opens the provider's authorization URL in the default browser.
-4. The user approves the request in the browser; the provider redirects back to
+3. rmcp discovers the server's OAuth metadata via `/.well-known/oauth-authorization-server`.
+4. It opens the provider's authorization URL in the default browser.
+5. The user approves the request in the browser; the provider redirects back to
    the local callback with an authorization code.
-5. Neo exchanges the code for access/refresh tokens at the provider's token
-   endpoint.
-6. Tokens are stored under `~/.neo/oauth.json` keyed by `mcp:<server-id>`.
+6. rmcp exchanges the code for access/refresh tokens and stores them.
+7. Tokens are persisted in `~/.neo/oauth.json` under keys `mcp:<server-id>`.
 
 The flow is authorization-code with PKCE (`code_challenge_method=S256`).
 
@@ -212,24 +187,10 @@ In interactive TUI mode:
 
 `O` is ignored for `stdio` servers.
 
-### Built-in providers
+### Custom provider overrides
 
-Neo ships with one built-in OAuth provider:
-
-| Provider | Server URL pattern | Authorization URL | Scopes |
-|----------|-------------------|-------------------|--------|
-| `linear` | URL containing `linear` | `https://linear.app/oauth/authorize` | `write` |
-
-For Linear MCP servers (for example `https://mcp.linear.app/mcp`):
-
-- Set the environment variable `NEO_OAUTH_LINEAR_CLIENT_ID` to the client ID of
-  your Linear OAuth app.
-- If the variable is unset, Neo falls back to the default client ID `neo`.
-
-### Custom providers
-
-Add an `[oauth.providers.<id>]` table to `~/.neo/config.toml` for any
-OAuth 2.0 provider that uses authorization-code with PKCE:
+Add an `[oauth.providers.<id>]` table to `~/.neo/config.toml` for manual OAuth
+provider overrides (bypasses discovery):
 
 ```toml
 [oauth.providers.myprovider]
@@ -240,17 +201,13 @@ scopes = ["read", "write"]
 default_callback_port = 0
 ```
 
-- `client_id` is required. It can be overridden at runtime by
-  `NEO_OAUTH_<ID_UPPER>_CLIENT_ID` (for example `NEO_OAUTH_MYPROVIDER_CLIENT_ID`).
+- `client_id` is required.
 - `auth_url` is the provider's authorization endpoint.
 - `token_url` is the provider's token endpoint.
 - `scopes` is the list of scopes requested during authorization.
 - `default_callback_port` is the port used in the `redirect_uri`. A value of `0`
   tells Neo to bind to a free local port and substitute the real port before
   opening the browser.
-
-A custom provider with the same `id` as a built-in provider overrides the
-built-in definition.
 
 ### Security model
 
@@ -268,23 +225,22 @@ built-in definition.
 
 ### Automatic token refresh
 
-Before each MCP HTTP/SSE request, Neo checks the stored token for the server. If
-`expires_at` is in the past and a `refresh_token` is available, Neo calls the
-provider's token endpoint to refresh the access token, updates the stored entry,
-and persists the file. If the refresh fails, the request fails with a protocol
-error. If no refresh token is available, the expired access token is still sent
-(as a last-resort fallback).
+Before each MCP HTTP/SSE request, the `AuthorizationManager` checks the stored
+token. If the token is expired or near-expiry and a refresh token is available,
+rmcp calls the provider's token endpoint to refresh the access token
+automatically. If the refresh fails, the request may fail with an authorization
+error.
 
 ### Troubleshooting
 
 | Symptom | Cause / fix |
 |---------|-------------|
-| "No OAuth provider configured for this server" | Neo could not match the server URL to a built-in or custom provider. Add `[oauth.providers.<id>]` with matching URL semantics, or verify the URL contains the provider id. |
+| "OAuth authorization required" | No valid token for this server. Run `neo mcp auth <server-id>` to start the OAuth flow. |
 | Browser does not open | Neo attempts to open the URL automatically but does not block on it. Copy the authorization URL from the log/status and paste it into a browser manually. |
-| Callback times out | Neo waits 5 minutes for the browser redirect. Make sure the browser can reach `127.0.0.1` on the callback port and that no firewall or proxy blocks the local loopback request. |
+| Callback times out | Neo waits for the browser redirect. Make sure the browser can reach `127.0.0.1` on the callback port and that no firewall or proxy blocks the local loopback request. |
 | "MCP server not found" (TUI) | The selected server id is no longer in config. Close the overlay and reopen it to refresh the list. |
 | "OAuth only supported for HTTP/SSE servers" | OAuth cannot be used with `stdio` MCP servers. Use a bearer token or env-based auth for those. |
-| Token endpoint returns an error | Check that `client_id`, `auth_url`, and `token_url` are correct and that the OAuth app allows PKCE and the requested redirect URI. |
+| Token endpoint returns an error | Check that the server supports dynamic client registration (DCR), or add a manual local `[oauth.providers.<id>]` override. |
 | Expired token causes requests to fail | Verify the provider returned a `refresh_token`; not all providers issue one. If not, run `neo mcp auth <server-id>` again. |
 
 Current limitation: Neo supports configured local stdio and explicit HTTP/SSE

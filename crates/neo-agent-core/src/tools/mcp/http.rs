@@ -85,13 +85,15 @@ impl OAuthStreamableHttpClient {
         }
         match &self.auth_manager {
             Some(manager) => {
-                let token = manager
+                // If no token is available the server may not require auth,
+                // so return Ok(None) instead of failing the connection.
+                manager
                     .lock()
                     .await
                     .get_access_token()
                     .await
-                    .map_err(|e| OAuthHttpError::Auth(e.to_string()))?;
-                Ok(Some(token))
+                    .map(Some)
+                    .or(Ok(None))
             }
             None => Ok(None),
         }

@@ -1,8 +1,8 @@
 //! OAuth adapters for rmcp (Task 3.2, 3.4).
 //!
 //! This module provides implementations of the rmcp `CredentialStore` and
-//! `StateStore` traits that integrate with Neo's file-backed `OAuthStore` for
-//! persistent credentials and an in-memory store for transient OAuth state.
+//! `StateStore` traits that integrate with Neo's file-backed local `OAuthStore`
+//! for persistent credentials and an in-memory store for transient OAuth state.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use crate::oauth::OAuthStore;
 /// Build an `AuthorizationManager` configured with Neo's persistent credential and state stores.
 ///
 /// This function creates an `AuthorizationManager` with a `FileCredentialStore` and
-/// `InMemoryStateStore`, which can be used to perform OAuth authorization flows for
+/// `InMemoryStateStore`, which can be used to perform local OAuth authorization flows for
 /// MCP servers.
 ///
 /// # Arguments
@@ -80,7 +80,7 @@ pub fn key_for_server(server_id: &str) -> String {
     format!("mcp:{server_id}")
 }
 
-/// File-backed credential store for rmcp OAuth flows.
+/// File-backed local credential store for rmcp OAuth flows.
 ///
 /// This adapter wraps Neo's [`OAuthStore`] to implement the rmcp
 /// `CredentialStore` trait. Credentials are persisted to a JSON file
