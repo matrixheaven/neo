@@ -248,14 +248,43 @@ pub async fn build_http_client(config: HttpConfig) -> Result<Arc<dyn McpClient>,
         Some(d) => tokio::time::timeout(d, ().serve(transport))
             .await
             .map_err(|_| McpError::protocol("HTTP MCP server initialization timed out"))?
-            .map_err(|e| McpError::protocol(e.to_string()))?,
-        None => ().serve(transport).await.map_err(|e| McpError::protocol(e.to_string()))?,
+            .map_err(friendly_http_init_error)?,
+        None => ().serve(transport)
+            .await
+            .map_err(friendly_http_init_error)?,
     };
 
     Ok(Arc::new(super::client::RmcpClient::new(
         service,
         request_timeout,
     )))
+}
+
+/// Convert rmcp initialization errors into user-friendly messages.
+///
+/// rmcp's raw error `Display` output is verbose and leaks internal type names
+/// (`StreamableHttpError`, `AuthRequiredError`, etc.) which are confusing in
+/// the TUI.  This helper detects common failure patterns and returns a clear,
+/// actionable message instead.
+fn friendly_http_init_error(err: rmcp::service::ClientInitializeError) -> McpError {
+    let display = err.to_string();
+
+    // OAuth required — the most common case for remote MCP servers.
+    if display.contains("AuthRequired") || display.contains("auth_required") {
+        return McpError::protocol(
+            "Server requires OAuth authorization. Run `neo mcp auth <server_id>` to authenticate.",
+        );
+    }
+
+    // Connection refused / unreachable host.
+    if display.contains("ConnectionClosed") || display.contains("connection closed") {
+        return McpError::protocol(format!(
+            "Could not connect to MCP server. Check that the URL is reachable. ({display})"
+        ));
+    }
+
+    // Fallback: include the raw error for less common failures.
+    McpError::protocol(display)
 }
 
 #[cfg(test)]

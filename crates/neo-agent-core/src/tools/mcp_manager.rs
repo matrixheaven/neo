@@ -794,7 +794,17 @@ fn diagnostic_from_error(
 
 fn diagnostic_hint(message: &str, config: &ManagedMcpServerConfig) -> Option<String> {
     let lower = message.to_ascii_lowercase();
-    if lower.contains("401") || lower.contains("unauthorized") {
+    if lower.contains("authrequired")
+        || lower.contains("auth required")
+        || lower.contains("401")
+        || lower.contains("unauthorized")
+        || lower.contains("invalid_token")
+    {
+        if matches!(config.transport, ManagedMcpTransport::Http { .. } | ManagedMcpTransport::Sse { .. }) {
+            return Some(
+                "This server requires OAuth. Run `neo mcp auth <server_id>` to authorize.".to_owned(),
+            );
+        }
         return Some("Check remote MCP authorization headers or disable this server.".to_owned());
     }
     if matches!(config.transport, ManagedMcpTransport::Stdio { .. })

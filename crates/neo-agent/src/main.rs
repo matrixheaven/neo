@@ -39,8 +39,16 @@ use crate::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     color_eyre::install().ok();
+    // Filter rmcp's internal tracing (worker errors, transport diagnostics) out of
+    // stderr by default — these are surfaced to the user through Neo's own MCP
+    // diagnostic system instead.  Users can still override with RUST_LOG.
+    let default_filter = "neo=info,neo_agent_core=info,rmcp=off,warn";
     tracing_subscriber::fmt()
         .with_target(false)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter)),
+        )
         .with_writer(std::io::stderr)
         .try_init()
         .ok();
