@@ -1885,6 +1885,17 @@ async fn wait_for_mcp_manager_probe(manager: &McpConnectionManager, config: &App
     }
 }
 
+/// Build a one-off [`McpClient`] for a short-lived CLI command.
+///
+/// This is used only by CLI operations such as `mcp add --probe` and
+/// post-add tool listing. For HTTP/SSE servers it goes through
+/// [`build_http_client_with_oauth`], which creates a *standalone*
+/// `AuthorizationManager` that is not shared with the long-lived
+/// [`McpConnectionManager`] credential store.
+///
+/// For long-lived connections (e.g. inside `tool_registry_for_config`),
+/// use [`McpConnectionManager`] directly so that OAuth credentials persist
+/// in the shared store.
 async fn build_mcp_client(
     server: &McpServerConfig,
     supervisor: &ProcessSupervisor,

@@ -17,6 +17,21 @@ pub use stdio::{StdioConfig, build_stdio_client};
 /// This is a convenience wrapper around [`build_http_client`] that automatically
 /// creates an [`AuthorizationManager`](rmcp::transport::auth::AuthorizationManager)
 /// from the Neo OAuth store when `oauth_store_path` is provided.
+///
+/// # When to use this vs. `McpConnectionManager`
+///
+/// This function is intended for **short-lived, one-off CLI operations** such as
+/// `mcp add --probe` or post-add tool listing. It creates a standalone
+/// `AuthorizationManager` that is *not* shared with the long-lived
+/// [`McpConnectionManager`](crate::tools::mcp_manager::McpConnectionManager)
+/// credential store. Consequently, tokens obtained or refreshed through this path
+/// do not propagate back to the shared store.
+///
+/// For long-lived connections — anything that feeds into `AgentRuntime` via
+/// `tool_registry_for_config` — use
+/// [`McpConnectionManager::build_client_for_config`] instead, which builds the
+/// `AuthorizationManager` from the shared `OAuthStore` so credentials persist
+/// across reconnects and are available to other parts of the runtime.
 pub async fn build_http_client_with_oauth(
     url: String,
     headers: std::collections::BTreeMap<String, String>,
