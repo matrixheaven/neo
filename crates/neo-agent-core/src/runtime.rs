@@ -3497,7 +3497,7 @@ fn approval_scope_for_tool_call(
             );
             (scope, None)
         }
-        _ => (None, None),
+        _ => tool_approval_scope(config, &tool_call.name),
     }
 }
 
@@ -3623,6 +3623,31 @@ fn file_write_approval_scope(
         keys: vec![key],
         label: label.to_owned(),
         detail: format!("File ({verb}): {path}"),
+    };
+    (Some(scope), None)
+}
+
+/// Build the session scope for a generic tool call (MCP/extension tools and any
+/// non-builtin tool). The scope is keyed by the fully-qualified tool name so the
+/// same tool is auto-approved for the rest of the session. Returns no prefix rule
+/// (prefix rules are shell-specific). Built-in write/shell tools are handled by
+/// their own dedicated scope derivations before this is reached.
+fn tool_approval_scope(
+    config: &AgentConfig,
+    tool_name: &str,
+) -> (Option<SessionApprovalScope>, Option<PrefixApprovalRule>) {
+    if tool_name.is_empty() {
+        return (None, None);
+    }
+    let workspace = workspace_key_root(config);
+    let key = SessionApprovalKey::Tool {
+        workspace,
+        name: tool_name.to_owned(),
+    };
+    let scope = SessionApprovalScope {
+        keys: vec![key],
+        label: "Approve this tool for this session".to_owned(),
+        detail: format!("Tool: {tool_name}"),
     };
     (Some(scope), None)
 }
