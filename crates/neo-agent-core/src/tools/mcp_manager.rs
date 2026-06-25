@@ -152,7 +152,7 @@ struct ManagedMcpEntry {
     error: Option<McpDiagnostic>,
     reconnect_attempt: u32,
     next_retry_ms: Option<u64>,
-    reconnect_task: Option<JoinHandle<()>>,
+    reconnect_task: Option<JoinHandle<Result<ConnectOutcome, McpError>>>,
     connect_task: Option<JoinHandle<Result<ConnectOutcome, McpError>>>,
 }
 
@@ -390,25 +390,34 @@ impl McpConnectionManager {
 
         let result = discover_tools(&client, &config).await;
 
-        let mut state = self.inner.write().await;
-        let Some(entry) = state.entries.get_mut(id) else {
-            anyhow::bail!("MCP server '{id}' disappeared during refresh");
+        let (snapshot, need_reconnect) = {
+            let mut state = self.inner.write().await;
+            let Some(entry) = state.entries.get_mut(id) else {
+                anyhow::bail!("MCP server '{id}' disappeared during refresh");
+            };
+            let need_reconnect = match result {
+                Ok((tools, resources)) => {
+                    entry.status = McpServerStatus::Connected;
+                    entry.tools = tools;
+                    entry.resources = resources;
+                    entry.error = None;
+                    entry.reconnect_attempt = 0;
+                    entry.next_retry_ms = None;
+                    false
+                }
+                Err(err) => {
+                    let diagnostic = diagnostic_from_error(&err, &entry.config, None);
+                    set_failed(entry, diagnostic)
+                }
+            };
+            (snapshot_for_entry(entry), need_reconnect)
         };
-        match result {
-            Ok((tools, resources)) => {
-                entry.status = McpServerStatus::Connected;
-                entry.tools = tools;
-                entry.resources = resources;
-                entry.error = None;
-                entry.reconnect_attempt = 0;
-                entry.next_retry_ms = None;
-            }
-            Err(err) => {
-                let diagnostic = diagnostic_from_error(&err, &entry.config, None);
-                set_failed(entry, diagnostic);
-            }
+
+        if need_reconnect {
+            self.schedule_reconnect(id).await;
         }
-        Ok(snapshot_for_entry(entry))
+
+        Ok(snapshot)
     }
 
     /// Return current snapshots for all managed servers.
@@ -561,21 +570,69 @@ impl McpConnectionManager {
         state.supervisor.cleanup_all().await;
     }
 
+    /// Schedule a background reconnect task for a server in `Reconnecting`
+    /// state. The task sleeps for the exponential backoff delay, then calls
+    /// `connect_one`. Its result is later consumed by
+    /// [`poll_finished_connections`].
+    async fn schedule_reconnect(&self, id: &str) {
+        let (config, supervisor, oauth_store, oauth_store_path, delay_ms) = {
+            let state = self.inner.read().await;
+            let Some(entry) = state.entries.get(id) else {
+                return;
+            };
+            if !matches!(entry.status, McpServerStatus::Reconnecting) {
+                return;
+            }
+            let Some(delay_ms) = entry.next_retry_ms else {
+                return;
+            };
+            (
+                entry.config.clone(),
+                state.supervisor.clone(),
+                Arc::clone(&state.oauth_store),
+                state.oauth_store_path.clone(),
+                delay_ms,
+            )
+        };
+
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            connect_one(config, supervisor, oauth_store, oauth_store_path).await
+        });
+
+        let mut state = self.inner.write().await;
+        if let Some(entry) = state.entries.get_mut(id) {
+            if let Some(old) = entry.reconnect_task.take() {
+                old.abort();
+            }
+            entry.reconnect_task = Some(handle);
+        }
+    }
+
     /// Poll any finished connect/reconnect tasks and update entry state.
     async fn poll_finished_connections(&self) {
-        let mut completed = Vec::new();
+        let mut completed_connects = Vec::new();
+        let mut completed_reconnects = Vec::new();
         {
             let mut state = self.inner.write().await;
             for (id, entry) in &mut state.entries {
                 if let Some(task) = &mut entry.connect_task
                     && task.is_finished()
                 {
-                    completed.push((id.clone(), entry.attempt_id));
+                    completed_connects.push((id.clone(), entry.attempt_id));
+                }
+                if let Some(task) = &mut entry.reconnect_task
+                    && task.is_finished()
+                {
+                    completed_reconnects.push((id.clone(), entry.attempt_id));
                 }
             }
         }
 
-        for (id, attempt_id) in completed {
+        let mut need_reconnect = Vec::new();
+
+        // Process finished connect tasks.
+        for (id, attempt_id) in completed_connects {
             let handle = {
                 let mut state = self.inner.write().await;
                 let Some(entry) = state.entries.get_mut(&id) else {
@@ -613,7 +670,9 @@ impl McpConnectionManager {
                         continue;
                     }
                     let diagnostic = diagnostic_from_error(&err, &entry.config, None);
-                    set_failed(entry, diagnostic);
+                    if set_failed(entry, diagnostic) {
+                        need_reconnect.push(id.clone());
+                    }
                 }
                 Err(join_err) => {
                     let mut state = self.inner.write().await;
@@ -630,9 +689,81 @@ impl McpConnectionManager {
                         hint: None,
                         stderr_tail: None,
                     };
-                    set_failed(entry, diagnostic);
+                    if set_failed(entry, diagnostic) {
+                        need_reconnect.push(id.clone());
+                    }
                 }
             }
+        }
+
+        // Process finished reconnect tasks.
+        for (id, attempt_id) in completed_reconnects {
+            let handle = {
+                let mut state = self.inner.write().await;
+                let Some(entry) = state.entries.get_mut(&id) else {
+                    continue;
+                };
+                entry.reconnect_task.take()
+            };
+            let Some(handle) = handle else {
+                continue;
+            };
+            match handle.await {
+                Ok(Ok(outcome)) => {
+                    let mut state = self.inner.write().await;
+                    let Some(entry) = state.entries.get_mut(&id) else {
+                        continue;
+                    };
+                    if entry.attempt_id != attempt_id {
+                        continue;
+                    }
+                    entry.client = Some(outcome.client);
+                    entry.auth_manager = outcome.auth_manager;
+                    entry.tools = outcome.tools;
+                    entry.resources = outcome.resources;
+                    entry.status = McpServerStatus::Connected;
+                    entry.error = None;
+                    entry.reconnect_attempt = 0;
+                    entry.next_retry_ms = None;
+                }
+                Ok(Err(err)) => {
+                    let mut state = self.inner.write().await;
+                    let Some(entry) = state.entries.get_mut(&id) else {
+                        continue;
+                    };
+                    if entry.attempt_id != attempt_id {
+                        continue;
+                    }
+                    let diagnostic = diagnostic_from_error(&err, &entry.config, None);
+                    if set_failed(entry, diagnostic) {
+                        need_reconnect.push(id.clone());
+                    }
+                }
+                Err(join_err) => {
+                    let mut state = self.inner.write().await;
+                    let Some(entry) = state.entries.get_mut(&id) else {
+                        continue;
+                    };
+                    if entry.attempt_id != attempt_id {
+                        continue;
+                    }
+                    let diagnostic = McpDiagnostic {
+                        server_id: entry.config.id.clone(),
+                        transport: entry.config.transport.label().to_owned(),
+                        message: format!("reconnect task panicked: {join_err}"),
+                        hint: None,
+                        stderr_tail: None,
+                    };
+                    if set_failed(entry, diagnostic) {
+                        need_reconnect.push(id.clone());
+                    }
+                }
+            }
+        }
+
+        // Schedule reconnect tasks for entries that need them.
+        for id in &need_reconnect {
+            self.schedule_reconnect(id).await;
         }
     }
 }
@@ -801,7 +932,9 @@ fn diagnostic_hint(message: &str, config: &ManagedMcpServerConfig) -> Option<Str
     None
 }
 
-fn set_failed(entry: &mut ManagedMcpEntry, diagnostic: McpDiagnostic) {
+/// Mark an entry as failed. Returns `true` when the reconnect policy allows
+/// another attempt and the caller should schedule a reconnect task.
+fn set_failed(entry: &mut ManagedMcpEntry, diagnostic: McpDiagnostic) -> bool {
     entry.status = McpServerStatus::Failed;
     entry.error = Some(diagnostic);
     entry.client = None;
@@ -816,12 +949,14 @@ fn set_failed(entry: &mut ManagedMcpEntry, diagnostic: McpDiagnostic) {
         {
             entry.status = McpServerStatus::Failed;
             entry.next_retry_ms = None;
-            return;
+            return false;
         }
         let delay = reconnect_delay_ms(entry.config.reconnect, entry.reconnect_attempt);
         entry.next_retry_ms = Some(delay);
         entry.status = McpServerStatus::Reconnecting;
+        return true;
     }
+    false
 }
 
 fn reconnect_delay_ms(policy: McpReconnectPolicy, attempt: u32) -> u64 {
