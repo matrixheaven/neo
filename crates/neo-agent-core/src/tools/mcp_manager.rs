@@ -292,13 +292,11 @@ impl McpConnectionManager {
             if server.enabled {
                 let oauth_store = Arc::clone(&state.oauth_store);
                 let oauth_store_path = state.oauth_store_path.clone();
-                let oauth_provider_registry = Arc::clone(&state.oauth_provider_registry);
                 let handle = spawn_connect(
                     server.clone(),
                     state.supervisor.clone(),
                     oauth_store,
                     oauth_store_path,
-                    oauth_provider_registry,
                 );
                 entry.connect_task = Some(handle);
             } else {
@@ -343,7 +341,7 @@ impl McpConnectionManager {
 
     /// Force an immediate reconnect for the given server.
     pub async fn reconnect_now(&self, id: &str) -> anyhow::Result<McpServerSnapshot> {
-        let (config, supervisor, oauth_store, oauth_store_path, oauth_provider_registry) = {
+        let (config, supervisor, oauth_store, oauth_store_path) = {
             let mut state = self.inner.write().await;
             let Some(mut entry) = state.entries.remove(id) else {
                 anyhow::bail!("MCP server '{id}' not found");
@@ -367,16 +365,9 @@ impl McpConnectionManager {
             let supervisor = state.supervisor.clone();
             let oauth_store = Arc::clone(&state.oauth_store);
             let oauth_store_path = state.oauth_store_path.clone();
-            let oauth_provider_registry = Arc::clone(&state.oauth_provider_registry);
             let config = entry.config.clone();
             state.entries.insert(id.to_owned(), entry);
-            (
-                config,
-                supervisor,
-                oauth_store,
-                oauth_store_path,
-                oauth_provider_registry,
-            )
+            (config, supervisor, oauth_store, oauth_store_path)
         };
 
         let handle = spawn_connect(
@@ -384,7 +375,6 @@ impl McpConnectionManager {
             supervisor,
             oauth_store,
             oauth_store_path,
-            oauth_provider_registry,
         );
         {
             let mut state = self.inner.write().await;
@@ -669,7 +659,6 @@ fn spawn_connect(
     supervisor: ProcessSupervisor,
     oauth_store: Arc<RwLock<OAuthStore>>,
     oauth_store_path: Option<PathBuf>,
-    oauth_provider_registry: Arc<OAuthProviderRegistry>,
 ) -> JoinHandle<Result<ConnectOutcome, McpError>> {
     tokio::spawn(async move {
         connect_one(
@@ -677,7 +666,6 @@ fn spawn_connect(
             supervisor,
             oauth_store,
             oauth_store_path,
-            oauth_provider_registry,
         )
         .await
     })
@@ -695,14 +683,12 @@ async fn connect_one(
     supervisor: ProcessSupervisor,
     oauth_store: Arc<RwLock<OAuthStore>>,
     oauth_store_path: Option<PathBuf>,
-    oauth_provider_registry: Arc<OAuthProviderRegistry>,
 ) -> Result<ConnectOutcome, McpError> {
     let (client, auth_manager) = build_client_for_config(
         &config,
         &supervisor,
         &oauth_store,
         oauth_store_path.as_ref(),
-        &oauth_provider_registry,
     )
     .await?;
     let timeout_ms = config.startup_timeout_ms.unwrap_or(5_000);
@@ -745,7 +731,6 @@ async fn build_client_for_config(
     supervisor: &ProcessSupervisor,
     _oauth_store: &Arc<RwLock<OAuthStore>>,
     oauth_store_path: Option<&PathBuf>,
-    _oauth_provider_registry: &Arc<OAuthProviderRegistry>,
 ) -> Result<(Arc<dyn McpClient>, Option<Arc<Mutex<AuthorizationManager>>>), McpError> {
     match &config.transport {
         ManagedMcpTransport::Stdio {
