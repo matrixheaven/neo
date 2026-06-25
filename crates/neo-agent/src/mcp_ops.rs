@@ -492,6 +492,14 @@ pub async fn authenticate_mcp_server_oauth(
     {
         let mut mgr = manager.lock().await;
 
+        // Discover OAuth metadata (RFC 8414 / RFC 9728) from the server.
+        // This is REQUIRED before register_client() can succeed.
+        let metadata = mgr
+            .discover_metadata()
+            .await
+            .context("failed to discover OAuth metadata from server")?;
+        mgr.set_metadata(metadata);
+
         // Dynamically register the client with the redirect URI.
         mgr.register_client("neo", &redirect_uri, &[])
             .await
