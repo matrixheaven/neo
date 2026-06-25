@@ -520,6 +520,14 @@ pub async fn authenticate_mcp_server_oauth(
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    // Fail fast on obviously malformed callbacks: the CSRF state parameter must
+    // be present. rmcp's `exchange_code_for_token` validates state against its
+    // internal `StateStore`; this check just prevents calling it with garbage.
+    if code.state.is_empty() {
+        tracing::warn!("OAuth callback received with empty CSRF state parameter");
+        anyhow::bail!("OAuth callback missing CSRF state parameter");
+    }
+
     // Exchange the code for a token (rmcp validates state and persists credentials).
     {
         let mgr = manager.lock().await;
