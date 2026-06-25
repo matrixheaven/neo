@@ -16,11 +16,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rmcp::transport::auth::{AuthError, AuthorizationManager, OAuthState, StateStore, StoredAuthorizationState, StoredCredentials};
+use rmcp::transport::auth::{
+    AuthError, AuthorizationManager, OAuthState, StateStore, StoredAuthorizationState,
+    StoredCredentials,
+};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::oauth::OAuthStore;
 use super::McpError;
+use crate::oauth::OAuthStore;
 
 /// Build an `AuthorizationManager` configured with Neo's persistent credential and state stores.
 ///
@@ -58,20 +61,16 @@ pub async fn build_authorization_manager(
     server_id: &str,
 ) -> Result<Arc<Mutex<AuthorizationManager>>, AuthError> {
     // Create file-backed credential store
-    let credential_store = FileCredentialStore::new(
-        oauth_store_path.to_path_buf(),
-        server_id.to_string(),
-    );
+    let credential_store =
+        FileCredentialStore::new(oauth_store_path.to_path_buf(), server_id.to_string());
 
     // Create in-memory state store
     let state_store = InMemoryStateStore::new();
 
     // Build AuthorizationManager with base URL
-    let mut manager = AuthorizationManager::new(base_url)
-        .await
-        .map_err(|e| {
-            AuthError::InternalError(format!("failed to build authorization manager: {e}"))
-        })?;
+    let mut manager = AuthorizationManager::new(base_url).await.map_err(|e| {
+        AuthError::InternalError(format!("failed to build authorization manager: {e}"))
+    })?;
 
     // Replace default credential store with file-backed store
     manager.set_credential_store(credential_store);
@@ -133,9 +132,9 @@ pub async fn start_mcp_oauth_flow(
 ) -> Result<(String, Arc<Mutex<OAuthState>>), McpError> {
     // Create a fresh OAuthState. OAuthState::new creates its own
     // AuthorizationManager internally, which handles discovery and registration.
-    let mut oauth_state = OAuthState::new(base_url, None)
-        .await
-        .map_err(|e| McpError::protocol(format!("failed to create OAuth state for {base_url}: {e}")))?;
+    let mut oauth_state = OAuthState::new(base_url, None).await.map_err(|e| {
+        McpError::protocol(format!("failed to create OAuth state for {base_url}: {e}"))
+    })?;
 
     // Replace the default stores with Neo's persistent credential store and
     // in-memory state store before starting the flow, so that credentials are
@@ -160,9 +159,7 @@ pub async fn start_mcp_oauth_flow(
                 oauth_state
                     .set_credentials(&client_id, token_response)
                     .await
-                    .map_err(|e| {
-                        McpError::protocol(format!("failed to set credentials: {e}"))
-                    })?;
+                    .map_err(|e| McpError::protocol(format!("failed to set credentials: {e}")))?;
                 return Ok((
                     "already-authorized".to_string(),
                     Arc::new(Mutex::new(oauth_state)),

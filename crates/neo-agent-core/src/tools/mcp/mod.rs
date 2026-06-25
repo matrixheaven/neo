@@ -4,18 +4,41 @@ use thiserror::Error;
 
 pub mod client;
 pub mod http;
-pub mod legacy;
 pub mod oauth;
 pub mod stdio;
 
-#[allow(unused_imports)]
 pub use client::{McpClient, RmcpClient};
-pub use http::HttpConfig;
-pub use legacy::{
-    McpHttpConfig, McpHttpToolAdapter, McpStdioConfig, McpStdioToolAdapter, McpToolAdapter,
-    McpToolProvider,
-};
-pub use stdio::StdioConfig;
+pub use http::{HttpConfig, build_http_client};
+pub use stdio::{StdioConfig, build_stdio_client};
+
+/// Build an HTTP/SSE MCP client with OAuth support from the persisted OAuth store.
+///
+/// This is a convenience wrapper around [`build_http_client`] that automatically
+/// creates an [`AuthorizationManager`](rmcp::transport::auth::AuthorizationManager)
+/// from the Neo OAuth store when `oauth_store_path` is provided.
+pub async fn build_http_client_with_oauth(
+    url: String,
+    headers: std::collections::BTreeMap<String, String>,
+    startup_timeout_ms: Option<u64>,
+    request_timeout_ms: Option<u64>,
+    oauth_store_path: Option<std::path::PathBuf>,
+    server_id: &str,
+) -> Result<std::sync::Arc<dyn McpClient>, McpError> {
+    let auth_manager = match oauth_store_path {
+        Some(path) => oauth::build_authorization_manager(&url, &path, server_id)
+            .await
+            .ok(),
+        None => None,
+    };
+    build_http_client(HttpConfig {
+        url,
+        headers,
+        startup_timeout_ms,
+        request_timeout_ms,
+        auth_manager,
+    })
+    .await
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpToolDefinition {

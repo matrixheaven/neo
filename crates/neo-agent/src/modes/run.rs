@@ -13,11 +13,11 @@ use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionMet
 use neo_agent_core::skills::SkillStore;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool,
-    CompactionSettings, Content, CreateSkillTool, ListSkillsTool, McpConnectionManager,
-    McpHttpConfig, McpHttpToolAdapter, McpServerStatus, McpStdioConfig, McpStdioToolAdapter,
-    McpToolAdapter, McpToolProvider, MoveSkillTool, PendingQuestion, PermissionApprovalDecision,
-    PermissionOperation, ProcessSupervisor, SteerInputHandle, SummarizeSessionsTool, ToolRegistry,
-    mode::PlanMode, oauth::OAuthStore,
+    CompactionSettings, Content, CreateSkillTool, ListSkillsTool, McpClient,
+    McpConnectionManager, McpServerStatus, MoveSkillTool, PendingQuestion,
+    PermissionApprovalDecision, PermissionOperation, ProcessSupervisor, StdioConfig,
+    SteerInputHandle, SummarizeSessionsTool, ToolRegistry, build_http_client_with_oauth,
+    build_stdio_client, mode::PlanMode,
 };
 use neo_ai::{
     ChatMessage, ContentPart, CredentialResolver, ModelClient, ModelRegistry, ModelSpec,
@@ -840,11 +840,10 @@ async fn list_mcp_tools_for_server(
     server: &McpServerConfig,
     oauth: &crate::config::OAuthConfig,
 ) -> anyhow::Result<Vec<String>> {
-    let adapter = mcp_adapter_for_server(server, oauth)?;
-    let provider = McpToolProvider::discover_dyn(&server.id, adapter)
-        .await
-        .with_context(|| format!("failed to discover MCP tools from {}", server.id))?;
-    let mut tools = provider.tool_names();
+    let supervisor = ProcessSupervisor::default();
+    let client = build_mcp_client(server, oauth, &supervisor).await?;
+    let tools = client.list_tools().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut tools: Vec<String> = tools.into_iter().map(|t| t.name).collect();
     apply_tool_filter(&mut tools, &server.enabled_tools, &server.disabled_tools);
     Ok(tools)
 }
@@ -954,14 +953,17 @@ async fn probe_mcp_server(
     timeout_ms: Option<u64>,
     oauth: &crate::config::OAuthConfig,
 ) -> anyhow::Result<()> {
-    let adapter = mcp_adapter_for_server(server, oauth)?;
-    let fut = adapter.list_tools();
+    let supervisor = ProcessSupervisor::default();
+    let client = build_mcp_client(server, oauth, &supervisor).await?;
+    let fut = client.list_tools();
     let tools = if let Some(ms) = timeout_ms {
         tokio::time::timeout(std::time::Duration::from_millis(ms), fut)
             .await
-            .with_context(|| format!("timeout connecting to MCP server {}", server.id))??
+            .with_context(|| format!("timeout connecting to MCP server {}", server.id))?
+            .map_err(|e| anyhow::anyhow!("{e}"))?
     } else {
         fut.await
+            .map_err(|e| anyhow::anyhow!("{e}"))
             .with_context(|| format!("failed to list tools from {}", server.id))?
     };
     let mut names: Vec<String> = tools.into_iter().map(|t| t.name).collect();
@@ -1888,51 +1890,50 @@ async fn wait_for_mcp_manager_probe(manager: &McpConnectionManager, config: &App
     }
 }
 
-fn mcp_adapter_for_server(
+async fn build_mcp_client(
     server: &McpServerConfig,
-    oauth: &crate::config::OAuthConfig,
-) -> anyhow::Result<Arc<dyn McpToolAdapter>> {
+    _oauth: &crate::config::OAuthConfig,
+    supervisor: &ProcessSupervisor,
+) -> anyhow::Result<Arc<dyn McpClient>> {
     match server.transport.as_str() {
         "stdio" => {
             let command = server
                 .command
                 .clone()
                 .with_context(|| format!("missing MCP command for {}", server.id))?;
-            Ok(Arc::new(McpStdioToolAdapter::new(McpStdioConfig {
-                command,
-                args: server.args.clone(),
-                env: server.env.clone(),
-                cwd: server.cwd.clone(),
-                tool_timeout_ms: server.tool_timeout_ms,
-            })))
+            let client = build_stdio_client(
+                &server.id,
+                StdioConfig {
+                    command,
+                    args: server.args.clone(),
+                    env: server.env.clone(),
+                    cwd: server.cwd.clone(),
+                    startup_timeout_ms: server.startup_timeout_ms,
+                    request_timeout_ms: server.tool_timeout_ms,
+                },
+                supervisor,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(client)
         }
         "http" | "sse" => {
             let url = server
                 .url
                 .clone()
                 .with_context(|| format!("missing MCP url for {}", server.id))?;
-            let registry = crate::mcp_ops::oauth_provider_registry(oauth);
-            let oauth_provider = registry.resolve_for_url(&url).cloned();
-            let oauth_store_and_path = neo_home().and_then(|home| {
-                let path = home.join("oauth.json");
-                OAuthStore::load(&path)
-                    .ok()
-                    .map(|store| (Arc::new(tokio::sync::RwLock::new(store)), path))
-            });
-            let oauth_store = oauth_store_and_path
-                .as_ref()
-                .map(|(store, _)| Arc::clone(store));
-            let oauth_store_path = oauth_store_and_path.map(|(_, path)| path);
-            Ok(Arc::new(McpHttpToolAdapter::new(McpHttpConfig {
+            let oauth_store_path = neo_home().map(|home| home.join("oauth.json"));
+            let client = build_http_client_with_oauth(
                 url,
-                headers: server.headers.clone(),
-                tool_timeout_ms: server.tool_timeout_ms,
-                server_id: Some(server.id.clone()),
-                oauth_store,
-                oauth_provider,
-                oauth_provider_registry: None,
+                server.headers.clone(),
+                server.startup_timeout_ms,
+                server.tool_timeout_ms,
                 oauth_store_path,
-            })))
+                &server.id,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(client)
         }
         other => anyhow::bail!("unsupported MCP transport for {}: {other}", server.id),
     }
