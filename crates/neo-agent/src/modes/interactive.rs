@@ -1482,6 +1482,29 @@ impl InteractiveController {
 
     fn handle_paste_text(&mut self, text: &str) {
         let cleaned = Self::clean_pasted_text(text);
+        // When the terminal intercepts Ctrl+V (e.g. Ghostty on macOS) it sends
+        // a bracketed-paste event. If the clipboard contains an image (not
+        // text), the paste content may be empty or contain non-text artifacts.
+        // Try to read an image from the clipboard in that case.
+        if cleaned.is_empty() && self.model_supports_images() {
+            if let Ok(image) = crate::clipboard::read_clipboard_image() {
+                let (width, height) =
+                    crate::image_blob::detect_image_dimensions(&image.bytes, &image.mime_type)
+                        .unwrap_or((0, 0));
+                let sha256 = crate::image_blob::sha256_hex(&image.bytes);
+                let id = self.image_attachment_store.add(
+                    sha256,
+                    image.mime_type,
+                    width,
+                    height,
+                    Some(image.bytes),
+                );
+                let placeholder = format!("[image #{} ({}x{})]", id, width, height);
+                self.apply_prompt_edit(PromptEdit::Insert(&placeholder));
+                return;
+            }
+        }
+
         let line_count = cleaned.split('\n').count();
         if line_count > 10 || cleaned.len() > 1000 {
             let id = self.next_paste_id;
