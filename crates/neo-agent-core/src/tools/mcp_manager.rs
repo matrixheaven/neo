@@ -1152,9 +1152,7 @@ mod tests {
             assert_eq!(name, self.tool_name);
             Ok(McpToolResponse::ok(format!(
                 "{}:{}:{}",
-                self.echo_text,
-                name,
-                arguments
+                self.echo_text, name, arguments
             )))
         }
 
@@ -1163,7 +1161,9 @@ mod tests {
         }
 
         async fn read_resource(&self, _uri: &str) -> Result<McpResourceRead, McpError> {
-            Ok(McpResourceRead { contents: Vec::new() })
+            Ok(McpResourceRead {
+                contents: Vec::new(),
+            })
         }
 
         async fn shutdown(&self) -> Result<(), McpError> {
@@ -1197,10 +1197,7 @@ mod tests {
         let result = tool.execute(&ctx, input.clone()).await.unwrap();
 
         assert!(!result.is_error);
-        assert_eq!(
-            result.content,
-            format!("mock-echo:echo:{input}"),
-        );
+        assert_eq!(result.content, format!("mock-echo:echo:{input}"),);
     }
 
     #[tokio::test]
@@ -1223,7 +1220,9 @@ mod tests {
                 Ok(Vec::new())
             }
             async fn read_resource(&self, _uri: &str) -> Result<McpResourceRead, McpError> {
-                Ok(McpResourceRead { contents: Vec::new() })
+                Ok(McpResourceRead {
+                    contents: Vec::new(),
+                })
             }
             async fn shutdown(&self) -> Result<(), McpError> {
                 Ok(())
@@ -1241,10 +1240,7 @@ mod tests {
         };
 
         let ctx = ToolContext::new(std::env::temp_dir()).unwrap();
-        let err = tool
-            .execute(&ctx, serde_json::json!({}))
-            .await
-            .unwrap_err();
+        let err = tool.execute(&ctx, serde_json::json!({})).await.unwrap_err();
         match err {
             ToolError::Mcp {
                 server_id,
