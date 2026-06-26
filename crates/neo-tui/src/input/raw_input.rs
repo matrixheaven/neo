@@ -325,8 +325,13 @@ impl RawInputParser {
 
     /// Feed raw stdin bytes and return complete events.
     pub fn feed_bytes(&mut self, data: &[u8]) -> Vec<RawEvent> {
-        // Handle high-byte conversion: single byte > 127 → ESC + (byte - 128)
-        let str_data = if data.len() == 1 && data[0] > 127 {
+        // Handle high-byte conversion: a single byte > 127 that is NOT a valid
+        // UTF-8 lead byte represents a terminal meta-key (Alt+key sent as
+        // ESC + key). Convert it to ESC + (byte - 128) for meta-key emulation.
+        // Valid multi-byte UTF-8 characters (e.g. CJK, emoji) are decoded as-is.
+        let str_data = if data.len() == 1 && data[0] >= 0x80 && data[0] < 0xc0 {
+            // 0x80-0xBF are UTF-8 continuation bytes, not valid lead bytes.
+            // A single such byte is a terminal meta-key, not a UTF-8 character.
             let byte = data[0] - 128;
             format!("\x1b{}", byte as char)
         } else {
@@ -1242,6 +1247,16 @@ pub fn parse_key(data: &str) -> Option<String> {
         }
     }
 
+    // Multi-byte UTF-8 printable characters (e.g. CJK, emoji, full-width symbols).
+    // These arrive as raw bytes from the terminal's text input path.
+    // Only accept if the entire string is a single character (no modifiers).
+    if data.chars().count() == 1 {
+        let ch = data.chars().next()?;
+        if (ch as u32) >= 0x80 && !ch.is_control() {
+            return Some(data.to_owned());
+        }
+    }
+
     None
 }
 
@@ -1786,5 +1801,48 @@ mod tests {
         assert!(is_key_release("\x1b[97;5:3u"));
         assert!(!is_key_release("\x1b[97;5u"));
         assert!(!is_key_release("\x1b[200~some paste:3u"));
+    }
+
+    #[test]
+    fn parse_cjk_character() {
+        // CJK character 你 (U+4F60, UTF-8: E4 BD A0)
+        assert_eq!(parse_key("你"), Some("你".to_owned()));
+    }
+
+    #[test]
+    fn parse_emoji_character() {
+        // Emoji 😀 (U+1F600)
+        assert_eq!(parse_key("😀"), Some("😀".to_owned()));
+    }
+
+    #[test]
+    fn parse_fullwidth_symbol() {
+        // Full-width comma （U+FF0C, UTF-8: EF BC 8C）
+        assert_eq!(parse_key("，"), Some("，".to_owned()));
+    }
+
+    #[test]
+    fn feed_bytes_cjk_character() {
+        let mut parser = RawInputParser::new();
+        let events = parser.feed_bytes("你".as_bytes());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], RawEvent::Key("你".to_owned()));
+    }
+
+    #[test]
+    fn feed_bytes_multiple_cjk() {
+        let mut parser = RawInputParser::new();
+        let events = parser.feed_bytes("你好".as_bytes());
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0], RawEvent::Key("你".to_owned()));
+        assert_eq!(events[1], RawEvent::Key("好".to_owned()));
+    }
+
+    #[test]
+    fn feed_bytes_space() {
+        let mut parser = RawInputParser::new();
+        let events = parser.feed_bytes(b" ");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], RawEvent::Key(" ".to_owned()));
     }
 }

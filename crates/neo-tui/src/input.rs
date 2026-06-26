@@ -165,6 +165,11 @@ impl InputParser {
             return Some(InputEvent::Insert(ch));
         }
 
+        // Named printable keys that should insert text
+        if key_id == "space" {
+            return Some(InputEvent::Insert(' '));
+        }
+
         // With keybindings, convert to KeyId and check
         if let Some(keybindings) = &self.keybindings {
             let key = KeyId::new(key_id).ok()?;
@@ -178,6 +183,7 @@ impl InputParser {
         // Without keybindings, map directly
         match key_id {
             "ctrl+c" => Some(InputEvent::Interrupt),
+            "space" => Some(InputEvent::Insert(' ')),
             "enter" => Some(InputEvent::Submit),
             "backspace" => Some(InputEvent::Backspace),
             "delete" => Some(InputEvent::Delete),
@@ -196,10 +202,7 @@ impl InputParser {
 fn is_plain_printable_key_id(key_id: &str) -> bool {
     !key_id.contains('+')
         && key_id.chars().count() == 1
-        && key_id
-            .chars()
-            .next()
-            .is_some_and(|c| !c.is_control() && c.is_ascii())
+        && key_id.chars().next().is_some_and(|c| !c.is_control())
 }
 
 /// Max time between an ESC and the following Enter for the pair to be treated
@@ -447,7 +450,6 @@ impl KeybindingAction {
             .iter()
             .find_map(|(action, action_id)| (*action_id == id).then_some(*action))
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1156,5 +1158,29 @@ mod tests {
             events[0],
             InputEvent::Key(ref k) if k.as_str() == "ctrl+c"
         ));
+    }
+
+    #[test]
+    fn feed_bytes_cjk_character_produces_insert() {
+        let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
+        let events = parser.feed_bytes("你".as_bytes());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], InputEvent::Insert('你'));
+    }
+
+    #[test]
+    fn feed_bytes_space_produces_insert() {
+        let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
+        let events = parser.feed_bytes(b" ");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], InputEvent::Insert(' '));
+    }
+
+    #[test]
+    fn feed_bytes_fullwidth_symbol_produces_insert() {
+        let mut parser = InputParser::with_keybindings(KeybindingsManager::default());
+        let events = parser.feed_bytes("，".as_bytes());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], InputEvent::Insert('，'));
     }
 }
