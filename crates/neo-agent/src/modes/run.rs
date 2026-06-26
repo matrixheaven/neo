@@ -27,10 +27,15 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::mcp_ops::authenticate_mcp_server_oauth;
+use crate::mcp_ops::{
+    authenticate_mcp_server_oauth, display_mcp_kind, parse_command_string, parse_mcp_kind,
+};
 use crate::{
     cli::RunOutput,
-    config::{self, AppConfig, McpServerConfig, ModelConfig, neo_home, workspace_sessions_dir},
+    config::{
+        self, AppConfig, McpServerConfig, McpTransport, ModelConfig, neo_home,
+        workspace_sessions_dir,
+    },
     modes::sessions,
     resources,
 };
@@ -772,33 +777,6 @@ fn apply_configured_provider_overrides(registry: &mut ProviderRegistry, config: 
     }
 }
 
-fn parse_mcp_kind(type_arg: &str) -> anyhow::Result<&'static str> {
-    match type_arg {
-        "studio" => Ok("stdio"),
-        "remote-http" => Ok("http"),
-        "remote-sse" => Ok("sse"),
-        _ => anyhow::bail!(
-            "unknown MCP type '{type_arg}'; expected studio, remote-http, or remote-sse"
-        ),
-    }
-}
-
-fn display_mcp_kind(transport: &str) -> &str {
-    match transport {
-        "stdio" => "studio",
-        "http" => "remote-http",
-        "sse" => "remote-sse",
-        _ => transport,
-    }
-}
-
-fn parse_command_string(cmd: &str) -> anyhow::Result<(String, Vec<String>)> {
-    let parts =
-        shell_words::split(cmd).with_context(|| format!("invalid command string: {cmd}"))?;
-    let (command, args) = parts.split_first().context("command string is empty")?;
-    Ok((command.clone(), args.to_vec()))
-}
-
 pub async fn list_mcp(config: &AppConfig) -> String {
     if config.mcp.servers.is_empty() {
         return "no MCP servers configured\n".to_owned();
@@ -806,7 +784,7 @@ pub async fn list_mcp(config: &AppConfig) -> String {
 
     let mut out = String::new();
     for (idx, server) in config.mcp.servers.iter().enumerate() {
-        let kind = display_mcp_kind(&server.transport);
+        let kind = display_mcp_kind(server.transport);
         let _ = writeln!(out, "[{}]<{}>({})", idx + 1, server.id, kind);
 
         if !server.enabled {
@@ -865,7 +843,7 @@ pub async fn add_mcp_server(
 ) -> anyhow::Result<String> {
     let transport = parse_mcp_kind(&r#type)?;
 
-    let (command, args) = if transport == "stdio" {
+    let (command, args) = if transport == McpTransport::Stdio {
         let Some(cmd) = command else {
             anyhow::bail!("studio MCP requires --command");
         };
@@ -878,7 +856,7 @@ pub async fn add_mcp_server(
         (None, Vec::new())
     };
 
-    let url = if transport == "http" || transport == "sse" {
+    let url = if transport == McpTransport::Http || transport == McpTransport::Sse {
         let Some(url) = url else {
             anyhow::bail!("remote MCP requires --url");
         };
@@ -890,17 +868,17 @@ pub async fn add_mcp_server(
         None
     };
 
-    if transport != "http" && transport != "sse" && !headers.is_empty() {
+    if transport != McpTransport::Http && transport != McpTransport::Sse && !headers.is_empty() {
         anyhow::bail!("--header is only valid for remote-http / remote-sse");
     }
-    if transport != "stdio" && cwd.is_some() {
+    if transport != McpTransport::Stdio && cwd.is_some() {
         anyhow::bail!("--cwd is only valid for studio");
     }
 
     let server = McpServerConfig {
         id: mcp_name.clone(),
         enabled,
-        transport: transport.to_owned(),
+        transport,
         command,
         url,
         args,
@@ -937,7 +915,7 @@ pub async fn auth_mcp_server(server_id: String, config: &AppConfig) -> anyhow::R
         .find(|server| server.id == server_id)
         .context("MCP server not found")?;
 
-    if server.transport != "http" && server.transport != "sse" {
+    if server.transport != McpTransport::Http && server.transport != McpTransport::Sse {
         anyhow::bail!("OAuth is limited to HTTP/SSE servers");
     }
 
@@ -985,28 +963,17 @@ pub struct PromptTurn {
 
 pub struct PromptApprovalRequest {
     pub id: String,
-    #[allow(dead_code)]
-    pub operation: PermissionOperation,
     pub decision_tx: oneshot::Sender<PermissionApprovalDecision>,
     pub feedback_tx: Option<oneshot::Sender<Option<String>>>,
     /// Returns the model-supplied plan-review option label the user picked,
     /// when the approval was an `ExitPlanMode` plan-review approve choice.
     pub selected_label_tx: Option<oneshot::Sender<Option<String>>>,
     /// Display label for the session-approval option (Layer 1). `None` hides it.
-    #[allow(dead_code)]
     pub session_option_label: Option<String>,
     /// Display label for the prefix-approval option (Layer 2). `None` hides it.
     /// When the user picks the prefix option, the controller sets
     /// `prefix_rule` so the runtime persists the rule.
-    #[allow(dead_code)]
     pub prefix_option_label: Option<String>,
-    /// The prefix rule to persist when the user picks the prefix option.
-    /// Forwarded back from the controller alongside the `AllowForSession` decision.
-    #[allow(dead_code)]
-    pub prefix_rule: Option<neo_agent_core::PrefixApprovalRule>,
-    /// The session scope to record when the user picks the session option.
-    #[allow(dead_code)]
-    pub session_scope: Option<neo_agent_core::SessionApprovalScope>,
 }
 
 pub async fn run_prompt(prompt: &[String], config: &AppConfig) -> anyhow::Result<PromptTurn> {
@@ -1466,7 +1433,7 @@ async fn finish_prompt_turn(
         if let AgentEvent::MessageAppended { message } = &event
             && matches!(message, AgentMessage::Assistant { .. })
         {
-            assistant_text.push_str(&message_text(message));
+            assistant_text.push_str(&message.text());
         }
         writer.append_event(&event).await?;
         events.push(event);
@@ -1657,7 +1624,7 @@ fn assistant_text_from_event(event: &AgentEvent) -> Option<String> {
         return None;
     };
     if matches!(message, AgentMessage::Assistant { .. }) {
-        Some(message_text(message))
+        Some(message.text())
     } else {
         None
     }
@@ -1749,14 +1716,11 @@ fn attach_async_approval_handler(
             if approval_tx
                 .send(PromptApprovalRequest {
                     id,
-                    operation,
                     decision_tx,
                     feedback_tx: Some(feedback_tx),
                     selected_label_tx: Some(selected_label_tx),
                     session_option_label,
                     prefix_option_label,
-                    prefix_rule,
-                    session_scope,
                 })
                 .is_err()
             {
@@ -1900,8 +1864,8 @@ async fn build_mcp_client(
     server: &McpServerConfig,
     supervisor: &ProcessSupervisor,
 ) -> anyhow::Result<Arc<dyn McpClient>> {
-    match server.transport.as_str() {
-        "stdio" => {
+    match server.transport {
+        McpTransport::Stdio => {
             let command = server
                 .command
                 .clone()
@@ -1922,7 +1886,7 @@ async fn build_mcp_client(
             .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(client)
         }
-        "http" | "sse" => {
+        McpTransport::Http | McpTransport::Sse => {
             let url = server
                 .url
                 .clone()
@@ -1940,7 +1904,6 @@ async fn build_mcp_client(
             .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(client)
         }
-        other => anyhow::bail!("unsupported MCP transport for {}: {other}", server.id),
     }
 }
 
@@ -2298,8 +2261,7 @@ pub(crate) fn resolve_model_client(
     model: &ModelSpec,
 ) -> anyhow::Result<Arc<dyn ModelClient>> {
     const RESOLVED_API_KEY_ENV: &str = "__NEO_RESOLVED_API_KEY";
-    let mut registry = ProviderRegistry::production();
-    apply_configured_provider_overrides(&mut registry, config);
+    let mut registry = provider_registry_for_config(config);
     if let Some(mut provider) = provider_with_invocation_overrides(config, &model.provider.0) {
         let credential = resolve_provider_credential(&provider);
         let mut env = env::vars().collect::<BTreeMap<_, _>>();
@@ -2320,21 +2282,6 @@ pub(crate) fn resolve_model_client(
         .resolver()
         .resolve(model)
         .map_err(anyhow::Error::from)
-}
-
-fn message_text(message: &AgentMessage) -> String {
-    let content = match message {
-        AgentMessage::System { content }
-        | AgentMessage::User { content }
-        | AgentMessage::Assistant { content, .. }
-        | AgentMessage::ToolResult { content, .. } => content,
-    };
-
-    content
-        .iter()
-        .filter_map(Content::as_text)
-        .collect::<Vec<_>>()
-        .join("")
 }
 
 #[cfg(test)]
@@ -2359,8 +2306,8 @@ mod tests {
         run_prompt_with_runtime, select_config_model, tool_registry_for_config,
     };
     use crate::config::{
-        AppConfig, Defaults, McpConfig, ModelConfig, ProviderConfig, RuntimeCompactionConfig,
-        RuntimeConfig, TuiConfig,
+        AppConfig, Defaults, McpConfig, McpTransport, ModelConfig, ProviderConfig,
+        RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
     };
 
     #[test]
@@ -2805,14 +2752,11 @@ mod tests {
         }));
         let PromptApprovalRequest {
             id,
-            operation: _,
             decision_tx,
             feedback_tx: _,
             selected_label_tx: _,
             session_option_label: _,
             prefix_option_label: _,
-            prefix_rule: _,
-            session_scope: _,
         } = approval_rx.recv().await.expect("approval waiter");
 
         assert_eq!(id, "tool-1");
@@ -3180,7 +3124,7 @@ mod tests {
         config.mcp.servers.push(crate::config::McpServerConfig {
             id: "bad".to_owned(),
             enabled: true,
-            transport: "stdio".to_owned(),
+            transport: McpTransport::Stdio,
             command: Some("neo-missing-mcp-binary-for-test".to_owned()),
             url: None,
             args: Vec::new(),
@@ -3209,13 +3153,13 @@ mod tests {
 
     fn test_mcp_server(
         id: &str,
-        transport: &str,
+        transport: McpTransport,
         url: Option<&str>,
     ) -> crate::config::McpServerConfig {
         crate::config::McpServerConfig {
             id: id.to_owned(),
             enabled: true,
-            transport: transport.to_owned(),
+            transport,
             command: None,
             url: url.map(str::to_owned),
             args: Vec::new(),
@@ -3245,7 +3189,7 @@ mod tests {
         config
             .mcp
             .servers
-            .push(test_mcp_server("fs", "stdio", None));
+            .push(test_mcp_server("fs", McpTransport::Stdio, None));
         let result = auth_mcp_server("fs".to_owned(), &config).await;
         assert!(result.is_err());
         let message = result.unwrap_err().to_string();

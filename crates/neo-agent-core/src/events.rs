@@ -240,11 +240,6 @@ pub enum AgentEvent {
         turn: u32,
         id: String,
     },
-    /// Plan mode was cancelled.
-    PlanModeCancelled {
-        turn: u32,
-        id: String,
-    },
     /// Plan-mode active state changed (for TUI replay / status updates).
     PlanUpdated {
         turn: u32,
@@ -401,18 +396,6 @@ mod tests {
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(json.contains("\"PlanModeExited\""));
-        let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(event, back);
-    }
-
-    #[test]
-    fn plan_mode_cancelled_serializes() {
-        let event = AgentEvent::PlanModeCancelled {
-            turn: 4,
-            id: "p1".into(),
-        };
-        let json = serde_json::to_string(&event).expect("serialize");
-        assert!(json.contains("\"PlanModeCancelled\""));
         let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(event, back);
     }

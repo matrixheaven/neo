@@ -642,7 +642,6 @@ fn rpc_sessions_export_json_returns_sanitized_replayed_session_artifact() {
         "export JSON should not leak absolute paths: {stdout}"
     );
     assert!(!stdout.contains("share_url"));
-    assert!(!stdout.contains("hosted"));
 
     let messages = parse_jsonl(&stdout);
     assert_eq!(messages.len(), 1);

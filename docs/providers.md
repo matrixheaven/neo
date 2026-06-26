@@ -47,10 +47,11 @@ The runtime should not parse provider-native chunks. It should consume these nor
 
 ## Credential Hints
 
-`neo_ai::find_env_keys(provider)` and `neo_ai::env_api_key(provider)` currently
-know a small environment-key map for common provider ids such as `anthropic`,
-`openai`, `openai-codex`, `github-copilot`, `google`, `google-vertex`,
-`mistral`, `openrouter`, and `amazon-bedrock`.
+`neo_ai::find_env_keys_from(provider, &env)` and
+`neo_ai::env_api_key_from(provider, &env)` currently know a small environment-key
+map for common provider ids such as `anthropic`, `openai`, `openai-codex`,
+`github-copilot`, `google`, `google-vertex`, `mistral`, `openrouter`, and
+`amazon-bedrock`.
 
 Neo does not have pi-style auth-file login flows yet. Keep provider secrets in
 environment variables or external secret managers. Anthropic can use

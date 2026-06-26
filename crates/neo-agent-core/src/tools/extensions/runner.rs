@@ -100,11 +100,6 @@ impl ExtensionRunner {
         }
         Ok(response)
     }
-
-    #[must_use]
-    pub fn child_id(&self) -> Option<u32> {
-        self.child.id()
-    }
 }
 
 impl Drop for ExtensionRunner {

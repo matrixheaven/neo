@@ -447,24 +447,6 @@ impl TuiRenderer {
         Ok(())
     }
 
-    /// Force the next `render()` call down the full clear render path.
-    pub fn force_clear(&mut self) {
-        // Set width_changed=true by making previous_width nonzero but different.
-        // The render() method checks `previous_width != 0 && previous_width != width`.
-        // We use 1 as a sentinel that will never match any real terminal width.
-        self.previous_lines.clear();
-        self.previous_width = 1; // sentinel — will always differ from real width
-        self.previous_height = 0;
-        self.previous_viewport_top = 0;
-        self.viewport_top = 0;
-        self.hardware_cursor_row = 0;
-        self.max_lines_rendered = 0;
-        self.cursor_row = 0;
-        // Do NOT set first_render — we want the width_changed path which does
-        // full_render(true), not first_render which does full_render(false).
-        self.first_render = false;
-    }
-
     /// Render a frame. `new_lines` contains all content lines (with ANSI codes).
     /// `cursor` is the optional prompt cursor position in the rendered content.
     ///

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, env};
+use std::collections::BTreeMap;
 
 const PROVIDER_ENV_KEYS: &[(&str, &[&str])] = &[
     ("anthropic", &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]),
@@ -16,16 +16,6 @@ const PROVIDER_ENV_KEYS: &[(&str, &[&str])] = &[
     ("mistral", &["MISTRAL_API_KEY"]),
     ("openrouter", &["OPENROUTER_API_KEY"]),
 ];
-
-#[must_use]
-pub fn find_env_keys(provider: &str) -> Vec<String> {
-    find_env_keys_from(provider, &env::vars().collect())
-}
-
-#[must_use]
-pub fn env_api_key(provider: &str) -> Option<String> {
-    env_api_key_from(provider, &env::vars().collect())
-}
 
 #[must_use]
 pub fn find_env_keys_from(provider: &str, env: &BTreeMap<String, String>) -> Vec<String> {

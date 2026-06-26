@@ -27,8 +27,8 @@ use crate::tools::BackgroundTaskManager;
 use crate::tools::normalize_path;
 use crate::{
     AgentEvent, AgentMessage, AgentToolCall, CompactionPhase, CompactionReason, CompactionSource,
-    CompactionSummary, Content, ImageRef, InjectionManager, PermissionApprovalDecision,
-    PermissionMode, PermissionOperation, PlanMode, PlanModeGuard, ProcessSupervisor, QueueKind,
+    CompactionSummary, Content, ImageRef, PermissionApprovalDecision, PermissionMode,
+    PermissionOperation, PlanMode, PlanModeGuard, PlanModeInjector, ProcessSupervisor, QueueKind,
     StopReason, TodoEventData, ToolAccess, ToolContext, ToolError, ToolRegistry, ToolResult,
     ToolUpdateCallback, check_plan_mode_guard,
     compaction::{self, CompactionStrategy},
@@ -88,11 +88,8 @@ enum ToolSchedulingClass {
     BlockingDialog,
 }
 
-#[allow(dead_code)]
 struct PreparedToolCall {
-    tool_call: AgentToolCall,
     result: PreparedToolCallResult,
-    scheduling: ToolSchedulingClass,
     access: ToolAccess,
 }
 
@@ -727,7 +724,7 @@ impl AgentContext {
                 self.plan_mode_active = true;
                 self.plan_mode_id = Some(id.clone());
             }
-            AgentEvent::PlanModeExited { .. } | AgentEvent::PlanModeCancelled { .. } => {
+            AgentEvent::PlanModeExited { .. } => {
                 self.plan_mode_active = false;
             }
             AgentEvent::PlanUpdated { enabled, .. } => {
@@ -1205,8 +1202,8 @@ async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatReque
             without_reasoning_content(message.to_chat_message())
         }
     }));
-    let mut injector = InjectionManager::new(Arc::clone(&config.plan_mode));
-    for injected in injector.inject(context).await {
+    let mut injector = PlanModeInjector::new(Arc::clone(&config.plan_mode));
+    if let Some(injected) = injector.inject(context) {
         messages.push(injected.to_chat_message());
     }
     ChatRequest {
@@ -1377,7 +1374,7 @@ impl EventEmitter {
                 context.plan_mode_active = true;
                 context.plan_mode_id = Some(id.clone());
             }
-            AgentEvent::PlanModeExited { .. } | AgentEvent::PlanModeCancelled { .. } => {
+            AgentEvent::PlanModeExited { .. } => {
                 context.plan_mode_active = false;
             }
             AgentEvent::PlanUpdated { enabled, .. } => {
@@ -1908,18 +1905,100 @@ fn append_queued_messages(emitter: &mut EventEmitter, messages: Vec<AgentMessage
 /// - the token estimate exceeds the strategy threshold.
 ///
 /// The LLM call runs inline (blocking the turn) and hard-fails on any error.
-#[allow(clippy::too_many_lines)]
 async fn maybe_compact(
     model: &Arc<dyn ModelClient>,
     config: &AgentConfig,
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
 ) {
-    let Some(settings) = config.compaction else {
+    let Some(trigger) = evaluate_compaction_need(config, emitter) else {
         return;
     };
-    if !settings.enabled {
+
+    let compacted_count = compute_compacted_count(&trigger);
+    if compacted_count == 0 {
+        if trigger.force {
+            let _ = emitter.send_error(AgentRuntimeError::Compaction(
+                compaction::CompactionError::NoBoundary,
+            ));
+        }
         return;
+    }
+
+    let (messages_to_compact, target_summary_chars) = emit_compaction_started(
+        emitter,
+        &trigger.messages,
+        compacted_count,
+        trigger.force,
+        trigger.used_tokens,
+    )
+    .await;
+
+    let (mut progress_rx, mut summary_rx) = spawn_summary_task(
+        model,
+        config,
+        &messages_to_compact,
+        trigger.custom_instruction.as_deref(),
+        cancel_token,
+    );
+
+    let Some((summary_text, progress_percent)) = run_summary_progress_loop(
+        emitter,
+        &mut progress_rx,
+        &mut summary_rx,
+        target_summary_chars,
+    )
+    .await
+    else {
+        return;
+    };
+
+    apply_compaction_result(
+        emitter,
+        config,
+        &trigger.messages,
+        compacted_count,
+        summary_text,
+        trigger.used_tokens,
+        progress_percent,
+    )
+    .await;
+}
+
+/// Bundled information produced by [`evaluate_compaction_need`] when compaction
+/// should proceed.
+struct CompactionTrigger {
+    force: bool,
+    custom_instruction: Option<String>,
+    messages: Vec<AgentMessage>,
+    used_tokens: usize,
+    max_context_tokens: usize,
+    settings: CompactionSettings,
+}
+
+/// Build the [`CompactionStrategy`] derived from [`CompactionSettings`].
+fn build_compaction_strategy(settings: &CompactionSettings) -> CompactionStrategy {
+    CompactionStrategy {
+        trigger_ratio: settings.trigger_ratio,
+        // Use keep_recent_messages as the auto-compaction retention limit so
+        // the configured value directly controls how many messages survive.
+        max_recent_messages: settings
+            .keep_recent_messages
+            .min(settings.max_recent_messages),
+        max_recent_size_ratio: 0.2,
+        reserved_context_tokens: settings.reserved_context_tokens,
+    }
+}
+
+/// Evaluate whether compaction should run based on settings, a manual request,
+/// and token thresholds. Returns `None` when no compaction is needed.
+fn evaluate_compaction_need(
+    config: &AgentConfig,
+    emitter: &EventEmitter,
+) -> Option<CompactionTrigger> {
+    let settings = config.compaction?;
+    if !settings.enabled {
+        return None;
     }
 
     let (force, custom_instruction) = match config.manual_compact_request.lock() {
@@ -1932,11 +2011,6 @@ async fn maybe_compact(
             (instruction.is_some(), instruction)
         }
     };
-    let source = if force {
-        CompactionSource::Manual
-    } else {
-        CompactionSource::Auto
-    };
 
     // Clone the messages out of the context so we can borrow `emitter` mutably
     // for event emission while still referencing the pre-compaction history.
@@ -1946,16 +2020,7 @@ async fn maybe_compact(
     let max_context_tokens = config.model.capabilities.max_context_tokens.unwrap_or(0) as usize;
     let used_tokens = compaction::estimate_messages_tokens(&messages);
 
-    let strategy = CompactionStrategy {
-        trigger_ratio: settings.trigger_ratio,
-        // Use keep_recent_messages as the auto-compaction retention limit so
-        // the configured value directly controls how many messages survive.
-        max_recent_messages: settings
-            .keep_recent_messages
-            .min(settings.max_recent_messages),
-        max_recent_size_ratio: 0.2,
-        reserved_context_tokens: settings.reserved_context_tokens,
-    };
+    let strategy = build_compaction_strategy(&settings);
 
     // Trigger compaction when:
     // 1. Manually requested via `/compact`, OR
@@ -1964,11 +2029,30 @@ async fn maybe_compact(
     let ratio_triggered = strategy.should_compact(used_tokens, max_context_tokens);
     let absolute_triggered = used_tokens > settings.max_estimated_tokens;
     if !force && !ratio_triggered && !absolute_triggered {
-        return;
+        return None;
     }
 
-    let compacted_count = compaction::compute_compact_count(
-        &messages,
+    Some(CompactionTrigger {
+        force,
+        custom_instruction,
+        messages,
+        used_tokens,
+        max_context_tokens,
+        settings,
+    })
+}
+
+/// Compute how many leading messages to compact. Only applies the fit-to-window
+/// constraint when the model actually advertises a context window.
+fn compute_compacted_count(trigger: &CompactionTrigger) -> usize {
+    let source = if trigger.force {
+        CompactionSource::Manual
+    } else {
+        CompactionSource::Auto
+    };
+    let strategy = build_compaction_strategy(&trigger.settings);
+    compaction::compute_compact_count(
+        &trigger.messages,
         source,
         &strategy,
         // Only apply the fit-to-window constraint when the model actually
@@ -1976,17 +2060,19 @@ async fn maybe_compact(
         // (max_estimated_tokens) is NOT the window — it's the compaction
         // trigger point — so passing it as the fit window would shrink
         // compaction to near-zero.
-        max_context_tokens,
-    );
-    if compacted_count == 0 {
-        if force {
-            let _ = emitter.send_error(AgentRuntimeError::Compaction(
-                compaction::CompactionError::NoBoundary,
-            ));
-        }
-        return;
-    }
+        trigger.max_context_tokens,
+    )
+}
 
+/// Emit `CompactionStarted` and the early progress phases, then compute the
+/// messages to compact and the target summary size.
+async fn emit_compaction_started(
+    emitter: &mut EventEmitter,
+    messages: &[AgentMessage],
+    compacted_count: usize,
+    force: bool,
+    used_tokens: usize,
+) -> (Vec<AgentMessage>, usize) {
     let reason = if force {
         CompactionReason::Manual
     } else {
@@ -2026,16 +2112,29 @@ async fn maybe_compact(
     let rendered_input_chars = compaction::render_messages_to_text(&messages_to_compact).len();
     let target_summary_chars = (rendered_input_chars / 10).max(500);
 
-    // Run the summary LLM in its own task and stream length updates back so the
-    // main loop can drive the progress bar without borrowing `emitter` across
-    // the streaming future.
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<usize>();
-    let (summary_tx, mut summary_rx) =
+    (messages_to_compact, target_summary_chars)
+}
+
+/// Spawn the summary LLM in its own task and return the progress and result
+/// channels.
+#[allow(clippy::type_complexity)]
+fn spawn_summary_task(
+    model: &Arc<dyn ModelClient>,
+    config: &AgentConfig,
+    messages_to_compact: &[AgentMessage],
+    custom_instruction: Option<&str>,
+    cancel_token: &CancellationToken,
+) -> (
+    mpsc::UnboundedReceiver<usize>,
+    oneshot::Receiver<Result<String, compaction::CompactionError>>,
+) {
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel::<usize>();
+    let (summary_tx, summary_rx) =
         oneshot::channel::<Result<String, compaction::CompactionError>>();
     let summary_model = Arc::clone(model);
     let summary_config = config.clone();
-    let summary_messages = messages_to_compact.clone();
-    let summary_instruction = custom_instruction.clone();
+    let summary_messages = messages_to_compact.to_vec();
+    let summary_instruction = custom_instruction.map(str::to_owned);
     let summary_cancel = cancel_token.child_token();
     tokio::spawn(async move {
         let result = compaction::generate_compaction_summary(
@@ -2051,13 +2150,25 @@ async fn maybe_compact(
         .await;
         let _ = summary_tx.send(result);
     });
+    (progress_rx, summary_rx)
+}
 
-    let mut progress_percent = 15;
+/// Drive the progress bar while waiting for the summary LLM to complete.
+/// Returns `None` (after sending an error) on failure, or `Some((text,
+/// progress_percent))` on success.
+async fn run_summary_progress_loop(
+    emitter: &mut EventEmitter,
+    progress_rx: &mut mpsc::UnboundedReceiver<usize>,
+    summary_rx: &mut oneshot::Receiver<Result<String, compaction::CompactionError>>,
+    target_summary_chars: usize,
+) -> Option<(String, u8)> {
+    let mut progress_percent: u8 = 15;
     let mut last_emitted_percent = progress_percent;
     let mut progress_tick = tokio::time::interval(Duration::from_millis(200));
     progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Skip the immediate first tick.
     let _ = progress_tick.tick().await;
+
     let summary_text: String;
     loop {
         tokio::select! {
@@ -2088,18 +2199,18 @@ async fn maybe_compact(
                     });
                 }
             }
-            result = &mut summary_rx => {
+            result = &mut *summary_rx => {
                 match result {
                     Ok(Ok(text)) => summary_text = text,
                     Ok(Err(err)) => {
                         let _ = emitter.send_error(AgentRuntimeError::Compaction(err));
-                        return;
+                        return None;
                     }
                     Err(_) => {
                         let _ = emitter.send_error(AgentRuntimeError::Compaction(
                             compaction::CompactionError::Llm("summary task aborted".to_owned()),
                         ));
-                        return;
+                        return None;
                     }
                 }
                 break;
@@ -2123,6 +2234,20 @@ async fn maybe_compact(
         }
     }
 
+    Some((summary_text, progress_percent))
+}
+
+/// Build the [`CompactionSummary`], animate the progress bar to 100%, emit
+/// `CompactionApplied`, and refresh the effective context window display.
+async fn apply_compaction_result(
+    emitter: &mut EventEmitter,
+    config: &AgentConfig,
+    messages: &[AgentMessage],
+    compacted_count: usize,
+    summary_text: String,
+    used_tokens: usize,
+    mut progress_percent: u8,
+) {
     let kept_messages = &messages[compacted_count..];
     let tokens_after =
         summary_text.len().div_ceil(4) + compaction::estimate_messages_tokens(kept_messages);
@@ -2854,19 +2979,14 @@ async fn prepare_tool_call(
     cancel_token: &CancellationToken,
 ) -> PreparedToolCall {
     let preparation = permission_preparation_for_mode(config, tool_call);
-    let scheduling = scheduling_class_for_preparation(config, tool_call, &preparation);
 
     match preparation {
         PermissionPreparation::Run(access) => PreparedToolCall {
-            tool_call: tool_call.clone(),
             result: PreparedToolCallResult::Run,
-            scheduling,
             access,
         },
         PermissionPreparation::Deny(message) => PreparedToolCall {
-            tool_call: tool_call.clone(),
             result: PreparedToolCallResult::Skip(ToolResult::error(message)),
-            scheduling,
             access: ToolAccess::none(),
         },
         PermissionPreparation::Ask {
@@ -2889,15 +3009,11 @@ async fn prepare_tool_call(
             .await
             {
                 Some(result) => PreparedToolCall {
-                    tool_call: tool_call.clone(),
                     result: PreparedToolCallResult::Skip(result),
-                    scheduling,
                     access: ToolAccess::none(),
                 },
                 None => PreparedToolCall {
-                    tool_call: tool_call.clone(),
                     result: PreparedToolCallResult::Run,
-                    scheduling,
                     access: access_for_tool(tool_call, true),
                 },
             }
@@ -2905,7 +3021,6 @@ async fn prepare_tool_call(
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn permission_preparation_for_mode(
     config: &AgentConfig,
     tool_call: &AgentToolCall,
@@ -2916,152 +3031,39 @@ fn permission_preparation_for_mode(
     let mode = current_permission_mode(config);
 
     // 1. Plan-mode hard guard.
-    {
-        let Ok(plan_mode) = config.plan_mode.read() else {
-            return PermissionPreparation::Deny("plan mode state is unavailable".to_owned());
-        };
-        if plan_mode.is_active() {
-            match check_plan_mode_guard(
-                &plan_mode,
-                config.workspace_root.as_deref(),
-                &tool_call.name,
-                &tool_call.arguments,
-            ) {
-                PlanModeGuard::Allow => {}
-                PlanModeGuard::Deny { message } => {
-                    return PermissionPreparation::Deny(message);
-                }
-            }
-        }
+    if let Some(prep) = check_plan_guard(config, tool_call) {
+        return prep;
     }
 
-    // 2. Auto mode hard deny for AskUserQuestion.
-    if tool_call.name == "AskUserQuestion" && mode == PermissionMode::Auto {
-        return PermissionPreparation::Deny(
-            "AskUserQuestion is disabled while auto permission mode is active".to_owned(),
-        );
+    // 2-5. Mode/tool-specific early returns (auto mode, EnterPlanMode, background AskUser).
+    if let Some(prep) = check_mode_early_returns(tool_call, mode) {
+        return prep;
     }
 
-    // 3. Background AskUserQuestion does not need an approval dialog in any mode.
-    if tool_call.name == "AskUserQuestion" && ask_user_runs_in_background(tool_call) {
-        return PermissionPreparation::Run(access_for_tool(tool_call, true));
-    }
-
-    // 4. Auto mode approves everything else.
-    if mode == PermissionMode::Auto {
-        return PermissionPreparation::Run(access_for_tool(tool_call, true));
-    }
-
-    // 5. EnterPlanMode is auto-approved in all modes.
-    if tool_call.name == "EnterPlanMode" {
-        return PermissionPreparation::Run(access_for_tool(tool_call, true));
-    }
-
-    // 6. Derive the reusable scope + prefix rule for this call. Done once here
-    //    so every downstream branch (session cache, prefix store, prompt) sees
-    //    the same values. Review transitions force both to `None`.
+    // 6. Derive the reusable scope + prefix rule for the ask fallback.
     let (session_scope, prefix_rule) = approval_scope_for_tool_call(config, tool_call);
 
-    // 7. Layer 2 — persistent prefix rules (loaded from disk). If the command's
-    //    canonical argv starts with a saved prefix, auto-approve without prompt.
-    if let Some(argv) = shell_argv_for_prefix_check(config, tool_call)
-        && config
-            .prefix_approval_rules
-            .lock()
-            .ok()
-            .is_some_and(|store| store.matches(&argv))
-    {
-        return PermissionPreparation::Run(access_for_tool(tool_call, true));
+    // 7-8. Cached approvals (persistent prefix rules + session approvals).
+    if let Some(prep) = check_cached_approvals(config, tool_call, &session_scope) {
+        return prep;
     }
 
-    // 8. Layer 1 — session approvals scoped by exact canonical command + cwd
-    //    (or exact file path + operation). NOT keyed by tool name, so approving
-    //    one Bash command never approves a different Bash command.
-    if let Some(scope) = &session_scope
-        && config
-            .session_approvals
-            .lock()
-            .ok()
-            .is_some_and(|set| scope.is_approved(&set))
-    {
-        return PermissionPreparation::Run(access_for_tool(tool_call, true));
-    }
-
-    // 9. ExitPlanMode review in ask/yolo when plan is non-empty.
-    //    These transitions must never become session-scoped wildcards, so scope
-    //    and prefix are forced to `None` in `approval_scope_for_tool_call`.
-    if tool_call.name == "ExitPlanMode" {
-        if exit_plan_mode_has_reviewable_plan(config) {
-            return PermissionPreparation::Ask {
-                operation: PermissionOperation::PlanTransition,
-                subject: "Exit plan mode".to_owned(),
-                session_scope: None,
-                prefix_rule: None,
-            };
-        }
-        return PermissionPreparation::Run(access_for_tool(tool_call, true));
-    }
-
-    if tool_call.name == "ExitGoalMode" {
-        if mode == PermissionMode::Auto {
-            return PermissionPreparation::Run(access_for_tool(tool_call, true));
-        }
-        return PermissionPreparation::Ask {
-            operation: PermissionOperation::GoalTransition,
-            subject: "Start reviewed goal".to_owned(),
-            session_scope: None,
-            prefix_rule: None,
-        };
+    // 9-10. Transition tools (ExitPlanMode, ExitGoalMode).
+    if let Some(prep) = check_transition_tools(config, tool_call, mode) {
+        return prep;
     }
 
     // 10. Plan-mode helper approvals (e.g. writing the active plan file).
-    if matches!(tool_call.name.as_str(), "Write" | "Edit") {
-        let Ok(plan_mode) = config.plan_mode.read() else {
-            return PermissionPreparation::Deny("plan mode state is unavailable".to_owned());
-        };
-        if let Some(path) = tool_call.arguments.get("path").and_then(|v| v.as_str())
-            && plan_mode.is_active()
-            && is_active_plan_file_path(&plan_mode, config.workspace_root.as_deref(), path)
-        {
-            return PermissionPreparation::Run(access_for_tool(tool_call, true));
-        }
+    if let Some(prep) = check_plan_file_write(config, tool_call) {
+        return prep;
     }
 
-    // 11. Yolo mode approves all remaining tools.
-    if mode == PermissionMode::Yolo {
-        return PermissionPreparation::Run(access_for_tool(tool_call, true));
+    // 11-13. Yolo mode, safe commands, and default-approved tools.
+    if let Some(prep) = check_safe_or_prompt(config, tool_call, mode) {
+        return prep;
     }
 
-    // 12. Layer 3 — read-only safe commands skip the prompt in ask mode.
-    //     `git status`, `ls`, `cat`, `cargo test`, etc. are auto-approved when
-    //     they classify as known-safe. Dangerous commands bypass this and the
-    //     default-approved list below so they always prompt.
-    if let Some(argv) = shell_argv_for_prefix_check(config, tool_call) {
-        if command_might_be_dangerous(&argv) {
-            // Force a prompt; do NOT offer session/prefix scope for dangerous
-            // commands, so the user re-reviews every time.
-            let (operation, subject) = permission_operation_for_tool(tool_call)
-                .unwrap_or((PermissionOperation::Tool, tool_call.name.clone()));
-            return PermissionPreparation::Ask {
-                operation,
-                subject,
-                session_scope: None,
-                prefix_rule: None,
-            };
-        }
-        if is_known_safe_command(&argv) {
-            return PermissionPreparation::Run(access_for_tool(tool_call, true));
-        }
-    }
-
-    // 13. Default safe tools in ask mode.
-    if is_default_approved_tool(tool_call) {
-        return PermissionPreparation::Run(access_for_tool(tool_call, true));
-    }
-
-    // 14. Ask fallback prompt. The derived scope + prefix travel with the Ask
-    //     so the UI can show the exact saved target (or omit the option when
-    //     scope is `None`, e.g. dangerous commands).
+    // 14. Ask fallback prompt.
     let (operation, subject) = permission_operation_for_tool(tool_call)
         .unwrap_or((PermissionOperation::Tool, tool_call.name.clone()));
     PermissionPreparation::Ask {
@@ -3070,6 +3072,185 @@ fn permission_preparation_for_mode(
         session_scope,
         prefix_rule,
     }
+}
+
+/// Section 1 — plan-mode hard guard. Returns `Some(Deny)` if the plan-mode guard
+/// rejects the call, or `None` to continue the pipeline.
+fn check_plan_guard(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+) -> Option<PermissionPreparation> {
+    let plan_mode = config.plan_mode.read().ok()?;
+    if plan_mode.is_active() {
+        match check_plan_mode_guard(
+            &plan_mode,
+            config.workspace_root.as_deref(),
+            &tool_call.name,
+            &tool_call.arguments,
+        ) {
+            PlanModeGuard::Allow => {}
+            PlanModeGuard::Deny { message } => {
+                return Some(PermissionPreparation::Deny(message));
+            }
+        }
+    }
+    None
+}
+
+/// Sections 2-5 — mode/tool-specific early returns: auto-mode AskUserQuestion
+/// deny, background AskUserQuestion run, auto-mode approves-all, EnterPlanMode
+/// auto-approve.
+fn check_mode_early_returns(
+    tool_call: &AgentToolCall,
+    mode: PermissionMode,
+) -> Option<PermissionPreparation> {
+    // 2. Auto mode hard deny for AskUserQuestion.
+    if tool_call.name == "AskUserQuestion" && mode == PermissionMode::Auto {
+        return Some(PermissionPreparation::Deny(
+            "AskUserQuestion is disabled while auto permission mode is active".to_owned(),
+        ));
+    }
+
+    // 3. Background AskUserQuestion does not need an approval dialog in any mode.
+    if tool_call.name == "AskUserQuestion" && ask_user_runs_in_background(tool_call) {
+        return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
+    }
+
+    // 4. Auto mode approves everything else.
+    if mode == PermissionMode::Auto {
+        return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
+    }
+
+    // 5. EnterPlanMode is auto-approved in all modes.
+    if tool_call.name == "EnterPlanMode" {
+        return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
+    }
+
+    None
+}
+
+/// Sections 7-8 — cached approvals: persistent prefix rules (layer 2) and
+/// session approvals (layer 1). Returns `Some(Run)` when the call matches a
+/// cached approval.
+fn check_cached_approvals(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+    session_scope: &Option<SessionApprovalScope>,
+) -> Option<PermissionPreparation> {
+    // Layer 2 — persistent prefix rules (loaded from disk).
+    if let Some(argv) = shell_argv_for_prefix_check(config, tool_call)
+        && config
+            .prefix_approval_rules
+            .lock()
+            .ok()
+            .is_some_and(|store| store.matches(&argv))
+    {
+        return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
+    }
+
+    // Layer 1 — session approvals scoped by exact canonical command + cwd
+    // (or exact file path + operation).
+    if let Some(scope) = session_scope
+        && config
+            .session_approvals
+            .lock()
+            .ok()
+            .is_some_and(|set| scope.is_approved(&set))
+    {
+        return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
+    }
+
+    None
+}
+
+/// Sections 9-10 — transition tools: ExitPlanMode and ExitGoalMode. These
+/// transitions must never become session-scoped wildcards.
+fn check_transition_tools(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+    mode: PermissionMode,
+) -> Option<PermissionPreparation> {
+    if tool_call.name == "ExitPlanMode" {
+        if exit_plan_mode_has_reviewable_plan(config) {
+            return Some(PermissionPreparation::Ask {
+                operation: PermissionOperation::PlanTransition,
+                subject: "Exit plan mode".to_owned(),
+                session_scope: None,
+                prefix_rule: None,
+            });
+        }
+        return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
+    }
+
+    if tool_call.name == "ExitGoalMode" {
+        if mode == PermissionMode::Auto {
+            return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
+        }
+        return Some(PermissionPreparation::Ask {
+            operation: PermissionOperation::GoalTransition,
+            subject: "Start reviewed goal".to_owned(),
+            session_scope: None,
+            prefix_rule: None,
+        });
+    }
+
+    None
+}
+
+/// Section 10 — plan-mode helper approvals (Write/Edit to the active plan file).
+fn check_plan_file_write(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+) -> Option<PermissionPreparation> {
+    if !matches!(tool_call.name.as_str(), "Write" | "Edit") {
+        return None;
+    }
+    let plan_mode = config.plan_mode.read().ok()?;
+    if let Some(path) = tool_call.arguments.get("path").and_then(|v| v.as_str())
+        && plan_mode.is_active()
+        && is_active_plan_file_path(&plan_mode, config.workspace_root.as_deref(), path)
+    {
+        return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
+    }
+    None
+}
+
+/// Sections 11-13 — yolo mode approves-all, dangerous-command force-prompt,
+/// known-safe commands, and default-approved tools.
+fn check_safe_or_prompt(
+    config: &AgentConfig,
+    tool_call: &AgentToolCall,
+    mode: PermissionMode,
+) -> Option<PermissionPreparation> {
+    // 11. Yolo mode approves all remaining tools.
+    if mode == PermissionMode::Yolo {
+        return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
+    }
+
+    // 12. Read-only safe commands skip the prompt in ask mode. Dangerous
+    //     commands bypass this and force a prompt.
+    if let Some(argv) = shell_argv_for_prefix_check(config, tool_call) {
+        if command_might_be_dangerous(&argv) {
+            let (operation, subject) = permission_operation_for_tool(tool_call)
+                .unwrap_or((PermissionOperation::Tool, tool_call.name.clone()));
+            return Some(PermissionPreparation::Ask {
+                operation,
+                subject,
+                session_scope: None,
+                prefix_rule: None,
+            });
+        }
+        if is_known_safe_command(&argv) {
+            return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
+        }
+    }
+
+    // 13. Default safe tools in ask mode.
+    if is_default_approved_tool(tool_call) {
+        return Some(PermissionPreparation::Run(access_for_tool(tool_call, true)));
+    }
+
+    None
 }
 
 /// Read the live permission mode. Falls back to the static snapshot only when

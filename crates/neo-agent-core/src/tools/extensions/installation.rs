@@ -6,10 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use super::{
-    DiscoveredExtension, ExtensionDiscovery, ExtensionDiscoveryError, ExtensionLifecycleStore,
-    ExtensionManifest,
-};
+use super::{DiscoveredExtension, ExtensionDiscovery, ExtensionDiscoveryError, ExtensionManifest};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledExtension {
@@ -75,7 +72,7 @@ pub enum ExtensionInstallError {
 #[derive(Debug, Clone)]
 pub struct ExtensionInstaller {
     root: PathBuf,
-    state_path: PathBuf,
+    _state_path: PathBuf,
     registry_path: PathBuf,
 }
 
@@ -88,14 +85,9 @@ impl ExtensionInstaller {
     ) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
-            state_path: state_path.as_ref().to_path_buf(),
+            _state_path: state_path.as_ref().to_path_buf(),
             registry_path: registry_path.as_ref().to_path_buf(),
         }
-    }
-
-    #[must_use]
-    pub fn lifecycle(&self) -> ExtensionLifecycleStore {
-        ExtensionLifecycleStore::new(&self.state_path)
     }
 
     pub fn install(

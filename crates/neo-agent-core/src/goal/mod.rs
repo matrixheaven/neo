@@ -150,11 +150,6 @@ impl GoalStore {
     pub fn queue(&self) -> &VecDeque<Goal> {
         &self.queue
     }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.active.is_none() && self.queue.is_empty()
-    }
 }
 
 fn goals_dir(session_dir: &Path) -> PathBuf {

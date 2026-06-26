@@ -348,12 +348,39 @@ pub struct McpConfig {
     pub servers: Vec<McpServerConfig>,
 }
 
+/// Transport mechanism for an MCP server connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpTransport {
+    Stdio,
+    Http,
+    Sse,
+}
+
+impl McpTransport {
+    /// Returns the string representation used in config files.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stdio => "stdio",
+            Self::Http => "http",
+            Self::Sse => "sse",
+        }
+    }
+}
+
+impl std::fmt::Display for McpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     pub id: String,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    pub transport: String,
+    pub transport: McpTransport,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -623,7 +650,7 @@ fn provider_api_key_env(
 }
 
 pub fn upsert_mcp_server(server: &McpServerConfig, config_path: &Path) -> anyhow::Result<String> {
-    validate_mcp_server(server)?;
+    crate::mcp_ops::validate_mcp_server_config(server)?;
     let mut config = read_file_config(config_path)?;
     let mcp = config.mcp.get_or_insert_with(McpConfig::default);
     if let Some(existing) = mcp
@@ -671,42 +698,6 @@ pub fn set_mcp_server_enabled(
     write_file_config(config_path, &config)?;
     let action = if enabled { "enabled" } else { "disabled" };
     Ok(format!("{action} MCP server {server_id}\n"))
-}
-
-fn validate_mcp_server(server: &McpServerConfig) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !server.id.trim().is_empty(),
-        "MCP server id must not be empty"
-    );
-    anyhow::ensure!(
-        !server.id.contains('/'),
-        "MCP server id must not contain '/'"
-    );
-    match server.transport.as_str() {
-        "stdio" => {
-            anyhow::ensure!(
-                server
-                    .command
-                    .as_deref()
-                    .is_some_and(|command| !command.trim().is_empty()),
-                "stdio MCP server {} requires --command",
-                server.id
-            );
-        }
-        "http" | "sse" => {
-            anyhow::ensure!(
-                server
-                    .url
-                    .as_deref()
-                    .is_some_and(|url| !url.trim().is_empty()),
-                "{} MCP server {} requires --url",
-                server.transport,
-                server.id
-            );
-        }
-        other => anyhow::bail!("unsupported MCP transport for {}: {other}", server.id),
-    }
-    Ok(())
 }
 
 fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
@@ -943,11 +934,11 @@ pub(crate) fn workspace_sessions_dir(config: &AppConfig) -> PathBuf {
     compute_workspace_sessions_dir(&config.sessions_dir, &config.project_dir)
 }
 
-fn expand_user_path(path: PathBuf) -> PathBuf {
+pub(crate) fn expand_user_path(path: PathBuf) -> PathBuf {
     expand_user_path_with_home(path, user_home().as_deref())
 }
 
-fn expand_user_path_with_home(path: PathBuf, home: Option<&Path>) -> PathBuf {
+pub(crate) fn expand_user_path_with_home(path: PathBuf, home: Option<&Path>) -> PathBuf {
     let Some(raw) = path.to_str().map(str::to_owned) else {
         return path;
     };
@@ -960,7 +951,7 @@ fn expand_user_path_with_home(path: PathBuf, home: Option<&Path>) -> PathBuf {
     home.map_or(path, |home| home.join(rest))
 }
 
-fn user_home() -> Option<PathBuf> {
+pub(crate) fn user_home() -> Option<PathBuf> {
     env::var_os("HOME")
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)

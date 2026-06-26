@@ -15,6 +15,10 @@ use tokio::{sync::Mutex, time::timeout};
 
 use super::{McpError, McpResourceDefinition, McpResourceRead, McpToolDefinition, McpToolResponse};
 
+/// MCP client abstraction.
+///
+/// This trait exists to enable test doubles (`MockMcpClient`, `FailingClient`
+/// in `mcp_manager` tests). The only production implementor is `RmcpClient`.
 #[async_trait]
 pub trait McpClient: Send + Sync {
     async fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError>;

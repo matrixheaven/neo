@@ -18,14 +18,6 @@ const COMMAND_PREVIEW_LINES: usize = 10;
 /// always be rendered, regardless of terminal width.
 const MAX_ARG_LENGTH: usize = 60;
 
-#[must_use]
-pub fn tool_header(state: &ToolCallState) -> String {
-    tool_header_spans(state, &TuiTheme::default(), None)
-        .iter()
-        .map(Span::text)
-        .collect()
-}
-
 /// Build the tool header as styled spans: `{symbol} {verb} {name} ({key}){chip}`.
 ///
 /// Color mapping (mirrors Neo's tool header):

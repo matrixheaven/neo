@@ -1,4 +1,4 @@
-//! Stdio MCP client builder (Task 2.2).
+//! Stdio MCP client builder.
 
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
@@ -8,8 +8,6 @@ use tokio::process::Command;
 use super::{McpError, client::McpClient};
 use crate::tools::ProcessSupervisor;
 
-// TODO: `StdioConfig` is currently unused while the rmcp migration is in
-// progress. It will be wired up through `McpConnectionManager` in Task 4.
 #[derive(Debug, Clone)]
 pub struct StdioConfig {
     pub command: String,
@@ -23,8 +21,6 @@ pub struct StdioConfig {
     pub tool_timeout_ms: Option<u64>,
 }
 
-// TODO: `build_stdio_client` is currently unused while the rmcp migration is in
-// progress. It will be wired up through `McpConnectionManager` in Task 4.
 pub async fn build_stdio_client(
     server_id: &str,
     config: StdioConfig,
@@ -55,16 +51,12 @@ pub async fn build_stdio_client(
     let handle = format!("mcp_stdio_{server_id}");
     let client_for_cleanup = Arc::clone(&client);
     supervisor
-        .register(
-            handle,
-            crate::tools::ProcessKind::McpStdio,
-            move |_handle| {
-                let client = Arc::clone(&client_for_cleanup);
-                Box::pin(async move {
-                    let _ = client.shutdown().await;
-                })
-            },
-        )
+        .register(handle, move |_handle| {
+            let client = Arc::clone(&client_for_cleanup);
+            Box::pin(async move {
+                let _ = client.shutdown().await;
+            })
+        })
         .await;
 
     Ok(client)

@@ -14,7 +14,7 @@ use neo_agent_core::{
 };
 use tokio::sync::RwLock;
 
-use crate::config::{McpServerConfig, neo_home};
+use crate::config::{McpServerConfig, McpTransport, neo_home};
 
 pub use neo_agent_core::ManagedMcpServerConfig;
 
@@ -62,26 +62,25 @@ pub enum McpToolDiscovery {
     Failed(String),
 }
 
-/// Convert CLI/user-facing type labels to the persisted transport value.
-pub fn parse_mcp_kind(type_arg: &str) -> anyhow::Result<&'static str> {
+/// Convert CLI/user-facing type labels to the persisted transport enum.
+pub fn parse_mcp_kind(type_arg: &str) -> anyhow::Result<McpTransport> {
     match type_arg {
-        "studio" | "stdio" => Ok("stdio"),
-        "remote-http" | "http" => Ok("http"),
-        "remote-sse" | "sse" => Ok("sse"),
+        "studio" | "stdio" => Ok(McpTransport::Stdio),
+        "remote-http" | "http" => Ok(McpTransport::Http),
+        "remote-sse" | "sse" => Ok(McpTransport::Sse),
         other => {
             anyhow::bail!("unknown MCP type '{other}'; expected studio, remote-http, or remote-sse")
         }
     }
 }
 
-/// Convert a persisted transport value back to a CLI/user-facing label.
+/// Convert a persisted transport enum back to a CLI/user-facing label.
 #[must_use]
-pub fn display_mcp_kind(transport: &str) -> &str {
+pub fn display_mcp_kind(transport: McpTransport) -> &'static str {
     match transport {
-        "stdio" => "studio",
-        "http" => "remote-http",
-        "sse" => "remote-sse",
-        other => other,
+        McpTransport::Stdio => "studio",
+        McpTransport::Http => "remote-http",
+        McpTransport::Sse => "remote-sse",
     }
 }
 
@@ -117,8 +116,8 @@ pub fn validate_mcp_server_config(server: &McpServerConfig) -> anyhow::Result<()
         !server.id.contains('/'),
         "MCP server id must not contain '/'"
     );
-    match server.transport.as_str() {
-        "stdio" => {
+    match server.transport {
+        McpTransport::Stdio => {
             anyhow::ensure!(
                 server.command.is_some(),
                 "studio MCP server '{}' requires a command",
@@ -135,7 +134,7 @@ pub fn validate_mcp_server_config(server: &McpServerConfig) -> anyhow::Result<()
                 server.id
             );
         }
-        "http" | "sse" => {
+        McpTransport::Http | McpTransport::Sse => {
             anyhow::ensure!(
                 server.url.is_some(),
                 "remote MCP server '{}' requires a url",
@@ -152,7 +151,6 @@ pub fn validate_mcp_server_config(server: &McpServerConfig) -> anyhow::Result<()
                 server.id
             );
         }
-        other => anyhow::bail!("unsupported MCP transport for {}: {other}", server.id),
     }
     Ok(())
 }
@@ -161,7 +159,7 @@ pub fn validate_mcp_server_config(server: &McpServerConfig) -> anyhow::Result<()
 pub fn build_mcp_server_config(input: AddMcpServerInput) -> anyhow::Result<McpServerConfig> {
     let transport = parse_mcp_kind(&input.cli_type)?;
 
-    let (command, args) = if transport == "stdio" {
+    let (command, args) = if transport == McpTransport::Stdio {
         let Some(cmd) = input.command else {
             anyhow::bail!("studio MCP requires a command");
         };
@@ -174,7 +172,7 @@ pub fn build_mcp_server_config(input: AddMcpServerInput) -> anyhow::Result<McpSe
         (None, Vec::new())
     };
 
-    let url = if transport == "http" || transport == "sse" {
+    let url = if transport == McpTransport::Http || transport == McpTransport::Sse {
         let Some(url) = input.url else {
             anyhow::bail!("remote MCP requires a url");
         };
@@ -186,17 +184,20 @@ pub fn build_mcp_server_config(input: AddMcpServerInput) -> anyhow::Result<McpSe
         None
     };
 
-    if transport != "http" && transport != "sse" && !input.headers.is_empty() {
+    if transport != McpTransport::Http
+        && transport != McpTransport::Sse
+        && !input.headers.is_empty()
+    {
         anyhow::bail!("--header is only valid for remote-http / remote-sse");
     }
-    if transport != "stdio" && input.cwd.is_some() {
+    if transport != McpTransport::Stdio && input.cwd.is_some() {
         anyhow::bail!("--cwd is only valid for studio");
     }
 
     Ok(McpServerConfig {
         id: input.id,
         enabled: input.enabled,
-        transport: transport.to_owned(),
+        transport,
         command,
         url,
         args,
@@ -213,8 +214,8 @@ pub fn build_mcp_server_config(input: AddMcpServerInput) -> anyhow::Result<McpSe
 /// Convert a persisted config to a runtime-managed config.
 pub fn to_managed_config(server: &McpServerConfig) -> anyhow::Result<ManagedMcpServerConfig> {
     validate_mcp_server_config(server)?;
-    let transport = match server.transport.as_str() {
-        "stdio" => {
+    let transport = match server.transport {
+        McpTransport::Stdio => {
             let command = server
                 .command
                 .clone()
@@ -226,21 +227,20 @@ pub fn to_managed_config(server: &McpServerConfig) -> anyhow::Result<ManagedMcpS
                 cwd: server.cwd.clone(),
             }
         }
-        "http" => {
+        McpTransport::Http => {
             let url = server.url.clone().context("missing MCP url for {}")?;
             ManagedMcpTransport::Http {
                 url,
                 headers: server.headers.clone(),
             }
         }
-        "sse" => {
+        McpTransport::Sse => {
             let url = server.url.clone().context("missing MCP url for {}")?;
             ManagedMcpTransport::Sse {
                 url,
                 headers: server.headers.clone(),
             }
         }
-        other => anyhow::bail!("unsupported MCP transport for {}: {other}", server.id),
     };
     Ok(ManagedMcpServerConfig {
         id: server.id.clone(),
@@ -272,8 +272,8 @@ pub fn summarize_mcp_servers_without_discovery(
         .iter()
         .map(|server| McpServerSummary {
             id: server.id.clone(),
-            transport: server.transport.clone(),
-            transport_label: display_mcp_kind(&server.transport).to_owned(),
+            transport: server.transport.as_str().to_owned(),
+            transport_label: display_mcp_kind(server.transport).to_owned(),
             enabled: server.enabled,
             endpoint_summary: endpoint_summary(server),
             cwd: server.cwd.clone(),
@@ -545,20 +545,20 @@ mod tests {
 
     #[test]
     fn parse_mcp_kind_maps_aliases() {
-        assert_eq!(parse_mcp_kind("studio").unwrap(), "stdio");
-        assert_eq!(parse_mcp_kind("stdio").unwrap(), "stdio");
-        assert_eq!(parse_mcp_kind("remote-http").unwrap(), "http");
-        assert_eq!(parse_mcp_kind("http").unwrap(), "http");
-        assert_eq!(parse_mcp_kind("remote-sse").unwrap(), "sse");
-        assert_eq!(parse_mcp_kind("sse").unwrap(), "sse");
+        assert_eq!(parse_mcp_kind("studio").unwrap(), McpTransport::Stdio);
+        assert_eq!(parse_mcp_kind("stdio").unwrap(), McpTransport::Stdio);
+        assert_eq!(parse_mcp_kind("remote-http").unwrap(), McpTransport::Http);
+        assert_eq!(parse_mcp_kind("http").unwrap(), McpTransport::Http);
+        assert_eq!(parse_mcp_kind("remote-sse").unwrap(), McpTransport::Sse);
+        assert_eq!(parse_mcp_kind("sse").unwrap(), McpTransport::Sse);
         assert!(parse_mcp_kind("unknown").is_err());
     }
 
     #[test]
     fn display_mcp_kind_round_trips() {
-        assert_eq!(display_mcp_kind("stdio"), "studio");
-        assert_eq!(display_mcp_kind("http"), "remote-http");
-        assert_eq!(display_mcp_kind("sse"), "remote-sse");
+        assert_eq!(display_mcp_kind(McpTransport::Stdio), "studio");
+        assert_eq!(display_mcp_kind(McpTransport::Http), "remote-http");
+        assert_eq!(display_mcp_kind(McpTransport::Sse), "remote-sse");
     }
 
     #[test]
@@ -646,7 +646,7 @@ mod tests {
         let server = McpServerConfig {
             id: "fs".to_owned(),
             enabled: true,
-            transport: "stdio".to_owned(),
+            transport: McpTransport::Stdio,
             command: Some("npx".to_owned()),
             url: None,
             args: vec!["-y".to_owned()],
@@ -691,7 +691,7 @@ mod tests {
                 servers: vec![McpServerConfig {
                     id: "docs".to_owned(),
                     enabled: true,
-                    transport: "stdio".to_owned(),
+                    transport: McpTransport::Stdio,
                     command: Some("docs-mcp".to_owned()),
                     url: None,
                     args: Vec::new(),

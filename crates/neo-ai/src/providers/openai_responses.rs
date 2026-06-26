@@ -315,6 +315,8 @@ fn content_text_with_reasoning_replay(
     ))
 }
 
+// NOTE: Uses provider-specific reasoning-replay validation; cannot use the shared
+// collect_text_content helper.
 fn text_content(content: &[ContentPart]) -> String {
     text_content_with_reasoning_replay(content, true)
 }

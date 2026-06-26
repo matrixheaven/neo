@@ -155,11 +155,6 @@ impl SkillStore {
             .filter(|skill| skill.manifest.auto_invokable())
             .collect()
     }
-
-    #[must_use]
-    pub fn available_for_slash(&self) -> Vec<&LoadedSkill> {
-        self.skills.values().collect()
-    }
 }
 
 pub fn load_skill_file(

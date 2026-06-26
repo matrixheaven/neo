@@ -35,7 +35,6 @@ pub struct ToolCallComponent {
     streaming_started_at: Option<std::time::Instant>,
 }
 
-const MAX_PROGRESS_LINES: usize = 24;
 const MAX_LIVE_OUTPUT_LINES: usize = 6;
 const MAX_LIVE_OUTPUT_CHARS: usize = 50_000;
 
@@ -76,14 +75,6 @@ impl ToolCallComponent {
         self.state.status = status;
         if status == ToolStatusKind::Running && self.streaming_started_at.is_none() {
             self.streaming_started_at = Some(std::time::Instant::now());
-        }
-    }
-
-    pub fn append_progress(&mut self, line: impl Into<String>) {
-        self.progress_lines.push(line.into());
-        if self.progress_lines.len() > MAX_PROGRESS_LINES {
-            let extra = self.progress_lines.len() - MAX_PROGRESS_LINES;
-            self.progress_lines.drain(..extra);
         }
     }
 
@@ -160,12 +151,6 @@ impl ToolCallComponent {
     #[must_use]
     pub const fn state(&self) -> &ToolCallState {
         &self.state
-    }
-
-    /// Consume into the underlying state.
-    #[must_use]
-    pub fn into_state(self) -> ToolCallState {
-        self.state
     }
 
     #[must_use]

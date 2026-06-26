@@ -17,8 +17,8 @@ use tokio::{
 use uuid::Uuid;
 
 use super::{
-    ProcessKind, Tool, ToolContext, ToolError, ToolFuture, ToolResult, ToolUpdateCallback,
-    cap_output, parse_input, schema,
+    Tool, ToolContext, ToolError, ToolFuture, ToolResult, ToolUpdateCallback, cap_output,
+    parse_input, schema,
 };
 
 const TERMINAL_READ_MAX_WAIT: Duration = Duration::from_millis(250);
@@ -232,7 +232,7 @@ async fn start_terminal(
         },
     );
     ctx.process_supervisor
-        .register(handle.clone(), ProcessKind::Terminal, |handle| {
+        .register(handle.clone(), |handle| {
             Box::pin(async move { cleanup_terminal_session(&handle).await })
         })
         .await;

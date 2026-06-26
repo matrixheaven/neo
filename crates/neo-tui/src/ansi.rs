@@ -481,29 +481,6 @@ pub fn truncate_to_width(text: &str, width: usize) -> String {
     result
 }
 
-/// A styled line of text (content + style).
-#[derive(Debug, Clone, Default)]
-pub struct StyledLine {
-    pub text: String,
-    pub style: Style,
-}
-
-impl StyledLine {
-    #[must_use]
-    pub fn new(text: impl Into<String>, style: Style) -> Self {
-        Self {
-            text: text.into(),
-            style,
-        }
-    }
-
-    /// Convert to a single ANSI-styled string.
-    #[must_use]
-    pub fn to_ansi(&self) -> String {
-        paint(&self.text, self.style)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

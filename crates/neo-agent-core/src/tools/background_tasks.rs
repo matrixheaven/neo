@@ -1023,7 +1023,8 @@ mod tests {
         manager
             .start_question("q-1".to_owned(), "Pick one".to_owned())
             .await;
-        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(dir.path())
             .unwrap()
             .with_background_tasks(manager);
         let tool = TaskListTool;
@@ -1045,7 +1046,8 @@ mod tests {
             .await
             .expect("bash task should start");
         let task_id = result_task_id(&started);
-        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(dir.path())
             .unwrap()
             .with_background_tasks(manager);
         let tool = TaskOutputTool;
@@ -1070,7 +1072,8 @@ mod tests {
             .await
             .expect("bash task should start");
         let task_id = result_task_id(&started);
-        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(dir.path())
             .unwrap()
             .with_access(crate::ToolAccess::all())
             .with_background_tasks(manager);
@@ -1096,7 +1099,8 @@ mod tests {
             .await
             .expect("bash task should start");
         let task_id = result_task_id(&started);
-        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(dir.path())
             .unwrap()
             .with_access(crate::ToolAccess {
                 file_read: true,

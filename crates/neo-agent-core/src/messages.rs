@@ -145,6 +145,24 @@ impl AgentMessage {
         }
     }
 
+    /// Extract all `Text` content parts from this message and join them.
+    ///
+    /// Returns an empty string for variants without text content.
+    #[must_use]
+    pub fn text(&self) -> String {
+        let content = match self {
+            Self::System { content }
+            | Self::User { content }
+            | Self::Assistant { content, .. }
+            | Self::ToolResult { content, .. } => content,
+        };
+        content
+            .iter()
+            .filter_map(Content::as_text)
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
     #[must_use]
     pub fn to_chat_message(&self) -> ChatMessage {
         match self {

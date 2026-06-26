@@ -1,18 +1,6 @@
-use neo_agent_core::{DEFAULT_BASH_TIMEOUT, ToolAccess, ToolContext, ToolError, ToolRegistry};
+use neo_agent_core::{ToolAccess, ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
-
-#[test]
-fn bash_default_timeout_allows_long_workspace_commands() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let context = ToolContext::new(workspace.path()).expect("context");
-
-    assert_eq!(context.bash_timeout, DEFAULT_BASH_TIMEOUT);
-    assert_eq!(
-        context.bash_timeout,
-        std::time::Duration::from_secs(10 * 60)
-    );
-}
 
 #[test]
 fn bash_model_schema_matches_kimi_style_shape() {

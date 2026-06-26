@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::{ApiType, ModelCapabilities};
+use crate::ApiType;
 
 /// Public catalog endpoint.
 pub const CATALOG_URL: &str = "https://models.dev/api.json";
@@ -89,7 +89,6 @@ pub struct CatalogModelInfo {
     pub max_context_tokens: Option<u32>,
     pub max_output_tokens: Option<u32>,
     pub capabilities: Vec<String>,
-    pub reasoning_key: Option<String>,
 }
 
 /// Result of applying a catalog provider: the config-level provider definition
@@ -189,7 +188,6 @@ pub fn catalog_provider_models(entry: &CatalogEntry) -> Vec<CatalogModelInfo> {
             max_context_tokens: m.limit.as_ref().and_then(|l| l.context),
             max_output_tokens: m.limit.as_ref().and_then(|l| l.output),
             capabilities: catalog_model_capabilities(m),
-            reasoning_key: catalog_reasoning_key(m),
         })
         .collect()
 }
@@ -224,15 +222,6 @@ fn catalog_model_accepts_images(model: &CatalogModel) -> bool {
         .is_some_and(|modalities| modalities.input.iter().any(|m| m == "image"))
 }
 
-/// Extract reasoning key from interleaved hint.
-fn catalog_reasoning_key(model: &CatalogModel) -> Option<String> {
-    match &model.interleaved {
-        Some(InterleavedHint::Bool(true)) => Some("reasoning_content".to_owned()),
-        Some(InterleavedHint::Field { field }) => field.clone(),
-        _ => None,
-    }
-}
-
 /// Convert a catalog entry to the config-level structures.
 ///
 /// Returns the provider type, base URL, env var, and model list.
@@ -256,29 +245,6 @@ pub fn catalog_to_provider_config(
         },
         models,
     })
-}
-
-/// Build `ModelCapabilities` from a `CatalogModelInfo`.
-#[must_use]
-pub fn catalog_model_to_capabilities(info: &CatalogModelInfo) -> ModelCapabilities {
-    let mut mc = ModelCapabilities::tool_chat();
-    mc.streaming = info.capabilities.iter().any(|c| c == "streaming");
-    mc.tools = info
-        .capabilities
-        .iter()
-        .any(|c| c == "tools" || c == "tool_use");
-    mc.images = info
-        .capabilities
-        .iter()
-        .any(|c| c == "images" || c == "image_in");
-    mc.reasoning = info
-        .capabilities
-        .iter()
-        .any(|c| c == "reasoning" || c == "thinking");
-    mc.embeddings = false;
-    mc.max_context_tokens = info.max_context_tokens;
-    mc.max_output_tokens = info.max_output_tokens;
-    mc
 }
 
 #[cfg(test)]

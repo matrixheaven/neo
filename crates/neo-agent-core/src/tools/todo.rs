@@ -375,7 +375,8 @@ mod tests {
     #[tokio::test]
     async fn execute_formats_and_returns() {
         let tool = TodoTool::new();
-        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(dir.path())
             .unwrap()
             .with_access(ToolAccess::all());
         let input = json!({
@@ -395,7 +396,8 @@ mod tests {
     #[tokio::test]
     async fn execute_empty_array_clears() {
         let tool = TodoTool::new();
-        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(dir.path())
             .unwrap()
             .with_access(ToolAccess::all());
         let result = tool
@@ -415,7 +417,8 @@ mod tests {
         let callback: super::super::ToolUpdateCallback = Arc::new(move |partial: &str| {
             captured_clone.lock().unwrap().push(partial.to_owned());
         });
-        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(dir.path())
             .unwrap()
             .with_access(ToolAccess::all())
             .with_tool_update(callback);
@@ -449,7 +452,8 @@ mod tests {
         let callback: super::super::ToolUpdateCallback = Arc::new(move |partial: &str| {
             captured_clone.lock().unwrap().push(partial.to_owned());
         });
-        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(dir.path())
             .unwrap()
             .with_access(ToolAccess::all())
             .with_tool_update(callback);
@@ -525,7 +529,8 @@ mod tests {
     #[tokio::test]
     async fn execute_includes_structured_details() {
         let tool = TodoTool::new();
-        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(dir.path())
             .unwrap()
             .with_access(ToolAccess::all());
         let input = json!({
@@ -550,7 +555,8 @@ mod tests {
     async fn execute_updates_shared_state() {
         let shared: Arc<Mutex<Vec<TodoEventData>>> = Arc::new(Mutex::new(Vec::new()));
         let tool = TodoTool::with_state(Arc::clone(&shared));
-        let ctx = ToolContext::new(std::env::current_dir().unwrap())
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(dir.path())
             .unwrap()
             .with_access(ToolAccess::all());
         let input = json!({

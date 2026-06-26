@@ -3,18 +3,10 @@ use std::{collections::HashMap, sync::Arc};
 use futures::future::BoxFuture;
 use tokio::sync::Mutex;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProcessKind {
-    BashBackground,
-    McpStdio,
-    Terminal,
-}
-
 type CleanupFn = Arc<dyn Fn(String) -> BoxFuture<'static, ()> + Send + Sync>;
 
 struct SupervisedProcess {
     cleanup: CleanupFn,
-    _kind: ProcessKind,
 }
 
 #[derive(Clone, Default)]
@@ -31,7 +23,7 @@ impl std::fmt::Debug for ProcessSupervisor {
 }
 
 impl ProcessSupervisor {
-    pub async fn register<F>(&self, handle: String, kind: ProcessKind, cleanup: F)
+    pub async fn register<F>(&self, handle: String, cleanup: F)
     where
         F: Fn(String) -> BoxFuture<'static, ()> + Send + Sync + 'static,
     {
@@ -39,7 +31,6 @@ impl ProcessSupervisor {
             handle,
             SupervisedProcess {
                 cleanup: Arc::new(cleanup),
-                _kind: kind,
             },
         );
     }

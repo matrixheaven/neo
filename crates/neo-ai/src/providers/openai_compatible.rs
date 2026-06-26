@@ -254,14 +254,7 @@ fn content_text(content: &[ContentPart], role: &str) -> Result<String, ProviderE
 }
 
 fn text_content(content: &[ContentPart]) -> String {
-    content
-        .iter()
-        .filter_map(|part| match part {
-            ContentPart::Text { text } | ContentPart::Thinking { text, .. } => Some(text.as_str()),
-            ContentPart::Image { .. } => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    super::collect_text_content(content, true)
 }
 
 fn user_content(content: &[ContentPart]) -> Value {

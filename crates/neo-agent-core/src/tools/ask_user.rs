@@ -322,7 +322,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn make_ctx() -> ToolContext {
-        ToolContext::new(std::env::current_dir().unwrap())
+        let dir = tempfile::tempdir().unwrap();
+        ToolContext::new(dir.path())
             .unwrap()
             .with_access(ToolAccess::all())
     }

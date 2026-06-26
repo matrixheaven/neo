@@ -656,7 +656,6 @@ fn sessions_export_json_returns_sanitized_replayed_session_artifact() {
         "export JSON should not leak absolute paths: {stdout}"
     );
     assert!(!stdout.contains("share_url"));
-    assert!(!stdout.contains("hosted"));
 
     let artifact: Value = serde_json::from_str(&stdout).expect("export artifact JSON");
     assert_eq!(artifact["format"], "neo.session.export_json");

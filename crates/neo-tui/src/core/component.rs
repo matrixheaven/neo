@@ -19,8 +19,6 @@ pub enum InputResult {
 pub trait Component {
     fn render(&mut self, width: usize) -> Vec<Line>;
 
-    fn invalidate(&mut self) {}
-
     fn finalization(&self) -> Finalization {
         Finalization::Live
     }

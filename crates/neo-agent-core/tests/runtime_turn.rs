@@ -3440,8 +3440,13 @@ async fn runtime_emits_shell_lifecycle_for_bash_tool() {
             },
         ],
     ]);
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let workspace_root = workspace.path().canonicalize().expect("canonicalize");
     let runtime = AgentRuntime::with_tools(
-        AgentConfig::for_model(harness.model()).with_permission_mode(PermissionMode::Yolo),
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Yolo)
+            .with_workspace_root(&workspace_root)
+            .expect("workspace root"),
         harness.client(),
         ToolRegistry::with_builtin_tools(),
     );
@@ -3459,7 +3464,7 @@ async fn runtime_emits_shell_lifecycle_for_bash_tool() {
         turn: 1,
         id: "tool_1".to_owned(),
         command: "printf shell-ok".to_owned(),
-        cwd: std::env::current_dir().expect("cwd"),
+        cwd: workspace_root,
     }));
     assert!(events.iter().any(|event| matches!(
         event,

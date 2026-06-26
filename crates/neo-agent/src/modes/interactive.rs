@@ -15,7 +15,7 @@ use std::{
     env,
     fmt::Write as _,
     fs,
-    future::{Future, Ready, ready},
+    future::Future,
     io::{IsTerminal as _, Write as _, stdout},
     path::{Path, PathBuf},
     pin::Pin,
@@ -23,6 +23,9 @@ use std::{
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
+
+#[cfg(test)]
+use std::future::{Ready, ready};
 
 use anyhow::{Context, Result};
 use crossterm::terminal::size;
@@ -1001,7 +1004,7 @@ impl InteractiveController {
         )
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn type_text(&mut self, text: &str) {
         self.tui
             .chrome_mut()
@@ -1307,7 +1310,7 @@ impl InteractiveController {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub async fn submit_prompt(&mut self) -> Result<String> {
         self.submit_current_prompt().await?;
         self.wait_for_active_turn().await?;
@@ -4292,7 +4295,9 @@ impl InteractiveController {
             self.push_status("MCP server not found");
             return;
         };
-        if server.transport != "http" && server.transport != "sse" {
+        if server.transport != crate::config::McpTransport::Http
+            && server.transport != crate::config::McpTransport::Sse
+        {
             self.push_status("OAuth is limited to HTTP/SSE servers");
             return;
         }
@@ -4848,12 +4853,6 @@ impl InteractiveController {
                 page_size: 0,
                 current_id: None,
             });
-    }
-
-    #[allow(dead_code)]
-    #[must_use]
-    pub const fn app(&self) -> &NeoChromeState {
-        self.tui.chrome()
     }
 
     #[cfg(test)]
@@ -5971,11 +5970,6 @@ impl NeoTerminal {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    fn leave(&mut self) {
-        self.tui.leave();
-    }
-
     fn reenter(&mut self) -> Result<()> {
         // Force a full redraw on the next render so the resumed session paints
         // cleanly after the terminal state was disturbed by SIGTSTP.
@@ -6192,7 +6186,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     controller
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn empty_session_loader(session_id: String) -> Ready<Result<LoadedSessionTranscript>> {
     ready(Ok(LoadedSessionTranscript::new(
         session_id,
@@ -6201,7 +6195,7 @@ fn empty_session_loader(session_id: String) -> Ready<Result<LoadedSessionTranscr
     )))
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn empty_session_forker(session_id: String) -> Ready<Result<ForkedSessionTranscript>> {
     ready(Ok(ForkedSessionTranscript::new(
         session_id.clone(),
@@ -6690,7 +6684,9 @@ mod tests {
     const SESSION_NEW: &str = "session_00000000-0000-4000-8000-000000000604";
 
     fn test_workspace_root() -> PathBuf {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        let dir = std::env::temp_dir().join("neo-test-workspace");
+        let _ = std::fs::create_dir_all(&dir);
+        dir
     }
 
     fn pending_approval_response(
@@ -9586,14 +9582,11 @@ command = "python3"
                     .approvals
                     .send(crate::modes::run::PromptApprovalRequest {
                         id: "tool-1".to_owned(),
-                        operation: neo_agent_core::PermissionOperation::Tool,
                         decision_tx,
                         feedback_tx: None,
                         selected_label_tx: None,
                         session_option_label: None,
                         prefix_option_label: None,
-                        prefix_rule: None,
-                        session_scope: None,
                     })
                     .expect("approval waiter sent");
                 let decision = decision_rx.await.expect("approval decision");
@@ -10506,14 +10499,11 @@ command = "python3"
         let (decision_tx, decision_rx) = oneshot::channel();
         controller.register_pending_approval(crate::modes::run::PromptApprovalRequest {
             id: "tool-1".to_owned(),
-            operation: neo_agent_core::PermissionOperation::Tool,
             decision_tx,
             feedback_tx: None,
             selected_label_tx: None,
             session_option_label: None,
             prefix_option_label: None,
-            prefix_rule: None,
-            session_scope: None,
         });
 
         assert_eq!(
@@ -11319,10 +11309,6 @@ command = "python3"
             .as_ref()
             .expect("skill store should load");
         assert!(
-            skill_store.get("define-goal").is_none(),
-            "builtin define-goal skill should not be loaded"
-        );
-        assert!(
             skill_store.get("sub-skill").is_some(),
             "builtin sub-skill skill should be loaded"
         );
@@ -11960,14 +11946,11 @@ command = "python3"
         let (feedback_tx, feedback_rx) = oneshot::channel();
         controller.register_pending_approval(crate::modes::run::PromptApprovalRequest {
             id: "exit-plan-1".to_owned(),
-            operation: neo_agent_core::PermissionOperation::PlanTransition,
             decision_tx,
             feedback_tx: Some(feedback_tx),
             selected_label_tx: None,
             session_option_label: None,
             prefix_option_label: None,
-            prefix_rule: None,
-            session_scope: None,
         });
 
         // Select "Revise" (index 2) and enter feedback, then confirm.
@@ -12065,14 +12048,11 @@ command = "python3"
         let (second_tx, mut second_rx) = oneshot::channel();
         controller.register_pending_approval(crate::modes::run::PromptApprovalRequest {
             id: "tool-2".to_owned(),
-            operation: neo_agent_core::PermissionOperation::Tool,
             decision_tx: second_tx,
             feedback_tx: None,
             selected_label_tx: None,
             session_option_label: None,
             prefix_option_label: None,
-            prefix_rule: None,
-            session_scope: None,
         });
         assert!(
             second_rx.try_recv().is_err(),
@@ -12963,7 +12943,7 @@ command = "python3"
         config.mcp.servers.push(crate::config::McpServerConfig {
             id: "example".to_owned(),
             enabled: true,
-            transport: "http".to_owned(),
+            transport: crate::config::McpTransport::Http,
             command: None,
             url: Some("https://example.com/mcp".to_owned()),
             args: Vec::new(),
@@ -13003,7 +12983,7 @@ command = "python3"
         config.mcp.servers.push(crate::config::McpServerConfig {
             id: "fs".to_owned(),
             enabled: true,
-            transport: "stdio".to_owned(),
+            transport: crate::config::McpTransport::Stdio,
             command: Some("mcp-server".to_owned()),
             url: None,
             args: Vec::new(),
@@ -13183,7 +13163,7 @@ command = "python3"
         let servers = config.mcp.expect("mcp section").servers;
         assert_eq!(servers.len(), 1, "expected one saved MCP server");
         assert_eq!(servers[0].id, "fs");
-        assert_eq!(servers[0].transport, "stdio");
+        assert_eq!(servers[0].transport, crate::config::McpTransport::Stdio);
         assert_eq!(
             servers[0].command,
             Some("npx".to_owned()),
@@ -13279,7 +13259,7 @@ command = "python3"
         let servers = config.mcp.expect("mcp section").servers;
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].id, "linear");
-        assert_eq!(servers[0].transport, "http");
+        assert_eq!(servers[0].transport, crate::config::McpTransport::Http);
         assert_eq!(
             servers[0].url,
             Some("https://example.invalid/mcp".to_owned())
@@ -13354,7 +13334,7 @@ command = "python3"
         let servers = config.mcp.expect("mcp section").servers;
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].id, "events");
-        assert_eq!(servers[0].transport, "sse");
+        assert_eq!(servers[0].transport, crate::config::McpTransport::Sse);
         assert_eq!(
             servers[0].url,
             Some("https://events.invalid/sse".to_owned())

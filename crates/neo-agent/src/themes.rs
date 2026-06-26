@@ -3,6 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::config::expand_user_path;
+#[cfg(test)]
+use crate::config::expand_user_path_with_home;
 use anyhow::{Context, bail};
 use neo_tui::ansi::Color;
 use neo_tui::chrome::TuiTheme;
@@ -134,29 +137,6 @@ fn resolve_theme_path(path: &Path) -> PathBuf {
         // Relative theme paths resolve against the neo home.
         crate::config::neo_home().map_or_else(|| PathBuf::from("."), |home| home.join(path))
     }
-}
-
-fn expand_user_path(path: PathBuf) -> PathBuf {
-    expand_user_path_with_home(path, user_home().as_deref())
-}
-
-fn expand_user_path_with_home(path: PathBuf, home: Option<&Path>) -> PathBuf {
-    let Some(raw) = path.to_str().map(str::to_owned) else {
-        return path;
-    };
-    if raw == "~" {
-        return home.map(Path::to_path_buf).unwrap_or(path);
-    }
-    let Some(rest) = raw.strip_prefix("~/") else {
-        return path;
-    };
-    home.map_or(path, |home| home.join(rest))
-}
-
-fn user_home() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
 }
 
 fn load_theme_file(path: &Path) -> anyhow::Result<ResolvedTheme> {

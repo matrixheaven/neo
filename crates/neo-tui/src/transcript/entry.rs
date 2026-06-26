@@ -217,14 +217,6 @@ impl TranscriptEntry {
     }
 
     #[must_use]
-    pub fn status_severity(content: impl Into<String>, severity: StatusSeverity) -> Self {
-        Self::Status {
-            text: content.into(),
-            severity: Some(severity),
-        }
-    }
-
-    #[must_use]
     pub fn queued_message(content: impl Into<String>, is_steer: bool) -> Self {
         Self::QueuedMessage {
             text: content.into(),

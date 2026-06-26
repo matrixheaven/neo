@@ -176,19 +176,3 @@ fn reasoning_continuation_strips_opaque_thinking_across_provider_or_api_boundari
         }]
     );
 }
-
-#[test]
-fn request_options_default_to_short_cache_without_transport_overrides() {
-    let options = RequestOptions::default();
-
-    assert_eq!(options.temperature, None);
-    assert_eq!(options.max_tokens, None);
-    assert!(options.headers.is_empty());
-    assert_eq!(options.timeout, None);
-    assert_eq!(options.reasoning_effort, None);
-    assert!(options.replay_reasoning);
-    assert_eq!(options.retries, Some(0));
-    assert_eq!(options.cache, CacheRetention::Short);
-    assert_eq!(options.session_id, None);
-    assert!(options.metadata.is_empty());
-}

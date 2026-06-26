@@ -5,7 +5,7 @@ use std::{
     time::SystemTime,
 };
 
-use neo_agent_core::{AgentEvent, AgentMessage, PermissionMode, PermissionOperation};
+use neo_agent_core::{AgentEvent, PermissionMode, PermissionOperation};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
@@ -421,20 +421,6 @@ fn format_token_count(tokens: u32) -> String {
         format!("{}k", tokens / 1_000)
     } else {
         tokens.to_string()
-    }
-}
-
-/// Extract the display text from an [`AgentMessage`].
-fn message_text(message: &AgentMessage) -> String {
-    match message {
-        AgentMessage::User { content } => content
-            .iter()
-            .filter_map(|part| match part {
-                neo_agent_core::Content::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>(),
-        _ => String::new(),
     }
 }
 
@@ -1013,10 +999,10 @@ impl NeoChromeState {
                 self.apply_stream_update(StreamUpdate::RunFinished { turn, stop_reason });
             }
             AgentEvent::SteeringQueued { message } => {
-                self.pending_input.queue_steer(message_text(&message));
+                self.pending_input.queue_steer(message.text());
             }
             AgentEvent::FollowUpQueued { message } => {
-                self.pending_input.queue_follow_up(message_text(&message));
+                self.pending_input.queue_follow_up(message.text());
             }
             AgentEvent::QueueDrained { kind, count } => {
                 self.pending_input.drain(kind, count);
@@ -1046,7 +1032,7 @@ impl NeoChromeState {
                 self.set_development_mode(DevelopmentMode::Normal);
             }
             AgentEvent::PlanModeEntered { .. } => self.set_plan_mode(true),
-            AgentEvent::PlanModeExited { .. } | AgentEvent::PlanModeCancelled { .. } => {
+            AgentEvent::PlanModeExited { .. } => {
                 self.set_plan_mode(false);
             }
             AgentEvent::PlanUpdated { enabled, .. } => self.set_plan_mode(enabled),
@@ -1304,11 +1290,6 @@ impl NeoChromeState {
 
     // -- Rich Neo dialog overlays ---------------------------------------
 
-    pub fn open_model_selector(&mut self, opts: crate::dialogs::ModelSelectorOptions) -> OverlayId {
-        let state = crate::dialogs::ModelSelectorState::new(opts);
-        self.push_overlay(Overlay::new("models", OverlayKind::ModelSelector(state)))
-    }
-
     pub fn open_tabbed_model_selector(
         &mut self,
         opts: crate::dialogs::TabbedModelSelectorOptions,
@@ -1372,11 +1353,6 @@ impl NeoChromeState {
         self.push_overlay(Overlay::new("api-key", OverlayKind::ApiKeyInput(state)))
     }
 
-    pub fn open_text_input(&mut self, opts: crate::dialogs::TextInputOptions) -> OverlayId {
-        let state = crate::dialogs::TextInputState::new(opts, self.theme);
-        self.push_overlay(Overlay::new("text-input", OverlayKind::TextInput(state)))
-    }
-
     pub fn open_custom_registry_import(
         &mut self,
         opts: crate::dialogs::CustomRegistryImportOptions,
@@ -1396,15 +1372,6 @@ impl NeoChromeState {
     pub fn open_trust_dialog(&mut self, data: crate::dialogs::TrustDialogData) -> OverlayId {
         let state = crate::dialogs::TrustDialogState::new(data, self.theme);
         self.push_overlay(Overlay::new("trust", OverlayKind::TrustDialog(state)))
-    }
-
-    #[must_use]
-    pub fn trust_dialog_result(&self) -> Option<&crate::dialogs::TrustDialogResult> {
-        let overlay = self.focused_overlay()?;
-        let OverlayKind::TrustDialog(state) = &overlay.kind else {
-            return None;
-        };
-        state.result()
     }
 
     #[must_use]
@@ -2489,15 +2456,6 @@ impl SessionPickerState {
         self.selected = 0;
     }
 
-    /// Clear the filter. Returns `true` if there was a filter to clear
-    /// (for the Esc two-stage behaviour).
-    pub fn clear_filter(&mut self) -> bool {
-        let had = !self.filter.is_empty();
-        self.filter.clear();
-        self.selected = 0;
-        had
-    }
-
     pub fn move_up(&mut self) {
         let len = self.filtered_items().len();
         if len > 0 {
@@ -3429,14 +3387,6 @@ impl PendingInputState {
         }
     }
 
-    /// Promote the oldest queued follow-up to a steer (FIFO). Returns the text
-    /// if any was available.
-    pub fn promote_oldest_follow_up_to_steer(&mut self) -> Option<String> {
-        let text = self.queued_follow_ups.pop_front()?;
-        self.pending_steers.push_back(text.clone());
-        Some(text)
-    }
-
     /// Pop the most recent queued follow-up back into the composer for editing
     /// (LIFO). Returns the text if any was available.
     pub fn pop_most_recent_follow_up_for_edit(&mut self) -> Option<String> {
@@ -4195,14 +4145,6 @@ impl ApprovalModal {
     }
 
     #[must_use]
-    pub fn with_selected(mut self, selected: usize) -> Self {
-        if !self.options.is_empty() {
-            self.selected = selected.min(self.options.len() - 1);
-        }
-        self
-    }
-
-    #[must_use]
     pub const fn with_theme(mut self, theme: TuiTheme) -> Self {
         self.theme = theme;
         self
@@ -4335,21 +4277,6 @@ impl SelectListState {
         let max_start = len.saturating_sub(visible);
         let start = self.selected_index.saturating_sub(half).min(max_start);
         start..start + visible
-    }
-
-    #[must_use]
-    pub fn visible_items(&self) -> Vec<VisibleSelectItem<'_>> {
-        self.visible_range()
-            .filter_map(|filtered_index| {
-                self.filtered_indices
-                    .get(filtered_index)
-                    .and_then(|index| self.items.get(*index))
-                    .map(|item| VisibleSelectItem {
-                        item,
-                        selected: filtered_index == self.selected_index,
-                    })
-            })
-            .collect()
     }
 
     #[must_use]

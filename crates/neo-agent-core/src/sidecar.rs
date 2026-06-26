@@ -47,23 +47,6 @@ mod tests {
     use super::*;
     use crate::StopReason;
 
-    fn message_text(message: &AgentMessage) -> String {
-        let content = match message {
-            AgentMessage::System { content }
-            | AgentMessage::User { content }
-            | AgentMessage::Assistant { content, .. }
-            | AgentMessage::ToolResult { content, .. } => content,
-        };
-        content
-            .iter()
-            .filter_map(|part| match part {
-                crate::Content::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("")
-    }
-
     #[test]
     fn deny_sidecar_tool_call_returns_error() {
         let call = AgentToolCall {
@@ -94,7 +77,7 @@ mod tests {
         let projected = sidecar_projected_messages(&parent);
 
         assert_eq!(parent, parent_clone, "parent must not be mutated");
-        let texts: Vec<String> = projected.iter().map(message_text).collect();
+        let texts: Vec<String> = projected.iter().map(|m| m.text()).collect();
         assert!(texts.iter().any(|t| t == "first"));
         assert!(texts.iter().any(|t| t == "second"));
         assert!(texts.iter().any(|t| t.contains("side-channel")));
@@ -132,12 +115,12 @@ mod tests {
         assert!(
             projected
                 .iter()
-                .any(|message| message_text(message) == "run a tool")
+                .any(|message| message.text() == "run a tool")
         );
         assert!(
             projected
                 .iter()
-                .any(|message| message_text(message).contains("side-channel"))
+                .any(|message| message.text().contains("side-channel"))
         );
     }
 
@@ -149,7 +132,7 @@ mod tests {
 
         let reminder_idx = projected
             .iter()
-            .position(|message| message_text(message).contains("side-channel"))
+            .position(|message| message.text().contains("side-channel"))
             .expect("reminder should be present");
         assert_eq!(
             reminder_idx,

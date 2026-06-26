@@ -448,14 +448,6 @@ impl RawInputParser {
         self.pending_kitty_printable_codepoint = None;
         vec![RawEvent::Key(seq)]
     }
-
-    /// Clear all buffered state.
-    pub fn clear(&mut self) {
-        self.buffer.clear();
-        self.paste_mode = false;
-        self.paste_buffer.clear();
-        self.pending_kitty_printable_codepoint = None;
-    }
 }
 
 // ===========================================================================
@@ -464,34 +456,16 @@ impl RawInputParser {
 
 /// Result of parsing a Kitty CSI-u or similar sequence.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct ParsedKitty {
     codepoint: i32,
-    shifted_key: Option<i32>,
     base_layout_key: Option<i32>,
     modifier: u32,
-    event_type: KeyEventType,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeyEventType {
-    Press,
-    Repeat,
-    Release,
 }
 
 #[derive(Debug, Clone)]
 struct ParsedModifyOtherKeys {
     codepoint: i32,
     modifier: u32,
-}
-
-fn parse_event_type(s: Option<&str>) -> KeyEventType {
-    match s.and_then(|v| v.parse::<u32>().ok()) {
-        Some(2) => KeyEventType::Repeat,
-        Some(3) => KeyEventType::Release,
-        _ => KeyEventType::Press,
-    }
 }
 
 fn csi_u_regex() -> &'static Regex {
@@ -526,29 +500,21 @@ fn parse_kitty_sequence(data: &str) -> Option<ParsedKitty> {
     // CSI-u format
     if let Some(caps) = csi_u_regex().captures(data) {
         let codepoint: i32 = caps.get(1)?.as_str().parse().ok()?;
-        let shifted_key = caps
-            .get(2)
-            .filter(|m| !m.as_str().is_empty())
-            .and_then(|m| m.as_str().parse().ok());
         let base_layout_key = caps.get(3).and_then(|m| m.as_str().parse().ok());
         let mod_value: u32 = caps
             .get(4)
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(1);
-        let event_type = parse_event_type(caps.get(5).map(|m| m.as_str()));
         return Some(ParsedKitty {
             codepoint,
-            shifted_key,
             base_layout_key,
             modifier: mod_value.saturating_sub(1),
-            event_type,
         });
     }
 
     // Arrow keys with modifier
     if let Some(caps) = arrow_mod_regex().captures(data) {
         let mod_value: u32 = caps.get(1)?.as_str().parse().ok()?;
-        let event_type = parse_event_type(caps.get(2).map(|m| m.as_str()));
         let letter = caps.get(3)?.as_str();
         let codepoint = match letter {
             "A" => CP_UP,
@@ -559,10 +525,8 @@ fn parse_kitty_sequence(data: &str) -> Option<ParsedKitty> {
         };
         return Some(ParsedKitty {
             codepoint,
-            shifted_key: None,
             base_layout_key: None,
             modifier: mod_value.saturating_sub(1),
-            event_type,
         });
     }
 
@@ -573,7 +537,6 @@ fn parse_kitty_sequence(data: &str) -> Option<ParsedKitty> {
             .get(2)
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(1);
-        let event_type = parse_event_type(caps.get(3).map(|m| m.as_str()));
         let codepoint = match key_num {
             2 => CP_INSERT,
             3 => CP_DELETE,
@@ -585,25 +548,20 @@ fn parse_kitty_sequence(data: &str) -> Option<ParsedKitty> {
         };
         return Some(ParsedKitty {
             codepoint,
-            shifted_key: None,
             base_layout_key: None,
             modifier: mod_value.saturating_sub(1),
-            event_type,
         });
     }
 
     // Home/End with modifier
     if let Some(caps) = home_end_mod_regex().captures(data) {
         let mod_value: u32 = caps.get(1)?.as_str().parse().ok()?;
-        let event_type = parse_event_type(caps.get(2).map(|m| m.as_str()));
         let letter = caps.get(3)?.as_str();
         let codepoint = if letter == "H" { CP_HOME } else { CP_END };
         return Some(ParsedKitty {
             codepoint,
-            shifted_key: None,
             base_layout_key: None,
             modifier: mod_value.saturating_sub(1),
-            event_type,
         });
     }
 

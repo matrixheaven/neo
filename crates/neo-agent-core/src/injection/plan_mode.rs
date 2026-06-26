@@ -3,8 +3,6 @@ use std::sync::{Arc, RwLock};
 use crate::mode::{PlanInjectionVariant, PlanMode};
 use crate::{AgentContext, AgentMessage};
 
-use super::DynamicInjector;
-
 #[derive(Debug, Clone)]
 pub struct PlanModeInjector {
     plan_mode: Arc<RwLock<PlanMode>>,
@@ -15,11 +13,10 @@ impl PlanModeInjector {
     pub fn new(plan_mode: Arc<RwLock<PlanMode>>) -> Self {
         Self { plan_mode }
     }
-}
 
-#[async_trait::async_trait]
-impl DynamicInjector for PlanModeInjector {
-    async fn inject(&mut self, context: &AgentContext) -> Option<AgentMessage> {
+    /// Returns an injected plan-mode reminder message if one is due for this
+    /// turn, or `None`.
+    pub fn inject(&mut self, context: &AgentContext) -> Option<AgentMessage> {
         let user_msg = matches!(context.messages().last(), Some(AgentMessage::User { .. }));
         let asst_count = u32::try_from(
             context

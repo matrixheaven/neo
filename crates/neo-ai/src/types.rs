@@ -88,12 +88,6 @@ impl ApiType {
     }
 }
 
-/// Parse an [`ApiKind`] from a config-style string.
-#[must_use]
-pub fn api_kind_from_str(s: &str) -> Option<ApiKind> {
-    ApiType::from_config_str(s).map(ApiType::to_api_kind)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

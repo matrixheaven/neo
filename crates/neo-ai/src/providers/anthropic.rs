@@ -5,8 +5,8 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
 use crate::{
-    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
-    ModelClient, ReasoningEffort, StopReason, TokenUsage, ToolSpec,
+    AiError, AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ImageData, ModelClient,
+    ReasoningEffort, StopReason, TokenUsage, ToolSpec,
 };
 
 #[derive(Clone)]
@@ -211,10 +211,6 @@ fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
     {
         body["metadata"] = json!({ "user_id": user_id });
     }
-    match request.options.cache {
-        CacheRetention::None | CacheRetention::Short | CacheRetention::Long => {}
-    }
-
     Ok(body)
 }
 
@@ -412,14 +408,7 @@ fn content_text(content: &[ContentPart], role: &str) -> Result<String, ProviderE
 }
 
 fn text_content(content: &[ContentPart]) -> String {
-    content
-        .iter()
-        .filter_map(|part| match part {
-            ContentPart::Text { text } => Some(text.as_str()),
-            ContentPart::Thinking { .. } | ContentPart::Image { .. } => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    super::collect_text_content(content, false)
 }
 
 fn reject_images(content: &[ContentPart], role: &str) -> Result<(), ProviderError> {

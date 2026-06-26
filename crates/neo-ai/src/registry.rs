@@ -127,24 +127,9 @@ impl ProviderRegistry {
         self.providers.insert(provider.id.clone(), provider);
     }
 
-    /// Insert or replace a provider by id.
-    pub fn upsert(&mut self, provider: ProviderSpec) {
-        self.providers.insert(provider.id.clone(), provider);
-    }
-
     #[must_use]
     pub fn get(&self, provider: &str) -> Option<&ProviderSpec> {
         self.providers.get(provider)
-    }
-
-    #[must_use]
-    pub fn list(&self) -> Vec<ProviderSpec> {
-        self.providers.values().cloned().collect()
-    }
-
-    #[must_use]
-    pub fn credential_status(&self, provider: &str) -> Option<ProviderCredentialStatus> {
-        self.credential_status_from(provider, &std::env::vars().collect())
     }
 
     #[must_use]
@@ -248,13 +233,6 @@ impl ProviderResolver {
                 provider.id, model.api
             ))),
         }
-    }
-}
-
-impl ProviderSpec {
-    #[must_use]
-    pub fn supports_api(&self, api: &ApiKind) -> bool {
-        self.supported_apis.contains(api)
     }
 }
 

@@ -144,14 +144,6 @@ impl OAuthStore {
         Ok(())
     }
 
-    /// Compatibility remover for the credentials stored under `key`.
-    ///
-    /// Returns `true` if a value was present and removed.
-    #[must_use]
-    pub fn remove_token(&mut self, key: &str) -> bool {
-        self.remove(key)
-    }
-
     /// Migrate a legacy store at `path` to the current format.
     fn migrate_legacy(path: &Path, parse_err: &serde_json::Error) -> Result<Self, OAuthError> {
         let file = OpenOptions::new()

@@ -1,6 +1,6 @@
 use neo_ai::{
     AiStreamEvent, ChatMessage, ContentPart, ImageData, StopReason, ToolCall, ToolSpec,
-    collect_tool_arguments, providers::openai_compatible::normalize_openai_chat_sse, schema_for,
+    collect_tool_arguments, providers::openai_compatible::normalize_openai_chat_sse,
 };
 use schemars::JsonSchema;
 use serde_json::{Value, json};
@@ -35,13 +35,6 @@ fn tool_spec_helpers_build_single_string_schema() {
         "Path to read"
     );
     assert_eq!(tool.input_schema["required"], json!(["path"]));
-}
-
-#[test]
-fn schema_for_returns_json_schema_for_types() {
-    let schema = schema_for::<CreateFileInput>();
-
-    assert_eq!(schema["type"], "object");
 }
 
 #[test]

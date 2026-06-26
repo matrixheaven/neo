@@ -7,11 +7,14 @@
 
 use std::{
     collections::HashSet,
-    env,
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
 };
+
+use crate::config::expand_user_path;
+#[cfg(test)]
+use crate::config::expand_user_path_with_home;
 
 use anyhow::Context;
 use neo_agent_core::skills::{LoadedSkill, SkillStore, builtin::builtin_skills, discovery};
@@ -217,25 +220,6 @@ fn xml_escape(value: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
-}
-
-fn expand_user_path(path: PathBuf) -> PathBuf {
-    expand_user_path_with_home(path, user_home().as_deref())
-}
-
-fn expand_user_path_with_home(path: PathBuf, home: Option<&Path>) -> PathBuf {
-    if let Some(rest) = path.to_string_lossy().strip_prefix("~/")
-        && let Some(home) = home
-    {
-        return home.join(rest);
-    }
-    path
-}
-
-fn user_home() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
 }
 
 fn normalize_prompt(prompt: &str) -> String {

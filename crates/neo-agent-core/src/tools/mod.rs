@@ -47,7 +47,7 @@ pub use mcp::{
     build_http_client, build_http_client_with_oauth, build_stdio_client,
 };
 pub use mcp_manager::*;
-pub use process_supervisor::{ProcessKind, ProcessSupervisor};
+pub use process_supervisor::ProcessSupervisor;
 
 // Re-export AskUser tool types for external use (TUI / CLI layer).
 pub use ask_user::{
@@ -399,14 +399,6 @@ impl ToolRegistry {
         self.register(goal::ExitGoalModeTool::new(Arc::clone(&manager)));
         self.register(goal::UpdateGoalStatusTool::new(Arc::clone(&manager)));
         self.register(goal::GetGoalStatusTool::new(manager));
-    }
-
-    pub fn retain_named(&mut self, names: &BTreeSet<String>) {
-        self.tools.retain(|name, _| names.contains(name));
-    }
-
-    pub fn remove_named(&mut self, names: &BTreeSet<String>) {
-        self.tools.retain(|name, _| !names.contains(name));
     }
 
     #[must_use]
