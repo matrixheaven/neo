@@ -25,7 +25,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use crossterm::{event, terminal::size};
+use crossterm::terminal::size;
 use neo_agent_core::{
     AgentEvent, AgentMessage, Content, McpConnectionManager, PendingQuestion,
     PermissionApprovalDecision, PermissionMode, ProcessSupervisor, QuestionResponse,
@@ -402,7 +402,7 @@ pub async fn execute_tty_with_startup(
         controller
             .resolve_trust_dialog_at_startup(
                 data,
-                CrosstermEvents::new(controller.keybindings.clone()),
+                RawStdinEvents::new(controller.keybindings.clone()),
                 |tui| terminal.borrow_mut().draw_tui(tui),
             )
             .await?;
@@ -414,7 +414,7 @@ pub async fn execute_tty_with_startup(
     } else {
         controller.apply_startup_action(&startup);
     }
-    let events = CrosstermEvents::new(controller.keybindings.clone());
+    let events = RawStdinEvents::new(controller.keybindings.clone());
     controller
         .run_terminal_loop_with_suspend(
             |tui| terminal.borrow_mut().draw_tui(tui),
@@ -1266,14 +1266,7 @@ impl InteractiveController {
     }
 
     fn plan_mode_plans_dir(&self) -> Option<PathBuf> {
-        let home = neo_home()?;
-        Some(
-            neo_agent_core::session::workspace_sessions_dir(
-                &home.join("sessions"),
-                &self.workspace_root,
-            )
-            .join("plans"),
-        )
+        Some(self.active_session_directory()?.join("plans"))
     }
 
     fn cycle_development_mode(&mut self) {
@@ -2615,9 +2608,9 @@ impl InteractiveController {
 
     async fn goal_manager(&mut self) -> Option<Arc<GoalManager>> {
         if self.goal_manager.is_none()
-            && let Some(home) = neo_home()
+            && let Some(session_dir) = self.active_session_directory()
         {
-            match GoalManager::load(home).await {
+            match GoalManager::load(session_dir).await {
                 Ok(manager) => self.goal_manager = Some(Arc::new(manager)),
                 Err(err) => {
                     self.push_status(format!("Failed to load goal manager: {err}"));
@@ -3927,6 +3920,7 @@ impl InteractiveController {
         self.tui.chrome_mut().clear_interrupted_turn_state();
         self.tui.chrome_mut().clear_todos();
         self.tui.chrome_mut().prompt_mut().clear_after_submit();
+        self.goal_manager = None;
         self.active_session_id = None;
         self.session_messages.clear();
         self.tui.chrome_mut().set_session_label("new");
@@ -5694,77 +5688,111 @@ pub trait TerminalEvents {
     }
 }
 
-struct CrosstermEvents {
+struct RawStdinEvents {
     parser: InputParser,
     pending: VecDeque<InputEvent>,
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    disconnected: bool,
 }
 
-impl CrosstermEvents {
+impl RawStdinEvents {
     fn new(keybindings: KeybindingsManager) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        // Spawn a background thread that blocks on raw stdin reads and forwards
+        // byte chunks through the channel. The thread exits on EOF or read error
+        // (e.g. terminal closed). The JoinHandle is intentionally dropped — the
+        // thread is daemon-like and will be reaped at process exit. When the
+        // `RawStdinEvents` is dropped, `rx` is dropped; the next `tx.send()` in
+        // the thread fails and the thread exits.
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut stdin, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
         Self {
             parser: InputParser::with_keybindings(keybindings),
             pending: VecDeque::new(),
+            rx,
+            disconnected: false,
         }
     }
 }
 
-impl Default for CrosstermEvents {
+impl Default for RawStdinEvents {
     fn default() -> Self {
         Self::new(KeybindingsManager::default())
     }
 }
 
-impl TerminalEvents for CrosstermEvents {
+impl TerminalEvents for RawStdinEvents {
     fn next_input_event(&mut self) -> Result<InputEvent> {
         loop {
             if let Some(input) = self.poll_input_event(Duration::from_millis(250))? {
                 return Ok(input);
             }
+            if self.disconnected {
+                anyhow::bail!("stdin reader closed");
+            }
         }
     }
 
     fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
-        if let Some(input) = self.pop_pending_input() {
+        if let Some(input) = self.pending.pop_front() {
             return Ok(Some(input));
         }
-        self.poll_terminal_input(timeout)
-    }
-}
 
-impl CrosstermEvents {
-    fn pop_pending_input(&mut self) -> Option<InputEvent> {
-        self.pending.pop_front()
-    }
-
-    fn read_crossterm_event(&mut self) -> Result<()> {
-        let event = event::read()?;
-        self.pending
-            .extend(self.parser.feed_crossterm_event(&event));
-        Ok(())
-    }
-
-    fn flush_parser_timeout(&mut self) {
-        self.pending.extend(self.parser.flush_timeout());
-    }
-
-    fn poll_terminal_input(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
-        if self.read_if_terminal_ready(timeout)? {
-            return Ok(self.pop_pending_input());
+        if self.disconnected {
+            return Ok(None);
         }
-        self.flush_parser_timeout();
-        Ok(self.pop_pending_input())
-    }
 
-    fn read_if_terminal_ready(&mut self, timeout: Duration) -> Result<bool> {
-        if !event::poll(timeout)? {
-            return Ok(false);
+        let deadline = Instant::now() + timeout;
+        let mut got_data = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match self.rx.recv_timeout(remaining) {
+                Ok(bytes) => {
+                    self.pending.extend(self.parser.feed_bytes(&bytes));
+                    // Drain any more immediately available bytes
+                    while let Ok(more_bytes) = self.rx.try_recv() {
+                        self.pending.extend(self.parser.feed_bytes(&more_bytes));
+                    }
+                    got_data = true;
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    self.disconnected = true;
+                    break;
+                }
+            }
         }
-        self.read_crossterm_event()?;
-        Ok(true)
+
+        // Only flush incomplete sequences when no data arrived within the timeout
+        // window. Flushing immediately after receiving data could break a partial
+        // escape sequence that hasn't fully arrived yet.
+        if !got_data {
+            self.pending.extend(self.parser.flush_timeout());
+        }
+
+        Ok(self.pending.pop_front())
     }
 }
 
 const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
+    KeybindingAction::PasteImage,
     KeybindingAction::InputSubmit,
     KeybindingAction::InputNewLine,
     KeybindingAction::PromptSteer,
