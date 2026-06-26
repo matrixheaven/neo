@@ -29,6 +29,7 @@ futures = "0.3.31"
 globset = "0.4.18"
 http = "1"
 ignore = "0.4.25"
+infer = { version = "0.16", default-features = false }
 jsonschema = "0.37.4"
 pulldown-cmark = "0.13.0"
 rand = "0.9.4"

@@ -17,6 +17,7 @@ clap.workspace = true
 color-eyre.workspace = true
 crossterm.workspace = true
 futures.workspace = true
+infer.workspace = true
 neo-agent-core = { path = "../neo-agent-core" }
 neo-ai = { path = "../neo-ai" }
 neo-tui = { path = "../neo-tui" }
