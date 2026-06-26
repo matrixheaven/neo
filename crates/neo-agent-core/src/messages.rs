@@ -241,14 +241,20 @@ fn to_content_part(content: &Content) -> ContentPart {
             signature: signature.clone(),
             redacted: *redacted,
         },
-        Content::Image { mime_type, data } => ContentPart::Image {
-            mime_type: mime_type.clone(),
-            data: match data {
-                ImageRef::Base64(value) => ImageData::Base64(value.clone()),
-                ImageRef::Url(value) => ImageData::Url(value.clone()),
-                // Blob references must be resolved to base64 before converting
-                // to provider-facing ContentPart. This arm is a fallback.
-                ImageRef::Blob(_) => ImageData::Base64(String::new()),
+        Content::Image { mime_type, data } => match data {
+            ImageRef::Base64(value) => ContentPart::Image {
+                mime_type: mime_type.clone(),
+                data: ImageData::Base64(value.clone()),
+            },
+            ImageRef::Url(value) => ContentPart::Image {
+                mime_type: mime_type.clone(),
+                data: ImageData::Url(value.clone()),
+            },
+            // Blob references must be resolved to base64 before conversion.
+            // If an unresolved blob reaches here, emit a text placeholder
+            // instead of invalid empty base64 image data.
+            ImageRef::Blob(sha) => ContentPart::Text {
+                text: format!("[unavailable image: blob {sha}]"),
             },
         },
     }
