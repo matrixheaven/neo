@@ -4253,7 +4253,14 @@ impl InteractiveController {
 
         self.push_status("Waiting for browser authorization...");
         match authenticate_mcp_server_oauth(&server_id, server, &neo_home).await {
-            Ok(_) => self.push_status("OAuth token saved"),
+            Ok(_) => {
+                self.push_status("OAuth token saved");
+                // Automatically sync the manager with the new credentials and
+                // probe the server so tool discovery happens without the user
+                // having to manually press Enter (Test).
+                self.sync_mcp_manager_from_config().await;
+                self.start_mcp_probe(&server_id, true);
+            }
             Err(err) => {
                 self.push_status(format!("OAuth flow failed: {err}"));
             }
