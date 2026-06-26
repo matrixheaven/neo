@@ -1,6 +1,7 @@
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::ansi::{Style, display_width};
+use crate::primitive::style::Style;
+use crate::primitive::text_layout::display_width;
 
 use super::{Component, Finalization, Line, Span};
 

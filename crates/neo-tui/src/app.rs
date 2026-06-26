@@ -1,5 +1,5 @@
-use crate::chrome::{NeoChromeState, OverlayKind};
-use crate::terminal::CursorPos;
+use crate::screen_output::CursorPos;
+use crate::shell::{NeoChromeState, OverlayKind};
 use crate::transcript::{
     CHROME_GUTTER, ChromeRender, TranscriptPane, apply_gutter, frame_content_width,
     render_chrome_lines_mut, render_footer_only_lines,

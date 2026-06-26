@@ -1,5 +1,6 @@
 pub mod diff_preview;
 pub mod entry;
+mod event_handler;
 pub mod pane;
 pub mod partial_json;
 pub mod plan_box;

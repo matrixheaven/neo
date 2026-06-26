@@ -1,9 +1,11 @@
-use neo_tui::chrome::{
+use neo_tui::shell::{
     ApprovalChoice, ChromeMode, CommandPaletteState, CommandSpec, ContextWindow, ModelPickerState,
     NeoChromeState, Overlay, OverlayKind, PickerItem, PromptEdit, SessionPickerItem,
     SessionPickerScope, SessionPickerState, StreamUpdate, ToolStatusKind,
 };
-use neo_tui::image::{ImageProtocolPreference, ImageRenderPolicy, TerminalImageCapabilities};
+use neo_tui::terminal_image::{
+    ImageProtocolPreference, ImageRenderPolicy, TerminalImageCapabilities,
+};
 use neo_tui::transcript::{TranscriptPane, render_chrome_lines};
 use std::path::PathBuf;
 
@@ -23,7 +25,7 @@ fn render_app(width: u16, app: &NeoChromeState) -> Vec<String> {
     render_chrome_lines(app, usize::from(width), 30)
         .lines
         .into_iter()
-        .map(|line| neo_tui::ansi::strip_ansi(&line))
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
         .collect()
 }
 
@@ -32,7 +34,7 @@ fn render_transcript(width: usize, height: usize, transcript: &mut TranscriptPan
         .render_frame(width, height)
         .expect("transcript frame")
         .into_iter()
-        .map(|line| neo_tui::ansi::strip_ansi(&line))
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
         .collect()
 }
 
@@ -191,8 +193,8 @@ fn footer_shows_plan_mode_indicator() {
 #[test]
 fn footer_shows_goal_mode_status_badges() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.set_development_mode(neo_tui::chrome::DevelopmentMode::Goal(
-        neo_tui::chrome::GoalModeStatus::Pending,
+    app.set_development_mode(neo_tui::shell::DevelopmentMode::Goal(
+        neo_tui::shell::GoalModeStatus::Pending,
     ));
     assert!(
         render_app(80, &app)
@@ -575,11 +577,11 @@ fn blocking_question_dialog_hides_composer_prompt() {
     app.prompt_mut().apply_edit(PromptEdit::Insert("draft"));
     app.push_question_overlay(
         "question-1",
-        vec![neo_tui::widgets::QuestionDisplayData {
+        vec![neo_tui::dialogs::QuestionDisplayData {
             question: "Pick one".to_owned(),
             header: Some("Question".to_owned()),
             body: None,
-            options: vec![neo_tui::widgets::QuestionDisplayOption {
+            options: vec![neo_tui::dialogs::QuestionDisplayOption {
                 label: "Yes".to_owned(),
                 description: None,
             }],
@@ -591,7 +593,7 @@ fn blocking_question_dialog_hides_composer_prompt() {
     let (lines, cursor) = tui.render_frame(80, 20);
     let frame = lines
         .iter()
-        .map(|line| neo_tui::ansi::strip_ansi(line))
+        .map(|line| neo_tui::primitive::strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -624,7 +626,7 @@ fn pending_approval_hides_composer_prompt() {
     let (lines, cursor) = tui.render_frame(80, 20);
     let frame = lines
         .iter()
-        .map(|line| neo_tui::ansi::strip_ansi(line))
+        .map(|line| neo_tui::primitive::strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -662,7 +664,7 @@ fn prompt_completion_keeps_composer_prompt_visible() {
     let (lines, cursor) = tui.render_frame(80, 20);
     let frame = lines
         .iter()
-        .map(|line| neo_tui::ansi::strip_ansi(line))
+        .map(|line| neo_tui::primitive::strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -737,7 +739,7 @@ fn app_shell_prompt_renders_tabs_without_terminal_tab_controls() {
     assert!(
         prompt_box_lines
             .iter()
-            .all(|line| neo_tui::ansi::visible_width(line) <= content_width),
+            .all(|line| neo_tui::primitive::visible_width(line) <= content_width),
         "prompt lines must stay inside composer width: {prompt_box_lines:?}"
     );
 }
@@ -774,7 +776,7 @@ fn app_shell_prompt_shows_scroll_indicators_when_clipped() {
     let width = 80;
     let render = render_chrome_lines(&app, width, 30);
     let prompt_box_lines = &render.lines[render.prompt_start_row..render.lines.len() - 1];
-    let top_border = neo_tui::ansi::strip_ansi(&prompt_box_lines[0]);
+    let top_border = neo_tui::primitive::strip_ansi(&prompt_box_lines[0]);
     assert!(
         top_border.contains('↑') && top_border.contains("more"),
         "top border should show scroll-up indicator when content is scrolled: {top_border:?}"
@@ -786,7 +788,7 @@ fn app_shell_prompt_shows_scroll_indicators_when_clipped() {
     let render = render_chrome_lines(&app, width, 30);
     let prompt_box_lines = &render.lines[render.prompt_start_row..render.lines.len() - 1];
     let bottom_border =
-        neo_tui::ansi::strip_ansi(prompt_box_lines.last().expect("prompt has bottom border"));
+        neo_tui::primitive::strip_ansi(prompt_box_lines.last().expect("prompt has bottom border"));
     assert!(
         bottom_border.contains('↓') && bottom_border.contains("more"),
         "bottom border should show scroll-down indicator when content is clipped: {bottom_border:?}"
@@ -1241,7 +1243,7 @@ fn api_key_dialog_paste_then_submit_closes_overlay_with_result() {
     let result = app.handle_focused_dialog_input(InputEvent::Paste(
         "sk-minimax-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
     ));
-    assert_eq!(result, neo_tui::core::InputResult::Handled);
+    assert_eq!(result, neo_tui::primitive::InputResult::Handled);
 
     // Render at a narrow width to ensure the masked field does not overflow.
     let _ = app.focused_overlay_lines(60);
@@ -1253,7 +1255,7 @@ fn api_key_dialog_paste_then_submit_closes_overlay_with_result() {
         app.handle_focused_dialog_input(InputEvent::Action(KeybindingAction::SelectConfirm));
     assert_eq!(
         result,
-        neo_tui::core::InputResult::Submitted,
+        neo_tui::primitive::InputResult::Submitted,
         "SelectConfirm (Enter) must submit the API key dialog"
     );
 
@@ -1272,7 +1274,7 @@ fn api_key_dialog_paste_then_submit_closes_overlay_with_result() {
     });
     let result =
         app.handle_focused_dialog_input(InputEvent::Action(KeybindingAction::SelectCancel));
-    assert_eq!(result, neo_tui::core::InputResult::Cancelled);
+    assert_eq!(result, neo_tui::primitive::InputResult::Cancelled);
     assert!(matches!(
         app.api_key_input_result(),
         Some(ApiKeyInputResult::Cancelled)

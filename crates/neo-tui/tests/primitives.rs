@@ -1,6 +1,6 @@
-use neo_tui::chrome::{NeoChromeState, PromptEdit, PromptState, SelectItem, SelectListState};
-use neo_tui::components::{truncate_width, visible_width, wrap_width};
 use neo_tui::input::{KeyId, KeybindingAction, KeybindingsManager};
+use neo_tui::primitive::{truncate_width, visible_width, wrap_width};
+use neo_tui::shell::{NeoChromeState, PromptEdit, PromptState, SelectItem, SelectListState};
 use neo_tui::transcript::{TranscriptEntry, TranscriptStore, TranscriptViewport};
 
 fn strip_ansi_escapes(text: &str) -> String {

@@ -1,4 +1,4 @@
-use crate::core::Line;
+use crate::primitive::Line;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiffKind {

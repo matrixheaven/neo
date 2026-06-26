@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::ansi::{clip_plain_to_width, truncate_to_width, visible_width};
+use crate::primitive::{clip_plain_to_width, truncate_to_width, visible_width};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiffStats {

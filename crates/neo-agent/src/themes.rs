@@ -7,8 +7,8 @@ use crate::config::expand_user_path;
 #[cfg(test)]
 use crate::config::expand_user_path_with_home;
 use anyhow::{Context, bail};
-use neo_tui::ansi::Color;
-use neo_tui::chrome::TuiTheme;
+use neo_tui::primitive::Color;
+use neo_tui::shell::TuiTheme;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,8 +1,8 @@
-use crate::ansi::{Style, paint};
-use crate::chrome::TuiTheme;
-use crate::components::{truncate_width, visible_width};
-use crate::core::InputResult;
 use crate::input::{InputEvent, KeybindingAction};
+use crate::primitive::InputResult;
+use crate::primitive::{Style, paint};
+use crate::primitive::{truncate_width, visible_width};
+use crate::shell::TuiTheme;
 
 /// Options used to create a [`TextInputState`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,7 +185,7 @@ mod tests {
         state
             .render_lines(width)
             .iter()
-            .map(|line| crate::ansi::strip_ansi(line))
+            .map(|line| crate::primitive::strip_ansi(line))
             .collect()
     }
 

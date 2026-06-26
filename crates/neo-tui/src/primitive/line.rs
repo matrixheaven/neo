@@ -1,4 +1,6 @@
-use crate::ansi::{Style, clip_plain_to_width, paint, strip_ansi, visible_width};
+use crate::primitive::ansi_escape::{paint, strip_ansi};
+use crate::primitive::style::Style;
+use crate::primitive::text_layout::{clip_plain_to_width, visible_width};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {

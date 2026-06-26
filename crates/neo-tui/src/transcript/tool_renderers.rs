@@ -1,12 +1,12 @@
 use std::path::Path;
 
-use crate::ansi::{Color, Style, clip_plain_to_width};
-use crate::chrome::ToolStatusKind;
-use crate::chrome::TuiTheme;
-use crate::core::{Line, Span, Text};
+use crate::diff_model::{DiffModel, DiffRenderLine, DiffRenderLineKind, DiffRenderState};
 use crate::markdown::{highlight_code_lines, lang_from_path};
+use crate::primitive::{Color, Style, clip_plain_to_width};
+use crate::primitive::{Line, Span, Text};
+use crate::shell::ToolStatusKind;
+use crate::shell::TuiTheme;
 use crate::token_estimate::{estimate_tokens, format_elapsed, format_token_count};
-use crate::tool_diff::{DiffModel, DiffRenderLine, DiffRenderLineKind, DiffRenderState};
 
 use super::partial_json::extract_partial_string_field;
 use super::tool_call::ToolCallState;
@@ -129,7 +129,10 @@ impl<'a> ToolBodyPalette<'a> {
     fn diff_line(self, line: &Line) -> Line {
         match self.theme {
             Some(theme) => diff_body_line(&line.to_ansi(), theme),
-            None => Line::raw(format!("  {}", crate::ansi::strip_ansi(&line.to_ansi()))),
+            None => Line::raw(format!(
+                "  {}",
+                crate::primitive::strip_ansi(&line.to_ansi())
+            )),
         }
     }
 
@@ -309,9 +312,10 @@ fn render_result_preview(
                 );
                 return rows;
             }
-            rows.push(
-                palette.body_line(format!("  {}", crate::ansi::strip_ansi(&wrapped.to_ansi()))),
-            );
+            rows.push(palette.body_line(format!(
+                "  {}",
+                crate::primitive::strip_ansi(&wrapped.to_ansi())
+            )));
             rendered += 1;
         }
     }
@@ -388,7 +392,7 @@ fn render_diff_line(line: &DiffRenderLine, theme: Option<&TuiTheme>) -> Line {
 /// Render one diff body line with add/remove coloring. Indented 2 spaces,
 /// the leading `+`/`-`/` ` drives the color.
 fn diff_body_line(raw: &str, theme: &TuiTheme) -> Line {
-    let plain = crate::ansi::strip_ansi(raw);
+    let plain = crate::primitive::strip_ansi(raw);
     let trimmed = plain.trim_start();
     let color = match trimmed.chars().next() {
         Some('+') => theme.diff_added,

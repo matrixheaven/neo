@@ -1,9 +1,9 @@
-use neo_tui::chrome::{NeoChromeState, Overlay, OverlayKind};
 use neo_tui::dialogs::{
     TrustDialogChoice, TrustDialogData, TrustDialogInput, TrustDialogInputKind, TrustDialogResult,
     TrustDialogState,
 };
 use neo_tui::input::{InputEvent, KeybindingAction};
+use neo_tui::shell::{NeoChromeState, Overlay, OverlayKind};
 use std::path::PathBuf;
 
 fn sample_data() -> TrustDialogData {
@@ -34,13 +34,13 @@ fn render_lines(state: &TrustDialogState, width: usize) -> Vec<String> {
     state
         .render_lines(width)
         .iter()
-        .map(|line| neo_tui::ansi::strip_ansi(line))
+        .map(|line| neo_tui::primitive::strip_ansi(line))
         .collect()
 }
 
 #[test]
 fn trust_dialog_defaults_to_continue_untrusted() {
-    let state = TrustDialogState::new(sample_data(), neo_tui::chrome::TuiTheme::default());
+    let state = TrustDialogState::new(sample_data(), neo_tui::shell::TuiTheme::default());
     assert_eq!(
         state.selected_choice(),
         TrustDialogChoice::ContinueUntrusted
@@ -49,7 +49,7 @@ fn trust_dialog_defaults_to_continue_untrusted() {
 
 #[test]
 fn trust_dialog_renders_detected_inputs_without_file_contents() {
-    let state = TrustDialogState::new(sample_data(), neo_tui::chrome::TuiTheme::default());
+    let state = TrustDialogState::new(sample_data(), neo_tui::shell::TuiTheme::default());
     let lines = render_lines(&state, 80);
     let text = lines.join("\n");
 
@@ -69,7 +69,7 @@ fn trust_dialog_renders_detected_inputs_without_file_contents() {
 
 #[test]
 fn trust_dialog_renders_parent_selection_step() {
-    let mut state = TrustDialogState::new(sample_data(), neo_tui::chrome::TuiTheme::default());
+    let mut state = TrustDialogState::new(sample_data(), neo_tui::shell::TuiTheme::default());
 
     // Move up once from ContinueUntrusted to TrustParent.
     state.handle_input(&InputEvent::Action(KeybindingAction::SelectUp));
@@ -79,7 +79,7 @@ fn trust_dialog_renders_parent_selection_step() {
     let result = state.handle_input(&InputEvent::Submit);
     assert_eq!(
         result,
-        neo_tui::core::InputResult::Handled,
+        neo_tui::primitive::InputResult::Handled,
         "multiple parent candidates should open selection step"
     );
 
@@ -95,12 +95,12 @@ fn trust_dialog_renders_parent_selection_step() {
 fn trust_dialog_hides_prompt_when_focused() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
     app.prompt_mut()
-        .apply_edit(neo_tui::chrome::PromptEdit::Insert("draft prompt"));
+        .apply_edit(neo_tui::shell::PromptEdit::Insert("draft prompt"));
     app.push_overlay(Overlay::new(
         "trust",
         OverlayKind::TrustDialog(TrustDialogState::new(
             sample_data(),
-            neo_tui::chrome::TuiTheme::default(),
+            neo_tui::shell::TuiTheme::default(),
         )),
     ));
 
@@ -108,7 +108,7 @@ fn trust_dialog_hides_prompt_when_focused() {
     let (lines, cursor) = tui.render_frame(80, 24);
     let frame = lines
         .iter()
-        .map(|line| neo_tui::ansi::strip_ansi(line))
+        .map(|line| neo_tui::primitive::strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -130,9 +130,9 @@ fn trust_dialog_routes_input_through_chrome() {
 
     // Digit 3 selects Continue untrusted; Enter confirms.
     let result = app.handle_focused_dialog_input(InputEvent::Insert('3'));
-    assert_eq!(result, neo_tui::core::InputResult::Handled);
+    assert_eq!(result, neo_tui::primitive::InputResult::Handled);
     let result = app.handle_focused_dialog_input(InputEvent::Submit);
-    assert_eq!(result, neo_tui::core::InputResult::Submitted);
+    assert_eq!(result, neo_tui::primitive::InputResult::Submitted);
 
     match app.take_trust_dialog_result() {
         Some(TrustDialogResult::Untrusted { target }) => {
@@ -149,7 +149,7 @@ fn trust_dialog_cancel_chooses_untrusted() {
     app.open_trust_dialog(sample_data());
 
     let result = app.handle_focused_dialog_input(InputEvent::Cancel);
-    assert_eq!(result, neo_tui::core::InputResult::Cancelled);
+    assert_eq!(result, neo_tui::primitive::InputResult::Cancelled);
 
     match app.take_trust_dialog_result() {
         Some(TrustDialogResult::Untrusted { target }) => {
@@ -174,7 +174,7 @@ fn trust_dialog_single_parent_trusts_directly() {
 
     app.handle_focused_dialog_input(InputEvent::Insert('2'));
     let result = app.handle_focused_dialog_input(InputEvent::Submit);
-    assert_eq!(result, neo_tui::core::InputResult::Submitted);
+    assert_eq!(result, neo_tui::primitive::InputResult::Submitted);
 
     match app.take_trust_dialog_result() {
         Some(TrustDialogResult::Trust { target }) => {

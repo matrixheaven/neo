@@ -10,8 +10,8 @@ use neo_agent_core::session::workspace_sessions_dir as compute_workspace_session
 use neo_agent_core::{PermissionMode, QueueMode, ToolExecutionMode};
 use neo_ai::{ModelSpec, ReasoningEffort};
 use neo_tui::{
-    image::ImageProtocolPreference,
     input::{KeyId, KeybindingAction, KeybindingsManager},
+    terminal_image::ImageProtocolPreference,
 };
 use serde::{Deserialize, Serialize};
 

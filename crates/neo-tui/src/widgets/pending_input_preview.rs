@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
-use crate::ansi::{Style, paint};
-use crate::chrome::TuiTheme;
-use crate::components::{truncate_width, visible_width, wrap_width};
+use crate::primitive::{Style, paint};
+use crate::primitive::{truncate_width, visible_width, wrap_width};
+use crate::shell::TuiTheme;
 
 /// Maximum content lines shown per message before an ellipsis row.
 const PREVIEW_LINE_LIMIT: usize = 3;
@@ -157,7 +157,10 @@ mod tests {
         let follow_ups: VecDeque<String> = VecDeque::new();
         let panel = PendingInputPreview::new(&steers, &follow_ups);
         let lines = panel.render(60);
-        let plain: Vec<String> = lines.iter().map(|l| crate::ansi::strip_ansi(l)).collect();
+        let plain: Vec<String> = lines
+            .iter()
+            .map(|l| crate::primitive::strip_ansi(l))
+            .collect();
         assert_eq!(plain[0], "• Messages to be submitted after next tool call");
         assert_eq!(plain[1], "  ↳ Please continue.");
     }
@@ -168,7 +171,10 @@ mod tests {
         let follow_ups: VecDeque<String> = VecDeque::from(["Hello?".to_owned()]);
         let panel = PendingInputPreview::new(&steers, &follow_ups);
         let lines = panel.render(40);
-        let plain: Vec<String> = lines.iter().map(|l| crate::ansi::strip_ansi(l)).collect();
+        let plain: Vec<String> = lines
+            .iter()
+            .map(|l| crate::primitive::strip_ansi(l))
+            .collect();
         assert_eq!(plain[0], "• Queued follow-up inputs");
         assert_eq!(plain[1], "  ↳ Hello?");
         assert!(plain[2].contains("Alt+↑ edit last queued message"));
@@ -181,7 +187,10 @@ mod tests {
             VecDeque::from(["Follow one".to_owned(), "Follow two".to_owned()]);
         let panel = PendingInputPreview::new(&steers, &follow_ups);
         let lines = panel.render(60);
-        let plain: Vec<String> = lines.iter().map(|l| crate::ansi::strip_ansi(l)).collect();
+        let plain: Vec<String> = lines
+            .iter()
+            .map(|l| crate::primitive::strip_ansi(l))
+            .collect();
         assert!(plain.contains(&"• Messages to be submitted after next tool call".to_owned()));
         assert!(plain.contains(&"  ↳ Steer one".to_owned()));
         assert!(plain.contains(&"• Queued follow-up inputs".to_owned()));
@@ -195,7 +204,10 @@ mod tests {
         let follow_ups: VecDeque<String> = VecDeque::new();
         let panel = PendingInputPreview::new(&steers, &follow_ups);
         let lines = panel.render(40);
-        let plain: Vec<String> = lines.iter().map(|l| crate::ansi::strip_ansi(l)).collect();
+        let plain: Vec<String> = lines
+            .iter()
+            .map(|l| crate::primitive::strip_ansi(l))
+            .collect();
         // Header + up to 3 wrapped lines + ellipsis row.
         assert_eq!(plain.len(), 5);
         assert!(plain.last().unwrap().contains('…'));

@@ -1,12 +1,12 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use neo_tui::chrome::NeoChromeState;
-use neo_tui::core::InputResult;
-use neo_tui::input::{InputEvent, KeybindingAction};
-use neo_tui::transcript::TranscriptPane;
-use neo_tui::widgets::{
+use neo_tui::dialogs::{
     QuestionDialogAction, QuestionDisplayData, QuestionDisplayOption, QuestionStateMachine,
-    TodoDisplayItem, TodoDisplayStatus, select_visible_todos,
 };
+use neo_tui::input::{InputEvent, KeybindingAction};
+use neo_tui::primitive::InputResult;
+use neo_tui::shell::NeoChromeState;
+use neo_tui::transcript::TranscriptPane;
+use neo_tui::widgets::{TodoDisplayItem, TodoDisplayStatus, select_visible_todos};
 
 // ---------------------------------------------------------------------------
 // QuestionDialog state machine tests
@@ -81,7 +81,7 @@ fn question_overlay_renders_in_live_tui_frame() {
     let (lines, _) = tui.render_frame(80, 24);
     let frame = lines
         .iter()
-        .map(|line| neo_tui::ansi::strip_ansi(line))
+        .map(|line| neo_tui::primitive::strip_ansi(line))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -123,9 +123,9 @@ fn question_overlay_lines_fit_terminal_width() {
     let (lines, _) = tui.render_frame(40, 24);
 
     for line in lines {
-        let plain = neo_tui::ansi::strip_ansi(&line);
+        let plain = neo_tui::primitive::strip_ansi(&line);
         assert!(
-            neo_tui::ansi::visible_width(&plain) <= 40,
+            neo_tui::primitive::visible_width(&plain) <= 40,
             "line exceeded width: {plain:?}"
         );
     }

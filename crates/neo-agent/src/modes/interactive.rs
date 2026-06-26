@@ -40,16 +40,16 @@ use neo_agent_core::{
     skills::SkillStore,
 };
 use neo_tui::{
-    chrome::{
+    dialogs::{McpManagerOptions, McpServerRow, McpToolStatus},
+    input::{InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager},
+    primitive::InputResult,
+    screen_output::TuiRenderer,
+    shell::{
         ApprovalChoice, ApprovalResult, CommandSpec, ContextWindow, DevelopmentMode,
         GoalModeStatus, NeoChromeState, OverlayKind, PickerItem, PromptEdit, SessionPickerItem,
         SessionPickerScope, StreamUpdate,
     },
-    core::InputResult,
-    dialogs::{McpManagerOptions, McpServerRow, McpToolStatus},
-    image::{ImageProtocolPreference, ImageRenderPolicy, TerminalImageCapabilities},
-    input::{InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager},
-    terminal::TuiRenderer,
+    terminal_image::{ImageProtocolPreference, ImageRenderPolicy, TerminalImageCapabilities},
     transcript::{TranscriptPane, pane::frame_content_width},
 };
 
@@ -1953,7 +1953,7 @@ impl InteractiveController {
     }
 
     fn clear_stale_streaming_turn(&mut self) -> bool {
-        if self.tui.chrome().mode() != neo_tui::chrome::ChromeMode::Streaming {
+        if self.tui.chrome().mode() != neo_tui::shell::ChromeMode::Streaming {
             return false;
         }
         self.clear_interrupted_turn_state();
@@ -6607,7 +6607,7 @@ fn render_transcript_snapshot(
     let mut lines = transcript
         .frame_ansi_lines()
         .into_iter()
-        .map(|line| neo_tui::ansi::strip_ansi(&line).trim_end().to_owned())
+        .map(|line| neo_tui::primitive::strip_ansi(&line).trim_end().to_owned())
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
     lines.extend(render_overlay_snapshot(app, width));
@@ -6646,12 +6646,12 @@ fn render_chrome_snapshot_lines(
     neo_tui::transcript::render_chrome_lines(app, width, 24)
         .lines
         .into_iter()
-        .map(|line| neo_tui::ansi::strip_ansi(&line).trim_end().to_owned())
+        .map(|line| neo_tui::primitive::strip_ansi(&line).trim_end().to_owned())
 }
 
 fn render_picker_snapshot(
     title: &str,
-    picker: &neo_tui::chrome::PickerState,
+    picker: &neo_tui::shell::PickerState,
     width: usize,
 ) -> Vec<String> {
     let mut lines = vec![title.to_owned()];
@@ -6670,8 +6670,8 @@ mod tests {
     use neo_agent_core::ToolResult;
     use neo_agent_core::{AgentEvent, AgentMessage, Content, PermissionMode, StopReason};
     use neo_tui::{
-        chrome::{ApprovalChoice, ChromeMode, CommandPaletteState, Overlay, OverlayKind},
         input::KeybindingAction,
+        shell::{ApprovalChoice, ChromeMode, CommandPaletteState, Overlay, OverlayKind},
         transcript::TranscriptEntry,
     };
 
@@ -6955,7 +6955,7 @@ mod tests {
 
         let plain: Vec<String> = lines
             .iter()
-            .map(|line| neo_tui::ansi::strip_ansi(line))
+            .map(|line| neo_tui::primitive::strip_ansi(line))
             .collect();
         assert!(plain.iter().any(|line| line.contains("Using Bash")));
         assert_eq!(compose_tui_frame(&app, &mut transcript, 0, 12), None);
@@ -7157,7 +7157,7 @@ mod tests {
 
         let joined = lines
             .iter()
-            .map(|line| neo_tui::ansi::strip_ansi(line))
+            .map(|line| neo_tui::primitive::strip_ansi(line))
             .collect::<Vec<_>>()
             .join("\n");
         // Banner (finalized) appears in the body before the running tool card,
@@ -7214,7 +7214,7 @@ mod tests {
         // before substring searching for the committed tool card.
         let plain: Vec<String> = lines
             .iter()
-            .map(|line| neo_tui::ansi::strip_ansi(line))
+            .map(|line| neo_tui::primitive::strip_ansi(line))
             .collect();
         let joined = plain.join("\n");
         let welcome = joined.find("Welcome to neo").expect("welcome in body");
@@ -10713,7 +10713,7 @@ command = "python3"
             .render_frame(80, 12)
             .expect("render frame")
             .into_iter()
-            .map(|line| neo_tui::ansi::strip_ansi(&line))
+            .map(|line| neo_tui::primitive::strip_ansi(&line))
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -12069,7 +12069,7 @@ command = "python3"
         let lines = compose_tui_frame(&app, &mut transcript, 80, 12).expect("frame composes");
         let expected = 80usize;
         for (i, line) in lines.iter().enumerate() {
-            let w = neo_tui::ansi::visible_width(line);
+            let w = neo_tui::primitive::visible_width(line);
             assert!(
                 w < expected,
                 "line {i} reaches terminal autowrap column {expected}: {w}: {line:?}"

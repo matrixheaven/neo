@@ -1,4 +1,4 @@
-use neo_tui::tool_diff::{DiffModel, DiffRenderState};
+use neo_tui::diff_model::{DiffModel, DiffRenderState};
 
 #[test]
 fn diff_model_parses_edit_tool_details_into_files_hunks_and_stats() {

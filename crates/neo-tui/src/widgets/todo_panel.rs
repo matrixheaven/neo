@@ -1,9 +1,6 @@
-use crate::chrome::TuiTheme;
-use crate::components::wrap_width;
-use crate::{
-    ansi::{Style, paint},
-    components::truncate_width,
-};
+use crate::primitive::wrap_width;
+use crate::primitive::{Style, paint, truncate_width};
+use crate::shell::TuiTheme;
 
 /// Maximum number of todo items visible without truncation.
 pub const MAX_VISIBLE_TODOS: usize = 5;
@@ -294,7 +291,7 @@ mod tests {
         let lines = TodoPanel::new(&todos).render(40);
         let plain = lines
             .iter()
-            .map(|line| crate::ansi::strip_ansi(line))
+            .map(|line| crate::primitive::strip_ansi(line))
             .collect::<Vec<_>>()
             .join("\n");
 

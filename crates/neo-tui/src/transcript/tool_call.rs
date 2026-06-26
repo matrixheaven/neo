@@ -1,8 +1,8 @@
-use crate::ansi::Style;
-use crate::chrome::ToolStatusKind;
-use crate::chrome::TuiTheme;
-use crate::components::wrap_width;
-use crate::core::{Component, Expandable, Finalization, Line};
+use crate::primitive::Style;
+use crate::primitive::wrap_width;
+use crate::primitive::{Component, Expandable, Finalization, Line};
+use crate::shell::ToolStatusKind;
+use crate::shell::TuiTheme;
 
 use super::plan_box::PlanBoxComponent;
 use super::tool_renderers::{

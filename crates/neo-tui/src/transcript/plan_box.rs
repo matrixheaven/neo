@@ -1,6 +1,6 @@
-use crate::ansi::{Color, Style};
-use crate::chrome::TuiTheme;
-use crate::core::Line;
+use crate::primitive::Line;
+use crate::primitive::{Color, Style};
+use crate::shell::TuiTheme;
 
 /// Renders plan content inside a bordered box, displayed within the
 /// `ExitPlanMode` tool card.

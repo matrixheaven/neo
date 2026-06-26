@@ -1,4 +1,4 @@
-use crate::ansi::{RESET, Style, clip_visible_to_width, paint, visible_width};
+use crate::primitive::{RESET, Style, clip_visible_to_width, paint, visible_width};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BoxSpec {
@@ -84,7 +84,7 @@ pub fn side_bordered_line(content: &str, width: usize, border_style: Style) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ansi::Style;
+    use crate::primitive::Style;
 
     #[test]
     fn rounded_box_width_exact() {
@@ -99,8 +99,8 @@ mod tests {
     fn content_line_pads_with_ansi_content() {
         let w = 20;
         let style = Style::default();
-        let red = crate::ansi::Style::default().fg(crate::ansi::Color::Red);
-        let content = format!("{}{}", crate::ansi::paint("hi", red), "x");
+        let red = crate::primitive::Style::default().fg(crate::primitive::Color::Red);
+        let content = format!("{}{}", crate::primitive::paint("hi", red), "x");
         let line = content_line(&content, w, style);
         assert_eq!(visible_width(&line), w);
     }

@@ -1,8 +1,8 @@
-use neo_tui::ansi::{Color, Style};
-use neo_tui::core::{
+use neo_tui::input::InputEvent;
+use neo_tui::primitive::{Color, Style};
+use neo_tui::primitive::{
     Component, Container, Finalization, GutterContainer, InputResult, Line, Span, Text,
 };
-use neo_tui::input::InputEvent;
 
 struct StaticComponent {
     rows: Vec<Line>,
@@ -39,7 +39,10 @@ fn line_truncate_preserves_visible_width_contract() {
     let truncated = line.truncate_to_width(8);
 
     assert_eq!(truncated.visible_width(), 7);
-    assert_eq!(neo_tui::ansi::strip_ansi(&truncated.to_ansi()), "abcdef…");
+    assert_eq!(
+        neo_tui::primitive::strip_ansi(&truncated.to_ansi()),
+        "abcdef…"
+    );
 }
 
 #[test]

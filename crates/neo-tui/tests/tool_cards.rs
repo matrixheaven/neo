@@ -1,5 +1,5 @@
-use neo_tui::chrome::{ToolStatusKind, TuiTheme};
-use neo_tui::core::{Component, Expandable, Finalization, Line};
+use neo_tui::primitive::{Component, Expandable, Finalization, Line};
+use neo_tui::shell::{ToolStatusKind, TuiTheme};
 use neo_tui::transcript::diff_preview::render_diff_lines_clustered;
 use neo_tui::transcript::tool_renderers::tool_header_spans;
 use neo_tui::transcript::{ToolCallComponent, ToolCallState, TranscriptPane};
@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 fn plain(rows: Vec<Line>) -> Vec<String> {
     rows.into_iter()
-        .map(|row| neo_tui::ansi::strip_ansi(&row.to_ansi()))
+        .map(|row| neo_tui::primitive::strip_ansi(&row.to_ansi()))
         .collect()
 }
 
@@ -79,7 +79,7 @@ fn tool_call_updates_in_place_to_finished_state() {
 
 #[test]
 fn long_tool_header_truncates_to_content_width() {
-    use neo_tui::ansi::visible_width;
+    use neo_tui::primitive::visible_width;
     use neo_tui::transcript::frame_content_width;
 
     const WIDTH: usize = 80;
@@ -259,7 +259,7 @@ fn edit_diff_preview_clusters_changes_with_context_and_hidden_footer() {
     let rows = render_diff_lines_clustered(old, new, "src/lib.rs", 1, Some(4));
     let plain: Vec<String> = rows
         .into_iter()
-        .map(|row| neo_tui::ansi::strip_ansi(&row.to_ansi()))
+        .map(|row| neo_tui::primitive::strip_ansi(&row.to_ansi()))
         .collect();
 
     assert!(plain[0].contains("+2 -2 src/lib.rs"));
@@ -326,7 +326,7 @@ fn transcript_pane_expansion_state_is_instance_local() {
 #[test]
 fn transcript_pane_expansion_reaches_rendered_bash_tool_body() {
     use neo_agent_core::AgentEvent;
-    use neo_tui::ansi::strip_ansi;
+    use neo_tui::primitive::strip_ansi;
 
     let mut runtime = TranscriptPane::new(80, 20);
     runtime.apply_agent_event(AgentEvent::ToolCallStarted {
@@ -389,7 +389,7 @@ fn tool_card_lines_do_not_exceed_terminal_width_after_gutter() {
     // gutter, pushing them one column past the edge. The terminal wrapped the
     // extra column and the differential renderer lost track of cursor rows.
     use neo_agent_core::AgentEvent;
-    use neo_tui::ansi::{strip_ansi, visible_width};
+    use neo_tui::primitive::{strip_ansi, visible_width};
     use neo_tui::transcript::{apply_gutter, frame_content_width};
 
     const WIDTH: usize = 40;
@@ -461,7 +461,7 @@ fn tool_card_lines_do_not_exceed_terminal_width_after_gutter() {
 #[test]
 fn ask_user_question_header_does_not_exceed_terminal_width_after_gutter() {
     use neo_agent_core::AgentEvent;
-    use neo_tui::ansi::{strip_ansi, visible_width};
+    use neo_tui::primitive::{strip_ansi, visible_width};
     use neo_tui::transcript::apply_gutter;
 
     const WIDTH: usize = 80;
@@ -517,7 +517,7 @@ fn ask_user_question_header_does_not_exceed_terminal_width_after_gutter() {
 #[test]
 fn grouped_read_lines_do_not_exceed_terminal_width_after_gutter() {
     use neo_agent_core::AgentEvent;
-    use neo_tui::ansi::{strip_ansi, visible_width};
+    use neo_tui::primitive::{strip_ansi, visible_width};
     use neo_tui::transcript::{apply_gutter, frame_content_width};
 
     const WIDTH: usize = 30;
@@ -654,7 +654,7 @@ fn long_path_header_preserves_tail() {
 #[test]
 fn write_streaming_preview_shows_progress_and_content() {
     use neo_agent_core::AgentEvent;
-    use neo_tui::ansi::strip_ansi;
+    use neo_tui::primitive::strip_ansi;
 
     let mut runtime = TranscriptPane::new(80, 20);
     runtime.apply_agent_event(AgentEvent::ToolCallStarted {
@@ -696,7 +696,7 @@ fn write_streaming_preview_shows_progress_and_content() {
 #[test]
 fn edit_streaming_preview_shows_progress() {
     use neo_agent_core::AgentEvent;
-    use neo_tui::ansi::strip_ansi;
+    use neo_tui::primitive::strip_ansi;
 
     let mut runtime = TranscriptPane::new(80, 20);
     runtime.apply_agent_event(AgentEvent::ToolCallStarted {

@@ -1,18 +1,16 @@
-pub mod ansi;
-pub mod chrome;
-pub mod components;
-pub mod core;
+pub mod app;
 pub mod dialogs;
-pub mod image;
+pub mod diff_model;
 pub mod input;
 pub mod markdown;
-pub mod neo_tui;
 pub mod paste;
+pub mod primitive;
+pub mod screen_output;
 pub mod searchable_list;
-pub mod terminal;
+pub mod shell;
+pub mod terminal_image;
 pub mod token_estimate;
-pub mod tool_diff;
 pub mod transcript;
 pub mod widgets;
 
-pub use neo_tui::NeoTui;
+pub use app::NeoTui;

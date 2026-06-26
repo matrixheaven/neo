@@ -3,10 +3,10 @@
 
 use std::path::PathBuf;
 
-use crate::chrome::TuiTheme;
-use crate::components::truncate_width;
-use crate::core::InputResult;
 use crate::input::{InputEvent, KeybindingAction};
+use crate::primitive::InputResult;
+use crate::primitive::truncate_width;
+use crate::shell::TuiTheme;
 
 /// Inputs shown in the trust dialog. Built from `neo_agent::trust` data but
 /// kept independent so `neo-tui` does not depend on `neo-agent`.
@@ -431,7 +431,7 @@ impl TrustDialogState {
     }
 }
 
-fn border_top(width: usize, title: &str, border_color: crate::ansi::Color) -> String {
+fn border_top(width: usize, title: &str, border_color: crate::primitive::Color) -> String {
     let inner = width.saturating_sub(2).max(1);
     let title = format!(" {title} ");
     let title_len = title.chars().count().min(inner);
@@ -444,7 +444,7 @@ fn border_top(width: usize, title: &str, border_color: crate::ansi::Color) -> St
     )
 }
 
-fn border_bottom(width: usize, border_color: crate::ansi::Color) -> String {
+fn border_bottom(width: usize, border_color: crate::primitive::Color) -> String {
     let inner = width.saturating_sub(2).max(1);
     format!(
         "\x1b[38;2;{}m╰{}\x1b[0m",
@@ -461,7 +461,7 @@ fn blank_line(inner: usize) -> String {
     format!(" {} ", " ".repeat(inner))
 }
 
-fn muted_line(text: &str, inner: usize, muted: crate::ansi::Color) -> String {
+fn muted_line(text: &str, inner: usize, muted: crate::primitive::Color) -> String {
     format!(
         "\x1b[38;2;{}m {} \x1b[0m",
         dialog_rgb(muted),
@@ -469,69 +469,69 @@ fn muted_line(text: &str, inner: usize, muted: crate::ansi::Color) -> String {
     )
 }
 
-fn dialog_rgb(color: crate::ansi::Color) -> String {
+fn dialog_rgb(color: crate::primitive::Color) -> String {
     match color {
-        crate::ansi::Color::Rgb(r, g, b) => format!("{r};{g};{b}"),
+        crate::primitive::Color::Rgb(r, g, b) => format!("{r};{g};{b}"),
         _ => "255;255;255".into(),
     }
 }
 
-fn dialog_sgr_fg(color: crate::ansi::Color) -> String {
+fn dialog_sgr_fg(color: crate::primitive::Color) -> String {
     dialog_sgr(color, DialogSgrLayer::Foreground)
 }
 
-fn dialog_sgr_bg(color: crate::ansi::Color) -> String {
+fn dialog_sgr_bg(color: crate::primitive::Color) -> String {
     dialog_sgr(color, DialogSgrLayer::Background)
 }
 
-fn dialog_sgr(color: crate::ansi::Color, layer: DialogSgrLayer) -> String {
+fn dialog_sgr(color: crate::primitive::Color, layer: DialogSgrLayer) -> String {
     match color {
-        crate::ansi::Color::Rgb(r, g, b) => format!("{};2;{r};{g};{b}", layer.rgb_prefix()),
-        crate::ansi::Color::Indexed(i) => format!("{};{i}", layer.indexed_prefix()),
+        crate::primitive::Color::Rgb(r, g, b) => format!("{};2;{r};{g};{b}", layer.rgb_prefix()),
+        crate::primitive::Color::Indexed(i) => format!("{};{i}", layer.indexed_prefix()),
         _ => named_dialog_sgr(color, layer)
             .unwrap_or_default()
             .to_owned(),
     }
 }
 
-fn named_dialog_sgr(color: crate::ansi::Color, layer: DialogSgrLayer) -> Option<&'static str> {
-    const FOREGROUND: &[(crate::ansi::Color, &str)] = &[
-        (crate::ansi::Color::Black, "30"),
-        (crate::ansi::Color::Red, "31"),
-        (crate::ansi::Color::Green, "32"),
-        (crate::ansi::Color::Yellow, "33"),
-        (crate::ansi::Color::Blue, "34"),
-        (crate::ansi::Color::Magenta, "35"),
-        (crate::ansi::Color::Cyan, "36"),
-        (crate::ansi::Color::White, "37"),
-        (crate::ansi::Color::Gray, "90"),
-        (crate::ansi::Color::DarkGray, "90"),
-        (crate::ansi::Color::LightRed, "91"),
-        (crate::ansi::Color::LightGreen, "92"),
-        (crate::ansi::Color::LightYellow, "93"),
-        (crate::ansi::Color::LightBlue, "94"),
-        (crate::ansi::Color::LightMagenta, "95"),
-        (crate::ansi::Color::LightCyan, "96"),
-        (crate::ansi::Color::Reset, "39"),
+fn named_dialog_sgr(color: crate::primitive::Color, layer: DialogSgrLayer) -> Option<&'static str> {
+    const FOREGROUND: &[(crate::primitive::Color, &str)] = &[
+        (crate::primitive::Color::Black, "30"),
+        (crate::primitive::Color::Red, "31"),
+        (crate::primitive::Color::Green, "32"),
+        (crate::primitive::Color::Yellow, "33"),
+        (crate::primitive::Color::Blue, "34"),
+        (crate::primitive::Color::Magenta, "35"),
+        (crate::primitive::Color::Cyan, "36"),
+        (crate::primitive::Color::White, "37"),
+        (crate::primitive::Color::Gray, "90"),
+        (crate::primitive::Color::DarkGray, "90"),
+        (crate::primitive::Color::LightRed, "91"),
+        (crate::primitive::Color::LightGreen, "92"),
+        (crate::primitive::Color::LightYellow, "93"),
+        (crate::primitive::Color::LightBlue, "94"),
+        (crate::primitive::Color::LightMagenta, "95"),
+        (crate::primitive::Color::LightCyan, "96"),
+        (crate::primitive::Color::Reset, "39"),
     ];
-    const BACKGROUND: &[(crate::ansi::Color, &str)] = &[
-        (crate::ansi::Color::Black, "40"),
-        (crate::ansi::Color::Red, "41"),
-        (crate::ansi::Color::Green, "42"),
-        (crate::ansi::Color::Yellow, "43"),
-        (crate::ansi::Color::Blue, "44"),
-        (crate::ansi::Color::Magenta, "45"),
-        (crate::ansi::Color::Cyan, "46"),
-        (crate::ansi::Color::White, "47"),
-        (crate::ansi::Color::Gray, "100"),
-        (crate::ansi::Color::DarkGray, "100"),
-        (crate::ansi::Color::LightRed, "101"),
-        (crate::ansi::Color::LightGreen, "102"),
-        (crate::ansi::Color::LightYellow, "103"),
-        (crate::ansi::Color::LightBlue, "104"),
-        (crate::ansi::Color::LightMagenta, "105"),
-        (crate::ansi::Color::LightCyan, "106"),
-        (crate::ansi::Color::Reset, "49"),
+    const BACKGROUND: &[(crate::primitive::Color, &str)] = &[
+        (crate::primitive::Color::Black, "40"),
+        (crate::primitive::Color::Red, "41"),
+        (crate::primitive::Color::Green, "42"),
+        (crate::primitive::Color::Yellow, "43"),
+        (crate::primitive::Color::Blue, "44"),
+        (crate::primitive::Color::Magenta, "45"),
+        (crate::primitive::Color::Cyan, "46"),
+        (crate::primitive::Color::White, "47"),
+        (crate::primitive::Color::Gray, "100"),
+        (crate::primitive::Color::DarkGray, "100"),
+        (crate::primitive::Color::LightRed, "101"),
+        (crate::primitive::Color::LightGreen, "102"),
+        (crate::primitive::Color::LightYellow, "103"),
+        (crate::primitive::Color::LightBlue, "104"),
+        (crate::primitive::Color::LightMagenta, "105"),
+        (crate::primitive::Color::LightCyan, "106"),
+        (crate::primitive::Color::Reset, "49"),
     ];
 
     let table = match layer {
@@ -609,7 +609,7 @@ mod tests {
         let lines = state.render_lines(80);
         let text: String = lines
             .iter()
-            .map(|line| crate::ansi::strip_ansi(line))
+            .map(|line| crate::primitive::strip_ansi(line))
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -638,7 +638,7 @@ mod tests {
         let lines = state.render_lines(80);
         let text: String = lines
             .iter()
-            .map(|line| crate::ansi::strip_ansi(line))
+            .map(|line| crate::primitive::strip_ansi(line))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Trust Parent Directory"), "{text}");

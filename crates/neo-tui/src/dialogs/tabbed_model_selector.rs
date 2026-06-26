@@ -2,12 +2,12 @@
 
 use std::fmt::Write as _;
 
-use crate::chrome::TuiTheme;
-use crate::core::InputResult;
 use crate::dialogs::model_selector::{
     ModelEntry, ModelSelectorOptions, ModelSelectorResult, ModelSelectorState,
 };
 use crate::input::InputEvent;
+use crate::primitive::InputResult;
+use crate::shell::TuiTheme;
 
 /// Options for the tabbed model selector.
 pub struct TabbedModelSelectorOptions {
@@ -228,9 +228,9 @@ fn filter_models_for_tab(all: &[ModelEntry], tab_idx: usize, tabs: &[String]) ->
         .collect()
 }
 
-fn rgb(c: crate::ansi::Color) -> String {
+fn rgb(c: crate::primitive::Color) -> String {
     match c {
-        crate::ansi::Color::Rgb(r, g, b) => format!("{r};{g};{b}"),
+        crate::primitive::Color::Rgb(r, g, b) => format!("{r};{g};{b}"),
         _ => "255;255;255".into(),
     }
 }

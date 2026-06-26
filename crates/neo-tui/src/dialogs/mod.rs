@@ -5,6 +5,7 @@ pub mod mcp_add_form;
 pub mod mcp_manager;
 pub mod model_selector;
 pub mod provider_manager;
+pub mod question_dialog;
 pub mod tabbed_model_selector;
 pub mod text_input;
 pub mod trust;
@@ -25,6 +26,10 @@ pub use model_selector::{
 pub use provider_manager::{
     ProviderManagerAction, ProviderManagerOptions, ProviderManagerState, ProviderSource,
     ProviderSourceKind,
+};
+pub use question_dialog::{
+    QuestionDialogAction, QuestionDisplayData, QuestionDisplayOption, QuestionOptionState,
+    QuestionResult, QuestionState, QuestionStateMachine,
 };
 pub use tabbed_model_selector::{TabbedModelSelectorOptions, TabbedModelSelectorState};
 pub use text_input::{TextInputOptions, TextInputResult, TextInputState};

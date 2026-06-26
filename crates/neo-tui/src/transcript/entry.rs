@@ -1,8 +1,10 @@
-use crate::ansi::{Color, Style, paint, visible_width};
-use crate::chrome::TuiTheme;
-use crate::components::wrap_width;
-use crate::core::{Line, Span};
-use crate::image::{ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities};
+use crate::primitive::wrap_width;
+use crate::primitive::{Color, Style, paint, visible_width};
+use crate::primitive::{Line, Span};
+use crate::shell::TuiTheme;
+use crate::terminal_image::{
+    ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
+};
 use crate::transcript::ToolCallComponent;
 use crate::widgets::box_draw;
 use serde::{Deserialize, Serialize};
@@ -1120,7 +1122,7 @@ fn render_goal_card(
 struct GoalCardChrome {
     icon: &'static str,
     label: &'static str,
-    color: crate::ansi::Color,
+    color: crate::primitive::Color,
 }
 
 impl GoalCardChrome {
@@ -1154,7 +1156,7 @@ fn goal_card_label(kind: GoalCardKind) -> &'static str {
     GOAL_CARD_LABELS[kind as usize]
 }
 
-fn goal_card_color(kind: GoalCardKind, theme: &TuiTheme) -> crate::ansi::Color {
+fn goal_card_color(kind: GoalCardKind, theme: &TuiTheme) -> crate::primitive::Color {
     [
         theme.brand,
         theme.status_warn,
@@ -1289,7 +1291,7 @@ fn thinking_style(theme: &TuiTheme) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chrome::TuiTheme;
+    use crate::shell::TuiTheme;
 
     #[test]
     fn welcome_banner_has_correct_width_and_logo() {
@@ -1304,7 +1306,7 @@ mod tests {
         };
         let lines = render_welcome_banner(&data, 60, &TuiTheme::default());
         for line in &lines {
-            let width = crate::ansi::visible_width(&line.to_ansi());
+            let width = crate::primitive::visible_width(&line.to_ansi());
             assert!(
                 width == 60 || width == 0,
                 "line width mismatch: {:?}",

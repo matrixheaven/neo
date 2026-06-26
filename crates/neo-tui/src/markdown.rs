@@ -7,9 +7,9 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-use crate::ansi::{Color, Style, clip_plain_to_width, visible_width};
-use crate::chrome::TuiTheme;
-use crate::core::{Line, Span};
+use crate::primitive::{Color, Style, clip_plain_to_width, visible_width};
+use crate::primitive::{Line, Span};
+use crate::shell::TuiTheme;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 /// Render markdown `text` into styled lines, wrapped to `width`.
@@ -462,7 +462,7 @@ impl<'a> MdRenderer<'a> {
 fn spans_to_plain(spans: &[Span]) -> String {
     spans
         .iter()
-        .map(|s| crate::ansi::strip_ansi(&s.to_ansi()))
+        .map(|s| crate::primitive::strip_ansi(&s.to_ansi()))
         .collect()
 }
 
@@ -531,7 +531,7 @@ fn highlight_code(code: &str, lang: &str, theme: &TuiTheme) -> Vec<String> {
     let fallback = || {
         code.trim_end_matches('\n')
             .lines()
-            .map(|l| crate::ansi::paint(l, Style::default().fg(theme.text_primary)))
+            .map(|l| crate::primitive::paint(l, Style::default().fg(theme.text_primary)))
             .collect::<Vec<_>>()
     };
     let ss = syntax_set();
@@ -553,7 +553,7 @@ fn highlight_code(code: &str, lang: &str, theme: &TuiTheme) -> Vec<String> {
     for line in syntect::util::LinesWithEndings::from(code.trim_end_matches('\n')) {
         match h.highlight_line(line, ss) {
             Ok(ranges) => out.push(syntect_to_ansi(&ranges, theme)),
-            Err(_) => out.push(crate::ansi::paint(
+            Err(_) => out.push(crate::primitive::paint(
                 line.trim_end_matches('\n'),
                 Style::default().fg(theme.text_primary),
             )),
@@ -579,7 +579,7 @@ fn syntect_to_ansi(ranges: &[(syntect::highlighting::Style, &str)], theme: &TuiT
                     .contains(syntect::highlighting::FontStyle::UNDERLINE),
                 ..Style::default()
             };
-            crate::ansi::paint(text, style)
+            crate::primitive::paint(text, style)
         })
         .collect()
 }

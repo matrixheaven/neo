@@ -1,5 +1,5 @@
-use neo_tui::chrome::InlineImageRenderCache;
-use neo_tui::image::{
+use neo_tui::shell::InlineImageRenderCache;
+use neo_tui::terminal_image::{
     ImageProtocolError, ImageProtocolPreference, ImageRenderPolicy, ImageSource, InlineImage,
     Iterm2Dimension, Iterm2InlineImageOptions, KittyGraphicsOptions, KittyImageFormat,
     NegotiatedImageProtocol, SixelImageOptions, SixelPaletteColor, TerminalImageCapabilities,

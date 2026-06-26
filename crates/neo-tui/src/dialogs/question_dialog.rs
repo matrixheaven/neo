@@ -1,8 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::ansi::{Color, Style, paint, truncate_to_width, visible_width, wrap_text};
-use crate::core::InputResult;
 use crate::input::{InputEvent, KeybindingAction};
+use crate::primitive::InputResult;
+use crate::primitive::{Color, Style, paint, truncate_to_width, visible_width, wrap_text};
 
 /// Maximum number of option lines shown per question page.
 pub const MAX_OPTIONS_VISIBLE: usize = 6;

@@ -1,9 +1,9 @@
 use std::fmt::Write as _;
 
-use crate::ansi::{RESET, Style, paint, visible_width};
-use crate::chrome::TuiTheme;
-use crate::components::wrap_width;
 use crate::markdown::render_markdown;
+use crate::primitive::wrap_width;
+use crate::primitive::{RESET, Style, paint, visible_width};
+use crate::shell::TuiTheme;
 use crate::widgets::box_draw::{ROUNDED, bottom_border, content_line};
 
 /// Stable identifier for a `/btw` sidecar session.
@@ -109,7 +109,7 @@ fn max_body_lines(terminal_rows: u16) -> usize {
     max_panel_lines.saturating_sub(1).max(1)
 }
 
-/// TUI state backing the `/btw` panel. Kept inside [`crate::chrome::NeoChromeState`].
+/// TUI state backing the `/btw` panel. Kept inside [`crate::shell::NeoChromeState`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtwPanelState {
     pub sidecar: BtwSidecar,
@@ -368,7 +368,7 @@ fn repeat_char(ch: char, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ansi::strip_ansi;
+    use crate::primitive::strip_ansi;
 
     fn plain(lines: &[String]) -> Vec<String> {
         lines.iter().map(|l| strip_ansi(l).clone()).collect()

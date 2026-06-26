@@ -31,8 +31,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, size},
 };
 
-use crate::ansi::visible_width;
-use crate::components::{truncate_width, wrap_width};
+use crate::primitive::visible_width;
+use crate::primitive::{truncate_width, wrap_width};
 
 const KITTY_SEQUENCE_PREFIX: &str = "\x1b_G";
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";

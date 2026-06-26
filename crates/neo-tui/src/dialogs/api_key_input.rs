@@ -1,10 +1,10 @@
 //! API key input dialog — masked single-field input.
 
-use crate::ansi::Color;
-use crate::chrome::TuiTheme;
-use crate::components::visible_width;
-use crate::core::InputResult;
 use crate::input::InputEvent;
+use crate::primitive::Color;
+use crate::primitive::InputResult;
+use crate::primitive::visible_width;
+use crate::shell::TuiTheme;
 
 pub struct ApiKeyInputOptions {
     pub title: String,

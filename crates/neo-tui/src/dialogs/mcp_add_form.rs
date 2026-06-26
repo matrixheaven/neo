@@ -1,10 +1,10 @@
 //! Single-page form for adding an MCP server.
 
-use crate::ansi::Color;
-use crate::chrome::TuiTheme;
-use crate::components::{truncate_width, visible_width};
-use crate::core::InputResult;
 use crate::input::{InputEvent, KeybindingAction};
+use crate::primitive::Color;
+use crate::primitive::InputResult;
+use crate::primitive::{truncate_width, visible_width};
+use crate::shell::TuiTheme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpAddFormOptions {

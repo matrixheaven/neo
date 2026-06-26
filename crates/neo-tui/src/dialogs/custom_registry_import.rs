@@ -1,10 +1,10 @@
 //! Custom registry import dialog — two-field form (URL + Bearer token).
 
-use crate::ansi::Color;
-use crate::chrome::TuiTheme;
-use crate::components::visible_width;
-use crate::core::InputResult;
 use crate::input::{InputEvent, KeybindingAction};
+use crate::primitive::Color;
+use crate::primitive::InputResult;
+use crate::primitive::visible_width;
+use crate::shell::TuiTheme;
 
 pub struct CustomRegistryImportOptions {
     pub title: String,

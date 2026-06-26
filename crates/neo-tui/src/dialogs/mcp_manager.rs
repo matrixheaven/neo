@@ -1,8 +1,8 @@
-use crate::ansi::{Style, paint};
-use crate::chrome::TuiTheme;
-use crate::components::{truncate_width, visible_width};
-use crate::core::InputResult;
 use crate::input::{InputEvent, KeybindingAction};
+use crate::primitive::InputResult;
+use crate::primitive::{Style, paint};
+use crate::primitive::{truncate_width, visible_width};
+use crate::shell::TuiTheme;
 
 /// Row data passed in from the controller for one configured MCP server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -479,7 +479,7 @@ fn render_row(
 
             let main =
                 format!("  {pointer_text}{status_text}{id_text}  {transport_text}  {tool_text}");
-            let main_visible = visible_width(&crate::ansi::strip_ansi(&main));
+            let main_visible = visible_width(&crate::primitive::strip_ansi(&main));
             let available = width.saturating_sub(main_visible).saturating_sub(2);
             let endpoint = if available > 8 {
                 let endpoint_text = truncate_width(&row.endpoint_summary, available, "…", false);
@@ -597,7 +597,7 @@ mod tests {
         state
             .render_lines(width)
             .iter()
-            .map(|line| crate::ansi::strip_ansi(line))
+            .map(|line| crate::primitive::strip_ansi(line))
             .collect()
     }
 

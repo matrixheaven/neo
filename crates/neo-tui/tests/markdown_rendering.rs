@@ -1,13 +1,13 @@
 //! Markdown rendering: verify each element is styled and laid out like Neo.
 
-use neo_tui::chrome::TuiTheme;
 use neo_tui::markdown::render_markdown;
+use neo_tui::shell::TuiTheme;
 
 fn plain(text: &str, width: usize) -> Vec<String> {
     render_markdown(text, width, &TuiTheme::default(), "", "")
         .into_iter()
         .map(|line| {
-            neo_tui::ansi::strip_ansi(&line.to_ansi())
+            neo_tui::primitive::strip_ansi(&line.to_ansi())
                 .trim_end()
                 .to_owned()
         })
@@ -260,7 +260,7 @@ fn finalized_bullet_prefix_keeps_first_line_inline_and_indents_continuation() {
     );
     let plain: Vec<String> = lines
         .iter()
-        .map(|l| neo_tui::ansi::strip_ansi(&l.to_ansi()))
+        .map(|l| neo_tui::primitive::strip_ansi(&l.to_ansi()))
         .collect();
     // First line: bullet + text inline (NOT bullet on its own line).
     assert!(
@@ -293,7 +293,7 @@ fn wrapped_inline_code_keeps_brand_color_on_continuation_lines() {
     );
     let joined = lines
         .iter()
-        .map(neo_tui::core::Line::to_ansi)
+        .map(neo_tui::primitive::Line::to_ansi)
         .collect::<Vec<_>>()
         .join("\n");
     let brand_color = "\x1b[38;2;198;120;221m";
@@ -313,7 +313,7 @@ fn table_truncates_long_cell_content_to_column_width() {
     assert!(joined.contains('┌'), "box border present: {joined}");
     // No line should exceed the width (24) — truncation keeps it in bounds.
     for line in &lines {
-        let w = neo_tui::ansi::visible_width(line);
+        let w = neo_tui::primitive::visible_width(line);
         assert!(w <= 24, "line within width ({w} > 24): {line:?}");
     }
     // The long content is truncated with an ellipsis.
@@ -334,7 +334,7 @@ fn table_handles_cjk_full_width_cells() {
     let body_widths: Vec<usize> = lines
         .iter()
         .filter(|l| l.contains('│'))
-        .map(|l| neo_tui::ansi::visible_width(l))
+        .map(|l| neo_tui::primitive::visible_width(l))
         .collect();
     if !body_widths.is_empty() {
         let w0 = body_widths[0];

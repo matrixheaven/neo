@@ -1,6 +1,6 @@
-use crate::chrome::ToolStatusKind;
-use crate::chrome::TuiTheme;
-use crate::core::Line;
+use crate::primitive::Line;
+use crate::shell::ToolStatusKind;
+use crate::shell::TuiTheme;
 use crate::transcript::{ToolCallComponent, ToolCallState};
 
 use super::entry::{ApprovalPromptData, ThinkingPhase, TranscriptEntry};

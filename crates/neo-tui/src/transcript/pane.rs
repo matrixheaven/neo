@@ -1,23 +1,21 @@
-use std::borrow::Borrow;
 use std::collections::{BTreeMap, VecDeque};
-use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use neo_agent_core::{
-    AgentEvent, AgentMessage, AgentToolCall, Content, ImageRef, PermissionOperation, ToolResult,
-    skills::SkillStore,
+    AgentEvent, AgentMessage, Content, ImageRef, PermissionOperation, skills::SkillStore,
 };
 
-use crate::ansi::{Color, Style, paint, truncate_to_width, visible_width};
-use crate::chrome::{
+use crate::primitive::wrap_width;
+use crate::primitive::{Color, Style, paint, truncate_to_width, visible_width};
+use crate::primitive::{Expandable, Line};
+use crate::screen_output::{CURSOR_MARKER, CursorPos};
+use crate::shell::{
     DevelopmentMode, GoalModeStatus, MAX_PROMPT_VISIBLE_LINES, NeoChromeState, PromptState,
     ToolStatusKind, TuiTheme,
 };
-use crate::components::wrap_width;
-use crate::core::{Expandable, Line};
-use crate::image::{ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities};
-use crate::terminal::{CURSOR_MARKER, CursorPos};
-use crate::transcript::entry::GoalCardKind;
+use crate::terminal_image::{
+    ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
+};
 use crate::transcript::{
     ApprovalPromptData, InlineImageRender, ToolCallComponent, ToolCallState, ToolGroup,
     TranscriptEntry, TranscriptStore, render_tool_group,
@@ -56,12 +54,12 @@ pub struct TranscriptPane {
     width: usize,
     height: usize,
     live_chrome_height: usize,
-    transcript: TranscriptStore,
+    pub(super) transcript: TranscriptStore,
     dirty: bool,
     tool_output_expanded: bool,
-    streaming_tool_args: BTreeMap<String, String>,
+    pub(super) streaming_tool_args: BTreeMap<String, String>,
     queued_approvals: VecDeque<ApprovalPromptData>,
-    completed_tool_result_ids: Vec<String>,
+    pub(super) completed_tool_result_ids: Vec<String>,
     next_image_id: u64,
     activity_frame: usize,
     workspace_root: Option<PathBuf>,
@@ -74,7 +72,7 @@ pub struct TranscriptPane {
     /// without holding a reference to the app. The interactive mode keeps it
     /// in sync via [`Self::set_theme`].
     theme: TuiTheme,
-    skill_store: Option<SkillStore>,
+    pub(super) skill_store: Option<SkillStore>,
 }
 
 impl TranscriptPane {
@@ -498,442 +496,6 @@ impl TranscriptPane {
         self.live_chrome_height
     }
 
-    pub fn apply_agent_event<E>(&mut self, event: E)
-    where
-        E: Borrow<AgentEvent>,
-    {
-        let event = event.borrow();
-        if self.apply_message_event(event) {
-            return;
-        }
-        if self.apply_thinking_event(event) {
-            return;
-        }
-        if self.apply_tool_event(event) {
-            return;
-        }
-        if self.apply_queue_event(event) {
-            return;
-        }
-        if self.apply_compaction_event(event) {
-            return;
-        }
-        self.apply_skill_goal_event(event);
-    }
-
-    fn apply_message_event(&mut self, event: &AgentEvent) -> bool {
-        match event {
-            AgentEvent::MessageStarted { .. } => {
-                self.mark_dirty();
-                true
-            }
-            AgentEvent::TextDelta { text, .. } => {
-                self.append_assistant_delta(text);
-                true
-            }
-            AgentEvent::MessageFinished { .. } | AgentEvent::TurnFinished { .. } => {
-                self.finish_active_text_blocks();
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn apply_thinking_event(&mut self, event: &AgentEvent) -> bool {
-        match event {
-            AgentEvent::ThinkingStarted { .. } => {
-                self.start_thinking_block();
-                true
-            }
-            AgentEvent::ThinkingDelta { text, .. } => {
-                self.append_thinking_block(text);
-                true
-            }
-            AgentEvent::ThinkingFinished { .. } => {
-                self.finish_thinking_block();
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn apply_tool_event(&mut self, event: &AgentEvent) -> bool {
-        match event {
-            AgentEvent::ToolCallStarted { id, name, .. } => {
-                self.start_tool_call(id, name.clone());
-                true
-            }
-            AgentEvent::ToolCallArgumentsDelta {
-                id, json_fragment, ..
-            } => {
-                self.append_tool_call_arguments(id, json_fragment);
-                true
-            }
-            AgentEvent::ToolCallFinished { tool_call, .. } => {
-                self.finish_tool_call(tool_call.clone());
-                true
-            }
-            AgentEvent::ToolExecutionStarted {
-                id,
-                name,
-                arguments,
-                ..
-            } => {
-                self.start_tool_execution(id, name.clone(), arguments);
-                true
-            }
-            AgentEvent::ApprovalRequested {
-                id,
-                operation,
-                subject,
-                arguments,
-                session_scope,
-                prefix_rule,
-                ..
-            } => {
-                let mut session_label = session_scope
-                    .as_ref()
-                    .filter(|scope| !scope.is_empty())
-                    .map(|scope| scope.label.clone());
-                // Tool and shell approvals always offer a session-approval option,
-                // even when no explicit session scope was derived. Use the default
-                // label so the modal keeps its four-option layout.
-                if session_label.is_none()
-                    && matches!(
-                        operation,
-                        PermissionOperation::Tool | PermissionOperation::Shell
-                    )
-                {
-                    session_label = Some("Approve for this session".to_owned());
-                }
-                let prefix_label = prefix_rule
-                    .as_ref()
-                    .map(|rule| format!("Approve commands starting with {}", rule.label));
-                self.request_approval(
-                    id.clone(),
-                    *operation,
-                    subject,
-                    arguments,
-                    session_label,
-                    prefix_label,
-                );
-                true
-            }
-            AgentEvent::ToolExecutionUpdate {
-                id,
-                name,
-                partial_result,
-                ..
-            } => {
-                self.update_tool_execution(id, name.clone(), partial_result.clone());
-                true
-            }
-            AgentEvent::ToolExecutionFinished {
-                id, name, result, ..
-            } => {
-                self.finish_tool_execution(id.clone(), name.clone(), result.clone());
-                true
-            }
-            AgentEvent::ShellCommandStarted {
-                id, command, cwd, ..
-            } => {
-                self.start_shell_command(id, command, cwd);
-                true
-            }
-            AgentEvent::ShellCommandFinished {
-                id,
-                exit_code,
-                stdout,
-                stderr,
-                truncated,
-                ..
-            } => {
-                self.finish_shell_command(id.clone(), *exit_code, stdout, stderr, *truncated);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn apply_queue_event(&mut self, event: &AgentEvent) -> bool {
-        match event {
-            // Queue events are now rendered in the dedicated Pending Input
-            // Preview panel above the composer, not as transcript status lines.
-            AgentEvent::SteeringQueued { .. }
-            | AgentEvent::FollowUpQueued { .. }
-            | AgentEvent::QueueDrained { .. } => true,
-            AgentEvent::Error { message, .. } => {
-                self.push_status(format!("Error: {message}"));
-                true
-            }
-            AgentEvent::RunFinished { turn, stop_reason } => {
-                if let Some(notice) = run_finished_notice(*turn, *stop_reason) {
-                    self.push_status(notice);
-                }
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn apply_compaction_event(&mut self, event: &AgentEvent) -> bool {
-        match event {
-            AgentEvent::CompactionStarted {
-                tokens_before,
-                message_count,
-                ..
-            } => {
-                self.upsert_compaction(
-                    Some(neo_agent_core::CompactionPhase::Estimating),
-                    0,
-                    *message_count,
-                    *tokens_before,
-                    0,
-                );
-                true
-            }
-            AgentEvent::CompactionProgress { phase, percent } => {
-                self.update_compaction_progress(*phase, (*percent).min(99));
-                true
-            }
-            AgentEvent::CompactionApplied { summary } => {
-                self.upsert_compaction(
-                    Some(neo_agent_core::CompactionPhase::Applying),
-                    100,
-                    summary.first_kept_message_index,
-                    summary.tokens_before,
-                    summary.tokens_after,
-                );
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn apply_skill_goal_event(&mut self, event: &AgentEvent) {
-        if let AgentEvent::SkillActivated { name, .. } = event {
-            self.push_skill_activation(name.clone());
-            return;
-        }
-        self.apply_goal_event(event);
-    }
-
-    fn apply_goal_event(&mut self, event: &AgentEvent) {
-        if self.apply_goal_state_event(event) {
-            return;
-        }
-        self.apply_goal_terminal_event(event);
-    }
-
-    fn apply_goal_state_event(&mut self, event: &AgentEvent) -> bool {
-        match event {
-            AgentEvent::GoalStarted { objective, .. } => {
-                self.push_goal_state_card(GoalCardKind::Started, objective);
-            }
-            AgentEvent::GoalPaused { objective, .. } => {
-                self.push_goal_state_card(GoalCardKind::Paused, objective);
-            }
-            AgentEvent::GoalResumed { objective, .. } => {
-                self.push_goal_state_card(GoalCardKind::Resumed, objective);
-            }
-            _ => return false,
-        }
-        true
-    }
-
-    fn apply_goal_terminal_event(&mut self, event: &AgentEvent) {
-        match event {
-            AgentEvent::GoalBlocked { .. } => self.push_goal_blocked_card(event),
-            AgentEvent::GoalFinished { .. } => self.push_goal_finished_card(event),
-            _ => {}
-        }
-    }
-
-    fn push_goal_blocked_card(&mut self, event: &AgentEvent) {
-        let AgentEvent::GoalBlocked {
-            objective, reason, ..
-        } = event
-        else {
-            return;
-        };
-        self.push_goal_card(
-            GoalCardKind::Blocked,
-            objective.clone(),
-            Some(reason.clone()),
-            None,
-        );
-    }
-
-    fn push_goal_finished_card(&mut self, event: &AgentEvent) {
-        let AgentEvent::GoalFinished {
-            objective,
-            outcome,
-            turn,
-            ..
-        } = event
-        else {
-            return;
-        };
-        self.push_goal_card(
-            GoalCardKind::Finished,
-            objective.clone(),
-            Some(outcome.clone()),
-            Some(*turn),
-        );
-    }
-
-    fn push_goal_state_card(&mut self, kind: GoalCardKind, objective: &str) {
-        self.push_goal_card(kind, objective.to_owned(), None, None);
-    }
-
-    fn start_thinking_block(&mut self) {
-        self.finish_assistant_message();
-        self.transcript.start_thinking();
-        self.apply_expand_state_to_active_thinking();
-        self.mark_dirty();
-    }
-
-    fn append_thinking_block(&mut self, text: &str) {
-        self.transcript.append_thinking_delta(text);
-        self.mark_dirty();
-    }
-
-    fn finish_thinking_block(&mut self) {
-        self.transcript.finish_thinking();
-        self.mark_dirty();
-    }
-
-    fn start_tool_call(&mut self, id: &str, name: String) {
-        self.upsert_tool(id, name, None, ToolStatusKind::Pending);
-        self.mark_dirty();
-    }
-
-    fn append_tool_call_arguments(&mut self, id: &str, json_fragment: &str) {
-        let arguments = self.streaming_tool_args.entry(id.to_owned()).or_default();
-        arguments.push_str(json_fragment);
-        if let Some(tool) = self.transcript.tool_mut(id) {
-            tool.update_call(Some(arguments.clone()));
-            self.mark_dirty();
-        }
-    }
-
-    fn finish_tool_call(&mut self, tool_call: AgentToolCall) {
-        let arguments = tool_call.arguments.to_string();
-        self.streaming_tool_args
-            .insert(tool_call.id.clone(), arguments.clone());
-        self.upsert_tool(
-            &tool_call.id,
-            tool_call.name,
-            Some(arguments),
-            ToolStatusKind::Pending,
-        );
-        self.mark_dirty();
-    }
-
-    fn start_tool_execution(&mut self, id: &str, name: String, arguments: &serde_json::Value) {
-        let arguments = self
-            .streaming_tool_args
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| arguments.to_string());
-        self.upsert_tool(id, name, Some(arguments), ToolStatusKind::Running);
-        self.mark_dirty();
-    }
-
-    fn request_approval(
-        &mut self,
-        id: String,
-        operation: PermissionOperation,
-        subject: &str,
-        arguments: &serde_json::Value,
-        session_option_label: Option<String>,
-        prefix_option_label: Option<String>,
-    ) {
-        self.upsert_approval(
-            id,
-            operation,
-            subject,
-            arguments,
-            session_option_label,
-            prefix_option_label,
-        );
-        self.mark_dirty();
-    }
-
-    fn update_tool_execution(&mut self, id: &str, name: String, partial_result: ToolResult) {
-        self.upsert_tool(id, name, None, ToolStatusKind::Running);
-        if let Some(tool) = self.transcript.tool_mut(id) {
-            tool.append_live_output(partial_result.content);
-        }
-        self.mark_dirty();
-    }
-
-    fn finish_tool_execution(&mut self, id: String, name: String, result: ToolResult) {
-        self.upsert_tool(&id, name, None, ToolStatusKind::Running);
-        self.streaming_tool_args.remove(&id);
-        if let Some(tool) = self.transcript.tool_mut(&id) {
-            let details = result.details;
-            let exit_code = details
-                .as_ref()
-                .and_then(|details| details.get("exit_code"))
-                .and_then(serde_json::Value::as_i64)
-                .and_then(|code| i32::try_from(code).ok());
-            tool.set_result(Some(result.content), details, result.is_error, exit_code);
-        }
-        self.completed_tool_result_ids.push(id);
-        self.mark_dirty();
-    }
-
-    fn start_shell_command(&mut self, id: &str, command: &str, cwd: &std::path::Path) {
-        self.upsert_tool(
-            id,
-            "Bash".to_owned(),
-            Some(format!("{command} ({})", cwd.display())),
-            ToolStatusKind::Running,
-        );
-        self.mark_dirty();
-    }
-
-    fn finish_shell_command(
-        &mut self,
-        id: String,
-        exit_code: Option<i32>,
-        stdout: &str,
-        stderr: &str,
-        truncated: bool,
-    ) {
-        let detail = shell_finished_detail(exit_code, stdout, stderr, truncated);
-        self.upsert_tool(&id, "Bash".to_owned(), None, ToolStatusKind::Running);
-        if let Some(tool) = self.transcript.tool_mut(&id) {
-            tool.set_result(Some(detail), None, exit_code != Some(0), exit_code);
-        }
-        self.completed_tool_result_ids.push(id);
-        self.mark_dirty();
-    }
-
-    fn push_skill_activation(&mut self, name: String) {
-        let description = self
-            .skill_store
-            .as_ref()
-            .and_then(|store| store.get(&name))
-            .map(|skill| skill.manifest.description.clone());
-        self.push_transcript(TranscriptEntry::skill_activated(
-            name,
-            description,
-            None::<String>,
-        ));
-    }
-
-    fn push_goal_card(
-        &mut self,
-        kind: GoalCardKind,
-        objective: String,
-        detail: Option<String>,
-        turns: Option<u32>,
-    ) {
-        self.push_transcript(TranscriptEntry::goal_card(kind, objective, detail, turns));
-    }
-
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
@@ -960,7 +522,7 @@ impl TranscriptPane {
     ///
     /// The chrome (prompt box + footer) depends on [`NeoChromeState`] state and is
     /// appended by the caller via [`render_chrome_lines`] before the
-    /// whole frame is handed to [`crate::terminal::TuiRenderer::render`].
+    /// whole frame is handed to [`crate::screen_output::TuiRenderer::render`].
     /// This uses the single-buffer model: every screen line lives in one
     /// `Vec<String>`, so the renderer can diff the whole frame and rewrite only
     /// what changed.
@@ -1053,14 +615,14 @@ impl TranscriptPane {
         (self.width, self.height)
     }
 
-    fn upsert_tool(
+    pub(super) fn upsert_tool(
         &mut self,
         id: &str,
         name: String,
         arguments: Option<String>,
         status: ToolStatusKind,
     ) {
-        use crate::core::Expandable as _;
+        use crate::primitive::Expandable as _;
 
         if let Some(tool) = self.transcript.tool_mut(id) {
             tool.update_call_state(name, arguments, status);
@@ -1091,7 +653,7 @@ impl TranscriptPane {
         entry
     }
 
-    fn apply_expand_state_to_active_thinking(&mut self) {
+    pub(super) fn apply_expand_state_to_active_thinking(&mut self) {
         for entry in self.transcript.entries_mut().iter_mut().rev() {
             if let TranscriptEntry::ThinkingBlock { expanded, .. } = entry {
                 *expanded = self.tool_output_expanded;
@@ -1100,12 +662,12 @@ impl TranscriptPane {
         }
     }
 
-    fn finish_active_text_blocks(&mut self) {
+    pub(super) fn finish_active_text_blocks(&mut self) {
         self.finish_assistant_message();
         self.transcript.finish_thinking();
     }
 
-    fn upsert_approval(
+    pub(super) fn upsert_approval(
         &mut self,
         id: String,
         operation: PermissionOperation,
@@ -1184,7 +746,7 @@ impl TranscriptPane {
         self.transcript.insert_approval_after_tool_or_push(next);
     }
 
-    fn upsert_compaction(
+    pub(super) fn upsert_compaction(
         &mut self,
         phase: Option<neo_agent_core::CompactionPhase>,
         percent: u8,
@@ -1222,7 +784,11 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
-    fn update_compaction_progress(&mut self, phase: neo_agent_core::CompactionPhase, percent: u8) {
+    pub(super) fn update_compaction_progress(
+        &mut self,
+        phase: neo_agent_core::CompactionPhase,
+        percent: u8,
+    ) {
         if let Some(TranscriptEntry::Compaction {
             phase: existing_phase,
             percent: existing_percent,
@@ -1584,45 +1150,6 @@ const fn base64_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn shell_finished_detail(
-    exit_code: Option<i32>,
-    stdout: &str,
-    stderr: &str,
-    truncated: bool,
-) -> String {
-    let mut detail = format!("{stdout}{stderr}");
-    if exit_code != Some(0) {
-        let exit_label = exit_code.map_or_else(|| "signal".to_owned(), |code| code.to_string());
-        if !detail.ends_with('\n') && !detail.is_empty() {
-            detail.push('\n');
-        }
-        let _ = write!(detail, "Command failed with exit code: {exit_label}.");
-    }
-    if truncated {
-        if !detail.ends_with('\n') && !detail.is_empty() {
-            detail.push('\n');
-        }
-        detail.push_str("[output truncated]");
-    }
-    detail
-}
-
-fn run_finished_notice(turn: u32, stop_reason: neo_agent_core::StopReason) -> Option<String> {
-    match stop_reason {
-        neo_agent_core::StopReason::MaxTokens => Some(format!(
-            "Run stopped after turn {turn}: response hit the output length cap (max_tokens). \
-             Raise [models.<alias>].max_output_tokens or [runtime].max_tokens to continue."
-        )),
-        neo_agent_core::StopReason::Error => {
-            Some(format!("Run stopped after turn {turn}: runtime error."))
-        }
-        neo_agent_core::StopReason::Cancelled => {
-            Some(format!("Run stopped after turn {turn}: cancelled."))
-        }
-        neo_agent_core::StopReason::EndTurn | neo_agent_core::StopReason::ToolUse => None,
-    }
-}
-
 fn take_completed_tool_result(completed_tool_result_ids: &mut Vec<String>, id: &str) -> bool {
     if let Some(index) = completed_tool_result_ids
         .iter()
@@ -1771,7 +1298,7 @@ pub fn frame_content_width(width: usize) -> usize {
 /// Render the `/` command dropdown below the prompt box, if active.
 fn render_prompt_completion_dropdown(app: &NeoChromeState, width: usize) -> Option<Vec<String>> {
     let overlay = app.focused_overlay()?;
-    let crate::chrome::OverlayKind::PromptCompletion(state) = &overlay.kind else {
+    let crate::shell::OverlayKind::PromptCompletion(state) = &overlay.kind else {
         return None;
     };
     let inner_width = width.saturating_sub(2).max(1);
@@ -2103,7 +1630,7 @@ fn render_git_status_part(part: &str, theme: TuiTheme) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chrome::{NeoChromeState, PickerItem, PromptCompletionPrefix, PromptEdit, TuiTheme};
+    use crate::shell::{NeoChromeState, PickerItem, PromptCompletionPrefix, PromptEdit, TuiTheme};
 
     #[test]
     fn prompt_box_lines_are_exact_width() {
@@ -2117,7 +1644,7 @@ mod tests {
         let expected_width = frame_content_width(40);
         for line in &render.lines {
             assert!(
-                crate::ansi::visible_width(line) <= expected_width,
+                crate::primitive::visible_width(line) <= expected_width,
                 "line: {line:?}"
             );
         }
@@ -2126,14 +1653,14 @@ mod tests {
             .lines
             .iter()
             .filter(|l| {
-                let s = crate::ansi::strip_ansi(l);
+                let s = crate::primitive::strip_ansi(l);
                 s.starts_with('│') || s.starts_with('╭') || s.starts_with('╰')
             })
             .collect();
         assert!(!prompt_box_lines.is_empty(), "prompt box lines missing");
         for line in prompt_box_lines {
             assert_eq!(
-                crate::ansi::visible_width(line),
+                crate::primitive::visible_width(line),
                 expected_width,
                 "line: {line:?}"
             );
@@ -2167,7 +1694,7 @@ mod tests {
         // The line immediately before the dropdown must be the prompt bottom border.
         assert!(render.lines[dropdown_start - 1].contains('╰'));
         // Dropdown items are side-bordered.
-        let stripped = crate::ansi::strip_ansi(&render.lines[dropdown_start]);
+        let stripped = crate::primitive::strip_ansi(&render.lines[dropdown_start]);
         assert!(stripped.starts_with('│'));
         assert!(stripped.ends_with('│'));
     }

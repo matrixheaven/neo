@@ -2,11 +2,11 @@
 
 use std::fmt::Write as _;
 
-use crate::ansi::Color;
-use crate::chrome::TuiTheme;
-use crate::components::visible_width;
-use crate::core::InputResult;
 use crate::input::{InputEvent, KeybindingAction};
+use crate::primitive::Color;
+use crate::primitive::InputResult;
+use crate::primitive::visible_width;
+use crate::shell::TuiTheme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChoiceItem {
