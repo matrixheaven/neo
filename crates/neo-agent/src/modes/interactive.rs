@@ -6116,6 +6116,17 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     }
     controller.skill_store = skill_store;
     controller.model_capabilities = model_capabilities;
+    // Initialise the active model from the default so that features like image
+    // paste work before the first turn (which would otherwise set it lazily).
+    if controller.active_model.is_none()
+        && let Ok(model) = SelectedModel::from_alias(
+            &config.default_model,
+            Some(&config),
+            &controller.model_items,
+        )
+    {
+        controller.active_model = Some(model);
+    }
     // Seed the composer's in-memory history from the workspace bucket so Up/Down
     // can recall prompts submitted in earlier TUI sessions for this workspace.
     controller.prompt_history = Some(crate::prompt_history::PromptHistoryStore::for_config(
