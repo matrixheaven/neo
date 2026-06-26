@@ -508,8 +508,9 @@ user-authored goals with `/goal <objective>`, plus `/goal pause`, `/goal
 resume`, `/goal cancel`, `/goal replace <objective>`, and `/goal next
 <objective>`. Goal mode is separate: it drafts a structured goal and submits it
 through `ExitGoalMode` for blocking review before creating the durable goal.
-Active goals are stored in `~/.neo/goals/`; structured runs also write
-`~/.neo/goals/runs/<goal-id>/GOAL.md`, `ROADMAP.md`, `STATE.md`,
+Active goals are stored in the session directory under
+`<session_dir>/goals/`; structured runs also write
+`<session_dir>/goals/runs/<goal-id>/GOAL.md`, `ROADMAP.md`, `STATE.md`,
 `THINKING.md`, `PROTOCOL.md`, and `phases/phase-N.md`. The runtime continues
 turns automatically while the goal is active; the model uses
 `update_goal_status` to mark completion or blockers. There is no turn cap.

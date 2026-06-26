@@ -157,23 +157,23 @@ impl GoalStore {
     }
 }
 
-fn goals_dir(home: &Path) -> PathBuf {
-    home.join("goals")
+fn goals_dir(session_dir: &Path) -> PathBuf {
+    session_dir.join("goals")
 }
 
-fn goal_path(home: &Path, id: &str) -> PathBuf {
-    goals_dir(home).join(format!("{id}.json"))
+fn goal_path(session_dir: &Path, id: &str) -> PathBuf {
+    goals_dir(session_dir).join(format!("{id}.json"))
 }
 
-fn goal_artifact_dir(home: &Path, id: &str) -> PathBuf {
-    goals_dir(home).join("runs").join(id)
+fn goal_artifact_dir(session_dir: &Path, id: &str) -> PathBuf {
+    goals_dir(session_dir).join("runs").join(id)
 }
 
-async fn ensure_goal_artifacts(home: &Path, goal: &mut Goal) -> Result<()> {
+async fn ensure_goal_artifacts(session_dir: &Path, goal: &mut Goal) -> Result<()> {
     let dir = goal
         .artifact_dir
         .clone()
-        .unwrap_or_else(|| goal_artifact_dir(home, &goal.id));
+        .unwrap_or_else(|| goal_artifact_dir(session_dir, &goal.id));
     let phases_dir = dir.join("phases");
     fs::create_dir_all(&phases_dir).await?;
     goal.artifact_dir = Some(dir.clone());
@@ -229,8 +229,8 @@ async fn ensure_goal_artifacts(home: &Path, goal: &mut Goal) -> Result<()> {
     Ok(())
 }
 
-pub async fn load_goal_store(home: &Path) -> Result<GoalStore> {
-    let dir = goals_dir(home);
+pub async fn load_goal_store(session_dir: &Path) -> Result<GoalStore> {
+    let dir = goals_dir(session_dir);
     fs::create_dir_all(&dir).await?;
     let mut store = GoalStore::new();
     let mut entries = fs::read_dir(&dir).await?;
@@ -256,16 +256,17 @@ pub async fn load_goal_store(home: &Path) -> Result<GoalStore> {
     Ok(store)
 }
 
-pub async fn save_goal(home: &Path, goal: &Goal) -> Result<()> {
-    let path = goal_path(home, &goal.id);
-    fs::create_dir_all(path.parent().unwrap()).await?;
+pub async fn save_goal(session_dir: &Path, goal: &Goal) -> Result<()> {
+    let path = goal_path(session_dir, &goal.id);
+    let goals_dir = goals_dir(session_dir);
+    fs::create_dir_all(&goals_dir).await?;
     let content = serde_json::to_string_pretty(goal)?;
     fs::write(&path, content).await?;
     Ok(())
 }
 
-pub async fn delete_goal(home: &Path, id: &str) -> Result<()> {
-    let path = goal_path(home, id);
+pub async fn delete_goal(session_dir: &Path, id: &str) -> Result<()> {
+    let path = goal_path(session_dir, id);
     if path.exists() {
         fs::remove_file(&path).await?;
     }
@@ -274,15 +275,15 @@ pub async fn delete_goal(home: &Path, id: &str) -> Result<()> {
 
 #[derive(Debug, Clone)]
 pub struct GoalManager {
-    home: PathBuf,
+    session_dir: PathBuf,
     store: Arc<Mutex<GoalStore>>,
 }
 
 impl GoalManager {
-    pub async fn load(home: PathBuf) -> Result<Self> {
-        let store = load_goal_store(&home).await?;
+    pub async fn load(session_dir: PathBuf) -> Result<Self> {
+        let store = load_goal_store(&session_dir).await?;
         Ok(Self {
-            home,
+            session_dir,
             store: Arc::new(Mutex::new(store)),
         })
     }
@@ -293,12 +294,12 @@ impl GoalManager {
     }
 
     pub async fn start(&self, mut goal: Goal) -> Result<Option<Goal>> {
-        ensure_goal_artifacts(&self.home, &mut goal).await?;
+        ensure_goal_artifacts(&self.session_dir, &mut goal).await?;
         let previous = {
             let mut store = self.store.lock().map_err(|_| GoalError::Lock)?;
             store.start(goal.clone())
         };
-        save_goal(&self.home, &goal).await?;
+        save_goal(&self.session_dir, &goal).await?;
         Ok(previous)
     }
 
@@ -308,7 +309,7 @@ impl GoalManager {
             store.pause()
         };
         if let Some(ref goal) = goal {
-            save_goal(&self.home, goal).await?;
+            save_goal(&self.session_dir, goal).await?;
         }
         Ok(goal)
     }
@@ -319,7 +320,7 @@ impl GoalManager {
             store.resume()
         };
         if let Some(ref goal) = goal {
-            save_goal(&self.home, goal).await?;
+            save_goal(&self.session_dir, goal).await?;
         }
         Ok(goal)
     }
@@ -330,31 +331,31 @@ impl GoalManager {
             store.cancel()
         };
         if let Some(ref goal) = goal {
-            delete_goal(&self.home, &goal.id).await?;
+            delete_goal(&self.session_dir, &goal.id).await?;
         }
         Ok(goal)
     }
 
     pub async fn replace(&self, mut goal: Goal) -> Result<Option<Goal>> {
-        ensure_goal_artifacts(&self.home, &mut goal).await?;
+        ensure_goal_artifacts(&self.session_dir, &mut goal).await?;
         let previous = {
             let mut store = self.store.lock().map_err(|_| GoalError::Lock)?;
             store.replace(goal.clone())
         };
         if let Some(ref previous) = previous {
-            delete_goal(&self.home, &previous.id).await?;
+            delete_goal(&self.session_dir, &previous.id).await?;
         }
-        save_goal(&self.home, &goal).await?;
+        save_goal(&self.session_dir, &goal).await?;
         Ok(previous)
     }
 
     pub async fn queue_next(&self, mut goal: Goal) -> Result<()> {
-        ensure_goal_artifacts(&self.home, &mut goal).await?;
+        ensure_goal_artifacts(&self.session_dir, &mut goal).await?;
         {
             let mut store = self.store.lock().map_err(|_| GoalError::Lock)?;
             store.queue_next(goal.clone());
         }
-        save_goal(&self.home, &goal).await?;
+        save_goal(&self.session_dir, &goal).await?;
         Ok(())
     }
 
@@ -398,12 +399,12 @@ impl GoalManager {
         match status {
             GoalStatus::Complete => {
                 if let Some(ref goal) = goal {
-                    delete_goal(&self.home, &goal.id).await?;
+                    delete_goal(&self.session_dir, &goal.id).await?;
                 }
             }
             _ => {
                 if let Some(ref goal) = goal {
-                    save_goal(&self.home, goal).await?;
+                    save_goal(&self.session_dir, goal).await?;
                 }
             }
         }

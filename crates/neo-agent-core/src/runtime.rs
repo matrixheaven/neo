@@ -195,11 +195,10 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub prefix_approval_rules: Arc<Mutex<ApprovalRuleStore>>,
-    /// Home directory used for plan file creation (e.g. `~/.neo`).
-    /// Falls back to `workspace_root` if unset.
+    /// Home directory for persistent state (e.g. `~/.neo`, approval rules).
     pub home_dir: Option<PathBuf>,
-    /// Session directory for this turn. Used to store plan files and image blobs
-    /// scoped to the active session.
+    /// Session directory for this turn. Used to store plan files (`plans/`) and
+    /// image blobs scoped to the active session.
     #[serde(skip)]
     #[schemars(skip)]
     pub session_directory: Option<PathBuf>,
@@ -1150,17 +1149,12 @@ async fn read_blob_bytes(session_dir: &std::path::Path, sha256: &str) -> Option<
     None
 }
 
-/// Compute the workspace-scoped plans directory.
+/// Compute the session-scoped plans directory (`<session_dir>/plans`).
 fn plan_mode_plans_dir(config: &AgentConfig) -> Option<PathBuf> {
-    if let Some(session_dir) = config.session_directory.as_deref() {
-        return Some(session_dir.join("plans"));
-    }
-    let home = config.home_dir.as_deref()?;
-    if let Some(workdir) = config.workspace_root.as_deref() {
-        Some(crate::session::workspace_sessions_dir(&home.join("sessions"), workdir).join("plans"))
-    } else {
-        Some(home.join("plans"))
-    }
+    config
+        .session_directory
+        .as_deref()
+        .map(|dir| dir.join("plans"))
 }
 
 async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {

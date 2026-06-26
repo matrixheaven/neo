@@ -74,8 +74,9 @@ objectives.
 
 ## Storage
 
-Goals are stored as JSON files in `~/.neo/goals/`. Each structured run also has
-an artifact directory under `~/.neo/goals/runs/<goal-id>/` containing
+Goals are stored as JSON files in the session directory under `<session_dir>/goals/`.
+Each structured run also has an artifact directory under
+`<session_dir>/goals/runs/<goal-id>/` containing
 `GOAL.md`, `ROADMAP.md`, `STATE.md`, `THINKING.md`, `PROTOCOL.md`, and
 `phases/phase-N.md`. Active, paused, and blocked goals persist across sessions.
 Completed goals are removed.

@@ -1351,8 +1351,8 @@ async fn runtime_for_config(
         &config.skill_path,
     )?;
     let mut agent_config = agent_config_for_app(model, config, approval_tx, &skill_store)?;
-    if let Some(session_directory) = session_directory {
-        agent_config = agent_config.with_session_directory(session_directory);
+    if let Some(session_directory) = &session_directory {
+        agent_config = agent_config.with_session_directory(session_directory.clone());
     }
     agent_config.manual_compact_request = manual_compact_request;
     if let Some(plan_mode) = plan_mode {
@@ -1384,8 +1384,8 @@ async fn runtime_for_config(
     }
     let mut runtime = AgentRuntime::with_tools_and_skills(agent_config, client, tools, skill_store);
     runtime = runtime.with_steer_input(steer_input);
-    if let Some(home) = neo_home() {
-        let goal_manager = Arc::new(GoalManager::load(home).await?);
+    if let Some(session_dir) = session_directory {
+        let goal_manager = Arc::new(GoalManager::load(session_dir).await?);
         if let Some(tools) = runtime.tools_mut() {
             Arc::get_mut(tools)
                 .expect("tools arc not yet shared")
