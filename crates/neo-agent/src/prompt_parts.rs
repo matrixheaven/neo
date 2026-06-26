@@ -30,9 +30,20 @@ pub fn expand_prompt_markers(
             }
             Marker::Image { id, .. } => {
                 if let Some(att) = image_store.get(id) {
+                    // If we have the raw bytes (pasted before session existed),
+                    // inline-encode as Base64 to avoid needing a session dir.
+                    // Otherwise use a Blob reference (resolved by the runtime).
+                    let data = if let Some(bytes) = image_store.pending_bytes(id) {
+                        ImageRef::Base64(base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            bytes,
+                        ))
+                    } else {
+                        ImageRef::Blob(att.sha256.clone())
+                    };
                     parts.push(Content::Image {
                         mime_type: att.mime_type.clone(),
-                        data: ImageRef::Blob(att.sha256.clone()),
+                        data,
                     });
                 }
             }
@@ -67,7 +78,7 @@ mod tests {
     #[test]
     fn expand_mixed_text_and_image() {
         let mut image_store = ImageAttachmentStore::new();
-        image_store.add("abc".into(), "image/png".into(), 100, 100);
+        image_store.add("abc".into(), "image/png".into(), 100, 100, None);
         let parts = expand_prompt_markers(
             "hello [image #1 (100x100)] world",
             &HashMap::new(),

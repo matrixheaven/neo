@@ -1,34 +1,10 @@
 //! Image blob storage and minimal dimension detection.
 
 use sha2::{Digest, Sha256};
-use std::path::Path;
 
-/// Save image bytes to the session's `blobs/` directory, keyed by SHA-256.
-/// Duplicate content is not written twice. Returns the SHA-256 key.
-pub fn save_image_blob(
-    session_dir: &Path,
-    bytes: &[u8],
-    mime_type: &str,
-) -> anyhow::Result<String> {
-    let sha256 = format!("{:x}", Sha256::digest(bytes));
-    let ext = mime_to_extension(mime_type).unwrap_or("bin");
-    let blob_dir = session_dir.join("blobs");
-    std::fs::create_dir_all(&blob_dir)?;
-    let path = blob_dir.join(format!("{}.{}", sha256, ext));
-    if !path.exists() {
-        std::fs::write(&path, bytes)?;
-    }
-    Ok(sha256)
-}
-
-fn mime_to_extension(mime: &str) -> Option<&str> {
-    match mime {
-        "image/png" => Some("png"),
-        "image/jpeg" => Some("jpg"),
-        "image/webp" => Some("webp"),
-        "image/gif" => Some("gif"),
-        _ => None,
-    }
+/// Compute the hex SHA-256 of `bytes`.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 /// Detect image dimensions from raw bytes for common formats.
@@ -143,11 +119,11 @@ mod tests {
     }
 
     #[test]
-    fn save_image_blob_deduplicates() {
-        let temp = tempfile::tempdir().expect("tempdir");
+    fn sha256_hex_is_deterministic() {
         let bytes = b"fake image";
-        let blob1 = save_image_blob(temp.path(), bytes, "image/png").expect("save blob");
-        let blob2 = save_image_blob(temp.path(), bytes, "image/png").expect("save blob");
-        assert_eq!(blob1, blob2);
+        let hash1 = sha256_hex(bytes);
+        let hash2 = sha256_hex(bytes);
+        assert_eq!(hash1, hash2);
+        assert!(!hash1.is_empty());
     }
 }

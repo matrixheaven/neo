@@ -80,10 +80,14 @@ pub struct ImageAttachment {
 }
 
 /// In-memory store for image attachments referenced by composer placeholders.
+///
+/// When images are pasted before a session exists, the raw bytes are kept in
+/// `pending_bytes` and flushed to the session blob directory on submit.
 #[derive(Debug, Default, Clone)]
 pub struct ImageAttachmentStore {
     next_id: usize,
     by_id: std::collections::BTreeMap<usize, ImageAttachment>,
+    pending_bytes: std::collections::BTreeMap<usize, Vec<u8>>,
 }
 
 impl ImageAttachmentStore {
@@ -92,11 +96,20 @@ impl ImageAttachmentStore {
         Self {
             next_id: 1,
             by_id: std::collections::BTreeMap::new(),
+            pending_bytes: std::collections::BTreeMap::new(),
         }
     }
 
     /// Register an image and return its attachment id.
-    pub fn add(&mut self, sha256: String, mime_type: String, width: u32, height: u32) -> usize {
+    /// If `bytes` are provided, they are stored for lazy blob writing.
+    pub fn add(
+        &mut self,
+        sha256: String,
+        mime_type: String,
+        width: u32,
+        height: u32,
+        bytes: Option<Vec<u8>>,
+    ) -> usize {
         let id = self.next_id;
         self.next_id += 1;
         self.by_id.insert(
@@ -109,12 +122,20 @@ impl ImageAttachmentStore {
                 height,
             },
         );
+        if let Some(b) = bytes {
+            self.pending_bytes.insert(id, b);
+        }
         id
     }
 
     /// Look up an attachment by id.
     pub fn get(&self, id: usize) -> Option<&ImageAttachment> {
         self.by_id.get(&id)
+    }
+
+    /// Get pending (unsaved) bytes for an attachment.
+    pub fn pending_bytes(&self, id: usize) -> Option<&Vec<u8>> {
+        self.pending_bytes.get(&id)
     }
 
     /// Remove an attachment by id.
@@ -194,8 +215,8 @@ mod tests {
     #[test]
     fn attachment_store_assigns_incrementing_ids() {
         let mut store = ImageAttachmentStore::new();
-        let id1 = store.add("a".into(), "image/png".into(), 100, 100);
-        let id2 = store.add("b".into(), "image/jpeg".into(), 200, 200);
+        let id1 = store.add("a".into(), "image/png".into(), 100, 100, None);
+        let id2 = store.add("b".into(), "image/jpeg".into(), 200, 200, None);
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
         assert_eq!(store.get(id1).unwrap().sha256, "a");
@@ -204,7 +225,7 @@ mod tests {
     #[test]
     fn attachment_store_finds_by_sha256() {
         let mut store = ImageAttachmentStore::new();
-        store.add("abc".into(), "image/png".into(), 100, 100);
+        store.add("abc".into(), "image/png".into(), 100, 100, None);
         assert!(store.find_by_sha256("abc").is_some());
         assert!(store.find_by_sha256("missing").is_none());
     }
