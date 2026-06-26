@@ -54,7 +54,6 @@ fn is_vision_mime(mime: &str) -> bool {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
-    use std::path::Path;
     use std::process::Command;
 
     pub fn read_clipboard_image() -> Result<ClipboardImage, ClipboardError> {
@@ -63,6 +62,12 @@ mod macos {
         // and only a tiny placeholder in PNG (or vice-versa).
         let png_bytes = read_pasteboard_type("$.NSPasteboardTypePNG");
         let tiff_bytes = read_pasteboard_type("$.NSPasteboardTypeTIFF");
+
+        tracing::debug!(
+            "clipboard: png={} bytes, tiff={} bytes",
+            png_bytes.as_deref().map_or(0, <[u8]>::len),
+            tiff_bytes.as_deref().map_or(0, <[u8]>::len),
+        );
 
         let bytes = tiff_bytes
             .as_ref()
@@ -101,11 +106,14 @@ mod macos {
 
     /// Read raw bytes for a given NSPasteboard type via JXA.
     fn read_pasteboard_type(pasteboard_type: &str) -> Option<Vec<u8>> {
-        let tmp = std::env::temp_dir().join(format!(
-            "neo-clip-{}-{}",
-            std::process::id(),
-            crc32(pasteboard_type)
-        ));
+        let suffix = if pasteboard_type.contains("PNG") {
+            "png"
+        } else {
+            "tiff"
+        };
+        let tmp = std::env::temp_dir().join(format!("neo-clip-{suffix}.dat"));
+        let _ = std::fs::remove_file(&tmp);
+
         let script = format!(
             "ObjC.import('AppKit'); var pb = $.NSPasteboard.generalPasteboard; var data = pb.dataForType({pasteboard_type}); var ok = false; if (data && !data.isNil()) {{ ok = data.writeToFileAtomically({:?}, true); }} ok;",
             tmp.to_str().unwrap_or("")
@@ -114,7 +122,15 @@ mod macos {
             .args(["-l", "JavaScript", "-e", &script])
             .output()
             .ok()?;
-        if !out.status.success() {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        tracing::debug!(
+            "{pasteboard_type}: exit={} stdout={:?} stderr={:?} file_exists={}",
+            out.status,
+            stdout.trim(),
+            String::from_utf8_lossy(&out.stderr).trim(),
+            tmp.exists(),
+        );
+        if !tmp.exists() {
             return None;
         }
         let bytes = std::fs::read(&tmp).ok()?;
@@ -151,20 +167,6 @@ mod macos {
             ))),
             Err(e) => Err(ClipboardError::ReadFailed(e.to_string())),
         }
-    }
-
-    fn crc32(s: &str) -> u32 {
-        let mut hash: u32 = 0;
-        for byte in s.bytes() {
-            hash = hash.wrapping_mul(31).wrapping_add(u32::from(byte));
-        }
-        hash
-    }
-
-    // Suppress unused import warning for Path (kept for potential future use).
-    #[allow(dead_code)]
-    fn _path_marker() -> Option<&'static Path> {
-        None
     }
 }
 
