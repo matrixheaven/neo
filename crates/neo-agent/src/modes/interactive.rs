@@ -1532,8 +1532,8 @@ impl InteractiveController {
 
     async fn handle_paste_image(&mut self) -> Result<()> {
         if !self.model_supports_images() {
-            self.push_status("当前模型不支持图片识别");
-            return Ok(());
+            // Model doesn't support images — fall through to text paste.
+            return self.fallback_text_paste();
         }
 
         if self.expand_marker_at_cursor() {
@@ -1543,8 +1543,9 @@ impl InteractiveController {
         let image = match crate::clipboard::read_clipboard_image() {
             Ok(img) => img,
             Err(crate::clipboard::ClipboardError::NoImage) => {
-                self.push_status("剪贴板中没有图片");
-                return Ok(());
+                // No image in clipboard — fall through to text paste (like
+                // kimi-code: Ctrl+V pastes text when no image is available).
+                return self.fallback_text_paste();
             }
             Err(err) => {
                 self.push_status(format!("读取剪贴板图片失败: {err}"));
@@ -1570,6 +1571,18 @@ impl InteractiveController {
         );
         let placeholder = format!("[image #{} ({}x{})]", id, width, height);
         self.apply_prompt_edit(PromptEdit::Insert(&placeholder));
+        Ok(())
+    }
+
+    /// Read text from the system clipboard and paste it into the prompt.
+    /// Used as a fallback when Ctrl+V is pressed but no image is available.
+    fn fallback_text_paste(&mut self) -> Result<()> {
+        let text = crate::clipboard::read_text_clipboard();
+        if let Some(text) = text
+            && !text.is_empty()
+        {
+            self.handle_paste_text(&text);
+        }
         Ok(())
     }
 

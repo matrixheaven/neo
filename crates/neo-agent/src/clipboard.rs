@@ -17,6 +17,50 @@ pub enum ClipboardError {
     ReadFailed(String),
 }
 
+/// Read plain text from the system clipboard. Used as a fallback when Ctrl+V
+/// is pressed but no image is available.
+pub fn read_text_clipboard() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("pbpaste")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .filter(|s| !s.is_empty())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        for (cmd, args) in [
+            ("wl-paste", &["--no-newline"][..]),
+            ("xclip", &["-selection", "clipboard", "-o"][..]),
+        ] {
+            if let Ok(out) = std::process::Command::new(cmd).args(args).output() {
+                if out.status.success() {
+                    if let Ok(text) = String::from_utf8(out.stdout)
+                        && !text.is_empty()
+                    {
+                        return Some(text);
+                    }
+                }
+            }
+        }
+        None
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let script =
+            "Add-Type -AssemblyName System.Windows.Forms; [Windows.Forms.Clipboard]::GetText()";
+        std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", script])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .filter(|s| !s.is_empty())
+    }
+}
+
 /// Read an image from the system clipboard, if one is available.
 pub fn read_clipboard_image() -> Result<ClipboardImage, ClipboardError> {
     #[cfg(target_os = "macos")]
