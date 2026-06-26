@@ -798,15 +798,34 @@ impl ForkedSessionTranscript {
 /// Produce a short display text for a mixed content vector. Used for prompt
 /// history and transcript summaries.
 fn content_to_display_text(content: &[Content]) -> String {
+    let mut image_idx = 0;
     let mut out = String::new();
     for part in content {
         match part {
             Content::Text { text } => out.push_str(text),
-            Content::Image { .. } => out.push_str("[image]"),
+            Content::Image { mime_type, data } => {
+                image_idx += 1;
+                let (w, h) = image_dimensions_from_data(mime_type, data);
+                out.push_str(&format!("[image #{image_idx} ({w}x{h})]"));
+            }
             Content::Thinking { .. } => {}
         }
     }
     out
+}
+
+/// Best-effort dimension extraction from image data for display purposes.
+fn image_dimensions_from_data(mime_type: &str, data: &neo_agent_core::ImageRef) -> (u32, u32) {
+    let bytes = match data {
+        neo_agent_core::ImageRef::Base64(b64) => {
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).ok()
+        }
+        _ => None,
+    };
+    bytes
+        .as_deref()
+        .and_then(|b| crate::image_blob::detect_image_dimensions(b, mime_type))
+        .unwrap_or((0, 0))
 }
 
 impl InteractiveController {
