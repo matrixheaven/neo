@@ -107,7 +107,7 @@ mod macos {
             crc32(pasteboard_type)
         ));
         let script = format!(
-            "ObjC.import('AppKit'); var pb = $.NSPasteboard.generalPasteboard; var data = pb.dataForType({pasteboard_type}); if (data && !data.isNil()) {{ data.writeToFileAtomically({:?}, true); }} else {{ $.exit(1); }}",
+            "ObjC.import('AppKit'); var pb = $.NSPasteboard.generalPasteboard; var data = pb.dataForType({pasteboard_type}); var ok = false; if (data && !data.isNil()) {{ ok = data.writeToFileAtomically({:?}, true); }} ok;",
             tmp.to_str().unwrap_or("")
         );
         let out = Command::new("osascript")
