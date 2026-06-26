@@ -32,15 +32,25 @@ pub fn read_clipboard_image() -> Result<ClipboardImage, ClipboardError> {
 /// Detect the MIME type of image bytes using magic-byte sniffing.
 /// Returns `None` if the bytes are not a recognized image format.
 fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
-    match infer::get(bytes)?.extension() {
-        "png" => Some("image/png"),
-        "jpg" | "jpeg" => Some("image/jpeg"),
-        "gif" => Some("image/gif"),
-        "webp" => Some("image/webp"),
-        "tiff" => Some("image/tiff"),
-        "bmp" => Some("image/bmp"),
-        _ => None,
+    if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" {
+        return Some("image/png");
     }
+    if bytes.len() >= 3 && &bytes[..3] == b"\xff\xd8\xff" {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
+        return Some("image/gif");
+    }
+    // TIFF: big-endian (MM\x00\x2a) or little-endian (II\x2a\x00)
+    if bytes.len() >= 4 {
+        if &bytes[..4] == b"MM\x00\x2a" || &bytes[..4] == b"II\x2a\x00" {
+            return Some("image/tiff");
+        }
+    }
+    None
 }
 
 /// Whether the MIME type is one that providers accept for vision (base64).
