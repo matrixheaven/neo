@@ -1543,8 +1543,8 @@ impl InteractiveController {
         let image = match crate::clipboard::read_clipboard_image() {
             Ok(img) => img,
             Err(crate::clipboard::ClipboardError::NoImage) => {
-                tracing::warn!("clipboard: no image detected (NoImage)");
-                self.push_status("剪贴板中没有图片");
+                // Silently ignore — the clipboard may contain text, and showing
+                // a "no image" status message on every Ctrl+V is noisy.
                 return Ok(());
             }
             Err(err) => {
