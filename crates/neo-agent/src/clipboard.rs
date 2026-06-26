@@ -43,27 +43,64 @@ mod macos {
                 });
             }
         }
+
         let tmp = std::env::temp_dir().join(format!("neo-clipboard-{}.png", std::process::id()));
-        let script = format!(
-            "ObjC.import('AppKit'); var pb = $.NSPasteboard.generalPasteboard; var data = pb.dataForType($.NSPasteboardTypePNG); if (data && !data.isNil()) {{ data.writeToFileAtomically({:?}, true); }} else {{ $.exit(1); }}",
-            tmp.to_str().unwrap_or("")
-        );
-        let out = Command::new("osascript")
-            .args(["-l", "JavaScript", "-e", &script])
-            .output()
-            .map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
-        if !out.status.success() {
-            return Err(ClipboardError::NoImage);
+        let tmp_tiff =
+            std::env::temp_dir().join(format!("neo-clipboard-{}.tiff", std::process::id()));
+
+        // Helper: run a JXA script that reads from the pasteboard.
+        let read_pasteboard = |type_str: &str, path: &std::path::Path| -> bool {
+            let script = format!(
+                "ObjC.import('AppKit'); var pb = $.NSPasteboard.generalPasteboard; var data = pb.dataForType({type_str}); if (data && !data.isNil()) {{ data.writeToFileAtomically({:?}, true); }} else {{ $.exit(1); }}",
+                path.to_str().unwrap_or("")
+            );
+            Command::new("osascript")
+                .args(["-l", "JavaScript", "-e", &script])
+                .output()
+                .map(|out| out.status.success() && path.exists())
+                .unwrap_or(false)
+        };
+
+        // Strategy 1: Read PNG directly (fast path).
+        if read_pasteboard("$.NSPasteboardTypePNG", &tmp) {
+            if let Ok(bytes) = std::fs::read(&tmp) {
+                let _ = std::fs::remove_file(&tmp);
+                if !bytes.is_empty() {
+                    return Ok(ClipboardImage {
+                        bytes,
+                        mime_type: "image/png".into(),
+                    });
+                }
+            }
         }
-        let bytes = std::fs::read(&tmp).map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
-        let _ = std::fs::remove_file(&tmp);
-        if bytes.is_empty() {
-            return Err(ClipboardError::NoImage);
+
+        // Strategy 2: Read TIFF and convert to PNG via sips.
+        // macOS screenshots and image copies often put the full-res data in
+        // the TIFF pasteboard type, with only a tiny placeholder in PNG.
+        if read_pasteboard("$.NSPasteboardTypeTIFF", &tmp_tiff) {
+            // Convert TIFF → PNG using the built-in macOS `sips` tool.
+            let convert = Command::new("sips")
+                .args(["-s", "format", "png"])
+                .arg(&tmp_tiff)
+                .args(["--out", tmp.to_str().unwrap_or("")])
+                .output();
+            let _ = std::fs::remove_file(&tmp_tiff);
+            if let Ok(out) = convert
+                && out.status.success()
+            {
+                if let Ok(bytes) = std::fs::read(&tmp) {
+                    let _ = std::fs::remove_file(&tmp);
+                    if !bytes.is_empty() {
+                        return Ok(ClipboardImage {
+                            bytes,
+                            mime_type: "image/png".into(),
+                        });
+                    }
+                }
+            }
         }
-        Ok(ClipboardImage {
-            bytes,
-            mime_type: "image/png".into(),
-        })
+
+        Err(ClipboardError::NoImage)
     }
 }
 
