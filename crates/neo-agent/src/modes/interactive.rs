@@ -1556,7 +1556,7 @@ impl InteractiveController {
             crate::image_blob::detect_image_dimensions(&image.bytes, &image.mime_type)
                 .unwrap_or((0, 0));
 
-        let Some(session_dir) = self.active_session_directory() else {
+        let Some(session_dir) = self.ensure_active_session_directory() else {
             self.push_status("没有活跃会话，无法保存图片");
             return Ok(());
         };
@@ -1583,6 +1583,24 @@ impl InteractiveController {
         let session_id = self.active_session_id.as_ref()?;
         let config = self.local_config.as_ref()?;
         Some(crate::config::workspace_sessions_dir(config).join(session_id))
+    }
+
+    /// Like `active_session_directory`, but creates a session if none is active
+    /// yet. This allows image paste to work before the first message.
+    fn ensure_active_session_directory(&mut self) -> Option<PathBuf> {
+        if self.active_session_id.is_some() {
+            return self.active_session_directory();
+        }
+        let config = self.local_config.as_ref()?;
+        let bucket_dir = crate::config::workspace_sessions_dir(config);
+        let session_id = format!("session_{}", uuid::Uuid::new_v4());
+        let session_dir = bucket_dir.join(&session_id);
+        if std::fs::create_dir_all(&session_dir).is_ok() {
+            self.set_active_session_id(session_id);
+            Some(session_dir)
+        } else {
+            None
+        }
     }
 
     fn apply_prompt_edit(&mut self, edit: PromptEdit<'_>) {
@@ -6118,9 +6136,10 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     controller.model_capabilities = model_capabilities;
     // Initialise the active model from the default so that features like image
     // paste work before the first turn (which would otherwise set it lazily).
+    let model_label = config.default_model_label();
     if controller.active_model.is_none()
         && let Ok(model) = SelectedModel::from_alias(
-            &config.default_model,
+            &model_label,
             Some(&config),
             &controller.model_items,
         )
