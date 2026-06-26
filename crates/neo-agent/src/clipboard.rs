@@ -45,12 +45,11 @@ mod macos {
         }
         let tmp = std::env::temp_dir().join(format!("neo-clipboard-{}.png", std::process::id()));
         let script = format!(
-            "ObjC.import('AppKit'); var pb = $.NSPasteboard.generalPasteboard; var data = pb.dataForType($.NSPasteboardTypePNG); if (data) {{ data.writeToFileAtomically({:?}, true); }} else {{ $.exit(1); }}",
+            "ObjC.import('AppKit'); var pb = $.NSPasteboard.generalPasteboard; var data = pb.dataForType($.NSPasteboardTypePNG); if (data && !data.isNil()) {{ data.writeToFileAtomically({:?}, true); }} else {{ $.exit(1); }}",
             tmp.to_str().unwrap_or("")
         );
         let out = Command::new("osascript")
-            .arg("-e")
-            .arg(script)
+            .args(["-l", "JavaScript", "-e", &script])
             .output()
             .map_err(|e| ClipboardError::ReadFailed(e.to_string()))?;
         if !out.status.success() {
