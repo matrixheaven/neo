@@ -105,13 +105,26 @@ narrow terminals or deeply nested lists from broken-looking boxes.
 
 ### Header title construction
 
-- If a language is provided: `title = format!("─ {lang} ")`.
-- If no language is provided: `title = "─"` (minimal corner transition).
-- Fit `title` to `horz_len` using `pad_to_width` or `truncate_to_width`.
+- Compute `horz_len = box_width - 2`.
+- If a language is provided:
+  - `label = format!("─ {lang} ")`.
+  - If `visible_width(label) <= horz_len`:
+    `title = label + "─".repeat(horz_len - visible_width(label))`.
+  - Otherwise: `title = truncate_to_width(label, horz_len)`.
+- If no language is provided:
+  `title = "─".repeat(horz_len)`.
+
+The remaining top-border width is filled with `─`, not spaces, so the header
+reads as a continuous top edge.
 
 ## Component Changes
 
-Only `crates/neo-tui/src/markdown.rs` changes.
+Primary change: `crates/neo-tui/src/markdown.rs`.
+
+The rounded-box output also requires updating integration tests in
+`crates/neo-tui/tests/markdown_rendering.rs` that assert on code block
+rendering (e.g. replacing backtick-fence expectations with rounded-border
+expectations).
 
 ### New constants
 
@@ -147,9 +160,8 @@ new box.
 
 | Element | Color |
 |---|---|
-| Border characters | `theme.text_muted` |
-| Header language label | `theme.brand` |
-| Header fill line | `theme.text_muted` |
+| Border characters (corners and bottom edge) | `theme.text_muted` |
+| Header title (language label and trailing `─` fill) | `theme.brand` |
 | Code content | Existing syntect highlight; `theme.text_primary` fallback |
 | Diff `+` lines | `theme.diff_added` |
 | Diff `-` lines | `theme.diff_removed` |
