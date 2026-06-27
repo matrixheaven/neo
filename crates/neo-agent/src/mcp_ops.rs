@@ -685,6 +685,7 @@ mod tests {
                 mode: "interactive".to_owned(),
             },
             runtime: crate::config::RuntimeConfig::default(),
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             tui: crate::config::TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: crate::config::McpConfig {

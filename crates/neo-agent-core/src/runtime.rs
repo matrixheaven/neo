@@ -23,14 +23,14 @@ use crate::permissions::{
     SessionApprovalScope, command_might_be_dangerous, is_known_safe_command,
 };
 use crate::skills::SkillStore;
-use crate::tools::BackgroundTaskManager;
 use crate::tools::normalize_path;
+use crate::tools::{BackgroundTaskManager, execute_model_bash_for_runtime};
 use crate::{
     AgentEvent, AgentMessage, AgentToolCall, CompactionPhase, CompactionReason, CompactionSource,
     CompactionSummary, Content, ImageRef, PermissionApprovalDecision, PermissionMode,
     PermissionOperation, PlanMode, PlanModeGuard, PlanModeInjector, ProcessSupervisor, QueueKind,
-    StopReason, TodoEventData, ToolAccess, ToolContext, ToolError, ToolRegistry, ToolResult,
-    ToolUpdateCallback, check_plan_mode_guard,
+    ShellCommandOrigin, ShellCommandOutcome, StopReason, TodoEventData, ToolAccess, ToolContext,
+    ToolError, ToolRegistry, ToolResult, ToolUpdateCallback, check_plan_mode_guard,
     compaction::{self, CompactionStrategy},
     is_active_plan_file_path, sanitize_tool_exchange_messages,
 };
@@ -1097,6 +1097,21 @@ async fn resolve_image_blobs(
             },
             AgentMessage::System { content } => AgentMessage::System {
                 content: resolve_content_blobs(content, session_dir).await,
+            },
+            AgentMessage::ShellCommand {
+                command,
+                stdout,
+                stderr,
+                exit_code,
+                outcome,
+                truncated,
+            } => AgentMessage::ShellCommand {
+                command,
+                stdout,
+                stderr,
+                exit_code,
+                outcome,
+                truncated,
             },
         });
     }
@@ -2388,6 +2403,12 @@ fn estimate_message_tokens(message: &AgentMessage) -> usize {
                 .sum::<usize>();
             content_chars + tool_chars
         }
+        AgentMessage::ShellCommand {
+            command,
+            stdout,
+            stderr,
+            ..
+        } => command.len() + stdout.len() + stderr.len(),
     };
     chars.div_ceil(4)
 }
@@ -3925,6 +3946,7 @@ fn emit_shell_started(
             id: tool_call.id.clone(),
             command: command.to_owned(),
             cwd: tool_context.workspace_root().to_path_buf(),
+            origin: ShellCommandOrigin::ModelBashTool,
         });
     }
 }
@@ -3959,6 +3981,7 @@ fn emit_shell_finished(
         .get("truncated")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let outcome = shell_command_outcome_from_details(details);
     emitter.emit(AgentEvent::ShellCommandFinished {
         turn,
         id: tool_call.id.clone(),
@@ -3966,7 +3989,35 @@ fn emit_shell_finished(
         stdout,
         stderr,
         truncated,
+        origin: ShellCommandOrigin::ModelBashTool,
+        outcome,
     });
+}
+
+fn shell_command_outcome_from_details(details: &serde_json::Value) -> ShellCommandOutcome {
+    match details.get("outcome").and_then(serde_json::Value::as_str) {
+        Some("cancelled") => ShellCommandOutcome::Cancelled,
+        Some("timed_out") => ShellCommandOutcome::TimedOut,
+        Some("backgrounded") => {
+            let task_id = details
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            ShellCommandOutcome::Backgrounded { task_id }
+        }
+        _ if details.get("kind").and_then(serde_json::Value::as_str) == Some("bash")
+            && details.get("status").and_then(serde_json::Value::as_str) == Some("running") =>
+        {
+            let task_id = details
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            ShellCommandOutcome::Backgrounded { task_id }
+        }
+        _ => ShellCommandOutcome::Completed,
+    }
 }
 
 fn emit_terminal_events(
@@ -4097,6 +4148,9 @@ async fn run_tool_with_cancel(
     if tool_call.name == "Skill" {
         return execute_invoke_skill(skills, tool_call);
     }
+    if tool_call.name == "Bash" {
+        return run_model_bash_with_cancel(tool_call, tool_context, cancel_token).await;
+    }
     tokio::select! {
         biased;
         result = registry.run(&tool_call.name, tool_context, tool_call.arguments.clone()) => {
@@ -4108,6 +4162,20 @@ async fn run_tool_with_cancel(
 
 fn cancelled_tool_result() -> ToolResult {
     ToolResult::error(ToolError::Cancelled.to_string())
+}
+
+async fn run_model_bash_with_cancel(
+    tool_call: &AgentToolCall,
+    tool_context: &ToolContext,
+    cancel_token: &CancellationToken,
+) -> ToolResult {
+    tokio::select! {
+        biased;
+        result = execute_model_bash_for_runtime(tool_context, tool_call.arguments.clone()) => {
+            result.unwrap_or_else(|err| ToolResult::error(err.to_string()))
+        }
+        () = cancel_token.cancelled() => cancelled_tool_result(),
+    }
 }
 
 fn invoke_skill_tool_spec() -> ToolSpec {

@@ -737,6 +737,7 @@ fn message_role(message: &AgentMessage) -> &'static str {
         AgentMessage::User { .. } => "user",
         AgentMessage::Assistant { .. } => "assistant",
         AgentMessage::ToolResult { .. } => "tool",
+        AgentMessage::ShellCommand { .. } => "shell",
     }
 }
 
@@ -746,6 +747,27 @@ fn one_line_message_text(message: &AgentMessage) -> String {
         | AgentMessage::User { content }
         | AgentMessage::Assistant { content, .. }
         | AgentMessage::ToolResult { content, .. } => content,
+        AgentMessage::ShellCommand {
+            command,
+            stdout,
+            stderr,
+            exit_code,
+            outcome,
+            truncated,
+        } => {
+            return format!(
+                "$ {} [{} exit={} truncated={}] {}{}",
+                command,
+                outcome.as_model_status(),
+                exit_code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+                truncated,
+                stdout.split_whitespace().collect::<Vec<_>>().join(" "),
+                stderr.split_whitespace().collect::<Vec<_>>().join(" ")
+            )
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        }
     };
     let text = content
         .iter()
@@ -775,6 +797,12 @@ fn estimate_message_tokens(message: &AgentMessage) -> usize {
                     .map(|call| call.name.len() + call.arguments.to_string().len())
                     .sum::<usize>()
         }
+        AgentMessage::ShellCommand {
+            command,
+            stdout,
+            stderr,
+            ..
+        } => command.len() + stdout.len() + stderr.len(),
     };
     chars.div_ceil(4)
 }

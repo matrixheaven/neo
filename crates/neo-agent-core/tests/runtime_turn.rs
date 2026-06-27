@@ -2,9 +2,9 @@ use futures::StreamExt;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentRuntimeError,
     AgentToolCall, ApprovalRequest, AskUserTool, CompactionSettings, Content,
-    PermissionApprovalDecision, PermissionMode, PermissionOperation, QueueMode, StopReason,
-    TodoEventData, Tool, ToolContext, ToolError, ToolExecutionMode, ToolFuture, ToolRegistry,
-    ToolResult,
+    PermissionApprovalDecision, PermissionMode, PermissionOperation, QueueMode, ShellCommandOrigin,
+    ShellCommandOutcome, StopReason, TodoEventData, Tool, ToolContext, ToolError,
+    ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult,
     harness::{FakeHarness, fake_model},
     session::{JsonlSessionWriter, workspace_sessions_dir},
     skills::SkillStore,
@@ -3465,6 +3465,7 @@ async fn runtime_emits_shell_lifecycle_for_bash_tool() {
         id: "tool_1".to_owned(),
         command: "printf shell-ok".to_owned(),
         cwd: workspace_root,
+        origin: ShellCommandOrigin::ModelBashTool,
     }));
     assert!(events.iter().any(|event| matches!(
         event,
@@ -3477,6 +3478,151 @@ async fn runtime_emits_shell_lifecycle_for_bash_tool() {
             ..
         } if id == "tool_1" && stdout.contains("shell-ok") && stderr.is_empty()
     )));
+}
+
+#[tokio::test]
+async fn runtime_emits_shell_finished_when_model_bash_times_out() {
+    let harness = FakeHarness::from_turns([vec![
+        AiStreamEvent::MessageStart {
+            id: "msg_1".to_owned(),
+        },
+        AiStreamEvent::ToolCallStart {
+            id: "tool_1".to_owned(),
+            name: "Bash".to_owned(),
+        },
+        AiStreamEvent::ToolCallEnd {
+            id: "tool_1".to_owned(),
+            arguments: json!({
+                "command": "printf before-timeout; sleep 5",
+                "timeout": 0
+            }),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::ToolUse,
+            usage: None,
+        },
+    ]]);
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let workspace_root = workspace.path().canonicalize().expect("canonicalize");
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Yolo)
+            .with_workspace_root(&workspace_root)
+            .expect("workspace root"),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(&mut context, AgentMessage::user_text("run shell timeout"))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should finish with tool error");
+
+    assert!(events.contains(&AgentEvent::ShellCommandStarted {
+        turn: 1,
+        id: "tool_1".to_owned(),
+        command: "printf before-timeout; sleep 5".to_owned(),
+        cwd: workspace_root,
+        origin: ShellCommandOrigin::ModelBashTool,
+    }));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ShellCommandFinished {
+            turn: 1,
+            id,
+            origin: ShellCommandOrigin::ModelBashTool,
+            outcome: ShellCommandOutcome::TimedOut,
+            ..
+        } if id == "tool_1"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolExecutionFinished {
+            id,
+            result,
+            ..
+        } if id == "tool_1"
+            && result.is_error
+            && result
+                .details
+                .as_ref()
+                .and_then(|details| details["outcome"].as_str())
+                == Some("timed_out")
+    )));
+}
+
+#[tokio::test]
+async fn runtime_marks_model_background_bash_as_backgrounded_shell_event() {
+    let harness = FakeHarness::from_turns([vec![
+        AiStreamEvent::MessageStart {
+            id: "msg_1".to_owned(),
+        },
+        AiStreamEvent::ToolCallStart {
+            id: "tool_1".to_owned(),
+            name: "Bash".to_owned(),
+        },
+        AiStreamEvent::ToolCallEnd {
+            id: "tool_1".to_owned(),
+            arguments: json!({
+                "command": "sleep 5",
+                "run_in_background": true,
+                "description": "sleep in background"
+            }),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: neo_ai::StopReason::ToolUse,
+            usage: None,
+        },
+    ]]);
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Yolo)
+            .with_workspace_root(workspace.path())
+            .expect("workspace root"),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(
+            &mut context,
+            AgentMessage::user_text("run background shell"),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should finish with background task");
+
+    let task_id = events.iter().find_map(|event| match event {
+        AgentEvent::ToolExecutionFinished { result, .. } => result
+            .details
+            .as_ref()
+            .and_then(|details| details["task_id"].as_str())
+            .map(str::to_owned),
+        _ => None,
+    });
+    let task_id = task_id.expect("background task id");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ShellCommandFinished {
+            id,
+            exit_code: None,
+            outcome: ShellCommandOutcome::Backgrounded { task_id: event_task_id },
+            ..
+        } if id == "tool_1" && event_task_id == &task_id
+    )));
+    let _ = runtime
+        .config()
+        .background_tasks
+        .stop(&task_id, "test cleanup", 1024)
+        .await;
 }
 
 #[tokio::test]
@@ -5371,6 +5517,8 @@ async fn auto_mode_approves_bash_without_approval() {
         stdout: "auto-ok".to_owned(),
         stderr: String::new(),
         truncated: false,
+        origin: ShellCommandOrigin::ModelBashTool,
+        outcome: ShellCommandOutcome::Completed,
     }));
 }
 

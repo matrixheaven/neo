@@ -6,7 +6,9 @@ use std::{
 };
 
 use anyhow::Context;
-use neo_agent_core::session::workspace_sessions_dir as compute_workspace_sessions_dir;
+use neo_agent_core::{
+    BackgroundTaskManager, session::workspace_sessions_dir as compute_workspace_sessions_dir,
+};
 use neo_agent_core::{PermissionMode, QueueMode, ToolExecutionMode};
 use neo_ai::{ModelSpec, ReasoningEffort};
 use neo_tui::{
@@ -215,6 +217,13 @@ pub struct AppConfig {
     pub live_permission_mode: Arc<RwLock<PermissionMode>>,
     pub defaults: Defaults,
     pub runtime: RuntimeConfig,
+    /// Shared background task registry for the interactive session.
+    ///
+    /// Model-initiated Bash background jobs, background AskUser questions, and
+    /// user shell-mode Ctrl+B detach all need to land in the same task list so
+    /// `TaskList`/`TaskOutput` can observe them on later turns.
+    #[serde(skip)]
+    pub background_tasks: BackgroundTaskManager,
     pub tui: TuiConfig,
     #[serde(skip)]
     pub theme: ResolvedTheme,
@@ -566,6 +575,7 @@ impl AppConfig {
             live_permission_mode: Arc::new(RwLock::new(permission_mode)),
             defaults: Defaults { mode },
             runtime,
+            background_tasks: BackgroundTaskManager::new(),
             tui,
             theme,
             mcp,

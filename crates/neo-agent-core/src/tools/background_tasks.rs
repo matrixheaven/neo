@@ -65,11 +65,15 @@ pub struct CommandOutput {
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
 }
 
 pub struct ManagedBackgroundCommand {
     pub stdout: Arc<Mutex<Vec<u8>>>,
     pub stderr: Arc<Mutex<Vec<u8>>>,
+    pub stdout_truncated: Arc<Mutex<bool>>,
+    pub stderr_truncated: Arc<Mutex<bool>>,
     pub stdout_task: JoinHandle<()>,
     pub stderr_task: JoinHandle<()>,
     pub try_wait: Arc<dyn Fn() -> BoxFuture<'static, std::io::Result<Option<i32>>> + Send + Sync>,
@@ -105,6 +109,9 @@ struct BackgroundTaskRecord {
     description: String,
     started_at: Instant,
     state: BackgroundTaskState,
+    detached: bool,
+    deadline: Option<Instant>,
+    detach_timeout: Option<Duration>,
 }
 
 #[derive(Clone, Default)]
@@ -140,6 +147,9 @@ impl BackgroundTaskManager {
                 description,
                 started_at: Instant::now(),
                 state: BackgroundTaskState::BashRunning(command),
+                detached: true,
+                deadline: None,
+                detach_timeout: None,
             },
         );
         Ok(ToolResult::ok(format!(
@@ -168,6 +178,7 @@ impl BackgroundTaskManager {
             "stdout_truncated": false,
             "stderr_truncated": false,
             "truncated": false,
+            "outcome": "backgrounded",
             "max_output_bytes": max_output_bytes,
         })))
     }
@@ -179,6 +190,9 @@ impl BackgroundTaskManager {
                 description: description.clone(),
                 started_at: Instant::now(),
                 state: BackgroundTaskState::QuestionWaiting,
+                detached: true,
+                deadline: None,
+                detach_timeout: None,
             },
         );
         ToolResult::ok(format!(
@@ -208,6 +222,51 @@ impl BackgroundTaskManager {
                 answers: Some(answers),
             };
         }
+    }
+
+    pub async fn start_bash_foreground(
+        &self,
+        description: String,
+        command: ManagedBackgroundCommand,
+        _max_output_bytes: usize,
+        detach_timeout: Duration,
+    ) -> Result<String, ToolError> {
+        let task_id = format!("bash-{}", Uuid::new_v4());
+        self.inner.lock().await.insert(
+            task_id.clone(),
+            BackgroundTaskRecord {
+                description,
+                started_at: Instant::now(),
+                state: BackgroundTaskState::BashRunning(command),
+                detached: false,
+                deadline: None,
+                detach_timeout: Some(detach_timeout),
+            },
+        );
+        Ok(task_id)
+    }
+
+    pub async fn detach(&self, task_id: &str) -> Result<BackgroundTaskSnapshot, ToolError> {
+        {
+            let mut tasks = self.inner.lock().await;
+            let Some(record) = tasks.get_mut(task_id) else {
+                return Err(ToolError::InvalidInput {
+                    tool: "TaskDetach".to_owned(),
+                    message: format!("unknown background task `{task_id}`"),
+                });
+            };
+            if !matches!(record.state, BackgroundTaskState::BashRunning(_)) {
+                return Err(ToolError::InvalidInput {
+                    tool: "TaskDetach".to_owned(),
+                    message: format!("background task `{task_id}` is not running"),
+                });
+            }
+            record.detached = true;
+            record.deadline = record
+                .detach_timeout
+                .map(|timeout| Instant::now() + timeout);
+        }
+        self.snapshot(task_id).await
     }
 
     pub async fn list(&self, active_only: bool, limit: usize) -> Vec<BackgroundTaskSnapshot> {
@@ -352,7 +411,14 @@ impl BackgroundTaskManager {
                 let exit_code = (command.cleanup)().await;
                 (command.drain)(command.stdout_task).await;
                 (command.drain)(command.stderr_task).await;
-                let output = output_from_buffers(exit_code, command.stdout, command.stderr).await;
+                let output = output_from_command_buffers(
+                    exit_code,
+                    command.stdout,
+                    command.stderr,
+                    command.stdout_truncated,
+                    command.stderr_truncated,
+                )
+                .await;
                 let snapshot = BackgroundTaskSnapshot {
                     task_id: task_id.to_owned(),
                     kind: BackgroundTaskKind::Bash,
@@ -371,6 +437,9 @@ impl BackgroundTaskManager {
                             status: BackgroundTaskStatus::Stopped,
                             output,
                         },
+                        detached: true,
+                        deadline: None,
+                        detach_timeout: None,
                     },
                 );
                 Ok(snapshot_result(&snapshot, max_output_bytes))
@@ -378,12 +447,34 @@ impl BackgroundTaskManager {
         }
     }
 
-    async fn snapshot(&self, task_id: &str) -> Result<BackgroundTaskSnapshot, ToolError> {
+    pub async fn snapshot(&self, task_id: &str) -> Result<BackgroundTaskSnapshot, ToolError> {
         self.snapshot_inner(task_id)
             .await
             .ok_or_else(|| ToolError::InvalidInput {
                 tool: "TaskOutput".to_owned(),
                 message: format!("unknown background task `{task_id}`"),
+            })
+    }
+
+    pub async fn is_detached(&self, task_id: &str) -> bool {
+        self.inner
+            .lock()
+            .await
+            .get(task_id)
+            .is_some_and(|record| record.detached)
+    }
+
+    pub async fn foreground_bash_task_id(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .await
+            .iter()
+            .find_map(|(task_id, record)| {
+                if !record.detached && matches!(record.state, BackgroundTaskState::BashRunning(_)) {
+                    Some(task_id.clone())
+                } else {
+                    None
+                }
             })
     }
 
@@ -396,6 +487,13 @@ impl BackgroundTaskManager {
                 description: String,
                 stdout: Arc<Mutex<Vec<u8>>>,
                 stderr: Arc<Mutex<Vec<u8>>>,
+                stdout_truncated: Arc<Mutex<bool>>,
+                stderr_truncated: Arc<Mutex<bool>>,
+            },
+            Timeout {
+                started_at: Instant,
+                description: String,
+                command: ManagedBackgroundCommand,
             },
             Finish {
                 started_at: Instant,
@@ -442,6 +540,22 @@ impl BackgroundTaskManager {
                         answers: answers.clone(),
                     })
                 }
+                BackgroundTaskState::BashRunning(command)
+                    if record.detached
+                        && record
+                            .deadline
+                            .is_some_and(|deadline| deadline <= Instant::now()) =>
+                {
+                    let record = tasks.remove(task_id).expect("record still exists");
+                    let BackgroundTaskState::BashRunning(command) = record.state else {
+                        unreachable!();
+                    };
+                    SnapshotAction::Timeout {
+                        started_at: record.started_at,
+                        description: record.description,
+                        command,
+                    }
+                }
                 BackgroundTaskState::BashRunning(command) => match (command.try_wait)().await {
                     Ok(Some(status)) => {
                         let record = tasks.remove(task_id).expect("record still exists");
@@ -460,6 +574,8 @@ impl BackgroundTaskManager {
                         description: record.description.clone(),
                         stdout: command.stdout.clone(),
                         stderr: command.stderr.clone(),
+                        stdout_truncated: command.stdout_truncated.clone(),
+                        stderr_truncated: command.stderr_truncated.clone(),
                     },
                 },
             }
@@ -472,18 +588,69 @@ impl BackgroundTaskManager {
                 description,
                 stdout,
                 stderr,
+                stdout_truncated,
+                stderr_truncated,
             } => {
                 let stdout = stdout.lock().await;
                 let stderr = stderr.lock().await;
+                let stdout_truncated = *stdout_truncated.lock().await;
+                let stderr_truncated = *stderr_truncated.lock().await;
                 Some(BackgroundTaskSnapshot {
                     task_id: task_id.to_owned(),
                     kind: BackgroundTaskKind::Bash,
                     status: BackgroundTaskStatus::Running,
                     description,
                     elapsed: started_at.elapsed(),
-                    output: Some(output_from_locked_buffers(None, &stdout, &stderr)),
+                    output: Some(output_from_locked_buffers(
+                        None,
+                        &stdout,
+                        &stderr,
+                        stdout_truncated,
+                        stderr_truncated,
+                    )),
                     answers: None,
                 })
+            }
+            SnapshotAction::Timeout {
+                started_at,
+                description,
+                command,
+            } => {
+                let exit_code = (command.cleanup)().await;
+                (command.drain)(command.stdout_task).await;
+                (command.drain)(command.stderr_task).await;
+                let output = output_from_command_buffers(
+                    exit_code,
+                    command.stdout,
+                    command.stderr,
+                    command.stdout_truncated,
+                    command.stderr_truncated,
+                )
+                .await;
+                let snapshot = BackgroundTaskSnapshot {
+                    task_id: task_id.to_owned(),
+                    kind: BackgroundTaskKind::Bash,
+                    status: BackgroundTaskStatus::TimedOut,
+                    description: description.clone(),
+                    elapsed: started_at.elapsed(),
+                    output: Some(output.clone()),
+                    answers: None,
+                };
+                self.inner.lock().await.insert(
+                    task_id.to_owned(),
+                    BackgroundTaskRecord {
+                        description,
+                        started_at,
+                        state: BackgroundTaskState::BashFinished {
+                            status: BackgroundTaskStatus::TimedOut,
+                            output,
+                        },
+                        detached: true,
+                        deadline: None,
+                        detach_timeout: None,
+                    },
+                );
+                Some(snapshot)
             }
             SnapshotAction::Finish {
                 started_at,
@@ -493,7 +660,14 @@ impl BackgroundTaskManager {
             } => {
                 (command.drain)(command.stdout_task).await;
                 (command.drain)(command.stderr_task).await;
-                let output = output_from_buffers(exit_code, command.stdout, command.stderr).await;
+                let output = output_from_command_buffers(
+                    exit_code,
+                    command.stdout,
+                    command.stderr,
+                    command.stdout_truncated,
+                    command.stderr_truncated,
+                )
+                .await;
                 let status = if output.exit_code == Some(0) {
                     BackgroundTaskStatus::Completed
                 } else {
@@ -514,6 +688,9 @@ impl BackgroundTaskManager {
                         description,
                         started_at,
                         state: BackgroundTaskState::BashFinished { status, output },
+                        detached: true,
+                        deadline: None,
+                        detach_timeout: None,
                     },
                 );
                 Some(snapshot)
@@ -760,9 +937,10 @@ pub fn snapshot_result(snapshot: &BackgroundTaskSnapshot, max_output_bytes: usiz
         details["exit_code"] = json!(output.exit_code);
         details["stdout"] = json!(cap_output_details(&output.stdout, max_output_bytes));
         details["stderr"] = json!(cap_output_details(&output.stderr, max_output_bytes));
-        details["stdout_truncated"] = json!(stdout_truncated);
-        details["stderr_truncated"] = json!(stderr_truncated);
-        details["truncated"] = json!(truncated);
+        details["stdout_truncated"] = json!(output.stdout_truncated || stdout_truncated);
+        details["stderr_truncated"] = json!(output.stderr_truncated || stderr_truncated);
+        details["truncated"] =
+            json!(output.stdout_truncated || output.stderr_truncated || truncated);
     }
     if let Some(answers) = &snapshot.answers {
         details["answers"] = json!(answers);
@@ -814,18 +992,42 @@ pub async fn output_from_buffers(
 ) -> CommandOutput {
     let stdout = stdout.lock().await;
     let stderr = stderr.lock().await;
-    output_from_locked_buffers(exit_code, &stdout, &stderr)
+    output_from_locked_buffers(exit_code, &stdout, &stderr, false, false)
+}
+
+pub async fn output_from_command_buffers(
+    exit_code: Option<i32>,
+    stdout: Arc<Mutex<Vec<u8>>>,
+    stderr: Arc<Mutex<Vec<u8>>>,
+    stdout_truncated: Arc<Mutex<bool>>,
+    stderr_truncated: Arc<Mutex<bool>>,
+) -> CommandOutput {
+    let stdout_truncated = *stdout_truncated.lock().await;
+    let stderr_truncated = *stderr_truncated.lock().await;
+    let stdout = stdout.lock().await;
+    let stderr = stderr.lock().await;
+    output_from_locked_buffers(
+        exit_code,
+        &stdout,
+        &stderr,
+        stdout_truncated,
+        stderr_truncated,
+    )
 }
 
 fn output_from_locked_buffers(
     exit_code: Option<i32>,
     stdout: &[u8],
     stderr: &[u8],
+    stdout_truncated: bool,
+    stderr_truncated: bool,
 ) -> CommandOutput {
     CommandOutput {
         exit_code,
         stdout: String::from_utf8_lossy(stdout).into_owned(),
         stderr: String::from_utf8_lossy(stderr).into_owned(),
+        stdout_truncated,
+        stderr_truncated,
     }
 }
 
@@ -887,6 +1089,8 @@ mod tests {
         ManagedBackgroundCommand {
             stdout: Arc::new(Mutex::new(stdout.as_bytes().to_vec())),
             stderr: Arc::new(Mutex::new(stderr.as_bytes().to_vec())),
+            stdout_truncated: Arc::new(Mutex::new(false)),
+            stderr_truncated: Arc::new(Mutex::new(false)),
             stdout_task: tokio::spawn(async {}),
             stderr_task: tokio::spawn(async {}),
             try_wait: Arc::new(move || {
@@ -1113,6 +1317,45 @@ mod tests {
         let tool = TaskStopTool;
         let result = tool.execute(&ctx, json!({"task_id": task_id})).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn foreground_bash_task_can_be_detached() {
+        let manager = BackgroundTaskManager::new();
+        let task_id = manager
+            .start_bash_foreground(
+                "long command".to_owned(),
+                fake_command(None, "", ""),
+                1024,
+                Duration::from_secs(600),
+            )
+            .await
+            .expect("foreground task id");
+
+        let snapshot = manager.detach(&task_id).await.expect("detach");
+        assert_eq!(snapshot.status, BackgroundTaskStatus::Running);
+        assert_eq!(snapshot.task_id, task_id);
+    }
+
+    #[tokio::test]
+    async fn detach_resets_deadline_to_background_timeout() {
+        let manager = BackgroundTaskManager::new();
+        let task_id = manager
+            .start_bash_foreground(
+                "long command".to_owned(),
+                fake_command(None, "", ""),
+                1024,
+                Duration::from_millis(80),
+            )
+            .await
+            .expect("foreground task id");
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        manager.detach(&task_id).await.expect("detach");
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        let snapshot = manager.snapshot(&task_id).await.expect("snapshot");
+        assert_eq!(snapshot.status, BackgroundTaskStatus::Running);
     }
 
     #[test]

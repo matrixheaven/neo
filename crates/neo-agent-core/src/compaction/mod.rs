@@ -349,6 +349,28 @@ fn render_single_message(message: &AgentMessage, index: usize) -> String {
                 }
             }
         }
+        AgentMessage::ShellCommand {
+            command,
+            stdout,
+            stderr,
+            exit_code,
+            outcome,
+            truncated,
+        } => {
+            lines.push(format!("command:\n{}", indent_block(command, 2)));
+            lines.push(format!(
+                "status: outcome={} exit_code={} truncated={}",
+                outcome.as_model_status(),
+                exit_code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+                truncated
+            ));
+            if !stdout.is_empty() {
+                lines.push(format!("stdout:\n{}", indent_block(stdout, 2)));
+            }
+            if !stderr.is_empty() {
+                lines.push(format!("stderr:\n{}", indent_block(stderr, 2)));
+            }
+        }
     }
 
     if let AgentMessage::ToolResult {
@@ -395,6 +417,7 @@ fn message_role_label(message: &AgentMessage) -> &'static str {
         AgentMessage::User { .. } => "user",
         AgentMessage::Assistant { .. } => "assistant",
         AgentMessage::ToolResult { .. } => "tool",
+        AgentMessage::ShellCommand { .. } => "shell",
     }
 }
 
@@ -520,6 +543,12 @@ fn estimate_message_tokens(message: &AgentMessage) -> usize {
                 .sum::<usize>();
             content_chars + tool_chars
         }
+        AgentMessage::ShellCommand {
+            command,
+            stdout,
+            stderr,
+            ..
+        } => command.len() + stdout.len() + stderr.len(),
     };
     chars.div_ceil(4)
 }

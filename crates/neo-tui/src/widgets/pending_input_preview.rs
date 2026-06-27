@@ -12,6 +12,7 @@ const PREVIEW_LINE_LIMIT: usize = 3;
 pub struct PendingInputPreview<'a> {
     pending_steers: &'a VecDeque<String>,
     queued_follow_ups: &'a VecDeque<String>,
+    queued_shell_commands: &'a VecDeque<String>,
     theme: TuiTheme,
 }
 
@@ -20,10 +21,12 @@ impl<'a> PendingInputPreview<'a> {
     pub fn new(
         pending_steers: &'a VecDeque<String>,
         queued_follow_ups: &'a VecDeque<String>,
+        queued_shell_commands: &'a VecDeque<String>,
     ) -> Self {
         Self {
             pending_steers,
             queued_follow_ups,
+            queued_shell_commands,
             theme: TuiTheme::default(),
         }
     }
@@ -44,7 +47,10 @@ impl<'a> PendingInputPreview<'a> {
     /// nothing pending.
     #[must_use]
     pub fn render(&self, width: usize) -> Vec<String> {
-        if self.pending_steers.is_empty() && self.queued_follow_ups.is_empty() {
+        if self.pending_steers.is_empty()
+            && self.queued_follow_ups.is_empty()
+            && self.queued_shell_commands.is_empty()
+        {
             return Vec::new();
         }
 
@@ -71,10 +77,51 @@ impl<'a> PendingInputPreview<'a> {
             lines.push(self.render_hint("Alt+↑ edit last queued message", width));
         }
 
+        if !self.queued_shell_commands.is_empty() {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.extend(self.render_shell_section(width));
+            lines.push(self.render_hint("Alt+↑ edit · will run after current task", width));
+        }
+
         lines
             .into_iter()
             .map(|line| truncate_width(&line, width, "", false))
             .collect()
+    }
+
+    fn render_shell_section(&self, width: usize) -> Vec<String> {
+        let mut lines = vec![paint(
+            "• Queued shell commands",
+            Style::default().fg(self.theme.pending_input_header),
+        )];
+        let prefix = "  ❯ ";
+        let prefix_width = visible_width(prefix);
+        let body_width = width.saturating_sub(prefix_width).max(1);
+        let continuation = " ".repeat(prefix_width);
+        let text_style = Style::default().fg(self.theme.pending_input_text).italic();
+        let shell_style = Style::default().fg(self.theme.shell_mode);
+
+        for command in self.queued_shell_commands {
+            let command = format!("$ {command}");
+            let wrapped = wrap_width(&command, body_width);
+            for (index, line) in wrapped.iter().enumerate().take(PREVIEW_LINE_LIMIT) {
+                if index == 0 {
+                    lines.push(format!(
+                        "{} {}",
+                        paint(prefix.trim_end(), shell_style),
+                        paint(line, shell_style)
+                    ));
+                } else {
+                    lines.push(paint(&format!("{continuation}{line}"), text_style));
+                }
+            }
+            if wrapped.len() > PREVIEW_LINE_LIMIT {
+                lines.push(paint(&format!("{continuation}…"), text_style));
+            }
+        }
+        lines
     }
 
     fn render_section(
@@ -146,7 +193,8 @@ mod tests {
     fn empty_panel_renders_nothing() {
         let steers: VecDeque<String> = VecDeque::new();
         let follow_ups: VecDeque<String> = VecDeque::new();
-        let panel = PendingInputPreview::new(&steers, &follow_ups);
+        let shell_commands: VecDeque<String> = VecDeque::new();
+        let panel = PendingInputPreview::new(&steers, &follow_ups, &shell_commands);
         assert!(panel.render(40).is_empty());
         assert_eq!(panel.height(40), 0);
     }
@@ -155,7 +203,8 @@ mod tests {
     fn steer_section_renders_with_brand_prefix() {
         let steers: VecDeque<String> = VecDeque::from(["Please continue.".to_owned()]);
         let follow_ups: VecDeque<String> = VecDeque::new();
-        let panel = PendingInputPreview::new(&steers, &follow_ups);
+        let shell_commands: VecDeque<String> = VecDeque::new();
+        let panel = PendingInputPreview::new(&steers, &follow_ups, &shell_commands);
         let lines = panel.render(60);
         let plain: Vec<String> = lines
             .iter()
@@ -169,7 +218,8 @@ mod tests {
     fn follow_up_section_renders_hint() {
         let steers: VecDeque<String> = VecDeque::new();
         let follow_ups: VecDeque<String> = VecDeque::from(["Hello?".to_owned()]);
-        let panel = PendingInputPreview::new(&steers, &follow_ups);
+        let shell_commands: VecDeque<String> = VecDeque::new();
+        let panel = PendingInputPreview::new(&steers, &follow_ups, &shell_commands);
         let lines = panel.render(40);
         let plain: Vec<String> = lines
             .iter()
@@ -185,7 +235,8 @@ mod tests {
         let steers: VecDeque<String> = VecDeque::from(["Steer one".to_owned()]);
         let follow_ups: VecDeque<String> =
             VecDeque::from(["Follow one".to_owned(), "Follow two".to_owned()]);
-        let panel = PendingInputPreview::new(&steers, &follow_ups);
+        let shell_commands: VecDeque<String> = VecDeque::new();
+        let panel = PendingInputPreview::new(&steers, &follow_ups, &shell_commands);
         let lines = panel.render(60);
         let plain: Vec<String> = lines
             .iter()
@@ -202,7 +253,8 @@ mod tests {
     fn long_message_wraps_and_truncates() {
         let steers: VecDeque<String> = VecDeque::from(["a".repeat(200)]);
         let follow_ups: VecDeque<String> = VecDeque::new();
-        let panel = PendingInputPreview::new(&steers, &follow_ups);
+        let shell_commands: VecDeque<String> = VecDeque::new();
+        let panel = PendingInputPreview::new(&steers, &follow_ups, &shell_commands);
         let lines = panel.render(40);
         let plain: Vec<String> = lines
             .iter()

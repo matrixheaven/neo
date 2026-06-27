@@ -42,6 +42,31 @@ pub fn top_border(width: usize, style: Style) -> String {
 }
 
 #[must_use]
+pub fn top_border_with_label(
+    width: usize,
+    label: &str,
+    border_style: Style,
+    label_style: Style,
+) -> String {
+    if width < 2 {
+        return String::new();
+    }
+    let inner = width - 2;
+    let label_width = visible_width(label);
+    if label_width + 1 > inner {
+        return top_border(width, border_style);
+    }
+    let remaining = inner - label_width;
+    format!(
+        "{}{}{}{}",
+        paint(&ROUNDED.top_left.to_string(), border_style),
+        paint(label, label_style),
+        paint(&repeat_char(ROUNDED.horizontal, remaining), border_style),
+        paint(&ROUNDED.top_right.to_string(), border_style)
+    )
+}
+
+#[must_use]
 pub fn bottom_border(width: usize, style: Style) -> String {
     if width < 2 {
         return String::new();

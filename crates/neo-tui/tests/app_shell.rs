@@ -818,6 +818,7 @@ fn transcript_pane_maps_shell_command_lifecycle_to_tool_run() {
         id: "shell-1".to_owned(),
         command: "cargo test -p neo-tui".to_owned(),
         cwd: PathBuf::from("/workspace/neo"),
+        origin: neo_agent_core::ShellCommandOrigin::ModelBashTool,
     });
     runtime.apply_agent_event(neo_agent_core::AgentEvent::ShellCommandFinished {
         turn: 1,
@@ -826,6 +827,8 @@ fn transcript_pane_maps_shell_command_lifecycle_to_tool_run() {
         stdout: "ok".to_owned(),
         stderr: String::new(),
         truncated: false,
+        origin: neo_agent_core::ShellCommandOrigin::ModelBashTool,
+        outcome: neo_agent_core::ShellCommandOutcome::Completed,
     });
 
     let entries = runtime.transcript().entries();

@@ -32,7 +32,7 @@ use crossterm::terminal::size;
 use neo_agent_core::{
     AgentEvent, AgentMessage, Content, McpConnectionManager, PendingQuestion,
     PermissionApprovalDecision, PermissionMode, ProcessSupervisor, QuestionResponse,
-    format_collected_answers,
+    ShellCommandOrigin, ShellCommandOutcome, format_collected_answers,
     goal::GoalManager,
     mode::PlanMode,
     oauth::OAuthStore,
@@ -65,10 +65,21 @@ type BoxedForkFuture = Pin<Box<dyn Future<Output = Result<ForkedSessionTranscrip
 type TurnDriver = Arc<dyn Fn(TurnRequest, TurnChannels) -> BoxedTurnFuture + Send + Sync>;
 type SessionLoader = Arc<dyn Fn(String) -> BoxedSessionFuture + Send + Sync>;
 type SessionForker = Arc<dyn Fn(String) -> BoxedForkFuture + Send + Sync>;
+type BoxedShellFuture = Pin<
+    Box<
+        dyn Future<Output = Result<neo_agent_core::tools::ShellExecutionResult, ShellDriverError>>
+            + Send
+            + 'static,
+    >,
+>;
+type ShellDriver = Arc<dyn Fn(ShellRunRequest) -> BoxedShellFuture + Send + Sync>;
 type ClipboardWriter = Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
 type GitStatusProvider = Arc<dyn Fn(&Path) -> Option<String> + Send + Sync>;
 
 const GIT_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const SHELL_FOREGROUND_TIMEOUT: Duration = Duration::from_secs(120);
+const SHELL_BACKGROUND_TIMEOUT: Duration = Duration::from_secs(600);
+const SHELL_MAX_OUTPUT_BYTES: usize = 200_000;
 
 fn mcp_manager_with_oauth_store() -> McpConnectionManager {
     let supervisor = ProcessSupervisor::default();
@@ -499,6 +510,9 @@ pub(crate) struct InteractiveController {
     session_messages: Vec<AgentMessage>,
     current_thinking: bool,
     active_turn: Option<RunningTurn>,
+    shell_driver: ShellDriver,
+    active_shell_command: Option<RunningShellCommand>,
+    next_shell_command_id: u64,
     btw_runner: Option<crate::modes::btw::BtwRunner>,
     btw_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<crate::modes::btw::BtwEvent>>,
     #[cfg(test)]
@@ -572,6 +586,57 @@ pub(crate) struct TurnChannels {
     /// Shared handle for pushing live steer/follow-up input into the running
     /// turn. The controller writes; the runtime drains at step boundaries.
     steer_input: neo_agent_core::SteerInputHandle,
+}
+
+struct ShellRunRequest {
+    id: String,
+    command: String,
+    cwd: PathBuf,
+    foreground_timeout: Duration,
+    background_timeout: Duration,
+    max_output_bytes: usize,
+    cancel_token: CancellationToken,
+    background_tasks: neo_agent_core::tools::BackgroundTaskManager,
+    event_tx: mpsc::UnboundedSender<AgentEvent>,
+}
+
+#[derive(Debug)]
+enum ShellDriverError {
+    Tool(neo_agent_core::ToolError),
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for ShellDriverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tool(err) => write!(f, "{err}"),
+            Self::Other(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for ShellDriverError {}
+
+impl From<neo_agent_core::ToolError> for ShellDriverError {
+    fn from(value: neo_agent_core::ToolError) -> Self {
+        Self::Tool(value)
+    }
+}
+
+impl From<anyhow::Error> for ShellDriverError {
+    fn from(value: anyhow::Error) -> Self {
+        Self::Other(value)
+    }
+}
+
+struct RunningShellCommand {
+    id: String,
+    command: String,
+    task: JoinHandle<Result<neo_agent_core::tools::ShellExecutionResult, ShellDriverError>>,
+    cancel_token: CancellationToken,
+    background_tasks: neo_agent_core::tools::BackgroundTaskManager,
+    foreground_task_id: Option<String>,
+    events: mpsc::UnboundedReceiver<AgentEvent>,
 }
 
 #[cfg(test)]
@@ -855,6 +920,42 @@ impl InteractiveController {
         let mut chrome =
             NeoChromeState::new(title, session_label, model_label, workspace_root.clone());
         chrome.set_git_status_label(git_status_provider(&workspace_root));
+        let shell_driver: ShellDriver = Arc::new(|request| {
+            Box::pin(async move {
+                let id = request.id.clone();
+                let event_tx = request.event_tx.clone();
+                let stream_update: neo_agent_core::tools::ToolUpdateCallback =
+                    Arc::new(move |partial: &str| {
+                        let _ = event_tx.send(AgentEvent::ToolExecutionUpdate {
+                            turn: 0,
+                            id: id.clone(),
+                            name: "Bash".to_owned(),
+                            partial_result: neo_agent_core::ToolResult {
+                                content: partial.to_owned(),
+                                is_error: false,
+                                details: None,
+                                terminate: false,
+                            },
+                        });
+                    });
+                neo_agent_core::tools::execute_shell_command(
+                    neo_agent_core::tools::ShellExecutionRequest {
+                        id: request.id,
+                        command: request.command,
+                        cwd: request.cwd,
+                        origin: ShellCommandOrigin::UserShellMode,
+                        foreground_timeout: request.foreground_timeout,
+                        background_timeout: request.background_timeout,
+                        max_output_bytes: request.max_output_bytes,
+                        cancel_token: request.cancel_token,
+                        stream_update: Some(stream_update),
+                        background_tasks: Some(request.background_tasks),
+                    },
+                )
+                .await
+                .map_err(ShellDriverError::from)
+            })
+        });
         Self {
             tui: neo_tui::NeoTui::with_welcome_banner(chrome, 80, 24, env!("CARGO_PKG_VERSION")),
             keybindings: KeybindingsManager::default(),
@@ -870,6 +971,9 @@ impl InteractiveController {
             session_messages: Vec::new(),
             current_thinking: false,
             active_turn: None,
+            shell_driver,
+            active_shell_command: None,
+            next_shell_command_id: 1,
             btw_runner: None,
             btw_receiver: None,
             #[cfg(test)]
@@ -1028,6 +1132,11 @@ impl InteractiveController {
     #[cfg(test)]
     fn set_git_status_provider(&mut self, provider: GitStatusProvider) {
         self.git_status_provider = provider;
+    }
+
+    #[cfg(test)]
+    fn set_shell_driver(&mut self, driver: ShellDriver) {
+        self.shell_driver = driver;
     }
 
     #[cfg(test)]
@@ -1367,6 +1476,7 @@ impl InteractiveController {
                 None => tokio::task::yield_now().await,
             }
             self.drain_active_turn().await?;
+            self.drain_active_shell_command().await?;
             self.drain_btw_sidecar();
             self.drain_log_events();
             if self.active_turn.is_some() {
@@ -1424,7 +1534,15 @@ impl InteractiveController {
             InputEvent::Paste(text) => {
                 self.handle_paste_text(text);
             }
-            InputEvent::Backspace => self.apply_prompt_edit(PromptEdit::Backspace),
+            InputEvent::Backspace => {
+                if self.tui.chrome().shell_mode_active()
+                    && self.tui.chrome().prompt().text.is_empty()
+                {
+                    self.tui.chrome_mut().exit_shell_mode();
+                    return true;
+                }
+                self.apply_prompt_edit(PromptEdit::Backspace);
+            }
             InputEvent::Delete => self.apply_prompt_edit(PromptEdit::Delete),
             InputEvent::MoveLeft => self.apply_prompt_edit(PromptEdit::MoveLeft),
             InputEvent::MoveRight => self.apply_prompt_edit(PromptEdit::MoveRight),
@@ -1438,6 +1556,14 @@ impl InteractiveController {
 
     fn handle_insert_prompt_event(&mut self, character: char) {
         if self.try_choose_approval_number(character) {
+            return;
+        }
+        if character == '!'
+            && !self.tui.chrome().shell_mode_active()
+            && self.tui.chrome().prompt().text.is_empty()
+        {
+            self.tui.chrome_mut().enter_shell_mode();
+            self.sync_inline_prompt_completion();
             return;
         }
         self.apply_prompt_edit(PromptEdit::Insert(&character.to_string()));
@@ -1513,6 +1639,16 @@ impl InteractiveController {
 
     fn handle_paste_text(&mut self, text: &str) {
         let cleaned = Self::clean_pasted_text(text);
+        if !self.tui.chrome().shell_mode_active()
+            && self.tui.chrome().prompt().text.is_empty()
+            && let Some(command) = cleaned.strip_prefix('!')
+        {
+            self.tui.chrome_mut().enter_shell_mode();
+            if !command.is_empty() {
+                self.apply_prompt_edit(PromptEdit::Insert(command));
+            }
+            return;
+        }
         // When the terminal intercepts Ctrl+V (e.g. Ghostty on macOS) it sends
         // a bracketed-paste event. If the clipboard contains an image (not
         // text), the paste content may be empty or contain non-text artifacts.
@@ -1673,6 +1809,14 @@ impl InteractiveController {
     }
 
     async fn handle_cancel_input(&mut self) -> Result<bool> {
+        if self.tui.chrome().shell_running() {
+            self.cancel_shell_command().await?;
+            return Ok(false);
+        }
+        if self.tui.chrome().shell_mode_active() && self.tui.chrome().prompt().text.is_empty() {
+            self.tui.chrome_mut().exit_shell_mode();
+            return Ok(false);
+        }
         if self.reject_pending_approval() {
             return Ok(false);
         }
@@ -1696,6 +1840,10 @@ impl InteractiveController {
     }
 
     async fn handle_interrupt_input(&mut self) -> Result<bool> {
+        if self.tui.chrome().shell_running() {
+            self.cancel_shell_command().await?;
+            return Ok(false);
+        }
         if self.reject_all_pending_approvals() {
             if self.active_turn.is_some() {
                 self.cancel_active_turn().await?;
@@ -1710,6 +1858,10 @@ impl InteractiveController {
     }
 
     async fn handle_keybinding_key(&mut self, key: &KeyId) -> Result<bool> {
+        if self.tui.chrome().shell_running() && key.as_str() == "ctrl+b" {
+            self.detach_shell_command().await?;
+            return Ok(false);
+        }
         let actions = self.keybindings.matching_actions(key);
         for action in self.keybinding_priority() {
             if *action == KeybindingAction::TranscriptCopySelection
@@ -1793,8 +1945,17 @@ impl InteractiveController {
                     .tui
                     .chrome_mut()
                     .pending_input_mut()
+                    .pop_most_recent_shell_command_for_edit()
+                {
+                    self.tui.chrome_mut().enter_shell_mode();
+                    self.tui.chrome_mut().prompt_mut().set_text(text);
+                } else if let Some(text) = self
+                    .tui
+                    .chrome_mut()
+                    .pending_input_mut()
                     .pop_most_recent_follow_up_for_edit()
                 {
+                    self.tui.chrome_mut().exit_shell_mode();
                     self.tui.chrome_mut().prompt_mut().set_text(text);
                 }
             }
@@ -2179,13 +2340,23 @@ impl InteractiveController {
             KeybindingAction::EditorCursorUp => {
                 if !self.tui.chrome_mut().prompt_mut().recall_previous_history() {
                     // No history to recall; pull the most recent queued
-                    // follow-up back into the composer for editing instead.
+                    // shell command or follow-up back into the composer for
+                    // editing instead.
                     if let Some(text) = self
+                        .tui
+                        .chrome_mut()
+                        .pending_input_mut()
+                        .pop_most_recent_shell_command_for_edit()
+                    {
+                        self.tui.chrome_mut().enter_shell_mode();
+                        self.tui.chrome_mut().prompt_mut().set_text(text);
+                    } else if let Some(text) = self
                         .tui
                         .chrome_mut()
                         .pending_input_mut()
                         .pop_most_recent_follow_up_for_edit()
                     {
+                        self.tui.chrome_mut().exit_shell_mode();
                         self.tui.chrome_mut().prompt_mut().set_text(text);
                     }
                 }
@@ -2498,6 +2669,7 @@ impl InteractiveController {
             "/resume" => self.open_session_picker(),
             "/provider" => self.open_provider_picker(),
             "/mcp" => self.open_mcp_manager().await,
+            "/tasks" => self.show_background_tasks().await,
             "/compact" => {
                 let instruction = slash_arg(prompt, "/compact").map(|arg| {
                     if arg.is_empty() {
@@ -2512,6 +2684,16 @@ impl InteractiveController {
         }
         self.clear_submitted_prompt();
         true
+    }
+
+    async fn show_background_tasks(&mut self) {
+        let Some(config) = self.local_config.as_ref() else {
+            self.push_status("No config available");
+            return;
+        };
+        let tasks = config.background_tasks.list(true, 50).await;
+        let result = neo_agent_core::tools::task_list_result(&tasks, true);
+        self.push_status(result.content);
     }
 
     fn handle_model_or_skill_slash_command(&mut self, prompt: &str) -> bool {
@@ -2837,6 +3019,24 @@ impl InteractiveController {
         }
 
         let prompt = self.tui.chrome_mut().prompt().text.trim_end().to_owned();
+        if !self.tui.chrome().shell_mode_active()
+            && let Some(command) = prompt.strip_prefix('!')
+        {
+            self.tui.chrome_mut().enter_shell_mode();
+            if command.trim().is_empty() {
+                self.tui.chrome_mut().prompt_mut().clear_after_submit();
+                return Ok(());
+            }
+            return self.submit_shell_command(command.to_owned()).await;
+        }
+        if self.tui.chrome().shell_mode_active() {
+            if prompt.trim() == "/tasks" {
+                self.clear_submitted_prompt();
+                let _ = self.handle_slash_command("/tasks").await;
+                return Ok(());
+            }
+            return self.submit_shell_command(prompt).await;
+        }
         if prompt.trim().is_empty() {
             return Ok(());
         }
@@ -2890,10 +3090,9 @@ impl InteractiveController {
             return Ok(());
         }
 
-        // While a turn is running, Enter queues the message as a follow-up
-        // instead of rejecting it. The runtime drains follow-ups FIFO after
-        // the current workflow completes.
-        if self.active_turn.is_some() {
+        // While a turn or shell command is running, Enter queues the message as
+        // a follow-up instead of starting a concurrent workflow.
+        if self.active_turn.is_some() || self.active_shell_command.is_some() {
             self.enqueue_follow_up_from_prompt(&prompt);
             return Ok(());
         }
@@ -2929,6 +3128,352 @@ impl InteractiveController {
         self.start_pending_background_question_followups().await
     }
 
+    async fn submit_shell_command(&mut self, prompt: String) -> Result<()> {
+        let command = prompt.trim().to_owned();
+        self.tui.chrome_mut().prompt_mut().clear_after_submit();
+        if command.is_empty() {
+            return Ok(());
+        }
+        if self.active_turn.is_some() || self.active_shell_command.is_some() {
+            self.tui
+                .chrome_mut()
+                .pending_input_mut()
+                .queue_shell_command(command);
+            return Ok(());
+        }
+        self.start_shell_command(command).await
+    }
+
+    async fn start_shell_command(&mut self, command: String) -> Result<()> {
+        let id = self.next_shell_id();
+        let cancel_token = CancellationToken::new();
+        let background_tasks = self
+            .local_config
+            .as_ref()
+            .map(|config| config.background_tasks.clone())
+            .unwrap_or_else(neo_agent_core::tools::BackgroundTaskManager::new);
+        let (event_tx, events) = mpsc::unbounded_channel();
+        let request = ShellRunRequest {
+            id: id.clone(),
+            command: command.clone(),
+            cwd: self.workspace_root.clone(),
+            foreground_timeout: SHELL_FOREGROUND_TIMEOUT,
+            background_timeout: SHELL_BACKGROUND_TIMEOUT,
+            max_output_bytes: SHELL_MAX_OUTPUT_BYTES,
+            cancel_token: cancel_token.clone(),
+            background_tasks: background_tasks.clone(),
+            event_tx,
+        };
+        let task = tokio::spawn((self.shell_driver)(request));
+        self.tui.chrome_mut().set_shell_running(true);
+        self.apply_turn_event(AgentEvent::ShellCommandStarted {
+            turn: 0,
+            id: id.clone(),
+            command: command.clone(),
+            cwd: self.workspace_root.clone(),
+            origin: ShellCommandOrigin::UserShellMode,
+        });
+        self.active_shell_command = Some(RunningShellCommand {
+            id,
+            command,
+            task,
+            cancel_token,
+            background_tasks,
+            foreground_task_id: None,
+            events,
+        });
+        Ok(())
+    }
+
+    fn next_shell_id(&mut self) -> String {
+        let id = format!("shell-{}", self.next_shell_command_id);
+        self.next_shell_command_id = self.next_shell_command_id.saturating_add(1);
+        id
+    }
+
+    async fn drain_active_shell_command(&mut self) -> Result<()> {
+        let (events, is_finished) = {
+            let Some(shell) = self.active_shell_command.as_mut() else {
+                return Ok(());
+            };
+            let mut events = Vec::new();
+            while let Ok(event) = shell.events.try_recv() {
+                events.push(event);
+            }
+            if shell.foreground_task_id.is_none()
+                && let Some(task_id) =
+                    current_shell_foreground_task_id(&shell.background_tasks).await
+            {
+                shell.foreground_task_id = Some(task_id);
+            }
+            (events, shell.task.is_finished())
+        };
+        for event in events {
+            self.apply_turn_event(event);
+        }
+        if !is_finished {
+            return Ok(());
+        }
+        let shell = self
+            .active_shell_command
+            .take()
+            .expect("active shell was checked");
+        let result = shell
+            .task
+            .await
+            .map_err(|error| anyhow::anyhow!("interactive shell task failed: {error}"))?;
+        let result = result.unwrap_or_else(|error| neo_agent_core::tools::ShellExecutionResult {
+            stdout: String::new(),
+            stderr: error.to_string(),
+            exit_code: None,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            truncated: false,
+            outcome: ShellCommandOutcome::Cancelled,
+            foreground_task_id: None,
+        });
+        self.finish_shell_command(shell.id, shell.command, result)
+            .await?;
+        self.start_next_queued_after_shell().await
+    }
+
+    #[cfg(test)]
+    async fn wait_for_active_shell_command(&mut self) -> Result<()> {
+        let initial_id = self
+            .active_shell_command
+            .as_ref()
+            .map(|shell| shell.id.clone());
+        loop {
+            self.drain_active_shell_command().await?;
+            let current_id = self
+                .active_shell_command
+                .as_ref()
+                .map(|shell| shell.id.clone());
+            if current_id.is_none() || current_id != initial_id {
+                tokio::task::yield_now().await;
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    async fn finish_shell_command(
+        &mut self,
+        id: String,
+        command: String,
+        result: neo_agent_core::tools::ShellExecutionResult,
+    ) -> Result<()> {
+        self.apply_turn_event(AgentEvent::ShellCommandFinished {
+            turn: 0,
+            id,
+            exit_code: result.exit_code,
+            stdout: result.stdout.clone(),
+            stderr: result.stderr.clone(),
+            truncated: result.truncated,
+            origin: ShellCommandOrigin::UserShellMode,
+            outcome: result.outcome.clone(),
+        });
+        let message = AgentMessage::shell_command(
+            command,
+            result.stdout,
+            result.stderr,
+            result.exit_code,
+            result.outcome,
+            result.truncated,
+        );
+        let event = AgentEvent::MessageAppended { message };
+        self.persist_shell_event(&event).await?;
+        self.apply_turn_event(event);
+        Ok(())
+    }
+
+    async fn persist_shell_event(&mut self, event: &AgentEvent) -> Result<()> {
+        let Some(config) = self.local_config.clone() else {
+            return Ok(());
+        };
+        let session_path = self.ensure_shell_session_path(&config).await?;
+        let mut writer = neo_agent_core::session::JsonlSessionWriter::open_append(&session_path)
+            .await
+            .with_context(|| format!("failed to append session {}", session_path.display()))?;
+        writer.append_event(event).await?;
+        writer.flush().await?;
+        Ok(())
+    }
+
+    async fn ensure_shell_session_path(&mut self, config: &AppConfig) -> Result<PathBuf> {
+        if let Some(session_id) = self.active_session_id.as_deref() {
+            return crate::modes::sessions::session_path(session_id, config);
+        }
+        let session_path = create_interactive_session_path(config).await?;
+        let session_id = session_id_from_transcript_path(&session_path)?;
+        self.set_active_session_id(session_id.clone());
+        let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
+            .await
+            .with_context(|| format!("failed to create session {}", session_path.display()))?;
+        writer.flush().await?;
+        let _ = neo_agent_core::session::SessionMetadataStore::new(workspace_sessions_dir(config))
+            .record_activity(
+                &session_id,
+                Some(config.project_dir.display().to_string()),
+                Some("shell command".to_owned()),
+                current_unix_timestamp(),
+            );
+        Ok(session_path)
+    }
+
+    async fn start_next_queued_after_shell(&mut self) -> Result<()> {
+        if let Some(command) = self
+            .tui
+            .chrome_mut()
+            .pending_input_mut()
+            .drain_next_shell_command()
+        {
+            return self.start_shell_command(command).await;
+        }
+        self.tui.chrome_mut().set_shell_running(false);
+        self.tui
+            .chrome_mut()
+            .apply_stream_update(StreamUpdate::TurnFinished);
+        if self.active_turn.is_none()
+            && let Some(prompt) = self
+                .tui
+                .chrome_mut()
+                .pending_input_mut()
+                .drain_next_follow_up()
+        {
+            let PromptSubmission {
+                prompt,
+                model_override,
+            } = PromptSubmission::from_text(
+                prompt,
+                &self.model_items,
+                self.local_config.as_ref(),
+                &self.completion_root,
+            )?;
+            let content = crate::prompt_parts::expand_prompt_markers(
+                &prompt,
+                &self.paste_store,
+                &self.image_attachment_store,
+            );
+            self.append_prompt_history(&content_to_display_text(&content));
+            self.start_turn_with_prompt(content, model_override, true);
+        }
+        Ok(())
+    }
+
+    async fn cancel_shell_command(&mut self) -> Result<()> {
+        let Some(shell) = self.active_shell_command.as_ref() else {
+            return Ok(());
+        };
+        shell.cancel_token.cancel();
+        self.wait_for_shell_cancel_or_abort().await
+    }
+
+    async fn detach_shell_command(&mut self) -> Result<()> {
+        let Some(shell) = self.active_shell_command.as_ref() else {
+            return Ok(());
+        };
+        let task_id = if let Some(task_id) = shell.foreground_task_id.clone() {
+            Some(task_id)
+        } else {
+            current_shell_foreground_task_id(&shell.background_tasks).await
+        };
+        let Some(task_id) = task_id else {
+            self.push_status("Shell command is not ready to background yet");
+            return Ok(());
+        };
+        shell.background_tasks.detach(&task_id).await?;
+        self.wait_for_shell_detach_or_abort(task_id).await
+    }
+
+    async fn wait_for_shell_cancel_or_abort(&mut self) -> Result<()> {
+        for _ in 0..200 {
+            self.drain_active_shell_command().await?;
+            if self.active_shell_command.is_none() {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if let Some(shell) = self.active_shell_command.take() {
+            let foreground_task_id = match shell.foreground_task_id {
+                Some(task_id) => Some(task_id),
+                None => current_shell_foreground_task_id(&shell.background_tasks).await,
+            };
+            let tasks = shell.background_tasks.list(true, 50).await;
+            for task in tasks
+                .into_iter()
+                .filter(|task| foreground_task_id.as_deref() == Some(task.task_id.as_str()))
+            {
+                let _ = shell
+                    .background_tasks
+                    .stop(
+                        &task.task_id,
+                        "Cancelled foreground shell command",
+                        SHELL_MAX_OUTPUT_BYTES,
+                    )
+                    .await;
+            }
+            shell.task.abort();
+            self.tui.chrome_mut().set_shell_running(false);
+            self.tui
+                .chrome_mut()
+                .apply_stream_update(StreamUpdate::TurnFinished);
+            let result = neo_agent_core::tools::ShellExecutionResult {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                truncated: false,
+                outcome: ShellCommandOutcome::Cancelled,
+                foreground_task_id,
+            };
+            self.finish_shell_command(shell.id, shell.command, result)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn wait_for_shell_detach_or_abort(&mut self, task_id: String) -> Result<()> {
+        for _ in 0..200 {
+            self.drain_active_shell_command().await?;
+            if self.active_shell_command.is_none() {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if let Some(shell) = self.active_shell_command.take() {
+            let snapshot = shell.background_tasks.snapshot(&task_id).await.ok();
+            let output = snapshot.and_then(|snapshot| snapshot.output).unwrap_or(
+                neo_agent_core::tools::CommandOutput {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: None,
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                },
+            );
+            shell.task.abort();
+            self.tui.chrome_mut().set_shell_running(false);
+            self.tui
+                .chrome_mut()
+                .apply_stream_update(StreamUpdate::TurnFinished);
+            let result = neo_agent_core::tools::ShellExecutionResult {
+                stdout: output.stdout,
+                stderr: output.stderr,
+                exit_code: output.exit_code,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                truncated: false,
+                outcome: ShellCommandOutcome::Backgrounded { task_id },
+                foreground_task_id: shell.foreground_task_id,
+            };
+            self.finish_shell_command(shell.id, shell.command, result)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Queue the current composer text as a follow-up message into the running
     /// turn. Called when Enter is pressed while a turn is active. The runtime
     /// drains follow-ups FIFO after the current workflow completes.
@@ -2951,6 +3496,10 @@ impl InteractiveController {
         let message = AgentMessage::User { content };
         self.tui.chrome_mut().prompt_mut().clear_after_submit();
         let Some(turn) = &self.active_turn else {
+            self.tui
+                .chrome_mut()
+                .pending_input_mut()
+                .queue_follow_up(prompt);
             return;
         };
         turn.steer_input
@@ -2966,6 +3515,9 @@ impl InteractiveController {
     /// 3. If no turn is active, fall back to a normal submit so Ctrl+S is never
     ///    a dead key when idle.
     async fn handle_prompt_steer(&mut self) -> Result<()> {
+        if self.tui.chrome().shell_mode_active() {
+            return Ok(());
+        }
         let text = self.tui.chrome().prompt().text.trim().to_owned();
         if !text.is_empty() {
             if self.active_turn.is_some() {
@@ -3169,8 +3721,22 @@ impl InteractiveController {
                 }
             }
             self.refresh_git_status_now();
+            self.start_next_queued_after_turn().await?;
         } else {
             self.active_turn = Some(turn);
+        }
+        Ok(())
+    }
+
+    async fn start_next_queued_after_turn(&mut self) -> Result<()> {
+        if self.active_shell_command.is_none()
+            && let Some(command) = self
+                .tui
+                .chrome_mut()
+                .pending_input_mut()
+                .drain_next_shell_command()
+        {
+            self.start_shell_command(command).await?;
         }
         Ok(())
     }
@@ -4895,16 +5461,15 @@ impl InteractiveController {
             events.push(event);
         }
         for event in events {
-            self.transcript_mut().push_transcript(
-                TranscriptEntry::Status {
+            self.transcript_mut()
+                .push_transcript(TranscriptEntry::Status {
                     text: event.message,
                     severity: Some(match event.level.as_str() {
                         "ERROR" => neo_tui::transcript::StatusSeverity::Error,
                         "WARN" | "WARNING" => neo_tui::transcript::StatusSeverity::Warning,
                         _ => neo_tui::transcript::StatusSeverity::Info,
                     }),
-                },
-            );
+                });
         }
     }
 
@@ -5107,6 +5672,12 @@ static STATIC_SLASH_COMMANDS: &[(&str, &str, Option<&str>, Option<&str>)] = &[
         "/mcp",
         "View and manage MCP servers",
         Some("MCP manager"),
+        Some("local"),
+    ),
+    (
+        "/tasks",
+        "View active background tasks",
+        Some("background tasks"),
         Some("local"),
     ),
     (
@@ -6557,6 +7128,58 @@ fn same_work_dir(left: &Path, right: &Path) -> bool {
     }
 }
 
+async fn create_interactive_session_path(config: &AppConfig) -> Result<PathBuf> {
+    let bucket_dir = workspace_sessions_dir(config);
+    tokio::fs::create_dir_all(&bucket_dir)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to create sessions directory {}",
+                bucket_dir.display()
+            )
+        })?;
+
+    loop {
+        let session_id = format!("session_{}", uuid::Uuid::new_v4());
+        let session_dir = bucket_dir.join(&session_id);
+        if tokio::fs::metadata(&session_dir).await.is_err() {
+            tokio::fs::create_dir_all(&session_dir)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to create session directory {}",
+                        session_dir.display()
+                    )
+                })?;
+            return Ok(session_dir.join("transcript.jsonl"));
+        }
+    }
+}
+
+fn session_id_from_transcript_path(path: &Path) -> Result<String> {
+    let session_dir = path
+        .parent()
+        .with_context(|| format!("invalid session path {}", path.display()))?;
+    let id = session_dir
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .with_context(|| format!("invalid session directory name {}", session_dir.display()))?;
+    Ok(id.to_owned())
+}
+
+fn current_unix_timestamp() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_owned())
+}
+
+async fn current_shell_foreground_task_id(
+    manager: &neo_agent_core::tools::BackgroundTaskManager,
+) -> Option<String> {
+    manager.foreground_bash_task_id().await
+}
+
 /// Parse a timestamp string (epoch millis, epoch secs, or RFC3339) into `SystemTime`.
 fn parse_timestamp(ts: &str) -> std::time::SystemTime {
     // Try epoch millis first
@@ -6915,6 +7538,8 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             truncated: false,
+            origin: neo_agent_core::ShellCommandOrigin::ModelBashTool,
+            outcome: neo_agent_core::ShellCommandOutcome::Completed,
         });
         assert_eq!(controller.chrome().git_status_label(), Some("main [↑1]"));
 
@@ -12197,6 +12822,7 @@ command = "python3"
                 mode: "interactive".to_owned(),
             },
             runtime: RuntimeConfig::default(),
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
@@ -14061,6 +14687,777 @@ command = "python3"
             seen,
             Some(vec![Content::text("submit via ctrl+s")]),
             "idle Ctrl+S should behave like a normal submit"
+        );
+    }
+
+    fn completed_shell_result(
+        stdout: impl Into<String>,
+    ) -> neo_agent_core::tools::ShellExecutionResult {
+        neo_agent_core::tools::ShellExecutionResult {
+            stdout: stdout.into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            truncated: false,
+            outcome: neo_agent_core::ShellCommandOutcome::Completed,
+            foreground_task_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_mode_bang_empty_prompt_enters_and_empty_cancel_exits() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+
+        controller.type_text("!");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("bang enters shell mode");
+
+        assert!(controller.chrome().shell_mode_active());
+        assert_eq!(controller.chrome().prompt().text, "");
+
+        controller
+            .handle_input_event(InputEvent::Cancel)
+            .await
+            .expect("empty cancel exits shell mode");
+
+        assert!(!controller.chrome().shell_mode_active());
+    }
+
+    #[tokio::test]
+    async fn shell_mode_paste_bang_command_enters_and_strips_prefix() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+
+        controller
+            .handle_input_event(InputEvent::Paste("!pwd".to_owned()))
+            .await
+            .expect("paste bang command");
+
+        assert!(controller.chrome().shell_mode_active());
+        assert_eq!(controller.chrome().prompt().text, "pwd");
+    }
+
+    #[tokio::test]
+    async fn shell_mode_enter_executes_persists_and_does_not_start_model_turn() {
+        let model_turns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_turns = Arc::clone(&model_turns);
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            move |_request| {
+                let observed_turns = Arc::clone(&observed_turns);
+                async move {
+                    observed_turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(Vec::<AgentEvent>::new())
+                }
+            },
+        );
+        let commands = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let observed_commands = Arc::clone(&commands);
+        controller.set_shell_driver(Arc::new(move |request| {
+            let observed_commands = Arc::clone(&observed_commands);
+            Box::pin(async move {
+                observed_commands
+                    .lock()
+                    .expect("command lock")
+                    .push(request.command);
+                Ok(completed_shell_result("neo\n"))
+            })
+        }));
+
+        controller.type_text("!");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("enter shell mode");
+        controller.type_text("printf neo");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("run shell command");
+        controller
+            .wait_for_active_shell_command()
+            .await
+            .expect("shell command completes");
+
+        assert_eq!(
+            commands.lock().expect("command lock").as_slice(),
+            ["printf neo"]
+        );
+        assert_eq!(model_turns.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(controller.chrome().shell_mode_active());
+        assert!(!controller.chrome().shell_running());
+        assert_eq!(
+            controller.chrome().working_label(),
+            None,
+            "finished shell command should return chrome to editing state"
+        );
+        assert!(
+            controller.session_messages.iter().any(|message| matches!(
+                message,
+                AgentMessage::ShellCommand {
+                    command,
+                    stdout,
+                    outcome: neo_agent_core::ShellCommandOutcome::Completed,
+                    ..
+                } if command == "printf neo" && stdout == "neo\n"
+            )),
+            "shell command result should be persisted as AgentMessage::ShellCommand"
+        );
+        assert!(
+            !controller
+                .prompt_history
+                .as_ref()
+                .is_some_and(|_| transcript_has_status(&controller, "printf neo")),
+            "shell commands must not be persisted to prompt history"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_mode_uses_spec_timeouts_for_user_commands() {
+        let observed_timeouts = Arc::new(std::sync::Mutex::new(None));
+        let captured_timeouts = Arc::clone(&observed_timeouts);
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.set_shell_driver(Arc::new(move |request| {
+            let captured_timeouts = Arc::clone(&captured_timeouts);
+            Box::pin(async move {
+                *captured_timeouts.lock().expect("timeouts lock") =
+                    Some((request.foreground_timeout, request.background_timeout));
+                Ok(completed_shell_result(""))
+            })
+        }));
+
+        controller.type_text("!true");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("run shell command");
+        controller
+            .wait_for_active_shell_command()
+            .await
+            .expect("shell completes");
+
+        assert_eq!(
+            *observed_timeouts.lock().expect("timeouts lock"),
+            Some((Duration::from_secs(120), Duration::from_secs(600)))
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_mode_enter_while_shell_busy_queues_and_drains_fifo() {
+        let releases = Arc::new(std::sync::Mutex::new(VecDeque::from([
+            tokio::sync::oneshot::channel::<()>().1,
+            tokio::sync::oneshot::channel::<()>().1,
+        ])));
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel::<()>();
+        let (second_tx, second_rx) = tokio::sync::oneshot::channel::<()>();
+        *releases.lock().expect("release lock") = VecDeque::from([first_rx, second_rx]);
+        let commands = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let observed_commands = Arc::clone(&commands);
+        let observed_releases = Arc::clone(&releases);
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.set_shell_driver(Arc::new(move |request| {
+            let observed_commands = Arc::clone(&observed_commands);
+            let release = observed_releases
+                .lock()
+                .expect("release lock")
+                .pop_front()
+                .expect("release receiver");
+            Box::pin(async move {
+                observed_commands
+                    .lock()
+                    .expect("command lock")
+                    .push(request.command);
+                let _ = release.await;
+                Ok(completed_shell_result(""))
+            })
+        }));
+
+        controller.type_text("!");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("enter shell mode");
+        controller.type_text("one");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("start first shell command");
+        controller.type_text("two");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("queue second shell command");
+
+        assert!(controller.chrome().shell_running());
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .queued_shell_commands()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["two"]
+        );
+
+        first_tx.send(()).expect("release first");
+        controller
+            .wait_for_active_shell_command()
+            .await
+            .expect("drain queued shell command");
+        assert_eq!(
+            commands.lock().expect("command lock").as_slice(),
+            ["one", "two"]
+        );
+        assert!(controller.chrome().shell_running());
+        second_tx.send(()).expect("release second");
+        controller
+            .wait_for_active_shell_command()
+            .await
+            .expect("second shell command completes");
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .queued_shell_commands()
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_mode_ctrl_s_does_not_steer_and_alt_up_edits_recent_shell_queue() {
+        let mut controller = running_turn_controller().await;
+
+        controller.tui.chrome_mut().enter_shell_mode();
+        controller.type_text("not a steer");
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+s").expect("valid key")))
+            .await
+            .expect("ctrl+s in shell mode is ignored");
+        assert_eq!(
+            controller.chrome().prompt().text,
+            "not a steer",
+            "Ctrl+S must not steer shell text"
+        );
+
+        controller
+            .tui
+            .chrome_mut()
+            .pending_input_mut()
+            .queue_follow_up("follow up");
+        controller
+            .tui
+            .chrome_mut()
+            .pending_input_mut()
+            .queue_shell_command("shell queued");
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::EditLastQueuedMessage))
+            .await
+            .expect("edit queued shell command");
+
+        assert_eq!(controller.chrome().prompt().text, "shell queued");
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .queued_follow_ups()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["follow up"],
+            "Alt+Up should prefer queued shell commands in shell mode"
+        );
+
+        controller.cancel_active_turn().await.expect("cancel turn");
+    }
+
+    #[tokio::test]
+    async fn shell_mode_commands_do_not_enter_prompt_history() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::prompt_history::PromptHistoryStore::for_dir(dir.path());
+        let mut controller = controller_with_history_store(store.clone());
+        controller.set_shell_driver(Arc::new(|request| {
+            Box::pin(async move {
+                assert_eq!(request.command, "echo hidden");
+                Ok(completed_shell_result("hidden\n"))
+            })
+        }));
+
+        controller.type_text("!");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("enter shell mode");
+        controller.type_text("echo hidden");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("run shell command");
+        controller
+            .wait_for_active_shell_command()
+            .await
+            .expect("shell completes");
+
+        let history = store.load_recent().expect("history loads");
+        assert!(
+            history.is_empty(),
+            "shell commands should not be written to prompt history"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_mode_ctrl_b_detaches_running_command() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+
+        controller.type_text("!sleep 5");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("start shell command");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+b").expect("valid key")))
+            .await
+            .expect("ctrl+b detaches");
+
+        assert!(!controller.chrome().shell_running());
+        assert!(
+            controller.session_messages.iter().any(|message| matches!(
+                message,
+                AgentMessage::ShellCommand {
+                    outcome: neo_agent_core::ShellCommandOutcome::Backgrounded { .. },
+                    ..
+                }
+            )),
+            "detached shell command should persist as backgrounded"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_mode_ctrl_b_detaches_current_shell_task_not_other_background_task() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            temp.path().to_path_buf(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        let config = test_config(temp.path(), sessions_dir);
+        config
+            .background_tasks
+            .start_question("question-1".to_owned(), "Existing question".to_owned())
+            .await;
+        controller.local_config = Some(config);
+
+        controller.type_text("!sleep 5");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("start shell command");
+        let (question_before, shell_task_id) = loop {
+            let tasks = controller
+                .local_config
+                .as_ref()
+                .expect("config")
+                .background_tasks
+                .list(true, 10)
+                .await;
+            let question = tasks
+                .iter()
+                .find(|task| task.task_id == "question-1")
+                .cloned();
+            let shell = tasks
+                .iter()
+                .find(|task| task.task_id != "question-1")
+                .cloned();
+            if let (Some(question), Some(shell)) = (question, shell) {
+                break (question, shell.task_id);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+b").expect("valid key")))
+            .await
+            .expect("ctrl+b detaches");
+
+        let question_after = controller
+            .local_config
+            .as_ref()
+            .expect("config")
+            .background_tasks
+            .snapshot("question-1")
+            .await
+            .expect("question remains");
+        assert_eq!(question_after.elapsed >= question_before.elapsed, true);
+        assert!(
+            controller.session_messages.iter().any(|message| matches!(
+                message,
+                AgentMessage::ShellCommand {
+                    outcome: neo_agent_core::ShellCommandOutcome::Backgrounded { task_id },
+                    ..
+                } if task_id == &shell_task_id
+            )),
+            "ctrl+b should persist the actual foreground shell task id"
+        );
+        let _ = controller
+            .local_config
+            .as_ref()
+            .expect("config")
+            .background_tasks
+            .stop(&shell_task_id, "test cleanup", 1024)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn shell_mode_detach_uses_shared_background_tasks_for_next_turn() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        let captured_task_count = Arc::new(std::sync::Mutex::new(None));
+        let observed_task_count = Arc::clone(&captured_task_count);
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            temp.path().to_path_buf(),
+            move |request| {
+                let observed_task_count = Arc::clone(&observed_task_count);
+                async move {
+                    let count = match request.base_config {
+                        Some(config) => config.background_tasks.list(true, 10).await.len(),
+                        None => 0,
+                    };
+                    *observed_task_count.lock().expect("task count") = Some(count);
+                    Ok(Vec::<AgentEvent>::new())
+                }
+            },
+        );
+        controller.local_config = Some(test_config(temp.path(), sessions_dir));
+
+        controller.type_text("!sleep 5");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("start shell command");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+b").expect("valid key")))
+            .await
+            .expect("ctrl+b detaches");
+
+        let shared_tasks = controller
+            .local_config
+            .as_ref()
+            .expect("config")
+            .background_tasks
+            .list(true, 10)
+            .await;
+        assert_eq!(shared_tasks.len(), 1);
+
+        controller.tui.chrome_mut().exit_shell_mode();
+        controller.type_text("inspect tasks");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("start follow-up turn");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("follow-up completes");
+
+        assert_eq!(
+            *captured_task_count.lock().expect("task count"),
+            Some(1),
+            "next model turn should see detached shell task via shared manager"
+        );
+        let _ = controller
+            .local_config
+            .as_ref()
+            .expect("config")
+            .background_tasks
+            .stop(&shared_tasks[0].task_id, "test cleanup", 1024)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn slash_tasks_lists_shared_background_tasks() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            temp.path().to_path_buf(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        let config = test_config(temp.path(), sessions_dir);
+        config
+            .background_tasks
+            .start_question("question-1".to_owned(), "Pick one".to_owned())
+            .await;
+        controller.local_config = Some(config);
+
+        controller.type_text("/tasks");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("show tasks");
+
+        assert!(transcript_has_status(
+            &controller,
+            "active_background_tasks: 1"
+        ));
+        assert!(transcript_has_status(&controller, "task_id: question-1"));
+    }
+
+    #[tokio::test]
+    async fn shell_mode_slash_tasks_lists_tasks_instead_of_running_shell_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            temp.path().to_path_buf(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        let config = test_config(temp.path(), sessions_dir);
+        config
+            .background_tasks
+            .start_question("question-1".to_owned(), "Pick one".to_owned())
+            .await;
+        controller.local_config = Some(config);
+        controller.tui.chrome_mut().enter_shell_mode();
+
+        controller.type_text("/tasks");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("show tasks");
+
+        assert!(transcript_has_status(
+            &controller,
+            "active_background_tasks: 1"
+        ));
+        assert!(transcript_has_status(&controller, "task_id: question-1"));
+        assert!(!controller.chrome().shell_running());
+    }
+
+    #[tokio::test]
+    async fn shell_mode_esc_cancels_running_command() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+
+        controller.type_text("!sleep 5");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("start shell command");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        controller
+            .handle_input_event(InputEvent::Cancel)
+            .await
+            .expect("esc cancels");
+
+        assert!(!controller.chrome().shell_running());
+        assert!(
+            controller.session_messages.iter().any(|message| matches!(
+                message,
+                AgentMessage::ShellCommand {
+                    outcome: neo_agent_core::ShellCommandOutcome::Cancelled,
+                    ..
+                }
+            )),
+            "cancelled shell command should persist as cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_mode_drains_chat_followup_after_shell_queue() {
+        let model_prompts = Arc::new(std::sync::Mutex::new(Vec::<Vec<Content>>::new()));
+        let observed_prompts = Arc::clone(&model_prompts);
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            move |request| {
+                let observed_prompts = Arc::clone(&observed_prompts);
+                async move {
+                    observed_prompts
+                        .lock()
+                        .expect("prompt lock")
+                        .push(request.prompt);
+                    Ok(Vec::<AgentEvent>::new())
+                }
+            },
+        );
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let release = Arc::new(std::sync::Mutex::new(Some(release_rx)));
+        let observed_release = Arc::clone(&release);
+        controller.set_shell_driver(Arc::new(move |_request| {
+            let release = observed_release
+                .lock()
+                .expect("release lock")
+                .take()
+                .expect("release receiver");
+            Box::pin(async move {
+                let _ = release.await;
+                Ok(completed_shell_result(""))
+            })
+        }));
+
+        controller.type_text("!sleeping");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("start shell command");
+        controller.tui.chrome_mut().exit_shell_mode();
+        controller.type_text("chat after shell");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("queue chat follow-up");
+
+        assert!(controller.active_turn.is_none());
+        release_tx.send(()).expect("release shell");
+        controller
+            .wait_for_active_shell_command()
+            .await
+            .expect("shell completes and starts follow-up");
+
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("follow-up turn completes");
+        assert_eq!(
+            model_prompts.lock().expect("prompt lock").as_slice(),
+            [vec![Content::text("chat after shell")]]
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_mode_queued_during_active_turn_runs_after_turn_finishes() {
+        let release_turn = Arc::new(std::sync::Mutex::new(None));
+        let observed_release_turn = Arc::clone(&release_turn);
+        let run_turn: TurnDriver = Arc::new(move |_request, _channels| {
+            let observed_release_turn = Arc::clone(&observed_release_turn);
+            Box::pin(async move {
+                let release = observed_release_turn
+                    .lock()
+                    .expect("turn release lock")
+                    .take()
+                    .expect("turn release receiver");
+                let _ = release.await;
+                Ok(TurnOutcome::default())
+            })
+        });
+        let mut controller = InteractiveController::new(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            run_turn,
+            PickerCatalogs::default(),
+            Arc::new(|session_id| Box::pin(empty_session_loader(session_id))),
+            Arc::new(|session_id| Box::pin(empty_session_forker(session_id))),
+        );
+        let (turn_tx, turn_rx) = tokio::sync::oneshot::channel::<()>();
+        *release_turn.lock().expect("turn release lock") = Some(turn_rx);
+        let shell_commands = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let observed_shell_commands = Arc::clone(&shell_commands);
+        controller.set_shell_driver(Arc::new(move |request| {
+            let observed_shell_commands = Arc::clone(&observed_shell_commands);
+            Box::pin(async move {
+                observed_shell_commands
+                    .lock()
+                    .expect("shell commands lock")
+                    .push(request.command);
+                Ok(completed_shell_result(""))
+            })
+        }));
+
+        controller.type_text("first prompt");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("start turn");
+        assert!(controller.active_turn.is_some());
+        controller.tui.chrome_mut().enter_shell_mode();
+        controller.type_text("echo queued");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("queue shell command");
+
+        assert_eq!(
+            controller
+                .chrome()
+                .pending_input()
+                .queued_shell_commands()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["echo queued"]
+        );
+        turn_tx.send(()).expect("release turn");
+        controller
+            .wait_for_active_turn()
+            .await
+            .expect("turn completes");
+        controller
+            .wait_for_active_shell_command()
+            .await
+            .expect("queued shell completes");
+
+        assert_eq!(
+            shell_commands
+                .lock()
+                .expect("shell commands lock")
+                .as_slice(),
+            ["echo queued"]
         );
     }
 

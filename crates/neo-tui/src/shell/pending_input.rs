@@ -6,6 +6,8 @@ pub struct PendingInputState {
     pending_steers: VecDeque<String>,
     /// Follow-ups queued while a turn is running (FIFO).
     queued_follow_ups: VecDeque<String>,
+    /// Shell commands queued while a turn, compaction, or shell command is running.
+    queued_shell_commands: VecDeque<String>,
 }
 
 impl PendingInputState {
@@ -24,6 +26,10 @@ impl PendingInputState {
     /// point in the running turn.
     pub fn queue_steer(&mut self, text: impl Into<String>) {
         self.pending_steers.push_back(text.into());
+    }
+
+    pub fn queue_shell_command(&mut self, text: impl Into<String>) {
+        self.queued_shell_commands.push_back(text.into());
     }
 
     /// Drain `count` messages from the matching queue (used when the runtime
@@ -47,6 +53,18 @@ impl PendingInputState {
         self.queued_follow_ups.pop_back()
     }
 
+    pub fn drain_next_follow_up(&mut self) -> Option<String> {
+        self.queued_follow_ups.pop_front()
+    }
+
+    pub fn drain_next_shell_command(&mut self) -> Option<String> {
+        self.queued_shell_commands.pop_front()
+    }
+
+    pub fn pop_most_recent_shell_command_for_edit(&mut self) -> Option<String> {
+        self.queued_shell_commands.pop_back()
+    }
+
     #[must_use]
     pub fn pending_steers(&self) -> &VecDeque<String> {
         &self.pending_steers
@@ -58,7 +76,45 @@ impl PendingInputState {
     }
 
     #[must_use]
+    pub fn queued_shell_commands(&self) -> &VecDeque<String> {
+        &self.queued_shell_commands
+    }
+
+    #[must_use]
+    pub fn has_queued_shell_commands(&self) -> bool {
+        !self.queued_shell_commands.is_empty()
+    }
+
+    #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.pending_steers.is_empty() && self.queued_follow_ups.is_empty()
+        self.pending_steers.is_empty()
+            && self.queued_follow_ups.is_empty()
+            && self.queued_shell_commands.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_queue_drains_fifo_but_edits_lifo() {
+        let mut state = PendingInputState::new();
+        state.queue_shell_command("one");
+        state.queue_shell_command("two");
+        assert_eq!(state.drain_next_shell_command(), Some("one".to_owned()));
+        assert_eq!(
+            state.pop_most_recent_shell_command_for_edit(),
+            Some("two".to_owned())
+        );
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn shell_queue_counts_as_pending_input() {
+        let mut state = PendingInputState::new();
+        state.queue_shell_command("whoami");
+        assert!(!state.is_empty());
+        assert!(state.has_queued_shell_commands());
     }
 }

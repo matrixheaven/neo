@@ -1,4 +1,4 @@
-use std::{fmt::Write, process::Stdio, sync::Arc, time::Duration};
+use std::{fmt::Write, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -18,9 +18,9 @@ use rustix::{
 
 use super::{
     CommandOutput, ManagedBackgroundCommand, Tool, ToolContext, ToolError, ToolFuture, ToolResult,
-    ToolUpdateCallback, cap_output_details, cap_plain_output, output_from_buffers, parse_input,
-    schema,
+    ToolUpdateCallback, cap_plain_output, output_from_buffers, parse_input, schema,
 };
+use crate::{BackgroundTaskManager, BackgroundTaskStatus, ShellCommandOrigin, ShellCommandOutcome};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +99,30 @@ The following common command categories are usually available. Availability stil
 
 pub struct BashTool;
 
+pub struct ShellExecutionRequest {
+    pub id: String,
+    pub command: String,
+    pub cwd: PathBuf,
+    pub origin: ShellCommandOrigin,
+    pub foreground_timeout: Duration,
+    pub background_timeout: Duration,
+    pub max_output_bytes: usize,
+    pub cancel_token: tokio_util::sync::CancellationToken,
+    pub stream_update: Option<ToolUpdateCallback>,
+    pub background_tasks: Option<BackgroundTaskManager>,
+}
+
+pub struct ShellExecutionResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub truncated: bool,
+    pub outcome: ShellCommandOutcome,
+    pub foreground_task_id: Option<String>,
+}
+
 impl Tool for BashTool {
     fn name(&self) -> &'static str {
         "Bash"
@@ -140,7 +164,7 @@ impl Tool for BashTool {
                 || u64::try_from(ctx.bash_timeout.as_millis()).unwrap_or(u64::MAX),
                 |s| s.saturating_mul(1000),
             );
-            let output = run_command(
+            let result = run_command(
                 ctx,
                 &input.command,
                 input.cwd.as_deref(),
@@ -148,7 +172,7 @@ impl Tool for BashTool {
                 max_output_bytes,
             )
             .await?;
-            Ok(command_result(&output, max_output_bytes))
+            Ok(shell_command_result(&result))
         })
     }
 }
@@ -161,15 +185,11 @@ struct ManagedChild {
 
 const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 
-fn command_result(output: &CommandOutput, max_output_bytes: usize) -> ToolResult {
-    let (stdout_capped, stdout_truncated) = cap_plain_output(&output.stdout, max_output_bytes);
-    let (stderr_capped, stderr_truncated) = cap_plain_output(&output.stderr, max_output_bytes);
-    let stdout_details = cap_output_details(&output.stdout, max_output_bytes);
-    let stderr_details = cap_output_details(&output.stderr, max_output_bytes);
-    let truncated = stdout_truncated || stderr_truncated;
-    let mut content = format!("{stdout_capped}{stderr_capped}");
-    if output.exit_code != Some(0) {
-        let exit_label = output
+fn shell_command_result(result: &ShellExecutionResult) -> ToolResult {
+    let truncated = result.truncated || result.stdout_truncated || result.stderr_truncated;
+    let mut content = format!("{}{}", result.stdout, result.stderr);
+    if result.exit_code != Some(0) {
+        let exit_label = result
             .exit_code
             .map_or_else(|| "signal".to_owned(), |code| code.to_string());
         if !content.ends_with('\n') && !content.is_empty() {
@@ -183,19 +203,72 @@ fn command_result(output: &CommandOutput, max_output_bytes: usize) -> ToolResult
         }
         content.push_str("[output truncated]");
     }
-    let result = if output.exit_code == Some(0) {
+    let tool_result = if result.exit_code == Some(0) {
         ToolResult::ok(content)
     } else {
         ToolResult::error(content)
     };
-    result.with_details(json!({
-        "exit_code": output.exit_code,
-        "stdout": stdout_details,
-        "stderr": stderr_details,
-        "stdout_truncated": stdout_truncated,
-        "stderr_truncated": stderr_truncated,
+    tool_result.with_details(shell_execution_details(result))
+}
+
+fn shell_execution_details(result: &ShellExecutionResult) -> serde_json::Value {
+    let truncated = result.truncated || result.stdout_truncated || result.stderr_truncated;
+    let mut details = json!({
+        "exit_code": result.exit_code,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "stdout_truncated": result.stdout_truncated,
+        "stderr_truncated": result.stderr_truncated,
         "truncated": truncated,
-    }))
+        "outcome": result.outcome.as_model_status(),
+    });
+    if let ShellCommandOutcome::Backgrounded { task_id } = &result.outcome {
+        details["task_id"] = json!(task_id);
+    }
+    if let Some(task_id) = &result.foreground_task_id {
+        details["foreground_task_id"] = json!(task_id);
+    }
+    details
+}
+
+pub async fn execute_model_bash_for_runtime(
+    ctx: &ToolContext,
+    input: serde_json::Value,
+) -> Result<ToolResult, ToolError> {
+    ctx.ensure_shell_allowed()?;
+    let input: BashInput = parse_input("Bash", input)?;
+    let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
+    let _disable_timeout = input.disable_timeout.unwrap_or(false);
+    if input.run_in_background == Some(true) {
+        if input.description.as_deref().unwrap_or("").trim().is_empty() {
+            return Err(ToolError::InvalidInput {
+                tool: "Bash".to_owned(),
+                message: "description is required when run_in_background is true".to_owned(),
+            });
+        }
+        return start_background_command(
+            ctx,
+            &input.command,
+            input.cwd.as_deref(),
+            input.description.unwrap_or_default(),
+            max_output_bytes,
+        )
+        .await;
+    }
+
+    let timeout_ms = input.timeout.map_or_else(
+        || u64::try_from(ctx.bash_timeout.as_millis()).unwrap_or(u64::MAX),
+        |s| s.saturating_mul(1000),
+    );
+    let result = run_command_without_error_mapping(
+        ctx,
+        &input.command,
+        input.cwd.as_deref(),
+        Duration::from_millis(timeout_ms),
+        max_output_bytes,
+    )
+    .await?;
+    Ok(shell_command_result(&result))
 }
 
 async fn run_command(
@@ -204,51 +277,259 @@ async fn run_command(
     workdir: Option<&str>,
     timeout_duration: Duration,
     stream_max_bytes: usize,
-) -> Result<CommandOutput, ToolError> {
-    let mut process = spawn_bash_process(ctx, command, workdir)?;
-    let stdout = Arc::new(Mutex::new(Vec::new()));
-    let stderr = Arc::new(Mutex::new(Vec::new()));
-    let stdout_task = spawn_streaming_output_reader(
-        process.child.stdout.take().expect("stdout was piped"),
-        stdout.clone(),
-        ctx.tool_update.clone(),
+) -> Result<ShellExecutionResult, ToolError> {
+    let result = run_command_without_error_mapping(
+        ctx,
+        command,
+        workdir,
+        timeout_duration,
         stream_max_bytes,
-    );
-    let stderr_task = spawn_streaming_output_reader(
-        process.child.stderr.take().expect("stderr was piped"),
-        stderr.clone(),
-        ctx.tool_update.clone(),
-        stream_max_bytes,
-    );
-
-    let status = tokio::select! {
-        status = process.child.wait() => status?,
-        () = tokio::time::sleep(timeout_duration) => {
-            kill_child(&mut process).await;
-            return Err(ToolError::CommandTimedOut {
-                timeout_ms: u64::try_from(timeout_duration.as_millis()).unwrap_or(u64::MAX),
-            });
-        }
-        () = ctx.cancel_token.cancelled() => {
-            kill_child(&mut process).await;
-            return Err(ToolError::Cancelled);
-        }
-    };
-
-    drain_reader(stdout_task).await;
-    drain_reader(stderr_task).await;
-    Ok(output_from_buffers(status.code(), stdout, stderr).await)
+    )
+    .await?;
+    match result.outcome {
+        ShellCommandOutcome::TimedOut => Err(ToolError::CommandTimedOut {
+            timeout_ms: u64::try_from(timeout_duration.as_millis()).unwrap_or(u64::MAX),
+        }),
+        ShellCommandOutcome::Cancelled => Err(ToolError::Cancelled),
+        ShellCommandOutcome::Completed | ShellCommandOutcome::Backgrounded { .. } => Ok(result),
+    }
 }
 
-fn spawn_bash_process(
+async fn run_command_without_error_mapping(
     ctx: &ToolContext,
-    command_text: &str,
+    command: &str,
     workdir: Option<&str>,
-) -> Result<ManagedChild, ToolError> {
+    timeout_duration: Duration,
+    stream_max_bytes: usize,
+) -> Result<ShellExecutionResult, ToolError> {
     let cwd = match workdir {
         Some(path) => ctx.resolve_workspace_path(std::path::Path::new(path))?,
         None => ctx.cwd.clone(),
     };
+    execute_shell_command(ShellExecutionRequest {
+        id: "bash".to_owned(),
+        command: command.to_owned(),
+        cwd,
+        origin: ShellCommandOrigin::ModelBashTool,
+        foreground_timeout: timeout_duration,
+        background_timeout: Duration::from_secs(10 * 60),
+        max_output_bytes: stream_max_bytes,
+        cancel_token: ctx.cancel_token.clone(),
+        stream_update: ctx.tool_update.clone(),
+        background_tasks: None,
+    })
+    .await
+}
+
+pub async fn execute_shell_command(
+    request: ShellExecutionRequest,
+) -> Result<ShellExecutionResult, ToolError> {
+    if request.background_tasks.is_some()
+        && matches!(request.origin, ShellCommandOrigin::UserShellMode)
+    {
+        return execute_manager_owned_shell_command(request).await;
+    }
+    let mut process = spawn_bash_process_at(&request.command, &request.cwd)?;
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stdout_truncated = Arc::new(Mutex::new(false));
+    let stderr_truncated = Arc::new(Mutex::new(false));
+    let stdout_task = spawn_streaming_output_reader(
+        process.child.stdout.take().expect("stdout was piped"),
+        stdout.clone(),
+        stdout_truncated.clone(),
+        request.stream_update.clone(),
+        request.max_output_bytes,
+    );
+    let stderr_task = spawn_streaming_output_reader(
+        process.child.stderr.take().expect("stderr was piped"),
+        stderr.clone(),
+        stderr_truncated.clone(),
+        request.stream_update.clone(),
+        request.max_output_bytes,
+    );
+
+    tokio::select! {
+        status = process.child.wait() => {
+            let status = status?;
+            let output = finish_shell_process(
+                status.code(),
+                stdout,
+                stderr,
+                stdout_truncated,
+                stderr_truncated,
+                stdout_task,
+                stderr_task,
+            ).await;
+            Ok(shell_result_from_output(
+                output,
+                ShellCommandOutcome::Completed,
+                None,
+                request.max_output_bytes,
+            ))
+        }
+        () = tokio::time::sleep(request.foreground_timeout) => {
+            let exit_code = kill_child(&mut process).await;
+            (drain_reader)(stdout_task).await;
+            (drain_reader)(stderr_task).await;
+            let output =
+                output_from_bounded_buffers(exit_code, stdout, stderr, stdout_truncated, stderr_truncated).await;
+            Ok(shell_result_from_output(
+                output,
+                ShellCommandOutcome::TimedOut,
+                None,
+                request.max_output_bytes,
+            ))
+        }
+        () = request.cancel_token.cancelled() => {
+            let exit_code = kill_child(&mut process).await;
+            (drain_reader)(stdout_task).await;
+            (drain_reader)(stderr_task).await;
+            let output =
+                output_from_bounded_buffers(exit_code, stdout, stderr, stdout_truncated, stderr_truncated).await;
+            Ok(shell_result_from_output(
+                output,
+                ShellCommandOutcome::Cancelled,
+                None,
+                request.max_output_bytes,
+            ))
+        }
+    }
+}
+
+async fn execute_manager_owned_shell_command(
+    request: ShellExecutionRequest,
+) -> Result<ShellExecutionResult, ToolError> {
+    let manager = request
+        .background_tasks
+        .clone()
+        .expect("checked background task manager");
+    let command = spawn_managed_background_command_at_with_stream(
+        &request.command,
+        &request.cwd,
+        request.stream_update.clone(),
+        request.max_output_bytes,
+    )?;
+    let task_id = manager
+        .start_bash_foreground(
+            request.command.clone(),
+            command,
+            request.max_output_bytes,
+            request.background_timeout,
+        )
+        .await?;
+    let started = tokio::time::Instant::now();
+    loop {
+        if manager.is_detached(&task_id).await {
+            let snapshot = manager.snapshot(&task_id).await?;
+            let output = snapshot.output.unwrap_or_else(empty_command_output);
+            return Ok(shell_result_from_output(
+                output,
+                ShellCommandOutcome::Backgrounded {
+                    task_id: task_id.clone(),
+                },
+                Some(task_id),
+                request.max_output_bytes,
+            ));
+        }
+
+        let snapshot = manager.snapshot(&task_id).await?;
+        if !snapshot.status.is_active() {
+            let output = snapshot.output.unwrap_or_else(empty_command_output);
+            let outcome = match snapshot.status {
+                BackgroundTaskStatus::TimedOut => ShellCommandOutcome::TimedOut,
+                BackgroundTaskStatus::Stopped => ShellCommandOutcome::Cancelled,
+                _ => ShellCommandOutcome::Completed,
+            };
+            return Ok(shell_result_from_output(
+                output,
+                outcome,
+                Some(task_id.clone()),
+                request.max_output_bytes,
+            ));
+        }
+
+        tokio::select! {
+            () = request.cancel_token.cancelled() => {
+                let _ = manager.stop(&task_id, "Cancelled foreground shell command", request.max_output_bytes).await?;
+                let snapshot = manager.snapshot(&task_id).await?;
+                let output = snapshot.output.unwrap_or_else(empty_command_output);
+                return Ok(shell_result_from_output(
+                    output,
+                    ShellCommandOutcome::Cancelled,
+                    Some(task_id.clone()),
+                    request.max_output_bytes,
+                ));
+            }
+            () = tokio::time::sleep_until(started + request.foreground_timeout) => {
+                let _ = manager.stop(&task_id, "Foreground shell command timed out", request.max_output_bytes).await?;
+                let snapshot = manager.snapshot(&task_id).await?;
+                let output = snapshot.output.unwrap_or_else(empty_command_output);
+                return Ok(shell_result_from_output(
+                    output,
+                    ShellCommandOutcome::TimedOut,
+                    Some(task_id.clone()),
+                    request.max_output_bytes,
+                ));
+            }
+            () = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+    }
+}
+
+fn empty_command_output() -> CommandOutput {
+    CommandOutput {
+        exit_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+    }
+}
+
+fn shell_result_from_output(
+    output: CommandOutput,
+    outcome: ShellCommandOutcome,
+    foreground_task_id: Option<String>,
+    max_output_bytes: usize,
+) -> ShellExecutionResult {
+    cap_shell_result_output(
+        ShellExecutionResult {
+            stdout: output.stdout,
+            stderr: output.stderr,
+            exit_code: output.exit_code,
+            stdout_truncated: output.stdout_truncated,
+            stderr_truncated: output.stderr_truncated,
+            truncated: output.stdout_truncated || output.stderr_truncated,
+            outcome,
+            foreground_task_id,
+        },
+        max_output_bytes,
+    )
+}
+
+fn cap_shell_result_output(
+    result: ShellExecutionResult,
+    max_output_bytes: usize,
+) -> ShellExecutionResult {
+    let (stdout, stdout_truncated) = cap_plain_output(&result.stdout, max_output_bytes);
+    let (stderr, stderr_truncated) = cap_plain_output(&result.stderr, max_output_bytes);
+    ShellExecutionResult {
+        stdout,
+        stderr,
+        exit_code: result.exit_code,
+        stdout_truncated: result.stdout_truncated || stdout_truncated,
+        stderr_truncated: result.stderr_truncated || stderr_truncated,
+        truncated: result.truncated || stdout_truncated || stderr_truncated,
+        outcome: result.outcome,
+        foreground_task_id: result.foreground_task_id,
+    }
+}
+
+fn spawn_bash_process_at(
+    command_text: &str,
+    cwd: &std::path::Path,
+) -> Result<ManagedChild, ToolError> {
     let mut process_command = Command::new("bash");
     process_command
         .arg("-lc")
@@ -266,6 +547,40 @@ fn spawn_bash_process(
         process_group: child_process_group(&child),
         child,
     })
+}
+
+async fn finish_shell_process(
+    exit_code: Option<i32>,
+    stdout: Arc<Mutex<Vec<u8>>>,
+    stderr: Arc<Mutex<Vec<u8>>>,
+    stdout_truncated: Arc<Mutex<bool>>,
+    stderr_truncated: Arc<Mutex<bool>>,
+    stdout_task: JoinHandle<()>,
+    stderr_task: JoinHandle<()>,
+) -> CommandOutput {
+    drain_reader(stdout_task).await;
+    drain_reader(stderr_task).await;
+    output_from_bounded_buffers(
+        exit_code,
+        stdout,
+        stderr,
+        stdout_truncated,
+        stderr_truncated,
+    )
+    .await
+}
+
+async fn output_from_bounded_buffers(
+    exit_code: Option<i32>,
+    stdout: Arc<Mutex<Vec<u8>>>,
+    stderr: Arc<Mutex<Vec<u8>>>,
+    stdout_truncated: Arc<Mutex<bool>>,
+    stderr_truncated: Arc<Mutex<bool>>,
+) -> CommandOutput {
+    let mut output = output_from_buffers(exit_code, stdout, stderr).await;
+    output.stdout_truncated = *stdout_truncated.lock().await;
+    output.stderr_truncated = *stderr_truncated.lock().await;
+    output
 }
 
 async fn drain_reader(task: JoinHandle<()>) {
@@ -310,35 +625,63 @@ async fn start_background_command(
     description: String,
     max_output_bytes: usize,
 ) -> Result<ToolResult, ToolError> {
-    let process = spawn_bash_process(ctx, command, workdir)?;
+    let cwd = match workdir {
+        Some(path) => ctx.resolve_workspace_path(std::path::Path::new(path))?,
+        None => ctx.cwd.clone(),
+    };
+    let command =
+        spawn_managed_background_command_at_with_stream(command, &cwd, None, max_output_bytes)?;
+
+    ctx.background_tasks
+        .start_bash(description, command, max_output_bytes)
+        .await
+}
+
+fn spawn_managed_background_command_at_with_stream(
+    command: &str,
+    cwd: &std::path::Path,
+    callback: Option<ToolUpdateCallback>,
+    stream_max_bytes: usize,
+) -> Result<ManagedBackgroundCommand, ToolError> {
+    let process = spawn_bash_process_at(command, cwd)?;
     let process = Arc::new(Mutex::new(process));
 
     let stdout = Arc::new(Mutex::new(Vec::new()));
     let stderr = Arc::new(Mutex::new(Vec::new()));
-    let mut locked_process = process.lock().await;
-    let stdout_task = spawn_output_reader(
+    let stdout_truncated = Arc::new(Mutex::new(false));
+    let stderr_truncated = Arc::new(Mutex::new(false));
+    let mut locked_process = process.try_lock().expect("new process lock available");
+    let stdout_task = spawn_streaming_output_reader(
         locked_process
             .child
             .stdout
             .take()
             .expect("stdout was piped"),
         stdout.clone(),
+        stdout_truncated.clone(),
+        callback.clone(),
+        stream_max_bytes,
     );
-    let stderr_task = spawn_output_reader(
+    let stderr_task = spawn_streaming_output_reader(
         locked_process
             .child
             .stderr
             .take()
             .expect("stderr was piped"),
         stderr.clone(),
+        stderr_truncated.clone(),
+        callback,
+        stream_max_bytes,
     );
     drop(locked_process);
 
     let try_wait_process = Arc::clone(&process);
     let cleanup_process = Arc::clone(&process);
-    let command = ManagedBackgroundCommand {
+    Ok(ManagedBackgroundCommand {
         stdout,
         stderr,
+        stdout_truncated,
+        stderr_truncated,
         stdout_task,
         stderr_task,
         try_wait: Arc::new(move || {
@@ -359,31 +702,13 @@ async fn start_background_command(
             })
         }),
         drain: Arc::new(|task| Box::pin(async move { drain_reader(task).await })),
-    };
-
-    ctx.background_tasks
-        .start_bash(description, command, max_output_bytes)
-        .await
-}
-
-fn spawn_output_reader<R>(mut reader: R, buffer: Arc<Mutex<Vec<u8>>>) -> JoinHandle<()>
-where
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-{
-    tokio::spawn(async move {
-        let mut local = [0_u8; 8192];
-        loop {
-            match reader.read(&mut local).await {
-                Ok(0) | Err(_) => break,
-                Ok(bytes_read) => buffer.lock().await.extend_from_slice(&local[..bytes_read]),
-            }
-        }
     })
 }
 
 fn spawn_streaming_output_reader<R>(
     mut reader: R,
     buffer: Arc<Mutex<Vec<u8>>>,
+    truncated: Arc<Mutex<bool>>,
     callback: Option<ToolUpdateCallback>,
     stream_max_bytes: usize,
 ) -> JoinHandle<()>
@@ -398,7 +723,19 @@ where
                 Ok(0) | Err(_) => break,
                 Ok(bytes_read) => {
                     let chunk = &local[..bytes_read];
-                    buffer.lock().await.extend_from_slice(chunk);
+                    {
+                        let mut buffer = buffer.lock().await;
+                        if buffer.len() < stream_max_bytes {
+                            let remaining = stream_max_bytes - buffer.len();
+                            let buffered = &chunk[..chunk.len().min(remaining)];
+                            buffer.extend_from_slice(buffered);
+                            if buffered.len() < chunk.len() {
+                                *truncated.lock().await = true;
+                            }
+                        } else {
+                            *truncated.lock().await = true;
+                        }
+                    }
                     if streamed < stream_max_bytes {
                         let remaining = stream_max_bytes - streamed;
                         let streamed_chunk = &chunk[..chunk.len().min(remaining)];
@@ -411,4 +748,29 @@ where
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt as _;
+
+    #[tokio::test]
+    async fn streaming_output_reader_bounds_buffer_to_max_output_bytes() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let truncated = Arc::new(Mutex::new(false));
+        let handle =
+            spawn_streaming_output_reader(reader, buffer.clone(), truncated.clone(), None, 4);
+
+        writer
+            .write_all(b"keep-secret-leak-tail")
+            .await
+            .expect("write output");
+        drop(writer);
+        handle.await.expect("reader task");
+
+        assert_eq!(&*buffer.lock().await, b"keep");
+        assert!(*truncated.lock().await);
+    }
 }

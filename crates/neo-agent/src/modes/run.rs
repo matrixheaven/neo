@@ -506,6 +506,22 @@ fn stable_message(message: &AgentMessage) -> Value {
             "content": stable_content(content),
             "isError": is_error,
         }),
+        AgentMessage::ShellCommand {
+            command,
+            stdout,
+            stderr,
+            exit_code,
+            outcome,
+            truncated,
+        } => json!({
+            "role": "shell",
+            "command": command,
+            "stdout": stdout,
+            "stderr": stderr,
+            "exitCode": exit_code,
+            "outcome": outcome,
+            "truncated": truncated,
+        }),
     }
 }
 
@@ -1644,6 +1660,7 @@ pub(crate) fn agent_config_for_app(
             config.runtime.follow_up_queue_mode,
         )
         .with_tool_execution_mode(config.runtime.tool_execution_mode)
+        .with_background_tasks(config.background_tasks.clone())
         .with_workspace_root(&config.project_dir)?;
     if let Some(home) = neo_home() {
         agent_config = agent_config.with_home_dir(home);
@@ -2347,6 +2364,7 @@ mod tests {
                     micro_keep_recent: 20,
                 }),
             },
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
@@ -2425,6 +2443,7 @@ mod tests {
                 tool_execution_mode: ToolExecutionMode::Sequential,
                 compaction: None,
             },
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
@@ -2470,6 +2489,7 @@ mod tests {
                 mode: "events".to_owned(),
             },
             runtime: RuntimeConfig::default(),
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
@@ -2586,6 +2606,7 @@ mod tests {
                     micro_keep_recent: 20,
                 }),
             },
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
@@ -2660,6 +2681,7 @@ mod tests {
                     micro_keep_recent: 20,
                 }),
             },
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
@@ -2716,6 +2738,7 @@ mod tests {
                 mode: "interactive".to_owned(),
             },
             runtime: RuntimeConfig::default(),
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
@@ -3104,6 +3127,7 @@ mod tests {
                 mode: "interactive".to_owned(),
             },
             runtime: RuntimeConfig::default(),
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),

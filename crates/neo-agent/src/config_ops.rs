@@ -663,6 +663,7 @@ model = "old"
                 mode: "interactive".to_owned(),
             },
             runtime: RuntimeConfig::default(),
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),

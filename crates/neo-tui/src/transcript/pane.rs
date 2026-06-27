@@ -17,8 +17,8 @@ use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
 };
 use crate::transcript::{
-    ApprovalPromptData, InlineImageRender, ToolCallComponent, ToolCallState, ToolGroup,
-    TranscriptEntry, TranscriptStore, render_tool_group,
+    ApprovalPromptData, InlineImageRender, ShellRunComponent, ToolCallComponent, ToolCallState,
+    ToolGroup, TranscriptEntry, TranscriptStore, render_tool_group,
 };
 use crate::widgets::box_draw::{ROUNDED, repeat_char};
 use crate::widgets::{PendingInputPreview, TodoPanel, box_draw};
@@ -269,6 +269,25 @@ impl TranscriptPane {
                 if !text.is_empty() {
                     self.push_status(text);
                 }
+            }
+            AgentMessage::ShellCommand {
+                command,
+                stdout,
+                stderr,
+                exit_code,
+                outcome,
+                truncated,
+            } => {
+                let id = format!("replay-shell-{}", self.transcript.entries().len());
+                self.push_transcript(TranscriptEntry::shell_run(ShellRunComponent::finished(
+                    id,
+                    command.clone(),
+                    stdout.clone(),
+                    stderr.clone(),
+                    *exit_code,
+                    outcome.clone(),
+                    *truncated,
+                )));
             }
         }
     }
@@ -1233,6 +1252,7 @@ pub fn render_chrome_lines(app: &NeoChromeState, width: usize, height: usize) ->
     let pending_input = PendingInputPreview::new(
         app.pending_input().pending_steers(),
         app.pending_input().queued_follow_ups(),
+        app.pending_input().queued_shell_commands(),
     )
     .with_theme(app.theme())
     .render(content_width);
@@ -1292,6 +1312,7 @@ pub fn render_chrome_lines_mut(
     let pending_input = PendingInputPreview::new(
         app.pending_input().pending_steers(),
         app.pending_input().queued_follow_ups(),
+        app.pending_input().queued_shell_commands(),
     )
     .with_theme(app.theme())
     .render(content_width);
@@ -1361,9 +1382,13 @@ fn render_prompt_completion_dropdown(app: &NeoChromeState, width: usize) -> Opti
 fn render_prompt_lines(app: &NeoChromeState, width: usize) -> (Vec<String>, Option<CursorPos>) {
     let theme = app.theme();
     let prompt = app.prompt();
-    let highlighted = app.is_plan_mode() || !prompt.text.is_empty();
+    let highlighted = app.is_plan_mode() || app.shell_mode_active() || !prompt.text.is_empty();
     let border_color = if highlighted {
-        theme.brand
+        if app.shell_mode_active() {
+            theme.shell_mode
+        } else {
+            theme.brand
+        }
     } else {
         theme.text_muted
     };
@@ -1392,11 +1417,24 @@ fn render_prompt_lines(app: &NeoChromeState, width: usize) -> (Vec<String>, Opti
     let mut lines = Vec::with_capacity(logical_lines.len() + 2);
     lines.push(if scroll_offset > 0 {
         scroll_indicator_top_border(width, scroll_offset, border_style)
+    } else if app.shell_mode_active() {
+        box_draw::top_border_with_label(
+            width,
+            "! shell mode",
+            border_style,
+            Style::default().fg(theme.shell_mode).bold(),
+        )
     } else {
         box_draw::top_border(width, border_style)
     });
     for (idx, line) in logical_lines.iter().enumerate() {
-        let prefix = if idx == 0 { "  > " } else { "    " };
+        let prefix = if idx == 0 && app.shell_mode_active() {
+            "  ! "
+        } else if idx == 0 {
+            "  > "
+        } else {
+            "    "
+        };
         let content = paint(&format!("{prefix}{line}"), text_style);
         lines.push(box_draw::content_line(&content, width, border_style));
     }
@@ -1569,6 +1607,12 @@ fn render_footer_lines(app: &NeoChromeState, width: usize) -> Vec<String> {
     )];
     if let Some(label) = development_mode_badge(app.development_mode()) {
         left_parts.push(paint(label, Style::default().fg(theme.status_warn).bold()));
+    }
+    if app.shell_mode_active() {
+        left_parts.push(paint(
+            "[shell]",
+            Style::default().fg(theme.shell_mode).bold(),
+        ));
     }
     if !app.model_label().is_empty() {
         left_parts.push(paint(

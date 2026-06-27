@@ -40,6 +40,7 @@ pub struct TuiTheme {
     pub pending_input_header: Color,
     pub pending_input_text: Color,
     pub pending_input_steer_prefix: Color,
+    pub shell_mode: Color,
 }
 
 impl Default for TuiTheme {
@@ -83,6 +84,7 @@ impl Default for TuiTheme {
             pending_input_header: Color::Rgb(139, 148, 158),
             pending_input_text: Color::Rgb(139, 148, 158),
             pending_input_steer_prefix: Color::Rgb(198, 120, 221),
+            shell_mode: Color::Rgb(86, 182, 194),
         }
     }
 }
@@ -223,6 +225,12 @@ impl TuiTheme {
     #[must_use]
     pub const fn with_pending_input_steer_prefix(mut self, color: Color) -> Self {
         self.pending_input_steer_prefix = color;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_shell_mode(mut self, color: Color) -> Self {
+        self.shell_mode = color;
         self
     }
 }

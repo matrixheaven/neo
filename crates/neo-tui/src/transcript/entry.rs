@@ -6,6 +6,7 @@ use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
 };
 use crate::transcript::PlanBoxComponent;
+use crate::transcript::ShellRunComponent;
 use crate::transcript::ToolCallComponent;
 use crate::widgets::box_draw;
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,9 @@ pub enum TranscriptEntry {
     },
     ToolRun {
         component: ToolCallComponent,
+    },
+    ShellRun {
+        component: ShellRunComponent,
     },
     ApprovalPrompt(ApprovalPromptData),
     Image {
@@ -179,6 +183,11 @@ impl TranscriptEntry {
     #[must_use]
     pub fn tool_run(component: ToolCallComponent) -> Self {
         Self::ToolRun { component }
+    }
+
+    #[must_use]
+    pub fn shell_run(component: ShellRunComponent) -> Self {
+        Self::ShellRun { component }
     }
 
     #[must_use]
@@ -335,6 +344,7 @@ impl TranscriptEntry {
     ) -> Vec<Line> {
         match self {
             Self::ToolRun { component } => render_tool_run(component, inner_width, theme),
+            Self::ShellRun { component } => component.render(inner_width, theme),
             Self::ApprovalPrompt(data) => render_approval_prompt(data, inner_width, theme),
             Self::Image { metadata, .. } => styled_wrap(metadata, inner_width, status_style(theme)),
             Self::Compaction {
@@ -440,6 +450,7 @@ fn utility_copy_parts(entry: &TranscriptEntry) -> Option<(&'static str, String)>
     match entry {
         TranscriptEntry::Banner(data) => Some(("Banner", copy_banner(data))),
         TranscriptEntry::ToolRun { component } => Some(("Tool", copy_tool(component))),
+        TranscriptEntry::ShellRun { component } => Some(("Shell", component.copy_text())),
         TranscriptEntry::Compaction {
             compacted_message_count,
             tokens_before,
@@ -481,6 +492,7 @@ fn card_copy_parts(entry: &TranscriptEntry) -> (&'static str, String) {
         | TranscriptEntry::QueuedMessage { .. } => unreachable!("simple copy parts handled above"),
         TranscriptEntry::Banner(_)
         | TranscriptEntry::ToolRun { .. }
+        | TranscriptEntry::ShellRun { .. }
         | TranscriptEntry::Compaction { .. } => unreachable!("utility copy parts handled above"),
     }
 }

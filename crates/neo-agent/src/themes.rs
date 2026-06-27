@@ -64,6 +64,7 @@ struct ThemeColors {
     footer_context_ok: Option<String>,
     footer_context_warn: Option<String>,
     footer_context_critical: Option<String>,
+    shell_mode: Option<String>,
 }
 
 pub fn resolve_theme() -> anyhow::Result<ResolvedTheme> {
@@ -332,6 +333,12 @@ fn apply_footer_colors(
         &mut theme.footer_context_critical,
         "footer_context_critical",
         colors.footer_context_critical.as_deref(),
+        path,
+    )?;
+    apply_color(
+        &mut theme.shell_mode,
+        "shell_mode",
+        colors.shell_mode.as_deref(),
         path,
     )?;
     Ok(())

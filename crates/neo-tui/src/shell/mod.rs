@@ -83,6 +83,8 @@ pub struct NeoChromeState {
     git_status_label: Option<String>,
     /// Pending steers and queued follow-ups waiting to be injected or sent.
     pending_input: PendingInputState,
+    shell_mode_active: bool,
+    shell_running: bool,
 }
 
 impl NeoChromeState {
@@ -121,6 +123,8 @@ impl NeoChromeState {
             exit_confirmation_label: None,
             git_status_label: None,
             pending_input: PendingInputState::new(),
+            shell_mode_active: false,
+            shell_running: false,
         }
     }
 
@@ -163,7 +167,32 @@ impl NeoChromeState {
         if let Some(label) = &self.custom_working_label {
             return Some(label.clone());
         }
+        if self.shell_running {
+            return Some("shell · esc to cancel".to_owned());
+        }
         matches!(self.mode, ChromeMode::Streaming).then(|| "working · esc interrupt".to_owned())
+    }
+
+    #[must_use]
+    pub const fn shell_mode_active(&self) -> bool {
+        self.shell_mode_active
+    }
+
+    #[must_use]
+    pub const fn shell_running(&self) -> bool {
+        self.shell_running
+    }
+
+    pub const fn set_shell_running(&mut self, running: bool) {
+        self.shell_running = running;
+    }
+
+    pub const fn enter_shell_mode(&mut self) {
+        self.shell_mode_active = true;
+    }
+
+    pub const fn exit_shell_mode(&mut self) {
+        self.shell_mode_active = false;
     }
 
     /// Set a custom footer working label. Pass `None` to clear it.

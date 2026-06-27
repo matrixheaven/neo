@@ -7,6 +7,26 @@ use serde::{Deserialize, Serialize};
 use crate::StopReason;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ShellCommandOutcome {
+    Completed,
+    Cancelled,
+    TimedOut,
+    Backgrounded { task_id: String },
+}
+
+impl ShellCommandOutcome {
+    #[must_use]
+    pub const fn as_model_status(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::Backgrounded { .. } => "backgrounded",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Content {
     Text {
         text: String,
@@ -100,6 +120,15 @@ pub enum AgentMessage {
         content: Vec<Content>,
         is_error: bool,
     },
+    ShellCommand {
+        command: String,
+        stdout: String,
+        stderr: String,
+        exit_code: Option<i32>,
+        outcome: ShellCommandOutcome,
+        #[serde(default)]
+        truncated: bool,
+    },
 }
 
 impl AgentMessage {
@@ -145,6 +174,25 @@ impl AgentMessage {
         }
     }
 
+    #[must_use]
+    pub fn shell_command(
+        command: impl Into<String>,
+        stdout: impl Into<String>,
+        stderr: impl Into<String>,
+        exit_code: Option<i32>,
+        outcome: ShellCommandOutcome,
+        truncated: bool,
+    ) -> Self {
+        Self::ShellCommand {
+            command: command.into(),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            exit_code,
+            outcome,
+            truncated,
+        }
+    }
+
     /// Extract all `Text` content parts from this message and join them.
     ///
     /// Returns an empty string for variants without text content.
@@ -155,6 +203,18 @@ impl AgentMessage {
             | Self::User { content }
             | Self::Assistant { content, .. }
             | Self::ToolResult { content, .. } => content,
+            Self::ShellCommand {
+                command,
+                stdout,
+                stderr,
+                exit_code,
+                outcome,
+                truncated,
+            } => {
+                return shell_command_model_text(
+                    command, stdout, stderr, *exit_code, outcome, *truncated,
+                );
+            }
         };
         content
             .iter()
@@ -189,6 +249,20 @@ impl AgentMessage {
                 tool_call_id: tool_call_id.clone(),
                 content: content.iter().map(to_content_part).collect(),
                 is_error: *is_error,
+            },
+            Self::ShellCommand {
+                command,
+                stdout,
+                stderr,
+                exit_code,
+                outcome,
+                truncated,
+            } => ChatMessage::User {
+                content: vec![ContentPart::Text {
+                    text: shell_command_model_text(
+                        command, stdout, stderr, *exit_code, outcome, *truncated,
+                    ),
+                }],
             },
         }
     }
@@ -245,6 +319,37 @@ pub fn sanitize_tool_exchange_messages(messages: Vec<AgentMessage>) -> Vec<Agent
         }
     }
     out
+}
+
+fn shell_command_model_text(
+    command: &str,
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+    outcome: &ShellCommandOutcome,
+    truncated: bool,
+) -> String {
+    let exit_code = exit_code.map_or_else(|| "signal".to_owned(), |code| code.to_string());
+    format!(
+        "<bash-input>\n{}\n</bash-input>\n<bash-stdout>\n{}\n</bash-stdout>\n<bash-stderr>\n{}\n</bash-stderr>\n<bash-status exit_code=\"{}\" outcome=\"{}\" truncated=\"{}\" />",
+        escape_xml_text(command),
+        escape_xml_text(stdout),
+        escape_xml_text(stderr),
+        escape_xml_attr(&exit_code),
+        outcome.as_model_status(),
+        truncated,
+    )
+}
+
+fn escape_xml_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn escape_xml_attr(value: &str) -> String {
+    escape_xml_text(value).replace('"', "&quot;")
 }
 
 fn to_content_part(content: &Content) -> ContentPart {

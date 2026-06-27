@@ -58,6 +58,11 @@ pub use background_tasks::{
     BackgroundTaskKind, BackgroundTaskManager, BackgroundTaskSnapshot, BackgroundTaskStatus,
     CommandOutput, ManagedBackgroundCommand, TaskListTool, TaskOutputTool, TaskStopTool,
     cap_output_details, cap_plain_output, format_collected_answers, output_from_buffers,
+    task_list_result,
+};
+pub use bash::{
+    ShellExecutionRequest, ShellExecutionResult, execute_model_bash_for_runtime,
+    execute_shell_command,
 };
 // Re-export Todo tool types.
 pub use todo::{TodoInput, TodoItem, TodoStatus, TodoTool};

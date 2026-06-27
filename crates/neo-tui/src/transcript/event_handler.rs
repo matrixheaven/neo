@@ -1,9 +1,12 @@
 use std::borrow::Borrow;
-use std::fmt::Write as _;
 
-use neo_agent_core::{AgentEvent, AgentToolCall, PermissionOperation, ToolResult};
+use neo_agent_core::{
+    AgentEvent, AgentToolCall, PermissionOperation, ShellCommandOrigin, ShellCommandOutcome,
+    ToolResult,
+};
 
 use crate::shell::ToolStatusKind;
+use crate::transcript::ShellRunComponent;
 use crate::transcript::TranscriptEntry;
 use crate::transcript::entry::GoalCardKind;
 
@@ -137,7 +140,11 @@ impl TranscriptPane {
                 partial_result,
                 ..
             } => {
-                self.update_tool_execution(id, name.clone(), partial_result.clone());
+                if self.transcript.has_shell_run(id) {
+                    self.update_shell_run(id, partial_result.clone());
+                } else {
+                    self.update_tool_execution(id, name.clone(), partial_result.clone());
+                }
                 true
             }
             AgentEvent::ToolExecutionFinished {
@@ -147,9 +154,16 @@ impl TranscriptPane {
                 true
             }
             AgentEvent::ShellCommandStarted {
-                id, command, cwd, ..
+                id,
+                command,
+                cwd,
+                origin,
+                ..
             } => {
-                self.start_shell_command(id, command, cwd);
+                match origin {
+                    ShellCommandOrigin::ModelBashTool => self.start_shell_command(id, command, cwd),
+                    ShellCommandOrigin::UserShellMode => self.start_user_shell_command(id, command),
+                }
                 true
             }
             AgentEvent::ShellCommandFinished {
@@ -158,9 +172,32 @@ impl TranscriptPane {
                 stdout,
                 stderr,
                 truncated,
+                origin,
+                outcome,
                 ..
             } => {
-                self.finish_shell_command(id.clone(), *exit_code, stdout, stderr, *truncated);
+                match origin {
+                    ShellCommandOrigin::ModelBashTool => {
+                        self.finish_shell_command(
+                            id.clone(),
+                            *exit_code,
+                            stdout,
+                            stderr,
+                            *truncated,
+                            outcome.clone(),
+                        );
+                    }
+                    ShellCommandOrigin::UserShellMode => {
+                        self.finish_user_shell_command(
+                            id,
+                            *exit_code,
+                            stdout,
+                            stderr,
+                            *truncated,
+                            outcome.clone(),
+                        );
+                    }
+                }
                 true
             }
             _ => false,
@@ -380,6 +417,13 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
+    fn update_shell_run(&mut self, id: &str, partial_result: ToolResult) {
+        if let Some(shell_run) = self.transcript.shell_run_mut(id) {
+            shell_run.append_live_output(partial_result.content);
+        }
+        self.mark_dirty();
+    }
+
     fn finish_tool_execution(&mut self, id: String, name: String, result: ToolResult) {
         self.upsert_tool(&id, name, None, ToolStatusKind::Running);
         self.streaming_tool_args.remove(&id);
@@ -406,6 +450,14 @@ impl TranscriptPane {
         self.mark_dirty();
     }
 
+    fn start_user_shell_command(&mut self, id: &str, command: &str) {
+        if !self.transcript.has_shell_run(id) {
+            self.transcript
+                .push_shell_run(ShellRunComponent::running(id, command));
+        }
+        self.mark_dirty();
+    }
+
     fn finish_shell_command(
         &mut self,
         id: String,
@@ -413,13 +465,38 @@ impl TranscriptPane {
         stdout: &str,
         stderr: &str,
         truncated: bool,
+        outcome: ShellCommandOutcome,
     ) {
-        let detail = shell_finished_detail(exit_code, stdout, stderr, truncated);
+        let detail = shell_finished_detail(exit_code, stdout, stderr, truncated, &outcome);
         self.upsert_tool(&id, "Bash".to_owned(), None, ToolStatusKind::Running);
         if let Some(tool) = self.transcript.tool_mut(&id) {
-            tool.set_result(Some(detail), None, exit_code != Some(0), exit_code);
+            let is_error = exit_code != Some(0)
+                || !matches!(
+                    outcome,
+                    ShellCommandOutcome::Completed | ShellCommandOutcome::Backgrounded { .. }
+                );
+            tool.set_result(Some(detail), None, is_error, exit_code);
         }
         self.completed_tool_result_ids.push(id);
+        self.mark_dirty();
+    }
+
+    fn finish_user_shell_command(
+        &mut self,
+        id: &str,
+        exit_code: Option<i32>,
+        stdout: &str,
+        stderr: &str,
+        truncated: bool,
+        outcome: ShellCommandOutcome,
+    ) {
+        if let Some(shell_run) = self.transcript.shell_run_mut(id) {
+            shell_run.finish(stdout, stderr, exit_code, outcome, truncated);
+        } else {
+            self.transcript.push_shell_run(ShellRunComponent::finished(
+                id, "", stdout, stderr, exit_code, outcome, truncated,
+            ));
+        }
         self.mark_dirty();
     }
 
@@ -452,20 +529,16 @@ fn shell_finished_detail(
     stdout: &str,
     stderr: &str,
     truncated: bool,
+    outcome: &ShellCommandOutcome,
 ) -> String {
-    let mut detail = format!("{stdout}{stderr}");
-    if exit_code != Some(0) {
-        let exit_label = exit_code.map_or_else(|| "signal".to_owned(), |code| code.to_string());
+    let mut detail = String::new();
+    for line in
+        super::shell_run::finished_plain_lines(stdout, stderr, exit_code, outcome, truncated)
+    {
         if !detail.ends_with('\n') && !detail.is_empty() {
             detail.push('\n');
         }
-        let _ = write!(detail, "Command failed with exit code: {exit_label}.");
-    }
-    if truncated {
-        if !detail.ends_with('\n') && !detail.is_empty() {
-            detail.push('\n');
-        }
-        detail.push_str("[output truncated]");
+        detail.push_str(&line);
     }
     detail
 }

@@ -326,5 +326,6 @@ fn message_role(message: &AgentMessage) -> &'static str {
         AgentMessage::User { .. } => "user",
         AgentMessage::Assistant { .. } => "assistant",
         AgentMessage::ToolResult { .. } => "tool",
+        AgentMessage::ShellCommand { .. } => "shell",
     }
 }

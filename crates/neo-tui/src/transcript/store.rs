@@ -1,7 +1,7 @@
 use crate::primitive::Line;
 use crate::shell::ToolStatusKind;
 use crate::shell::TuiTheme;
-use crate::transcript::{ToolCallComponent, ToolCallState};
+use crate::transcript::{ShellRunComponent, ToolCallComponent, ToolCallState};
 
 use super::entry::{ApprovalPromptData, ThinkingPhase, TranscriptEntry};
 
@@ -218,9 +218,20 @@ impl TranscriptStore {
         self.push(TranscriptEntry::tool_run(component));
     }
 
+    pub fn push_shell_run(&mut self, component: ShellRunComponent) {
+        self.push(TranscriptEntry::shell_run(component));
+    }
+
     pub fn tool_mut(&mut self, id: &str) -> Option<&mut ToolCallComponent> {
         self.entries.iter_mut().find_map(|entry| match entry {
             TranscriptEntry::ToolRun { component } if component.id() == id => Some(component),
+            _ => None,
+        })
+    }
+
+    pub fn shell_run_mut(&mut self, id: &str) -> Option<&mut ShellRunComponent> {
+        self.entries.iter_mut().find_map(|entry| match entry {
+            TranscriptEntry::ShellRun { component } if component.id() == id => Some(component),
             _ => None,
         })
     }
@@ -253,6 +264,13 @@ impl TranscriptStore {
     pub fn has_tool(&self, id: &str) -> bool {
         self.entries.iter().any(
             |entry| matches!(entry, TranscriptEntry::ToolRun { component } if component.id() == id),
+        )
+    }
+
+    #[must_use]
+    pub fn has_shell_run(&self, id: &str) -> bool {
+        self.entries.iter().any(
+            |entry| matches!(entry, TranscriptEntry::ShellRun { component } if component.id() == id),
         )
     }
 

@@ -328,6 +328,7 @@ mod tests {
                     micro_keep_recent: 20,
                 }),
             },
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),

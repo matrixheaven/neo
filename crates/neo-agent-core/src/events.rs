@@ -3,7 +3,13 @@ use serde::{Deserialize, Serialize};
 
 use std::path::PathBuf;
 
-use crate::{AgentMessage, AgentToolCall, PermissionOperation, ToolResult};
+use crate::{AgentMessage, AgentToolCall, PermissionOperation, ShellCommandOutcome, ToolResult};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ShellCommandOrigin {
+    ModelBashTool,
+    UserShellMode,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AgentTokenUsage {
@@ -153,6 +159,7 @@ pub enum AgentEvent {
         id: String,
         command: String,
         cwd: PathBuf,
+        origin: ShellCommandOrigin,
     },
     ShellCommandFinished {
         turn: u32,
@@ -161,6 +168,8 @@ pub enum AgentEvent {
         stdout: String,
         stderr: String,
         truncated: bool,
+        origin: ShellCommandOrigin,
+        outcome: ShellCommandOutcome,
     },
     TerminalSessionStarted {
         turn: u32,
