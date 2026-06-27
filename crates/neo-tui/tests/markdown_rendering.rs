@@ -165,19 +165,18 @@ fn horizontal_rule_uses_box_chars() {
 }
 
 #[test]
-fn code_block_has_backtick_borders_and_indent() {
+fn code_block_has_rounded_box_borders_and_language_header() {
     let md = "```rust\nfn main() {}\n```";
     let lines = plain(md, 80);
     let joined = lines.join("\n");
-    // top border with language
-    assert!(joined.contains("```rust"), "top border: {joined}");
-    // bottom border
-    assert!(
-        joined.contains("```") && joined.matches("```").count() >= 2,
-        "bottom border: {joined}"
-    );
-    // code indented 2 spaces
-    assert!(joined.contains("  fn main()"), "indented code: {joined}");
+    assert!(joined.contains('╭'), "top-left corner: {joined}");
+    assert!(joined.contains('╮'), "top-right corner: {joined}");
+    assert!(joined.contains('╰'), "bottom-left corner: {joined}");
+    assert!(joined.contains('╯'), "bottom-right corner: {joined}");
+    assert!(joined.contains('│'), "side borders: {joined}");
+    assert!(joined.contains("rust"), "language header: {joined}");
+    assert!(!joined.contains("```"), "no fence backticks: {joined}");
+    assert!(joined.contains("fn main() {}"), "code content: {joined}");
 }
 
 #[test]
@@ -187,15 +186,17 @@ fn fenced_bash_block_does_not_leak_thinking_or_prompt_chrome() {
     let lines = plain(&md, 80);
     let joined = lines.join("\n");
 
-    assert_eq!(
-        joined.matches("```bash").count(),
-        1,
-        "one opening fence: {joined}"
+    assert!(
+        !joined.contains("```"),
+        "code block should not use fence backticks: {joined}"
     );
-    assert_eq!(
-        lines.iter().filter(|line| line.trim() == "```").count(),
-        1,
-        "one closing fence: {joined}"
+    assert!(
+        joined.contains('╭') && joined.contains('╮'),
+        "code block should have rounded top border: {joined}"
+    );
+    assert!(
+        joined.contains('╰') && joined.contains('╯'),
+        "code block should have rounded bottom border: {joined}"
     );
     assert!(
         !joined.contains(thinking),

@@ -7,18 +7,16 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-#[allow(unused_imports)]
-use crate::primitive::clip_visible_to_width;
-use crate::primitive::{Color, Style, clip_plain_to_width, visible_width};
-use crate::primitive::{Line, Span};
+use crate::primitive::{
+    Color, Line, Span, Style, clip_plain_to_width, clip_visible_to_width, pad_to_width,
+    truncate_to_width, visible_width,
+};
 use crate::shell::TuiTheme;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 /// Inner horizontal padding between the side border and code content.
-#[allow(dead_code)]
 const CODE_SIDE_PADDING: usize = 2;
 /// Minimum width for a code block box. Below this we fall back to plain text.
-#[allow(dead_code)]
 const CODE_MIN_BOX_WIDTH: usize = 12;
 
 /// Render markdown `text` into styled lines, wrapped to `width`.
@@ -394,34 +392,77 @@ impl<'a> MdRenderer<'a> {
         let lang = self.code_lang.take().unwrap_or_default();
         let code = std::mem::take(&mut self.code_buffer);
         self.buffering_code = false;
-        let lines: Vec<&str> = code.trim_end_matches('\n').lines().collect();
-        let border = if lang.is_empty() {
-            "```".to_owned()
+
+        if self.width < CODE_MIN_BOX_WIDTH {
+            self.emit_plain_code_block(&lang, &code);
+            return;
+        }
+
+        let box_width = self.width;
+        let horz_len = box_width - 2;
+        let content_width = box_width.saturating_sub(2 + 2 * CODE_SIDE_PADDING).max(1);
+        let border_style = Style::default().fg(self.theme.text_muted);
+        let brand_style = Style::default().fg(self.theme.brand);
+
+        // Top border with language label.
+        let title_fitted = if lang.is_empty() {
+            "─".repeat(horz_len)
         } else {
-            format!("```{lang}")
+            let label = format!("─ {lang} ");
+            let label_width = visible_width(&label);
+            if label_width <= horz_len {
+                format!("{}{}", label, "─".repeat(horz_len - label_width))
+            } else {
+                truncate_to_width(&label, horz_len)
+            }
         };
-        self.out.push(Line::styled(
-            format!("  {border}"),
-            Style::default().fg(self.theme.text_muted),
-        ));
-        if lang.eq_ignore_ascii_case("diff") {
-            for line in &lines {
-                self.emit_diff_line(line);
+        self.out.push(Line::from_spans(vec![
+            Span::styled("╭", border_style),
+            Span::styled(title_fitted, brand_style),
+            Span::styled("╮", border_style),
+        ]));
+
+        // Content lines.
+        let raw_lines: Vec<&str> = code.trim_end_matches('\n').lines().collect();
+        if raw_lines.is_empty() {
+            self.emit_code_content_line("", content_width, border_style);
+        } else if lang.eq_ignore_ascii_case("diff") {
+            for line in raw_lines {
+                self.emit_diff_box_line(line, content_width, border_style);
             }
         } else {
             let highlighted = highlight_code(&code, &lang, self.theme);
             for line in highlighted {
-                self.out.push(Line::raw(format!("  {line}")));
+                let fitted = fit_ansi_line_to_width(&line, content_width);
+                self.emit_code_content_line(&fitted, content_width, border_style);
             }
         }
-        self.out.push(Line::styled(
-            "  ```".to_owned(),
-            Style::default().fg(self.theme.text_muted),
-        ));
+
+        // Bottom border.
+        let bottom_inner = "─".repeat(horz_len);
+        self.out.push(Line::from_spans(vec![
+            Span::styled("╰", border_style),
+            Span::styled(bottom_inner, border_style),
+            Span::styled("╯", border_style),
+        ]));
+
+        // Trailing blank line.
         self.out.push(Line::raw(""));
     }
 
-    fn emit_diff_line(&mut self, line: &str) {
+    fn emit_code_content_line(&mut self, text: &str, content_width: usize, border_style: Style) {
+        let fitted = pad_to_width(text, content_width);
+        self.out.push(Line::from_spans(vec![
+            Span::styled("│", border_style),
+            Span::raw(" ".repeat(CODE_SIDE_PADDING)),
+            Span::raw(fitted),
+            Span::raw(crate::primitive::RESET.to_string()),
+            Span::raw(" ".repeat(CODE_SIDE_PADDING)),
+            Span::styled("│", border_style),
+        ]));
+    }
+
+    fn emit_diff_box_line(&mut self, line: &str, content_width: usize, border_style: Style) {
         let (color, text) = if let Some(t) = line.strip_prefix('+') {
             (self.theme.diff_added, t)
         } else if let Some(t) = line.strip_prefix('-') {
@@ -431,10 +472,35 @@ impl<'a> MdRenderer<'a> {
         } else {
             (self.theme.diff_context, line)
         };
+        let fitted = pad_to_width(&truncate_to_width(text, content_width), content_width);
+        self.out.push(Line::from_spans(vec![
+            Span::styled("│", border_style),
+            Span::raw(" ".repeat(CODE_SIDE_PADDING)),
+            Span::styled(fitted, Style::default().fg(color)),
+            Span::raw(crate::primitive::RESET.to_string()),
+            Span::raw(" ".repeat(CODE_SIDE_PADDING)),
+            Span::styled("│", border_style),
+        ]));
+    }
+
+    fn emit_plain_code_block(&mut self, lang: &str, code: &str) {
+        let border = if lang.is_empty() {
+            "```".to_owned()
+        } else {
+            format!("```{lang}")
+        };
         self.out.push(Line::styled(
-            format!("  {text}"),
-            Style::default().fg(color),
+            format!("  {border}"),
+            Style::default().fg(self.theme.text_muted),
         ));
+        for raw_line in code.trim_end_matches('\n').lines() {
+            self.out.push(Line::raw(format!("  {raw_line}")));
+        }
+        self.out.push(Line::styled(
+            "  ```".to_owned(),
+            Style::default().fg(self.theme.text_muted),
+        ));
+        self.out.push(Line::raw(""));
     }
 
     fn flush_table(&mut self) {
@@ -734,6 +800,18 @@ fn truncate_visible(s: &str, width: usize) -> String {
     let mut out = clip_plain_to_width(s, width.saturating_sub(1));
     out.push('…');
     out
+}
+
+/// Pad or hard-truncate an ANSI-styled line to exactly `width` visible columns.
+fn fit_ansi_line_to_width(line: &str, width: usize) -> String {
+    let vis = visible_width(line);
+    if vis > width {
+        clip_visible_to_width(line, width)
+    } else {
+        let mut result = line.to_owned();
+        result.push_str(&" ".repeat(width - vis));
+        result
+    }
 }
 
 // ---------------------------------------------------------------------------
