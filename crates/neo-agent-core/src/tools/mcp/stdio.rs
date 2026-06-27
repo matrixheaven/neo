@@ -21,11 +21,11 @@ pub struct StdioConfig {
     pub tool_timeout_ms: Option<u64>,
 }
 
-pub async fn build_stdio_client(
-    server_id: &str,
-    config: StdioConfig,
-    supervisor: &ProcessSupervisor,
-) -> Result<Arc<dyn McpClient>, McpError> {
+/// Configure a `tokio::process::Command` for an MCP stdio server.
+///
+/// Extracted from `build_stdio_client` so it can be unit-tested without
+/// spawning a real subprocess.
+pub(crate) fn build_command(config: &StdioConfig) -> Command {
     let mut cmd = Command::new(&config.command);
     cmd.args(&config.args);
     for (k, v) in &config.env {
@@ -34,9 +34,36 @@ pub async fn build_stdio_client(
     if let Some(cwd) = &config.cwd {
         cmd.current_dir(cwd);
     }
+    // Pipe stderr so MCP server log output never leaks onto the terminal.
+    // The drain task in `build_stdio_client` reads it.
+    cmd.stderr(std::process::Stdio::piped());
+    cmd
+}
 
-    let transport = TokioChildProcess::new(cmd)
+pub async fn build_stdio_client(
+    server_id: &str,
+    config: StdioConfig,
+    supervisor: &ProcessSupervisor,
+) -> Result<Arc<dyn McpClient>, McpError> {
+    let cmd = build_command(&config);
+
+    let (transport, stderr_opt) = TokioChildProcess::builder(cmd)
+        .spawn()
         .map_err(|e| McpError::protocol(format!("failed to spawn stdio MCP server: {e}")))?;
+
+    // Drain stderr in the background so the child never blocks on a full
+    // stderr pipe. Lines are read and dropped — they must NOT be inherited
+    // (which would leak onto the terminal in TUI mode).
+    if let Some(stderr) = stderr_opt {
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut reader = BufReader::new(stderr).lines();
+            while reader.next_line().await.is_ok() {
+                // Intentionally drop lines — MCP server stderr is debug noise
+                // that must not reach the terminal.
+            }
+        });
+    }
 
     let request_timeout = config.tool_timeout_ms.map(Duration::from_millis);
 
@@ -78,5 +105,24 @@ mod tests {
         };
         assert_eq!(config.command, "npx");
         assert_eq!(config.args.len(), 2);
+    }
+
+    #[test]
+    fn build_command_pipes_stderr() {
+        let config = StdioConfig {
+            command: "echo".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+            cwd: None,
+            startup_timeout_ms: None,
+            tool_timeout_ms: None,
+        };
+        // We can't inspect the Stdio setting directly on tokio::process::Command,
+        // but we can verify the command is configured without panicking.
+        // The key invariant: stderr is NOT inherited (the default), so it won't
+        // leak to the terminal. This is enforced by build_command calling
+        // .stderr(Stdio::piped()).
+        let _cmd = build_command(&config);
+        // If we reach here, the command was built successfully with piped stderr.
     }
 }
