@@ -50,7 +50,7 @@ use neo_tui::{
         SessionPickerScope, StreamUpdate,
     },
     terminal_image::{ImageProtocolPreference, ImageRenderPolicy, TerminalImageCapabilities},
-    transcript::{TranscriptPane, pane::frame_content_width},
+    transcript::{TranscriptEntry, TranscriptPane, pane::frame_content_width},
 };
 
 use tokio::{
@@ -391,6 +391,7 @@ pub async fn execute_tty_with_startup(
     config: &AppConfig,
     startup: StartupAction,
     options: InteractiveOptions,
+    log_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<crate::log_capture::CapturedEvent>>,
 ) -> Result<Option<String>> {
     if !stdout().is_terminal() {
         return Ok(Some(execute_with_startup(config, &startup, options)));
@@ -398,6 +399,9 @@ pub async fn execute_tty_with_startup(
 
     let mut controller = controller_for_config(config);
     controller.apply_startup_options(config, options);
+    if let Some(rx) = log_receiver {
+        controller.set_log_event_receiver(rx);
+    }
 
     let terminal = RefCell::new(NeoTerminal::enter()?);
 
@@ -553,6 +557,9 @@ pub(crate) struct InteractiveController {
     image_attachment_store: neo_tui::paste::ImageAttachmentStore,
     /// Cached model capabilities for the active workspace/model scope.
     model_capabilities: std::collections::HashMap<String, neo_ai::ModelCapabilities>,
+    /// Optional receiver for captured tracing WARN/ERROR events, surfaced as
+    /// transcript status lines. `None` in tests that don't exercise this path.
+    log_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::log_capture::CapturedEvent>>,
 }
 
 pub(crate) struct TurnChannels {
@@ -900,6 +907,7 @@ impl InteractiveController {
             next_paste_id: 1,
             image_attachment_store: neo_tui::paste::ImageAttachmentStore::new(),
             model_capabilities: std::collections::HashMap::new(),
+            log_event_rx: None,
         }
     }
 
@@ -1360,6 +1368,7 @@ impl InteractiveController {
             }
             self.drain_active_turn().await?;
             self.drain_btw_sidecar();
+            self.drain_log_events();
             if self.active_turn.is_some() {
                 self.refresh_git_status_if_due();
             }
@@ -4868,6 +4877,37 @@ impl InteractiveController {
         requested
     }
 
+    fn set_log_event_receiver(
+        &mut self,
+        rx: tokio::sync::mpsc::UnboundedReceiver<crate::log_capture::CapturedEvent>,
+    ) {
+        self.log_event_rx = Some(rx);
+    }
+
+    /// Drain any pending captured log events and surface them as transcript
+    /// status lines. Called from the terminal loop on every tick.
+    fn drain_log_events(&mut self) {
+        let Some(rx) = self.log_event_rx.as_mut() else {
+            return;
+        };
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        for event in events {
+            self.transcript_mut().push_transcript(
+                TranscriptEntry::Status {
+                    text: event.message,
+                    severity: Some(match event.level.as_str() {
+                        "ERROR" => neo_tui::transcript::StatusSeverity::Error,
+                        "WARN" | "WARNING" => neo_tui::transcript::StatusSeverity::Warning,
+                        _ => neo_tui::transcript::StatusSeverity::Info,
+                    }),
+                },
+            );
+        }
+    }
+
     #[must_use]
     pub fn render_snapshot(&self) -> String {
         let mut transcript = self.tui.transcript().clone();
@@ -6699,6 +6739,67 @@ mod tests {
             session_option_label: None,
             prefix_option_label: None,
         }
+    }
+
+    #[test]
+    fn drain_log_events_pushes_warn_as_status() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<crate::log_capture::CapturedEvent>();
+        controller.set_log_event_receiver(rx);
+        tx.send(crate::log_capture::CapturedEvent {
+            level: "WARN".to_owned(),
+            message: "MCP server unavailable server_id=linear".to_owned(),
+        })
+        .expect("send event");
+        controller.drain_log_events();
+        let snapshot = controller.render_snapshot();
+        assert!(
+            snapshot.contains("MCP server unavailable"),
+            "transcript should show captured WARN, got:\n{snapshot}"
+        );
+    }
+
+    #[test]
+    fn drain_log_events_pushes_error_as_status() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<crate::log_capture::CapturedEvent>();
+        controller.set_log_event_receiver(rx);
+        tx.send(crate::log_capture::CapturedEvent {
+            level: "ERROR".to_owned(),
+            message: "critical failure".to_owned(),
+        })
+        .expect("send event");
+        controller.drain_log_events();
+        let snapshot = controller.render_snapshot();
+        assert!(
+            snapshot.contains("critical failure"),
+            "transcript should show captured ERROR, got:\n{snapshot}"
+        );
+    }
+
+    #[test]
+    fn drain_log_events_does_not_crash_without_receiver() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        // No set_log_event_receiver — should be a no-op, not a panic.
+        controller.drain_log_events();
     }
 
     #[test]
@@ -10178,6 +10279,10 @@ command = "python3"
             .pending_approvals
             .insert("tool-1".to_owned(), pending_approval_response(decision_tx));
 
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
+            .await
+            .expect("down selects session-approval option");
         controller
             .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
             .await

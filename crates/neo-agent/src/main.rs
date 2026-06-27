@@ -4,6 +4,7 @@ mod config;
 mod config_ops;
 mod extension_commands;
 mod image_blob;
+mod log_capture;
 mod mcp_ops;
 mod modes;
 mod prompt_history;
@@ -39,9 +40,44 @@ use crate::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     color_eyre::install().ok();
-    // Filter rmcp's internal tracing (worker errors, transport diagnostics) out of
-    // stderr by default — these are surfaced to the user through Neo's own MCP
-    // diagnostic system instead.  Users can still override with RUST_LOG.
+
+    let cli = Cli::parse_from(std::env::args_os());
+
+    // Determine whether we will enter the interactive TUI. If so, tracing
+    // output must NOT go to stderr — it would corrupt the terminal display.
+    // Instead, capture it into an in-memory ring buffer and forward WARN/ERROR
+    // events to the TUI transcript.
+    let is_tui = is_interactive_tui_mode(&cli);
+    let log_receiver = if is_tui {
+        let (_capture, rx) = log_capture::setup_tui_tracing(500);
+        rx
+    } else {
+        init_stderr_tracing();
+        None
+    };
+
+    let output = dispatch(cli, log_receiver).await?;
+    print!("{output}");
+    Ok(())
+}
+
+/// Check whether the CLI invocation will launch the interactive TUI (where
+/// stderr is owned by the terminal renderer).
+fn is_interactive_tui_mode(cli: &Cli) -> bool {
+    let is_tty = std::io::stdout().is_terminal();
+    if !is_tty {
+        return false;
+    }
+    match &cli.command {
+        // `neo` with no subcommand, or `neo --resume`
+        None => true,
+        // `neo resume`
+        Some(cli::Command::Resume { .. }) => true,
+        Some(_) => false,
+    }
+}
+
+fn init_stderr_tracing() {
     let default_filter = "neo=info,neo_agent_core=info,rmcp=off,warn";
     tracing_subscriber::fmt()
         .with_target(false)
@@ -52,14 +88,12 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .try_init()
         .ok();
-
-    let cli = Cli::parse_from(std::env::args_os());
-    let output = dispatch(cli).await?;
-    print!("{output}");
-    Ok(())
 }
 
-async fn dispatch(cli: Cli) -> anyhow::Result<String> {
+async fn dispatch(
+    cli: Cli,
+    log_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<log_capture::CapturedEvent>>,
+) -> anyhow::Result<String> {
     let config = AppConfig::load(ConfigOverrides::from_cli(&cli))?;
 
     if cli.resume_picker && cli.command.is_some() {
@@ -78,6 +112,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<String> {
         session_options,
         cli.resume_picker,
         interactive_options,
+        log_receiver,
     )
     .await
 }
@@ -103,13 +138,14 @@ async fn dispatch_command(
     session_options: RunSessionOptions,
     resume_picker: bool,
     interactive_options: modes::interactive::InteractiveOptions,
+    log_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<log_capture::CapturedEvent>>,
 ) -> anyhow::Result<String> {
     match command {
         Some(Command::Run { output, prompt }) => {
             dispatch_run_command(config, session_options, output, prompt).await
         }
         Some(Command::Resume { session_id }) => {
-            dispatch_resume_command(config, interactive_options, session_id).await
+            dispatch_resume_command(config, interactive_options, session_id, log_receiver).await
         }
         Some(Command::Sessions { command }) => dispatch_session_command(config, command).await,
         Some(Command::Extensions { command }) => dispatch_extensions(config, command).await,
@@ -118,7 +154,9 @@ async fn dispatch_command(
         Some(Command::Mcp { command }) => dispatch_mcp_command(config, command).await,
         Some(Command::Rpc) => rpc_mode::execute(config).await,
         Some(Command::Trust { command }) => trust_commands::execute(config, &command),
-        None => dispatch_default_command(config, resume_picker, interactive_options).await,
+        None => {
+            dispatch_default_command(config, resume_picker, interactive_options, log_receiver).await
+        }
     }
 }
 
@@ -143,6 +181,7 @@ async fn dispatch_resume_command(
     config: &AppConfig,
     interactive_options: modes::interactive::InteractiveOptions,
     session_id: Option<String>,
+    log_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<log_capture::CapturedEvent>>,
 ) -> anyhow::Result<String> {
     if io::stdout().is_terminal() {
         let startup = session_id.map_or(
@@ -153,6 +192,7 @@ async fn dispatch_resume_command(
             config,
             startup,
             interactive_options,
+            log_receiver,
         )
         .await?
         .unwrap_or_default());
@@ -392,6 +432,7 @@ async fn dispatch_default_command(
     config: &AppConfig,
     resume_picker: bool,
     interactive_options: modes::interactive::InteractiveOptions,
+    log_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<log_capture::CapturedEvent>>,
 ) -> anyhow::Result<String> {
     if config.defaults.mode.eq_ignore_ascii_case("rpc") {
         return rpc_mode::execute(config).await;
@@ -402,9 +443,14 @@ async fn dispatch_default_command(
         modes::interactive::StartupAction::None
     };
     Ok(
-        modes::interactive::execute_tty_with_startup(config, startup, interactive_options)
-            .await?
-            .unwrap_or_default(),
+        modes::interactive::execute_tty_with_startup(
+            config,
+            startup,
+            interactive_options,
+            log_receiver,
+        )
+        .await?
+        .unwrap_or_default(),
     )
 }
 
