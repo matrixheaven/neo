@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved design, ready for implementation planning.
+Implemented in `crates/neo-tui/src/markdown.rs`.
 
 ## Goal
 
@@ -73,10 +73,12 @@ markers (`` ``` ``) are removed entirely.
 
 ## Layout and Width Math
 
-`MdRenderer::new()` already reserves `max(first_prefix, cont_prefix)` columns,
-so `self.width` is the body width *after* the message prefix. The code block
-box renders at exactly `self.width`; `finish()` then prepends `cont_prefix`,
-aligning the box with the body text.
+`MdRenderer::new()` reserves `max(first_prefix, cont_prefix)` columns, so
+`self.width` is the body width *after* the outer message prefix. The code block
+box renders at exactly `self.width`; `finish()` then prepends the outer prefix
+(`first_prefix` on line 0, `cont_prefix` on all other lines). This aligns the
+box with the outer body text, but it does not apply any current list or
+blockquote marker indent.
 
 Constants:
 
@@ -177,13 +179,14 @@ No background color is set; rely on border and padding for visual separation.
    not soft-wrap.
 3. **Spacing**: the box is followed by one blank line. The preceding blank line
    comes naturally from the end of the previous paragraph.
-4. **Lists and blockquotes**: because `self.width` already excludes list/quote
-   prefixes, the box fills the remaining width correctly inside nested
-   structures.
-5. **Prefix alignment**: `MdRenderer::new()` reserves
-   `max(first_prefix, cont_prefix)` columns, and for assistant messages both
-   prefixes are 2 columns wide (`"● "` and `"  "`). Therefore the code block
-   box, rendered at `self.width` and then prefixed in `finish()`, aligns with
+4. **Lists and blockquotes**: code blocks use `self.width` directly and are
+   prefixed only with the outer `cont_prefix`/`first_prefix` in `finish()`.
+   They do not inherit the current list or blockquote marker indent, so inside
+   nested structures the box aligns with the outer continuation margin while
+   still fitting within the total width.
+5. **Prefix alignment**: for top-level assistant messages, `MdRenderer::new()`
+   reserves `max(first_prefix, cont_prefix)` columns and both prefixes are 2
+   columns wide (`"● "` and `"  "`). Therefore the code block box aligns with
    the body text. Callers with unequal prefix widths already have the same
    alignment behavior for all rendered lines and are not special-cased here.
 
