@@ -24,7 +24,9 @@ pub struct StdioConfig {
 /// Configure a `tokio::process::Command` for an MCP stdio server.
 ///
 /// Extracted from `build_stdio_client` so it can be unit-tested without
-/// spawning a real subprocess.
+/// spawning a real subprocess. Note: stderr is NOT set here — it is set on
+/// the `TokioChildProcessBuilder` instead, because the builder overwrites
+/// stdio settings during `spawn()`.
 pub(crate) fn build_command(config: &StdioConfig) -> Command {
     let mut cmd = Command::new(&config.command);
     cmd.args(&config.args);
@@ -34,9 +36,6 @@ pub(crate) fn build_command(config: &StdioConfig) -> Command {
     if let Some(cwd) = &config.cwd {
         cmd.current_dir(cwd);
     }
-    // Pipe stderr so MCP server log output never leaks onto the terminal.
-    // The drain task in `build_stdio_client` reads it.
-    cmd.stderr(std::process::Stdio::piped());
     cmd
 }
 
@@ -47,7 +46,11 @@ pub async fn build_stdio_client(
 ) -> Result<Arc<dyn McpClient>, McpError> {
     let cmd = build_command(&config);
 
+    // Pipe stderr so MCP server log output never leaks onto the terminal.
+    // Must use the builder's .stderr() method — spawn() overwrites any stderr
+    // already set on the Command with the builder's value.
     let (transport, stderr_opt) = TokioChildProcess::builder(cmd)
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| McpError::protocol(format!("failed to spawn stdio MCP server: {e}")))?;
 
@@ -119,10 +122,7 @@ mod tests {
         };
         // We can't inspect the Stdio setting directly on tokio::process::Command,
         // but we can verify the command is configured without panicking.
-        // The key invariant: stderr is NOT inherited (the default), so it won't
-        // leak to the terminal. This is enforced by build_command calling
-        // .stderr(Stdio::piped()).
+        // stderr piping is set on the TokioChildProcessBuilder, not here.
         let _cmd = build_command(&config);
-        // If we reach here, the command was built successfully with piped stderr.
     }
 }

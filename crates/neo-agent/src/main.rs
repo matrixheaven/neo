@@ -442,16 +442,14 @@ async fn dispatch_default_command(
     } else {
         modes::interactive::StartupAction::None
     };
-    Ok(
-        modes::interactive::execute_tty_with_startup(
-            config,
-            startup,
-            interactive_options,
-            log_receiver,
-        )
-        .await?
-        .unwrap_or_default(),
+    Ok(modes::interactive::execute_tty_with_startup(
+        config,
+        startup,
+        interactive_options,
+        log_receiver,
     )
+    .await?
+    .unwrap_or_default())
 }
 
 fn run_output_for_mode(config: &AppConfig) -> cli::RunOutput {

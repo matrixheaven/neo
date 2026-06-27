@@ -69,6 +69,7 @@ impl LogCapture {
     }
 
     /// Return a snapshot of the most recent lines (oldest first).
+    #[cfg(test)]
     pub fn recent_lines(&self) -> Vec<String> {
         let inner = self.inner.lock().expect("LogCapture mutex poisoned");
         inner.lines.iter().cloned().collect()
