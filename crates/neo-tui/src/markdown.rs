@@ -7,10 +7,19 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+#[allow(unused_imports)]
+use crate::primitive::clip_visible_to_width;
 use crate::primitive::{Color, Style, clip_plain_to_width, visible_width};
 use crate::primitive::{Line, Span};
 use crate::shell::TuiTheme;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+/// Inner horizontal padding between the side border and code content.
+#[allow(dead_code)]
+const CODE_SIDE_PADDING: usize = 2;
+/// Minimum width for a code block box. Below this we fall back to plain text.
+#[allow(dead_code)]
+const CODE_MIN_BOX_WIDTH: usize = 12;
 
 /// Render markdown `text` into styled lines, wrapped to `width`.
 ///
