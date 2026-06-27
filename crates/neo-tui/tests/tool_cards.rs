@@ -78,7 +78,7 @@ fn tool_call_updates_in_place_to_finished_state() {
 }
 
 #[test]
-fn long_tool_header_truncates_to_content_width() {
+fn unrecognized_json_keys_omit_parens_in_header() {
     use neo_tui::primitive::visible_width;
     use neo_tui::transcript::frame_content_width;
 
@@ -113,10 +113,12 @@ fn long_tool_header_truncates_to_content_width() {
         rows.iter()
             .any(|line| line.contains("Using AskUserQuestion"))
     );
-    assert_eq!(rows.len(), 1, "long header should stay compact: {rows:?}");
+    assert_eq!(rows.len(), 1, "header should stay compact: {rows:?}");
+    // Unrecognized-key JSON no longer leaks as a raw-arg suffix, so the
+    // header is short and carries no `(...)` parens.
     assert!(
-        rows[0].contains('…'),
-        "long header should be truncated: {rows:?}"
+        !rows[0].contains('('),
+        "header must not show raw-args parens: {rows:?}"
     );
     assert!(
         rows.iter().all(|line| visible_width(line) <= content_width),
@@ -140,6 +142,32 @@ fn successful_todo_list_tool_card_hides_redundant_result_body() {
 
     assert!(rows.iter().any(|line| line.contains("Used TodoList")));
     assert!(!rows.iter().any(|line| line.contains("[in_progress] ship")));
+}
+
+#[test]
+fn empty_args_tool_header_omits_parens() {
+    let theme = TuiTheme::default();
+    let state = ToolCallState {
+        id: "plan-1".to_owned(),
+        name: "EnterPlanMode".to_owned(),
+        arguments: Some("{}".to_owned()),
+        result: None,
+        details: None,
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    };
+    let rows = plain(vec![Line::from_spans(tool_header_spans(
+        &state, &theme, None,
+    ))]);
+    let header = &rows[0];
+    assert!(
+        header.contains("Used EnterPlanMode"),
+        "header should name the tool: {header:?}"
+    );
+    assert!(
+        !header.contains("({})"),
+        "header must not show empty-args parens: {header:?}"
+    );
 }
 
 #[test]
@@ -216,7 +244,7 @@ fn write_tool_card_renders_finalized_diff_from_details() {
     let rows = plain(card.render(80));
     assert!(
         rows.iter()
-            .any(|line| line.contains("Used Write (src/generated.rs) · +20 -0"))
+            .any(|line| line.contains("Used Write (src/generated.rs) · 1 lines"))
     );
     assert!(rows.iter().any(|line| line.contains("ctrl+o to expand")));
     // New files show a syntax-highlighted preview, not an all-green diff.
@@ -586,6 +614,103 @@ fn grouped_read_lines_do_not_exceed_terminal_width_after_gutter() {
 }
 
 #[test]
+fn exit_plan_mode_header_shows_approved_without_label() {
+    use neo_tui::transcript::tool_renderers::exit_plan_mode_header_spans;
+
+    let theme = TuiTheme::default();
+    let state = ToolCallState {
+        id: "plan-1".to_owned(),
+        name: "ExitPlanMode".to_owned(),
+        arguments: Some("{}".to_owned()),
+        result: None,
+        details: None,
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    };
+
+    let rows = plain(vec![Line::from_spans(exit_plan_mode_header_spans(
+        &state, &theme,
+    ))]);
+    let header = &rows[0];
+    assert!(
+        header.contains("Current plan"),
+        "header should say 'Current plan': {header:?}"
+    );
+    assert!(
+        header.contains("Approved"),
+        "header should show 'Approved' on success: {header:?}"
+    );
+    assert!(
+        !header.contains("ExitPlanMode"),
+        "header should not show generic tool name: {header:?}"
+    );
+}
+
+#[test]
+fn exit_plan_mode_header_shows_approved_with_label() {
+    use neo_tui::transcript::tool_renderers::exit_plan_mode_header_spans;
+
+    let theme = TuiTheme::default();
+    let state = ToolCallState {
+        id: "plan-1".to_owned(),
+        name: "ExitPlanMode".to_owned(),
+        arguments: Some("{}".to_owned()),
+        result: None,
+        details: Some(serde_json::json!({
+            "plan_selected_label": "incremental",
+        })),
+        status: ToolStatusKind::Succeeded,
+        exit_code: None,
+    };
+
+    let rows = plain(vec![Line::from_spans(exit_plan_mode_header_spans(
+        &state, &theme,
+    ))]);
+    let header = &rows[0];
+    assert!(
+        header.contains("Current plan"),
+        "header should say 'Current plan': {header:?}"
+    );
+    assert!(
+        header.contains("Approved: incremental"),
+        "header should show 'Approved: incremental': {header:?}"
+    );
+}
+
+#[test]
+fn exit_plan_mode_header_shows_rejected_on_failure() {
+    use neo_tui::transcript::tool_renderers::exit_plan_mode_header_spans;
+
+    let theme = TuiTheme::default();
+    let state = ToolCallState {
+        id: "plan-1".to_owned(),
+        name: "ExitPlanMode".to_owned(),
+        arguments: Some("{}".to_owned()),
+        result: None,
+        details: None,
+        status: ToolStatusKind::Failed,
+        exit_code: None,
+    };
+
+    let rows = plain(vec![Line::from_spans(exit_plan_mode_header_spans(
+        &state, &theme,
+    ))]);
+    let header = &rows[0];
+    assert!(
+        header.contains("Current plan"),
+        "header should say 'Current plan': {header:?}"
+    );
+    assert!(
+        header.contains("Rejected"),
+        "header should show 'Rejected' on failure: {header:?}"
+    );
+    assert!(
+        !header.contains("Approved"),
+        "header should not show 'Approved' on failure: {header:?}"
+    );
+}
+
+#[test]
 fn long_command_header_keeps_closing_paren() {
     let theme = TuiTheme::default();
     let state = ToolCallState {
@@ -652,7 +777,7 @@ fn long_path_header_preserves_tail() {
 }
 
 #[test]
-fn write_streaming_preview_shows_progress_and_content() {
+fn write_streaming_preview_reuses_final_format() {
     use neo_agent_core::AgentEvent;
     use neo_tui::primitive::strip_ansi;
 
@@ -675,21 +800,23 @@ fn write_streaming_preview_shows_progress_and_content() {
         .map(|line| strip_ansi(line).clone())
         .collect::<Vec<_>>();
 
+    // Should NOT contain the old progress line format.
     assert!(
-        frame
-            .iter()
-            .any(|line| line.contains("Preparing changes for src/foo.rs")),
-        "progress line should show path: {frame:?}"
+        !frame.iter().any(|line| line.contains("Preparing changes")),
+        "streaming preview should not show old progress line: {frame:?}"
     );
-    assert!(
-        frame.iter().any(|line| line.contains("tok")),
-        "progress line should show token count: {frame:?}"
-    );
+    // Content should be rendered with the final preview format (line numbers).
     assert!(
         frame
             .iter()
             .any(|line| line.contains("use std::collections::HashMap")),
         "streaming content should be visible: {frame:?}"
+    );
+    assert!(
+        frame
+            .iter()
+            .any(|line| line.contains("src/foo.rs") && line.contains("lines")),
+        "streaming preview should show path header: {frame:?}"
     );
 }
 
@@ -718,13 +845,45 @@ fn edit_streaming_preview_shows_progress() {
         .collect::<Vec<_>>();
 
     assert!(
-        frame
-            .iter()
-            .any(|line| line.contains("Preparing changes for src/foo.rs")),
+        !frame.iter().any(|line| line.contains("Preparing changes")),
+        "streaming preview should not show old progress line: {frame:?}"
+    );
+    assert!(
+        frame.iter().any(|line| line.contains("Editing src/foo.rs")),
         "Edit progress line should show path: {frame:?}"
     );
     assert!(
-        frame.iter().any(|line| line.contains("elapsed")),
-        "Edit progress line should show elapsed time: {frame:?}"
+        frame.iter().any(|line| line.contains("tok")),
+        "streaming preview should show token count: {frame:?}"
+    );
+}
+
+#[test]
+fn write_streaming_uses_preview_format() {
+    use neo_tui::transcript::ToolCallComponent;
+
+    let state = ToolCallState {
+        id: "stream-1".to_string(),
+        name: "Write".to_string(),
+        arguments: Some(
+            r##"{"path":"/tmp/test.md","content":"# Title\nLine 2\nLine 3"}"##.to_string(),
+        ),
+        result: None,
+        details: None,
+        status: ToolStatusKind::Running,
+        exit_code: None,
+    };
+    let mut comp = ToolCallComponent::new(state);
+    let lines = comp.render_with_theme(80, &TuiTheme::default());
+    let body_text = lines.iter().map(|l| l.to_ansi()).collect::<String>();
+    // Should NOT contain the old progress line
+    assert!(
+        !body_text.contains("Preparing changes"),
+        "streaming preview should not show progress line"
+    );
+    // Should contain line numbers (same format as final preview)
+    assert!(
+        body_text.contains("Title"),
+        "streaming content should be rendered"
     );
 }

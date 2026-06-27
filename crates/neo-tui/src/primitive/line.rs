@@ -79,6 +79,12 @@ impl Line {
         &self.spans
     }
 
+    /// Consume the line and return the underlying spans.
+    #[must_use]
+    pub fn into_spans(self) -> Vec<Span> {
+        self.spans
+    }
+
     /// Prepend an unstyled prefix to this line, preserving existing styling.
     #[must_use]
     pub fn prepend_prefix(mut self, prefix: &str) -> Self {

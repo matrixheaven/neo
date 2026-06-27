@@ -1,6 +1,6 @@
 use crate::primitive::Style;
 use crate::primitive::wrap_width;
-use crate::primitive::{Component, Expandable, Finalization, Line};
+use crate::primitive::{Component, Expandable, Finalization, Line, Span};
 use crate::shell::ToolStatusKind;
 use crate::shell::TuiTheme;
 
@@ -205,7 +205,28 @@ impl ToolCallComponent {
     /// + tool name + key arg + chip) and the body as weak preview lines.
     #[must_use]
     pub fn render_with_theme(&mut self, width: usize, theme: &TuiTheme) -> Vec<Line> {
-        let header_spans = tool_header_spans(&self.state, theme, self.workspace_dir.as_deref());
+        let mut header_spans = if self.state.name == "ExitPlanMode" {
+            crate::transcript::tool_renderers::exit_plan_mode_header_spans(&self.state, theme)
+        } else {
+            tool_header_spans(&self.state, theme, self.workspace_dir.as_deref())
+        };
+        // While Write/Edit is streaming, show a token count chip in the header
+        // instead of a separate progress line in the body.
+        if is_pending_or_running(self.state.status)
+            && is_file_write_tool(&self.state.name)
+            && let Some(started_at) = self.streaming_started_at
+        {
+            let tokens = crate::transcript::tool_renderers::estimate_tool_tokens(
+                self.state.arguments.as_deref().unwrap_or(""),
+            );
+            let elapsed = started_at.elapsed().as_secs();
+            let chip = format!(
+                " · ~{} tok · {}m",
+                crate::transcript::tool_renderers::format_tool_token_count(tokens),
+                elapsed
+            );
+            header_spans.push(Span::styled(chip, Style::default().fg(theme.text_muted)));
+        }
         let header_width = width.saturating_sub(2).max(1);
         let mut rows = vec![Line::from_spans(header_spans).truncate_to_width(header_width)];
 
@@ -218,15 +239,7 @@ impl ToolCallComponent {
                 .get("plan_path")
                 .and_then(|v| v.as_str())
                 .map(std::string::ToString::to_string);
-            let status = if self.state.status == ToolStatusKind::Failed {
-                Some("Rejected".to_string())
-            } else {
-                None
-            };
-            let mut plan_box = PlanBoxComponent::new(plan_content, plan_path);
-            if let Some(status) = status {
-                plan_box = plan_box.with_status(status);
-            }
+            let plan_box = PlanBoxComponent::new(plan_content, plan_path);
             rows.extend(plan_box.render(width, theme));
         }
 

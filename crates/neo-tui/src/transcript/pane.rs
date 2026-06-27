@@ -682,6 +682,8 @@ impl TranscriptPane {
             approval.title = prompt.title;
             approval.details = prompt.details;
             approval.queued_label = prompt.queued_label;
+            approval.plan_content = prompt.plan_content;
+            approval.plan_path = prompt.plan_path;
             approval.queued_count = self.queued_approvals.len();
             approval.resolved = None;
             approval
@@ -704,6 +706,8 @@ impl TranscriptPane {
             resolved: None,
             session_option_label,
             prefix_option_label,
+            plan_content: prompt.plan_content,
+            plan_path: prompt.plan_path,
         };
         if self.active_approval_mut().is_some() {
             self.queued_approvals.push_back(data);
@@ -855,6 +859,8 @@ struct ApprovalPromptSummary {
     title: String,
     details: Vec<String>,
     queued_label: String,
+    plan_content: Option<String>,
+    plan_path: Option<String>,
 }
 
 fn approval_prompt(
@@ -878,12 +884,16 @@ fn approval_prompt(
                 labeled_argument(arguments, "reason"),
             ]),
             queued_label: String::new(),
+            plan_content: None,
+            plan_path: None,
         }
     } else if is_terminal {
         ApprovalPromptSummary {
             title: terminal_approval_title(arguments),
             details: terminal_approval_details(arguments, subject),
             queued_label: String::new(),
+            plan_content: None,
+            plan_path: None,
         }
     } else if is_edit {
         ApprovalPromptSummary {
@@ -893,6 +903,8 @@ fn approval_prompt(
                 labeled_argument(arguments, "replace_all"),
             ]),
             queued_label: String::new(),
+            plan_content: None,
+            plan_path: None,
         }
     } else {
         match operation {
@@ -900,11 +912,15 @@ fn approval_prompt(
                 title: "Run this command?".to_owned(),
                 details: shell_approval_details(arguments, subject),
                 queued_label: String::new(),
+                plan_content: None,
+                plan_path: None,
             },
             PermissionOperation::FileWrite => ApprovalPromptSummary {
                 title: "Write file?".to_owned(),
                 details: compact_details([labeled_argument(arguments, "path")]),
                 queued_label: String::new(),
+                plan_content: None,
+                plan_path: None,
             },
             PermissionOperation::FileRead => ApprovalPromptSummary {
                 title: "Read workspace data?".to_owned(),
@@ -916,26 +932,47 @@ fn approval_prompt(
                     || vec![format!("target: {subject}")],
                 ),
                 queued_label: String::new(),
+                plan_content: None,
+                plan_path: None,
             },
             PermissionOperation::Tool => ApprovalPromptSummary {
                 title: "Run tool?".to_owned(),
                 details: compact_details([Some(format!("tool: {subject}"))]),
                 queued_label: String::new(),
+                plan_content: None,
+                plan_path: None,
             },
             PermissionOperation::UserQuestion => ApprovalPromptSummary {
                 title: "User question".to_owned(),
                 details: compact_details([Some(subject.to_owned())]),
                 queued_label: String::new(),
+                plan_content: None,
+                plan_path: None,
             },
-            PermissionOperation::PlanTransition => ApprovalPromptSummary {
-                title: "Plan mode transition".to_owned(),
-                details: compact_details([Some(subject.to_owned())]),
-                queued_label: String::new(),
-            },
+            PermissionOperation::PlanTransition => {
+                let plan_content = arguments
+                    .get("plan_content")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .map(str::to_owned);
+                let plan_path = arguments
+                    .get("plan_path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                ApprovalPromptSummary {
+                    title: "Plan Review".to_owned(),
+                    details: compact_details([Some("Ready to build with this plan?".to_owned())]),
+                    queued_label: String::new(),
+                    plan_content,
+                    plan_path,
+                }
+            }
             PermissionOperation::GoalTransition => ApprovalPromptSummary {
                 title: "Goal mode transition".to_owned(),
                 details: compact_details([Some(subject.to_owned())]),
                 queued_label: String::new(),
+                plan_content: None,
+                plan_path: None,
             },
         }
     }
@@ -1494,12 +1531,12 @@ fn scroll_indicator_border(
         );
     }
     let bars = inner.saturating_sub(label_width);
-    let left_bars = bars / 2;
-    let right_bars = bars - left_bars;
+    // Left-aligned: the indicator sits at the left corner, matching natural
+    // left-to-right reading order.
+    let right_bars = bars;
     format!(
-        "{}{}{}{}{}",
+        "{}{}{}{}",
         paint(&left_corner.to_string(), style),
-        paint(&repeat_char(ROUNDED.horizontal, left_bars), style),
         paint(&label, style),
         paint(&repeat_char(ROUNDED.horizontal, right_bars), style),
         paint(&right_corner.to_string(), style)

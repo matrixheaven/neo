@@ -2,11 +2,11 @@ use std::path::Path;
 
 use crate::diff_model::{DiffModel, DiffRenderLine, DiffRenderLineKind, DiffRenderState};
 use crate::markdown::{highlight_code_lines, lang_from_path};
-use crate::primitive::{Color, Style, clip_plain_to_width};
+use crate::primitive::{Color, Style};
 use crate::primitive::{Line, Span, Text};
 use crate::shell::ToolStatusKind;
 use crate::shell::TuiTheme;
-use crate::token_estimate::{estimate_tokens, format_elapsed, format_token_count};
+use crate::token_estimate::{estimate_tokens, format_token_count};
 
 use super::partial_json::extract_partial_string_field;
 use super::tool_call::ToolCallState;
@@ -52,6 +52,48 @@ pub fn tool_header_spans(
     if !chip.is_empty() {
         spans.push(Span::styled(chip, Style::default().fg(meta_color)));
     }
+    spans
+}
+
+/// Build a custom header for the ExitPlanMode tool card.
+///
+/// Replaces the generic "Used ExitPlanMode" with "Current plan",
+/// optionally appending "· Approved: <label>" (on success with a chosen
+/// approach) or "· Rejected" (on failure).
+#[must_use]
+pub fn exit_plan_mode_header_spans(state: &ToolCallState, theme: &TuiTheme) -> Vec<Span> {
+    let symbol = tool_symbol(state.status);
+    let status_color = tool_status_color(state.status, theme);
+    let name_color = theme.brand;
+    let success_color = theme.status_ok;
+
+    let mut spans = vec![
+        Span::styled(format!("{symbol} "), Style::default().fg(status_color)),
+        Span::styled("Current plan", Style::default().fg(name_color).bold()),
+    ];
+
+    // On success, show "· Approved" or "· Approved: <label>"
+    if state.status == ToolStatusKind::Succeeded {
+        let label = state
+            .details
+            .as_ref()
+            .and_then(|d| d.get("plan_selected_label"))
+            .and_then(serde_json::Value::as_str);
+        let chip = match label {
+            Some(l) if !l.is_empty() => format!(" · Approved: {l}"),
+            _ => " · Approved".to_string(),
+        };
+        spans.push(Span::styled(chip, Style::default().fg(success_color)));
+    }
+
+    // On failure, show "· Rejected"
+    if state.status == ToolStatusKind::Failed {
+        spans.push(Span::styled(
+            " · Rejected".to_string(),
+            Style::default().fg(theme.status_error),
+        ));
+    }
+
     spans
 }
 
@@ -167,17 +209,9 @@ fn render_diff_details(
     width: usize,
     palette: ToolBodyPalette<'_>,
 ) -> Option<Vec<Line>> {
-    if !is_file_write_tool(&state.name) {
-        return None;
-    }
-    // For newly created files, prefer a syntax-highlighted file preview over
-    // an all-green unified diff.
-    if let Some("created") = state
-        .details
-        .as_ref()
-        .and_then(|d| d.get("operation"))
-        .and_then(serde_json::Value::as_str)
-    {
+    // Only Edit uses unified diff rendering. Write always uses a
+    // syntax-highlighted content preview (via render_write_body).
+    if state.name != "Edit" {
         return None;
     }
     if let Some(model) = state
@@ -452,6 +486,9 @@ fn extract_key_argument(arguments: Option<&str>) -> Option<(String, bool)> {
                 return Some((one_line(text), is_path));
             }
         }
+        // Valid JSON but no recognized key — return None so the header
+        // omits the `(...)` suffix entirely (e.g. EnterPlanMode with `{}`).
+        return None;
     }
     if let Some(path) = arguments
         .strip_prefix(r#"{"path":"#)
@@ -540,7 +577,7 @@ fn prefix_chars(s: &str, n: usize) -> String {
 }
 
 fn result_chip(state: &ToolCallState) -> String {
-    if is_file_write_tool(&state.name)
+    if state.name == "Edit"
         && let Some(model) = state
             .details
             .as_ref()
@@ -551,7 +588,7 @@ fn result_chip(state: &ToolCallState) -> String {
     let Some(result) = state.result.as_deref().filter(|value| !value.is_empty()) else {
         return String::new();
     };
-    if state.name == "Read" {
+    if state.name == "Read" || state.name == "Write" {
         return format!(" · {} lines", result.lines().count());
     }
     String::new()
@@ -566,134 +603,57 @@ fn one_line(text: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Render a live preview while a tool's arguments are still streaming from the
-/// model. Returns a progress line and, for `Write`, the tail of the partial
-/// content with syntax highlighting.
+/// model. For Write, reuses the final `render_write_preview` format (with line
+/// numbers and syntax highlighting) so there is no format switch on completion.
+/// For Edit, shows only a brief progress line.
 #[must_use]
 pub fn render_streaming_preview(
     state: &ToolCallState,
-    _expanded: bool,
-    width: usize,
+    expanded: bool,
+    _width: usize,
     theme: &TuiTheme,
-    started_at: Option<std::time::Instant>,
+    _started_at: Option<std::time::Instant>,
 ) -> Vec<Line> {
-    let mut rows = Vec::new();
     let args = state.arguments.as_deref().unwrap_or("");
-    let tokens = estimate_tokens(args);
-    let elapsed = started_at.map_or(0, |start| start.elapsed().as_secs());
 
     if state.name == "Write" {
         let path = extract_partial_string_field(args, "file_path")
             .or_else(|| extract_partial_string_field(args, "path"))
-            .or_else(|| Some(key_argument(Some(args))))
-            .filter(|p| !p.is_empty());
-        let progress = format_progress_line(path.as_deref(), tokens, elapsed);
-        rows.push(Line::styled(
-            progress,
-            Style::default().fg(theme.text_muted),
-        ));
-
-        if let Some(content) = extract_partial_string_field(args, "content") {
-            if !content.is_empty() {
-                rows.extend(render_write_streaming_content(
-                    &content,
-                    path.as_deref().unwrap_or(""),
-                    width,
-                    theme,
-                ));
-            }
+            .unwrap_or_default();
+        let content = extract_partial_string_field(args, "content").unwrap_or_default();
+        if content.is_empty() {
+            return vec![Line::styled(
+                "  Waiting for content...",
+                Style::default().fg(theme.text_muted),
+            )];
         }
-        return rows;
+        // Reuse the final preview renderer for format consistency.
+        let palette = ToolBodyPalette::themed(theme);
+        return render_write_preview(&path, &content, expanded, palette);
     }
 
     if state.name == "Edit" {
         let path = extract_partial_string_field(args, "file_path")
             .or_else(|| extract_partial_string_field(args, "path"))
-            .or_else(|| Some(key_argument(Some(args))))
-            .filter(|p| !p.is_empty());
-        let progress = format_progress_line(path.as_deref(), tokens, elapsed);
-        rows.push(Line::styled(
-            progress,
-            Style::default().fg(theme.text_muted),
-        ));
-    }
-
-    rows
-}
-
-fn format_progress_line(path: Option<&str>, tokens: usize, elapsed: u64) -> String {
-    let target = path.map_or_else(String::new, |p| format!(" for {p}"));
-    format!(
-        "  Preparing changes{target}... ~{} tok · {} elapsed",
-        format_token_count(tokens),
-        format_elapsed(elapsed)
-    )
-}
-
-fn render_write_streaming_content(
-    content: &str,
-    path: &str,
-    width: usize,
-    theme: &TuiTheme,
-) -> Vec<Line> {
-    let lines: Vec<&str> = content.lines().collect();
-    let total = lines.len();
-    let start = total.saturating_sub(COMMAND_PREVIEW_LINES);
-    let highlighted = if lang_from_path(path).is_some() {
-        highlight_code_lines(content, path, theme)
-    } else {
-        Vec::new()
-    };
-    let use_highlight = !highlighted.is_empty();
-
-    let mut rows = Vec::new();
-    for (offset, line) in lines.iter().skip(start).enumerate() {
-        let original_number = start + offset + 1;
-        let line_num = format!("  {:>4} ", original_number);
-        let body_width = width.saturating_sub(line_num.chars().count()).max(1);
-        let mut spans = vec![Span::styled(
-            line_num,
+            .unwrap_or_default();
+        let tokens = estimate_tokens(args);
+        return vec![Line::styled(
+            format!("  Editing {path}... ~{} tok", format_token_count(tokens)),
             Style::default().fg(theme.text_muted),
         )];
-        if use_highlight {
-            let line_spans = highlighted
-                .get(original_number - 1)
-                .cloned()
-                .unwrap_or_else(|| {
-                    vec![Span::styled(
-                        line.to_string(),
-                        Style::default().fg(theme.text_primary),
-                    )]
-                });
-            spans.extend(truncate_spans_to_width(&line_spans, body_width));
-        } else {
-            spans.push(Span::styled(
-                clip_plain_to_width(line, body_width),
-                Style::default().fg(theme.text_primary),
-            ));
-        }
-        rows.push(Line::from_spans(spans));
     }
-    rows
+
+    Vec::new()
 }
 
-fn truncate_spans_to_width(spans: &[Span], width: usize) -> Vec<Span> {
-    let mut used = 0usize;
-    let mut out = Vec::new();
-    for span in spans {
-        let span_width = span.visible_width();
-        if used + span_width <= width {
-            out.push(span.clone());
-            used += span_width;
-        } else {
-            let remaining = width.saturating_sub(used);
-            if remaining > 0 {
-                let text = clip_plain_to_width(span.text(), remaining);
-                if !text.is_empty() {
-                    out.push(Span::styled(text, span.style()));
-                }
-            }
-            break;
-        }
-    }
-    out
+/// Public wrapper for token estimation (used by tool header streaming chip).
+#[must_use]
+pub fn estimate_tool_tokens(args: &str) -> usize {
+    estimate_tokens(args)
+}
+
+/// Public wrapper for token count formatting (used by tool header streaming chip).
+#[must_use]
+pub fn format_tool_token_count(tokens: usize) -> String {
+    format_token_count(tokens)
 }

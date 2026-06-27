@@ -1,6 +1,11 @@
-use crate::primitive::Line;
-use crate::primitive::{Color, Style};
+use crate::markdown::render_markdown;
+use crate::primitive::{Line, Span, Style, pad_to_width, truncate_to_width, visible_width};
 use crate::shell::TuiTheme;
+
+/// Uniform left margin so the plan box aligns with other tool-card children.
+const LEFT_MARGIN: usize = 2;
+/// Space between the side border and the content on each side.
+const SIDE_PADDING: usize = 1;
 
 /// Renders plan content inside a bordered box, displayed within the
 /// `ExitPlanMode` tool card.
@@ -31,15 +36,23 @@ impl PlanBoxComponent {
     /// Render the plan box as styled lines, fitting within `width` columns.
     #[must_use]
     pub fn render(&self, width: usize, theme: &TuiTheme) -> Vec<Line> {
-        if width < 10 {
+        if width < LEFT_MARGIN + 4 {
             return vec![];
         }
 
-        let border_color = theme.status_ok;
-        let content_color = theme.text_primary;
-        let muted_color = theme.text_muted;
+        let border_style = Style::default().fg(theme.status_ok);
+        let content_style = Style::default().fg(theme.text_primary);
+        let muted_style = Style::default().fg(theme.text_muted);
 
-        let content_width = width.saturating_sub(4).max(1); // │ + space + content + space + │
+        let indent = " ".repeat(LEFT_MARGIN);
+
+        // Box layout with a uniform left margin:
+        // "  ┌──...──┐"
+        // "  │ content │"
+        // "  └──...──┘"
+        // width = LEFT_MARGIN + 1 (corner/border) + horz_len + 1 (corner/border)
+        let horz_len = width.saturating_sub(LEFT_MARGIN + 2).max(2);
+        let content_width = horz_len.saturating_sub(2 * SIDE_PADDING).max(1);
 
         // Title
         let basename = self
@@ -53,42 +66,68 @@ impl PlanBoxComponent {
             format!(" plan: {basename} ")
         };
 
-        let mut lines = vec![Self::titled_border(&title, width, border_color)];
+        let mut lines = vec![Self::titled_border(&indent, &title, horz_len, border_style)];
 
-        // Content lines
-        for raw_line in self.content.lines() {
-            for chunk in Self::wrap_text(raw_line, content_width) {
-                let padded = Self::pad_to(&chunk, content_width);
-                lines.push(Line::styled(
-                    format!(" \u{2502} {padded} \u{2502}"),
-                    Style::default().fg(content_color),
-                ));
+        // Content lines — render as markdown if the file is .md, plain text otherwise
+        let is_markdown = self.path.as_ref().is_some_and(|p| p.ends_with(".md"));
+        if is_markdown && !self.content.trim().is_empty() {
+            let md_lines = render_markdown(&self.content, content_width, theme, "", "");
+            for md_line in md_lines {
+                let visible_w = md_line.visible_width();
+                let padding = " ".repeat(content_width.saturating_sub(visible_w));
+                let mut spans = vec![
+                    Span::styled(indent.clone(), Style::default()),
+                    Span::styled("\u{2502} ", border_style),
+                ];
+                spans.extend(md_line.into_spans());
+                spans.push(Span::styled(padding, Style::default()));
+                spans.push(Span::styled(" \u{2502}", border_style));
+                lines.push(Line::from_spans(spans));
+            }
+        } else {
+            for raw_line in self.content.lines() {
+                for chunk in Self::wrap_text(raw_line, content_width) {
+                    let padded = Self::pad_to(&chunk, content_width);
+                    lines.push(Line::from_spans(vec![
+                        Span::styled(indent.clone(), Style::default()),
+                        Span::styled("\u{2502} ", border_style),
+                        Span::styled(padded, content_style),
+                        Span::styled(" \u{2502}", border_style),
+                    ]));
+                }
+            }
+            if self.content.trim().is_empty() {
+                let padded = " ".repeat(content_width);
+                lines.push(Line::from_spans(vec![
+                    Span::styled(indent.clone(), Style::default()),
+                    Span::styled("\u{2502} ", border_style),
+                    Span::styled(padded, muted_style),
+                    Span::styled(" \u{2502}", border_style),
+                ]));
             }
         }
 
-        // Empty row if no content
-        if self.content.trim().is_empty() {
-            let padded = " ".repeat(content_width);
-            lines.push(Line::styled(
-                format!(" \u{2502} {padded} \u{2502}"),
-                Style::default().fg(muted_color),
-            ));
-        }
-
         // Bottom border
-        let bottom = format!("\u{2514}{}", "\u{2500}".repeat(width.saturating_sub(1)));
-        lines.push(Line::styled(bottom, Style::default().fg(border_color)));
+        let bottom_inner = "\u{2500}".repeat(horz_len);
+        lines.push(Line::from_spans(vec![
+            Span::styled(indent, Style::default()),
+            Span::styled(format!("\u{2514}{bottom_inner}"), border_style),
+            Span::styled("\u{2519}", border_style),
+        ]));
 
         lines
     }
 
-    fn titled_border(title: &str, width: usize, color: Color) -> Line {
-        let title_display: String = title.chars().take(width.saturating_sub(2)).collect();
-        let remaining = width
-            .saturating_sub(2)
-            .saturating_sub(title_display.chars().count());
-        let line = format!("\u{250c}{title_display}{}", "\u{2500}".repeat(remaining));
-        Line::styled(line, Style::default().fg(color))
+    fn titled_border(indent: &str, title: &str, horz_len: usize, border_style: Style) -> Line {
+        let title_fitted = if visible_width(title) <= horz_len {
+            pad_to_width(title, horz_len)
+        } else {
+            truncate_to_width(title, horz_len)
+        };
+        Line::from_spans(vec![
+            Span::styled(indent.to_owned(), Style::default()),
+            Span::styled(format!("\u{250c}{title_fitted}\u{2510}"), border_style),
+        ])
     }
 
     fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
@@ -148,15 +187,6 @@ mod tests {
     }
 
     #[test]
-    fn render_with_status() {
-        let comp =
-            PlanBoxComponent::new("plan", Some("/tmp/x.md".to_string())).with_status("Rejected");
-        let lines = comp.render(40, &TuiTheme::default());
-        let top = lines[0].to_ansi();
-        assert!(top.contains("Rejected"));
-    }
-
-    #[test]
     fn render_empty_content() {
         let comp = PlanBoxComponent::new("", None);
         let lines = comp.render(20, &TuiTheme::default());
@@ -164,8 +194,118 @@ mod tests {
     }
 
     #[test]
+    fn top_border_has_right_corner() {
+        let comp = PlanBoxComponent::new("hello", None);
+        let lines = comp.render(40, &TuiTheme::default());
+        let top = lines[0].to_ansi();
+        assert!(
+            top.contains('\u{2510}'),
+            "top border must end with ┐, got: {top}"
+        );
+    }
+
+    #[test]
+    fn bottom_border_has_right_corner() {
+        let comp = PlanBoxComponent::new("hello", None);
+        let lines = comp.render(40, &TuiTheme::default());
+        let bottom = lines.last().unwrap().to_ansi();
+        assert!(
+            bottom.contains('\u{2519}'),
+            "bottom border must end with ┘, got: {bottom}"
+        );
+    }
+
+    #[test]
     fn wrap_text_long_line() {
         let wrapped = PlanBoxComponent::wrap_text("aaaa bbbb cccc dddd", 10);
         assert!(wrapped.len() > 1);
+    }
+
+    #[test]
+    fn markdown_content_renders_in_box() {
+        let comp = PlanBoxComponent::new("# Title\n\nSome text", Some("/tmp/plan.md".to_string()));
+        let lines = comp.render(60, &TuiTheme::default());
+        assert!(lines.len() >= 4, "should have border + content lines");
+        // The content should contain "Title" somewhere
+        let all_text = lines.iter().map(|l| l.to_ansi()).collect::<String>();
+        assert!(
+            all_text.contains("Title"),
+            "markdown content should be rendered"
+        );
+        // Should have proper border structure
+        let top = lines[0].to_ansi();
+        assert!(top.contains('\u{2510}'), "top border must have ┐");
+        let bottom = lines.last().unwrap().to_ansi();
+        assert!(bottom.contains('\u{2519}'), "bottom border must have ┘");
+    }
+
+    #[test]
+    fn non_markdown_file_uses_plain_text() {
+        let comp = PlanBoxComponent::new("plain text", Some("/tmp/plan.txt".to_string()));
+        let lines = comp.render(40, &TuiTheme::default());
+        assert!(lines.len() >= 3);
+        let content = lines[1].to_ansi();
+        assert!(content.contains("plain text"));
+    }
+
+    #[test]
+    fn rendered_lines_fit_width() {
+        let comp = PlanBoxComponent::new(
+            "# Title\n\nSome fairly long text that should wrap within the box.",
+            Some("/tmp/plan.md".to_string()),
+        );
+        for width in [20, 40, 60, 80] {
+            let lines = comp.render(width, &TuiTheme::default());
+            for line in &lines {
+                assert!(
+                    line.visible_width() <= width,
+                    "line width {} should be <= {width}: {:?}",
+                    line.visible_width(),
+                    line.to_ansi()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rendered_lines_are_exactly_width() {
+        let comp = PlanBoxComponent::new(
+            "# Title\n\nSome text that may wrap.",
+            Some("/tmp/plan.md".to_string()),
+        );
+        for width in [20, 40, 60, 80] {
+            let lines = comp.render(width, &TuiTheme::default());
+            assert!(!lines.is_empty(), "should render at width {width}");
+            for line in &lines {
+                assert_eq!(
+                    line.visible_width(),
+                    width,
+                    "every rendered line should be exactly {width} columns: {:?}",
+                    line.to_ansi()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn box_has_left_margin() {
+        let comp = PlanBoxComponent::new("hello", Some("/tmp/plan.md".to_string()));
+        let lines = comp.render(40, &TuiTheme::default());
+        let top = lines[0].to_ansi();
+        let plain = crate::primitive::strip_ansi(&top);
+        assert!(
+            plain.starts_with("  ┌"),
+            "box should start with a 2-space left margin"
+        );
+    }
+
+    #[test]
+    fn top_and_bottom_borders_have_same_width() {
+        let comp = PlanBoxComponent::new("hello", Some("/tmp/plan.md".to_string()));
+        let lines = comp.render(40, &TuiTheme::default());
+        let top = lines.first().unwrap().visible_width();
+        let bottom = lines.last().unwrap().visible_width();
+        assert_eq!(top, bottom);
+        assert_eq!(top, 40);
     }
 }

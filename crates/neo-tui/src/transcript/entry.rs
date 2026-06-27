@@ -5,6 +5,7 @@ use crate::shell::TuiTheme;
 use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
 };
+use crate::transcript::PlanBoxComponent;
 use crate::transcript::ToolCallComponent;
 use crate::widgets::box_draw;
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,12 @@ pub struct ApprovalPromptData {
     /// `None` omits the option.
     #[serde(default)]
     pub prefix_option_label: Option<String>,
+    /// Plan file content to render inside the approval dialog (PlanTransition only).
+    #[serde(default)]
+    pub plan_content: Option<String>,
+    /// Plan file path for the box title (PlanTransition only).
+    #[serde(default)]
+    pub plan_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -667,6 +674,15 @@ fn render_approval_prompt(data: &ApprovalPromptData, width: usize, theme: &TuiTh
         rows.extend(styled_wrap_with_indent(detail, width, 2, 4, body));
     }
     rows.push(Line::raw(""));
+    // Render the plan content box (PlanTransition only).
+    if let Some(plan_content) = &data.plan_content {
+        let plan_box = PlanBoxComponent::new(plan_content.clone(), data.plan_path.clone());
+        let box_lines = plan_box.render(width, theme);
+        for line in box_lines {
+            rows.push(line);
+        }
+        rows.push(Line::raw(""));
+    }
     // Build the option list dynamically. The session-approval (Layer 1) and
     // prefix-rule (Layer 2) options appear only when their labels are `Some`,
     // so numeric shortcuts and the feedback-input index track the visible list.
