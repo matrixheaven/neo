@@ -340,6 +340,23 @@ struct DiffRender {
     final_cursor_row: usize,
 }
 
+struct ConstrainedFrameLines {
+    lines: Vec<String>,
+    row_starts: Vec<usize>,
+}
+
+impl ConstrainedFrameLines {
+    fn map_cursor(&self, cursor: CursorPos) -> CursorPos {
+        let Some(&row_start) = self.row_starts.get(cursor.row) else {
+            return cursor;
+        };
+        CursorPos {
+            row: row_start,
+            col: cursor.col,
+        }
+    }
+}
+
 fn push_vertical_move(buffer: &mut String, line_diff: isize) {
     if line_diff > 0 {
         let _ = write!(buffer, "\x1b[{line_diff}B");
@@ -475,7 +492,9 @@ impl TuiRenderer {
         let dimensions = RenderDimensions::new(width, height_u16);
         self.log_render_start(dimensions, &new_lines);
 
-        new_lines = constrain_frame_lines(width, new_lines);
+        let constrained = constrain_frame_lines(width, new_lines);
+        let cursor = cursor.map(|cursor| constrained.map_cursor(cursor));
+        new_lines = constrained.lines;
         check_line_widths(width, &new_lines)?;
 
         let width_changed = self.previous_width != 0 && self.previous_width != width;
@@ -964,10 +983,12 @@ fn apply_line_resets(mut lines: Vec<String>) -> Vec<String> {
     lines
 }
 
-fn constrain_frame_lines(width: u16, lines: Vec<String>) -> Vec<String> {
+fn constrain_frame_lines(width: u16, lines: Vec<String>) -> ConstrainedFrameLines {
     let width = usize::from(width).max(1);
     let mut constrained = Vec::with_capacity(lines.len());
+    let mut row_starts = Vec::with_capacity(lines.len());
     for mut line in lines {
+        row_starts.push(constrained.len());
         if is_image_line(&line) {
             constrained.push(line);
             continue;
@@ -983,7 +1004,10 @@ fn constrain_frame_lines(width: u16, lines: Vec<String>) -> Vec<String> {
                 .map(|line| truncate_width(&line, width, "", false)),
         );
     }
-    constrained
+    ConstrainedFrameLines {
+        lines: constrained,
+        row_starts,
+    }
 }
 
 fn normalize_terminal_output(line: &mut String) {
@@ -1490,6 +1514,32 @@ mod tests {
         assert!(
             output.contains("\x1b[8G"),
             "cursor col should follow prompt: {output:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_cursor_row_tracks_lines_inserted_by_width_constraint() {
+        let mut renderer = test_renderer(Vec::new());
+        let mut buf = Vec::new();
+        renderer
+            .render_to_with_size(
+                &mut buf,
+                80,
+                10,
+                vec![
+                    "x".repeat(81),
+                    "│  > first prompt line                                                   │"
+                        .to_owned(),
+                    "│    second prompt line                                                  │"
+                        .to_owned(),
+                ],
+                Some(CursorPos { row: 2, col: 8 }),
+            )
+            .unwrap();
+
+        assert_eq!(
+            renderer.hardware_cursor_row, 3,
+            "cursor row should account for wrapped lines inserted before it"
         );
     }
 
