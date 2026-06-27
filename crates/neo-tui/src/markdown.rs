@@ -398,32 +398,60 @@ impl<'a> MdRenderer<'a> {
             return;
         }
 
-        let box_width = self.width;
-        let horz_len = box_width - 2;
-        let content_width = box_width.saturating_sub(2 + 2 * CODE_SIDE_PADDING).max(1);
         let border_style = Style::default().fg(self.theme.text_muted);
         let brand_style = Style::default().fg(self.theme.brand);
 
-        // Top border with language label.
-        let title_fitted = if lang.is_empty() {
-            "─".repeat(horz_len)
+        // Content-adaptive box width.
+        let raw_lines: Vec<&str> = code.trim_end_matches('\n').lines().collect();
+        let max_content_width = raw_lines
+            .iter()
+            .map(|line| {
+                let display = if lang.eq_ignore_ascii_case("diff") {
+                    line.strip_prefix('+')
+                        .or_else(|| line.strip_prefix('-'))
+                        .unwrap_or(line)
+                } else {
+                    line
+                };
+                visible_width(display)
+            })
+            .max()
+            .unwrap_or(0);
+        let header_label_width = if lang.is_empty() {
+            1
         } else {
-            let label = format!("─ {lang} ");
-            let label_width = visible_width(&label);
-            if label_width <= horz_len {
-                format!("{}{}", label, "─".repeat(horz_len - label_width))
-            } else {
-                truncate_to_width(&label, horz_len)
-            }
+            visible_width(&format!("─ {lang} "))
         };
-        self.out.push(Line::from_spans(vec![
-            Span::styled("╭", border_style),
-            Span::styled(title_fitted, brand_style),
-            Span::styled("╮", border_style),
-        ]));
+        let desired_inner_width = max_content_width + 2 * CODE_SIDE_PADDING;
+        let horz_len = desired_inner_width
+            .max(header_label_width)
+            .max(CODE_MIN_BOX_WIDTH - 2)
+            .min(self.width - 2);
+        let content_width = horz_len.saturating_sub(2 * CODE_SIDE_PADDING).max(1);
+
+        // Top border with language label. Border chars and fill use border_style;
+        // only the language text itself uses brand_style so the frame stays uniform.
+        let mut top_spans = vec![Span::styled("╭", border_style)];
+        if lang.is_empty() {
+            top_spans.push(Span::styled("─".repeat(horz_len), border_style));
+        } else {
+            let label_prefix = "─ ";
+            let label_suffix = " ";
+            let lang_text = lang.as_str();
+            let fill_width = horz_len.saturating_sub(
+                visible_width(label_prefix)
+                    + visible_width(lang_text)
+                    + visible_width(label_suffix),
+            );
+            top_spans.push(Span::styled(label_prefix.to_owned(), border_style));
+            top_spans.push(Span::styled(lang_text.to_owned(), brand_style));
+            top_spans.push(Span::styled(label_suffix.to_owned(), border_style));
+            top_spans.push(Span::styled("─".repeat(fill_width), border_style));
+        }
+        top_spans.push(Span::styled("╮", border_style));
+        self.out.push(Line::from_spans(top_spans));
 
         // Content lines.
-        let raw_lines: Vec<&str> = code.trim_end_matches('\n').lines().collect();
         if raw_lines.is_empty() {
             self.emit_code_content_line("", content_width, border_style);
         } else if lang.eq_ignore_ascii_case("diff") {
@@ -989,19 +1017,37 @@ mod code_block_tests {
     }
 
     #[test]
-    fn code_block_width_equals_input_width() {
+    fn code_block_width_is_consistent_and_within_bounds() {
         let text = "```rust\nfn main() {\n    println!();\n}\n```";
         for width in [20, 40, 60, 80] {
             let lines = render_markdown(text, width, &TuiTheme::default(), "● ", "  ");
+            let first_width = lines[0].visible_width();
             for line in &lines {
                 assert_eq!(
                     line.visible_width(),
-                    width,
-                    "line must be exactly {width} columns: {:?}",
-                    line.to_ansi()
+                    first_width,
+                    "all lines must have the same width"
+                );
+                assert!(
+                    line.visible_width() <= width,
+                    "line width {} should be <= {width}",
+                    line.visible_width()
                 );
             }
         }
+    }
+
+    #[test]
+    fn code_block_adapts_to_short_content() {
+        let text = "```bash\necho hi\n```";
+        let width = 40;
+        let lines = render_markdown(text, width, &TuiTheme::default(), "● ", "  ");
+        // Short content should not expand to the full 40 columns.
+        assert!(
+            lines[0].visible_width() < width,
+            "box should be narrower than full width for short content: {:?}",
+            lines[0].to_ansi()
+        );
     }
 
     #[test]

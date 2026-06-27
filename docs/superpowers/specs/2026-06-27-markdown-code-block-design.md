@@ -75,10 +75,11 @@ markers (`` ``` ``) are removed entirely.
 
 `MdRenderer::new()` reserves `max(first_prefix, cont_prefix)` columns, so
 `self.width` is the body width *after* the outer message prefix. The code block
-box renders at exactly `self.width`; `finish()` then prepends the outer prefix
-(`first_prefix` on line 0, `cont_prefix` on all other lines). This aligns the
-box with the outer body text, but it does not apply any current list or
-blockquote marker indent.
+box width is derived from the content and the header label, capped at
+`self.width` so it never overflows the message body. `finish()` then prepends
+the outer prefix (`first_prefix` on line 0, `cont_prefix` on all other lines),
+aligning the box with the outer body text. It does not apply any current list
+or blockquote marker indent.
 
 Constants:
 
@@ -90,18 +91,23 @@ const CODE_MIN_BOX_WIDTH: usize = 12;
 Derived values:
 
 ```text
-box_width       = self.width
-horz_len        = box_width - 2
-content_width   = box_width - 2 - 2 * CODE_SIDE_PADDING
+max_content_width = max visible width of displayed code lines
+header_label_width = visible_width("─ {lang} ") or 1 if no language
+desired_inner_width = max_content_width + 2 * CODE_SIDE_PADDING
+horz_len          = max(desired_inner_width, header_label_width, CODE_MIN_BOX_WIDTH - 2)
+                      .min(self.width - 2)
+content_width     = horz_len - 2 * CODE_SIDE_PADDING
+box_width         = horz_len + 2
 ```
 
 Line templates:
 
-- Top:    `"╭{title_filled_to_horz_len}╮"`
-- Content:`"│{padding}{code_filled_to_content_width}{padding}│"`
+- Top:    `"╭─ {lang} {─ filled to horz_len}╮"` (border chars and fill are
+  `text_muted`; only `{lang}` is `brand`)
+- Content:`"│{padding}{code_filled_to content_width}{padding}│"`
 - Bottom: `"╰{─ repeated horz_len}╯"`
 
-If `box_width < CODE_MIN_BOX_WIDTH`, fall back to the old plain style
+If `self.width < CODE_MIN_BOX_WIDTH`, fall back to the old plain style
 (`  ```{lang}` / `  {line}` / `  ````) without a border. This protects extremely
 narrow terminals or deeply nested lists from broken-looking boxes.
 
@@ -117,7 +123,8 @@ narrow terminals or deeply nested lists from broken-looking boxes.
   `title = "─".repeat(horz_len)`.
 
 The remaining top-border width is filled with `─`, not spaces, so the header
-reads as a continuous top edge.
+reads as a continuous top edge. The frame characters and the `─` fill use
+`text_muted`; only the language label text itself is rendered in `brand`.
 
 ## Component Changes
 
@@ -139,9 +146,11 @@ const CODE_MIN_BOX_WIDTH: usize = 12;
 
 Replace the current `` ``` ``-based output with:
 
-1. Compute `box_width`, `horz_len`, and `content_width`.
-2. If `box_width < CODE_MIN_BOX_WIDTH`, emit plain indented lines.
-3. Emit the top border with the fitted title.
+1. Compute `max_content_width`, `header_label_width`, `horz_len`,
+   `content_width`, and `box_width` based on content and the available width.
+2. If `self.width < CODE_MIN_BOX_WIDTH`, emit plain indented lines.
+3. Emit the top border with the language label in `brand` and the frame/fill
+   in `text_muted`.
 4. For each code line:
    - Truncate or pad to `content_width`.
    - Wrap in `"│  {line}  │"`.
@@ -162,8 +171,8 @@ new box.
 
 | Element | Color |
 |---|---|
-| Border characters (corners and bottom edge) | `theme.text_muted` |
-| Header title (language label and trailing `─` fill) | `theme.brand` |
+| Border characters, header `─` fill, corners, bottom edge | `theme.text_muted` |
+| Header language label | `theme.brand` |
 | Code content | Existing syntect highlight; `theme.text_primary` fallback |
 | Diff `+` lines | `theme.diff_added` |
 | Diff `-` lines | `theme.diff_removed` |
@@ -197,7 +206,8 @@ Add tests to the `#[cfg(test)]` module in `crates/neo-tui/src/markdown.rs`:
 | Test | Assertion |
 |---|---|
 | `code_block_has_rounded_borders` | Top contains `╭` and `╮`, bottom contains `╰` and `╯`, sides contain `│` |
-| `code_block_width_equals_input_width` | Every line has `visible_width() == width` |
+| `code_block_width_is_consistent_and_within_bounds` | All lines share the same width and it is `<= input width` |
+| `code_block_adapts_to_short_content` | Short content produces a box narrower than the full input width |
 | `code_block_language_in_header` | Header line contains the language name |
 | `code_block_no_fence_backticks` | Output contains no `` ``` `` sequences |
 | `code_block_empty_content_renders_box` | Empty block emits top, empty content row, bottom |
