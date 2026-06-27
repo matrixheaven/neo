@@ -888,3 +888,99 @@ mod highlight_tests {
         assert_eq!(lines[0][0].text(), "hello world");
     }
 }
+
+#[cfg(test)]
+mod code_block_tests {
+    use super::*;
+
+    #[test]
+    fn code_block_has_rounded_borders() {
+        let text = "```bash\necho hi\n```";
+        let lines = render_markdown(text, 40, &TuiTheme::default(), "● ", "  ");
+        let top = lines[0].to_ansi();
+        assert!(top.contains('╭'), "top must contain ╭");
+        assert!(top.contains('╮'), "top must contain ╮");
+        let bottom = lines.last().unwrap().to_ansi();
+        assert!(bottom.contains('╰'), "bottom must contain ╰");
+        assert!(bottom.contains('╯'), "bottom must contain ╯");
+        let all_plain: String = lines
+            .iter()
+            .map(|l| crate::primitive::strip_ansi(&l.to_ansi()))
+            .collect();
+        assert!(all_plain.contains('│'), "output must contain side borders");
+    }
+
+    #[test]
+    fn code_block_width_equals_input_width() {
+        let text = "```rust\nfn main() {\n    println!();\n}\n```";
+        for width in [20, 40, 60, 80] {
+            let lines = render_markdown(text, width, &TuiTheme::default(), "● ", "  ");
+            for line in &lines {
+                assert_eq!(
+                    line.visible_width(),
+                    width,
+                    "line must be exactly {width} columns: {:?}",
+                    line.to_ansi()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn code_block_language_in_header() {
+        let text = "```bash\necho hi\n```";
+        let lines = render_markdown(text, 40, &TuiTheme::default(), "● ", "  ");
+        let top = lines[0].to_ansi();
+        assert!(top.contains("bash"), "header must contain language: {top}");
+        let all = lines
+            .iter()
+            .map(|l| crate::primitive::strip_ansi(&l.to_ansi()))
+            .collect::<String>();
+        assert!(!all.contains("```bash"), "must not use old fence style");
+    }
+
+    #[test]
+    fn code_block_no_fence_backticks() {
+        let text = "```bash\necho hi\n```";
+        let all = render_markdown(text, 40, &TuiTheme::default(), "● ", "  ")
+            .into_iter()
+            .map(|l| crate::primitive::strip_ansi(&l.to_ansi()))
+            .collect::<String>();
+        assert!(
+            !all.contains("```"),
+            "output must not contain fence backticks"
+        );
+    }
+
+    #[test]
+    fn code_block_empty_content_renders_box() {
+        let text = "```bash\n```";
+        let lines = render_markdown(text, 30, &TuiTheme::default(), "● ", "  ");
+        let top = lines[0].to_ansi();
+        let bottom = lines.last().unwrap().to_ansi();
+        assert!(top.contains('╭') && top.contains('╮'));
+        assert!(bottom.contains('╰') && bottom.contains('╯'));
+    }
+
+    #[test]
+    fn code_block_honors_min_width() {
+        // Width is too small for a real box; just ensure no panic.
+        let text = "```bash\necho hi\n```";
+        let _lines = render_markdown(text, 4, &TuiTheme::default(), "● ", "  ");
+    }
+
+    #[test]
+    fn code_block_in_list_renders_within_width() {
+        let text = "- item\n\n  ```bash\n  echo hi\n  ```\n";
+        let width = 40;
+        let lines = render_markdown(text, width, &TuiTheme::default(), "● ", "  ");
+        for line in &lines {
+            assert!(
+                line.visible_width() <= width,
+                "line width {} should be <= {width}: {:?}",
+                line.visible_width(),
+                line.to_ansi()
+            );
+        }
+    }
+}
