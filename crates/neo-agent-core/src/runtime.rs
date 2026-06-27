@@ -1511,6 +1511,17 @@ async fn run_agent_turn(
         // tool results to the context so the next model turn sees the prefix,
         // and before the side-effect events flip plan mode off.
         attach_exit_plan_details(&config, &mut tool_results);
+        // For EnterPlanMode: create the plan file and inject its path into the
+        // tool result so the model knows where to write. Must happen before
+        // append_tool_result_messages and before the duplicate enter in
+        // emit_tool_side_effect_events.
+        let has_enter_plan_mode = tool_results
+            .iter()
+            .any(|(tc, _)| tc.name == "EnterPlanMode");
+        if has_enter_plan_mode {
+            enter_plan_mode_state(&config);
+            attach_enter_plan_details(&config, &mut tool_results);
+        }
         append_tool_result_messages(&tool_results, emitter);
         emit_effective_context_window(&config, emitter, turn).await;
         emit_tool_side_effect_events(turn, &config, &tool_results, emitter);
@@ -1591,6 +1602,14 @@ fn attach_exit_plan_details(
                      Execute ONLY the selected approach. Do not execute any unselected alternatives.\n\n{}",
                     result.content
                 );
+                if let Some(details) = result.details.as_mut()
+                    && let Some(obj) = details.as_object_mut()
+                {
+                    obj.insert(
+                        "plan_selected_label".to_string(),
+                        serde_json::Value::String(label),
+                    );
+                }
             }
         }
     }
@@ -1627,8 +1646,34 @@ fn emit_plan_tool_event(
 }
 
 fn emit_plan_mode_entered(turn: u32, config: &AgentConfig, emitter: &mut EventEmitter) {
+    // If plan mode is already active (the enter side-effect was executed
+    // earlier in the turn via `enter_plan_mode_state`), skip the duplicate
+    // enter and just emit the events with the existing id.
+    let id = {
+        let pm = config.plan_mode.read().unwrap();
+        if pm.is_active() {
+            pm.plan_id().unwrap_or("").to_owned()
+        } else {
+            drop(pm);
+            enter_plan_mode_state(config)
+        }
+    };
+    emitter.emit(AgentEvent::PlanModeEntered {
+        turn,
+        id: id.clone(),
+    });
+    emitter.emit(AgentEvent::PlanUpdated {
+        turn,
+        enabled: true,
+    });
+}
+
+/// Execute the plan-mode enter side-effect (create plan file, set active state)
+/// and return the plan id. Extracted so [`attach_enter_plan_details`] can run
+/// the side-effect *before* tool results are appended to the model context.
+fn enter_plan_mode_state(config: &AgentConfig) -> String {
     let mut pm = config.plan_mode.write().unwrap();
-    let id = if let Some(plans_dir) = plan_mode_plans_dir(config) {
+    if let Some(plans_dir) = plan_mode_plans_dir(config) {
         pm.enter(&plans_dir, true).map_or_else(
             |_| {
                 pm.enter_in_memory();
@@ -1639,16 +1684,33 @@ fn emit_plan_mode_entered(turn: u32, config: &AgentConfig, emitter: &mut EventEm
     } else {
         pm.enter_in_memory();
         pm.plan_id().unwrap_or("").to_owned()
+    }
+}
+
+/// After EnterPlanMode runs and the plan file has been created, inject the plan
+/// file path into the tool result so the model knows where to write its plan.
+/// Must run *after* [`enter_plan_mode_state`] and *before*
+/// [`append_tool_result_messages`].
+fn attach_enter_plan_details(
+    config: &AgentConfig,
+    tool_results: &mut [(AgentToolCall, ToolResult)],
+) {
+    let plan_path = config
+        .plan_mode
+        .read()
+        .ok()
+        .and_then(|pm| pm.plan_file_path().map(|p| p.display().to_string()));
+    let Some(plan_path) = plan_path else {
+        return;
     };
-    drop(pm);
-    emitter.emit(AgentEvent::PlanModeEntered {
-        turn,
-        id: id.clone(),
-    });
-    emitter.emit(AgentEvent::PlanUpdated {
-        turn,
-        enabled: true,
-    });
+    for (tool_call, result) in tool_results {
+        if tool_call.name == "EnterPlanMode" && !result.is_error {
+            result.content = format!(
+                "{}\n\nThe plan file is at: {plan_path}\nWrite your plan to this file.",
+                result.content
+            );
+        }
+    }
 }
 
 fn emit_plan_mode_exited(turn: u32, config: &AgentConfig, emitter: &mut EventEmitter) {
@@ -3316,12 +3378,29 @@ async fn resolve_approval(
     emitter: &mut impl EventPublisher,
     cancel_token: &CancellationToken,
 ) -> Option<ToolResult> {
+    let mut arguments = tool_call.arguments.clone();
+    // For plan transitions, inject the plan file content so the TUI can
+    // render it inside the approval dialog.
+    if operation == PermissionOperation::PlanTransition
+        && let Ok(plan_mode) = config.plan_mode.read()
+        && let Ok(Some(plan_data)) = plan_mode.data()
+        && let Some(obj) = arguments.as_object_mut()
+    {
+        obj.insert(
+            "plan_content".to_string(),
+            serde_json::Value::String(plan_data.content.clone()),
+        );
+        obj.insert(
+            "plan_path".to_string(),
+            serde_json::Value::String(plan_data.path.display().to_string()),
+        );
+    }
     let request = ApprovalRequest {
         turn,
         id: tool_call.id.clone(),
         operation,
         subject: subject.clone(),
-        arguments: tool_call.arguments.clone(),
+        arguments,
         session_scope: session_scope.clone(),
         prefix_rule: prefix_rule.clone(),
     };

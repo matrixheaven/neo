@@ -48,8 +48,15 @@ pub fn check_plan_mode_guard(
             {
                 return PlanModeGuard::Allow;
             }
+            let plan_path = plan_mode.plan_file_path().map_or_else(
+                || "(no plan file selected yet)".to_owned(),
+                |p| p.display().to_string(),
+            );
             PlanModeGuard::Deny {
-                message: format!("blocked by plan mode: {tool_name} is read-only while planning"),
+                message: format!(
+                    "Plan mode is active. You may only write to the current plan file: \
+                     {plan_path}. Call ExitPlanMode to exit plan mode before editing other files."
+                ),
             }
         }
         "TaskStop" | "CronCreate" | "CronDelete" => PlanModeGuard::Deny {

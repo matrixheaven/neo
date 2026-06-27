@@ -4463,15 +4463,22 @@ async fn runtime_ask_mode_reviews_exit_plan_mode_with_non_empty_plan() {
         .collect::<Result<Vec<_>, _>>()
         .expect("turn should succeed");
 
-    assert!(events.contains(&AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool_1".to_owned(),
-        operation: PermissionOperation::PlanTransition,
-        subject: "Exit plan mode".to_owned(),
-        arguments: json!({ "plan_summary": "Ready to execute" }),
-        session_scope: None,
-        prefix_rule: None,
-    }));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::ApprovalRequested {
+            turn: 1,
+            id,
+            operation: PermissionOperation::PlanTransition,
+            subject,
+            arguments,
+            session_scope: None,
+            prefix_rule: None,
+        } if id == "tool_1"
+            && subject == "Exit plan mode"
+            && arguments.get("plan_summary").and_then(|v| v.as_str()) == Some("Ready to execute")
+            && arguments.get("plan_content").and_then(|v| v.as_str()) == Some("do the thing")
+            && arguments.get("plan_path").is_some()
+    )));
     assert!(events.iter().any(|event| matches!(
         event,
         AgentEvent::PlanModeExited { turn, .. } if *turn == 1
@@ -5516,15 +5523,22 @@ async fn yolo_exit_plan_mode_with_non_empty_plan_requests_review() {
         .collect::<Result<Vec<_>, _>>()
         .expect("turn should succeed");
 
-    assert!(events.contains(&AgentEvent::ApprovalRequested {
-        turn: 1,
-        id: "tool_1".to_owned(),
-        operation: PermissionOperation::PlanTransition,
-        subject: "Exit plan mode".to_owned(),
-        arguments: json!({ "plan_summary": "Ready" }),
-        session_scope: None,
-        prefix_rule: None,
-    }));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::ApprovalRequested {
+            turn: 1,
+            id,
+            operation: PermissionOperation::PlanTransition,
+            subject,
+            arguments,
+            session_scope: None,
+            prefix_rule: None,
+        } if id == "tool_1"
+            && subject == "Exit plan mode"
+            && arguments.get("plan_summary").and_then(|v| v.as_str()) == Some("Ready")
+            && arguments.get("plan_content").and_then(|v| v.as_str()) == Some("do the thing")
+            && arguments.get("plan_path").is_some()
+    )));
     assert!(events.iter().any(|event| matches!(
         event,
         AgentEvent::PlanModeExited { turn, .. } if *turn == 1
