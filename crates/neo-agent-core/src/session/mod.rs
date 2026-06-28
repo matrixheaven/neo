@@ -11,6 +11,7 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use uuid::Uuid;
 
+use crate::runtime::estimate_messages_tokens;
 use crate::{AgentContext, AgentEvent, AgentMessage, CompactionSummary, Content};
 
 pub mod export;
@@ -775,45 +776,4 @@ fn one_line_message_text(message: &AgentMessage) -> String {
         .collect::<Vec<_>>()
         .join("");
     text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn estimate_messages_tokens(messages: &[AgentMessage]) -> usize {
-    messages.iter().map(estimate_message_tokens).sum()
-}
-
-fn estimate_message_tokens(message: &AgentMessage) -> usize {
-    let chars = match message {
-        AgentMessage::System { content }
-        | AgentMessage::User { content }
-        | AgentMessage::ToolResult { content, .. } => estimate_content_chars(content),
-        AgentMessage::Assistant {
-            content,
-            tool_calls,
-            ..
-        } => {
-            estimate_content_chars(content)
-                + tool_calls
-                    .iter()
-                    .map(|call| call.name.len() + call.arguments.to_string().len())
-                    .sum::<usize>()
-        }
-        AgentMessage::ShellCommand {
-            command,
-            stdout,
-            stderr,
-            ..
-        } => command.len() + stdout.len() + stderr.len(),
-    };
-    chars.div_ceil(4)
-}
-
-fn estimate_content_chars(content: &[Content]) -> usize {
-    content
-        .iter()
-        .map(|part| match part {
-            Content::Text { text } => text.len(),
-            Content::Thinking { .. } => 0,
-            Content::Image { .. } => 4800,
-        })
-        .sum()
 }

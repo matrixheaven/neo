@@ -22,6 +22,7 @@ use neo_ai::{AiStreamEvent, ChatMessage, ChatRequest, ModelClient, RequestOption
 use tokio_util::sync::CancellationToken;
 
 use crate::events::{AgentEvent, CompactionReason};
+use crate::runtime::{estimate_message_tokens, estimate_messages_tokens};
 use crate::{AgentConfig, AgentContext, AgentMessage, CompactionPhase, CompactionSummary, Content};
 
 pub use crate::events::CompactionSource;
@@ -523,51 +524,6 @@ where
 fn render_instruction(custom_instruction: Option<&str>) -> String {
     let custom = custom_instruction.unwrap_or("");
     COMPACTION_INSTRUCTION.replace("{{ customInstruction }}", custom)
-}
-
-/// Estimate token count for a single message (chars / 4 heuristic).
-fn estimate_message_tokens(message: &AgentMessage) -> usize {
-    let chars = match message {
-        AgentMessage::System { content }
-        | AgentMessage::User { content }
-        | AgentMessage::ToolResult { content, .. } => estimate_content_chars(content),
-        AgentMessage::Assistant {
-            content,
-            tool_calls,
-            ..
-        } => {
-            let content_chars = estimate_content_chars(content);
-            let tool_chars = tool_calls
-                .iter()
-                .map(|call| call.name.len() + call.arguments.to_string().len())
-                .sum::<usize>();
-            content_chars + tool_chars
-        }
-        AgentMessage::ShellCommand {
-            command,
-            stdout,
-            stderr,
-            ..
-        } => command.len() + stdout.len() + stderr.len(),
-    };
-    chars.div_ceil(4)
-}
-
-fn estimate_content_chars(content: &[Content]) -> usize {
-    content
-        .iter()
-        .map(|part| match part {
-            Content::Text { text } => text.len(),
-            Content::Thinking { .. } => 0,
-            Content::Image { .. } => 4800,
-        })
-        .sum()
-}
-
-/// Estimate total token count for a slice of messages.
-#[must_use]
-pub fn estimate_messages_tokens(messages: &[AgentMessage]) -> usize {
-    messages.iter().map(estimate_message_tokens).sum()
 }
 
 /// Run LLM-driven compaction and emit the lifecycle events.

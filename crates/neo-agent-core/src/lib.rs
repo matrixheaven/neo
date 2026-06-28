@@ -16,8 +16,7 @@ pub mod tools;
 
 pub use compaction::{
     CompactionError, CompactionSource, CompactionStrategy, can_split_after, compute_compact_count,
-    estimate_messages_tokens as estimate_compaction_tokens, generate_compaction_summary,
-    render_messages_to_text,
+    generate_compaction_summary, render_messages_to_text,
 };
 pub use events::*;
 pub use injection::*;

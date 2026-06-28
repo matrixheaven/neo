@@ -1,5 +1,7 @@
 pub mod diff_preview;
 pub mod entry;
+pub mod chrome_render;
+mod approval_data;
 mod event_handler;
 pub mod pane;
 pub mod partial_json;
@@ -14,10 +16,11 @@ pub use entry::{
     ApprovalPromptData, BannerData, InlineImageRender, StatusSeverity, ThinkingPhase,
     TranscriptEntry,
 };
-pub use pane::{
-    CHROME_GUTTER, ChromeRender, TranscriptPane, apply_gutter, frame_content_width,
-    render_chrome_lines, render_chrome_lines_mut, render_footer_only_lines,
+pub use chrome_render::{
+    CHROME_GUTTER, ChromeRender, apply_gutter, frame_content_width, render_chrome_lines,
+    render_chrome_lines_mut, render_footer_only_lines,
 };
+pub use pane::TranscriptPane;
 pub use plan_box::PlanBoxComponent;
 pub use shell_run::{ShellRunComponent, ShellRunState};
 pub use store::{TranscriptSelection, TranscriptStore, TranscriptViewport};

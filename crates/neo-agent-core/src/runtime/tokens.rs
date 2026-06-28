@@ -5,15 +5,15 @@ use neo_ai::{ChatMessage, ContentPart};
 
 use crate::{AgentMessage, Content};
 
-pub(super) fn estimate_messages_tokens(messages: &[AgentMessage]) -> usize {
+pub(crate) fn estimate_messages_tokens(messages: &[AgentMessage]) -> usize {
     messages.iter().map(estimate_message_tokens).sum()
 }
 
-pub(super) fn estimate_chat_messages_tokens(messages: &[ChatMessage]) -> usize {
+pub(crate) fn estimate_chat_messages_tokens(messages: &[ChatMessage]) -> usize {
     messages.iter().map(estimate_chat_message_tokens).sum()
 }
 
-pub(super) fn estimate_chat_message_tokens(message: &ChatMessage) -> usize {
+pub(crate) fn estimate_chat_message_tokens(message: &ChatMessage) -> usize {
     let chars = match message {
         ChatMessage::System { content }
         | ChatMessage::User { content }
@@ -33,7 +33,7 @@ pub(super) fn estimate_chat_message_tokens(message: &ChatMessage) -> usize {
     chars.div_ceil(4)
 }
 
-pub(super) fn estimate_message_tokens(message: &AgentMessage) -> usize {
+pub(crate) fn estimate_message_tokens(message: &AgentMessage) -> usize {
     let chars = match message {
         AgentMessage::System { content }
         | AgentMessage::User { content }
@@ -60,7 +60,7 @@ pub(super) fn estimate_message_tokens(message: &AgentMessage) -> usize {
     chars.div_ceil(4)
 }
 
-pub(super) fn estimate_chat_content_chars(content: &[ContentPart]) -> usize {
+pub(crate) fn estimate_chat_content_chars(content: &[ContentPart]) -> usize {
     content
         .iter()
         .map(|part| match part {
@@ -71,7 +71,7 @@ pub(super) fn estimate_chat_content_chars(content: &[ContentPart]) -> usize {
         .sum()
 }
 
-pub(super) fn estimate_content_chars(content: &[Content]) -> usize {
+pub(crate) fn estimate_content_chars(content: &[Content]) -> usize {
     content
         .iter()
         .map(|part| match part {

@@ -1,6 +1,6 @@
 use neo_tui::primitive::strip_ansi;
 use neo_tui::shell::{NeoChromeState, PromptEdit};
-use neo_tui::transcript::pane::render_chrome_lines;
+use neo_tui::transcript::chrome_render::render_chrome_lines;
 
 fn render(app: &NeoChromeState) -> Vec<String> {
     render_chrome_lines(app, 80, 30)

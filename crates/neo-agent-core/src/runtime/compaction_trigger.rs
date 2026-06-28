@@ -128,7 +128,7 @@ fn evaluate_compaction_need(
     // safe suffix boundary.
     let messages = sanitize_tool_exchange_messages(emitter.context.messages().to_vec());
     let max_context_tokens = config.model.capabilities.max_context_tokens.unwrap_or(0) as usize;
-    let used_tokens = compaction::estimate_messages_tokens(&messages);
+    let used_tokens = super::estimate_messages_tokens(&messages);
 
     let strategy = build_compaction_strategy(&settings);
 
@@ -360,7 +360,7 @@ async fn apply_compaction_result(
 ) {
     let kept_messages = &messages[compacted_count..];
     let tokens_after =
-        summary_text.len().div_ceil(4) + compaction::estimate_messages_tokens(kept_messages);
+        summary_text.len().div_ceil(4) + super::estimate_messages_tokens(kept_messages);
 
     let summary = CompactionSummary {
         summary: summary_text,

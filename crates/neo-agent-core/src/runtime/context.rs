@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::tokens::estimate_messages_tokens;
+use super::estimate_messages_tokens;
 use crate::{
     AgentEvent, AgentMessage, CompactionSummary, QueueKind, TodoEventData,
     sanitize_tool_exchange_messages,
