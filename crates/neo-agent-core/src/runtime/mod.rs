@@ -6,11 +6,13 @@
 
 mod image_blobs;
 mod legacy;
+mod queue;
 mod tokens;
 
 // Re-export all public items from `legacy.rs` so that the existing
 // `pub use runtime::*;` in `lib.rs` continues to resolve without
 // logic or call-site changes during the split.
 pub use legacy::*;
+pub use queue::*;
 
 // Submodules will be added here as code is extracted from legacy.rs.

@@ -1,5 +1,4 @@
 use std::{
-    collections::VecDeque,
     future::Future,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
@@ -18,6 +17,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::image_blobs::*;
+use super::queue::*;
 use super::tokens::*;
 use crate::goal::GoalManager;
 use crate::permissions::{
@@ -544,23 +544,23 @@ pub struct AgentContext {
     // that turn's `CancellationToken`. It is not durable session state. A
     // replayed cancelled turn must remain visible in the transcript and must
     // still advance the turn counter, but it must not affect future turns.
-    messages: Vec<AgentMessage>,
-    turns: u32,
-    steering_queue: Vec<AgentMessage>,
-    follow_up_queue: Vec<AgentMessage>,
+    pub(super) messages: Vec<AgentMessage>,
+    pub(super) turns: u32,
+    pub(super) steering_queue: Vec<AgentMessage>,
+    pub(super) follow_up_queue: Vec<AgentMessage>,
     /// Skill context injected before the next user message in the current turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    skill_context: Option<AgentMessage>,
-    compaction_summary: Option<CompactionSummary>,
+    pub(super) skill_context: Option<AgentMessage>,
+    pub(super) compaction_summary: Option<CompactionSummary>,
     /// Whether plan mode was active at the end of the last replayed/exected turn.
     #[serde(default)]
-    plan_mode_active: bool,
+    pub(super) plan_mode_active: bool,
     /// The plan id from the last `PlanModeEntered` event, if any.
     #[serde(default)]
-    plan_mode_id: Option<String>,
+    pub(super) plan_mode_id: Option<String>,
     /// Latest todo list state, restored on resume replay.
     #[serde(default)]
-    todos: Vec<TodoEventData>,
+    pub(super) todos: Vec<TodoEventData>,
 }
 
 impl AgentContext {
@@ -753,63 +753,6 @@ pub enum AgentRuntimeError {
 }
 
 pub type AgentEventStream<'a> = stream::BoxStream<'a, Result<AgentEvent, AgentRuntimeError>>;
-
-/// Live input pushed into a running turn by the controller.
-///
-/// `SteerNow` injects at the next step boundary (tool-call end / thinking end)
-/// as a steering context message, without interrupting the current step.
-/// `FollowUp` is appended to the follow-up queue and starts a fresh turn after
-/// the current workflow drains.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActiveTurnInput {
-    /// Inject as a steering message at the next natural break point.
-    SteerNow(AgentMessage),
-    /// Queue as a follow-up turn after the current turn completes (FIFO).
-    FollowUp(AgentMessage),
-    /// Reclassify the oldest queued follow-up as steering input.
-    PromoteFollowUpToSteer,
-}
-
-/// Shared handle used to push live input into a running turn.
-///
-/// Created by the controller before a turn starts, threaded into the
-/// [`AgentRuntime`], and drained at each step boundary by `run_agent_turn`.
-/// Both the controller and the runtime share the same cell.
-#[derive(Debug, Clone, Default)]
-pub struct SteerInputHandle {
-    inner: Arc<Mutex<VecDeque<ActiveTurnInput>>>,
-}
-
-impl SteerInputHandle {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Push a live input onto the queue. Called by the controller.
-    pub fn push(&self, input: ActiveTurnInput) {
-        if let Ok(mut queue) = self.inner.lock() {
-            queue.push_back(input);
-        }
-    }
-
-    /// Drain all pending live inputs. Called by the runtime at step boundaries.
-    fn drain(&self) -> Vec<ActiveTurnInput> {
-        self.inner
-            .lock()
-            .map(|mut queue| queue.drain(..).collect())
-            .unwrap_or_default()
-    }
-
-    /// Number of pending live inputs (for UI status).
-    #[must_use]
-    pub fn pending(&self) -> usize {
-        self.inner
-            .lock()
-            .map(|queue| queue.len())
-            .unwrap_or_default()
-    }
-}
 
 #[derive(Clone)]
 pub struct AgentRuntime {
@@ -1226,14 +1169,14 @@ fn request_messages_contain_image(messages: &[ChatMessage]) -> bool {
     })
 }
 
-struct EventEmitter {
-    sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
-    context: AgentContext,
-    last_context_window_tokens: Option<u32>,
+pub(super) struct EventEmitter {
+    pub(super) sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
+    pub(super) context: AgentContext,
+    pub(super) last_context_window_tokens: Option<u32>,
 }
 
 impl EventEmitter {
-    fn new(
+    pub(super) fn new(
         sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
         context: AgentContext,
     ) -> Self {
@@ -1244,24 +1187,24 @@ impl EventEmitter {
         }
     }
 
-    fn emit(&mut self, event: AgentEvent) {
+    pub(super) fn emit(&mut self, event: AgentEvent) {
         Self::apply_to_context(&mut self.context, &event);
         let _ = self.sender.send(Ok(event));
     }
 
-    fn sink(&self) -> EventSink {
+    pub(super) fn sink(&self) -> EventSink {
         EventSink {
             sender: self.sender.clone(),
         }
     }
 
-    fn send_error(&mut self, err: AgentRuntimeError) -> Result<(), AgentRuntimeError> {
+    pub(super) fn send_error(&mut self, err: AgentRuntimeError) -> Result<(), AgentRuntimeError> {
         self.sender
             .send(Err(err))
             .map_err(|_| AgentRuntimeError::Cancelled)
     }
 
-    fn apply_to_context(context: &mut AgentContext, event: &AgentEvent) {
+    pub(super) fn apply_to_context(context: &mut AgentContext, event: &AgentEvent) {
         match event {
             AgentEvent::MessageAppended { message } => context.append_message(message.clone()),
             AgentEvent::TurnFinished { turn, .. } => {
@@ -1306,7 +1249,7 @@ impl EventEmitter {
     }
 }
 
-trait EventPublisher {
+pub(super) trait EventPublisher {
     fn emit(&mut self, event: AgentEvent);
 }
 
@@ -1317,13 +1260,13 @@ impl EventPublisher for EventEmitter {
 }
 
 #[derive(Clone)]
-struct EventSink {
-    sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
+pub(super) struct EventSink {
+    pub(super) sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
 }
 
 impl EventSink {
     /// Emit an event by value without needing `&mut self`.
-    fn emit_event(&self, event: AgentEvent) {
+    pub(super) fn emit_event(&self, event: AgentEvent) {
         let _ = self.sender.send(Ok(event));
     }
 }
@@ -1745,67 +1688,6 @@ fn emit_goal_event_from_result(
             });
         }
         _ => {}
-    }
-}
-
-fn drain_next_pending_queue(config: &AgentConfig, emitter: &mut EventEmitter) -> Vec<AgentMessage> {
-    let steering = drain_steering_queue(config, emitter);
-    if steering.is_empty() {
-        drain_follow_up_queue(config, emitter)
-    } else {
-        steering
-    }
-}
-
-fn drain_steering_queue(config: &AgentConfig, emitter: &mut EventEmitter) -> Vec<AgentMessage> {
-    let messages = take_messages(&emitter.context.steering_queue, config.steering_queue_mode);
-    emit_queue_drained(emitter, QueueKind::Steering, messages.len());
-    messages
-}
-
-fn drain_follow_up_queue(config: &AgentConfig, emitter: &mut EventEmitter) -> Vec<AgentMessage> {
-    let messages = take_messages(
-        &emitter.context.follow_up_queue,
-        config.follow_up_queue_mode,
-    );
-    emit_queue_drained(emitter, QueueKind::FollowUp, messages.len());
-    messages
-}
-
-/// Drain live input pushed by the controller into the running turn and route
-/// each item into the matching context queue via a persisted queue event.
-///
-/// `SteerNow` feeds the steering queue (injected at the next model call);
-/// `FollowUp` feeds the follow-up queue (starts a fresh turn after the current
-/// workflow drains). Both emit their queue events so the TUI and JSONL replay
-/// stay in sync — this is the only production emitter of `SteeringQueued` and
-/// `FollowUpQueued`.
-fn drain_live_steer_input(handle: &SteerInputHandle, emitter: &mut EventEmitter) {
-    for input in handle.drain() {
-        match input {
-            ActiveTurnInput::SteerNow(message) => {
-                emitter.emit(AgentEvent::SteeringQueued { message });
-            }
-            ActiveTurnInput::FollowUp(message) => {
-                emitter.emit(AgentEvent::FollowUpQueued { message });
-            }
-            ActiveTurnInput::PromoteFollowUpToSteer => {
-                let Some(message) = emitter.context.follow_up_queue.first().cloned() else {
-                    continue;
-                };
-                emitter.emit(AgentEvent::QueueDrained {
-                    kind: QueueKind::FollowUp,
-                    count: 1,
-                });
-                emitter.emit(AgentEvent::SteeringQueued { message });
-            }
-        }
-    }
-}
-
-fn emit_queue_drained(emitter: &mut EventEmitter, kind: QueueKind, count: usize) {
-    if count > 0 {
-        emitter.emit(AgentEvent::QueueDrained { kind, count });
     }
 }
 
@@ -2259,14 +2141,6 @@ async fn apply_compaction_result(
 
     let turn = emitter.context.turns.saturating_add(1);
     emit_effective_context_window(config, emitter, turn).await;
-}
-
-fn take_messages(queue: &[AgentMessage], mode: QueueMode) -> Vec<AgentMessage> {
-    let count = match mode {
-        QueueMode::All => queue.len(),
-        QueueMode::OneAtATime => usize::from(!queue.is_empty()),
-    };
-    queue.iter().take(count).cloned().collect()
 }
 
 fn terminates_tool_batch(tool_results: &[(AgentToolCall, ToolResult)]) -> bool {
