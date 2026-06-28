@@ -40,6 +40,7 @@ use crate::dialogs::{
 };
 use crate::input::{InputEvent, KeybindingAction};
 use crate::primitive::{Color, InputResult};
+use crate::tasks_browser::TaskBrowserState;
 use crate::terminal_image::{ImageRenderPolicy, TerminalImageCapabilities};
 use crate::widgets::{TodoDisplayItem, TodoDisplayStatus};
 
@@ -994,6 +995,20 @@ impl NeoChromeState {
         self.push_overlay(Overlay::new("trust", OverlayKind::TrustDialog(state)))
     }
 
+    pub fn push_task_browser_overlay(&mut self, state: TaskBrowserState) -> OverlayId {
+        if let Some(overlay) = self
+            .overlays
+            .iter_mut()
+            .find(|overlay| matches!(overlay.kind, OverlayKind::TaskBrowser(_)))
+        {
+            overlay.kind = OverlayKind::TaskBrowser(state);
+            let id = overlay.id;
+            self.focus_overlay(id);
+            return id;
+        }
+        self.push_overlay(Overlay::new("tasks", OverlayKind::TaskBrowser(state)))
+    }
+
     #[must_use]
     pub fn take_trust_dialog_result(&mut self) -> Option<crate::dialogs::TrustDialogResult> {
         let id = self.focused_overlay?;
@@ -1009,6 +1024,16 @@ impl NeoChromeState {
     pub fn focused_overlay_lines(&self, width: usize) -> Vec<String> {
         self.focused_overlay()
             .map_or_else(Vec::new, |overlay| overlay.render_lines(width, &self.theme))
+    }
+
+    #[must_use]
+    pub fn render_focused_full_screen_overlay(
+        &self,
+        width: usize,
+        height: usize,
+    ) -> Option<Vec<String>> {
+        self.focused_overlay()?
+            .render_full_screen_lines(width, height, &self.theme)
     }
 
     /// Height in terminal lines the focused overlay wants to occupy.
@@ -1037,6 +1062,7 @@ impl NeoChromeState {
                 | OverlayKind::CustomRegistryImport(_)
                 | OverlayKind::QuestionDialog(_)
                 | OverlayKind::TrustDialog(_)
+                | OverlayKind::TaskBrowser(_)
         )
     }
 
@@ -1549,7 +1575,25 @@ impl NeoChromeState {
                 | OverlayKind::QuestionDialog(_)
                 | OverlayKind::Approval(_)
                 | OverlayKind::TrustDialog(_)
+                | OverlayKind::TaskBrowser(_)
         )
+    }
+
+    #[must_use]
+    pub fn task_browser_state(&self) -> Option<&TaskBrowserState> {
+        let OverlayKind::TaskBrowser(state) = &self.focused_overlay()?.kind else {
+            return None;
+        };
+        Some(state)
+    }
+
+    pub fn task_browser_state_mut(&mut self) -> Option<&mut TaskBrowserState> {
+        let id = self.focused_overlay?;
+        let overlay = self.overlays.iter_mut().find(|overlay| overlay.id == id)?;
+        let OverlayKind::TaskBrowser(state) = &mut overlay.kind else {
+            return None;
+        };
+        Some(state)
     }
 }
 

@@ -2,6 +2,7 @@ use crate::{
     config::{self, AppConfig, neo_home, workspace_sessions_dir},
     mcp_ops::{self, authenticate_mcp_server_oauth},
     modes::sessions::{SessionPickerScope as SessionDataScope, session_summaries},
+    modes::task_browser,
     prompt_templates::{
         PromptTemplateLocation, discover_prompt_template_commands, expand_prompt_template_args,
         load_project_prompt_templates,
@@ -39,6 +40,7 @@ use neo_agent_core::{
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
     skills::SkillStore,
 };
+use neo_tui::tasks_browser::TaskBrowserAction;
 use neo_tui::{
     dialogs::{McpManagerOptions, McpServerRow, McpToolStatus},
     input::{InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager},
@@ -77,6 +79,7 @@ type ClipboardWriter = Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
 type GitStatusProvider = Arc<dyn Fn(&Path) -> Option<String> + Send + Sync>;
 
 const GIT_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const TASK_BROWSER_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const SHELL_FOREGROUND_TIMEOUT: Duration = Duration::from_secs(120);
 const SHELL_BACKGROUND_TIMEOUT: Duration = Duration::from_secs(600);
 const SHELL_MAX_OUTPUT_BYTES: usize = 200_000;
@@ -529,6 +532,7 @@ pub(crate) struct InteractiveController {
     git_status_provider: GitStatusProvider,
     last_git_status_refresh: Option<Instant>,
     git_status_refresh_interval: Duration,
+    last_task_browser_refresh: Option<Instant>,
     pending_exit_confirmation: Option<ExitConfirmation>,
     suspend_requested: bool,
     pending_custom_registry: Option<PendingCustomRegistry>,
@@ -989,6 +993,7 @@ impl InteractiveController {
             git_status_provider,
             last_git_status_refresh: Some(Instant::now()),
             git_status_refresh_interval: GIT_STATUS_REFRESH_INTERVAL,
+            last_task_browser_refresh: None,
             pending_exit_confirmation: None,
             suspend_requested: false,
             pending_custom_registry: None,
@@ -1482,6 +1487,7 @@ impl InteractiveController {
             if self.active_turn.is_some() {
                 self.refresh_git_status_if_due();
             }
+            self.maybe_refresh_task_browser().await;
             self.poll_pending_catalog_fetch().await;
             self.poll_pending_mcp_probe().await;
             self.tui.chrome_mut().advance_activity_frame();
@@ -1492,6 +1498,9 @@ impl InteractiveController {
 
     async fn handle_input_event(&mut self, event: InputEvent) -> Result<bool> {
         if self.handle_pending_approval_event(&event).await? {
+            return Ok(false);
+        }
+        if self.handle_task_browser_event(event.clone()).await? {
             return Ok(false);
         }
         if self.handle_rich_dialog_event(event.clone()).await? {
@@ -1635,6 +1644,156 @@ impl InteractiveController {
         }
         self.process_rich_dialog_result(result).await?;
         Ok(true)
+    }
+
+    async fn handle_task_browser_event(&mut self, event: InputEvent) -> Result<bool> {
+        if self.tui.chrome().task_browser_state().is_none() {
+            return Ok(false);
+        }
+        let Some(action) = self.task_browser_action_for_event(event) else {
+            return Ok(true);
+        };
+        self.apply_task_browser_action(action).await?;
+        Ok(true)
+    }
+
+    fn task_browser_action_for_event(&self, event: InputEvent) -> Option<TaskBrowserAction> {
+        match event {
+            InputEvent::Action(KeybindingAction::SelectUp) => Some(TaskBrowserAction::SelectUp),
+            InputEvent::Action(KeybindingAction::SelectDown) => Some(TaskBrowserAction::SelectDown),
+            InputEvent::Action(KeybindingAction::SelectPageUp) => {
+                Some(TaskBrowserAction::SelectPageUp)
+            }
+            InputEvent::Action(KeybindingAction::SelectPageDown) => {
+                Some(TaskBrowserAction::SelectPageDown)
+            }
+            InputEvent::Action(KeybindingAction::SelectConfirm) | InputEvent::Submit => self
+                .tui
+                .chrome()
+                .task_browser_state()
+                .map_or(Some(TaskBrowserAction::ToggleOutputFocus), |state| {
+                    if state.stop_confirmation_task_id().is_some() {
+                        Some(TaskBrowserAction::ConfirmStop)
+                    } else {
+                        Some(TaskBrowserAction::ToggleOutputFocus)
+                    }
+                }),
+            InputEvent::Action(KeybindingAction::SelectCancel) | InputEvent::Cancel => {
+                Some(TaskBrowserAction::Cancel)
+            }
+            InputEvent::Action(KeybindingAction::InputTab) | InputEvent::Insert('\t') => {
+                Some(TaskBrowserAction::ToggleFilter)
+            }
+            InputEvent::MoveHome => Some(TaskBrowserAction::SelectFirst),
+            InputEvent::MoveEnd => Some(TaskBrowserAction::SelectLast),
+            InputEvent::Insert('q' | 'Q') => Some(TaskBrowserAction::Close),
+            InputEvent::Insert('r' | 'R') => Some(TaskBrowserAction::Refresh),
+            InputEvent::Insert('s' | 'S') => Some(TaskBrowserAction::RequestStop),
+            InputEvent::Insert('o' | 'O') => Some(TaskBrowserAction::ToggleOutputFocus),
+            InputEvent::Key(key) => {
+                let actions = self.keybindings.matching_actions(&key);
+                OVERLAY_ACTION_PRIORITY
+                    .iter()
+                    .chain(std::iter::once(&KeybindingAction::InputTab))
+                    .copied()
+                    .find(|action| actions.contains(action))
+                    .and_then(|action| {
+                        self.task_browser_action_for_event(InputEvent::Action(action))
+                    })
+            }
+            _ => None,
+        }
+    }
+
+    async fn apply_task_browser_action(&mut self, action: TaskBrowserAction) -> Result<()> {
+        match action {
+            TaskBrowserAction::Refresh => {
+                self.refresh_task_browser().await;
+            }
+            TaskBrowserAction::Close => {
+                self.tui.chrome_mut().close_focused_overlay();
+            }
+            TaskBrowserAction::ConfirmStop => {
+                let task_id = self
+                    .tui
+                    .chrome_mut()
+                    .task_browser_state_mut()
+                    .and_then(|state| state.handle_action(TaskBrowserAction::ConfirmStop));
+                if let Some(task_id) = task_id {
+                    self.stop_task_from_browser(task_id).await;
+                }
+            }
+            TaskBrowserAction::Cancel => {
+                let result = self
+                    .tui
+                    .chrome_mut()
+                    .task_browser_state_mut()
+                    .and_then(|state| state.handle_action(TaskBrowserAction::Cancel));
+                if result.as_deref() == Some("__close__") {
+                    self.tui.chrome_mut().close_focused_overlay();
+                }
+            }
+            other => {
+                if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                    let _ = state.handle_action(other);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn refresh_task_browser(&mut self) {
+        let Some(config) = self.local_config.as_ref() else {
+            if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                state.set_footer_message("No config available");
+            }
+            return;
+        };
+        let tasks = config.background_tasks.list(false, 50).await;
+        let snapshot = task_browser::snapshots_to_browser_snapshot(&tasks);
+        if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+            state.apply_snapshot(&snapshot);
+            state.clear_footer_message();
+        }
+        self.last_task_browser_refresh = Some(Instant::now());
+    }
+
+    async fn maybe_refresh_task_browser(&mut self) {
+        if self.tui.chrome().task_browser_state().is_none() {
+            self.last_task_browser_refresh = None;
+            return;
+        }
+        let should_refresh = self
+            .last_task_browser_refresh
+            .is_none_or(|last_refresh| last_refresh.elapsed() >= TASK_BROWSER_REFRESH_INTERVAL);
+        if should_refresh {
+            self.refresh_task_browser().await;
+        }
+    }
+
+    async fn stop_task_from_browser(&mut self, task_id: String) {
+        let Some(config) = self.local_config.as_ref() else {
+            if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                state.set_footer_message("No config available");
+            }
+            return;
+        };
+        let result = config
+            .background_tasks
+            .stop(
+                &task_id,
+                "Stopped from Task Browser",
+                SHELL_MAX_OUTPUT_BYTES,
+            )
+            .await;
+        match result {
+            Ok(_) => self.refresh_task_browser().await,
+            Err(error) => {
+                if let Some(state) = self.tui.chrome_mut().task_browser_state_mut() {
+                    state.set_footer_message(error.to_string());
+                }
+            }
+        }
     }
 
     fn handle_paste_text(&mut self, text: &str) {
@@ -2691,9 +2850,17 @@ impl InteractiveController {
             self.push_status("No config available");
             return;
         };
-        let tasks = config.background_tasks.list(true, 50).await;
-        let result = neo_agent_core::tools::task_list_result(&tasks, true);
-        self.push_status(result.content);
+        let tasks = config.background_tasks.list(false, 50).await;
+        let snapshot = task_browser::snapshots_to_browser_snapshot(&tasks);
+        let mut state = self
+            .tui
+            .chrome()
+            .task_browser_state()
+            .cloned()
+            .unwrap_or_default();
+        state.apply_snapshot(&snapshot);
+        self.last_task_browser_refresh = Some(Instant::now());
+        self.tui.chrome_mut().push_task_browser_overlay(state);
     }
 
     fn handle_model_or_skill_slash_command(&mut self, prompt: &str) -> bool {
@@ -15217,7 +15384,7 @@ command = "python3"
     }
 
     #[tokio::test]
-    async fn slash_tasks_lists_shared_background_tasks() {
+    async fn slash_tasks_opens_task_browser_with_shared_background_tasks() {
         let temp = tempfile::tempdir().expect("tempdir");
         let sessions_dir = temp.path().join(".neo/sessions");
         let mut controller = InteractiveController::new_for_test(
@@ -15240,15 +15407,20 @@ command = "python3"
             .await
             .expect("show tasks");
 
-        assert!(transcript_has_status(
+        let browser = controller
+            .chrome()
+            .task_browser_state()
+            .expect("task browser opens");
+        assert_eq!(browser.snapshot().items().len(), 1);
+        assert_eq!(browser.snapshot().items()[0].id, "question-1");
+        assert!(!transcript_has_status(
             &controller,
             "active_background_tasks: 1"
         ));
-        assert!(transcript_has_status(&controller, "task_id: question-1"));
     }
 
     #[tokio::test]
-    async fn shell_mode_slash_tasks_lists_tasks_instead_of_running_shell_command() {
+    async fn shell_mode_slash_tasks_opens_browser_instead_of_running_shell_command() {
         let temp = tempfile::tempdir().expect("tempdir");
         let sessions_dir = temp.path().join(".neo/sessions");
         let mut controller = InteractiveController::new_for_test(
@@ -15272,12 +15444,283 @@ command = "python3"
             .await
             .expect("show tasks");
 
-        assert!(transcript_has_status(
+        let browser = controller
+            .chrome()
+            .task_browser_state()
+            .expect("task browser opens");
+        assert_eq!(browser.snapshot().items().len(), 1);
+        assert_eq!(browser.snapshot().items()[0].id, "question-1");
+        assert!(!controller.chrome().shell_running());
+        assert!(!transcript_has_status(
             &controller,
             "active_background_tasks: 1"
         ));
-        assert!(transcript_has_status(&controller, "task_id: question-1"));
-        assert!(!controller.chrome().shell_running());
+    }
+
+    #[tokio::test]
+    async fn task_browser_escape_closes_overlay_and_tab_toggles_filter() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            temp.path().to_path_buf(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        let config = test_config(temp.path(), sessions_dir);
+        config
+            .background_tasks
+            .start_question("question-1".to_owned(), "Pick one".to_owned())
+            .await;
+        controller.local_config = Some(config);
+        controller.type_text("/tasks");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("show tasks");
+
+        controller
+            .handle_input_event(InputEvent::Action(KeybindingAction::InputTab))
+            .await
+            .expect("toggle filter");
+        assert_eq!(
+            controller
+                .chrome()
+                .task_browser_state()
+                .expect("browser open")
+                .filter(),
+            neo_tui::tasks_browser::TaskBrowserFilter::Active
+        );
+
+        controller
+            .handle_input_event(InputEvent::Cancel)
+            .await
+            .expect("close browser");
+        assert!(controller.chrome().task_browser_state().is_none());
+    }
+
+    #[tokio::test]
+    async fn task_browser_refresh_updates_snapshot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            temp.path().to_path_buf(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        let config = test_config(temp.path(), sessions_dir);
+        config
+            .background_tasks
+            .start_question("question-1".to_owned(), "Pick one".to_owned())
+            .await;
+        controller.local_config = Some(config);
+        controller.type_text("/tasks");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("show tasks");
+
+        controller
+            .local_config
+            .as_ref()
+            .expect("config")
+            .background_tasks
+            .start_question("question-2".to_owned(), "Pick another".to_owned())
+            .await;
+        controller
+            .handle_input_event(InputEvent::Insert('r'))
+            .await
+            .expect("refresh browser");
+
+        let browser = controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser remains open");
+        assert_eq!(browser.snapshot().items().len(), 2);
+        assert!(
+            browser
+                .snapshot()
+                .items()
+                .iter()
+                .any(|item| item.id == "question-2")
+        );
+    }
+
+    #[tokio::test]
+    async fn task_browser_reopening_updates_existing_overlay_in_place() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            temp.path().to_path_buf(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        let config = test_config(temp.path(), sessions_dir);
+        config
+            .background_tasks
+            .start_question("question-1".to_owned(), "Pick one".to_owned())
+            .await;
+        controller.local_config = Some(config);
+        controller.type_text("/tasks");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("show tasks");
+        let overlay_count = controller.chrome().overlays().len();
+        let focused_overlay = controller.chrome().focused_overlay_id();
+
+        controller.show_background_tasks().await;
+
+        assert_eq!(controller.chrome().overlays().len(), overlay_count);
+        assert_eq!(controller.chrome().focused_overlay_id(), focused_overlay);
+        assert!(controller.chrome().task_browser_state().is_some());
+    }
+
+    #[tokio::test]
+    async fn task_browser_periodic_refresh_updates_open_browser() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            temp.path().to_path_buf(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        let config = test_config(temp.path(), sessions_dir);
+        config
+            .background_tasks
+            .start_question("question-1".to_owned(), "Pick one".to_owned())
+            .await;
+        controller.local_config = Some(config);
+        controller.type_text("/tasks");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("show tasks");
+
+        controller
+            .local_config
+            .as_ref()
+            .expect("config")
+            .background_tasks
+            .start_question("question-2".to_owned(), "Pick another".to_owned())
+            .await;
+        controller.last_task_browser_refresh =
+            Some(Instant::now() - TASK_BROWSER_REFRESH_INTERVAL - Duration::from_millis(1));
+        controller.maybe_refresh_task_browser().await;
+
+        let browser = controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser remains open");
+        assert_eq!(browser.snapshot().items().len(), 2);
+        assert!(controller.last_task_browser_refresh.is_some());
+    }
+
+    #[tokio::test]
+    async fn task_browser_stop_confirmation_stops_selected_task() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            temp.path().to_path_buf(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        let config = test_config(temp.path(), sessions_dir);
+        config
+            .background_tasks
+            .start_question("question-1".to_owned(), "Pick one".to_owned())
+            .await;
+        controller.local_config = Some(config);
+        controller.type_text("/tasks");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("show tasks");
+
+        controller
+            .handle_input_event(InputEvent::Insert('s'))
+            .await
+            .expect("request stop");
+        assert_eq!(
+            controller
+                .chrome()
+                .task_browser_state()
+                .expect("browser open")
+                .stop_confirmation_task_id(),
+            Some("question-1")
+        );
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("confirm stop");
+
+        let browser = controller
+            .chrome()
+            .task_browser_state()
+            .expect("browser remains open");
+        assert_eq!(
+            browser.snapshot().items()[0].status,
+            neo_tui::tasks_browser::TaskBrowserStatus::Stopped
+        );
+        assert_eq!(
+            controller
+                .local_config
+                .as_ref()
+                .expect("config")
+                .background_tasks
+                .snapshot("question-1")
+                .await
+                .expect("snapshot")
+                .status,
+            neo_agent_core::tools::BackgroundTaskStatus::Stopped
+        );
+    }
+
+    #[tokio::test]
+    async fn task_browser_enter_toggles_output_focus_without_stop_confirmation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join(".neo/sessions");
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            temp.path().to_path_buf(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        let config = test_config(temp.path(), sessions_dir);
+        config
+            .background_tasks
+            .start_question("question-1".to_owned(), "Pick one".to_owned())
+            .await;
+        controller.local_config = Some(config);
+        controller.type_text("/tasks");
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("show tasks");
+
+        controller
+            .handle_input_event(InputEvent::Submit)
+            .await
+            .expect("toggle output focus");
+
+        assert_eq!(
+            controller
+                .chrome()
+                .task_browser_state()
+                .expect("browser open")
+                .focus(),
+            neo_tui::tasks_browser::TaskBrowserFocus::Output
+        );
     }
 
     #[tokio::test]

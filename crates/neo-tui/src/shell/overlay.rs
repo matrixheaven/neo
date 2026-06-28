@@ -12,6 +12,7 @@ use crate::dialogs::{
     TextInputState, TrustDialogState,
 };
 use crate::input::KeybindingAction;
+use crate::tasks_browser::{TaskBrowserRenderer, TaskBrowserState};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OverlayId(u64);
@@ -92,6 +93,16 @@ impl Overlay {
     }
 
     #[must_use]
+    pub(super) fn render_full_screen_lines(
+        &self,
+        width: usize,
+        height: usize,
+        theme: &TuiTheme,
+    ) -> Option<Vec<String>> {
+        self.kind.full_screen_lines(width, height, theme)
+    }
+
+    #[must_use]
     pub(super) fn render_lines(&self, width: usize, theme: &TuiTheme) -> Vec<String> {
         self.kind
             .picker_lines(width, theme)
@@ -130,6 +141,7 @@ pub enum OverlayKind {
     TextInput(TextInputState),
     CustomRegistryImport(CustomRegistryImportState),
     TrustDialog(TrustDialogState),
+    TaskBrowser(TaskBrowserState),
 }
 
 impl OverlayKind {
@@ -193,6 +205,19 @@ impl OverlayKind {
     }
 
     #[must_use]
+    fn full_screen_lines(
+        &self,
+        width: usize,
+        height: usize,
+        theme: &TuiTheme,
+    ) -> Option<Vec<String>> {
+        let Self::TaskBrowser(state) = self else {
+            return None;
+        };
+        Some(TaskBrowserRenderer::new(state, *theme).render(width, height))
+    }
+
+    #[must_use]
     fn message_lines(&self) -> Option<Vec<String>> {
         let Self::Message(text) = self else {
             return None;
@@ -224,6 +249,7 @@ impl OverlayKind {
             | Self::McpAddForm(_)
             | Self::ChoicePicker(_)
             | Self::TrustDialog(_) => Some(16),
+            Self::TaskBrowser(_) => Some(0),
             _ => None,
         }
     }

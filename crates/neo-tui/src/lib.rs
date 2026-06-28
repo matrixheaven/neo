@@ -8,6 +8,7 @@ pub mod primitive;
 pub mod screen_output;
 pub mod searchable_list;
 pub mod shell;
+pub mod tasks_browser;
 pub mod terminal_image;
 pub mod token_estimate;
 pub mod transcript;

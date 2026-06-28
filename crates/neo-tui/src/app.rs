@@ -59,6 +59,11 @@ impl NeoTui {
         width: usize,
         height: usize,
     ) -> (Vec<String>, Option<CursorPos>) {
+        if let Some(mut lines) = render_full_screen_overlay_frame(&self.chrome, width, height) {
+            apply_gutter(&mut lines);
+            return (lines, None);
+        }
+
         let chrome_render = render_chrome(&mut self.chrome, width, height);
         let chrome_height = chrome_render.lines.len();
         if self.transcript.live_chrome_height() != chrome_height {
@@ -81,7 +86,20 @@ impl NeoTui {
     }
 }
 
+fn render_full_screen_overlay_frame(
+    app: &NeoChromeState,
+    width: usize,
+    height: usize,
+) -> Option<Vec<String>> {
+    if !app.focused_overlay_blocks_prompt() {
+        return None;
+    }
+    let content_width = frame_content_width(width);
+    app.render_focused_full_screen_overlay(content_width, height)
+}
+
 fn render_chrome(app: &mut NeoChromeState, width: usize, height: usize) -> ChromeRender {
+    let content_width = frame_content_width(width);
     if app.focused_overlay_blocks_prompt()
         && app.focused_overlay().is_some_and(|overlay| {
             !matches!(
@@ -90,7 +108,6 @@ fn render_chrome(app: &mut NeoChromeState, width: usize, height: usize) -> Chrom
             )
         })
     {
-        let content_width = frame_content_width(width);
         let overlay = app
             .render_focused_overlay(content_width)
             .unwrap_or_default();

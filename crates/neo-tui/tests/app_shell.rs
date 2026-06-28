@@ -3,6 +3,9 @@ use neo_tui::shell::{
     NeoChromeState, Overlay, OverlayKind, PickerItem, PromptEdit, SessionPickerItem,
     SessionPickerScope, SessionPickerState, StreamUpdate, ToolStatusKind,
 };
+use neo_tui::tasks_browser::{
+    TaskBrowserItem, TaskBrowserKind, TaskBrowserSnapshot, TaskBrowserState, TaskBrowserStatus,
+};
 use neo_tui::terminal_image::{
     ImageProtocolPreference, ImageRenderPolicy, TerminalImageCapabilities,
 };
@@ -36,6 +39,82 @@ fn render_transcript(width: usize, height: usize, transcript: &mut TranscriptPan
         .into_iter()
         .map(|line| neo_tui::primitive::strip_ansi(&line))
         .collect()
+}
+
+fn task_browser_item(id: &str, status: TaskBrowserStatus) -> TaskBrowserItem {
+    TaskBrowserItem {
+        id: id.to_owned(),
+        kind: TaskBrowserKind::Bash,
+        status,
+        title: "cargo test".to_owned(),
+        description: "cargo test".to_owned(),
+        elapsed: "00:05".to_owned(),
+        detail_lines: vec![format!("id:          {id}")],
+        preview_lines: vec!["running tests".to_owned()],
+        can_stop: status.is_active(),
+    }
+}
+
+#[test]
+fn task_browser_overlay_blocks_prompt_and_renders_own_footer() {
+    let mut app = NeoChromeState::new("neo", "test-session", "model", "/tmp/neo-ws");
+    let mut state = TaskBrowserState::new();
+    state.apply_snapshot(&TaskBrowserSnapshot::new(vec![task_browser_item(
+        "bash-1",
+        TaskBrowserStatus::Running,
+    )]));
+    app.push_task_browser_overlay(state);
+
+    assert!(app.focused_overlay_blocks_prompt());
+    assert!(app.focused_overlay_is_rich_dialog());
+
+    let mut tui = neo_tui::NeoTui::new(app, TranscriptPane::new(80, 20));
+    let (lines, cursor) = tui.render_frame(80, 20);
+    let plain = lines
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>();
+    let rendered = plain.join("\n");
+
+    assert!(cursor.is_none());
+    assert!(rendered.contains("TASK BROWSER"));
+    assert!(rendered.contains("Tasks [all]"));
+    assert!(rendered.contains("Detail"));
+    assert!(rendered.contains("Preview Output"));
+    assert!(rendered.contains("Q/Esc close"));
+    assert!(!rendered.contains("/tmp/neo-ws"));
+    assert_eq!(
+        plain
+            .iter()
+            .filter(|line| line.contains("Q/Esc close"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn task_browser_overlay_replaces_existing_transcript_body() {
+    let mut app = NeoChromeState::new("neo", "test-session", "model", "/tmp/neo-ws");
+    let mut state = TaskBrowserState::new();
+    state.apply_snapshot(&TaskBrowserSnapshot::new(vec![task_browser_item(
+        "bash-1",
+        TaskBrowserStatus::Running,
+    )]));
+    app.push_task_browser_overlay(state);
+
+    let mut transcript = TranscriptPane::new(80, 20);
+    transcript.push_status("old transcript line should be hidden");
+    let mut tui = neo_tui::NeoTui::new(app, transcript);
+    let (lines, cursor) = tui.render_frame(80, 20);
+    let rendered = lines
+        .into_iter()
+        .map(|line| neo_tui::primitive::strip_ansi(&line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(cursor.is_none());
+    assert!(rendered.contains("TASK BROWSER"));
+    assert!(!rendered.contains("old transcript line should be hidden"));
 }
 
 #[test]
