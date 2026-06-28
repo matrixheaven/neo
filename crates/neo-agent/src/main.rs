@@ -7,9 +7,7 @@ mod image_blob;
 mod log_capture;
 mod mcp_ops;
 mod modes;
-mod prompt_history;
-mod prompt_parts;
-mod prompt_templates;
+mod prompt;
 mod resources;
 mod rpc;
 mod themes;
@@ -460,7 +458,7 @@ fn run_output_for_mode(config: &AppConfig) -> cli::RunOutput {
 }
 
 fn prepare_prompt(prompt: Vec<String>, config: &AppConfig) -> anyhow::Result<Vec<String>> {
-    let prompt = prompt_templates::expand_prompt_template_args(
+    let prompt = prompt::templates::expand_prompt_template_args(
         prompt,
         &config.project_dir,
         config::global_prompts_dir().as_deref(),

@@ -3,7 +3,7 @@ use crate::{
     mcp_ops::{self, authenticate_mcp_server_oauth},
     modes::sessions::{SessionPickerScope as SessionDataScope, session_summaries},
     modes::task_browser,
-    prompt_templates::{
+    prompt::templates::{
         PromptTemplateLocation, discover_prompt_template_commands, expand_prompt_template_args,
         load_project_prompt_templates,
     },
@@ -560,7 +560,7 @@ pub(crate) struct InteractiveController {
     /// Workspace-scoped prompt history store. `None` for test controllers that
     /// do not exercise persistence. Real controllers seed `PromptState` from
     /// this on startup and append accepted prompts to it after each submit.
-    prompt_history: Option<crate::prompt_history::PromptHistoryStore>,
+    prompt_history: Option<crate::prompt::history::PromptHistoryStore>,
     /// Optional trust store override for tests. Production controllers created
     /// via `controller_for_config` initialize this from `~/.neo/trust.json`.
     trust_store: Option<crate::trust::ProjectTrustStore>,
@@ -3281,7 +3281,7 @@ impl InteractiveController {
             self.local_config.as_ref(),
             &self.completion_root,
         )?;
-        let content = crate::prompt_parts::expand_prompt_markers(
+        let content = crate::prompt::parts::expand_prompt_markers(
             &prompt,
             &self.paste_store,
             &self.image_attachment_store,
@@ -3517,7 +3517,7 @@ impl InteractiveController {
                 self.local_config.as_ref(),
                 &self.completion_root,
             )?;
-            let content = crate::prompt_parts::expand_prompt_markers(
+            let content = crate::prompt::parts::expand_prompt_markers(
                 &prompt,
                 &self.paste_store,
                 &self.image_attachment_store,
@@ -3655,7 +3655,7 @@ impl InteractiveController {
             self.push_status("Slash commands can't be queued — wait for the turn to finish");
             return;
         }
-        let content = crate::prompt_parts::expand_prompt_markers(
+        let content = crate::prompt::parts::expand_prompt_markers(
             prompt,
             &self.paste_store,
             &self.image_attachment_store,
@@ -3688,7 +3688,7 @@ impl InteractiveController {
         let text = self.tui.chrome().prompt().text.trim().to_owned();
         if !text.is_empty() {
             if self.active_turn.is_some() {
-                let content = crate::prompt_parts::expand_prompt_markers(
+                let content = crate::prompt::parts::expand_prompt_markers(
                     &text,
                     &self.paste_store,
                     &self.image_attachment_store,
@@ -4168,7 +4168,7 @@ impl InteractiveController {
 
     /// Replace the workspace prompt history store (test hook).
     #[cfg(test)]
-    fn set_prompt_history_store(&mut self, store: crate::prompt_history::PromptHistoryStore) {
+    fn set_prompt_history_store(&mut self, store: crate::prompt::history::PromptHistoryStore) {
         self.prompt_history = Some(store);
     }
 
@@ -6956,7 +6956,7 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     }
     // Seed the composer's in-memory history from the workspace bucket so Up/Down
     // can recall prompts submitted in earlier TUI sessions for this workspace.
-    controller.prompt_history = Some(crate::prompt_history::PromptHistoryStore::for_config(
+    controller.prompt_history = Some(crate::prompt::history::PromptHistoryStore::for_config(
         &config,
     ));
     controller.load_prompt_history();
@@ -13258,7 +13258,7 @@ command = "python3"
     #[tokio::test]
     async fn slash_new_preserves_loaded_prompt_history() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+        let store = crate::prompt::history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
         store.append(Some(SESSION_A), "remembered prompt").unwrap();
         let mut controller = controller_with_history_store(store);
         controller.active_session_id = Some(SESSION_A.to_owned());
@@ -13667,7 +13667,7 @@ command = "python3"
     /// Build a test controller with a temp-backed prompt history store so tests
     /// exercise the real load/append path without touching the user's home.
     fn controller_with_history_store(
-        store: crate::prompt_history::PromptHistoryStore,
+        store: crate::prompt::history::PromptHistoryStore,
     ) -> InteractiveController {
         let mut controller = InteractiveController::new_for_test(
             "neo",
@@ -13684,7 +13684,7 @@ command = "python3"
     #[tokio::test]
     async fn controller_loads_workspace_prompt_history_on_startup() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+        let store = crate::prompt::history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
         store
             .append(Some("prior-session"), "earlier prompt")
             .expect("seed earlier");
@@ -13712,7 +13712,7 @@ command = "python3"
     async fn submitted_prompt_is_persisted_to_workspace_history() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("prompt-history.jsonl");
-        let store = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+        let store = crate::prompt::history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
 
         let mut controller = controller_with_history_store(store);
 
@@ -13733,7 +13733,7 @@ command = "python3"
         );
 
         // A fresh controller on the same workspace bucket recalls it.
-        let store2 = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+        let store2 = crate::prompt::history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
         let controller2 = controller_with_history_store(store2);
         assert_eq!(
             controller2
@@ -13751,7 +13751,7 @@ command = "python3"
     async fn slash_commands_are_not_persisted_to_prompt_history() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("prompt-history.jsonl");
-        let store = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+        let store = crate::prompt::history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
 
         let mut controller = controller_with_history_store(store);
 
@@ -14301,7 +14301,7 @@ command = "python3"
     #[tokio::test]
     async fn prompt_history_is_shared_across_sessions_in_same_workspace() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store_a = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+        let store_a = crate::prompt::history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
 
         // Session A submits a prompt.
         let mut controller_a = controller_with_history_store(store_a);
@@ -14317,7 +14317,7 @@ command = "python3"
 
         // Session B starts fresh in the same workspace bucket and recalls A's
         // prompt via Up from an empty composer.
-        let store_b = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+        let store_b = crate::prompt::history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
         let mut controller_b = controller_with_history_store(store_b);
         controller_b
             .handle_input_event(InputEvent::Key(KeyId::new("up").expect("valid key")))
@@ -14333,7 +14333,7 @@ command = "python3"
         let dir_two = tempfile::tempdir().expect("temp dir two");
 
         let store_one =
-            crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir_one.path()));
+            crate::prompt::history::PromptHistoryStore::for_dir(PathBuf::from(dir_one.path()));
         let mut controller_one = controller_with_history_store(store_one);
         controller_one.type_text("workspace one");
         controller_one
@@ -14347,7 +14347,7 @@ command = "python3"
 
         // A different workspace bucket must not recall workspace one's prompt.
         let store_two =
-            crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir_two.path()));
+            crate::prompt::history::PromptHistoryStore::for_dir(PathBuf::from(dir_two.path()));
         let controller_two = controller_with_history_store(store_two);
         assert!(
             controller_two
@@ -14364,7 +14364,7 @@ command = "python3"
     #[tokio::test]
     async fn approval_up_down_does_not_recall_prompt_history() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+        let store = crate::prompt::history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
         store.append(None, "old prompt").expect("seed history");
         let mut controller = controller_with_history_store(store);
         // Composer is empty so any leaked Up would otherwise recall "old prompt".
@@ -14404,7 +14404,7 @@ command = "python3"
     #[tokio::test]
     async fn question_up_down_does_not_recall_prompt_history() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let store = crate::prompt_history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
+        let store = crate::prompt::history::PromptHistoryStore::for_dir(PathBuf::from(dir.path()));
         store.append(None, "old prompt").expect("seed history");
         let mut controller = controller_with_history_store(store);
 
@@ -15171,7 +15171,7 @@ command = "python3"
     #[tokio::test]
     async fn shell_mode_commands_do_not_enter_prompt_history() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = crate::prompt_history::PromptHistoryStore::for_dir(dir.path());
+        let store = crate::prompt::history::PromptHistoryStore::for_dir(dir.path());
         let mut controller = controller_with_history_store(store.clone());
         controller.set_shell_driver(Arc::new(|request| {
             Box::pin(async move {

@@ -17,7 +17,7 @@ use super::types::{
 use crate::{
     config::{self, AppConfig, workspace_sessions_dir},
     modes::{run, sessions},
-    prompt_templates::{self, PromptTemplateLocation},
+    prompt::templates::{self, PromptTemplateLocation},
 };
 
 pub async fn execute(config: &AppConfig) -> anyhow::Result<String> {
@@ -95,7 +95,7 @@ fn handle_get_commands(
     request: RpcRequest,
     output: &mut String,
 ) -> anyhow::Result<()> {
-    let commands = match prompt_templates::discover_prompt_template_commands(
+    let commands = match templates::discover_prompt_template_commands(
         &config.project_dir,
         config::global_prompts_dir().as_deref(),
         &config.prompt_templates,
