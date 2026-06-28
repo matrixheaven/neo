@@ -17,10 +17,7 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::fmt::Write as _;
-use std::fs;
 use std::io::{Write, stdout};
-use std::path::PathBuf;
-use std::time::SystemTime;
 
 use crossterm::{
     event::{
@@ -34,7 +31,12 @@ use crossterm::{
 use crate::primitive::visible_width;
 use crate::primitive::{truncate_width, wrap_width};
 
-const KITTY_SEQUENCE_PREFIX: &str = "\x1b_G";
+use super::debug_log::{check_line_widths, debug_log_enabled, write_debug_log, write_output_log};
+use super::kitty_image::{
+    collect_kitty_image_ids, delete_kitty_images, get_kitty_image_reserved_rows,
+    image_block_fits, is_image_line, push_image_block, reserved_render_rows,
+};
+
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
 
 /// Cursor position for prompt editing (row, col) in the rendered content.
@@ -47,10 +49,6 @@ pub struct CursorPos {
 /// A zero-width cursor marker embedded in rendered output.
 /// The renderer finds this marker, strips it, and positions the hardware cursor.
 pub const CURSOR_MARKER: &str = "\x1b_pi:c\x07";
-
-fn debug_log_enabled() -> bool {
-    env::var("NEO_TUI_DEBUG").is_ok_and(|v| v == "1")
-}
 
 fn is_termux_session() -> bool {
     env::var("TERMUX_VERSION").is_ok()
@@ -67,167 +65,34 @@ const fn height_change_requires_clear(height_changed: bool, is_termux: bool) -> 
     height_changed && !is_termux
 }
 
-fn write_output_log(label: &str, buffer: &str) -> std::io::Result<()> {
-    let mut file = create_debug_log_file(&format!("output-{label}"))?;
-    file.write_all(buffer.as_bytes())?;
-    file.flush()
-}
-
-fn create_debug_log_file(stem: &str) -> std::io::Result<fs::File> {
-    let path = debug_log_path(stem)?;
-    fs::File::create(path)
-}
-
-fn debug_log_path(stem: &str) -> std::io::Result<PathBuf> {
-    let dir = PathBuf::from("/tmp/neo-tui-debug");
-    fs::create_dir_all(&dir)?;
-    let timestamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    Ok(dir.join(format!("{stem}-{timestamp}.log")))
-}
-
-fn write_rendered_lines(
-    file: &mut fs::File,
-    heading: &str,
-    lines: &[String],
-) -> std::io::Result<()> {
-    writeln!(file, "{heading}")?;
-    for (index, line) in lines.iter().enumerate() {
-        let width = visible_width(line);
-        writeln!(file, "[{index}] (w={width}) {line}")?;
-    }
-    Ok(())
-}
-
-fn write_debug_log(
-    label: &str,
-    width: u16,
-    height: usize,
-    new_lines: &[String],
-    previous_lines: &[String],
-    extra: Option<&str>,
-) -> std::io::Result<()> {
-    let mut file = create_debug_log_file(label)?;
-    write_debug_log_header(&mut file, label, width, height, new_lines, previous_lines)?;
-    write_optional_debug_text(&mut file, extra)?;
-    write_debug_log_lines(&mut file, new_lines, previous_lines)?;
-    file.flush()
-}
-
-fn write_debug_log_lines(
-    file: &mut fs::File,
-    new_lines: &[String],
-    previous_lines: &[String],
-) -> std::io::Result<()> {
-    write_rendered_lines(file, "=== new_lines ===", new_lines)?;
-    write_rendered_lines(file, "=== previous_lines ===", previous_lines)
-}
-
-fn write_debug_log_header(
-    file: &mut fs::File,
-    label: &str,
-    width: u16,
-    height: usize,
-    new_lines: &[String],
-    previous_lines: &[String],
-) -> std::io::Result<()> {
-    writeln!(file, "[{label}] width={width} height={height}")?;
-    writeln!(
-        file,
-        "new_lines.len()={} previous_lines.len()={}",
-        new_lines.len(),
-        previous_lines.len()
-    )
-}
-
-fn write_optional_debug_text(file: &mut fs::File, extra: Option<&str>) -> std::io::Result<()> {
-    if let Some(text) = extra {
-        writeln!(file, "{text}")?;
-    }
-    Ok(())
-}
-
-fn write_width_crash_log(
-    width: u16,
-    new_lines: &[String],
-    offender_idx: usize,
-) -> std::io::Result<PathBuf> {
-    let path = debug_log_path("width-crash")?;
-    let mut file = fs::File::create(&path)?;
-    write_width_crash_body(&mut file, width, new_lines, offender_idx)?;
-    Ok(path)
-}
-
-fn write_width_crash_body(
-    file: &mut fs::File,
-    width: u16,
-    new_lines: &[String],
-    offender_idx: usize,
-) -> std::io::Result<()> {
-    write_width_crash_header(file, width, new_lines, offender_idx)?;
-    write_rendered_lines(file, "=== All rendered lines ===", new_lines)?;
-    file.flush()
-}
-
-fn write_width_crash_header(
-    file: &mut fs::File,
-    width: u16,
-    new_lines: &[String],
-    offender_idx: usize,
-) -> std::io::Result<()> {
-    writeln!(file, "Terminal width: {width}")?;
-    writeln!(file, "Offending line index: {offender_idx}")?;
-    writeln!(
-        file,
-        "Offending line visible width: {}",
-        visible_width(&new_lines[offender_idx])
-    )
-}
-
-fn check_line_widths(width: u16, new_lines: &[String]) -> std::io::Result<()> {
-    for (i, line) in new_lines.iter().enumerate() {
-        if visible_width(line) > usize::from(width) {
-            let path = write_width_crash_log(width, new_lines, i)?;
-            return Err(std::io::Error::other(format!(
-                "rendered line {i} exceeds terminal width ({} > {width}). crash log: {}",
-                visible_width(line),
-                path.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
 pub struct TuiRenderer {
-    previous_lines: Vec<String>,
-    previous_kitty_image_ids: BTreeSet<u32>,
+    pub(super) previous_lines: Vec<String>,
+    pub(super) previous_kitty_image_ids: BTreeSet<u32>,
     /// Content row index of the top of the visible viewport.
-    viewport_top: usize,
-    previous_viewport_top: usize,
+    pub(super) viewport_top: usize,
+    pub(super) previous_viewport_top: usize,
     /// Rendered content row currently occupied by the terminal cursor.
-    hardware_cursor_row: usize,
-    previous_width: u16,
-    previous_height: u16,
+    pub(super) hardware_cursor_row: usize,
+    pub(super) previous_width: u16,
+    pub(super) previous_height: u16,
     /// Whether this is the first render (no diff, just output everything).
-    first_render: bool,
+    pub(super) first_render: bool,
     /// Track terminal's working area (max lines ever rendered).
     /// Grows but doesn't shrink unless the renderer takes a clear path.
-    max_lines_rendered: usize,
+    pub(super) max_lines_rendered: usize,
     /// Logical end-of-content row.
-    cursor_row: usize,
+    pub(super) cursor_row: usize,
     /// Defaults to off; when enabled, a shrink below the historical high-water
     /// mark takes the full clear path.
-    clear_on_shrink: bool,
-    show_hardware_cursor: bool,
+    pub(super) clear_on_shrink: bool,
+    pub(super) show_hardware_cursor: bool,
 }
 
 #[derive(Clone, Copy)]
-struct RenderDimensions {
-    width: u16,
-    height: usize,
-    height_u16: u16,
+pub(super) struct RenderDimensions {
+    pub(super) width: u16,
+    pub(super) height: usize,
+    pub(super) height_u16: u16,
 }
 
 impl RenderDimensions {
@@ -247,10 +112,10 @@ struct RenderChangeFlags {
 }
 
 #[derive(Clone, Copy)]
-struct ViewportState {
-    previous_top: usize,
-    top: usize,
-    hardware_cursor_row: usize,
+pub(super) struct ViewportState {
+    pub(super) previous_top: usize,
+    pub(super) top: usize,
+    pub(super) hardware_cursor_row: usize,
 }
 
 impl ViewportState {
@@ -306,10 +171,10 @@ impl ViewportState {
 }
 
 #[derive(Clone, Copy)]
-struct ChangeRange {
-    first: usize,
-    last: usize,
-    append_start: bool,
+pub(super) struct ChangeRange {
+    pub(super) first: usize,
+    pub(super) last: usize,
+    pub(super) append_start: bool,
 }
 
 impl ChangeRange {
@@ -331,13 +196,13 @@ enum ChangedLinesRender {
     NeedsFullRender,
 }
 
-struct DiffRender {
-    buffer: String,
-    change_range: ChangeRange,
-    viewport: ViewportState,
-    move_target_row: usize,
-    render_end: usize,
-    final_cursor_row: usize,
+pub(super) struct DiffRender {
+    pub(super) buffer: String,
+    pub(super) change_range: ChangeRange,
+    pub(super) viewport: ViewportState,
+    pub(super) move_target_row: usize,
+    pub(super) render_end: usize,
+    pub(super) final_cursor_row: usize,
 }
 
 struct ConstrainedFrameLines {
@@ -627,62 +492,6 @@ impl TuiRenderer {
             return Some(true);
         }
         None
-    }
-
-    fn log_render_start(&self, dimensions: RenderDimensions, new_lines: &[String]) {
-        if !debug_log_enabled() {
-            return;
-        }
-
-        let _ = write_debug_log(
-            "render-start",
-            dimensions.width,
-            dimensions.height,
-            new_lines,
-            &self.previous_lines,
-            Some(&format!(
-                "previous_width={} previous_height={} previous_viewport_top={} viewport_top={} hardware_cursor_row={} first_render={} clear_on_shrink={}",
-                self.previous_width,
-                self.previous_height,
-                self.previous_viewport_top,
-                self.viewport_top,
-                self.hardware_cursor_row,
-                self.first_render,
-                self.clear_on_shrink
-            )),
-        );
-    }
-
-    fn log_diff_render(
-        &self,
-        dimensions: RenderDimensions,
-        new_lines: &[String],
-        diff_render: &DiffRender,
-    ) {
-        if !debug_log_enabled() {
-            return;
-        }
-
-        let _ = write_output_log("diff-render", &diff_render.buffer);
-        let _ = write_debug_log(
-            "diff-render",
-            dimensions.width,
-            dimensions.height,
-            new_lines,
-            &self.previous_lines,
-            Some(&format!(
-                "first_changed={} last_changed={} append_start={} prev_viewport_top={} viewport_top={} hardware_cursor_row={} move_target_row={move_target_row} render_end={render_end} final_cursor_row={final_cursor_row}",
-                diff_render.change_range.first,
-                diff_render.change_range.last,
-                diff_render.change_range.append_start,
-                diff_render.viewport.previous_top,
-                diff_render.viewport.top,
-                diff_render.viewport.hardware_cursor_row,
-                move_target_row = diff_render.move_target_row,
-                render_end = diff_render.render_end,
-                final_cursor_row = diff_render.final_cursor_row
-            )),
-        );
     }
 
     fn build_diff_render(
@@ -1031,91 +840,6 @@ fn extract_cursor_position(lines: &mut [String], height: usize) -> Option<Cursor
     None
 }
 
-fn is_image_line(line: &str) -> bool {
-    line.contains(KITTY_SEQUENCE_PREFIX) || line.contains("\x1b]1337;File=")
-}
-
-fn collect_kitty_image_ids(lines: &[String]) -> BTreeSet<u32> {
-    lines
-        .iter()
-        .flat_map(|line| extract_kitty_image_ids(line))
-        .collect()
-}
-
-fn extract_kitty_image_ids(line: &str) -> Vec<u32> {
-    let mut ids = Vec::new();
-    let mut rest = line;
-    while let Some(sequence_start) = rest.find(KITTY_SEQUENCE_PREFIX) {
-        rest = &rest[sequence_start + KITTY_SEQUENCE_PREFIX.len()..];
-        let Some(params_end) = rest.find(';') else {
-            break;
-        };
-        let params = &rest[..params_end];
-        for param in params.split(',') {
-            let Some((key, value)) = param.split_once('=') else {
-                continue;
-            };
-            if key == "i"
-                && let Ok(id) = value.parse::<u32>()
-                && id > 0
-            {
-                ids.push(id);
-            }
-        }
-        rest = &rest[params_end + 1..];
-    }
-    ids
-}
-
-fn extract_kitty_image_rows(line: &str) -> usize {
-    let Some(sequence_start) = line.find(KITTY_SEQUENCE_PREFIX) else {
-        return 1;
-    };
-    let params_start = sequence_start + KITTY_SEQUENCE_PREFIX.len();
-    let Some(params_end) = line[params_start..].find(';') else {
-        return 1;
-    };
-    let params = &line[params_start..params_start + params_end];
-    for param in params.split(',') {
-        let Some((key, value)) = param.split_once('=') else {
-            continue;
-        };
-        if key == "r"
-            && let Ok(rows) = value.parse::<usize>()
-        {
-            return rows.max(1);
-        }
-    }
-    1
-}
-
-fn get_kitty_image_reserved_rows(lines: &[String], index: usize, max_index: usize) -> usize {
-    let rows = extract_kitty_image_rows(lines.get(index).map_or("", String::as_str));
-    if rows <= 1 {
-        return 1;
-    }
-    let max_rows = rows
-        .min(max_index.saturating_sub(index) + 1)
-        .min(lines.len() - index);
-    let mut reserved_rows = 1;
-    while reserved_rows < max_rows {
-        let line = lines.get(index + reserved_rows).map_or("", String::as_str);
-        if is_image_line(line) || visible_width(line) > 0 {
-            break;
-        }
-        reserved_rows += 1;
-    }
-    reserved_rows
-}
-
-fn delete_kitty_images(ids: &BTreeSet<u32>) -> String {
-    let mut buffer = String::new();
-    for id in ids {
-        let _ = write!(buffer, "\x1b_Ga=d,d=I,i={id},q=2\x1b\\");
-    }
-    buffer
-}
-
 fn raw_changed_range(
     previous_lines: &[String],
     new_lines: &[String],
@@ -1191,79 +915,6 @@ fn render_changed_lines(
         index += 1;
     }
     ChangedLinesRender::Rendered { render_end }
-}
-
-fn reserved_render_rows(lines: &[String], index: usize, render_end: usize) -> usize {
-    if is_image_line(&lines[index]) {
-        get_kitty_image_reserved_rows(lines, index, render_end)
-    } else {
-        1
-    }
-}
-
-fn image_block_fits(
-    index: usize,
-    image_reserved_rows: usize,
-    viewport: ViewportState,
-    height: usize,
-) -> bool {
-    let image_start_screen_row = index.cast_signed() - viewport.top.cast_signed();
-    image_start_screen_row >= 0
-        && image_start_screen_row.cast_unsigned() + image_reserved_rows <= height
-}
-
-fn push_image_block(buffer: &mut String, line: &str, image_reserved_rows: usize) {
-    buffer.push_str("\x1b[2K");
-    for _ in 1..image_reserved_rows {
-        buffer.push_str("\r\n\x1b[2K");
-    }
-    let _ = write!(buffer, "\x1b[{}A", image_reserved_rows - 1);
-    buffer.push_str(line);
-    let _ = write!(buffer, "\x1b[{}B", image_reserved_rows - 1);
-}
-
-impl TuiRenderer {
-    fn expand_changed_range_for_kitty_images(
-        &self,
-        first_changed: usize,
-        last_changed: usize,
-        new_lines: &[String],
-    ) -> (usize, usize) {
-        let mut expanded_first = first_changed;
-        let mut expanded_last = last_changed;
-
-        for lines in [&self.previous_lines[..], new_lines] {
-            for index in 0..lines.len() {
-                if extract_kitty_image_ids(&lines[index]).is_empty() {
-                    continue;
-                }
-                let block_end =
-                    index + get_kitty_image_reserved_rows(lines, index, lines.len() - 1) - 1;
-                if index >= first_changed || (index <= last_changed && block_end >= first_changed) {
-                    expanded_first = expanded_first.min(index);
-                    expanded_last = expanded_last.max(block_end);
-                }
-            }
-        }
-
-        (expanded_first, expanded_last)
-    }
-
-    fn delete_changed_kitty_images(&self, first_changed: usize, last_changed: usize) -> String {
-        if last_changed < first_changed {
-            return String::new();
-        }
-        let mut ids = BTreeSet::new();
-        let max_line = last_changed.min(self.previous_lines.len().saturating_sub(1));
-        for index in first_changed..=max_line {
-            for id in
-                extract_kitty_image_ids(self.previous_lines.get(index).map_or("", String::as_str))
-            {
-                ids.insert(id);
-            }
-        }
-        delete_kitty_images(&ids)
-    }
 }
 
 impl Drop for TuiRenderer {
