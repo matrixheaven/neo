@@ -1,6 +1,6 @@
 use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
-use crate::primitive::{Color, Style, paint, visible_width};
+use crate::primitive::{Color, Style, visible_width};
 use crate::primitive::{Line, Span};
 use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
@@ -8,10 +8,13 @@ use crate::terminal_image::{
 use crate::transcript::PlanBoxComponent;
 use crate::transcript::ShellRunComponent;
 use crate::transcript::ToolCallComponent;
-use crate::widgets::box_draw;
 use serde::{Deserialize, Serialize};
 
 mod copy;
+mod render_banner;
+mod render_goal;
+mod render_status;
+mod render_thinking;
 
 /// Rich welcome-banner content rendered as a rounded box (matching Neo).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -312,20 +315,24 @@ impl TranscriptEntry {
         activity_frame: usize,
     ) -> Option<Vec<Line>> {
         let lines = match self {
-            Self::Banner(data) => render_welcome_banner(data, inner_width, theme),
-            Self::UserMessage(content) => render_user_message(content, inner_width, theme),
-            Self::Status { text, severity } => render_status(text, *severity, inner_width, theme),
+            Self::Banner(data) => render_banner::render_welcome_banner(data, inner_width, theme),
+            Self::UserMessage(content) => {
+                render_banner::render_user_message(content, inner_width, theme)
+            }
+            Self::Status { text, severity } => {
+                render_status::render_status(text, *severity, inner_width, theme)
+            }
             Self::QueuedMessage { text, is_steer } => {
-                render_queued_message(text, *is_steer, inner_width, theme)
+                render_banner::render_queued_message(text, *is_steer, inner_width, theme)
             }
             Self::AssistantMessage { content } => {
-                render_assistant_message(content, inner_width, theme)
+                render_banner::render_assistant_message(content, inner_width, theme)
             }
             Self::ThinkingBlock {
                 content,
                 phase,
                 expanded,
-            } => render_thinking_block(
+            } => render_thinking::render_thinking_block(
                 content,
                 *phase,
                 *expanded,
@@ -348,14 +355,16 @@ impl TranscriptEntry {
             Self::ToolRun { component } => render_tool_run(component, inner_width, theme),
             Self::ShellRun { component } => component.render(inner_width, theme),
             Self::ApprovalPrompt(data) => render_approval_prompt(data, inner_width, theme),
-            Self::Image { metadata, .. } => styled_wrap(metadata, inner_width, status_style(theme)),
+            Self::Image { metadata, .. } => {
+                styled_wrap(metadata, inner_width, render_status::status_style(theme))
+            }
             Self::Compaction {
                 phase,
                 percent,
                 compacted_message_count,
                 tokens_before,
                 tokens_after,
-            } => render_compaction(
+            } => render_status::render_compaction(
                 *phase,
                 *percent,
                 *compacted_message_count,
@@ -370,7 +379,7 @@ impl TranscriptEntry {
                 objective,
                 detail,
                 turns,
-            } => render_goal_card(
+            } => render_goal::render_goal_card(
                 *kind,
                 objective,
                 detail.as_deref(),
@@ -447,42 +456,6 @@ pub struct InlineImageRender {
     pub escape_sequence: String,
 }
 
-/// Wrap `text` and apply a bullet prefix to the first row, indenting the rest
-/// to align under the body (prefix width of spaces). This is the Neo
-/// "bullet + indented continuation" layout used by user/assistant messages.
-fn bulleted_wrap(text: &str, width: usize, prefix: &str, style: Style) -> Vec<Line> {
-    let prefix_width = visible_width(prefix);
-    // BUGFIX: previously this wrapped at the full `width` without subtracting
-    // the prefix, so the first rendered row was `prefix + width` columns wide
-    // and overflowed the terminal. Long CJK prompts (each char is 2 columns)
-    // hit this reliably and crashed the renderer's width invariant
-    // (`renderer.rs` `check_line_widths`). The body budget must reserve space
-    // for the prefix, mirroring `styled_wrap_with_prefix` and `render_markdown`.
-    let body_width = width.saturating_sub(prefix_width).max(1);
-    let indent = " ".repeat(prefix_width);
-    let mut rows = Vec::new();
-    for (i, line) in wrap_width(text, body_width).into_iter().enumerate() {
-        if i == 0 {
-            rows.push(Line::styled(format!("{prefix}{line}"), style));
-        } else {
-            rows.push(Line::styled(format!("{indent}{line}"), style));
-        }
-    }
-    if rows.is_empty() {
-        rows.push(Line::styled(prefix.to_owned(), style));
-    }
-    rows
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn severity_color(severity: StatusSeverity, theme: &TuiTheme) -> Color {
-    match severity {
-        StatusSeverity::Info => theme.brand,
-        StatusSeverity::Warning => theme.status_warn,
-        StatusSeverity::Error => theme.status_error,
-    }
-}
-
 pub(super) fn format_token_count_usize(tokens: usize) -> String {
     if tokens >= 1_000_000 {
         format!("{}m", tokens / 1_000_000)
@@ -493,79 +466,8 @@ pub(super) fn format_token_count_usize(tokens: usize) -> String {
     }
 }
 
-/// Number of thinking lines shown in the floating window (streaming) or as a
-/// compact preview. Matches Neo's `THINKING_PREVIEW_LINES = 2`.
-const THINKING_PREVIEW_LINES: usize = 2;
-
-/// Render the thinking block as a fixed-height floating window.
-///
-/// - **Streaming**: a braille-spinner header line
-///   `⠋ thinking...` followed by the *last* `THINKING_PREVIEW_LINES` wrapped
-///   rows. As new content streams in the window shows the tail, giving the
-///   impression of text scrolling up within a fixed 2-line height.
-/// - **Complete**: the *first* `THINKING_PREVIEW_LINES` rows prefixed with a
-///   `●` bullet, followed by a `… N more lines (ctrl+o to expand)` hint when
-///   the full text was longer. This keeps completed thinking compact instead
-///   of unbounded.
-fn render_thinking(
-    thinking: &str,
-    width: usize,
-    phase: ThinkingPhase,
-    expanded: bool,
-    theme: &TuiTheme,
-    activity_frame: usize,
-) -> Vec<Line> {
-    let style = thinking_style(theme);
-    let body_width = width.max(1).saturating_sub(2).max(1);
-    let wrapped = wrap_width(thinking, body_width);
-    let total = wrapped.len();
-    let mut rows = Vec::new();
-
-    if phase == ThinkingPhase::Streaming && !expanded {
-        // Streaming: spinner + tail window.
-        rows.push(Line::styled(
-            format!("{} thinking...", thinking_spinner(activity_frame)),
-            style,
-        ));
-        let start = total.saturating_sub(THINKING_PREVIEW_LINES);
-        for line in &wrapped[start..] {
-            rows.push(Line::styled(format!("  {line}"), style));
-        }
-        return rows;
-    }
-
-    if expanded {
-        for (i, line) in wrapped.iter().enumerate() {
-            if i == 0 {
-                rows.push(Line::styled(format!("● {line}"), style));
-            } else {
-                rows.push(Line::styled(format!("  {line}"), style));
-            }
-        }
-        return rows;
-    }
-
-    // Complete: head window + collapse hint.
-    let limit = THINKING_PREVIEW_LINES.min(total);
-    for (i, line) in wrapped.iter().take(limit).enumerate() {
-        if i == 0 {
-            rows.push(Line::styled(format!("● {line}"), style));
-        } else {
-            rows.push(Line::styled(format!("  {line}"), style));
-        }
-    }
-    if total > limit {
-        let remaining = total - limit;
-        rows.push(Line::styled(
-            format!("  … {remaining} more lines (ctrl+o to expand)"),
-            Style::default().fg(theme.text_muted),
-        ));
-    }
-    rows
-}
-
 /// Wrap `text` to `width` and emit each wrapped row as a styled [`Line`].
-fn styled_wrap(text: &str, width: usize, style: Style) -> Vec<Line> {
+pub(super) fn styled_wrap(text: &str, width: usize, style: Style) -> Vec<Line> {
     wrap_width(text, width.max(1))
         .into_iter()
         .map(|line| Line::styled(line, style))
@@ -724,399 +626,9 @@ fn styled_wrap_with_prefix(
     rows
 }
 
-/// Render the welcome banner as a rounded box with an ASCII-art logo and
-/// aligned metadata, matching Neo's `welcome.ts`.
-///
-/// Layout:
-/// ```text
-/// ╭──────╮
-/// │      │
-/// │  ▐█▛█▛█▌  Welcome to Neo!
-/// │  ▐█████▌  Send /help for help.
-/// │      │
-/// │  Directory: /path
-/// │  Session:   abc
-/// │  Model:     GLM
-/// │  ...
-/// │      │
-/// ╰──────╯
-/// ```
-fn render_welcome_banner(data: &BannerData, width: usize, theme: &TuiTheme) -> Vec<Line> {
-    use std::fmt::Write as _;
-    let logo = [
-        "\u{2590}\u{2588}\u{259b}\u{2588}\u{259b}\u{2588}\u{258c}",
-        "\u{2590}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{258c}",
-    ];
-    let gap = "  ";
-
-    // Build the content lines (plain text with ANSI via paint, to be padded).
-    let logo_color = Style::default().fg(theme.brand);
-    let title_style = Style::default().fg(theme.brand).bold();
-    let subtitle_style = Style::default().fg(theme.text_muted);
-    let label_style = Style::default().fg(theme.text_muted).bold();
-    let value_style = Style::default().fg(theme.text_primary);
-
-    let mut content: Vec<String> = Vec::new();
-    // blank line at top of box
-    content.push(String::new());
-    // logo + title / subtitle
-    let mut line0 = String::new();
-    let _ = write!(line0, "{}{}", paint(logo[0], logo_color), gap);
-    let mut rest0 = String::new();
-    if !data.title.is_empty() {
-        rest0.push_str(&paint(&data.title, title_style));
-    }
-    content.push(format!("{line0}{rest0}"));
-    let mut line1 = String::new();
-    let _ = write!(line1, "{}{}", paint(logo[1], logo_color), gap);
-    let mut rest1 = String::new();
-    if !data.subtitle.is_empty() {
-        rest1.push_str(&paint(&data.subtitle, subtitle_style));
-    }
-    content.push(format!("{line1}{rest1}"));
-    // blank line between logo and metadata
-    content.push(String::new());
-
-    // Metadata rows: label padded to a fixed width so colons align.
-    let label_w = 11usize;
-    let mut meta: Vec<(&str, &str)> = Vec::new();
-    if !data.directory.is_empty() {
-        meta.push(("Directory:", data.directory.as_str()));
-    }
-    if !data.session.is_empty() {
-        meta.push(("Session:", data.session.as_str()));
-    }
-    if !data.model.is_empty() {
-        meta.push(("Model:", data.model.as_str()));
-    }
-    if !data.version.is_empty() {
-        meta.push(("Version:", data.version.as_str()));
-    }
-    if let Some(m) = &data.mcp {
-        meta.push(("MCP:", m.as_str()));
-    }
-    for (label, value) in &meta {
-        let mut label_padded = label.to_string();
-        while visible_width(&label_padded) < label_w {
-            label_padded.push(' ');
-        }
-        let mut row = String::new();
-        let _ = write!(
-            row,
-            "{} {}",
-            paint(&label_padded, label_style),
-            paint(value, value_style)
-        );
-        content.push(row);
-    }
-    // blank line at bottom of box
-    content.push(String::new());
-
-    let border_style = Style::default().fg(theme.brand);
-    let mut rows = Vec::new();
-    rows.push(Line::raw(box_draw::top_border(width, border_style)));
-    for cline in &content {
-        rows.push(Line::raw(box_draw::content_line(
-            &format!(" {cline} "),
-            width,
-            border_style,
-        )));
-    }
-    rows.push(Line::raw(box_draw::bottom_border(width, border_style)));
-    rows.push(Line::raw(""));
-    rows
-}
-
-fn render_user_message(content: &str, width: usize, theme: &TuiTheme) -> Vec<Line> {
-    let style = Style::default().fg(theme.user_message);
-    bulleted_wrap(content, width, "✨ ", style)
-}
-
-/// Render a queued/steered message. Steer uses `↳` (brand color) to signal an
-/// immediate mid-turn injection; follow-up uses `↪` (muted) to signal a queued
-/// turn that runs after the current one.
-fn render_queued_message(text: &str, is_steer: bool, width: usize, theme: &TuiTheme) -> Vec<Line> {
-    let (prefix, style) = if is_steer {
-        ("↳ ", Style::default().fg(theme.brand).italic())
-    } else {
-        ("↪ ", Style::default().fg(theme.text_muted))
-    };
-    bulleted_wrap(text, width, prefix, style)
-}
-
-fn render_status(
-    text: &str,
-    severity: Option<StatusSeverity>,
-    width: usize,
-    theme: &TuiTheme,
-) -> Vec<Line> {
-    let Some(severity) = severity else {
-        return styled_wrap(text, width, status_style(theme));
-    };
-    let style = Style::default().fg(severity_color(severity, theme)).bold();
-    styled_wrap(text, width, style)
-}
-
-fn render_assistant_message(content: &str, width: usize, theme: &TuiTheme) -> Vec<Line> {
-    if content.is_empty() {
-        Vec::new()
-    } else {
-        crate::markdown::render_markdown(content, width, theme, "● ", "  ")
-    }
-}
-
-fn render_thinking_block(
-    content: &str,
-    phase: ThinkingPhase,
-    expanded: bool,
-    width: usize,
-    theme: &TuiTheme,
-    activity_frame: usize,
-) -> Vec<Line> {
-    if content.is_empty() {
-        Vec::new()
-    } else {
-        render_thinking(content, width, phase, expanded, theme, activity_frame)
-    }
-}
-
-fn thinking_spinner(activity_frame: usize) -> char {
-    const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-    SPINNER[activity_frame % SPINNER.len()]
-}
-
-fn compaction_pulse_char(activity_frame: usize) -> char {
-    // A subtle shimmer on the leading edge of the filled bar.
-    const PULSE: &[char] = &['▓', '▒', '▓', '█'];
-    PULSE[activity_frame % PULSE.len()]
-}
-
 fn render_tool_run(component: &ToolCallComponent, width: usize, theme: &TuiTheme) -> Vec<Line> {
     let mut component = component.clone();
     component.render_with_theme(width, theme)
-}
-
-fn render_compaction(
-    phase: Option<neo_agent_core::CompactionPhase>,
-    percent: u8,
-    compacted_message_count: usize,
-    tokens_before: usize,
-    tokens_after: usize,
-    width: usize,
-    theme: &TuiTheme,
-    activity_frame: usize,
-) -> Vec<Line> {
-    let is_complete = percent >= 100 && phase == Some(neo_agent_core::CompactionPhase::Applying);
-    if is_complete {
-        let text = format!(
-            "✔ Compaction complete: {compacted_message_count} messages · {} → {} tokens",
-            format_token_count_usize(tokens_before),
-            format_token_count_usize(tokens_after),
-        );
-        return styled_wrap(&text, width, Style::default().fg(theme.status_ok).bold());
-    }
-
-    let phase_label = phase.map_or_else(
-        || "Compacting".to_owned(),
-        |phase| match phase {
-            neo_agent_core::CompactionPhase::Estimating => "Estimating".to_owned(),
-            neo_agent_core::CompactionPhase::SelectingBoundary => "Selecting boundary".to_owned(),
-            neo_agent_core::CompactionPhase::Summarizing => "Summarizing".to_owned(),
-            neo_agent_core::CompactionPhase::Applying => "Applying".to_owned(),
-        },
-    );
-
-    // Warm-up -> working -> almost done colour progression.
-    let (label_color, bar_color) = match percent {
-        0..=29 => (theme.status_warn, theme.status_warn),
-        30..=69 => (theme.brand, theme.brand),
-        _ => (theme.status_ok, theme.status_ok),
-    };
-
-    let bar_width = 12;
-    let filled = ((percent as usize).min(100) * bar_width).div_ceil(100);
-    let empty = bar_width.saturating_sub(filled);
-
-    // Header: neutral product colour for context, bold for visibility.
-    let mut lines = Vec::new();
-    let header = format!(
-        "◈ Compacting context… {compacted_message_count} messages · {} tokens",
-        format_token_count_usize(tokens_before)
-    );
-    lines.extend(styled_wrap(
-        &header,
-        width,
-        Style::default().fg(theme.text_primary).bold(),
-    ));
-
-    // Progress line: fixed ◈ icon, phase label, animated bar, percentage.
-    let mut spans = vec![
-        Span::styled("◈ ", Style::default().fg(theme.brand).bold()),
-        Span::styled(
-            format!("{phase_label} "),
-            Style::default().fg(label_color).bold(),
-        ),
-        Span::styled("[", Style::default().fg(theme.text_muted)),
-    ];
-
-    // Filled portion with a subtle pulse on the leading edge.
-    if filled > 0 {
-        let pulse_char = compaction_pulse_char(activity_frame);
-        for i in 0..filled {
-            let ch = if i == filled - 1 { pulse_char } else { '█' };
-            spans.push(Span::styled(
-                ch.to_string(),
-                Style::default().fg(bar_color).bold(),
-            ));
-        }
-    }
-
-    // Empty portion.
-    for _ in 0..empty {
-        spans.push(Span::styled("░", Style::default().fg(theme.text_muted)));
-    }
-
-    spans.push(Span::styled("]", Style::default().fg(theme.text_muted)));
-    spans.push(Span::styled(
-        format!(" {percent}%"),
-        Style::default().fg(label_color).bold(),
-    ));
-    lines.push(Line::from_spans(spans));
-
-    lines
-}
-
-fn render_goal_card(
-    kind: GoalCardKind,
-    objective: &str,
-    detail: Option<&str>,
-    turns: Option<u32>,
-    width: usize,
-    theme: &TuiTheme,
-) -> Vec<Line> {
-    let chrome = GoalCardChrome::new(kind, theme);
-    let content = goal_card_content(&chrome, objective, detail, turns);
-    render_goal_card_rows(&content, width, &chrome, theme)
-}
-
-struct GoalCardChrome {
-    icon: &'static str,
-    label: &'static str,
-    color: crate::primitive::Color,
-}
-
-impl GoalCardChrome {
-    fn new(kind: GoalCardKind, theme: &TuiTheme) -> Self {
-        Self {
-            icon: goal_card_icon(kind),
-            label: goal_card_label(kind),
-            color: goal_card_color(kind, theme),
-        }
-    }
-
-    fn header(&self) -> String {
-        format!("{} {}", self.icon, self.label)
-    }
-}
-
-const GOAL_CARD_ICONS: [&str; 5] = ["▶", "⏸", "▶", "⏹", "✓"];
-const GOAL_CARD_LABELS: [&str; 5] = [
-    "GOAL STARTED",
-    "GOAL PAUSED",
-    "GOAL RESUMED",
-    "GOAL BLOCKED",
-    "GOAL COMPLETE",
-];
-
-fn goal_card_icon(kind: GoalCardKind) -> &'static str {
-    GOAL_CARD_ICONS[kind as usize]
-}
-
-fn goal_card_label(kind: GoalCardKind) -> &'static str {
-    GOAL_CARD_LABELS[kind as usize]
-}
-
-fn goal_card_color(kind: GoalCardKind, theme: &TuiTheme) -> crate::primitive::Color {
-    [
-        theme.brand,
-        theme.status_warn,
-        theme.brand,
-        theme.status_error,
-        theme.status_ok,
-    ][kind as usize]
-}
-
-fn goal_card_content(
-    chrome: &GoalCardChrome,
-    objective: &str,
-    detail: Option<&str>,
-    turns: Option<u32>,
-) -> Vec<String> {
-    let mut content: Vec<String> = Vec::new();
-    content.push(chrome.header());
-    content.push(String::new());
-    content.push(objective.to_owned());
-    if let Some(detail) = detail {
-        content.push(String::new());
-        content.push(detail.to_owned());
-    }
-    if let Some(turns) = turns {
-        content.push(String::new());
-        content.push(format!("Turns used: {turns}"));
-    }
-    content
-}
-
-fn render_goal_card_rows(
-    content: &[String],
-    width: usize,
-    chrome: &GoalCardChrome,
-    theme: &TuiTheme,
-) -> Vec<Line> {
-    let border_style = Style::default().fg(chrome.color);
-    let header_style = Style::default().fg(chrome.color).bold();
-    let body_style = Style::default().fg(theme.text_primary);
-    let inner_width = width.saturating_sub(4).max(1);
-    let mut rows: Vec<Line> = Vec::new();
-    rows.push(Line::raw(box_draw::top_border(width, border_style)));
-    for (idx, line) in content.iter().enumerate() {
-        let style = if idx == 0 { header_style } else { body_style };
-        rows.extend(render_goal_card_content_line(
-            line,
-            inner_width,
-            width,
-            border_style,
-            style,
-        ));
-    }
-    rows.push(Line::raw(box_draw::bottom_border(width, border_style)));
-    rows.push(Line::raw(""));
-    rows
-}
-
-fn render_goal_card_content_line(
-    line: &str,
-    inner_width: usize,
-    width: usize,
-    border_style: Style,
-    style: Style,
-) -> Vec<Line> {
-    let wrapped = wrap_width(line, inner_width);
-    if wrapped.is_empty() {
-        return vec![Line::raw(paint(
-            &box_draw::content_line("", width, border_style),
-            style,
-        ))];
-    }
-    wrapped
-        .into_iter()
-        .map(|part| {
-            Line::raw(paint(
-                &box_draw::content_line(&format!(" {part} "), width, border_style),
-                style,
-            ))
-        })
-        .collect()
 }
 
 fn render_skill_used(
@@ -1160,14 +672,6 @@ pub(super) fn skill_body(description: Option<&str>, args: Option<&str>) -> Optio
         })
 }
 
-fn status_style(theme: &TuiTheme) -> Style {
-    Style::default().fg(theme.text_muted)
-}
-
-fn thinking_style(theme: &TuiTheme) -> Style {
-    Style::default().fg(theme.text_muted).italic()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1184,7 +688,7 @@ mod tests {
             version: "0.1.0".to_owned(),
             mcp: None,
         };
-        let lines = render_welcome_banner(&data, 60, &TuiTheme::default());
+        let lines = render_banner::render_welcome_banner(&data, 60, &TuiTheme::default());
         for line in &lines {
             let width = crate::primitive::visible_width(&line.to_ansi());
             assert!(
