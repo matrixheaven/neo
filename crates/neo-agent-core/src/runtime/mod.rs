@@ -5,6 +5,7 @@
 //! all the code; submodules are extracted one domain at a time.
 
 mod chat_request;
+mod compaction_trigger;
 mod config;
 mod context;
 mod events;
