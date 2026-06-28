@@ -907,7 +907,7 @@ pub async fn add_mcp_server(
         tool_timeout_ms,
     };
 
-    let saved = config::upsert_mcp_server(&server, &config.config_path)?;
+    let saved = config::mutations::upsert_mcp_server(&server, &config.config_path)?;
 
     if !enabled {
         return Ok(format!("{saved}{mcp_name} added (disabled)\n"));

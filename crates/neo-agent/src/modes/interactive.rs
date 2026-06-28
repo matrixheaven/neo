@@ -4936,7 +4936,7 @@ impl InteractiveController {
         // Persist the selection to disk so the next session opens on the same
         // model the user chose, instead of reverting to a stale default.
         if let Some(config_path) = self.config_path()
-            && let Err(error) = crate::config_ops::set_default_model(&config_path, &selection.alias)
+            && let Err(error) = crate::config::mutations::set_default_model(&config_path, &selection.alias)
         {
             tracing::warn!("failed to persist default model: {error}");
         }
@@ -5167,7 +5167,7 @@ impl InteractiveController {
         let Some(config_path) = self.config_path() else {
             return;
         };
-        if let Err(err) = config::upsert_mcp_server(&config, &config_path) {
+        if let Err(err) = config::mutations::upsert_mcp_server(&config, &config_path) {
             self.push_status(format!("Failed to save MCP server: {err}"));
             return;
         }
@@ -5245,7 +5245,7 @@ impl InteractiveController {
         let Some(config_path) = self.config_path() else {
             return;
         };
-        if let Err(err) = config::set_mcp_server_enabled(id, new_enabled, &config_path) {
+        if let Err(err) = config::mutations::set_mcp_server_enabled(id, new_enabled, &config_path) {
             self.push_status(format!("Failed to update MCP server: {err}"));
             return;
         }
@@ -5264,7 +5264,7 @@ impl InteractiveController {
         let Some(config_path) = self.config_path() else {
             return;
         };
-        if let Err(err) = config::remove_mcp_server(id, &config_path) {
+        if let Err(err) = config::mutations::remove_mcp_server(id, &config_path) {
             self.push_status(format!("Failed to remove MCP server: {err}"));
             return;
         }
@@ -5300,7 +5300,7 @@ impl InteractiveController {
             return;
         };
         for id in ids {
-            if let Err(error) = crate::config_ops::remove_provider(&config_path, id) {
+            if let Err(error) = crate::config::mutations::remove_provider(&config_path, id) {
                 self.push_status(format!("Failed to remove provider {id}: {error}"));
             }
         }
@@ -5408,7 +5408,7 @@ impl InteractiveController {
             self.push_status("No config available");
             return;
         };
-        match crate::config_ops::add_provider_from_catalog_entry(
+        match crate::config::mutations::add_provider_from_catalog_entry(
             &config_path,
             provider_id,
             entry,
@@ -5525,7 +5525,7 @@ impl InteractiveController {
                 if let Some(add) = pending.pending_add {
                     match catalog.get(&add.provider_id) {
                         Some(entry) => {
-                            match crate::config_ops::add_provider_from_catalog_entry(
+                            match crate::config::mutations::add_provider_from_catalog_entry(
                                 &add.config_path,
                                 &add.provider_id,
                                 entry,

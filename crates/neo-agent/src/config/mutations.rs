@@ -1,4 +1,4 @@
-//! Config mutation operations for provider/model management.
+//! Config mutation operations for provider/model/MCP management.
 //!
 //! All functions read → modify → write `config.toml` atomically.
 
@@ -10,8 +10,9 @@ use std::path::Path;
 use anyhow::Context;
 use serde_json::json;
 
-use crate::config::{
-    AppConfig, FileConfig, ModelConfig, ProviderConfig, read_file_config, write_file_config,
+use super::{
+    AppConfig, FileConfig, McpConfig, McpServerConfig, ModelConfig, ProviderConfig,
+    read_file_config, write_file_config,
 };
 
 /// Add or replace a provider in config.toml.
@@ -152,6 +153,57 @@ pub fn list_providers(config: &AppConfig, json: bool) -> anyhow::Result<String> 
         let _ = writeln!(out, "\nDefault model: {}", config.default_model);
     }
     Ok(out)
+}
+
+pub fn upsert_mcp_server(server: &McpServerConfig, config_path: &Path) -> anyhow::Result<String> {
+    crate::mcp_ops::validate_mcp_server_config(server)?;
+    let mut config = read_file_config(config_path)?;
+    let mcp = config.mcp.get_or_insert_with(McpConfig::default);
+    if let Some(existing) = mcp
+        .servers
+        .iter_mut()
+        .find(|existing| existing.id == server.id)
+    {
+        *existing = server.clone();
+    } else {
+        mcp.servers.push(server.clone());
+    }
+    write_file_config(config_path, &config)?;
+    Ok(format!("added MCP server {}\n", server.id))
+}
+
+pub fn remove_mcp_server(server_id: &str, config_path: &Path) -> anyhow::Result<String> {
+    let mut config = read_file_config(config_path)?;
+    let Some(mcp) = config.mcp.as_mut() else {
+        anyhow::bail!("MCP server {server_id} is not configured");
+    };
+    let original_len = mcp.servers.len();
+    mcp.servers.retain(|server| server.id != server_id);
+    anyhow::ensure!(
+        mcp.servers.len() != original_len,
+        "MCP server {server_id} is not configured"
+    );
+    write_file_config(config_path, &config)?;
+    Ok(format!("removed MCP server {server_id}\n"))
+}
+
+pub fn set_mcp_server_enabled(
+    server_id: &str,
+    enabled: bool,
+    config_path: &Path,
+) -> anyhow::Result<String> {
+    let mut config = read_file_config(config_path)?;
+    let Some(server) = config
+        .mcp
+        .as_mut()
+        .and_then(|mcp| mcp.servers.iter_mut().find(|server| server.id == server_id))
+    else {
+        anyhow::bail!("MCP server {server_id} is not configured");
+    };
+    server.enabled = enabled;
+    write_file_config(config_path, &config)?;
+    let action = if enabled { "enabled" } else { "disabled" };
+    Ok(format!("{action} MCP server {server_id}\n"))
 }
 
 fn remove_provider_config(file_config: &mut FileConfig, provider_id: &str) {
@@ -498,7 +550,7 @@ model = "gpt-4.1"
     #[test]
     fn add_provider_from_catalog_entry_replaces_existing_provider_models() {
         let temp = TempDir::new().expect("temp dir");
-        let config_path = write_project_config(
+        let config_path = write_project_header(
             temp.path(),
             r#"
 default_model = "openai/old"
@@ -552,7 +604,7 @@ model = "stays"
     #[test]
     fn add_provider_syncs_default_provider_to_new_provider() {
         let temp = TempDir::new().expect("temp dir");
-        let config_path = write_project_config(
+        let config_path = write_project_header(
             temp.path(),
             r#"
 default_model = "deepseek/old"
@@ -590,12 +642,18 @@ model = "old"
         assert!(!written.contains("default_provider = \"deepseek\""));
     }
 
-    fn write_project_config(project_dir: &std::path::Path, content: &str) -> std::path::PathBuf {
+    fn write_project_header(project_dir: &std::path::Path, content: &str) -> std::path::PathBuf {
         let config_dir = project_dir.join(".neo");
         fs::create_dir_all(&config_dir).expect("create .neo");
         let config_path = config_dir.join("config.toml");
         fs::write(&config_path, content).expect("write config");
         config_path
+    }
+
+    /// Original test helper name preserved for the catalog tests that were
+    /// migrated from `config_ops.rs`.
+    fn write_project_config(project_dir: &std::path::Path, content: &str) -> std::path::PathBuf {
+        write_project_header(project_dir, content)
     }
 
     fn catalog_entry() -> catalog::CatalogEntry {

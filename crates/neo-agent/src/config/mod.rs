@@ -22,6 +22,7 @@ use crate::{
 };
 
 mod matching;
+pub(crate) mod mutations;
 mod paths;
 #[allow(unused_imports)]
 pub(crate) use paths::{
@@ -548,57 +549,6 @@ fn provider_api_key_env(
     providers
         .get(provider_id)
         .and_then(|provider| provider.api_key_env.clone())
-}
-
-pub fn upsert_mcp_server(server: &McpServerConfig, config_path: &Path) -> anyhow::Result<String> {
-    crate::mcp_ops::validate_mcp_server_config(server)?;
-    let mut config = read_file_config(config_path)?;
-    let mcp = config.mcp.get_or_insert_with(McpConfig::default);
-    if let Some(existing) = mcp
-        .servers
-        .iter_mut()
-        .find(|existing| existing.id == server.id)
-    {
-        *existing = server.clone();
-    } else {
-        mcp.servers.push(server.clone());
-    }
-    write_file_config(config_path, &config)?;
-    Ok(format!("added MCP server {}\n", server.id))
-}
-
-pub fn remove_mcp_server(server_id: &str, config_path: &Path) -> anyhow::Result<String> {
-    let mut config = read_file_config(config_path)?;
-    let Some(mcp) = config.mcp.as_mut() else {
-        anyhow::bail!("MCP server {server_id} is not configured");
-    };
-    let original_len = mcp.servers.len();
-    mcp.servers.retain(|server| server.id != server_id);
-    anyhow::ensure!(
-        mcp.servers.len() != original_len,
-        "MCP server {server_id} is not configured"
-    );
-    write_file_config(config_path, &config)?;
-    Ok(format!("removed MCP server {server_id}\n"))
-}
-
-pub fn set_mcp_server_enabled(
-    server_id: &str,
-    enabled: bool,
-    config_path: &Path,
-) -> anyhow::Result<String> {
-    let mut config = read_file_config(config_path)?;
-    let Some(server) = config
-        .mcp
-        .as_mut()
-        .and_then(|mcp| mcp.servers.iter_mut().find(|server| server.id == server_id))
-    else {
-        anyhow::bail!("MCP server {server_id} is not configured");
-    };
-    server.enabled = enabled;
-    write_file_config(config_path, &config)?;
-    let action = if enabled { "enabled" } else { "disabled" };
-    Ok(format!("{action} MCP server {server_id}\n"))
 }
 
 fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {

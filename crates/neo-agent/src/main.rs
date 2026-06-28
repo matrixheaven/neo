@@ -1,7 +1,6 @@
 mod cli;
 mod clipboard;
 mod config;
-mod config_ops;
 mod extension_commands;
 mod image_blob;
 mod log_capture;
@@ -237,7 +236,7 @@ fn dispatch_model_command(config: &AppConfig, command: ModelCommand) -> anyhow::
             max_context_tokens,
             capabilities,
             display_name,
-        } => config_ops::add_model(
+        } => config::mutations::add_model(
             &config.config_path,
             &alias,
             config::ModelConfig {
@@ -249,8 +248,8 @@ fn dispatch_model_command(config: &AppConfig, command: ModelCommand) -> anyhow::
                 display_name,
             },
         ),
-        ModelCommand::Remove { alias } => config_ops::remove_model(&config.config_path, &alias),
-        ModelCommand::Set { alias } => config_ops::set_default_model(&config.config_path, &alias),
+        ModelCommand::Remove { alias } => config::mutations::remove_model(&config.config_path, &alias),
+        ModelCommand::Set { alias } => config::mutations::set_default_model(&config.config_path, &alias),
     }
 }
 
@@ -267,7 +266,7 @@ async fn dispatch_provider_command(
     command: ProviderCommand,
 ) -> anyhow::Result<String> {
     match command {
-        ProviderCommand::List { json } => config_ops::list_providers(config, json),
+        ProviderCommand::List { json } => config::mutations::list_providers(config, json),
         ProviderCommand::Add {
             provider_id,
             r#type,
@@ -283,7 +282,7 @@ async fn dispatch_provider_command(
             api_key_env,
         ),
         ProviderCommand::Remove { provider_id } => {
-            config_ops::remove_provider(&config.config_path, &provider_id)
+            config::mutations::remove_provider(&config.config_path, &provider_id)
         }
         ProviderCommand::Catalog { command } => dispatch_catalog_command(config, command).await,
     }
@@ -303,7 +302,7 @@ fn add_provider(
                 .ok_or_else(|| anyhow::anyhow!("unsupported provider type: {value}"))
         })
         .transpose()?;
-    config_ops::add_provider(
+    config::mutations::add_provider(
         &config.config_path,
         provider_id,
         config::ProviderConfig {
@@ -330,7 +329,7 @@ async fn dispatch_catalog_command(
             api_key,
             default_model,
         } => {
-            config_ops::catalog_add_provider(
+            config::mutations::catalog_add_provider(
                 &config.config_path,
                 &provider_id,
                 api_key.as_deref(),
@@ -378,14 +377,14 @@ async fn dispatch_mcp_command(config: &AppConfig, command: McpCommand) -> anyhow
             .await?)
         }
         McpCommand::Del { mcp_name } => {
-            Ok(config::remove_mcp_server(&mcp_name, &config.config_path)?)
+            Ok(config::mutations::remove_mcp_server(&mcp_name, &config.config_path)?)
         }
-        McpCommand::Disable { mcp_name } => Ok(config::set_mcp_server_enabled(
+        McpCommand::Disable { mcp_name } => Ok(config::mutations::set_mcp_server_enabled(
             &mcp_name,
             false,
             &config.config_path,
         )?),
-        McpCommand::Enable { mcp_name } => Ok(config::set_mcp_server_enabled(
+        McpCommand::Enable { mcp_name } => Ok(config::mutations::set_mcp_server_enabled(
             &mcp_name,
             true,
             &config.config_path,
