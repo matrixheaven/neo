@@ -35,9 +35,8 @@ use neo_agent_core::{
 };
 use neo_tui::tasks_browser::TaskBrowserAction;
 use neo_tui::{
-    input::{InputEvent, InputParser, KeyId, KeybindingAction, KeybindingsManager},
+    input::{InputEvent, KeyId, KeybindingAction, KeybindingsManager},
     primitive::InputResult,
-    screen_output::TuiRenderer,
     shell::{
         ApprovalChoice, ApprovalResult, ContextWindow,
         NeoChromeState, OverlayKind, PickerItem, PromptEdit, SessionPickerItem,
@@ -114,6 +113,9 @@ mod image_capabilities;
 use image_capabilities::terminal_image_capabilities_for_policy;
 
 mod turn;
+
+mod terminal_io;
+use terminal_io::{NeoTerminal, RawStdinEvents, TerminalEvents};
 
 mod model_picker;
 use model_picker::{context_window_from_picker_item, picker_catalogs_for_config};
@@ -3350,172 +3352,6 @@ fn split_first_prompt_token(prompt: &str) -> Option<(&str, &str)> {
     match prompt.find(char::is_whitespace) {
         Some(index) => Some((&prompt[..index], &prompt[index..])),
         None => Some((prompt, "")),
-    }
-}
-
-pub trait TerminalEvents {
-    fn next_input_event(&mut self) -> Result<InputEvent>;
-
-    fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
-        self.next_input_event().map(Some)
-    }
-}
-
-struct RawStdinEvents {
-    parser: InputParser,
-    pending: VecDeque<InputEvent>,
-    rx: std::sync::mpsc::Receiver<Vec<u8>>,
-    disconnected: bool,
-}
-
-impl RawStdinEvents {
-    fn new(keybindings: KeybindingsManager) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        // Spawn a background thread that blocks on raw stdin reads and forwards
-        // byte chunks through the channel. The thread exits on EOF or read error
-        // (e.g. terminal closed). The JoinHandle is intentionally dropped — the
-        // thread is daemon-like and will be reaped at process exit. When the
-        // `RawStdinEvents` is dropped, `rx` is dropped; the next `tx.send()` in
-        // the thread fails and the thread exits.
-        std::thread::spawn(move || {
-            let mut stdin = std::io::stdin();
-            let mut buf = [0u8; 4096];
-            loop {
-                match std::io::Read::read(&mut stdin, &mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if tx.send(buf[..n].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        Self {
-            parser: InputParser::with_keybindings(keybindings),
-            pending: VecDeque::new(),
-            rx,
-            disconnected: false,
-        }
-    }
-}
-
-impl Default for RawStdinEvents {
-    fn default() -> Self {
-        Self::new(KeybindingsManager::default())
-    }
-}
-
-impl TerminalEvents for RawStdinEvents {
-    fn next_input_event(&mut self) -> Result<InputEvent> {
-        loop {
-            if let Some(input) = self.poll_input_event(Duration::from_millis(250))? {
-                return Ok(input);
-            }
-            if self.disconnected {
-                anyhow::bail!("stdin reader closed");
-            }
-        }
-    }
-
-    fn poll_input_event(&mut self, timeout: Duration) -> Result<Option<InputEvent>> {
-        if let Some(input) = self.pending.pop_front() {
-            return Ok(Some(input));
-        }
-
-        if self.disconnected {
-            return Ok(None);
-        }
-
-        let deadline = Instant::now() + timeout;
-        let mut got_data = false;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match self.rx.recv_timeout(remaining) {
-                Ok(bytes) => {
-                    self.pending.extend(self.parser.feed_bytes(&bytes));
-                    // Drain any more immediately available bytes
-                    while let Ok(more_bytes) = self.rx.try_recv() {
-                        self.pending.extend(self.parser.feed_bytes(&more_bytes));
-                    }
-                    got_data = true;
-                    break;
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    self.disconnected = true;
-                    break;
-                }
-            }
-        }
-
-        // Only flush incomplete sequences when no data arrived within the timeout
-        // window. Flushing immediately after receiving data could break a partial
-        // escape sequence that hasn't fully arrived yet.
-        if !got_data {
-            self.pending.extend(self.parser.flush_timeout());
-        }
-
-        Ok(self.pending.pop_front())
-    }
-}
-
-struct NeoTerminal {
-    tui: TuiRenderer,
-}
-
-impl NeoTerminal {
-    fn enter() -> Result<Self> {
-        let tui = TuiRenderer::enter()?;
-        Ok(Self { tui })
-    }
-
-    fn draw_tui(&mut self, tui: &mut neo_tui::NeoTui) -> Result<()> {
-        let (cols, rows) = size()?;
-        if cols == 0 || rows == 0 {
-            return Ok(());
-        }
-        let (lines, cursor) = tui.render_frame(usize::from(cols), usize::from(rows));
-        // Single-buffer differential render: hand the whole frame to
-        // TuiRenderer::render, which diffs against the previous frame and
-        // rewrites only changed lines in place.
-        self.tui.render(lines, cursor)?;
-        Ok(())
-    }
-
-    fn reenter(&mut self) -> Result<()> {
-        // Force a full redraw on the next render so the resumed session paints
-        // cleanly after the terminal state was disturbed by SIGTSTP.
-        self.tui.suspend_resume()?;
-        Ok(())
-    }
-}
-
-/// Compose the full frame (body + chrome) as ANSI strings, without writing to
-/// the terminal. Used by tests that need to inspect what would be drawn.
-#[cfg(test)]
-impl Drop for NeoTerminal {
-    fn drop(&mut self) {
-        self.tui.leave();
-    }
-}
-
-impl NeoTerminal {
-    fn suspend(&mut self) -> Result<()> {
-        self.tui.suspend_prepare();
-        #[cfg(unix)]
-        {
-            rustix::process::kill_current_process_group(rustix::process::Signal::TSTP)?;
-        }
-        #[cfg(not(unix))]
-        {
-            eprintln!("Suspend to background is not supported on this platform");
-        }
-        self.reenter()
     }
 }
 
