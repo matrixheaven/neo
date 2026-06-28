@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use super::legacy::ApprovalRequest;
+use super::permission::ApprovalRequest;
 use crate::permissions::{ApprovalRuleStore, SessionApprovalKey};
 use crate::tools::BackgroundTaskManager;
 use crate::{

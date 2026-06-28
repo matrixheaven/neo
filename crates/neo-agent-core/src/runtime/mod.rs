@@ -11,6 +11,7 @@ mod context;
 mod events;
 mod image_blobs;
 mod legacy;
+mod permission;
 mod plan_orchestration;
 mod queue;
 mod skill_dispatch;
@@ -24,6 +25,7 @@ mod tool_dispatch;
 pub use config::*;
 pub use context::*;
 pub use legacy::*;
+pub use permission::*;
 pub use queue::*;
 
 // Submodules will be added here as code is extracted from legacy.rs.

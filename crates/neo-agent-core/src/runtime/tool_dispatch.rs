@@ -8,9 +8,10 @@ use super::events::{
     EventEmitter, emit_shell_finished, emit_shell_started,
     emit_terminal_events, make_tool_update_callback,
 };
-use super::legacy::{
-    AgentRuntimeError, PermissionPreparation, current_permission_mode,
-    permission_preparation_for_mode, prepare_tool_call,
+use super::legacy::AgentRuntimeError;
+use super::permission::{
+    PermissionPreparation, current_permission_mode, permission_preparation_for_mode,
+    prepare_tool_call,
 };
 use super::plan_orchestration::exit_plan_mode_has_reviewable_plan;
 use super::skill_dispatch::execute_invoke_skill;
