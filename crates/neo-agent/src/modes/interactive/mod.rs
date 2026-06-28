@@ -28,7 +28,7 @@ use crossterm::terminal::size;
 use neo_agent_core::{
     AgentEvent, AgentMessage, Content, McpConnectionManager, PendingQuestion,
     PermissionApprovalDecision, PermissionMode, ProcessSupervisor, QuestionResponse,
-    ShellCommandOrigin, ShellCommandOutcome, format_collected_answers,
+    ShellCommandOrigin, ShellCommandOutcome,
     mode::PlanMode,
     oauth::OAuthStore,
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
@@ -99,6 +99,8 @@ use mcp_manager::PendingMcpProbe;
 
 mod catalog_fetch;
 use catalog_fetch::{PendingCatalogFetch, PendingCustomRegistry};
+
+mod questions;
 
 type BoxedTurnFuture = Pin<Box<dyn Future<Output = Result<TurnOutcome>> + Send + 'static>>;
 type BoxedSessionFuture = Pin<Box<dyn Future<Output = Result<LoadedSessionTranscript>> + Send>>;
@@ -182,12 +184,6 @@ fn slash_permission_mode(prompt: &str) -> Option<PermissionMode> {
 /// permission state and never submit a turn or open a focused overlay.
 fn is_live_permission_slash(prompt: &str) -> bool {
     slash_permission_mode(prompt.trim()).is_some()
-}
-
-fn background_question_followup_prompt(task_id: &str) -> String {
-    format!(
-        "Background question `{task_id}` has been answered. Use TaskOutput with task_id `{task_id}` to read the answer, then continue the current work."
-    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3143,55 +3139,6 @@ impl InteractiveController {
     /// Register a pending `AskUser` question. Stores the oneshot response channel
     /// and synthesizes a `QuestionRequested` event for the TUI so it can display
     /// the question dialog.
-    fn register_pending_question(&mut self, pending: PendingQuestion) {
-        let id = pending.id.clone();
-        let questions = pending.questions.clone();
-        // Synthesize a QuestionRequested event for the TUI to display the dialog.
-        // The TUI's apply_agent_event will push a question overlay (implemented by
-        // the TUI subagent).
-        self.tui
-            .chrome_mut()
-            .apply_agent_event(AgentEvent::QuestionRequested {
-                turn: 0,
-                id: id.clone(),
-                questions: questions.clone(),
-            });
-        self.pending_questions
-            .insert(id.clone(), pending.response_tx);
-        self.pending_question_prompts.insert(id, questions);
-    }
-
-    /// Resolve a pending question by sending the user's answers through the
-    /// stored oneshot channel.
-    async fn resolve_question(&mut self, id: &str, answers: Vec<String>) -> Result<()> {
-        if let Some(questions) = self.pending_question_prompts.remove(id) {
-            self.transcript_mut()
-                .push_transcript(neo_tui::transcript::TranscriptEntry::status(
-                    format_collected_answers(&questions, &answers),
-                ));
-        }
-        if let Some(tx) = self.pending_questions.remove(id) {
-            let _ = tx.send(QuestionResponse { answers });
-        }
-        if id.starts_with("question-") {
-            self.pending_background_question_followups
-                .push_back(background_question_followup_prompt(id));
-            self.start_pending_background_question_followups().await?;
-        }
-        Ok(())
-    }
-
-    async fn start_pending_background_question_followups(&mut self) -> Result<()> {
-        while self.active_turn.is_none() {
-            let Some(prompt) = self.pending_background_question_followups.pop_front() else {
-                break;
-            };
-            self.start_turn_with_prompt(vec![Content::text(prompt)], None, false);
-            self.drain_active_turn().await?;
-        }
-        Ok(())
-    }
-
     fn abort_active_turn(&mut self) {
         if let Some(turn) = self.active_turn.take() {
             turn.cancel_token.cancel();
