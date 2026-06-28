@@ -43,9 +43,11 @@ use neo_tui::{
         GoalModeStatus, NeoChromeState, OverlayKind, PickerItem, PromptEdit, SessionPickerItem,
         SessionPickerScope, StreamUpdate,
     },
-    terminal_image::{ImageProtocolPreference, TerminalImageCapabilities},
     transcript::{TranscriptPane, frame_content_width},
 };
+
+#[cfg(test)]
+use neo_tui::terminal_image::{ImageProtocolPreference, TerminalImageCapabilities};
 
 use tokio::{
     sync::{mpsc, oneshot},
@@ -104,6 +106,9 @@ mod questions;
 
 mod startup;
 pub use startup::{InteractiveOptions, StartupAction};
+
+mod image_capabilities;
+use image_capabilities::terminal_image_capabilities_for_policy;
 
 type BoxedTurnFuture = Pin<Box<dyn Future<Output = Result<TurnOutcome>> + Send + 'static>>;
 type BoxedSessionFuture = Pin<Box<dyn Future<Output = Result<LoadedSessionTranscript>> + Send>>;
@@ -3520,54 +3525,6 @@ impl InteractiveController {
     pub fn render_snapshot(&self) -> String {
         let mut transcript = self.tui.transcript().clone();
         render_transcript_snapshot(self.tui.chrome(), &mut transcript, 80, 24)
-    }
-}
-
-fn terminal_image_capabilities_for_policy(
-    protocol: ImageProtocolPreference,
-    env_var: impl Fn(&str) -> std::result::Result<String, env::VarError>,
-) -> TerminalImageCapabilities {
-    if matches!(protocol, ImageProtocolPreference::None) {
-        return TerminalImageCapabilities::default();
-    }
-
-    let term = env_var("TERM").unwrap_or_default().to_ascii_lowercase();
-    let term_program = env_var("TERM_PROGRAM")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let has_env = |name: &str| env_var(name).is_ok();
-    let conservative_multiplexer = has_env("TMUX")
-        || has_env("STY")
-        || has_env("SSH_CONNECTION")
-        || has_env("SSH_TTY")
-        || term.starts_with("screen")
-        || term.contains("tmux");
-    if conservative_multiplexer {
-        return TerminalImageCapabilities::default();
-    }
-
-    let static_hints = TerminalImageCapabilities::default()
-        .with_kitty(
-            has_env("KITTY_WINDOW_ID")
-                || has_env("WEZTERM_PANE")
-                || term.contains("kitty")
-                || term_program.contains("wezterm"),
-        )
-        .with_iterm2(term_program.contains("iterm"))
-        .with_sixel(term.contains("sixel") || has_env("SIXEL"));
-
-    match protocol {
-        ImageProtocolPreference::Kitty => {
-            TerminalImageCapabilities::default().with_kitty(static_hints.kitty())
-        }
-        ImageProtocolPreference::Iterm2 => {
-            TerminalImageCapabilities::default().with_iterm2(static_hints.iterm2())
-        }
-        ImageProtocolPreference::Sixel => {
-            TerminalImageCapabilities::default().with_sixel(static_hints.sixel())
-        }
-        ImageProtocolPreference::Auto => static_hints,
-        ImageProtocolPreference::None => TerminalImageCapabilities::default(),
     }
 }
 
