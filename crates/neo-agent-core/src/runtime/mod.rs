@@ -10,6 +10,7 @@ mod events;
 mod image_blobs;
 mod legacy;
 mod queue;
+mod skill_dispatch;
 mod stream_aggregator;
 mod tokens;
 
