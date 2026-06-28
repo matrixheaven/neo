@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use futures::{StreamExt, future, stream};
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
 use crate::providers::common::error::ProviderError;
@@ -9,7 +8,7 @@ use crate::providers::common::helpers::{reject_images, rounded_f64, token_usage_
 use crate::providers::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 
 use crate::{
-    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
+    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart,
     ModelClient, StopReason, TokenUsage, ToolSpec,
 };
 
@@ -43,7 +42,7 @@ impl OpenAiCompatibleClient {
         let mut builder = self
             .client
             .post(url)
-            .headers(headers(
+            .headers(super::headers(
                 &self.api_key,
                 &request.options.headers,
                 request.options.session_id.as_deref(),
@@ -80,27 +79,6 @@ impl ModelClient for OpenAiCompatibleClient {
             })
             .boxed()
     }
-}
-
-fn headers(
-    api_key: &str,
-    extra_headers: &BTreeMap<String, String>,
-    session_id: Option<&str>,
-) -> Result<HeaderMap, ProviderError> {
-    let mut headers = HeaderMap::new();
-    let authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
-        .map_err(|err| ProviderError::Header(format!("invalid authorization header: {err}")))?;
-    headers.insert(AUTHORIZATION, authorization);
-
-    crate::providers::common::http::inject_extra_headers(&mut headers, extra_headers)?;
-    if let Some(session_id) = session_id {
-        let value = HeaderValue::from_str(session_id).map_err(|err| {
-            ProviderError::Header(format!("invalid x-client-request-id header: {err}"))
-        })?;
-        headers.insert(HeaderName::from_static("x-client-request-id"), value);
-    }
-
-    Ok(headers)
 }
 
 fn request_body(request: &ChatRequest) -> Result<Value, ProviderError> {
@@ -236,16 +214,9 @@ fn content_part_body(part: &ContentPart) -> Value {
         ContentPart::Image { mime_type, data } => json!({
             "type": "image_url",
             "image_url": {
-                "url": image_url(mime_type, data),
+                "url": super::image_url(mime_type, data),
             },
         }),
-    }
-}
-
-fn image_url(mime_type: &str, data: &ImageData) -> String {
-    match data {
-        ImageData::Base64(data) => format!("data:{mime_type};base64,{data}"),
-        ImageData::Url(url) => url.clone(),
     }
 }
 
