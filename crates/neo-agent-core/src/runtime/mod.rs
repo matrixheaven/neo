@@ -5,6 +5,7 @@
 //! all the code; submodules are extracted one domain at a time.
 
 mod config;
+mod context;
 mod events;
 mod image_blobs;
 mod legacy;
@@ -15,6 +16,7 @@ mod tokens;
 // `pub use runtime::*;` in `lib.rs` continues to resolve without
 // logic or call-site changes during the split.
 pub use config::*;
+pub use context::*;
 pub use legacy::*;
 pub use queue::*;
 

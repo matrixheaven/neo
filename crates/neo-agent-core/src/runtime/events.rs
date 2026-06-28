@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::config::AgentConfig;
-use super::legacy::AgentContext;
+use super::context::AgentContext;
 
 pub(super) struct EventEmitter {
     pub(super) sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
