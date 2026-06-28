@@ -5,6 +5,8 @@ pub mod openai_compatible;
 pub mod openai_images;
 pub mod openai_responses;
 
+mod common;
+
 use crate::types::ContentPart;
 
 /// Extract text from content parts, joining with newlines.
