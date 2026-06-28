@@ -30,23 +30,7 @@ impl AnthropicMessagesClient {
     }
 
     async fn open_response(&self, request: ChatRequest) -> Result<reqwest::Response, AiError> {
-        let attempts = request.options.retries.unwrap_or(0).saturating_add(1);
-        let mut last_error = None;
-
-        for attempt in 0..attempts {
-            match self.open_response_once(&request).await {
-                Ok(response) => return Ok(response),
-                Err(err) if attempt + 1 < attempts && err.is_retryable() => {
-                    last_error = Some(err);
-                }
-                Err(err) => return Err(err.into_ai_error()),
-            }
-        }
-
-        Err(last_error.map_or_else(
-            || AiError::Stream("provider request failed without an error".to_owned()),
-            ProviderError::into_ai_error,
-        ))
+        super::common::http::open_response(&request, |req| Box::pin(self.open_response_once(req))).await
     }
 
     async fn open_response_once(
@@ -111,13 +95,7 @@ fn headers(
         HeaderValue::from_static("2023-06-01"),
     );
 
-    for (name, value) in extra_headers {
-        let name = HeaderName::from_bytes(name.as_bytes())
-            .map_err(|err| ProviderError::Header(format!("invalid header name {name}: {err}")))?;
-        let value = HeaderValue::from_str(value)
-            .map_err(|err| ProviderError::Header(format!("invalid header value {name}: {err}")))?;
-        headers.insert(name, value);
-    }
+    super::common::http::inject_extra_headers(&mut headers, extra_headers)?;
 
     Ok(headers)
 }
