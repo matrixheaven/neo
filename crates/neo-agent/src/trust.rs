@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, bail};
 
 const TRUST_FILE: &str = "trust.json";
-const CONTEXT_FILE_CANDIDATES: &[&str] = &["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
+pub(crate) const CONTEXT_FILE_CANDIDATES: &[&str] = &["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
 
 /// Where a trust decision originates: the current working directory or an
 /// ancestor that was explicitly trusted/untrusted.

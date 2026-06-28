@@ -15,13 +15,13 @@ use std::{
 use crate::config::expand_user_path;
 #[cfg(test)]
 use crate::config::expand_user_path_with_home;
+use crate::trust::CONTEXT_FILE_CANDIDATES;
 
 use anyhow::Context;
 use neo_agent_core::skills::{LoadedSkill, SkillStore, builtin::builtin_skills, discovery};
 
 const SYSTEM_PROMPT_FILE: &str = "SYSTEM.md";
 const APPEND_SYSTEM_PROMPT_FILE: &str = "APPEND_SYSTEM.md";
-const CONTEXT_FILE_CANDIDATES: &[&str] = &["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
 
 /// Load the system prompt for a turn.
 ///
