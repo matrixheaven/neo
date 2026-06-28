@@ -10,7 +10,7 @@ use futures::StreamExt;
 use neo_ai::{
     AiStreamEvent, ApiKind, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
     ModelCapabilities, ModelClient, ModelSpec, ProviderId, ReasoningEffort, RequestMetadata,
-    RequestOptions, StopReason, ToolSpec, providers::openai_compatible::OpenAiCompatibleClient,
+    RequestOptions, StopReason, ToolSpec, providers::openai::compatible::OpenAiCompatibleClient,
 };
 use serde_json::{Value, json};
 

@@ -12,8 +12,8 @@ use neo_ai::{
     StopReason, ToolCall, ToolSpec,
     providers::{
         anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
-        openai_compatible::OpenAiCompatibleClient, openai_images::OpenAiImagesClient,
-        openai_responses::OpenAiResponsesClient,
+        openai::compatible::OpenAiCompatibleClient, openai::images::OpenAiImagesClient,
+        openai::responses::OpenAiResponsesClient,
     },
 };
 use serde_json::{Value, json};

@@ -1,7 +1,7 @@
 //! Shared HTTP helpers: retry loop and extra-header injection.
 //!
 //! These are byte-for-byte identical across the four provider wire clients
-//! (`openai_responses`, `anthropic`, `openai_compatible`, `google`), so they
+//! (`openai::responses`, `anthropic`, `openai::compatible`, `google`), so they
 //! live here to avoid duplication.
 
 use std::collections::BTreeMap;

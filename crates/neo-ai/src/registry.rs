@@ -4,7 +4,7 @@ use crate::{
     AiError, ApiKind, ApiType, ModelCapabilities, ModelClient, ModelSpec, ProviderId,
     providers::{
         anthropic::AnthropicMessagesClient, google::GoogleGenerativeAiClient,
-        openai_compatible::OpenAiCompatibleClient, openai_responses::OpenAiResponsesClient,
+        openai::compatible::OpenAiCompatibleClient, openai::responses::OpenAiResponsesClient,
     },
 };
 #[derive(Debug, Clone, Default)]

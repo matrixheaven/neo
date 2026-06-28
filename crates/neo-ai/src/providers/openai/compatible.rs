@@ -4,9 +4,9 @@ use futures::{StreamExt, future, stream};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
-use super::common::error::ProviderError;
-use super::common::helpers::{reject_images, rounded_f64, token_usage_from};
-use super::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
+use crate::providers::common::error::ProviderError;
+use crate::providers::common::helpers::{reject_images, rounded_f64, token_usage_from};
+use crate::providers::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 
 use crate::{
     AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
@@ -31,7 +31,7 @@ impl OpenAiCompatibleClient {
     }
 
     async fn open_response(&self, request: ChatRequest) -> Result<reqwest::Response, AiError> {
-        super::common::http::open_response(&request, |req| Box::pin(self.open_response_once(req))).await
+        crate::providers::common::http::open_response(&request, |req| Box::pin(self.open_response_once(req))).await
     }
 
     async fn open_response_once(
@@ -92,7 +92,7 @@ fn headers(
         .map_err(|err| ProviderError::Header(format!("invalid authorization header: {err}")))?;
     headers.insert(AUTHORIZATION, authorization);
 
-    super::common::http::inject_extra_headers(&mut headers, extra_headers)?;
+    crate::providers::common::http::inject_extra_headers(&mut headers, extra_headers)?;
     if let Some(session_id) = session_id {
         let value = HeaderValue::from_str(session_id).map_err(|err| {
             ProviderError::Header(format!("invalid x-client-request-id header: {err}"))
@@ -213,7 +213,7 @@ fn content_text(content: &[ContentPart], role: &str) -> Result<String, ProviderE
 }
 
 fn text_content(content: &[ContentPart]) -> String {
-    super::collect_text_content(content, true)
+    crate::providers::collect_text_content(content, true)
 }
 
 fn user_content(content: &[ContentPart]) -> Value {

@@ -1,6 +1,6 @@
 use neo_ai::{
     AiStreamEvent, ChatMessage, ContentPart, ImageData, StopReason, ToolCall, ToolSpec,
-    collect_tool_arguments, providers::openai_compatible::normalize_openai_chat_sse,
+    collect_tool_arguments, providers::openai::compatible::normalize_openai_chat_sse,
 };
 use schemars::JsonSchema;
 use serde_json::{Value, json};
