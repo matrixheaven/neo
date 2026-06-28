@@ -1,29 +1,27 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    env, fs,
-    path::{Path, PathBuf},
+    collections::BTreeMap,
+    path::PathBuf,
     sync::{Arc, RwLock},
 };
 
-use anyhow::Context;
 use neo_agent_core::BackgroundTaskManager;
 use neo_agent_core::{PermissionMode, QueueMode, ToolExecutionMode};
 use neo_ai::ReasoningEffort;
-use neo_tui::{
-    input::{KeyId, KeybindingAction, KeybindingsManager},
-    terminal_image::ImageProtocolPreference,
-};
+use neo_tui::terminal_image::ImageProtocolPreference;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     cli::Cli,
-    themes::{self, ResolvedTheme},
+    themes::ResolvedTheme,
     trust,
 };
 
+mod loader;
 mod matching;
 pub(crate) mod mutations;
 mod paths;
+mod types;
+
 #[allow(unused_imports)]
 pub(crate) use paths::{
     default_config_path, expand_user_path, expand_user_path_with_home, global_prompts_dir,
@@ -31,41 +29,10 @@ pub(crate) use paths::{
 };
 pub(crate) use matching::scoped_models;
 
-const DEFAULT_MODEL: &str = "gpt-4.1";
-const DEFAULT_PROVIDER: &str = "openai";
-const DEFAULT_MODE: &str = "interactive";
-
-fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::{Deserialize, SeqAccess, Visitor};
-    struct StringOrVec;
-
-    impl<'de> Visitor<'de> for StringOrVec {
-        type Value = Vec<String>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-            formatter.write_str("a string or a list of strings")
-        }
-
-        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(vec![value.to_owned()])
-        }
-
-        fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: SeqAccess<'de>,
-        {
-            Vec::<String>::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
-        }
-    }
-
-    deserializer.deserialize_any(StringOrVec)
-}
+// Re-export config types for callers that access them via `crate::config::*`.
+pub use types::{McpConfig, McpServerConfig, McpTransport, ModelConfig, ProviderConfig};
+pub(crate) use types::FileConfig;
+pub(crate) use loader::{read_file_config, write_file_config};
 
 #[derive(Debug, Clone, Default)]
 pub struct ConfigOverrides {
@@ -136,6 +103,27 @@ pub struct AppConfig {
     pub config_path: PathBuf,
 }
 
+impl AppConfig {
+    /// The canonical `provider/model` display label for the configured default
+    /// model. This is the single source of truth for label formatting.
+    ///
+    /// `default_model` stores the model alias. If that alias exists in
+    /// `[models.*]`, the label is derived from the referenced provider/model.
+    /// Otherwise built-in bare model ids such as `gpt-4.1` are prefixed with
+    /// `default_provider`, while already-qualified values are used as-is.
+    #[must_use]
+    pub fn default_model_label(&self) -> String {
+        if let Some(model) = self.models.get(&self.default_model) {
+            return format!("{}/{}", model.provider, model.model);
+        }
+        if self.default_model.contains('/') {
+            self.default_model.clone()
+        } else {
+            format!("{}/{}", self.default_provider, self.default_model)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Defaults {
     pub mode: String,
@@ -180,22 +168,12 @@ pub struct RuntimeCompactionConfig {
     pub micro_keep_recent: usize,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TuiConfig {
-    #[serde(default)]
-    pub image_protocol: ImageProtocolPreference,
-    #[serde(default)]
-    pub fetch_remote_images: bool,
-    #[serde(default)]
-    pub keybindings: BTreeMap<String, Vec<String>>,
-}
-
 impl Default for RuntimeCompactionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_estimated_tokens: default_runtime_compaction_max_estimated_tokens(),
-            keep_recent_messages: default_runtime_compaction_keep_recent_messages(),
+            max_estimated_tokens: types::default_runtime_compaction_max_estimated_tokens(),
+            keep_recent_messages: types::default_runtime_compaction_keep_recent_messages(),
             trigger_ratio: 0.85,
             reserved_context_tokens: 50_000,
             max_recent_messages: 4,
@@ -206,570 +184,13 @@ impl Default for RuntimeCompactionConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ProviderConfig {
-    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
-    pub provider_type: Option<neo_ai::ApiType>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-    /// Inline API key stored directly in config.toml.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    /// Environment variable name that holds the API key.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key_env: Option<String>,
-}
-
-/// A model definition in `config.toml` `[models.<alias>]`.
-///
-/// Each model references a provider by id and specifies the actual model ID
-/// sent to the API, context window, and capabilities.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ModelConfig {
-    /// Provider id — must match a key in `[providers.<id>]`.
-    pub provider: String,
-    /// Actual model ID sent to the provider API.
-    pub model: String,
-    /// Maximum context window in tokens.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_context_tokens: Option<u32>,
-    /// Maximum output tokens (optional).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_output_tokens: Option<u32>,
-    /// Capability tags: `"streaming"`, `"tools"`, `"images"`, `"reasoning"`.
+pub struct TuiConfig {
     #[serde(default)]
-    pub capabilities: Vec<String>,
-    /// Human-readable display name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct McpConfig {
+    pub image_protocol: ImageProtocolPreference,
     #[serde(default)]
-    pub servers: Vec<McpServerConfig>,
-}
-
-/// Transport mechanism for an MCP server connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum McpTransport {
-    Stdio,
-    Http,
-    Sse,
-}
-
-impl McpTransport {
-    /// Returns the string representation used in config files.
-    #[must_use]
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Stdio => "stdio",
-            Self::Http => "http",
-            Self::Sse => "sse",
-        }
-    }
-}
-
-impl std::fmt::Display for McpTransport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpServerConfig {
-    pub id: String,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-    pub transport: McpTransport,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
+    pub fetch_remote_images: bool,
     #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    #[serde(default)]
-    pub headers: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub enabled_tools: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub disabled_tools: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub startup_timeout_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_timeout_ms: Option<u64>,
-}
-
-const fn default_enabled() -> bool {
-    true
-}
-
-const fn default_runtime_compaction_max_estimated_tokens() -> usize {
-    32_000
-}
-
-const fn default_runtime_compaction_keep_recent_messages() -> usize {
-    20
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct FileConfig {
-    pub(crate) default_model: Option<String>,
-    pub(crate) default_provider: Option<String>,
-    pub(crate) api_key_env: Option<String>,
-    pub(crate) providers: Option<BTreeMap<String, ProviderConfig>>,
-    /// Models defined inline via `[models.<alias>]` tables.
-    pub(crate) models: Option<BTreeMap<String, ModelConfig>>,
-    pub(crate) model_scope: Option<Vec<String>>,
-    pub(crate) prompt_templates: Option<Vec<String>>,
-    pub(crate) extra_skill_dirs: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
-    pub(crate) skill_path: Vec<String>,
-    pub(crate) sessions_dir: Option<PathBuf>,
-    pub(crate) permission_mode: Option<PermissionMode>,
-    pub(crate) defaults: Option<FileDefaults>,
-    pub(crate) runtime: Option<FileRuntimeConfig>,
-    pub(crate) tui: Option<FileTuiConfig>,
-    pub(crate) mcp: Option<McpConfig>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct FileDefaults {
-    pub(crate) mode: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct FileRuntimeConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) temperature: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) max_tokens: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) reasoning_effort: Option<ReasoningEffort>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) replay_reasoning: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) steering_queue_mode: Option<QueueMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) follow_up_queue_mode: Option<QueueMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) tool_execution_mode: Option<ToolExecutionMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) compaction: Option<FileRuntimeCompactionConfig>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct FileRuntimeCompactionConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) max_estimated_tokens: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) keep_recent_messages: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) trigger_ratio: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) reserved_context_tokens: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) max_recent_messages: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) micro_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) micro_keep_recent: Option<usize>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct FileTuiConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    image_protocol: Option<ImageProtocolPreference>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    fetch_remote_images: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    keybindings: Option<BTreeMap<String, Vec<String>>>,
-}
-
-impl AppConfig {
-    #[allow(clippy::too_many_lines)]
-    pub fn load(overrides: ConfigOverrides) -> anyhow::Result<Self> {
-        // There is exactly one config file: `~/.neo/config.toml` (or wherever
-        // `NEO_HOME` points). There is no project-local config anymore —
-        // providers/models/settings/skills/prompts/themes all live under the
-        // single neo home and are shared across every workspace.
-        let config_path = overrides.config_path.unwrap_or_else(default_config_path);
-        // `project_dir` is the *workspace identity* (used for trust keying,
-        // session bucketing, git status, `@file` sandboxing). It is NOT a config
-        // location. Default to the current working directory.
-        let project_dir = overrides.project_dir.map_or_else(env::current_dir, Ok)?;
-
-        let file_config = read_file_config(&config_path)?;
-        let (project_trusted, project_trust) =
-            resolve_project_trust_state(&project_dir, overrides.yolo, overrides.trust_store)?;
-        anyhow::ensure!(
-            !(overrides.yolo && overrides.auto),
-            "--yolo and --auto cannot be used together"
-        );
-
-        let default_model = file_config
-            .default_model
-            .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
-        let default_provider = file_config
-            .default_provider
-            .unwrap_or_else(|| DEFAULT_PROVIDER.to_owned());
-        let providers = file_config.providers.unwrap_or_default();
-        let models = file_config.models.unwrap_or_default();
-        let api_key_env = file_config
-            .api_key_env
-            .or_else(|| provider_api_key_env(&providers, &default_provider));
-        let model_scope = file_config.model_scope.unwrap_or_default();
-        let prompt_templates = file_config.prompt_templates.unwrap_or_default();
-        let extra_skill_dirs = file_config.extra_skill_dirs.unwrap_or_default();
-        let skill_path = file_config.skill_path;
-        let sessions_dir = file_config.sessions_dir.map_or_else(
-            || {
-                neo_home().map_or_else(
-                    || project_dir.join("sessions"),
-                    |home| home.join("sessions"),
-                )
-            },
-            expand_user_path,
-        );
-        let permission_mode = if overrides.yolo {
-            PermissionMode::Yolo
-        } else if overrides.auto {
-            PermissionMode::Auto
-        } else {
-            file_config.permission_mode.unwrap_or_default()
-        };
-        let runtime = runtime_from_file(file_config.runtime);
-        validate_runtime_config(&runtime)?;
-        let tui = tui_from_file(file_config.tui);
-        validate_tui_config(&tui)?;
-        let theme = themes::resolve_theme()?;
-        let mcp = file_config.mcp.unwrap_or_default();
-        let mode = file_config
-            .defaults
-            .and_then(|defaults| defaults.mode)
-            .unwrap_or_else(|| DEFAULT_MODE.to_owned());
-
-        Ok(Self {
-            default_model,
-            default_provider,
-            api_key_env,
-            providers,
-            models,
-            model_scope,
-            sessions_dir,
-            permission_mode,
-            live_permission_mode: Arc::new(RwLock::new(permission_mode)),
-            defaults: Defaults { mode },
-            runtime,
-            background_tasks: BackgroundTaskManager::new(),
-            tui,
-            theme,
-            mcp,
-            prompt_templates,
-            extra_skill_dirs,
-            skill_path,
-            project_trusted,
-            project_trust,
-            project_dir,
-            config_path,
-        })
-    }
-
-    /// The canonical `provider/model` display label for the configured default
-    /// model. This is the single source of truth for label formatting.
-    ///
-    /// `default_model` stores the model alias. If that alias exists in
-    /// `[models.*]`, the label is derived from the referenced provider/model.
-    /// Otherwise built-in bare model ids such as `gpt-4.1` are prefixed with
-    /// `default_provider`, while already-qualified values are used as-is.
-    #[must_use]
-    pub fn default_model_label(&self) -> String {
-        if let Some(model) = self.models.get(&self.default_model) {
-            return format!("{}/{}", model.provider, model.model);
-        }
-        if self.default_model.contains('/') {
-            self.default_model.clone()
-        } else {
-            format!("{}/{}", self.default_provider, self.default_model)
-        }
-    }
-}
-
-fn resolve_project_trust_state(
-    project_dir: &Path,
-    yolo: bool,
-    trust_store: Option<trust::ProjectTrustStore>,
-) -> anyhow::Result<(bool, trust::ProjectTrustState)> {
-    let project_dir = project_dir.canonicalize().with_context(|| {
-        format!(
-            "failed to canonicalize project dir {}",
-            project_dir.display()
-        )
-    })?;
-
-    if yolo {
-        return Ok((false, trust::ProjectTrustState::NotRequired));
-    }
-
-    let inputs = trust::collect_project_trust_inputs(&project_dir)?;
-    if inputs.detected.is_empty() && inputs.parent_candidates.is_empty() {
-        return Ok((true, trust::ProjectTrustState::NotRequired));
-    }
-
-    let store = trust_store.map_or_else(trust::ProjectTrustStore::from_home, Ok)?;
-    match trust::resolve_project_trust_decision(&project_dir, false, &store)? {
-        trust::ProjectTrustDecision::Trusted { source } => Ok((
-            true,
-            trust::ProjectTrustState::Trusted {
-                target: source.target(&project_dir),
-            },
-        )),
-        trust::ProjectTrustDecision::Untrusted { source } => Ok((
-            false,
-            trust::ProjectTrustState::Untrusted {
-                target: source.target(&project_dir),
-            },
-        )),
-        trust::ProjectTrustDecision::Unknown { inputs } => {
-            Ok((false, trust::ProjectTrustState::Unknown { inputs }))
-        }
-    }
-}
-
-fn provider_api_key_env(
-    providers: &BTreeMap<String, ProviderConfig>,
-    provider_id: &str,
-) -> Option<String> {
-    providers
-        .get(provider_id)
-        .and_then(|provider| provider.api_key_env.clone())
-}
-
-fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
-    let Some(runtime) = runtime else {
-        return RuntimeConfig::default();
-    };
-    RuntimeConfig {
-        temperature: runtime.temperature,
-        max_tokens: runtime.max_tokens,
-        reasoning_effort: runtime.reasoning_effort,
-        replay_reasoning: runtime.replay_reasoning.unwrap_or(true),
-        steering_queue_mode: runtime.steering_queue_mode.unwrap_or(QueueMode::All),
-        follow_up_queue_mode: runtime.follow_up_queue_mode.unwrap_or(QueueMode::All),
-        tool_execution_mode: runtime
-            .tool_execution_mode
-            .unwrap_or(ToolExecutionMode::Parallel),
-        compaction: runtime
-            .compaction
-            .map(|compaction| RuntimeCompactionConfig {
-                enabled: compaction.enabled.unwrap_or(true),
-                max_estimated_tokens: compaction
-                    .max_estimated_tokens
-                    .unwrap_or_else(default_runtime_compaction_max_estimated_tokens),
-                keep_recent_messages: compaction
-                    .keep_recent_messages
-                    .unwrap_or_else(default_runtime_compaction_keep_recent_messages),
-                trigger_ratio: compaction.trigger_ratio.unwrap_or(0.85),
-                reserved_context_tokens: compaction.reserved_context_tokens.unwrap_or(50_000),
-                max_recent_messages: compaction.max_recent_messages.unwrap_or(4),
-                micro_enabled: compaction.micro_enabled.unwrap_or(false),
-                micro_keep_recent: compaction.micro_keep_recent.unwrap_or(20),
-            }),
-    }
-}
-
-fn tui_from_file(tui: Option<FileTuiConfig>) -> TuiConfig {
-    let Some(tui) = tui else {
-        return TuiConfig::default();
-    };
-    TuiConfig {
-        image_protocol: tui.image_protocol.unwrap_or_default(),
-        fetch_remote_images: tui.fetch_remote_images.unwrap_or(false),
-        keybindings: tui.keybindings.unwrap_or_default(),
-    }
-}
-
-fn validate_runtime_config(config: &RuntimeConfig) -> anyhow::Result<()> {
-    if let Some(temperature) = config.temperature {
-        anyhow::ensure!(
-            temperature.is_finite() && temperature >= 0.0,
-            "runtime.temperature must be a finite non-negative number"
-        );
-    }
-    if let Some(max_tokens) = config.max_tokens {
-        anyhow::ensure!(max_tokens > 0, "runtime.max_tokens must be greater than 0");
-    }
-    if let Some(compaction) = &config.compaction
-        && compaction.enabled
-    {
-        anyhow::ensure!(
-            compaction.max_estimated_tokens > 0,
-            "runtime.compaction.max_estimated_tokens must be greater than 0"
-        );
-        anyhow::ensure!(
-            compaction.keep_recent_messages > 0,
-            "runtime.compaction.keep_recent_messages must be greater than 0"
-        );
-    }
-    Ok(())
-}
-
-fn validate_tui_config(config: &TuiConfig) -> anyhow::Result<()> {
-    let default_manager = KeybindingsManager::default();
-    let mut manager = KeybindingsManager::default();
-    let overrides = config.keybinding_overrides()?;
-    for (_action, keys) in &overrides {
-        for key in keys {
-            anyhow::ensure!(
-                !key.is_text_insertion_key(),
-                "tui.keybindings key {key} is reserved for prompt text insertion"
-            );
-        }
-    }
-    manager.set_user_bindings(overrides.iter().cloned());
-    anyhow::ensure!(
-        manager.conflicts().is_empty(),
-        "tui.keybindings contains conflicting key assignments"
-    );
-    validate_tui_context_conflicts(&default_manager, &manager, &overrides)?;
-    Ok(())
-}
-
-fn validate_tui_context_conflicts(
-    default_manager: &KeybindingsManager,
-    manager: &KeybindingsManager,
-    overrides: &[(KeybindingAction, Vec<KeyId>)],
-) -> anyhow::Result<()> {
-    for (action, keys) in overrides {
-        for context in [TUI_EDITING_ACTIONS, TUI_OVERLAY_ACTIONS] {
-            if !context.contains(action) {
-                continue;
-            }
-            for key in keys {
-                let current_actions = context_actions_for_key(manager, context, key);
-                if current_actions.len() <= 1 {
-                    continue;
-                }
-                let default_actions = context_actions_for_key(default_manager, context, key);
-                if current_actions != default_actions {
-                    let action_ids = current_actions
-                        .iter()
-                        .map(|action| action.id())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    anyhow::bail!(
-                        "tui.keybindings key {key} conflicts within a TUI input context: {action_ids}"
-                    );
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn context_actions_for_key(
-    manager: &KeybindingsManager,
-    context: &[KeybindingAction],
-    key: &KeyId,
-) -> BTreeSet<KeybindingAction> {
-    context
-        .iter()
-        .filter(|action| {
-            manager
-                .keys(**action)
-                .iter()
-                .any(|candidate| candidate == key)
-        })
-        .copied()
-        .collect()
-}
-
-const TUI_EDITING_ACTIONS: &[KeybindingAction] = &[
-    KeybindingAction::InputSubmit,
-    KeybindingAction::InputNewLine,
-    KeybindingAction::TranscriptCopySelection,
-    KeybindingAction::AppClear,
-    KeybindingAction::AppExit,
-    KeybindingAction::AppSuspend,
-    KeybindingAction::InputCopy,
-    KeybindingAction::TranscriptSelectionStart,
-    KeybindingAction::TranscriptSelectionClear,
-    KeybindingAction::TranscriptSelectionExtendUp,
-    KeybindingAction::TranscriptSelectionExtendDown,
-    KeybindingAction::TranscriptSelectionExtendPageUp,
-    KeybindingAction::TranscriptSelectionExtendPageDown,
-    KeybindingAction::CommandPaletteOpen,
-    KeybindingAction::SessionPickerOpen,
-    KeybindingAction::ModelPickerOpen,
-    KeybindingAction::EditorCursorLeft,
-    KeybindingAction::EditorCursorRight,
-    KeybindingAction::EditorCursorWordLeft,
-    KeybindingAction::EditorCursorWordRight,
-    KeybindingAction::EditorCursorLineStart,
-    KeybindingAction::EditorCursorLineEnd,
-    KeybindingAction::EditorDeleteCharBackward,
-    KeybindingAction::EditorDeleteCharForward,
-    KeybindingAction::EditorDeleteWordBackward,
-    KeybindingAction::EditorDeleteWordForward,
-    KeybindingAction::EditorDeleteToLineStart,
-    KeybindingAction::EditorDeleteToLineEnd,
-    KeybindingAction::EditorYank,
-    KeybindingAction::EditorUndo,
-    KeybindingAction::InputTab,
-    KeybindingAction::SelectCancel,
-];
-
-const TUI_OVERLAY_ACTIONS: &[KeybindingAction] = &[
-    KeybindingAction::SelectConfirm,
-    KeybindingAction::SelectCancel,
-    KeybindingAction::SessionFork,
-    KeybindingAction::SelectUp,
-    KeybindingAction::SelectDown,
-    KeybindingAction::SelectPageUp,
-    KeybindingAction::SelectPageDown,
-];
-
-impl TuiConfig {
-    pub fn keybinding_overrides(&self) -> anyhow::Result<Vec<(KeybindingAction, Vec<KeyId>)>> {
-        self.keybindings
-            .iter()
-            .map(|(action_id, keys)| {
-                let action = KeybindingAction::from_id(action_id)
-                    .with_context(|| format!("unsupported TUI keybinding action: {action_id}"))?;
-                let keys = keys
-                    .iter()
-                    .map(|key| KeyId::new(key).map_err(|err| anyhow::anyhow!(err.to_string())))
-                    .collect::<anyhow::Result<Vec<_>>>()?;
-                Ok((action, keys))
-            })
-            .collect()
-    }
-}
-
-pub(crate) fn read_file_config(path: &Path) -> anyhow::Result<FileConfig> {
-    if !path.exists() {
-        return Ok(FileConfig::default());
-    }
-
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read config {}", path.display()))?;
-    toml::from_str(&content).with_context(|| format!("failed to parse config {}", path.display()))
-}
-
-pub(crate) fn write_file_config(path: &Path, config: &FileConfig) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create config directory {}", parent.display()))?;
-    }
-
-    let content = toml::to_string_pretty(config)?;
-    fs::write(path, content).with_context(|| format!("failed to write config {}", path.display()))
+    pub keybindings: BTreeMap<String, Vec<String>>,
 }
 
 #[cfg(test)]
