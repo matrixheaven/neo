@@ -1,5 +1,8 @@
+mod mcp_cli;
+mod models_cli;
 mod output;
 mod runtime;
+mod session_mgmt;
 
 // Re-export runtime functions for callers that access them via
 // `crate::modes::run::*` (interactive.rs, btw.rs, rpc/server.rs).
@@ -9,9 +12,17 @@ pub(crate) use runtime::{
     select_config_model, tool_registry_for_config,
 };
 
+// Re-export CLI functions called from `main.rs` via `modes::run::*`.
+pub(crate) use mcp_cli::{add_mcp_server, auth_mcp_server, list_mcp};
+pub(crate) use models_cli::list_configured_models;
+
+// Re-export session helpers used within this module.
+use session_mgmt::{
+    create_session_path, latest_session_id, record_initial_session_title, record_session_activity,
+    session_id_from_path,
+};
+
 use std::{
-    collections::BTreeMap,
-    fmt::Write as _,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
 };
@@ -19,29 +30,22 @@ use std::{
 use anyhow::Context;
 use futures::StreamExt;
 use neo_agent_core::goal::GoalManager;
-use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter, SessionMetadataStore};
+use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter};
 use neo_agent_core::{
     AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool,
     Content, CreateSkillTool, ListSkillsTool, McpConnectionManager,
     MoveSkillTool, PendingQuestion, PermissionApprovalDecision,
-    ProcessSupervisor, SteerInputHandle, SummarizeSessionsTool,
+    SteerInputHandle, SummarizeSessionsTool,
     mode::PlanMode,
 };
-use neo_ai::{
-    ChatMessage, ContentPart, RequestOptions,
-};
-use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
-use crate::mcp_ops::{
-    authenticate_mcp_server_oauth, display_mcp_kind, parse_command_string, parse_mcp_kind,
-};
 use crate::{
     cli::RunOutput,
     config::{
-        self, AppConfig, McpServerConfig, McpTransport, ModelConfig, neo_home,
+        AppConfig,
+        neo_home,
         workspace_sessions_dir,
     },
     modes::sessions,
@@ -74,313 +78,6 @@ pub async fn execute(
             }
             Ok(output)
         }
-    }
-}
-
-/// List only the models explicitly configured in `config.toml`.
-///
-/// Unlike `list_models_with_options`, built-in seeded models are excluded so
-/// the output reflects exactly what the user has configured.
-pub fn list_configured_models(config: &AppConfig, json_output: bool) -> anyhow::Result<String> {
-    if config.models.is_empty() {
-        return list_empty_configured_models(config, json_output);
-    }
-
-    let entries = configured_model_entries(config);
-    if json_output {
-        return configured_models_json(config, &entries);
-    }
-    Ok(configured_models_text(&entries))
-}
-
-#[derive(Debug)]
-struct ConfiguredModelEntry<'a> {
-    alias: &'a str,
-    provider: &'a str,
-    model: &'a str,
-    provider_type: &'a str,
-    capabilities: &'a [String],
-    max_context_tokens: Option<u32>,
-    display_name: Option<&'a str>,
-    is_default: bool,
-}
-
-fn list_empty_configured_models(config: &AppConfig, json_output: bool) -> anyhow::Result<String> {
-    if json_output {
-        return Ok(serde_json::to_string_pretty(&json!({
-            "models": [],
-            "default_model": config.default_model,
-        }))? + "\n");
-    }
-    Ok("no models configured\n".to_owned())
-}
-
-fn configured_model_entries(config: &AppConfig) -> Vec<ConfiguredModelEntry<'_>> {
-    config
-        .models
-        .iter()
-        .map(|(alias, model_cfg)| configured_model_entry(alias, model_cfg, config))
-        .collect()
-}
-
-fn configured_model_entry<'a>(
-    alias: &'a str,
-    model_cfg: &'a ModelConfig,
-    config: &'a AppConfig,
-) -> ConfiguredModelEntry<'a> {
-    let provider_type = config
-        .providers
-        .get(&model_cfg.provider)
-        .and_then(|cfg| cfg.provider_type)
-        .map_or("unknown", |t| t.as_config_str());
-    ConfiguredModelEntry {
-        alias,
-        provider: &model_cfg.provider,
-        model: &model_cfg.model,
-        provider_type,
-        capabilities: &model_cfg.capabilities,
-        max_context_tokens: model_cfg.max_context_tokens,
-        display_name: model_cfg.display_name.as_deref(),
-        is_default: configured_model_is_default(alias, model_cfg, config),
-    }
-}
-
-fn configured_model_is_default(alias: &str, model_cfg: &ModelConfig, config: &AppConfig) -> bool {
-    runtime::model_config_matches_default(alias, model_cfg, config)
-}
-
-fn configured_models_json(
-    config: &AppConfig,
-    entries: &[ConfiguredModelEntry<'_>],
-) -> anyhow::Result<String> {
-    let models_json: Vec<_> = entries.iter().map(configured_model_json).collect();
-    Ok(serde_json::to_string_pretty(&json!({
-        "models": models_json,
-        "default_model": config.default_model,
-    }))? + "\n")
-}
-
-fn configured_model_json(entry: &ConfiguredModelEntry<'_>) -> Value {
-    json!({
-        "alias": entry.alias,
-        "provider": entry.provider,
-        "model": entry.model,
-        "type": entry.provider_type,
-        "capabilities": entry.capabilities,
-        "max_context_tokens": entry.max_context_tokens,
-        "display_name": entry.display_name,
-        "default": entry.is_default,
-    })
-}
-
-fn configured_models_text(entries: &[ConfiguredModelEntry<'_>]) -> String {
-    let mut out = "models:\n".to_owned();
-    for entry in entries {
-        out.push_str(&configured_model_text(entry));
-    }
-    out
-}
-
-fn configured_model_text(entry: &ConfiguredModelEntry<'_>) -> String {
-    let default_marker = if entry.is_default { " default" } else { "" };
-    let display = entry
-        .display_name
-        .map(|display_name| format!(" - {display_name}"))
-        .unwrap_or_default();
-    let caps = entry.capabilities.join(",");
-    let ctx = entry
-        .max_context_tokens
-        .map_or("?".to_owned(), |tokens| tokens.to_string());
-    let alias_label = configured_model_alias_label(entry);
-    format!(
-        "- {alias_label} ({ptype}{default_marker}) ctx={ctx} [{caps}]{display}\n",
-        ptype = entry.provider_type,
-    )
-}
-
-fn configured_model_alias_label(entry: &ConfiguredModelEntry<'_>) -> String {
-    if entry.alias.contains('/') {
-        entry.alias.to_owned()
-    } else {
-        format!("{} -> {}/{}", entry.alias, entry.provider, entry.model)
-    }
-}
-
-pub async fn list_mcp(config: &AppConfig) -> String {
-    if config.mcp.servers.is_empty() {
-        return "no MCP servers configured\n".to_owned();
-    }
-
-    let mut out = String::new();
-    for (idx, server) in config.mcp.servers.iter().enumerate() {
-        let kind = display_mcp_kind(server.transport);
-        let _ = writeln!(out, "[{}]<{}>({})", idx + 1, server.id, kind);
-
-        if !server.enabled {
-            let _ = writeln!(out, "{{}}");
-            continue;
-        }
-
-        match list_mcp_tools_for_server(server).await {
-            Ok(tools) => {
-                let map: serde_json::Map<String, serde_json::Value> = tools
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, name)| ((i + 1).to_string(), serde_json::Value::String(name)))
-                    .collect();
-                let _ = writeln!(
-                    out,
-                    "{}",
-                    serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_owned())
-                );
-            }
-            Err(_) => {
-                let _ = writeln!(out, "{{}}");
-            }
-        }
-    }
-    out
-}
-
-async fn list_mcp_tools_for_server(server: &McpServerConfig) -> anyhow::Result<Vec<String>> {
-    let supervisor = ProcessSupervisor::default();
-    let client = runtime::build_mcp_client(server, &supervisor).await?;
-    let tools = client
-        .list_tools()
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let mut tools: Vec<String> = tools.into_iter().map(|t| t.name).collect();
-    apply_tool_filter(&mut tools, &server.enabled_tools, &server.disabled_tools);
-    Ok(tools)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn add_mcp_server(
-    mcp_name: String,
-    r#type: String,
-    command: Option<String>,
-    url: Option<String>,
-    env: Vec<String>,
-    headers: Vec<String>,
-    cwd: Option<PathBuf>,
-    enabled_tools: Vec<String>,
-    disabled_tools: Vec<String>,
-    startup_timeout_ms: Option<u64>,
-    tool_timeout_ms: Option<u64>,
-    enabled: bool,
-    config: &AppConfig,
-) -> anyhow::Result<String> {
-    let transport = parse_mcp_kind(&r#type)?;
-
-    let (command, args) = if transport == McpTransport::Stdio {
-        let Some(cmd) = command else {
-            anyhow::bail!("studio MCP requires --command");
-        };
-        let (cmd, args) = parse_command_string(&cmd)?;
-        (Some(cmd), args)
-    } else {
-        if command.is_some() {
-            anyhow::bail!("remote MCP uses --url, not --command");
-        }
-        (None, Vec::new())
-    };
-
-    let url = if transport == McpTransport::Http || transport == McpTransport::Sse {
-        let Some(url) = url else {
-            anyhow::bail!("remote MCP requires --url");
-        };
-        Some(url)
-    } else {
-        if url.is_some() {
-            anyhow::bail!("studio MCP uses --command, not --url");
-        }
-        None
-    };
-
-    if transport != McpTransport::Http && transport != McpTransport::Sse && !headers.is_empty() {
-        anyhow::bail!("--header is only valid for remote-http / remote-sse");
-    }
-    if transport != McpTransport::Stdio && cwd.is_some() {
-        anyhow::bail!("--cwd is only valid for studio");
-    }
-
-    let server = McpServerConfig {
-        id: mcp_name.clone(),
-        enabled,
-        transport,
-        command,
-        url,
-        args,
-        env: key_value_pairs(env, "--env")?,
-        headers: key_value_pairs(headers, "--header")?,
-        cwd,
-        enabled_tools,
-        disabled_tools,
-        startup_timeout_ms,
-        tool_timeout_ms,
-    };
-
-    let saved = config::mutations::upsert_mcp_server(&server, &config.config_path)?;
-
-    if !enabled {
-        return Ok(format!("{saved}{mcp_name} added (disabled)\n"));
-    }
-
-    let probe_result = probe_mcp_server(&server, startup_timeout_ms).await;
-    let probe_msg = match probe_result {
-        Ok(()) => format!("{mcp_name} successfully connected!\n"),
-        Err(_) => format!("{mcp_name} connect failed\n"),
-    };
-    Ok(format!("{saved}{probe_msg}"))
-}
-
-/// Run the OAuth authorization-code flow for a configured MCP server and save
-/// the resulting token to `~/.neo/oauth.json`.
-pub async fn auth_mcp_server(server_id: String, config: &AppConfig) -> anyhow::Result<String> {
-    let server = config
-        .mcp
-        .servers
-        .iter()
-        .find(|server| server.id == server_id)
-        .context("MCP server not found")?;
-
-    if server.transport != McpTransport::Http && server.transport != McpTransport::Sse {
-        anyhow::bail!("OAuth is limited to HTTP/SSE servers");
-    }
-
-    let neo_home = neo_home().context("failed to resolve neo home directory")?;
-    authenticate_mcp_server_oauth(&server_id, server, &neo_home).await?;
-
-    Ok(format!("OAuth token saved for MCP server {server_id}\n"))
-}
-
-async fn probe_mcp_server(server: &McpServerConfig, timeout_ms: Option<u64>) -> anyhow::Result<()> {
-    let supervisor = ProcessSupervisor::default();
-    let client = runtime::build_mcp_client(server, &supervisor).await?;
-    let fut = client.list_tools();
-    let tools = if let Some(ms) = timeout_ms {
-        tokio::time::timeout(std::time::Duration::from_millis(ms), fut)
-            .await
-            .with_context(|| format!("timeout connecting to MCP server {}", server.id))?
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-    } else {
-        fut.await
-            .map_err(|e| anyhow::anyhow!("{e}"))
-            .with_context(|| format!("failed to list tools from {}", server.id))?
-    };
-    let mut names: Vec<String> = tools.into_iter().map(|t| t.name).collect();
-    apply_tool_filter(&mut names, &server.enabled_tools, &server.disabled_tools);
-    Ok(())
-}
-
-fn apply_tool_filter(tools: &mut Vec<String>, enabled_tools: &[String], disabled_tools: &[String]) {
-    if !enabled_tools.is_empty() {
-        let allow: std::collections::HashSet<_> = enabled_tools.iter().cloned().collect();
-        tools.retain(|name| allow.contains(name));
-    }
-    if !disabled_tools.is_empty() {
-        let deny: std::collections::HashSet<_> = disabled_tools.iter().cloned().collect();
-        tools.retain(|name| !deny.contains(name));
     }
 }
 
@@ -1059,219 +756,6 @@ fn assistant_text_from_event(event: &AgentEvent) -> Option<String> {
     }
 }
 
-fn key_value_pairs(values: Vec<String>, flag: &str) -> anyhow::Result<BTreeMap<String, String>> {
-    let mut pairs = BTreeMap::new();
-    for value in values {
-        let Some((key, value)) = value.split_once('=') else {
-            anyhow::bail!("{flag} values must use KEY=VALUE");
-        };
-        let key = key.trim();
-        anyhow::ensure!(!key.is_empty(), "{flag} key must not be empty");
-        pairs.insert(key.to_owned(), value.trim().to_owned());
-    }
-    Ok(pairs)
-}
-
-async fn create_session_path(config: &AppConfig) -> anyhow::Result<std::path::PathBuf> {
-    let bucket_dir = workspace_sessions_dir(config);
-    tokio::fs::create_dir_all(&bucket_dir)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to create sessions directory {}",
-                bucket_dir.display()
-            )
-        })?;
-
-    loop {
-        let session_id = format!("session_{}", Uuid::new_v4());
-        let session_dir = bucket_dir.join(&session_id);
-        if tokio::fs::metadata(&session_dir).await.is_err() {
-            tokio::fs::create_dir_all(&session_dir)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to create session directory {}",
-                        session_dir.display()
-                    )
-                })?;
-            return Ok(session_dir.join("transcript.jsonl"));
-        }
-    }
-}
-
-fn session_id_from_path(path: &Path) -> anyhow::Result<String> {
-    let file_name = path
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        .with_context(|| format!("invalid session path {}", path.display()))?;
-
-    if file_name != "transcript.jsonl" {
-        anyhow::bail!("invalid session path {}", path.display());
-    }
-
-    let session_dir = path.parent().with_context(|| {
-        format!(
-            "session transcript has no parent directory {}",
-            path.display()
-        )
-    })?;
-    let dir_name = session_dir
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        .with_context(|| format!("invalid session directory name {}", session_dir.display()))?;
-    if dir_name.starts_with("session_") {
-        return Ok(dir_name.to_owned());
-    }
-
-    anyhow::bail!("invalid session path {}", path.display())
-}
-
-pub(crate) fn latest_session_id(config: &AppConfig) -> anyhow::Result<String> {
-    let bucket_dir = workspace_sessions_dir(config);
-    let mut latest: Option<(std::time::SystemTime, String)> = None;
-    let entries = std::fs::read_dir(&bucket_dir)
-        .with_context(|| format!("failed to read sessions directory {}", bucket_dir.display()))?;
-
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !name.starts_with("session_") {
-            continue;
-        }
-        let transcript = path.join("transcript.jsonl");
-        if !transcript.exists() {
-            continue;
-        }
-        let Ok(session_id) = session_id_from_path(&transcript) else {
-            continue;
-        };
-        if neo_agent_core::session::validate_session_id(&session_id).is_err() {
-            continue;
-        }
-        let modified = std::fs::metadata(&transcript)
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        let should_replace = latest.as_ref().is_none_or(|(latest_modified, latest_id)| {
-            modified > *latest_modified || (modified == *latest_modified && session_id > *latest_id)
-        });
-        if should_replace {
-            latest = Some((modified, session_id));
-        }
-    }
-
-    latest
-        .map(|(_, session_id)| session_id)
-        .with_context(|| format!("no sessions found in {}", bucket_dir.display()))
-}
-
-fn record_session_activity(config: &AppConfig, session_id: &str, prompt: &str) {
-    let bucket_dir = workspace_sessions_dir(config);
-    let _ = SessionMetadataStore::new(&bucket_dir).record_activity(
-        session_id,
-        Some(config.project_dir.display().to_string()),
-        Some(one_line(prompt, 240)),
-        output::current_unix_timestamp(),
-    );
-}
-
-async fn record_initial_session_title(config: &AppConfig, turn: &PromptTurn, prompt: &str) {
-    let bucket_dir = workspace_sessions_dir(config);
-    let store = SessionMetadataStore::new(&bucket_dir);
-    let Ok(sessions) = store.list() else {
-        return;
-    };
-    let Some(record) = sessions
-        .into_iter()
-        .find(|session| session.id == turn.session_id)
-    else {
-        return;
-    };
-    if record.name.is_some() || record.title_model.is_some() {
-        return;
-    }
-
-    let fallback = one_line(prompt, 40);
-    let (title, model_label) =
-        match generate_session_title(config, prompt, &turn.assistant_text).await {
-            Ok((title, model_label)) if !title.is_empty() => (title, Some(model_label)),
-            _ => (fallback, None),
-        };
-    let _ = store.record_title(
-        &turn.session_id,
-        title,
-        model_label,
-        output::current_unix_timestamp(),
-    );
-}
-
-async fn generate_session_title(
-    config: &AppConfig,
-    prompt: &str,
-    assistant_text: &str,
-) -> anyhow::Result<(String, String)> {
-    let model = runtime::resolve_model(config)?;
-    let client = runtime::resolve_model_client(config, &model)?;
-    let model_label = format!("{}/{}", model.provider.0, model.model);
-    let request = neo_ai::ChatRequest {
-        model,
-        messages: vec![
-            ChatMessage::System {
-                content: vec![ContentPart::Text {
-                    text: "Generate a concise session title. Return only the title, no quotes."
-                        .to_owned(),
-                }],
-            },
-            ChatMessage::User {
-                content: vec![ContentPart::Text {
-                    text: format!(
-                        "User prompt:\n{}\n\nAssistant response:\n{}",
-                        one_line(prompt, 500),
-                        one_line(assistant_text, 500)
-                    ),
-                }],
-            },
-        ],
-        tools: Vec::new(),
-        options: RequestOptions {
-            max_tokens: Some(32),
-            temperature: Some(0.2),
-            ..RequestOptions::default()
-        },
-    };
-    let events = client.stream_chat(request).collect::<Vec<_>>().await;
-    let mut title = String::new();
-    for event in events {
-        if let neo_ai::AiStreamEvent::TextDelta { text } = event? {
-            title.push_str(&text);
-        }
-    }
-    Ok((clean_session_title(&title), model_label))
-}
-
-fn clean_session_title(title: &str) -> String {
-    one_line(title.trim().trim_matches(['"', '\'', '`']), 40)
-        .trim_matches(['*', '#'])
-        .trim()
-        .to_owned()
-}
-
-fn one_line(text: &str, max_chars: usize) -> String {
-    let mut line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if line.chars().count() > max_chars {
-        line = line.chars().take(max_chars.saturating_sub(1)).collect();
-        line.push('…');
-    }
-    line
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
@@ -1289,10 +773,12 @@ mod tests {
     };
 
     use super::{
-        PromptApprovalRequest, auth_mcp_server,
-        create_session_path, list_configured_models,
+        PromptApprovalRequest,
         run_prompt_with_runtime,
     };
+    use super::mcp_cli::auth_mcp_server;
+    use super::models_cli::list_configured_models;
+    use super::session_mgmt::create_session_path;
     use super::runtime::{
         agent_config_for_app, model_registry_for_config, select_config_model,
         tool_registry_for_config,
