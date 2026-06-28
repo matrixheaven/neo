@@ -2,7 +2,6 @@ pub mod compaction;
 pub mod events;
 pub mod goal;
 pub mod harness;
-pub mod injection;
 pub mod messages;
 pub mod mode;
 pub mod oauth;
@@ -19,7 +18,6 @@ pub use compaction::{
     generate_compaction_summary, render_messages_to_text,
 };
 pub use events::*;
-pub use injection::*;
 pub use messages::*;
 pub use mode::*;
 pub use permissions::{
