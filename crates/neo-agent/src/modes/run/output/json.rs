@@ -519,3 +519,62 @@ pub(crate) fn current_unix_timestamp() -> String {
         .unwrap_or_default();
     format!("{}.{:09}Z", duration.as_secs(), duration.subsec_nanos())
 }
+
+#[cfg(test)]
+mod tests {
+    use neo_agent_core::AgentEvent;
+
+    use super::StableJsonState;
+
+    #[test]
+    fn stable_json_maps_compaction_lifecycle_events() {
+        let mut state = StableJsonState::default();
+
+        assert_eq!(
+            state.map_event(&AgentEvent::CompactionStarted {
+                reason: neo_agent_core::CompactionReason::Threshold,
+                tokens_before: 12_345,
+                message_count: 8,
+            }),
+            vec![serde_json::json!({
+                "type": "compaction_start",
+                "reason": "threshold",
+                "tokensBefore": 12_345,
+                "messageCount": 8,
+            })]
+        );
+        assert_eq!(
+            state.map_event(&AgentEvent::CompactionProgress {
+                phase: neo_agent_core::CompactionPhase::Summarizing,
+                percent: 70,
+            }),
+            vec![serde_json::json!({
+                "type": "compaction_update",
+                "phase": "summarizing",
+                "percent": 70,
+            })]
+        );
+        assert_eq!(
+            state.map_event(&AgentEvent::CompactionApplied {
+                summary: neo_agent_core::CompactionSummary {
+                    summary: "Older context summarized.".to_owned(),
+                    tokens_before: 12_345,
+                    tokens_after: 6_000,
+                    first_kept_message_index: 4,
+                },
+            }),
+            vec![serde_json::json!({
+                "type": "compaction_end",
+                "reason": "threshold",
+                "result": {
+                    "summary": "Older context summarized.",
+                    "tokens_before": 12_345,
+                    "tokens_after": 6_000,
+                    "first_kept_message_index": 4,
+                },
+                "aborted": false,
+                "willRetry": false,
+            })]
+        );
+    }
+}
