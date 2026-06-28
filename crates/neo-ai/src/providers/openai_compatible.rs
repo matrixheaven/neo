@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use super::common::error::ProviderError;
 use super::common::helpers::{reject_images, rounded_f64, token_usage_from};
+use super::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 
 use crate::{
     AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
@@ -263,10 +264,6 @@ pub fn normalize_openai_chat_sse(body: &str) -> Result<Vec<AiStreamEvent>, AiErr
     parse_sse_events(body).map_err(ProviderError::into_ai_error)
 }
 
-enum StreamChunk {
-    Data(Result<Vec<u8>, reqwest::Error>),
-    End,
-}
 
 fn stream_response(
     response: reqwest::Response,
@@ -396,30 +393,6 @@ impl IncrementalSse {
     }
 }
 
-fn find_frame_end(buffer: &[u8]) -> Option<(usize, usize)> {
-    buffer
-        .windows(2)
-        .position(|window| window == b"\n\n")
-        .map(|index| (index, 2))
-        .or_else(|| {
-            buffer
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .map(|index| (index, 4))
-        })
-}
-
-fn parse_sse_frame(frame: &[u8]) -> Result<Option<String>, AiError> {
-    let text = std::str::from_utf8(frame)
-        .map_err(|err| AiError::Stream(format!("invalid SSE UTF-8: {err}")))?;
-    let data = text
-        .lines()
-        .filter_map(|line| line.strip_prefix("data:"))
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok((!data.is_empty()).then_some(data))
-}
 
 fn parse_sse_events(body: &str) -> Result<Vec<AiStreamEvent>, ProviderError> {
     let mut state = ParseState::default();
