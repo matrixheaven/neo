@@ -17,6 +17,7 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use super::tokens::*;
 use crate::goal::GoalManager;
 use crate::permissions::{
     ApprovalRuleStore, FileWriteApprovalOperation, PrefixApprovalRule, SessionApprovalKey,
@@ -2356,83 +2357,6 @@ async fn apply_compaction_result(
 
     let turn = emitter.context.turns.saturating_add(1);
     emit_effective_context_window(config, emitter, turn).await;
-}
-
-fn estimate_messages_tokens(messages: &[AgentMessage]) -> usize {
-    messages.iter().map(estimate_message_tokens).sum()
-}
-
-fn estimate_chat_messages_tokens(messages: &[ChatMessage]) -> usize {
-    messages.iter().map(estimate_chat_message_tokens).sum()
-}
-
-fn estimate_chat_message_tokens(message: &ChatMessage) -> usize {
-    let chars = match message {
-        ChatMessage::System { content }
-        | ChatMessage::User { content }
-        | ChatMessage::ToolResult { content, .. } => estimate_chat_content_chars(content),
-        ChatMessage::Assistant {
-            content,
-            tool_calls,
-        } => {
-            let content_chars = estimate_chat_content_chars(content);
-            let tool_chars = tool_calls
-                .iter()
-                .map(|call| call.name.len() + call.arguments.to_string().len())
-                .sum::<usize>();
-            content_chars + tool_chars
-        }
-    };
-    chars.div_ceil(4)
-}
-
-fn estimate_message_tokens(message: &AgentMessage) -> usize {
-    let chars = match message {
-        AgentMessage::System { content }
-        | AgentMessage::User { content }
-        | AgentMessage::ToolResult { content, .. } => estimate_content_chars(content),
-        AgentMessage::Assistant {
-            content,
-            tool_calls,
-            ..
-        } => {
-            let content_chars = estimate_content_chars(content);
-            let tool_chars = tool_calls
-                .iter()
-                .map(|call| call.name.len() + call.arguments.to_string().len())
-                .sum::<usize>();
-            content_chars + tool_chars
-        }
-        AgentMessage::ShellCommand {
-            command,
-            stdout,
-            stderr,
-            ..
-        } => command.len() + stdout.len() + stderr.len(),
-    };
-    chars.div_ceil(4)
-}
-
-fn estimate_chat_content_chars(content: &[ContentPart]) -> usize {
-    content
-        .iter()
-        .map(|part| match part {
-            ContentPart::Text { text } => text.len(),
-            ContentPart::Thinking { .. } => 0,
-            ContentPart::Image { .. } => 4800,
-        })
-        .sum()
-}
-
-fn estimate_content_chars(content: &[Content]) -> usize {
-    content
-        .iter()
-        .map(|part| match part {
-            Content::Text { text } => text.len(),
-            Content::Thinking { .. } => 0,
-            Content::Image { .. } => 4800,
-        })
-        .sum()
 }
 
 fn take_messages(queue: &[AgentMessage], mode: QueueMode) -> Vec<AgentMessage> {
