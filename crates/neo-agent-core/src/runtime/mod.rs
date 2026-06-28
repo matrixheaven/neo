@@ -10,6 +10,7 @@ mod context;
 mod events;
 mod image_blobs;
 mod legacy;
+mod plan_orchestration;
 mod queue;
 mod skill_dispatch;
 mod stream_aggregator;
