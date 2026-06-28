@@ -77,6 +77,9 @@ use git_status::{event_should_refresh_git_status, git_status_label};
 mod clipboard;
 use clipboard::write_system_clipboard;
 
+mod snapshot;
+use snapshot::render_transcript_snapshot;
+
 type BoxedTurnFuture = Pin<Box<dyn Future<Output = Result<TurnOutcome>> + Send + 'static>>;
 type BoxedSessionFuture = Pin<Box<dyn Future<Output = Result<LoadedSessionTranscript>> + Send>>;
 type BoxedForkFuture = Pin<Box<dyn Future<Output = Result<ForkedSessionTranscript>> + Send>>;
@@ -6386,22 +6389,6 @@ impl NeoTerminal {
 /// Compose the full frame (body + chrome) as ANSI strings, without writing to
 /// the terminal. Used by tests that need to inspect what would be drawn.
 #[cfg(test)]
-fn compose_tui_frame(
-    app: &NeoChromeState,
-    transcript: &mut TranscriptPane,
-    cols: u16,
-    rows: u16,
-) -> Option<Vec<String>> {
-    if cols == 0 || rows == 0 {
-        return None;
-    }
-    transcript.mark_dirty();
-    let mut tui = neo_tui::NeoTui::new(app.clone(), transcript.clone());
-    let (lines, _) = tui.render_frame(usize::from(cols), usize::from(rows));
-    *transcript = tui.transcript().clone();
-    Some(lines)
-}
-
 impl Drop for NeoTerminal {
     fn drop(&mut self) {
         self.tui.leave();
@@ -7051,71 +7038,6 @@ async fn fork_session_transcript(
     Ok(ForkedSessionTranscript::new(child_id, loaded))
 }
 
-fn render_transcript_snapshot(
-    app: &NeoChromeState,
-    transcript: &mut TranscriptPane,
-    width: usize,
-    height: usize,
-) -> String {
-    transcript.resize(width, height);
-    transcript.mark_dirty();
-    let _ = transcript.render_frame(width, height);
-
-    let mut lines = transcript
-        .frame_ansi_lines()
-        .into_iter()
-        .map(|line| neo_tui::primitive::strip_ansi(&line).trim_end().to_owned())
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    lines.extend(render_overlay_snapshot(app, width));
-    format!("{}\n", lines.join("\n").trim_end())
-}
-
-fn render_overlay_snapshot(app: &NeoChromeState, width: usize) -> Vec<String> {
-    let content_width = neo_tui::transcript::frame_content_width(width);
-    let mut lines = render_overlay_content_snapshot(app, content_width);
-    lines.extend(render_chrome_snapshot_lines(app, width));
-    lines
-}
-
-fn render_overlay_content_snapshot(app: &NeoChromeState, content_width: usize) -> Vec<String> {
-    match app.focused_overlay().map(|overlay| &overlay.kind) {
-        Some(OverlayKind::SessionPicker(picker)) => {
-            let theme = app.theme();
-            picker.render_lines(content_width, &theme)
-        }
-        Some(OverlayKind::ModelPicker(picker)) => {
-            render_picker_snapshot("Models", picker, content_width)
-        }
-        Some(OverlayKind::CommandPalette(_)) => vec!["Commands".to_owned()],
-        Some(OverlayKind::PromptCompletion(_)) => vec![],
-        Some(OverlayKind::Message(message)) => vec![message.clone()],
-        Some(OverlayKind::Approval(_) | OverlayKind::QuestionDialog(_)) | None => Vec::new(),
-        // Rich dialogs — use their own render_lines.
-        Some(_) => app.focused_overlay_lines(content_width),
-    }
-}
-
-fn render_chrome_snapshot_lines(
-    app: &NeoChromeState,
-    width: usize,
-) -> impl Iterator<Item = String> {
-    neo_tui::transcript::render_chrome_lines(app, width, 24)
-        .lines
-        .into_iter()
-        .map(|line| neo_tui::primitive::strip_ansi(&line).trim_end().to_owned())
-}
-
-fn render_picker_snapshot(
-    title: &str,
-    picker: &neo_tui::shell::PickerState,
-    width: usize,
-) -> Vec<String> {
-    let mut lines = vec![title.to_owned()];
-    lines.extend(picker.render_lines(width));
-    lines
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -7136,6 +7058,7 @@ mod tests {
     use super::git_status::{
         GitStatusBadge, git_status_label_with_program, parse_git_numstat, parse_git_status_porcelain,
     };
+    use super::snapshot::{compose_tui_frame, render_overlay_snapshot, render_picker_snapshot};
     use crate::config::{Defaults, McpConfig, ModelConfig, RuntimeConfig, TuiConfig};
 
     const SESSION_A: &str = "session_00000000-0000-4000-8000-000000000601";
