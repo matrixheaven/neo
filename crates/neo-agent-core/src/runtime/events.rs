@@ -1,0 +1,430 @@
+//! Event emission infrastructure — `EventEmitter`, `EventPublisher`,
+//! `EventSink`, and the `emit_*` helpers that translate tool results into
+//! `AgentEvent` values.
+
+use std::sync::Arc;
+
+use tokio::sync::mpsc;
+
+use crate::{
+    AgentEvent, AgentRuntimeError, AgentToolCall, QueueKind, ShellCommandOrigin,
+    ShellCommandOutcome, TodoEventData, ToolContext, ToolResult, ToolUpdateCallback,
+};
+
+use super::legacy::{AgentConfig, AgentContext};
+
+pub(super) struct EventEmitter {
+    pub(super) sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
+    pub(super) context: AgentContext,
+    pub(super) last_context_window_tokens: Option<u32>,
+}
+
+impl EventEmitter {
+    pub(super) fn new(
+        sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
+        context: AgentContext,
+    ) -> Self {
+        Self {
+            sender,
+            context,
+            last_context_window_tokens: None,
+        }
+    }
+
+    pub(super) fn emit(&mut self, event: AgentEvent) {
+        Self::apply_to_context(&mut self.context, &event);
+        let _ = self.sender.send(Ok(event));
+    }
+
+    pub(super) fn sink(&self) -> EventSink {
+        EventSink {
+            sender: self.sender.clone(),
+        }
+    }
+
+    pub(super) fn send_error(&mut self, err: AgentRuntimeError) -> Result<(), AgentRuntimeError> {
+        self.sender
+            .send(Err(err))
+            .map_err(|_| AgentRuntimeError::Cancelled)
+    }
+
+    pub(super) fn apply_to_context(context: &mut AgentContext, event: &AgentEvent) {
+        match event {
+            AgentEvent::MessageAppended { message } => context.append_message(message.clone()),
+            AgentEvent::TurnFinished { turn, .. } => {
+                // Same invariant as replay: even live cancelled turns must not
+                // poison the context used by subsequent user prompts.
+                context.turns = context.turns.max(*turn);
+            }
+            AgentEvent::SteeringQueued { message } => {
+                context.queue_steering_message(message.clone());
+            }
+            AgentEvent::FollowUpQueued { message } => {
+                context.queue_follow_up_message(message.clone());
+            }
+            AgentEvent::QueueDrained { kind, count } => match kind {
+                QueueKind::Steering => {
+                    let drain_count = (*count).min(context.steering_queue.len());
+                    context.steering_queue.drain(0..drain_count);
+                }
+                QueueKind::FollowUp => {
+                    let drain_count = (*count).min(context.follow_up_queue.len());
+                    context.follow_up_queue.drain(0..drain_count);
+                }
+            },
+            AgentEvent::CompactionApplied { summary } => {
+                context.apply_compaction(summary.clone());
+            }
+            AgentEvent::PlanModeEntered { id, .. } => {
+                context.plan_mode_active = true;
+                context.plan_mode_id = Some(id.clone());
+            }
+            AgentEvent::PlanModeExited { .. } => {
+                context.plan_mode_active = false;
+            }
+            AgentEvent::PlanUpdated { enabled, .. } => {
+                context.plan_mode_active = *enabled;
+            }
+            AgentEvent::TodoUpdated { todos, .. } => {
+                context.todos.clone_from(todos);
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(super) trait EventPublisher {
+    fn emit(&mut self, event: AgentEvent);
+}
+
+impl EventPublisher for EventEmitter {
+    fn emit(&mut self, event: AgentEvent) {
+        Self::emit(self, event);
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct EventSink {
+    pub(super) sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
+}
+
+impl EventSink {
+    /// Emit an event by value without needing `&mut self`.
+    pub(super) fn emit_event(&self, event: AgentEvent) {
+        let _ = self.sender.send(Ok(event));
+    }
+}
+
+impl EventPublisher for EventSink {
+    fn emit(&mut self, event: AgentEvent) {
+        self.emit_event(event);
+    }
+}
+
+pub(super) fn emit_todo_event(
+    turn: u32,
+    config: &AgentConfig,
+    tool_name: &str,
+    result: &ToolResult,
+    emitter: &mut EventEmitter,
+) {
+    if tool_name != "TodoList" || result.is_error {
+        return;
+    }
+    let Some(details) = &result.details else {
+        return;
+    };
+    let Some(todos_val) = details.get("todos") else {
+        return;
+    };
+    let Ok(todos) = serde_json::from_value::<Vec<TodoEventData>>(todos_val.clone()) else {
+        return;
+    };
+    if let Ok(mut shared) = config.todos.lock() {
+        shared.clone_from(&todos);
+    }
+    emitter.emit(AgentEvent::TodoUpdated { turn, todos });
+}
+
+pub(super) fn emit_goal_event_from_result(
+    turn: u32,
+    tool_name: &str,
+    result: &ToolResult,
+    emitter: &mut EventEmitter,
+) {
+    if result.is_error {
+        return;
+    }
+    let Some(details) = &result.details else {
+        return;
+    };
+    if details.get("kind").and_then(serde_json::Value::as_str) != Some("goal") {
+        return;
+    }
+    let Some(objective) = details
+        .get("objective")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+    else {
+        return;
+    };
+    match (
+        tool_name,
+        details.get("event").and_then(serde_json::Value::as_str),
+        details.get("status").and_then(serde_json::Value::as_str),
+    ) {
+        ("StartGoal" | "ExitGoalMode", Some("started"), _) => {
+            emitter.emit(AgentEvent::GoalStarted { turn, objective });
+        }
+        ("UpdateGoalStatus", Some("updated"), Some("paused")) => {
+            emitter.emit(AgentEvent::GoalPaused { turn, objective });
+        }
+        ("UpdateGoalStatus", Some("updated"), Some("active")) => {
+            emitter.emit(AgentEvent::GoalResumed { turn, objective });
+        }
+        ("UpdateGoalStatus", Some("updated"), Some("blocked")) => {
+            let reason = details
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("blocked")
+                .to_owned();
+            emitter.emit(AgentEvent::GoalBlocked {
+                turn,
+                objective,
+                reason,
+            });
+        }
+        ("UpdateGoalStatus", Some("updated"), Some("complete")) => {
+            emitter.emit(AgentEvent::GoalFinished {
+                turn,
+                objective,
+                outcome: "complete".to_owned(),
+            });
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn emit_context_window_update(
+    emitter: &mut EventEmitter,
+    turn: u32,
+    used_tokens: usize,
+) {
+    let used_tokens = u32::try_from(used_tokens).unwrap_or(u32::MAX);
+    if emitter.last_context_window_tokens == Some(used_tokens) {
+        return;
+    }
+    emitter.last_context_window_tokens = Some(used_tokens);
+    emitter.emit(AgentEvent::ContextWindowUpdated { turn, used_tokens });
+}
+
+pub(super) fn emit_shell_started(
+    turn: u32,
+    tool_call: &AgentToolCall,
+    tool_context: &ToolContext,
+    emitter: &mut impl EventPublisher,
+) {
+    if tool_call.name != "Bash" {
+        return;
+    }
+    if let Some(command) = tool_call
+        .arguments
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+    {
+        emitter.emit(AgentEvent::ShellCommandStarted {
+            turn,
+            id: tool_call.id.clone(),
+            command: command.to_owned(),
+            cwd: tool_context.workspace_root().to_path_buf(),
+            origin: ShellCommandOrigin::ModelBashTool,
+        });
+    }
+}
+
+pub(super) fn emit_shell_finished(
+    turn: u32,
+    tool_call: &AgentToolCall,
+    result: &ToolResult,
+    emitter: &mut impl EventPublisher,
+) {
+    if tool_call.name != "Bash" {
+        return;
+    }
+    let Some(details) = &result.details else {
+        return;
+    };
+    let stdout = details
+        .get("stdout")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let stderr = details
+        .get("stderr")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let exit_code = details
+        .get("exit_code")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok());
+    let truncated = details
+        .get("truncated")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let outcome = shell_command_outcome_from_details(details);
+    emitter.emit(AgentEvent::ShellCommandFinished {
+        turn,
+        id: tool_call.id.clone(),
+        exit_code,
+        stdout,
+        stderr,
+        truncated,
+        origin: ShellCommandOrigin::ModelBashTool,
+        outcome,
+    });
+}
+
+fn shell_command_outcome_from_details(details: &serde_json::Value) -> ShellCommandOutcome {
+    match details.get("outcome").and_then(serde_json::Value::as_str) {
+        Some("cancelled") => ShellCommandOutcome::Cancelled,
+        Some("timed_out") => ShellCommandOutcome::TimedOut,
+        Some("backgrounded") => {
+            let task_id = details
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            ShellCommandOutcome::Backgrounded { task_id }
+        }
+        _ if details.get("kind").and_then(serde_json::Value::as_str) == Some("bash")
+            && details.get("status").and_then(serde_json::Value::as_str) == Some("running") =>
+        {
+            let task_id = details
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            ShellCommandOutcome::Backgrounded { task_id }
+        }
+        _ => ShellCommandOutcome::Completed,
+    }
+}
+
+pub(super) fn emit_terminal_events(
+    turn: u32,
+    tool_call: &AgentToolCall,
+    result: &ToolResult,
+    tool_context: &ToolContext,
+    emitter: &mut impl EventPublisher,
+) {
+    if tool_call.name != "Terminal" {
+        return;
+    }
+    let Some(details) = &result.details else {
+        return;
+    };
+    let Some(handle) = details
+        .get("handle")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+    else {
+        return;
+    };
+    match tool_call
+        .arguments
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("start") => {
+            let command = details
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let cols = details
+                .get("cols")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+                .unwrap_or(80);
+            let rows = details
+                .get("rows")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+                .unwrap_or(24);
+            emitter.emit(AgentEvent::TerminalSessionStarted {
+                turn,
+                id: tool_call.id.clone(),
+                handle,
+                command,
+                cwd: tool_context.workspace_root().to_path_buf(),
+                cols,
+                rows,
+            });
+        }
+        Some("read") => {
+            let output = details
+                .get("output")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if output.is_empty() {
+                return;
+            }
+            let truncated = details
+                .get("truncated")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            emitter.emit(AgentEvent::TerminalSessionOutput {
+                turn,
+                id: tool_call.id.clone(),
+                handle,
+                output,
+                truncated,
+            });
+        }
+        Some("stop") => {
+            let status = details
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("stopped")
+                .to_owned();
+            let exit_code = details
+                .get("exit_code")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|code| i32::try_from(code).ok());
+            emitter.emit(AgentEvent::TerminalSessionFinished {
+                turn,
+                id: tool_call.id.clone(),
+                handle,
+                status,
+                exit_code,
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Creates a `ToolUpdateCallback` that emits `ToolExecutionUpdate` events
+/// through an `EventSink`. This lets tools (e.g. bash) stream intermediate
+/// output that the TUI renders live.
+pub(super) fn make_tool_update_callback(
+    sink: EventSink,
+    turn: u32,
+    id: String,
+    name: String,
+) -> ToolUpdateCallback {
+    Arc::new(move |partial: &str| {
+        sink.emit_event(AgentEvent::ToolExecutionUpdate {
+            turn,
+            id: id.clone(),
+            name: name.clone(),
+            partial_result: ToolResult {
+                content: partial.to_owned(),
+                is_error: false,
+                details: None,
+                terminate: false,
+            },
+        });
+    })
+}

@@ -4,6 +4,7 @@
 //! focused submodules. During the transition, `legacy.rs` contains
 //! all the code; submodules are extracted one domain at a time.
 
+mod events;
 mod image_blobs;
 mod legacy;
 mod queue;
