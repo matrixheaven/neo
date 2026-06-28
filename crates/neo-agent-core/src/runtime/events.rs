@@ -11,7 +11,8 @@ use crate::{
     ShellCommandOutcome, TodoEventData, ToolContext, ToolResult, ToolUpdateCallback,
 };
 
-use super::legacy::{AgentConfig, AgentContext};
+use super::config::AgentConfig;
+use super::legacy::AgentContext;
 
 pub(super) struct EventEmitter {
     pub(super) sender: mpsc::UnboundedSender<Result<AgentEvent, AgentRuntimeError>>,
