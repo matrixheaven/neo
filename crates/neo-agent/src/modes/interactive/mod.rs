@@ -61,6 +61,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod keybinding_priority;
+use keybinding_priority::{
+    EDITING_ACTION_PRIORITY, OVERLAY_ACTION_PRIORITY, PROMPT_COMPLETION_ACTION_PRIORITY,
+    QUESTION_ACTION_PRIORITY,
+};
+
 type BoxedTurnFuture = Pin<Box<dyn Future<Output = Result<TurnOutcome>> + Send + 'static>>;
 type BoxedSessionFuture = Pin<Box<dyn Future<Output = Result<LoadedSessionTranscript>> + Send>>;
 type BoxedForkFuture = Pin<Box<dyn Future<Output = Result<ForkedSessionTranscript>> + Send>>;
@@ -6624,106 +6630,6 @@ impl TerminalEvents for RawStdinEvents {
         Ok(self.pending.pop_front())
     }
 }
-
-const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
-    KeybindingAction::PasteImage,
-    KeybindingAction::InputSubmit,
-    KeybindingAction::InputNewLine,
-    KeybindingAction::PromptSteer,
-    KeybindingAction::CycleDevelopmentMode,
-    KeybindingAction::TranscriptCopySelection,
-    KeybindingAction::AppClear,
-    KeybindingAction::AppExit,
-    KeybindingAction::AppSuspend,
-    KeybindingAction::TranscriptSelectionStart,
-    KeybindingAction::TranscriptSelectionClear,
-    KeybindingAction::TranscriptSelectionExtendUp,
-    KeybindingAction::TranscriptSelectionExtendDown,
-    KeybindingAction::TranscriptSelectionExtendPageUp,
-    KeybindingAction::TranscriptSelectionExtendPageDown,
-    KeybindingAction::CommandPaletteOpen,
-    KeybindingAction::SessionPickerOpen,
-    KeybindingAction::ToolOutputToggle,
-    KeybindingAction::ModelPickerOpen,
-    KeybindingAction::EditorCursorUp,
-    KeybindingAction::EditorCursorDown,
-    KeybindingAction::EditorCursorLeft,
-    KeybindingAction::EditorCursorRight,
-    KeybindingAction::EditorCursorWordLeft,
-    KeybindingAction::EditorCursorWordRight,
-    KeybindingAction::EditorCursorLineStart,
-    KeybindingAction::EditorCursorLineEnd,
-    KeybindingAction::EditorDeleteCharBackward,
-    KeybindingAction::EditorDeleteCharForward,
-    KeybindingAction::EditorDeleteWordBackward,
-    KeybindingAction::EditorDeleteWordForward,
-    KeybindingAction::EditorDeleteToLineStart,
-    KeybindingAction::EditorDeleteToLineEnd,
-    KeybindingAction::EditorYank,
-    KeybindingAction::EditorUndo,
-    KeybindingAction::InputTab,
-    KeybindingAction::InputCopy,
-    KeybindingAction::SelectCancel,
-];
-
-const OVERLAY_ACTION_PRIORITY: &[KeybindingAction] = &[
-    KeybindingAction::SelectConfirm,
-    KeybindingAction::SelectCancel,
-    KeybindingAction::SessionFork,
-    KeybindingAction::SelectUp,
-    KeybindingAction::SelectDown,
-    KeybindingAction::SelectPageUp,
-    KeybindingAction::SelectPageDown,
-];
-
-const QUESTION_ACTION_PRIORITY: &[KeybindingAction] = &[
-    KeybindingAction::SelectConfirm,
-    KeybindingAction::SelectCancel,
-    KeybindingAction::SelectUp,
-    KeybindingAction::SelectDown,
-    KeybindingAction::EditorCursorUp,
-    KeybindingAction::EditorCursorDown,
-    KeybindingAction::EditorCursorLeft,
-    KeybindingAction::EditorCursorRight,
-    KeybindingAction::EditorCursorWordLeft,
-    KeybindingAction::EditorCursorWordRight,
-    KeybindingAction::EditorCursorLineStart,
-    KeybindingAction::EditorCursorLineEnd,
-    KeybindingAction::EditorDeleteCharBackward,
-    KeybindingAction::EditorDeleteCharForward,
-    KeybindingAction::EditorDeleteWordBackward,
-    KeybindingAction::EditorDeleteWordForward,
-    KeybindingAction::EditorDeleteToLineStart,
-    KeybindingAction::EditorDeleteToLineEnd,
-    KeybindingAction::InputSubmit,
-    KeybindingAction::InputNewLine,
-    KeybindingAction::InputTab,
-];
-
-const PROMPT_COMPLETION_ACTION_PRIORITY: &[KeybindingAction] = &[
-    KeybindingAction::SelectConfirm,
-    KeybindingAction::SelectCancel,
-    KeybindingAction::SelectUp,
-    KeybindingAction::SelectDown,
-    KeybindingAction::SelectPageUp,
-    KeybindingAction::SelectPageDown,
-    KeybindingAction::EditorCursorLeft,
-    KeybindingAction::EditorCursorRight,
-    KeybindingAction::EditorCursorWordLeft,
-    KeybindingAction::EditorCursorWordRight,
-    KeybindingAction::EditorCursorLineStart,
-    KeybindingAction::EditorCursorLineEnd,
-    KeybindingAction::EditorDeleteCharBackward,
-    KeybindingAction::EditorDeleteCharForward,
-    KeybindingAction::EditorDeleteWordBackward,
-    KeybindingAction::EditorDeleteWordForward,
-    KeybindingAction::EditorDeleteToLineStart,
-    KeybindingAction::EditorDeleteToLineEnd,
-    KeybindingAction::EditorYank,
-    KeybindingAction::EditorUndo,
-    KeybindingAction::InputTab,
-    KeybindingAction::InputCopy,
-];
 
 struct NeoTerminal {
     tui: TuiRenderer,
