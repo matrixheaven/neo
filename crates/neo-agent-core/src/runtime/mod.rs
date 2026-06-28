@@ -16,6 +16,7 @@ mod queue;
 mod skill_dispatch;
 mod stream_aggregator;
 mod tokens;
+mod tool_dispatch;
 
 // Re-export all public items from `legacy.rs` so that the existing
 // `pub use runtime::*;` in `lib.rs` continues to resolve without
