@@ -4,6 +4,9 @@ use futures::{StreamExt, future, stream};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
+use super::common::error::ProviderError;
+use super::common::helpers::{reject_images, rounded_f64, token_usage_from};
+
 use crate::{
     AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
     ModelClient, StopReason, TokenUsage, ToolSpec,
@@ -69,7 +72,10 @@ impl OpenAiResponsesClient {
         let response = builder.send().await.map_err(ProviderError::Transport)?;
         let status = response.status();
         if !status.is_success() {
-            return Err(ProviderError::HttpStatus(status.as_u16()));
+            return Err(ProviderError::HttpStatus {
+                status: status.as_u16(),
+                body: None,
+            });
         }
 
         Ok(response)
@@ -88,32 +94,6 @@ impl ModelClient for OpenAiResponsesClient {
                 Err(err) => stream::iter(vec![Err(err)]).boxed(),
             })
             .boxed()
-    }
-}
-
-#[derive(Debug)]
-enum ProviderError {
-    Header(String),
-    HttpStatus(u16),
-    Transport(reqwest::Error),
-    Stream(String),
-}
-
-impl ProviderError {
-    const fn is_retryable(&self) -> bool {
-        match self {
-            Self::HttpStatus(status) => *status == 429 || *status >= 500,
-            Self::Transport(_) => true,
-            Self::Header(_) | Self::Stream(_) => false,
-        }
-    }
-
-    fn into_ai_error(self) -> AiError {
-        match self {
-            Self::Header(message) | Self::Stream(message) => AiError::Stream(message),
-            Self::HttpStatus(status) => AiError::Stream(format!("http status {status}")),
-            Self::Transport(err) => AiError::Stream(format!("transport error: {err}")),
-        }
     }
 }
 
@@ -308,7 +288,7 @@ fn content_text_with_reasoning_replay(
     role: &str,
     replay_reasoning: bool,
 ) -> Result<String, ProviderError> {
-    reject_images(content, role)?;
+    reject_images(content, "OpenAI Responses", role)?;
     Ok(text_content_with_reasoning_replay(
         content,
         replay_reasoning,
@@ -353,18 +333,6 @@ fn user_content(content: &[ContentPart]) -> Value {
     } else {
         json!(text_content(content))
     }
-}
-
-fn reject_images(content: &[ContentPart], role: &str) -> Result<(), ProviderError> {
-    if content
-        .iter()
-        .any(|part| matches!(part, ContentPart::Image { .. }))
-    {
-        return Err(ProviderError::Stream(format!(
-            "OpenAI Responses image content is only supported in user messages, not {role} messages"
-        )));
-    }
-    Ok(())
 }
 
 fn tool_body(tool: &ToolSpec) -> Value {
@@ -759,7 +727,9 @@ impl ParseState {
 
     fn ingest_completed(&mut self, value: &Value) {
         let response = value.get("response").unwrap_or(&Value::Null);
-        self.usage = response.get("usage").and_then(token_usage);
+        self.usage = response
+            .get("usage")
+            .and_then(|v| token_usage_from(v, "input_tokens", "output_tokens"));
         self.last_stop_reason = if self.tool_args.is_empty() {
             StopReason::EndTurn
         } else {
@@ -881,15 +851,4 @@ fn reasoning_item_text(item: &Value) -> Option<String> {
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>();
     (!values.is_empty()).then(|| values.join("\n\n"))
-}
-
-fn token_usage(value: &Value) -> Option<TokenUsage> {
-    Some(TokenUsage {
-        input_tokens: u32::try_from(value.get("input_tokens")?.as_u64()?).ok()?,
-        output_tokens: u32::try_from(value.get("output_tokens")?.as_u64()?).ok()?,
-    })
-}
-
-fn rounded_f64(value: f64) -> f64 {
-    (value * 1_000_000.0).round() / 1_000_000.0
 }

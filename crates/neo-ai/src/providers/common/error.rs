@@ -49,7 +49,7 @@ pub(crate) enum ProviderError {
 
 impl ProviderError {
     /// Whether a failed request is worth retrying.
-    const fn is_retryable(&self) -> bool {
+    pub(crate) const fn is_retryable(&self) -> bool {
         match self {
             Self::HttpStatus { status, .. } => *status == 429 || *status >= 500,
             Self::Transport(_) => true,
@@ -58,7 +58,7 @@ impl ProviderError {
     }
 
     /// Convert into the public [`AiError`] type.
-    fn into_ai_error(self) -> AiError {
+    pub(crate) fn into_ai_error(self) -> AiError {
         match self {
             Self::Header(message)
             | Self::Stream(message)

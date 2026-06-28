@@ -4,6 +4,9 @@ use futures::{StreamExt, future, stream};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
+use super::common::error::{ProviderError, error_body_excerpt};
+use super::common::helpers::{reject_images, rounded_f64, token_usage_from};
+
 use crate::{
     AiError, AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ImageData, ModelClient,
     ReasoningEffort, StopReason, TokenUsage, ToolSpec,
@@ -72,7 +75,7 @@ impl AnthropicMessagesClient {
                 .unwrap_or_else(|err| format!("failed to read error body: {err}"));
             return Err(ProviderError::HttpStatus {
                 status,
-                body: error_body_excerpt(&body),
+                body: Some(error_body_excerpt(&body)),
             });
         }
 
@@ -92,58 +95,6 @@ impl ModelClient for AnthropicMessagesClient {
                 Err(err) => stream::iter(vec![Err(err)]).boxed(),
             })
             .boxed()
-    }
-}
-
-#[derive(Debug)]
-enum ProviderError {
-    Header(String),
-    HttpStatus { status: u16, body: String },
-    Transport(reqwest::Error),
-    Stream(String),
-}
-
-impl ProviderError {
-    const fn is_retryable(&self) -> bool {
-        match self {
-            Self::HttpStatus { status, .. } => *status == 429 || *status >= 500,
-            Self::Transport(_) => true,
-            Self::Header(_) | Self::Stream(_) => false,
-        }
-    }
-
-    fn into_ai_error(self) -> AiError {
-        match self {
-            Self::Header(message) | Self::Stream(message) => AiError::Stream(message),
-            Self::HttpStatus { status, body } => {
-                AiError::Stream(format_http_status_error(status, &body))
-            }
-            Self::Transport(err) => AiError::Stream(format!("transport error: {err}")),
-        }
-    }
-}
-
-const MAX_HTTP_ERROR_BODY_CHARS: usize = 4096;
-
-fn error_body_excerpt(body: &str) -> String {
-    let trimmed = body.trim();
-    let mut chars = trimmed.chars();
-    let excerpt = chars
-        .by_ref()
-        .take(MAX_HTTP_ERROR_BODY_CHARS)
-        .collect::<String>();
-    if chars.next().is_some() {
-        format!("{excerpt}...")
-    } else {
-        excerpt
-    }
-}
-
-fn format_http_status_error(status: u16, body: &str) -> String {
-    if body.is_empty() {
-        format!("http status {status}")
-    } else {
-        format!("http status {status}: {body}")
     }
 }
 
@@ -403,24 +354,12 @@ fn content_part_body(part: &ContentPart) -> Result<Value, ProviderError> {
 }
 
 fn content_text(content: &[ContentPart], role: &str) -> Result<String, ProviderError> {
-    reject_images(content, role)?;
+    reject_images(content, "Anthropic", role)?;
     Ok(text_content(content))
 }
 
 fn text_content(content: &[ContentPart]) -> String {
     super::collect_text_content(content, false)
-}
-
-fn reject_images(content: &[ContentPart], role: &str) -> Result<(), ProviderError> {
-    if content
-        .iter()
-        .any(|part| matches!(part, ContentPart::Image { .. }))
-    {
-        return Err(ProviderError::Stream(format!(
-            "Anthropic image content is only supported in user messages, not {role} messages"
-        )));
-    }
-    Ok(())
 }
 
 fn tool_body(tool: &ToolSpec) -> Value {
@@ -747,7 +686,7 @@ impl ParseState {
         }
         self.usage = value
             .get("usage")
-            .and_then(token_usage)
+            .and_then(|v| token_usage_from(v, "input_tokens", "output_tokens"))
             .or(self.usage.clone());
     }
 
@@ -797,21 +736,10 @@ impl ParseState {
     }
 }
 
-fn token_usage(value: &Value) -> Option<TokenUsage> {
-    Some(TokenUsage {
-        input_tokens: u32::try_from(value.get("input_tokens")?.as_u64()?).ok()?,
-        output_tokens: u32::try_from(value.get("output_tokens")?.as_u64()?).ok()?,
-    })
-}
-
 fn stop_reason(reason: &str) -> StopReason {
     match reason {
         "tool_use" => StopReason::ToolUse,
         "max_tokens" => StopReason::MaxTokens,
         _ => StopReason::EndTurn,
     }
-}
-
-fn rounded_f64(value: f64) -> f64 {
-    (value * 1_000_000.0).round() / 1_000_000.0
 }

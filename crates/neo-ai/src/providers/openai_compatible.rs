@@ -4,6 +4,9 @@ use futures::{StreamExt, future, stream};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
+use super::common::error::ProviderError;
+use super::common::helpers::{reject_images, rounded_f64, token_usage_from};
+
 use crate::{
     AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ImageData,
     ModelClient, StopReason, TokenUsage, ToolSpec,
@@ -69,7 +72,10 @@ impl OpenAiCompatibleClient {
         let response = builder.send().await.map_err(ProviderError::Transport)?;
         let status = response.status();
         if !status.is_success() {
-            return Err(ProviderError::HttpStatus(status.as_u16()));
+            return Err(ProviderError::HttpStatus {
+                status: status.as_u16(),
+                body: None,
+            });
         }
 
         Ok(response)
@@ -88,32 +94,6 @@ impl ModelClient for OpenAiCompatibleClient {
                 Err(err) => stream::iter(vec![Err(err)]).boxed(),
             })
             .boxed()
-    }
-}
-
-#[derive(Debug)]
-enum ProviderError {
-    Header(String),
-    HttpStatus(u16),
-    Transport(reqwest::Error),
-    Stream(String),
-}
-
-impl ProviderError {
-    const fn is_retryable(&self) -> bool {
-        match self {
-            Self::HttpStatus(status) => *status == 429 || *status >= 500,
-            Self::Transport(_) => true,
-            Self::Header(_) | Self::Stream(_) => false,
-        }
-    }
-
-    fn into_ai_error(self) -> AiError {
-        match self {
-            Self::Header(message) | Self::Stream(message) => AiError::Stream(message),
-            Self::HttpStatus(status) => AiError::Stream(format!("http status {status}")),
-            Self::Transport(err) => AiError::Stream(format!("transport error: {err}")),
-        }
     }
 }
 
@@ -249,7 +229,7 @@ fn tool_result_message_body(
 }
 
 fn content_text(content: &[ContentPart], role: &str) -> Result<String, ProviderError> {
-    reject_images(content, role)?;
+    reject_images(content, "OpenAI-compatible", role)?;
     Ok(text_content(content))
 }
 
@@ -288,18 +268,6 @@ fn image_url(mime_type: &str, data: &ImageData) -> String {
         ImageData::Base64(data) => format!("data:{mime_type};base64,{data}"),
         ImageData::Url(url) => url.clone(),
     }
-}
-
-fn reject_images(content: &[ContentPart], role: &str) -> Result<(), ProviderError> {
-    if content
-        .iter()
-        .any(|part| matches!(part, ContentPart::Image { .. }))
-    {
-        return Err(ProviderError::Stream(format!(
-            "OpenAI-compatible image content is only supported in user messages, not {role} messages"
-        )));
-    }
-    Ok(())
 }
 
 fn tool_body(tool: &ToolSpec) -> Value {
@@ -535,7 +503,7 @@ impl ParseState {
     fn ingest(&mut self, value: &Value) {
         self.ensure_started(value);
         if let Some(usage) = value.get("usage") {
-            self.usage = token_usage(usage);
+            self.usage = token_usage_from(usage, "prompt_tokens", "completion_tokens");
         }
 
         let Some(choice) = value
@@ -675,17 +643,6 @@ fn merge_tool_argument_fragment(arguments: &mut String, fragment: &str) -> Optio
     }
     arguments.push_str(fragment);
     Some(fragment.to_owned())
-}
-
-fn token_usage(value: &Value) -> Option<TokenUsage> {
-    Some(TokenUsage {
-        input_tokens: u32::try_from(value.get("prompt_tokens")?.as_u64()?).ok()?,
-        output_tokens: u32::try_from(value.get("completion_tokens")?.as_u64()?).ok()?,
-    })
-}
-
-fn rounded_f64(value: f64) -> f64 {
-    (value * 1_000_000.0).round() / 1_000_000.0
 }
 
 fn stop_reason(reason: &str) -> StopReason {

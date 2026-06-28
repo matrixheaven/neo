@@ -4,6 +4,9 @@ use futures::{StreamExt, future, stream};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
+use super::common::error::ProviderError;
+use super::common::helpers::{reject_images, rounded_f64, token_usage_from};
+
 use crate::{
     AiError, AiStreamEvent, ChatMessage, ChatRequest, ContentPart, ImageData, ModelClient,
     ReasoningEffort, StopReason, TokenUsage, ToolSpec,
@@ -65,7 +68,10 @@ impl GoogleGenerativeAiClient {
         let response = builder.send().await.map_err(ProviderError::Transport)?;
         let status = response.status();
         if !status.is_success() {
-            return Err(ProviderError::HttpStatus(status.as_u16()));
+            return Err(ProviderError::HttpStatus {
+                status: status.as_u16(),
+                body: None,
+            });
         }
 
         Ok(response)
@@ -84,35 +90,6 @@ impl ModelClient for GoogleGenerativeAiClient {
                 Err(err) => stream::iter(vec![Err(err)]).boxed(),
             })
             .boxed()
-    }
-}
-
-#[derive(Debug)]
-enum ProviderError {
-    Header(String),
-    HttpStatus(u16),
-    Transport(reqwest::Error),
-    Url(String),
-    Unsupported(String),
-}
-
-impl ProviderError {
-    const fn is_retryable(&self) -> bool {
-        match self {
-            Self::HttpStatus(status) => *status == 429 || *status >= 500,
-            Self::Transport(_) => true,
-            Self::Header(_) | Self::Url(_) | Self::Unsupported(_) => false,
-        }
-    }
-
-    fn into_ai_error(self) -> AiError {
-        match self {
-            Self::Header(message) | Self::Url(message) | Self::Unsupported(message) => {
-                AiError::Stream(message)
-            }
-            Self::HttpStatus(status) => AiError::Stream(format!("http status {status}")),
-            Self::Transport(err) => AiError::Stream(format!("transport error: {err}")),
-        }
     }
 }
 
@@ -236,7 +213,7 @@ fn content_body(
             tool_call_id,
             content,
             is_error,
-        } => Some(reject_images(content, "tool result").map(|()| {
+        } => Some(reject_images(content, "Google Generative AI", "tool result").map(|()| {
             json!({
                 "role": "function",
                 "parts": [{
@@ -330,18 +307,6 @@ fn content_text(content: &[ContentPart]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn reject_images(content: &[ContentPart], role: &str) -> Result<(), ProviderError> {
-    if content
-        .iter()
-        .any(|part| matches!(part, ContentPart::Image { .. }))
-    {
-        return Err(ProviderError::Unsupported(format!(
-            "Google Generative AI image content is only supported in user/model messages, not {role} messages"
-        )));
-    }
-    Ok(())
 }
 
 fn tool_body(tool: &ToolSpec) -> Value {
@@ -495,7 +460,7 @@ impl ParseState {
     fn ingest(&mut self, value: &Value) -> Result<(), AiError> {
         self.usage = value
             .get("usageMetadata")
-            .and_then(token_usage)
+            .and_then(|v| token_usage_from(v, "promptTokenCount", "candidatesTokenCount"))
             .or(self.usage.clone());
 
         for candidate in value
@@ -648,21 +613,10 @@ impl ParseState {
     }
 }
 
-fn token_usage(value: &Value) -> Option<TokenUsage> {
-    Some(TokenUsage {
-        input_tokens: u32::try_from(value.get("promptTokenCount")?.as_u64()?).ok()?,
-        output_tokens: u32::try_from(value.get("candidatesTokenCount")?.as_u64()?).ok()?,
-    })
-}
-
 fn stop_reason(reason: &str) -> StopReason {
     match reason {
         "MAX_TOKENS" => StopReason::MaxTokens,
         "SAFETY" | "RECITATION" | "SPII" | "MALFORMED_FUNCTION_CALL" => StopReason::Error,
         _ => StopReason::EndTurn,
     }
-}
-
-fn rounded_f64(value: f64) -> f64 {
-    (value * 1_000_000.0).round() / 1_000_000.0
 }
