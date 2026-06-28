@@ -1,5 +1,5 @@
 use neo_tui::primitive::strip_ansi;
-use neo_tui::shell::TuiTheme;
+use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::transcript::{TranscriptEntry, TranscriptStore};
 
 fn plain_rows(store: &TranscriptStore) -> Vec<String> {

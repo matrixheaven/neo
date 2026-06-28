@@ -1,4 +1,4 @@
-use super::theme::TuiTheme;
+use crate::primitive::theme::TuiTheme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalChoice {

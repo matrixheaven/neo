@@ -2,7 +2,7 @@ use crate::primitive::Style;
 use crate::primitive::wrap_width;
 use crate::primitive::{Component, Expandable, Finalization, Line, Span};
 use crate::shell::ToolStatusKind;
-use crate::shell::TuiTheme;
+use crate::primitive::theme::TuiTheme;
 
 use super::plan_box::PlanBoxComponent;
 use super::tool_renderers::{

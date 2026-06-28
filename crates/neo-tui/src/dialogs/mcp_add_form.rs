@@ -4,7 +4,7 @@ use crate::input::{InputEvent, KeybindingAction};
 use crate::primitive::Color;
 use crate::primitive::InputResult;
 use crate::primitive::{truncate_width, visible_width};
-use crate::shell::TuiTheme;
+use crate::primitive::theme::TuiTheme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpAddFormOptions {

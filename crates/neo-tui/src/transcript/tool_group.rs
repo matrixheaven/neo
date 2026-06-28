@@ -8,7 +8,7 @@
 use crate::primitive::Style;
 use crate::primitive::{Line, Span};
 use crate::shell::ToolStatusKind;
-use crate::shell::TuiTheme;
+use crate::primitive::theme::TuiTheme;
 
 use super::tool_call::ToolCallState;
 use super::tool_renderers::key_argument;

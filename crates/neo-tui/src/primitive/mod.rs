@@ -12,6 +12,7 @@ pub mod line;
 pub mod style;
 pub mod text;
 pub mod text_layout;
+pub mod theme;
 
 // Flat re-exports for ergonomic single-path imports
 pub use ansi_escape::{bg_to_ansi, fg_to_ansi, paint, strip_ansi, style_to_ansi};
@@ -25,6 +26,7 @@ pub use text_layout::{
     pad_to_width, truncate_to_width, truncate_width, visible_width, wrap_text, wrap_width,
     wrap_width_with_indices,
 };
+pub use theme::{ChromeMode, DevelopmentMode, GoalModeStatus, TuiTheme};
 
 // Crate-visible re-exports
 pub(crate) use ansi_escape::next_sequence;

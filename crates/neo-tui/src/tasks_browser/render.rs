@@ -1,5 +1,5 @@
 use crate::primitive::{Color, Style, paint, truncate_width, visible_width};
-use crate::shell::TuiTheme;
+use crate::primitive::theme::TuiTheme;
 
 use super::{
     state::{TaskBrowserFilter, TaskBrowserState},

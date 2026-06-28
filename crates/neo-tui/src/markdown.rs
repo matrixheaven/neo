@@ -11,7 +11,7 @@ use crate::primitive::{
     Color, Line, Span, Style, clip_plain_to_width, clip_visible_to_width, pad_to_width,
     truncate_to_width, visible_width,
 };
-use crate::shell::TuiTheme;
+use crate::primitive::theme::TuiTheme;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 /// Inner horizontal padding between the side border and code content.

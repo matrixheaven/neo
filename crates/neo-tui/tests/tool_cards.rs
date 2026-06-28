@@ -1,5 +1,6 @@
 use neo_tui::primitive::{Component, Expandable, Finalization, Line};
-use neo_tui::shell::{ToolStatusKind, TuiTheme};
+use neo_tui::primitive::theme::TuiTheme;
+use neo_tui::shell::ToolStatusKind;
 use neo_tui::transcript::diff_preview::render_diff_lines_clustered;
 use neo_tui::transcript::tool_renderers::tool_header_spans;
 use neo_tui::transcript::{ToolCallComponent, ToolCallState, TranscriptPane};

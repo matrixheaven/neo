@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crate::primitive::{Style, paint};
 use crate::primitive::{truncate_width, visible_width, wrap_width};
-use crate::shell::TuiTheme;
+use crate::primitive::theme::TuiTheme;
 
 /// Maximum content lines shown per message before an ellipsis row.
 const PREVIEW_LINE_LIMIT: usize = 3;

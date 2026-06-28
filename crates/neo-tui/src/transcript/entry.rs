@@ -1,7 +1,7 @@
+use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
 use crate::primitive::{Color, Style, paint, visible_width};
 use crate::primitive::{Line, Span};
-use crate::shell::TuiTheme;
 use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
 };
@@ -1319,7 +1319,7 @@ fn thinking_style(theme: &TuiTheme) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::TuiTheme;
+    use crate::primitive::theme::TuiTheme;
 
     #[test]
     fn welcome_banner_has_correct_width_and_logo() {

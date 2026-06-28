@@ -260,7 +260,7 @@ pub enum GoalModeStatus {
     Blocked,
 }
 
-pub(super) fn format_token_count(tokens: u32) -> String {
+pub(crate) fn format_token_count(tokens: u32) -> String {
     if tokens >= 1_000_000 {
         format!("{}m", tokens / 1_000_000)
     } else if tokens >= 1_000 {
@@ -270,7 +270,7 @@ pub(super) fn format_token_count(tokens: u32) -> String {
     }
 }
 
-pub(super) fn review_title(operation: PermissionOperation) -> &'static str {
+pub(crate) fn review_title(operation: PermissionOperation) -> &'static str {
     match operation {
         PermissionOperation::GoalTransition => "Goal Review",
         _ => "Plan Review",
@@ -282,7 +282,7 @@ pub(super) fn review_title(operation: PermissionOperation) -> &'static str {
 /// where `labels` is the ordered list of approach labels (empty when the model
 /// supplied no alternatives) and `body` is a rendered list of
 /// `label — description` lines for the dialog body.
-pub(super) fn plan_review_options(arguments: &serde_json::Value) -> (Vec<String>, String) {
+pub(crate) fn plan_review_options(arguments: &serde_json::Value) -> (Vec<String>, String) {
     let Some(options) = arguments.get("options").and_then(|v| v.as_array()) else {
         return (Vec::new(), String::new());
     };

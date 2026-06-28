@@ -6,7 +6,7 @@ use crate::primitive::Color;
 use crate::primitive::InputResult;
 use crate::primitive::{truncate_width, visible_width};
 use crate::searchable_list::SearchableList;
-use crate::shell::TuiTheme;
+use crate::primitive::theme::TuiTheme;
 
 /// One model entry in the picker.
 #[derive(Debug, Clone, PartialEq, Eq)]

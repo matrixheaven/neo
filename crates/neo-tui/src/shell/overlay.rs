@@ -3,7 +3,7 @@ use super::command_palette::CommandPaletteState;
 use super::dialog_dispatch::handle_dialog_selection;
 use super::pickers::{ModelPickerState, PromptCompletionState};
 use super::session_picker::SessionPickerState;
-use super::theme::TuiTheme;
+use crate::primitive::theme::TuiTheme;
 
 use crate::dialogs::QuestionStateMachine;
 use crate::dialogs::{

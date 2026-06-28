@@ -1,7 +1,7 @@
 //! Markdown rendering: verify each element is styled and laid out like Neo.
 
 use neo_tui::markdown::render_markdown;
-use neo_tui::shell::TuiTheme;
+use neo_tui::primitive::theme::TuiTheme;
 
 fn plain(text: &str, width: usize) -> Vec<String> {
     render_markdown(text, width, &TuiTheme::default(), "", "")

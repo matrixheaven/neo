@@ -1,5 +1,6 @@
+use neo_tui::primitive::theme::ChromeMode;
 use neo_tui::shell::{
-    ApprovalChoice, ChromeMode, CommandPaletteState, CommandSpec, ContextWindow, ModelPickerState,
+    ApprovalChoice, CommandPaletteState, CommandSpec, ContextWindow, ModelPickerState,
     NeoChromeState, Overlay, OverlayKind, PickerItem, PromptEdit, SessionPickerItem,
     SessionPickerScope, SessionPickerState, StreamUpdate, ToolStatusKind,
 };
@@ -272,8 +273,8 @@ fn footer_shows_plan_mode_indicator() {
 #[test]
 fn footer_shows_goal_mode_status_badges() {
     let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
-    app.set_development_mode(neo_tui::shell::DevelopmentMode::Goal(
-        neo_tui::shell::GoalModeStatus::Pending,
+    app.set_development_mode(neo_tui::primitive::theme::DevelopmentMode::Goal(
+        neo_tui::primitive::theme::GoalModeStatus::Pending,
     ));
     assert!(
         render_app(80, &app)

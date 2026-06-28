@@ -1,6 +1,6 @@
 use crate::primitive::wrap_width;
 use crate::primitive::{Style, paint, truncate_width};
-use crate::shell::TuiTheme;
+use crate::primitive::theme::TuiTheme;
 
 /// Maximum number of todo items visible without truncation.
 pub const MAX_VISIBLE_TODOS: usize = 5;

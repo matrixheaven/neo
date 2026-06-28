@@ -7,7 +7,7 @@ use crate::dialogs::model_selector::{
 };
 use crate::input::InputEvent;
 use crate::primitive::InputResult;
-use crate::shell::TuiTheme;
+use crate::primitive::theme::TuiTheme;
 
 /// Options for the tabbed model selector.
 pub struct TabbedModelSelectorOptions {

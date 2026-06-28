@@ -5,7 +5,7 @@ use crate::markdown::{highlight_code_lines, lang_from_path};
 use crate::primitive::{Color, Style};
 use crate::primitive::{Line, Span, Text};
 use crate::shell::ToolStatusKind;
-use crate::shell::TuiTheme;
+use crate::primitive::theme::TuiTheme;
 use crate::token_estimate::{estimate_tokens, format_token_count};
 
 use super::partial_json::extract_partial_string_field;

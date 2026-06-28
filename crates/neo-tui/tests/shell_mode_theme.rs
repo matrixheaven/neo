@@ -1,5 +1,5 @@
 use neo_tui::primitive::Color;
-use neo_tui::shell::TuiTheme;
+use neo_tui::primitive::theme::TuiTheme;
 
 #[test]
 fn shell_mode_color_defaults_to_cyan() {

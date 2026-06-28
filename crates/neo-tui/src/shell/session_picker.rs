@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use super::theme::TuiTheme;
+use crate::primitive::theme::TuiTheme;
 use crate::primitive::Color;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

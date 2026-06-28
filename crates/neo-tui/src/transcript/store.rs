@@ -1,6 +1,6 @@
 use crate::primitive::Line;
 use crate::shell::ToolStatusKind;
-use crate::shell::TuiTheme;
+use crate::primitive::theme::TuiTheme;
 use crate::transcript::{ShellRunComponent, ToolCallComponent, ToolCallState};
 
 use super::entry::{ApprovalPromptData, ThinkingPhase, TranscriptEntry};

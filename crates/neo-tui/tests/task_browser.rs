@@ -1,6 +1,6 @@
 use neo_tui::primitive::strip_ansi;
 use neo_tui::primitive::visible_width;
-use neo_tui::shell::TuiTheme;
+use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::tasks_browser::{
     TaskBrowserAction, TaskBrowserFilter, TaskBrowserItem, TaskBrowserKind, TaskBrowserRenderer,
     TaskBrowserSnapshot, TaskBrowserState, TaskBrowserStatus,

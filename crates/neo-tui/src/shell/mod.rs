@@ -10,7 +10,8 @@ mod prompt;
 mod select_list;
 mod session_picker;
 mod stream;
-mod theme;
+
+use crate::primitive::theme::{ChromeMode, DevelopmentMode, GoalModeStatus, TuiTheme};
 
 pub use approval::{
     ApprovalChoice, ApprovalModal, ApprovalOption, ApprovalRequestModal, ApprovalResult,
@@ -27,7 +28,6 @@ pub use prompt::{PromptEdit, PromptState};
 pub use select_list::{SelectItem, SelectListState, VisibleSelectItem};
 pub use session_picker::{SessionPickerItem, SessionPickerScope, SessionPickerState};
 pub use stream::{StreamUpdate, ToolStatusKind};
-pub use theme::{ChromeMode, DevelopmentMode, GoalModeStatus, TuiTheme};
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -573,7 +573,7 @@ impl NeoChromeState {
                         // ExitPlanMode carries `{plan_summary, options: [{label, description}]}`.
                         // Surface the model-supplied options as a real picker (mirrors
                         // kimi-code) instead of dumping the raw JSON into the body.
-                        let (option_labels, options_body) = theme::plan_review_options(&arguments);
+                        let (option_labels, options_body) = crate::primitive::theme::plan_review_options(&arguments);
                         let body = match arguments.get("plan_summary").and_then(|v| v.as_str()) {
                             Some(summary) if !summary.trim().is_empty() => {
                                 if options_body.is_empty() {
@@ -586,12 +586,12 @@ impl NeoChromeState {
                         };
                         ApprovalRequestModal::new_plan_review(
                             id,
-                            theme::review_title(operation),
+                            crate::primitive::theme::review_title(operation),
                             body,
                             option_labels,
                         )
                     } else if is_review {
-                        ApprovalRequestModal::new_review(id, theme::review_title(operation), body)
+                        ApprovalRequestModal::new_review(id, crate::primitive::theme::review_title(operation), body)
                     } else {
                         ApprovalRequestModal::new_with_options(
                             id,

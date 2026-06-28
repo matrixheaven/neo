@@ -8,10 +8,10 @@ use neo_agent_core::{
 use crate::primitive::wrap_width;
 use crate::primitive::{Color, Style, paint, truncate_to_width, visible_width};
 use crate::primitive::{Expandable, Line};
+use crate::primitive::theme::{DevelopmentMode, GoalModeStatus, TuiTheme};
 use crate::screen_output::{CURSOR_MARKER, CursorPos};
 use crate::shell::{
-    DevelopmentMode, GoalModeStatus, MAX_PROMPT_VISIBLE_LINES, NeoChromeState, PromptState,
-    ToolStatusKind, TuiTheme,
+    MAX_PROMPT_VISIBLE_LINES, NeoChromeState, PromptState, ToolStatusKind,
 };
 use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
@@ -1711,7 +1711,8 @@ fn render_git_status_part(part: &str, theme: TuiTheme) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::{NeoChromeState, PickerItem, PromptCompletionPrefix, PromptEdit, TuiTheme};
+    use crate::primitive::theme::TuiTheme;
+    use crate::shell::{NeoChromeState, PickerItem, PromptCompletionPrefix, PromptEdit};
 
     #[test]
     fn prompt_box_lines_are_exact_width() {

@@ -2,7 +2,7 @@ use crate::input::{InputEvent, KeybindingAction};
 use crate::primitive::InputResult;
 use crate::primitive::{Style, paint};
 use crate::primitive::{truncate_width, visible_width};
-use crate::shell::TuiTheme;
+use crate::primitive::theme::TuiTheme;
 
 /// Row data passed in from the controller for one configured MCP server.
 #[derive(Debug, Clone, PartialEq, Eq)]

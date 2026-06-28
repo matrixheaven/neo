@@ -1,4 +1,4 @@
-use super::theme::format_token_count;
+use crate::primitive::theme::format_token_count;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextWindow {
