@@ -11,8 +11,7 @@ mod prompt_history;
 mod prompt_parts;
 mod prompt_templates;
 mod resources;
-mod rpc_mode;
-mod rpc_types;
+mod rpc;
 mod themes;
 mod trust;
 mod trust_commands;
@@ -152,7 +151,7 @@ async fn dispatch_command(
         Some(Command::Models { command }) => dispatch_model_command(config, command),
         Some(Command::Provider { command }) => dispatch_provider_command(config, command).await,
         Some(Command::Mcp { command }) => dispatch_mcp_command(config, command).await,
-        Some(Command::Rpc) => rpc_mode::execute(config).await,
+        Some(Command::Rpc) => rpc::server::execute(config).await,
         Some(Command::Trust { command }) => trust_commands::execute(config, &command),
         None => {
             dispatch_default_command(config, resume_picker, interactive_options, log_receiver).await
@@ -435,7 +434,7 @@ async fn dispatch_default_command(
     log_receiver: Option<tokio::sync::mpsc::UnboundedReceiver<log_capture::CapturedEvent>>,
 ) -> anyhow::Result<String> {
     if config.defaults.mode.eq_ignore_ascii_case("rpc") {
-        return rpc_mode::execute(config).await;
+        return rpc::server::execute(config).await;
     }
     let startup = if resume_picker {
         modes::interactive::StartupAction::OpenSessionPicker

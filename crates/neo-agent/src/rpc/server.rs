@@ -9,7 +9,7 @@ use neo_agent_core::session::{
 };
 use serde_json::{Value, json};
 
-use crate::rpc_types::{
+use super::types::{
     RpcCommandKind, RpcCommandRecord, RpcCommandsResult, RpcSessionExportHtmlResult,
     RpcSessionGetResult, RpcSessionRecord, RpcSessionsListResult,
 };
