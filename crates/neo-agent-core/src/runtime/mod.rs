@@ -10,6 +10,7 @@ mod events;
 mod image_blobs;
 mod legacy;
 mod queue;
+mod stream_aggregator;
 mod tokens;
 
 // Re-export all public items from `legacy.rs` so that the existing
