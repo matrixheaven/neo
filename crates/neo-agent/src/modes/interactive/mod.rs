@@ -1,7 +1,7 @@
 use crate::{
     config::{self, AppConfig, neo_home, workspace_sessions_dir},
     mcp_ops,
-    modes::sessions::{SessionPickerScope as SessionDataScope, session_summaries},
+    modes::sessions::SessionPickerScope as SessionDataScope,
     modes::task_browser,
     prompt::templates::expand_prompt_template_args,
     resources,
@@ -114,6 +114,15 @@ mod image_capabilities;
 use image_capabilities::terminal_image_capabilities_for_policy;
 
 mod turn;
+
+mod model_picker;
+use model_picker::{context_window_from_picker_item, picker_catalogs_for_config};
+
+#[cfg(test)]
+use model_picker::{
+    model_picker_catalog_for_config, model_picker_items_from_config, model_to_picker_item,
+    session_catalog_for_config,
+};
 
 type BoxedTurnFuture = Pin<Box<dyn Future<Output = Result<TurnOutcome>> + Send + 'static>>;
 type BoxedSessionFuture = Pin<Box<dyn Future<Output = Result<LoadedSessionTranscript>> + Send>>;
@@ -2868,68 +2877,6 @@ impl InteractiveController {
             .open_session_picker(&current_session_id, picker_scope, items);
     }
 
-    fn open_model_picker(&mut self) {
-        let entries = self.model_entries_for_picker();
-        if entries.is_empty() {
-            self.push_status("No configured models");
-            return;
-        }
-        let current_alias = self
-            .active_model
-            .as_ref()
-            .map(|m| format!("{}/{}", m.provider, m.model))
-            .unwrap_or_default();
-        let theme = self.tui.chrome().theme();
-        self.tui.chrome_mut().open_tabbed_model_selector(
-            neo_tui::dialogs::TabbedModelSelectorOptions {
-                models: entries,
-                current_alias,
-                selected_alias: None,
-                current_thinking: self.current_thinking,
-                initial_tab_id: None,
-                theme,
-            },
-        );
-    }
-
-    /// Open the model picker with a specific alias pre-selected.
-    fn open_model_picker_with_alias(&mut self, alias: &str) {
-        let entries = self.model_entries_for_picker();
-        if entries.is_empty() {
-            self.push_status("No configured models");
-            return;
-        }
-        let current_alias = self
-            .active_model
-            .as_ref()
-            .map(|m| format!("{}/{}", m.provider, m.model))
-            .unwrap_or_default();
-        let initial_tab_id = entries
-            .iter()
-            .find(|e| e.alias == alias)
-            .map(|e| e.provider_id.clone());
-        let theme = self.tui.chrome().theme();
-        self.tui.chrome_mut().open_tabbed_model_selector(
-            neo_tui::dialogs::TabbedModelSelectorOptions {
-                models: entries,
-                current_alias,
-                selected_alias: Some(alias.to_owned()),
-                current_thinking: self.current_thinking,
-                initial_tab_id,
-                theme,
-            },
-        );
-    }
-
-    /// Resolve the ordered list of `ModelEntry` to show in the picker.
-    /// Only providers/models explicitly configured via `[models.*]` are shown
-    /// so the picker does not list providers the user has not set up.
-    fn model_entries_for_picker(&self) -> Vec<neo_tui::dialogs::ModelEntry> {
-        self.local_config
-            .as_ref()
-            .map_or_else(Vec::new, model_entries_from_config)
-    }
-
     fn open_provider_picker(&mut self) {
         let Some(config) = &self.local_config else {
             self.push_status("No config available");
@@ -3022,28 +2969,6 @@ impl InteractiveController {
                 questions: question_rx,
                 steer_input,
             });
-        }
-    }
-
-    fn apply_selected_model(&mut self) {
-        let Some(item) = self.tui.chrome_mut().confirm_model_picker() else {
-            return;
-        };
-        if let Ok(selected) = SelectedModel::from_picker_item(&item) {
-            self.tui.chrome_mut().set_model_label(item.label);
-            self.tui
-                .chrome_mut()
-                .set_context_window(selected.max_context_tokens.map(ContextWindow::new));
-            self.active_model = Some(selected);
-        } else {
-            // Not a model item (e.g. a provider from /provider) — show info.
-            let detail = item
-                .description
-                .as_deref()
-                .filter(|d| !d.is_empty())
-                .map(|d| format!(" — {d}"))
-                .unwrap_or_default();
-            self.push_status(format!("Provider: {}{detail}", item.label));
         }
     }
 
@@ -3777,135 +3702,6 @@ fn empty_session_forker(session_id: String) -> Ready<Result<ForkedSessionTranscr
         session_id.clone(),
         LoadedSessionTranscript::new(session_id, Vec::new(), Vec::new()),
     )))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SessionCatalog {
-    items: Vec<SessionSummary>,
-    error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ModelPickerCatalog {
-    items: Vec<PickerItem>,
-    error: Option<String>,
-}
-
-fn picker_catalogs_for_config(config: &AppConfig) -> PickerCatalogs {
-    let sessions = session_catalog_for_config(config);
-    let models = model_picker_catalog_for_config(config);
-    PickerCatalogs {
-        session_items: sessions.items,
-        session_error: sessions.error,
-        model_items: models.items,
-    }
-}
-
-fn session_catalog_for_config(config: &AppConfig) -> SessionCatalog {
-    match session_summaries(config, SessionDataScope::Workspace) {
-        Ok(items) => SessionCatalog { items, error: None },
-        Err(error) => SessionCatalog {
-            items: Vec::new(),
-            error: Some(error.to_string()),
-        },
-    }
-}
-
-fn model_picker_catalog_for_config(config: &AppConfig) -> ModelPickerCatalog {
-    if !config.models.is_empty() {
-        return ModelPickerCatalog {
-            items: model_picker_items_from_config(config),
-            error: None,
-        };
-    }
-    match crate::modes::run::model_registry_for_config(config) {
-        Ok(registry) => {
-            let models = registry.list();
-            let models = config::scoped_models(models.iter(), &config.model_scope);
-            ModelPickerCatalog {
-                items: models.iter().map(model_to_picker_item).collect(),
-                error: None,
-            }
-        }
-        Err(error) => ModelPickerCatalog {
-            items: Vec::new(),
-            error: Some(error.to_string()),
-        },
-    }
-}
-
-fn model_picker_items_from_config(config: &AppConfig) -> Vec<PickerItem> {
-    config
-        .models
-        .iter()
-        .map(|(alias, model)| {
-            let description = model.max_context_tokens.map_or_else(
-                || model.provider.clone(),
-                |max_context_tokens| format!("{} · ctx {max_context_tokens}", model.provider),
-            );
-            PickerItem::new(alias.clone(), alias.clone(), Some(description))
-        })
-        .collect()
-}
-
-fn model_to_picker_item(model: &neo_ai::ModelSpec) -> PickerItem {
-    let value = format!("{}/{}", model.provider.0, model.model);
-    let description = match model.capabilities.max_context_tokens {
-        Some(max_context_tokens) => {
-            format!("{:?} · ctx {max_context_tokens}", model.api)
-        }
-        None => format!("{:?}", model.api),
-    };
-    PickerItem::new(value.clone(), value, Some(description))
-}
-
-/// Build `ModelEntry` list directly from `[models.*]` in config.
-fn model_entries_from_config(config: &AppConfig) -> Vec<neo_tui::dialogs::ModelEntry> {
-    if !config.models.is_empty() {
-        return config
-            .models
-            .iter()
-            .map(|(alias, model)| {
-                let provider_id = model.provider.clone();
-                let mut capabilities = model.capabilities.clone();
-                if capabilities.iter().any(|c| c == "reasoning")
-                    && !capabilities.iter().any(|c| c == "thinking")
-                {
-                    capabilities.push("thinking".to_owned());
-                }
-                neo_tui::dialogs::ModelEntry {
-                    alias: alias.clone(),
-                    provider_id,
-                    display_name: model.display_name.clone().unwrap_or_else(|| alias.clone()),
-                    model_id: model.model.clone(),
-                    capabilities,
-                    max_context_tokens: model.max_context_tokens,
-                }
-            })
-            .collect();
-    }
-    Vec::new()
-}
-
-fn context_window_from_picker_item(item: &PickerItem) -> Option<u32> {
-    let description = item.description.as_deref()?;
-    let (_, context) = description.rsplit_once("ctx ")?;
-    parse_token_count(context.trim())
-}
-
-fn parse_token_count(value: &str) -> Option<u32> {
-    let value = value.trim().to_ascii_lowercase();
-    let (number, multiplier) = match value.strip_suffix('m') {
-        Some(number) => (number, 1_000_000u32),
-        None => match value.strip_suffix('k') {
-            Some(number) => (number, 1_000u32),
-            None => (value.as_str(), 1u32),
-        },
-    };
-    number
-        .parse::<u32>()
-        .ok()
-        .and_then(|count| count.checked_mul(multiplier))
 }
 
 fn split_skill_invocation(input: &str) -> (&str, &str) {
