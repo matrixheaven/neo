@@ -15,7 +15,7 @@ mod session_picker;
 mod state;
 mod stream;
 
-use crate::primitive::theme::ChromeMode;
+pub use crate::primitive::theme::{ChromeMode, DevelopmentMode, GoalModeStatus, TuiTheme};
 
 pub use approval::{
     ApprovalChoice, ApprovalModal, ApprovalOption, ApprovalRequestModal, ApprovalResult,

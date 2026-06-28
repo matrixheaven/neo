@@ -52,7 +52,7 @@ use neo_tui::{
         SessionPickerScope, StreamUpdate,
     },
     terminal_image::{ImageProtocolPreference, ImageRenderPolicy, TerminalImageCapabilities},
-    transcript::{TranscriptEntry, TranscriptPane, pane::frame_content_width},
+    transcript::{TranscriptEntry, TranscriptPane, frame_content_width},
 };
 
 use tokio::{
