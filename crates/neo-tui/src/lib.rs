@@ -3,6 +3,7 @@ pub mod dialogs;
 pub mod diff_model;
 pub mod input;
 pub mod markdown;
+pub mod notify;
 pub mod paste;
 pub mod primitive;
 pub mod screen_output;
