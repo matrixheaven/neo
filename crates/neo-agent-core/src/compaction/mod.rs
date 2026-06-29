@@ -560,6 +560,74 @@ pub(crate) fn is_stale(snapshot: &[AgentMessage], current: &[AgentMessage]) -> b
         .any(|(a, b)| a != b)
 }
 
+/// Whether a compaction LLM error is worth retrying (rate limit, timeout, etc.).
+fn is_retryable_compaction_error(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    lower.contains("rate limit")
+        || lower.contains("429")
+        || lower.contains("timeout")
+        || lower.contains("connection")
+}
+
+/// Generate a compaction summary with retry on empty/truncated responses.
+///
+/// Each retry shrinks the prefix to a smaller safe boundary, giving the
+/// model a shorter input that is more likely to produce a valid summary.
+///
+/// Returns `(summary_text, actual_compacted_count)` so the caller knows
+/// exactly which messages were summarized.
+pub(crate) async fn generate_with_retry(
+    model: &Arc<dyn ModelClient>,
+    config: &AgentConfig,
+    messages: &[AgentMessage],
+    strategy: &CompactionStrategy,
+    max_context_tokens: usize,
+    cancel_token: &CancellationToken,
+    max_retry_attempts: u32,
+) -> Result<(String, usize), CompactionError> {
+    let mut compacted_count = compute_compact_count(
+        messages,
+        CompactionSource::Auto,
+        strategy,
+        max_context_tokens,
+    );
+
+    for attempt in 0..max_retry_attempts {
+        if compacted_count == 0 {
+            return Err(CompactionError::NoBoundary);
+        }
+
+        if cancel_token.is_cancelled() {
+            return Err(CompactionError::Cancelled);
+        }
+
+        let prefix = &messages[..compacted_count];
+        match generate_compaction_summary(model, config, prefix, None, cancel_token, |_| {}).await
+        {
+            Ok(summary) if !summary.trim().is_empty() => {
+                return Ok((summary, compacted_count));
+            }
+            Ok(_) => {
+                // Empty summary → shrink prefix
+                let reduced = reduce_compact_count(messages, compacted_count);
+                if reduced == 0 {
+                    return Err(CompactionError::Truncated(attempt + 1));
+                }
+                compacted_count = reduced;
+            }
+            Err(CompactionError::Llm(msg)) if is_retryable_compaction_error(&msg) => {
+                let reduced = reduce_compact_count(messages, compacted_count);
+                if reduced == 0 {
+                    return Err(CompactionError::Truncated(attempt + 1));
+                }
+                compacted_count = reduced;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(CompactionError::Truncated(max_retry_attempts))
+}
+
 /// Run LLM-driven compaction and emit the lifecycle events.
 ///
 /// This replaces the old `maybe_compact` counter logic.  It:
@@ -941,6 +1009,35 @@ mod tests {
         let err = CompactionError::Stale;
         let msg = err.to_string();
         assert!(msg.contains("stale"));
+    }
+
+    #[test]
+    fn generate_with_retry_has_correct_signature() {
+        // Full async testing requires FakeModelClient + tokio runtime.
+        // The integration is verified by the multi-round compaction tests in
+        // compaction_trigger.rs (Task 7). This test is a compilation marker:
+        // if the function signature changes, this fails to compile.
+        fn _assert_signature<'a>(
+            model: &'a Arc<dyn ModelClient>,
+            config: &'a AgentConfig,
+            messages: &'a [AgentMessage],
+            strategy: &'a CompactionStrategy,
+            max_context_tokens: usize,
+            cancel_token: &'a CancellationToken,
+            max_retry_attempts: u32,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(String, usize), CompactionError>> + Send + 'a>>
+        {
+            Box::pin(generate_with_retry(
+                model,
+                config,
+                messages,
+                strategy,
+                max_context_tokens,
+                cancel_token,
+                max_retry_attempts,
+            ))
+        }
+        // If this compiles, the signature is correct.
     }
 
     #[test]
