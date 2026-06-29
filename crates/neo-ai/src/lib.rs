@@ -2,6 +2,7 @@ pub mod auth;
 pub mod catalog;
 pub mod env_api_keys;
 pub mod error;
+pub mod error_info;
 pub mod image_generation;
 pub mod options;
 pub mod providers;
@@ -14,6 +15,7 @@ pub mod types;
 pub use auth::{CredentialResolver, CredentialSource, ResolvedCredential};
 pub use env_api_keys::{env_api_key_from, find_env_keys_from};
 pub use error::AiError;
+pub use error_info::{NeoErrorInfo, error_info};
 pub use image_generation::{
     ImageGenerationClient, ImageGenerationRequest, ImageGenerationResponse,
     ImageGenerationResponseImage,
