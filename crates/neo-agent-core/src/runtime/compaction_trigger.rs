@@ -127,7 +127,7 @@ fn evaluate_compaction_need(
     // Drop any trailing incomplete tool turn first so it is not treated as a
     // safe suffix boundary.
     let messages = sanitize_tool_exchange_messages(emitter.context.messages().to_vec());
-    let max_context_tokens = config.model.capabilities.max_context_tokens.unwrap_or(0) as usize;
+    let max_context_tokens = super::config::effective_max_context_tokens(config);
     let used_tokens = super::estimate_messages_tokens(&messages);
 
     let strategy = build_compaction_strategy(&settings);
