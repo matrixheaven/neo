@@ -45,6 +45,57 @@ Provider adapters should translate their native streams into:
 
 The runtime should not parse provider-native chunks. It should consume these normalized events only.
 
+## Error Types
+
+Neo uses a typed error enum (`AiError`) with 8 variants, each carrying a stable
+`code()` string in `domain.reason` format for serialization:
+
+| Variant | Code | Retryable | Description |
+|---------|------|-----------|-------------|
+| `Configuration { message }` | `config.invalid` | No | Provider/model config error |
+| `RateLimit { message, retry_after }` | `provider.rate_limit` | Yes | HTTP 429; carries optional `Retry-After` duration |
+| `Auth { message }` | `provider.auth_error` | No | HTTP 401/403 |
+| `ContextOverflow { message }` | `provider.context_overflow` | No | Request too large for context window |
+| `Server { status, message }` | `provider.server_error` | Yes | HTTP 5xx |
+| `Stream { message }` | `provider.stream_error` | No | SSE parse/stream error |
+| `Network { message }` | `provider.network_error` | Yes | Transport/network error |
+| `Cancelled` | `request.cancelled` | No | Request cancelled by user |
+
+Provider adapters should map HTTP status codes to the appropriate variant:
+- 429 → `RateLimit` (parse `Retry-After` header)
+- 401/403 → `Auth`
+- 5xx → `Server`
+- 400/413/422 + context-overflow message → `ContextOverflow`
+- Transport failure → `Network`
+
+The shared `ProviderError::HttpStatus` carries a `retry_after: Option<Duration>`
+field, parsed from the `Retry-After` response header (both integer-seconds and
+HTTP-date formats).
+
+## Retry Behavior
+
+Provider requests are retried automatically with exponential backoff:
+
+- **Base delay:** 300ms, growing by factor 2 each attempt
+- **Cap:** 5 seconds
+- **Jitter:** ±25% random jitter on each delay
+- **Retry-After:** If the provider sends a `Retry-After` header, that value
+  takes precedence (capped at 5s)
+- **Default attempts:** 3 (configurable via `RequestOptions.retries`)
+- **Cancellable:** Backoff sleep aborts immediately on user cancellation
+
+Retryable error types: `RateLimit`, `Server`, `Network`. All other errors
+propagate immediately without retry.
+
+## Context Overflow Recovery
+
+When a provider returns `ContextOverflow`, the runtime:
+1. Records the observed overflow point (estimated tokens × 0.85) as the new
+   effective context limit for that model
+2. Triggers forced multi-round compaction
+3. Rebuilds the request with the compacted context
+4. Retries the model call once
+
 ## Credential Hints
 
 `neo_ai::find_env_keys_from(provider, &env)` and

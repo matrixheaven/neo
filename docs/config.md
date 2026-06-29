@@ -168,6 +168,47 @@ top of the active permission mode: `Write`/`Edit` may only modify the active
 plan file, and some disruptive tools are denied. Goal mode is the structured
 goal-authoring workflow and uses a review dialog before starting a durable goal.
 
+## Runtime Configuration
+
+Runtime behavior is configured under the `[runtime]` table:
+
+```toml
+[runtime]
+temperature = 0.7
+max_tokens = 16384
+```
+
+### Compaction
+
+Context compaction automatically summarizes older messages when the context
+window fills up. Configure it under `[runtime.compaction]`:
+
+```toml
+[runtime.compaction]
+enabled = true                         # Enable/disable compaction (default: true)
+trigger_ratio = 0.85                   # Context-fill ratio that triggers compaction
+max_estimated_tokens = 200000          # Absolute token threshold
+keep_recent_messages = 20              # Messages always kept verbatim
+max_recent_messages = 4                # Max recent messages after compaction
+reserved_context_tokens = 50000        # Tokens reserved for model response
+max_rounds = 5                         # Max multi-round compaction iterations
+max_retry_attempts = 5                 # Max retries on empty/failed summaries
+micro_enabled = false                  # Enable lightweight tool-result truncation
+micro_keep_recent = 20                 # Messages exempt from micro-compaction
+```
+
+**Multi-round compaction:** When a single compaction pass doesn't reduce the
+context enough, Neo runs additional rounds (up to `max_rounds`). Each round
+compacts the already-summarized context further. Stops early if the reduction
+is less than 1024 tokens (diminishing returns).
+
+**Overflow recovery:** When the provider reports a context-overflow error, Neo
+automatically triggers forced compaction and retries the request. The observed
+overflow point is recorded and used to adapt future compaction thresholds.
+
+**Empty-summary retry:** If the summarization model returns an empty response,
+Neo shrinks the compaction prefix and retries (up to `max_retry_attempts` times).
+
 ## TUI Slash Commands
 
 In interactive mode:
@@ -228,6 +269,29 @@ Available actions include `session_picker_open`, `model_picker_open`,
 
 `tui.todo.toggle` defaults to `ctrl+t` and expands or collapses the todo panel
 when more than five todo items exist.
+
+## Notifications
+
+Neo can notify you when a task finishes or when the agent asks a question:
+
+```toml
+[tui]
+# Notification when a task completes
+# "none" = no notification
+# "bell" = terminal bell (\x07) — lightweight, respects terminal bell settings
+# "system" = desktop notification (macOS Notification Center / Linux notify-send)
+# "all" = both bell and desktop notification
+completion_notification = "bell"       # default
+
+# Notification when the agent asks a question
+question_notification = "none"         # default — avoids noise
+```
+
+The terminal bell is universal (every terminal supports `\x07`) and respects
+the user's terminal emulator settings (visual bell, mute, etc.). Desktop
+notifications are fire-and-forget — they never block the TUI event loop.
+Notifications do not fire for error or cancelled stops, only for successful
+completion (`EndTurn`, `ToolUse`, `MaxTokens`).
 
 ## Importing from models.dev
 

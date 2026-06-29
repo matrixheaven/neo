@@ -72,7 +72,8 @@ Test runner is `cargo-nextest` (install if missing; never fall back to `cargo te
 2. Sessions: JSONL under `~/.neo/sessions/wd_<slug>_<hash12>/` (workspace-scoped buckets). Global `session_index.jsonl` for cross-workspace resume.
 3. Model resolution: `ModelRegistry` (catalog + inline TOML) → `ProviderRegistry` → `ProviderResolver` selects wire client by provider `type`.
 4. Streams normalized to `AiStreamEvent` (`TextDelta`, `Thinking*`, `ToolCall*`, `MessageEnd`, `Error`). Reasoning preserved as `ContentPart::Thinking`.
-5. Tools authorized against `PermissionMode`, executed by `ToolRegistry`.
+5. Errors typed (`AiError` 8 variants) with exponential backoff retry (300ms–5s, jitter); context-overflow triggers forced multi-round compaction + retry; `Retry-After` honored.
+6. Tools authorized against `PermissionMode`, executed by `ToolRegistry`.
 6. Skills: project/user/extra/built-in tiers; `<available_skills>` injected into system prompt; activation injects skill body before user message.
 7. Goals: autonomous across turns via `update_goal_status`; no turn cap. Stored under `<session_dir>/goals/`.
 8. Queue & steer: `Enter` while busy → follow-up (FIFO). `Ctrl+S` → steer at next break point. See `docs/queue-and-steer.md`.
@@ -99,7 +100,7 @@ Test runner is `cargo-nextest` (install if missing; never fall back to `cargo te
 
 ### Config sections
 
-`providers.<id>`, `models.<alias>`, `permission_mode`, `runtime` (temp, max_tokens, reasoning_effort, queue/execution modes, compaction, extra_skill_dirs), `tui` (image_protocol, fetch_remote_images, keybindings), `mcp.servers`. System prompt: `~/.neo/SYSTEM.md`, `~/.neo/APPEND_SYSTEM.md`. Trust: `~/.neo/trust.json` gates `AGENTS.md`/`CLAUDE.md` loading.
+`providers.<id>`, `models.<alias>`, `permission_mode`, `runtime` (temp, max_tokens, reasoning_effort, queue/execution modes, compaction, extra_skill_dirs), `tui` (image_protocol, fetch_remote_images, keybindings, completion_notification, question_notification), `mcp.servers`. System prompt: `~/.neo/SYSTEM.md`, `~/.neo/APPEND_SYSTEM.md`. Trust: `~/.neo/trust.json` gates `AGENTS.md`/`CLAUDE.md` loading.
 
 ## Security
 

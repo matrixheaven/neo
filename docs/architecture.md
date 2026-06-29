@@ -16,8 +16,8 @@ xtask maintenance commands
 
 ## Implemented Today
 
-- `neo-ai` defines provider-neutral request, message, model, capability, tool, and stream event types.
-- `neo-ai` defines request options, environment key helpers, model/provider registries, and production provider resolution.
+- `neo-ai` defines provider-neutral request, message, model, capability, tool, stream event, and typed error (`AiError` with 8 variants, `NeoErrorInfo`) types.
+- `neo-ai` defines request options, environment key helpers, model/provider registries, production provider resolution, and HTTP-status-based error mapping with `Retry-After` parsing.
 - `neo-ai` includes OpenAI Responses, Anthropic Messages, Google Generative AI,
   OpenAI-compatible, and OpenAI-style image generation network clients.
 - `neo-ai::providers::fake::FakeModelClient` records requests and replays stream events for tests.
@@ -25,8 +25,8 @@ xtask maintenance commands
   built-in tools (Read, List, Grep, Find, Glob, Write, Edit, Bash, Terminal,
   TodoList, EnterPlanMode, ExitPlanMode, and goal tools when a GoalManager is
   attached), MCP adapters, local extension adapters, skill loading, JSONL RPC
-  primitives, HTML export, reasoning event persistence, and JSONL session
-  helpers.
+  primitives, HTML export, reasoning event persistence, multi-round
+  compaction with provider overflow recovery, and JSONL session helpers.
 - `neo-agent` exposes the local command-line and TUI surface.
 - `neo-tui` owns terminal rendering via a component-tree architecture:
   - `terminal/`: single-buffer terminal rendering, input parsing, and low-level UI
@@ -52,6 +52,11 @@ xtask maintenance commands
    into plain assistant text.
 8. Session events are persisted so `resume` can rebuild conversation and tool
    state from local JSONL history.
+
+> **Error handling:** Provider errors are typed (`AiError` with 8 variants)
+> and retried with exponential backoff (300ms–5s, jitter). Context-overflow
+> errors trigger forced multi-round compaction before retrying. Rate-limit
+> errors honor the `Retry-After` header.
 
 The current Rust surface implements all major components of this flow. See the
 individual crate docs in `docs/` for module-by-module status.
