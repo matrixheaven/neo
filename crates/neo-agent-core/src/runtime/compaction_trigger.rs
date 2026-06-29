@@ -21,59 +21,73 @@ pub(super) async fn maybe_compact(
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
 ) {
-    let Some(trigger) = evaluate_compaction_need(config, emitter) else {
-        return;
-    };
+    // Hardcoded until Task 10 makes it configurable.
+    const MAX_ROUNDS: u32 = 5;
+    const MIN_REDUCTION_TOKENS: usize = 1024;
 
-    let compacted_count = compute_compacted_count(&trigger);
-    if compacted_count == 0 {
-        if trigger.force {
-            let _ = emitter.send_error(AgentRuntimeError::Compaction(
-                compaction::CompactionError::NoBoundary,
-            ));
+    for round in 0..MAX_ROUNDS {
+        let Some(trigger) = evaluate_compaction_need(config, emitter) else {
+            break;
+        };
+
+        let compacted_count = compute_compacted_count(&trigger);
+        if compacted_count == 0 {
+            if trigger.force {
+                let _ = emitter.send_error(AgentRuntimeError::Compaction(
+                    compaction::CompactionError::NoBoundary,
+                ));
+            }
+            break;
         }
-        return;
+
+        let (_, target_summary_chars) = emit_compaction_started(
+            emitter,
+            &trigger.messages,
+            compacted_count,
+            trigger.force,
+            trigger.used_tokens,
+            round == 0,
+        )
+        .await;
+
+        let strategy = build_compaction_strategy(&trigger.settings);
+        let (mut progress_rx, mut summary_rx) = spawn_summary_task(
+            model,
+            config,
+            // Pass the full message history — generate_with_retry computes its own
+            // split boundary internally (which may shrink on retry).
+            &trigger.messages,
+            trigger.custom_instruction.as_deref(),
+            cancel_token,
+            &strategy,
+            trigger.max_context_tokens,
+        );
+
+        let Some(((summary_text, actual_compacted_count), progress_percent)) =
+            run_summary_progress_loop(emitter, &mut progress_rx, &mut summary_rx, target_summary_chars)
+                .await
+        else {
+            break;
+        };
+
+        let tokens_before = trigger.used_tokens;
+        apply_compaction_result(
+            emitter,
+            config,
+            &trigger.messages,
+            actual_compacted_count,
+            summary_text,
+            trigger.used_tokens,
+            progress_percent,
+        )
+        .await;
+
+        // Stop if the round produced too little reduction (diminishing returns).
+        let tokens_after = super::estimate_messages_tokens(emitter.context.messages());
+        if tokens_before.saturating_sub(tokens_after) < MIN_REDUCTION_TOKENS {
+            break;
+        }
     }
-
-    let (_messages_to_compact, target_summary_chars) = emit_compaction_started(
-        emitter,
-        &trigger.messages,
-        compacted_count,
-        trigger.force,
-        trigger.used_tokens,
-    )
-    .await;
-
-    let strategy = build_compaction_strategy(&trigger.settings);
-    let (mut progress_rx, mut summary_rx) = spawn_summary_task(
-        model,
-        config,
-        // Pass the full message history — generate_with_retry computes its own
-        // split boundary internally (which may shrink on retry).
-        &trigger.messages,
-        trigger.custom_instruction.as_deref(),
-        cancel_token,
-        &strategy,
-        trigger.max_context_tokens,
-    );
-
-    let Some(((summary_text, actual_compacted_count), progress_percent)) =
-        run_summary_progress_loop(emitter, &mut progress_rx, &mut summary_rx, target_summary_chars)
-            .await
-    else {
-        return;
-    };
-
-    apply_compaction_result(
-        emitter,
-        config,
-        &trigger.messages,
-        actual_compacted_count,
-        summary_text,
-        trigger.used_tokens,
-        progress_percent,
-    )
-    .await;
 }
 
 /// Bundled information produced by [`evaluate_compaction_need`] when compaction
@@ -175,14 +189,16 @@ fn compute_compacted_count(trigger: &CompactionTrigger) -> usize {
     )
 }
 
-/// Emit `CompactionStarted` and the early progress phases, then compute the
-/// messages to compact and the target summary size.
+/// Emit `CompactionStarted` (only when `first_round` is true) and the early
+/// progress phases, then compute the messages to compact and the target summary
+/// size.
 async fn emit_compaction_started(
     emitter: &mut EventEmitter,
     messages: &[AgentMessage],
     compacted_count: usize,
     force: bool,
     used_tokens: usize,
+    first_round: bool,
 ) -> (Vec<AgentMessage>, usize) {
     let reason = if force {
         CompactionReason::Manual
@@ -190,11 +206,13 @@ async fn emit_compaction_started(
         CompactionReason::Threshold
     };
     let message_count = messages.len();
-    emitter.emit(AgentEvent::CompactionStarted {
-        reason,
-        tokens_before: used_tokens,
-        message_count,
-    });
+    if first_round {
+        emitter.emit(AgentEvent::CompactionStarted {
+            reason,
+            tokens_before: used_tokens,
+            message_count,
+        });
+    }
     emitter.emit(AgentEvent::CompactionProgress {
         phase: CompactionPhase::Estimating,
         percent: 0,
