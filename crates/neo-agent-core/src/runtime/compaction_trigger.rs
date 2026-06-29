@@ -360,6 +360,10 @@ async fn run_summary_progress_loop(
 
 /// Build the [`CompactionSummary`], animate the progress bar to 100%, emit
 /// `CompactionApplied`, and refresh the effective context window display.
+///
+/// The `messages` parameter is the snapshot taken before the summary task was
+/// spawned. If the live context has changed since (undo/clear during the LLM
+/// call), the stale summary is discarded silently.
 async fn apply_compaction_result(
     emitter: &mut EventEmitter,
     config: &AgentConfig,
@@ -369,6 +373,13 @@ async fn apply_compaction_result(
     used_tokens: usize,
     mut progress_percent: u8,
 ) {
+    // Staleness check: if the user undid/cleared messages while the summary
+    // was being generated, applying it now would clobber the new state.
+    let current_messages = emitter.context.messages();
+    if compaction::is_stale(messages, current_messages) {
+        return;
+    }
+
     let kept_messages = &messages[compacted_count..];
     let tokens_after =
         summary_text.len().div_ceil(4) + super::estimate_messages_tokens(kept_messages);
