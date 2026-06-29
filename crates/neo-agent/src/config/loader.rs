@@ -7,6 +7,7 @@ use anyhow::Context;
 use neo_agent_core::BackgroundTaskManager;
 use neo_agent_core::{PermissionMode, QueueMode, ToolExecutionMode};
 use neo_tui::input::{KeyId, KeybindingAction, KeybindingsManager};
+use neo_tui::notify::NotificationMode;
 
 use super::types::{
     FileConfig, FileRuntimeConfig, FileTuiConfig, default_runtime_compaction_keep_recent_messages,
@@ -206,6 +207,10 @@ fn tui_from_file(tui: Option<FileTuiConfig>) -> TuiConfig {
         image_protocol: tui.image_protocol.unwrap_or_default(),
         fetch_remote_images: tui.fetch_remote_images.unwrap_or(false),
         keybindings: tui.keybindings.unwrap_or_default(),
+        completion_notification: tui.completion_notification.unwrap_or_default(),
+        question_notification: tui
+            .question_notification
+            .unwrap_or(NotificationMode::None),
     }
 }
 

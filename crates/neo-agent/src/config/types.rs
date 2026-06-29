@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use neo_agent_core::{PermissionMode, QueueMode, ToolExecutionMode};
 use neo_ai::ReasoningEffort;
+use neo_tui::notify::NotificationMode;
 use neo_tui::terminal_image::ImageProtocolPreference;
 use serde::{Deserialize, Serialize};
 
@@ -223,4 +224,8 @@ pub(crate) struct FileTuiConfig {
     pub(crate) fetch_remote_images: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) keybindings: Option<BTreeMap<String, Vec<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) completion_notification: Option<NotificationMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) question_notification: Option<NotificationMode>,
 }

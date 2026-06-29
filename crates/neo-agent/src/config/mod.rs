@@ -7,6 +7,7 @@ use std::{
 use neo_agent_core::BackgroundTaskManager;
 use neo_agent_core::{PermissionMode, QueueMode, ToolExecutionMode};
 use neo_ai::ReasoningEffort;
+use neo_tui::notify::NotificationMode;
 use neo_tui::terminal_image::ImageProtocolPreference;
 use serde::{Deserialize, Serialize};
 
@@ -183,7 +184,7 @@ impl Default for RuntimeCompactionConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuiConfig {
     #[serde(default)]
     pub image_protocol: ImageProtocolPreference,
@@ -191,6 +192,22 @@ pub struct TuiConfig {
     pub fetch_remote_images: bool,
     #[serde(default)]
     pub keybindings: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub completion_notification: NotificationMode,
+    #[serde(default)]
+    pub question_notification: NotificationMode,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            image_protocol: ImageProtocolPreference::default(),
+            fetch_remote_images: false,
+            keybindings: BTreeMap::new(),
+            completion_notification: NotificationMode::Bell,
+            question_notification: NotificationMode::None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -200,7 +217,7 @@ mod tests {
     use neo_ai::{ApiKind, ModelCapabilities, ModelSpec, ProviderId};
     use tempfile::TempDir;
 
-    use crate::config::{AppConfig, ConfigOverrides, PermissionMode};
+    use crate::config::{AppConfig, ConfigOverrides, PermissionMode, TuiConfig};
     use crate::trust::{ProjectTrustState, ProjectTrustStore};
 
     fn temp_project_config(content: &str) -> (TempDir, PathBuf, PathBuf) {
@@ -452,6 +469,28 @@ model = "gpt-4.1"
                 target: project_dir.canonicalize().expect("canonicalize"),
             }
         );
+    }
+
+    #[test]
+    fn tui_config_parses_notification_fields() {
+        use neo_tui::notify::NotificationMode;
+
+        let toml = r#"
+            completion_notification = "all"
+            question_notification = "bell"
+        "#;
+        let tui: TuiConfig = toml::from_str(toml).unwrap();
+        assert_eq!(tui.completion_notification, NotificationMode::All);
+        assert_eq!(tui.question_notification, NotificationMode::Bell);
+    }
+
+    #[test]
+    fn tui_config_defaults_notification_fields() {
+        use neo_tui::notify::NotificationMode;
+
+        let tui = TuiConfig::default();
+        assert_eq!(tui.completion_notification, NotificationMode::Bell);
+        assert_eq!(tui.question_notification, NotificationMode::None);
     }
 
     #[test]
