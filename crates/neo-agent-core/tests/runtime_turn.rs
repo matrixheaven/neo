@@ -515,7 +515,7 @@ async fn assert_runtime_rejects_unsupported_capability(
 
     assert!(matches!(
         error,
-        AgentRuntimeError::Model(AiError::Configuration(_))
+        AgentRuntimeError::Model(AiError::Configuration { message: _ })
     ));
     assert!(
         error.to_string().contains(expected_substring),

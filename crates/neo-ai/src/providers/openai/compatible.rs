@@ -247,7 +247,7 @@ fn stream_response(
             future::ready(Some(match chunk {
                 StreamChunk::Data(Ok(bytes)) => state.push_chunk(&bytes),
                 StreamChunk::Data(Err(err)) => {
-                    vec![Err(AiError::Stream(format!("transport error: {err}")))]
+                    vec![Err(AiError::Stream { message: format!("transport error: {err}") })]
                 }
                 StreamChunk::End => state.finish(),
             }))
@@ -310,7 +310,7 @@ impl IncrementalSse {
         out: &mut Vec<Result<AiStreamEvent, AiError>>,
     ) -> Result<(), AiError> {
         let value = serde_json::from_str::<Value>(payload)
-            .map_err(|err| AiError::Stream(format!("invalid SSE JSON: {err}")))?;
+            .map_err(|err| AiError::Stream { message: format!("invalid SSE JSON: {err}") })?;
         self.parser.ingest(&value);
         out.extend(self.parser.drain_events().into_iter().map(Ok));
         Ok(())
@@ -323,7 +323,7 @@ impl IncrementalSse {
 
         self.done = true;
         if !self.saw_done && !self.parser.saw_finish_reason() {
-            return vec![Err(AiError::Stream("missing SSE done marker".to_owned()))];
+            return vec![Err(AiError::Stream { message: "missing SSE done marker".to_owned() })];
         }
 
         match self.drain_trailing_payload_events() {

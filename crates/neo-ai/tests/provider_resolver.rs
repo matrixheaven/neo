@@ -208,7 +208,7 @@ fn provider_resolver_rejects_model_api_mismatches() {
     )) else {
         panic!("untyped provider must be rejected");
     };
-    assert!(matches!(missing_type, AiError::Configuration(_)));
+    assert!(matches!(missing_type, AiError::Configuration { message: _ }));
     assert!(
         missing_type
             .to_string()
@@ -296,7 +296,7 @@ fn provider_resolver_rejects_missing_credentials_and_test_only_fake() {
     else {
         panic!("missing credentials should fail");
     };
-    assert!(matches!(missing, AiError::Configuration(_)));
+    assert!(matches!(missing, AiError::Configuration { message: _ }));
     assert!(missing.to_string().contains("OPENAI_API_KEY"));
 
     let Err(fake) = resolver.resolve(&model("fake", "test-model", ApiKind::Local)) else {

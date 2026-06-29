@@ -35,7 +35,7 @@ pub(crate) async fn open_response<'a>(
     }
 
     Err(last_error.map_or_else(
-        || AiError::Stream("provider request failed without an error".to_owned()),
+        || AiError::Stream { message: "provider request failed without an error".to_owned() },
         ProviderError::into_ai_error,
     ))
 }

@@ -308,7 +308,7 @@ fn stream_response(
             future::ready(Some(match chunk {
                 StreamChunk::Data(Ok(bytes)) => state.push_chunk(&bytes),
                 StreamChunk::Data(Err(err)) => {
-                    vec![Err(AiError::Stream(format!("transport error: {err}")))]
+                    vec![Err(AiError::Stream { message: format!("transport error: {err}") })]
                 }
                 StreamChunk::End => state.finish(),
             }))
@@ -364,7 +364,7 @@ impl IncrementalSse {
         out: &mut Vec<Result<AiStreamEvent, AiError>>,
     ) -> Result<(), AiError> {
         let value = serde_json::from_str::<Value>(payload)
-            .map_err(|err| AiError::Stream(format!("invalid SSE JSON: {err}")))?;
+            .map_err(|err| AiError::Stream { message: format!("invalid SSE JSON: {err}") })?;
         self.parser.ingest(&value)?;
         out.extend(self.parser.drain_events().into_iter().map(Ok));
         Ok(())
@@ -523,7 +523,7 @@ impl ParseState {
             .cloned()
             .unwrap_or_else(|| json!({}));
         let fragment = serde_json::to_string(&args)
-            .map_err(|err| AiError::Stream(format!("invalid tool arguments: {err}")))?;
+            .map_err(|err| AiError::Stream { message: format!("invalid tool arguments: {err}") })?;
 
         self.ensure_started();
         if self.open_tool_ids.insert(name.clone()) {

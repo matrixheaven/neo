@@ -63,11 +63,11 @@ impl ProviderError {
             Self::Header(message)
             | Self::Stream(message)
             | Self::Url(message)
-            | Self::Unsupported(message) => AiError::Stream(message),
+            | Self::Unsupported(message) => AiError::Stream { message: message },
             Self::HttpStatus { status, body } => {
-                AiError::Stream(format_http_status_error(status, &body))
+                AiError::Stream { message: format_http_status_error(status, &body) }
             }
-            Self::Transport(err) => AiError::Stream(format!("transport error: {err}")),
+            Self::Transport(err) => AiError::Stream { message: format!("transport error: {err}") },
         }
     }
 }

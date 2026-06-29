@@ -127,22 +127,22 @@ fn filter_reasoning(content: Vec<neo_ai::ContentPart>) -> Vec<neo_ai::ContentPar
 pub(super) fn validate_model_capabilities(request: &ChatRequest) -> Result<(), AiError> {
     let capabilities = &request.model.capabilities;
     if !request.tools.is_empty() && !capabilities.tools {
-        return Err(AiError::Configuration(format!(
+        return Err(AiError::Configuration { message: format!(
             "model {}/{} does not support tools",
             request.model.provider.0, request.model.model
-        )));
+        ) });
     }
     if request.options.reasoning_effort.is_some() && !capabilities.reasoning {
-        return Err(AiError::Configuration(format!(
+        return Err(AiError::Configuration { message: format!(
             "model {}/{} does not support reasoning",
             request.model.provider.0, request.model.model
-        )));
+        ) });
     }
     if request_messages_contain_image(&request.messages) && !capabilities.images {
-        return Err(AiError::Configuration(format!(
+        return Err(AiError::Configuration { message: format!(
             "model {}/{} does not support image input",
             request.model.provider.0, request.model.model
-        )));
+        ) });
     }
     Ok(())
 }
