@@ -576,7 +576,7 @@ fn is_retryable_compaction_error(msg: &str) -> bool {
 ///
 /// Returns `(summary_text, actual_compacted_count)` so the caller knows
 /// exactly which messages were summarized.
-pub(crate) async fn generate_with_retry(
+pub(crate) async fn generate_with_retry<F>(
     model: &Arc<dyn ModelClient>,
     config: &AgentConfig,
     messages: &[AgentMessage],
@@ -585,7 +585,11 @@ pub(crate) async fn generate_with_retry(
     instruction: Option<&str>,
     cancel_token: &CancellationToken,
     max_retry_attempts: u32,
-) -> Result<(String, usize), CompactionError> {
+    on_progress: F,
+) -> Result<(String, usize), CompactionError>
+where
+    F: Fn(usize) + Send + Sync,
+{
     let mut compacted_count = compute_compact_count(
         messages,
         CompactionSource::Auto,
@@ -603,8 +607,15 @@ pub(crate) async fn generate_with_retry(
         }
 
         let prefix = &messages[..compacted_count];
-        match generate_compaction_summary(model, config, prefix, instruction, cancel_token, |_| {})
-            .await
+        match generate_compaction_summary(
+            model,
+            config,
+            prefix,
+            instruction,
+            cancel_token,
+            |len| on_progress(len),
+        )
+        .await
         {
             Ok(summary) if !summary.trim().is_empty() => {
                 return Ok((summary, compacted_count));
@@ -1028,6 +1039,7 @@ mod tests {
             instruction: Option<&'a str>,
             cancel_token: &'a CancellationToken,
             max_retry_attempts: u32,
+            _on_progress: &'a dyn Fn(usize),
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(String, usize), CompactionError>> + Send + 'a>>
         {
             Box::pin(generate_with_retry(
@@ -1039,6 +1051,7 @@ mod tests {
                 instruction,
                 cancel_token,
                 max_retry_attempts,
+                |_len: usize| {},
             ))
         }
         // If this compiles, the signature is correct.

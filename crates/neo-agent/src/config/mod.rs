@@ -167,6 +167,8 @@ pub struct RuntimeCompactionConfig {
     pub max_recent_messages: usize,
     pub micro_enabled: bool,
     pub micro_keep_recent: usize,
+    pub max_rounds: usize,
+    pub max_retry_attempts: u32,
 }
 
 impl Default for RuntimeCompactionConfig {
@@ -180,6 +182,8 @@ impl Default for RuntimeCompactionConfig {
             max_recent_messages: 4,
             micro_enabled: false,
             micro_keep_recent: 20,
+            max_rounds: 5,
+            max_retry_attempts: 5,
         }
     }
 }

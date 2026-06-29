@@ -871,6 +871,8 @@ mod tests {
                 max_recent_messages: 4,
                 micro_enabled: false,
                 micro_keep_recent: 20,
+                max_rounds: 5,
+                max_retry_attempts: 5,
             })
         );
         assert!(agent_config.workspace_root.is_some());
@@ -1049,6 +1051,8 @@ mod tests {
                 max_recent_messages: 4,
                 micro_enabled: false,
                 micro_keep_recent: 20,
+                max_rounds: 5,
+                max_retry_attempts: 5,
             })
         );
     }
@@ -1124,6 +1128,8 @@ mod tests {
                 max_recent_messages: 4,
                 micro_enabled: false,
                 micro_keep_recent: 20,
+                max_rounds: 5,
+                max_retry_attempts: 5,
             })
         );
     }

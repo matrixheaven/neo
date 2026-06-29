@@ -490,6 +490,10 @@ pub struct CompactionSettings {
     pub micro_enabled: bool,
     /// Number of recent messages exempt from micro compaction.
     pub micro_keep_recent: usize,
+    /// Maximum compaction rounds per invocation.
+    pub max_rounds: usize,
+    /// Maximum retry attempts for empty/truncated summaries.
+    pub max_retry_attempts: u32,
 }
 
 impl CompactionSettings {
@@ -504,6 +508,8 @@ impl CompactionSettings {
             max_recent_messages: 4,
             micro_enabled: false,
             micro_keep_recent: 20,
+            max_rounds: 5,
+            max_retry_attempts: 5,
         }
     }
 }

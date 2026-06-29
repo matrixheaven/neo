@@ -21,11 +21,14 @@ pub(super) async fn maybe_compact(
     emitter: &mut EventEmitter,
     cancel_token: &CancellationToken,
 ) {
-    // Hardcoded until Task 10 makes it configurable.
-    const MAX_ROUNDS: u32 = 5;
+    let max_rounds = config
+        .compaction
+        .as_ref()
+        .map(|s| s.max_rounds)
+        .unwrap_or(5);
     const MIN_REDUCTION_TOKENS: usize = 1024;
 
-    for round in 0..MAX_ROUNDS {
+    for round in 0..max_rounds {
         let Some(trigger) = evaluate_compaction_need(config, emitter) else {
             break;
         };
@@ -273,6 +276,12 @@ fn spawn_summary_task(
     let summary_instruction = custom_instruction.map(str::to_owned);
     let summary_cancel = cancel_token.child_token();
     let summary_strategy = strategy.clone();
+    let max_retry_attempts = config
+        .compaction
+        .as_ref()
+        .map(|s| s.max_retry_attempts)
+        .unwrap_or(5);
+    let progress_tx_for_task = progress_tx.clone();
     tokio::spawn(async move {
         let result = compaction::generate_with_retry(
             &summary_model,
@@ -282,8 +291,10 @@ fn spawn_summary_task(
             max_context_tokens,
             summary_instruction.as_deref(),
             &summary_cancel,
-            // Hardcoded until Task 10 makes it configurable.
-            5,
+            max_retry_attempts,
+            |len| {
+                let _ = progress_tx_for_task.send(len);
+            },
         )
         .await;
         let _ = summary_tx.send(result);

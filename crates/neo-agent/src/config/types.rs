@@ -214,6 +214,10 @@ pub(crate) struct FileRuntimeCompactionConfig {
     pub(crate) micro_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) micro_keep_recent: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_rounds: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_retry_attempts: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -65,6 +65,8 @@ pub(crate) fn agent_config_for_app(
             max_recent_messages: compaction.max_recent_messages,
             micro_enabled: compaction.micro_enabled,
             micro_keep_recent: compaction.micro_keep_recent,
+            max_rounds: compaction.max_rounds,
+            max_retry_attempts: compaction.max_retry_attempts,
         });
     }
     if let Some(approval_tx) = approval_tx {

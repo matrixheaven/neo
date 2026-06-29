@@ -195,6 +195,8 @@ fn runtime_from_file(runtime: Option<FileRuntimeConfig>) -> RuntimeConfig {
                 max_recent_messages: compaction.max_recent_messages.unwrap_or(4),
                 micro_enabled: compaction.micro_enabled.unwrap_or(false),
                 micro_keep_recent: compaction.micro_keep_recent.unwrap_or(20),
+                max_rounds: compaction.max_rounds.unwrap_or(5),
+                max_retry_attempts: compaction.max_retry_attempts.unwrap_or(5),
             }),
     }
 }
