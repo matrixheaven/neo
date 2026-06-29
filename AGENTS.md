@@ -4,12 +4,6 @@ Neo is a Rust-native, local-only AI coding agent (CLI + TUI). Cargo workspace, e
 
 Read [CX.md](../../.kimi-code/CX.md) and [RTK.md](../../.kimi-code/RTK.md). Use `cx`/`rtk` CLIs to save tokens. Parallelize substantial work across ≥3 subagents when slices are independent.
 
-<important>
-
-**NEVER restore any file to `HEAD` or any prior revision. NEVER use `git` mutations. Use `git` only for `diff`/`log`/`status` (read-only or commit or push).**
-
-</important>
-
 ## Critical rules
 
 1. **Stay in scope.** Don't fix unrelated failures or clean up other agents' work. The worktree is shared and concurrent.
@@ -22,6 +16,7 @@ Read [CX.md](../../.kimi-code/CX.md) and [RTK.md](../../.kimi-code/RTK.md). Use 
 1. Recall: `icm recall-context "<task>" --limit 5`.
 2. Scope your own work only.
 3. Verify proportionally (tiers below). Use `cargo run -p xtask -- test ...`; never use bare `cargo test` as evidence.
+4. Commit: after verification passes, commit the changes with a conventional commit message (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:` prefix). One logical task = one commit. Don't batch unrelated changes.
 
 ### Verification tiers — err toward less testing
 
@@ -121,11 +116,13 @@ Never store trivial details, existing AGENTS.md facts, or transient logs.
 
 ## Git mutation policy — STRICT
 
-**No git mutations** unless the user explicitly authorizes that exact command. The safety boundary is the worktree.
+The safety boundary is the worktree. `add`/`commit` are autonomous (see below); all other mutations need explicit authorization.
 
 **Forbidden** (discard/rewrite worktree): `git reset --hard/--merge/--keep`, `git checkout/restore -- <path>`, `git stash`, `git rebase`, `git clean -fd`, `git rm`, `git commit --amend`, force push, `git filter-branch/repo`, `git gc --prune`, `git reflog expire`.
 
-**Per-command authorization required**: `git add`, `commit`, `push`, `merge`, `cherry-pick`, `checkout/switch <branch>`, `branch -d/-D`, `tag`, `worktree add/remove`.
+**Autonomous** (no authorization needed): `git add`, `git commit` — commit after each verified task per the work loop.
+
+**Per-command authorization required**: `git push`, `merge`, `cherry-pick`, `checkout/switch <branch>`, `branch -d/-D`, `tag`, `worktree add/remove`.
 
 **Read-only allowed**: `status`, `diff`, `log`, `show`, `branch` (no delete), `stash list`, `reflog`, `blame`, `ls-files`, `fsck`.
 
