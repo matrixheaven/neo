@@ -43,6 +43,10 @@ pub enum CompactionError {
     Cancelled,
     #[error("no safe compaction boundary found in the current history")]
     NoBoundary,
+    #[error("compaction truncated: model returned empty/truncated after {0} attempts")]
+    Truncated(u32),
+    #[error("compaction stale: history changed during summarization")]
+    Stale,
 }
 
 /// Heuristics for when and how much to compact.
@@ -892,6 +896,21 @@ mod tests {
         ];
         // suffix would start with assistant that still needs tc2 result
         assert!(!can_split_after(&messages, 2));
+    }
+
+    #[test]
+    fn truncated_error_displays_attempt_count() {
+        let err = CompactionError::Truncated(5);
+        let msg = err.to_string();
+        assert!(msg.contains('5'));
+        assert!(msg.contains("truncated"));
+    }
+
+    #[test]
+    fn stale_error_has_message() {
+        let err = CompactionError::Stale;
+        let msg = err.to_string();
+        assert!(msg.contains("stale"));
     }
 
     #[test]
