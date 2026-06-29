@@ -6,9 +6,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::config::{AgentConfig, CompactionSettings};
+use super::error::AgentRuntimeError;
 use super::events::EventEmitter;
-use super::legacy::AgentRuntimeError;
-use super::legacy::emit_effective_context_window;
+use super::turn_loop::emit_effective_context_window;
 use crate::compaction::{self, CompactionStrategy};
 use crate::{
     AgentEvent, AgentMessage, CompactionPhase, CompactionReason, CompactionSource,

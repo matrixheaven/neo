@@ -2,27 +2,15 @@
 //!
 //! The hand-rolled PKCE, authorization-URL, code-exchange, and refresh helpers
 //! have been removed in favour of `rmcp::transport::auth::AuthorizationManager`.
-//! What remains are the token set data type, the token store, and the callback
-//! server used during interactive OAuth flows.
+//! What remains are the token store and the callback server used during
+//! interactive OAuth flows.
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod callback_server;
 pub mod store;
 
 pub use store::OAuthStore;
-
-/// A set of OAuth tokens returned by the token endpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OAuthTokenSet {
-    pub access_token: String,
-    pub token_type: String,
-    pub refresh_token: Option<String>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub scopes: Vec<String>,
-}
 
 /// Errors that may occur during OAuth operations.
 #[derive(Debug, Error)]

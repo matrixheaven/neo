@@ -45,10 +45,7 @@ pub use mcp::{
     HttpConfig, HttpOAuthConfig, McpClient, McpError, McpResourceContent, McpResourceDefinition,
     McpResourceRead, McpToolDefinition, McpToolResponse, StdioConfig, build_authorization_manager,
     build_http_client, build_stdio_client,
-    oauth::{
-        McpOAuthIdentity, McpOAuthMigrationOutcome, McpOAuthService, McpOAuthServiceConfig,
-        McpOAuthTransportKind,
-    },
+    oauth::{McpOAuthIdentity, McpOAuthService, McpOAuthServiceConfig, McpOAuthTransportKind},
 };
 pub use mcp_manager::*;
 pub use process_supervisor::ProcessSupervisor;

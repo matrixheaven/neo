@@ -5,9 +5,9 @@ use neo_ai::{AiStreamEvent, ChatRequest, ModelClient};
 use tokio_util::sync::CancellationToken;
 
 use super::config::AgentConfig;
+use super::error::AgentRuntimeError;
 use super::events::EventEmitter;
-use super::legacy::AgentRuntimeError;
-use super::legacy::emit_effective_context_window;
+use super::turn_loop::emit_effective_context_window;
 use crate::{AgentEvent, AgentMessage, AgentToolCall, Content, StopReason};
 
 pub(super) async fn run_model_turn(

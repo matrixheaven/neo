@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::oauth::OAuthStore;
 use rmcp::transport::auth::{AuthorizationManager, OAuthClientConfig, StoredCredentials};
 use tokio::sync::Mutex;
 
@@ -14,14 +13,6 @@ use super::{
 };
 
 const TOKEN_EXPIRY_SKEW_SECS: u64 = 60;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum McpOAuthMigrationOutcome {
-    NotFound,
-    AlreadyMigrated,
-    TokensMigrated,
-    Unusable,
-}
 
 #[derive(Debug, Clone)]
 pub struct McpOAuthServiceConfig {
@@ -129,37 +120,6 @@ impl McpOAuthService {
                 remove_empty_server_dir(&self.store.server_dir(identity))
             }
         }
-    }
-
-    pub async fn migrate_legacy_tokens(
-        &self,
-        old_store_path: &Path,
-        server_id: &str,
-        identity: &McpOAuthIdentity,
-    ) -> Result<McpOAuthMigrationOutcome, McpOAuthError> {
-        if !old_store_path.exists() {
-            return Ok(McpOAuthMigrationOutcome::NotFound);
-        }
-        if self
-            .store
-            .load_tokens(identity)
-            .map_err(|err| McpOAuthError::Store(err.to_string()))?
-            .is_some()
-        {
-            return Ok(McpOAuthMigrationOutcome::AlreadyMigrated);
-        }
-
-        let old_store = OAuthStore::load(old_store_path)
-            .map_err(|err| McpOAuthError::Store(err.to_string()))?;
-        let Some(credentials) = old_store.get(&format!("mcp:{server_id}")) else {
-            return Ok(McpOAuthMigrationOutcome::NotFound);
-        };
-        let Some(tokens) = token_record_from_credentials(credentials) else {
-            return Ok(McpOAuthMigrationOutcome::Unusable);
-        };
-
-        self.store.save_tokens(identity, &tokens)?;
-        Ok(McpOAuthMigrationOutcome::TokensMigrated)
     }
 
     pub async fn begin_authorization(
@@ -373,7 +333,6 @@ fn remove_empty_server_dir(path: &Path) -> Result<(), McpOAuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth::OAuthStore;
     use crate::tools::mcp::oauth::store::McpOAuthDiscoveryRecord;
     use crate::tools::mcp::oauth::{
         InvalidateScope, McpOAuthClientRecord, McpOAuthError, McpOAuthIdentity,
@@ -630,99 +589,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migration_missing_file_or_key_returns_not_found() {
-        let dir = tempfile::tempdir().unwrap();
-        let service = McpOAuthService::from_store(McpOAuthStore::new(dir.path().join("new")));
-        let identity = identity();
-        let old_path = dir.path().join("oauth.json");
-
-        assert_eq!(
-            service
-                .migrate_legacy_tokens(&old_path, "linear", &identity)
-                .await
-                .unwrap(),
-            McpOAuthMigrationOutcome::NotFound
-        );
-
-        OAuthStore::default().save(&old_path).unwrap();
-        assert_eq!(
-            service
-                .migrate_legacy_tokens(&old_path, "linear", &identity)
-                .await
-                .unwrap(),
-            McpOAuthMigrationOutcome::NotFound
-        );
-    }
-
-    #[tokio::test]
-    async fn migration_writes_only_tokens_for_usable_old_credentials() {
-        let dir = tempfile::tempdir().unwrap();
-        let service = McpOAuthService::from_store(McpOAuthStore::new(dir.path().join("new")));
-        let identity = identity();
-        let old_path = dir.path().join("oauth.json");
-        let mut old_store = OAuthStore::default();
-        old_store.set("mcp:linear", stored_credentials("migrated-token", 3600));
-        old_store.save(&old_path).unwrap();
-
-        let outcome = service
-            .migrate_legacy_tokens(&old_path, "linear", &identity)
-            .await
-            .unwrap();
-
-        assert_eq!(outcome, McpOAuthMigrationOutcome::TokensMigrated);
-        let migrated = service.store().load_tokens(&identity).unwrap().unwrap();
-        assert_eq!(migrated.access_token, "migrated-token");
-        assert!(service.store().load_client(&identity).unwrap().is_none());
-        assert!(service.store().load_discovery(&identity).unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn migration_does_not_overwrite_existing_new_tokens() {
-        let dir = tempfile::tempdir().unwrap();
-        let service = McpOAuthService::from_store(McpOAuthStore::new(dir.path().join("new")));
-        let identity = identity();
-        service
-            .store()
-            .save_tokens(&identity, &token_record("fresh-token"))
-            .unwrap();
-        let old_path = dir.path().join("oauth.json");
-        let mut old_store = OAuthStore::default();
-        old_store.set("mcp:linear", stored_credentials("stale-token", 3600));
-        old_store.save(&old_path).unwrap();
-
-        let outcome = service
-            .migrate_legacy_tokens(&old_path, "linear", &identity)
-            .await
-            .unwrap();
-
-        assert_eq!(outcome, McpOAuthMigrationOutcome::AlreadyMigrated);
-        let tokens = service.store().load_tokens(&identity).unwrap().unwrap();
-        assert_eq!(tokens.access_token, "fresh-token");
-    }
-
-    #[tokio::test]
-    async fn migration_existing_entry_without_token_response_is_unusable() {
-        let dir = tempfile::tempdir().unwrap();
-        let service = McpOAuthService::from_store(McpOAuthStore::new(dir.path().join("new")));
-        let identity = identity();
-        let old_path = dir.path().join("oauth.json");
-        let mut old_store = OAuthStore::default();
-        old_store.set(
-            "mcp:linear",
-            StoredCredentials::new("client-id".to_owned(), None, Vec::new(), None),
-        );
-        old_store.save(&old_path).unwrap();
-
-        let outcome = service
-            .migrate_legacy_tokens(&old_path, "linear", &identity)
-            .await
-            .unwrap();
-
-        assert_eq!(outcome, McpOAuthMigrationOutcome::Unusable);
-        assert!(service.store().load_tokens(&identity).unwrap().is_none());
-    }
-
-    #[tokio::test]
     async fn persist_rmcp_credentials_writes_tokens_and_minimal_client() {
         let (_dir, service, identity) = service();
 
@@ -825,26 +691,5 @@ mod tests {
 
         assert_eq!(record.redirect_uris, vec![redirect_uri.to_owned()]);
         assert_ne!(record.redirect_uris[0], identity.canonical_resource_url);
-    }
-
-    #[tokio::test]
-    async fn migrated_expired_token_without_client_discovery_needs_auth() {
-        let dir = tempfile::tempdir().unwrap();
-        let service = McpOAuthService::from_store(McpOAuthStore::new(dir.path().join("new")));
-        let identity = identity();
-        let old_path = dir.path().join("oauth.json");
-        let mut old_store = OAuthStore::default();
-        old_store.set("mcp:linear", stored_credentials("expired-token", 1));
-        old_store.save(&old_path).unwrap();
-
-        service
-            .migrate_legacy_tokens(&old_path, "linear", &identity)
-            .await
-            .unwrap();
-
-        let err = service.access_token(&identity).await.unwrap_err();
-        assert!(
-            matches!(err, McpOAuthError::NeedsAuth(message) if message == "OAuth client registration is missing")
-        );
     }
 }

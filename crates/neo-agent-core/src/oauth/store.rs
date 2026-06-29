@@ -5,8 +5,7 @@
 //! permissions on Unix (`0o600`).
 //!
 //! The on-disk format stores [`rmcp::transport::auth::StoredCredentials`] under
-//! server keys such as `mcp:<server_id>`. Legacy stores that used Neo's own
-//! [`OAuthTokenSet`] layout are transparently migrated on first load.
+//! server keys such as `mcp:<server_id>`.
 
 use std::{
     collections::BTreeMap,
@@ -15,12 +14,10 @@ use std::{
     path::Path,
 };
 
-use chrono::Utc;
-use rmcp::transport::auth::{OAuthTokenResponse, StoredCredentials};
+use rmcp::transport::auth::StoredCredentials;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
-use super::{OAuthError, OAuthTokenSet};
+use super::OAuthError;
 
 /// On-disk layout for the OAuth token store.
 // `PartialEq`/`Eq` are not derived because `rmcp::transport::auth::StoredCredentials`
@@ -30,25 +27,16 @@ pub struct OAuthStore {
     pub entries: BTreeMap<String, StoredCredentials>,
 }
 
-/// Legacy on-disk layout, kept for one-time migration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LegacyOAuthStore {
-    entries: BTreeMap<String, OAuthTokenSet>,
-}
-
 impl OAuthStore {
     /// Load the store from `path`.
     ///
-    /// Returns an empty store if the file does not exist. If the file uses the
-    /// legacy Neo `OAuthTokenSet` format, it is migrated in-memory to the new
-    /// `StoredCredentials` format. The migrated data is not written back until
-    /// [`Self::save`] is called.
+    /// Returns an empty store if the file does not exist.
     ///
     /// # Errors
     ///
     /// Returns `OAuthError::StoreLoad` for I/O errors other than a missing file,
-    /// and `OAuthError::StoreParse` for JSON that is neither the current nor the
-    /// legacy format.
+    /// and `OAuthError::StoreParse` for malformed JSON or non-canonical store
+    /// shape.
     pub fn load(path: &Path) -> Result<Self, OAuthError> {
         if !path.exists() {
             return Ok(Self::default());
@@ -58,10 +46,7 @@ impl OAuthStore {
             .open(path)
             .map_err(OAuthError::StoreLoad)?;
         let reader = BufReader::new(file);
-        match serde_json::from_reader(reader) {
-            Ok(store) => Ok(store),
-            Err(parse_err) => Self::migrate_legacy(path, &parse_err),
-        }
+        serde_json::from_reader(reader).map_err(|err| OAuthError::StoreParse(err.to_string()))
     }
 
     /// Save the store to `path`.
@@ -123,133 +108,14 @@ impl OAuthStore {
     pub fn remove(&mut self, key: &str) -> bool {
         self.entries.remove(key).is_some()
     }
-
-    /// Compatibility accessor that returns the legacy [`OAuthTokenSet`] view of
-    /// the credentials stored under `key`, if any.
-    #[must_use]
-    pub fn get_token(&self, key: &str) -> Option<OAuthTokenSet> {
-        self.get(key).and_then(token_set_from_credentials)
-    }
-
-    /// Compatibility setter that stores an [`OAuthTokenSet`] as
-    /// [`StoredCredentials`] under `key`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `OAuthError::StoreParse` if `token_set` cannot be converted to
-    /// rmcp [`StoredCredentials`].
-    pub fn set_token(&mut self, key: &str, token_set: &OAuthTokenSet) -> Result<(), OAuthError> {
-        let credentials = credentials_from_token_set(token_set)?;
-        self.set(key, credentials);
-        Ok(())
-    }
-
-    /// Migrate a legacy store at `path` to the current format.
-    fn migrate_legacy(path: &Path, parse_err: &serde_json::Error) -> Result<Self, OAuthError> {
-        let file = OpenOptions::new()
-            .read(true)
-            .open(path)
-            .map_err(OAuthError::StoreLoad)?;
-        let legacy: LegacyOAuthStore = serde_json::from_reader(BufReader::new(file)).map_err(
-            |legacy_err| {
-                OAuthError::StoreParse(format!(
-                    "file is neither current OAuth store format nor legacy format: {parse_err}; legacy parse error: {legacy_err}"
-                ))
-            },
-        )?;
-        let mut store = Self::default();
-        for (key, token_set) in legacy.entries {
-            store.set(&key, credentials_from_token_set(&token_set)?);
-        }
-        Ok(store)
-    }
-}
-
-/// Convert a Neo [`OAuthTokenSet`] into an rmcp [`StoredCredentials`].
-fn credentials_from_token_set(token_set: &OAuthTokenSet) -> Result<StoredCredentials, OAuthError> {
-    let expires_in = token_set.expires_at.map(|expires_at| {
-        let seconds = (expires_at - Utc::now()).num_seconds();
-        u64::try_from(seconds).unwrap_or(0)
-    });
-
-    let mut value = serde_json::Map::new();
-    value.insert("access_token".to_owned(), json!(token_set.access_token));
-    value.insert("token_type".to_owned(), json!(token_set.token_type));
-    if let Some(ref refresh_token) = token_set.refresh_token {
-        value.insert("refresh_token".to_owned(), json!(refresh_token));
-    }
-    if let Some(secs) = expires_in {
-        value.insert("expires_in".to_owned(), json!(secs));
-    }
-    if !token_set.scopes.is_empty() {
-        value.insert("scope".to_owned(), json!(token_set.scopes.join(" ")));
-    }
-
-    let token_response: OAuthTokenResponse = serde_json::from_value(Value::Object(value))
-        .map_err(|err| OAuthError::StoreParse(err.to_string()))?;
-
-    // Preserve the original expiration moment by backdating the receive time.
-    let token_received_at = if let Some((expires_at, secs)) = token_set.expires_at.zip(expires_in) {
-        let secs_i64 = i64::try_from(secs).unwrap_or(i64::MAX);
-        u64::try_from((expires_at - chrono::Duration::seconds(secs_i64)).timestamp()).unwrap_or(0)
-    } else {
-        u64::try_from(Utc::now().timestamp()).unwrap_or(0)
-    };
-
-    Ok(StoredCredentials::new(
-        String::new(),
-        Some(token_response),
-        token_set.scopes.clone(),
-        Some(token_received_at),
-    ))
-}
-
-/// Convert rmcp [`StoredCredentials`] back into a Neo [`OAuthTokenSet`].
-fn token_set_from_credentials(credentials: &StoredCredentials) -> Option<OAuthTokenSet> {
-    let token_response = credentials.token_response.as_ref()?;
-    let value = serde_json::to_value(token_response).ok()?;
-
-    let access_token = value
-        .get("access_token")
-        .and_then(|v| v.as_str())?
-        .to_owned();
-    let token_type = value
-        .get("token_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Bearer")
-        .to_owned();
-    let refresh_token = value
-        .get("refresh_token")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let expires_in = value.get("expires_in").and_then(serde_json::Value::as_u64);
-    let expires_at = credentials
-        .token_received_at
-        .zip(expires_in)
-        .and_then(|(received, secs)| {
-            let timestamp = i64::try_from(received + secs).unwrap_or(i64::MAX);
-            chrono::DateTime::from_timestamp(timestamp, 0)
-        });
-    let scopes = if let Some(scope) = value.get("scope").and_then(|v| v.as_str()) {
-        scope.split_whitespace().map(String::from).collect()
-    } else {
-        credentials.granted_scopes.clone()
-    };
-
-    Some(OAuthTokenSet {
-        access_token,
-        token_type,
-        refresh_token,
-        expires_at,
-        scopes,
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::DateTime;
-    use std::time::SystemTime;
+    use chrono::Utc;
+    use rmcp::transport::auth::OAuthTokenResponse;
+    use serde_json::{Value, json};
 
     fn sample_token_response() -> OAuthTokenResponse {
         let mut value = serde_json::Map::new();
@@ -268,18 +134,6 @@ mod tests {
             vec!["read".to_owned(), "write".to_owned()],
             Some(u64::try_from(Utc::now().timestamp()).unwrap_or(0)),
         )
-    }
-
-    fn sample_token_set() -> OAuthTokenSet {
-        OAuthTokenSet {
-            access_token: "access-123".to_string(),
-            token_type: "Bearer".to_string(),
-            refresh_token: Some("refresh-456".to_string()),
-            expires_at: Some(DateTime::from(
-                SystemTime::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 0),
-            )),
-            scopes: vec!["read".to_string(), "write".to_string()],
-        }
     }
 
     fn access_token(credentials: &StoredCredentials) -> Option<String> {
@@ -402,30 +256,27 @@ mod tests {
     }
 
     #[test]
-    fn load_legacy_store_migrates_to_stored_credentials() {
+    fn load_rejects_oauth_token_set_store() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("oauth.json");
 
-        let legacy = LegacyOAuthStore {
-            entries: BTreeMap::from([("mcp:linear".to_owned(), sample_token_set())]),
-        };
-        std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
-
-        let store = OAuthStore::load(&path).unwrap();
-        let credentials = store.get("mcp:linear").expect("migrated entry");
-        assert_eq!(access_token(credentials), Some("access-123".to_owned()));
-        assert_eq!(credentials.granted_scopes, vec!["read", "write"]);
+        std::fs::write(
+            &path,
+            r#"{
+  "entries": {
+    "mcp:linear": {
+      "access_token": "access-123",
+      "token_type": "Bearer",
+      "refresh_token": "refresh-456",
+      "expires_at": "2023-11-14T22:13:20Z",
+      "scopes": ["read", "write"]
     }
+  }
+}"#,
+        )
+        .unwrap();
 
-    #[test]
-    fn compatibility_get_token_returns_oauth_token_set() {
-        let mut store = OAuthStore::default();
-        store.set_token("linear", &sample_token_set()).unwrap();
-
-        let token = store.get_token("linear").unwrap();
-        assert_eq!(token.access_token, "access-123");
-        assert_eq!(token.token_type, "bearer");
-        assert_eq!(token.refresh_token, Some("refresh-456".to_owned()));
-        assert_eq!(token.scopes, vec!["read", "write"]);
+        let result = OAuthStore::load(&path);
+        assert!(matches!(result, Err(OAuthError::StoreParse(_))));
     }
 }

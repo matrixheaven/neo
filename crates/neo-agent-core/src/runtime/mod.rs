@@ -1,16 +1,13 @@
 //! Agent runtime — turn loop, tool dispatch, permissions, compaction.
 //!
-//! This module is being progressively split from `legacy.rs` into
-//! focused submodules. During the transition, `legacy.rs` contains
-//! all the code; submodules are extracted one domain at a time.
-
+mod agent;
 mod chat_request;
 mod compaction_trigger;
 mod config;
 mod context;
+mod error;
 mod events;
 mod image_blobs;
-mod legacy;
 mod permission;
 mod plan_orchestration;
 mod queue;
@@ -18,15 +15,12 @@ mod skill_dispatch;
 mod stream_aggregator;
 mod tokens;
 mod tool_dispatch;
+mod turn_loop;
 
-// Re-export all public items from `legacy.rs` so that the existing
-// `pub use runtime::*;` in `lib.rs` continues to resolve without
-// logic or call-site changes during the split.
+pub use agent::*;
 pub use config::*;
 pub use context::*;
-pub use legacy::*;
+pub use error::*;
 pub use permission::*;
 pub use queue::*;
 pub(crate) use tokens::*;
-
-// Submodules will be added here as code is extracted from legacy.rs.

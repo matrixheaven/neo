@@ -37,9 +37,8 @@ use neo_tui::{
     input::{InputEvent, KeyId, KeybindingAction, KeybindingsManager},
     primitive::InputResult,
     shell::{
-        ApprovalChoice, ApprovalResult, ContextWindow,
-        NeoChromeState, OverlayKind, PickerItem, PromptEdit, SessionPickerItem,
-        SessionPickerScope, StreamUpdate,
+        ApprovalChoice, ApprovalResult, ContextWindow, NeoChromeState, OverlayKind, PickerItem,
+        PromptEdit, SessionPickerItem, SessionPickerScope, StreamUpdate,
     },
     transcript::{TranscriptPane, frame_content_width},
 };
@@ -80,7 +79,7 @@ use prompt_completion::{longest_common_completion_prefix, prompt_completions};
 
 #[cfg(test)]
 use prompt_completion::{
-    CompletionCatalog, CompletionCandidate, CompletionSource, completion_source_candidates,
+    CompletionCandidate, CompletionCatalog, CompletionSource, completion_source_candidates,
     session_completion_items,
 };
 
@@ -124,8 +123,8 @@ use input::ExitConfirmation;
 
 mod prompt_edit;
 use prompt_edit::{
-    content_to_display_text, expand_slash_skill, prompt_edit_for_action,
-    skill_invocation_args, split_skill_invocation,
+    content_to_display_text, expand_slash_skill, prompt_edit_for_action, skill_invocation_args,
+    split_skill_invocation,
 };
 
 mod dialog_results;
@@ -180,7 +179,6 @@ fn approval_number(character: char) -> Option<usize> {
         _ => None,
     }
 }
-
 
 fn slash_arg<'a>(prompt: &'a str, command: &str) -> Option<&'a str> {
     let rest = prompt.strip_prefix(command)?;
@@ -1394,7 +1392,6 @@ impl InteractiveController {
             );
         }
     }
-
 
     /// Register a pending `AskUser` question. Stores the oneshot response channel
     /// and synthesizes a `QuestionRequested` event for the TUI so it can display

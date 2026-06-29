@@ -10,10 +10,7 @@ use neo_agent_core::{PermissionApprovalDecision, PermissionOperation};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{AppConfig, McpServerConfig, McpTransport, neo_home};
-use crate::mcp_ops::{
-    mcp_oauth_identity_for_server, mcp_oauth_service_for_current_home,
-    migrate_legacy_oauth_for_config,
-};
+use crate::mcp_ops::{mcp_oauth_identity_for_server, mcp_oauth_service_for_current_home};
 use crate::modes::run::PromptApprovalRequest;
 use crate::resources;
 
@@ -246,7 +243,6 @@ pub(crate) async fn build_mcp_client(
                 .clone()
                 .with_context(|| format!("missing MCP url for {}", server.id))?;
             let service = mcp_oauth_service_for_current_home();
-            migrate_legacy_oauth_for_config(&service, std::slice::from_ref(server)).await?;
             let identity = mcp_oauth_identity_for_server(&server.id, server)?;
             let client = build_http_client(HttpConfig {
                 url,

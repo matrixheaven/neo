@@ -4,11 +4,11 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use tokio_util::sync::CancellationToken;
 
 use super::config::{AgentConfig, ToolExecutionMode};
+use super::error::AgentRuntimeError;
 use super::events::{
     EventEmitter, emit_shell_finished, emit_shell_started, emit_terminal_events,
     make_tool_update_callback,
 };
-use super::legacy::AgentRuntimeError;
 use super::permission::{
     PermissionPreparation, current_permission_mode, permission_preparation_for_mode,
     prepare_tool_call,

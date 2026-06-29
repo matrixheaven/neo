@@ -6,9 +6,9 @@ use std::{
 
 use anyhow::Context;
 use neo_agent_core::{
-    ManagedMcpTransport, McpConnectionManager, McpOAuthIdentity, McpOAuthMigrationOutcome,
-    McpOAuthService, McpOAuthServiceConfig, McpOAuthTransportKind, McpReconnectPolicy,
-    McpResourceListEntry, McpResourceRead, McpServerSnapshot, McpServerStatus, ProcessSupervisor,
+    ManagedMcpTransport, McpConnectionManager, McpOAuthIdentity, McpOAuthService,
+    McpOAuthServiceConfig, McpOAuthTransportKind, McpReconnectPolicy, McpResourceListEntry,
+    McpResourceRead, McpServerSnapshot, McpServerStatus, ProcessSupervisor,
     build_authorization_manager,
     oauth::{callback_server::CallbackServer, store::OAuthStore},
 };
@@ -298,7 +298,6 @@ pub async fn reload_mcp_manager_from_config(
     manager: &McpConnectionManager,
 ) -> anyhow::Result<Vec<McpServerSnapshot>> {
     let service = mcp_oauth_service_for_current_home();
-    migrate_legacy_oauth_for_config(&service, &config.mcp.servers).await?;
     manager.set_oauth_service(service).await;
 
     let managed_configs = to_managed_configs(&config.mcp.servers)?;
@@ -647,39 +646,6 @@ pub(crate) fn mcp_oauth_service_for_current_home() -> McpOAuthService {
     McpOAuthService::new(McpOAuthServiceConfig {
         neo_home: neo_home(),
     })
-}
-
-pub(crate) async fn migrate_legacy_oauth_for_config(
-    service: &McpOAuthService,
-    servers: &[McpServerConfig],
-) -> anyhow::Result<()> {
-    let Some(home) = neo_home() else {
-        return Ok(());
-    };
-    let legacy_path = home.join("oauth.json");
-    if !legacy_path.exists() {
-        return Ok(());
-    }
-
-    for server in servers {
-        if server.transport != McpTransport::Http && server.transport != McpTransport::Sse {
-            continue;
-        }
-        let identity = mcp_oauth_identity_for_server(&server.id, server)?;
-        match service
-            .migrate_legacy_tokens(&legacy_path, &server.id, &identity)
-            .await
-        {
-            Ok(
-                McpOAuthMigrationOutcome::NotFound
-                | McpOAuthMigrationOutcome::AlreadyMigrated
-                | McpOAuthMigrationOutcome::TokensMigrated
-                | McpOAuthMigrationOutcome::Unusable,
-            ) => {}
-            Err(err) => anyhow::bail!("failed to migrate legacy OAuth credentials: {err}"),
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn mcp_oauth_identity_for_server(

@@ -18,7 +18,7 @@ mod store;
 pub use error::{InvalidateScope, McpOAuthError};
 pub use flow::{InMemoryStateStore, McpOAuthFlow};
 pub use identity::{McpOAuthIdentity, McpOAuthTransportKind};
-pub use service::{McpOAuthMigrationOutcome, McpOAuthService, McpOAuthServiceConfig};
+pub use service::{McpOAuthService, McpOAuthServiceConfig};
 pub use store::{McpOAuthClientRecord, McpOAuthStore, McpOAuthTokenRecord};
 
 /// Build an `AuthorizationManager` configured with Neo's current rmcp OAuth bridge.
