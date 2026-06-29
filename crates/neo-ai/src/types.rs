@@ -322,7 +322,7 @@ impl ToolSpec {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ChatRequest {
     pub model: ModelSpec,
     pub messages: Vec<ChatMessage>,

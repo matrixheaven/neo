@@ -49,6 +49,7 @@ fn request_options_have_typed_defaults_and_preserve_metadata() {
         cache: CacheRetention::Long,
         session_id: Some("session-123".to_owned()),
         metadata: RequestMetadata::from_pairs([("user_id", "u-1"), ("project_id", "p-1")]),
+        cancel_token: None,
     };
 
     assert_eq!(options.temperature, Some(0.2));

@@ -211,6 +211,7 @@ async fn openai_compatible_client_posts_typed_options_and_normalizes_sse_events(
         cache: CacheRetention::Long,
         session_id: Some("session-1".to_owned()),
         metadata: RequestMetadata::from_pairs([("user_id", "u-1")]),
+        cancel_token: None,
     });
 
     let events = client
