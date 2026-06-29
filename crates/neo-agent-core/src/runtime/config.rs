@@ -73,6 +73,11 @@ pub struct AgentConfig {
     #[schemars(skip)]
     pub live_permission_mode: Arc<RwLock<PermissionMode>>,
     pub compaction: Option<CompactionSettings>,
+    /// Runtime-observed context overflow point.
+    /// Set when provider reports overflow; used to cap effective max.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub observed_max_context_tokens: Arc<Mutex<Option<usize>>>,
     #[serde(skip)]
     #[schemars(skip)]
     pub context_transform: Option<ContextTransform>,
@@ -172,6 +177,7 @@ impl AgentConfig {
             permission_mode: PermissionMode::default(),
             live_permission_mode: Arc::new(RwLock::new(PermissionMode::default())),
             compaction: None,
+            observed_max_context_tokens: Arc::new(Mutex::new(None)),
             context_transform: None,
             before_tool_call: None,
             async_before_tool_call: None,
@@ -425,6 +431,49 @@ impl AgentConfig {
     }
 }
 
+/// Safety ratio: observed overflow point × this = safe effective max.
+const OVERFLOW_SAFETY_RATIO: f64 = 0.85;
+
+/// Effective max context tokens, considering observed overflow.
+///
+/// Returns `min(configured, observed × 0.85)`.
+#[must_use]
+pub fn effective_max_context_tokens(config: &AgentConfig) -> usize {
+    let configured = config
+        .model
+        .capabilities
+        .max_context_tokens
+        .unwrap_or(0) as usize;
+    let observed = config
+        .observed_max_context_tokens
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map(|v| ((v as f64) * OVERFLOW_SAFETY_RATIO) as usize);
+
+    match (configured, observed) {
+        (0, Some(o)) => o,
+        (c, Some(o)) => c.min(o),
+        (c, None) => c,
+    }
+}
+
+/// Record an observed context overflow point.
+///
+/// Only updates if the new value (× 0.85) is smaller than the current
+/// observation — never increases the effective max.
+pub fn observe_context_overflow(config: &AgentConfig, estimated_tokens: usize) {
+    let safe = ((estimated_tokens as f64) * OVERFLOW_SAFETY_RATIO) as usize;
+    let mut guard = config
+        .observed_max_context_tokens
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match *guard {
+        Some(current) if safe < current => *guard = Some(safe),
+        None => *guard = Some(safe),
+        _ => {}
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CompactionSettings {
     pub enabled: bool,
@@ -456,5 +505,72 @@ impl CompactionSettings {
             micro_enabled: false,
             micro_keep_recent: 20,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use neo_ai::{ApiKind, ModelCapabilities, ModelSpec, ProviderId};
+
+    /// Test helper — constructs a minimal AgentConfig via for_model.
+    /// AgentConfig has NO Default impl (closure/handler fields).
+    fn test_config() -> AgentConfig {
+        let spec = ModelSpec {
+            provider: ProviderId("test".to_owned()),
+            model: "test-model".to_owned(),
+            api: ApiKind::OpenAiChatCompletions,
+            capabilities: ModelCapabilities {
+                max_context_tokens: Some(200_000),
+                ..ModelCapabilities::chat()
+            },
+        };
+        AgentConfig::for_model(spec)
+    }
+
+    #[test]
+    fn effective_max_uses_observed_when_smaller() {
+        let mut config = test_config();
+        config.model.capabilities.max_context_tokens = Some(200_000);
+        *config.observed_max_context_tokens.lock().unwrap() = Some(100_000);
+
+        let effective = effective_max_context_tokens(&config);
+        // observed (100k * 0.85 = 85k) < configured (200k) → use 85k
+        assert_eq!(effective, 85_000);
+    }
+
+    #[test]
+    fn effective_max_uses_configured_when_no_observation() {
+        let config = test_config();
+        // observed is None → use configured 200k
+        let effective = effective_max_context_tokens(&config);
+        assert_eq!(effective, 200_000);
+    }
+
+    #[test]
+    fn observe_context_overflow_only_updates_smaller() {
+        let mut config = test_config();
+        config.model.capabilities.max_context_tokens = Some(200_000);
+
+        observe_context_overflow(&config, 180_000);
+        // 180k * 0.85 = 153k
+        assert_eq!(
+            *config.observed_max_context_tokens.lock().unwrap(),
+            Some(153_000)
+        );
+
+        // Second overflow at 220k → 220k * 0.85 = 187k > 153k → should NOT update
+        observe_context_overflow(&config, 220_000);
+        assert_eq!(
+            *config.observed_max_context_tokens.lock().unwrap(),
+            Some(153_000)
+        );
+
+        // Third overflow at 100k → 100k * 0.85 = 85k < 153k → should update
+        observe_context_overflow(&config, 100_000);
+        assert_eq!(
+            *config.observed_max_context_tokens.lock().unwrap(),
+            Some(85_000)
+        );
     }
 }
