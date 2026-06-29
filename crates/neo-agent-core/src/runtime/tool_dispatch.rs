@@ -5,8 +5,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::config::{AgentConfig, ToolExecutionMode};
 use super::events::{
-    EventEmitter, emit_shell_finished, emit_shell_started,
-    emit_terminal_events, make_tool_update_callback,
+    EventEmitter, emit_shell_finished, emit_shell_started, emit_terminal_events,
+    make_tool_update_callback,
 };
 use super::legacy::AgentRuntimeError;
 use super::permission::{
@@ -18,8 +18,8 @@ use super::skill_dispatch::execute_invoke_skill;
 use crate::skills::SkillStore;
 use crate::tools::execute_model_bash_for_runtime;
 use crate::{
-    AgentEvent, AgentToolCall, PermissionMode, ProcessSupervisor,
-    ToolAccess, ToolContext, ToolError, ToolRegistry, ToolResult,
+    AgentEvent, AgentToolCall, PermissionMode, ProcessSupervisor, ToolAccess, ToolContext,
+    ToolError, ToolRegistry, ToolResult,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

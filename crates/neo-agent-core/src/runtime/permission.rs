@@ -6,8 +6,7 @@ use super::config::AgentConfig;
 use super::events::EventPublisher;
 use super::plan_orchestration::exit_plan_mode_has_reviewable_plan;
 use super::tool_dispatch::{
-    PreparedToolCall, PreparedToolCallResult, ask_user_runs_in_background,
-    cancelled_tool_result,
+    PreparedToolCall, PreparedToolCallResult, ask_user_runs_in_background, cancelled_tool_result,
 };
 use crate::permissions::{
     ApprovalRuleStore, FileWriteApprovalOperation, PrefixApprovalRule, SessionApprovalKey,

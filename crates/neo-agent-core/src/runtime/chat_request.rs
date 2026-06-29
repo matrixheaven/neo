@@ -5,10 +5,7 @@ use neo_ai::{AiError, ChatMessage, ChatRequest, ContentPart, RequestOptions};
 use super::config::AgentConfig;
 use super::context::AgentContext;
 use super::image_blobs::resolve_image_blobs;
-use crate::{
-    AgentMessage, PlanModeInjector,
-    sanitize_tool_exchange_messages,
-};
+use crate::{AgentMessage, PlanModeInjector, sanitize_tool_exchange_messages};
 
 pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -> ChatRequest {
     let mut messages = Vec::new();

@@ -89,7 +89,10 @@ pub(super) async fn resolve_content_blobs(
     out
 }
 
-pub(super) async fn read_blob_bytes(session_dir: &std::path::Path, sha256: &str) -> Option<Vec<u8>> {
+pub(super) async fn read_blob_bytes(
+    session_dir: &std::path::Path,
+    sha256: &str,
+) -> Option<Vec<u8>> {
     let blob_dir = session_dir.join("blobs");
     let mut entries = tokio::fs::read_dir(&blob_dir).await.ok()?;
     while let Some(entry) = entries.next_entry().await.ok()? {

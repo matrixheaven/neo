@@ -11,8 +11,8 @@ use super::compaction_trigger::*;
 use super::config::*;
 use super::context::AgentContext;
 use super::events::*;
-use super::queue::*;
 use super::plan_orchestration::*;
+use super::queue::*;
 use super::skill_dispatch::*;
 use super::stream_aggregator::*;
 use super::tokens::*;
@@ -20,10 +20,8 @@ use super::tool_dispatch::*;
 use crate::goal::GoalManager;
 use crate::skills::SkillStore;
 use crate::{
-    AgentEvent, AgentMessage, AgentToolCall, Content, ProcessSupervisor,
-    StopReason,
-    ToolError, ToolRegistry, ToolResult,
-    compaction::self,
+    AgentEvent, AgentMessage, AgentToolCall, Content, ProcessSupervisor, StopReason, ToolError,
+    ToolRegistry, ToolResult, compaction,
 };
 
 #[derive(Debug, Error)]

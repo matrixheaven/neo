@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::{AgentEvent, AgentMessage, QueueKind};
 
-use super::events::EventEmitter;
 use super::config::{AgentConfig, QueueMode};
+use super::events::EventEmitter;
 
 /// Live input pushed into a running turn by the controller.
 ///

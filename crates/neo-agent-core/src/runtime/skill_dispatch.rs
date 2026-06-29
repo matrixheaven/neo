@@ -24,7 +24,10 @@ pub(super) fn invoke_skill_tool_spec() -> ToolSpec {
     }
 }
 
-pub(super) fn execute_invoke_skill(skills: Option<&SkillStore>, tool_call: &AgentToolCall) -> ToolResult {
+pub(super) fn execute_invoke_skill(
+    skills: Option<&SkillStore>,
+    tool_call: &AgentToolCall,
+) -> ToolResult {
     let Some(skills) = skills else {
         return ToolResult::error("skill system is not enabled");
     };

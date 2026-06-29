@@ -9,11 +9,11 @@ use super::config::{AgentConfig, CompactionSettings};
 use super::events::EventEmitter;
 use super::legacy::AgentRuntimeError;
 use super::legacy::emit_effective_context_window;
-use crate::{
-    AgentEvent, AgentMessage, CompactionPhase, CompactionReason, CompactionSource, CompactionSummary,
-    sanitize_tool_exchange_messages,
-};
 use crate::compaction::{self, CompactionStrategy};
+use crate::{
+    AgentEvent, AgentMessage, CompactionPhase, CompactionReason, CompactionSource,
+    CompactionSummary, sanitize_tool_exchange_messages,
+};
 
 pub(super) async fn maybe_compact(
     model: &Arc<dyn ModelClient>,

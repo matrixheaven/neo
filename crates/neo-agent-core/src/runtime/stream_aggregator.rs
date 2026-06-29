@@ -8,9 +8,7 @@ use super::config::AgentConfig;
 use super::events::EventEmitter;
 use super::legacy::AgentRuntimeError;
 use super::legacy::emit_effective_context_window;
-use crate::{
-    AgentEvent, AgentMessage, AgentToolCall, Content, StopReason,
-};
+use crate::{AgentEvent, AgentMessage, AgentToolCall, Content, StopReason};
 
 pub(super) async fn run_model_turn(
     model: Arc<dyn ModelClient>,
