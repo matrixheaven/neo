@@ -101,6 +101,8 @@ impl ModelTurnState {
                 emitter.emit(AgentEvent::Error {
                     turn,
                     message: message.clone(),
+                    code: None,
+                    retry_after: None,
                 });
                 self.finish_current_message(turn, StopReason::Error, emitter);
             }

@@ -238,6 +238,12 @@ pub enum AgentEvent {
     Error {
         turn: u32,
         message: String,
+        /// Stable error code (e.g. `"provider.rate_limit"`). `None` for old sessions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        /// Retry-After hint in seconds, if the provider included one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after: Option<u64>,
     },
     /// Plan mode was entered — read-only exploration plus plan file writes.
     PlanModeEntered {
@@ -489,5 +495,41 @@ mod tests {
         };
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn error_with_code_serializes() {
+        let event = AgentEvent::Error {
+            turn: 1,
+            message: "rate limited".into(),
+            code: Some("provider.rate_limit".into()),
+            retry_after: Some(30),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"code\":\"provider.rate_limit\""));
+        assert!(json.contains("\"retry_after\":30"));
+        let back: AgentEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(event, back);
+    }
+
+    #[test]
+    fn error_without_code_backward_compatible() {
+        // Old JSONL format without code/retry_after
+        let json = r#"{"Error":{"turn":1,"message":"old format"}}"#;
+        let event: AgentEvent = serde_json::from_str(json).expect("deserialize");
+        match event {
+            AgentEvent::Error {
+                turn,
+                message,
+                code,
+                retry_after,
+            } => {
+                assert_eq!(turn, 1);
+                assert_eq!(message, "old format");
+                assert_eq!(code, None);
+                assert_eq!(retry_after, None);
+            }
+            _ => panic!("expected Error variant"),
+        }
     }
 }

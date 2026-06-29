@@ -521,6 +521,8 @@ mod tests {
             Ok(AgentEvent::Error {
                 turn: 1,
                 message: "boom".to_owned(),
+                code: None,
+                retry_after: None,
             })
         ));
         assert_eq!(rx.try_recv(), Ok(BtwEvent::Failed("boom".to_owned())));

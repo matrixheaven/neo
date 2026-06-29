@@ -170,7 +170,7 @@ impl StableJsonState {
                 push_unique(&mut self.messages, stable_message(message));
                 Vec::new()
             }
-            AgentEvent::Error { turn, message } => vec![json!({
+            AgentEvent::Error { turn, message, .. } => vec![json!({
                 "type": "error",
                 "turn": turn,
                 "message": message,

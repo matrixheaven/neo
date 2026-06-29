@@ -1658,6 +1658,8 @@ async fn runtime_finishes_message_turn_and_run_with_error_stop_reason() {
     assert!(events.contains(&AgentEvent::Error {
         turn: 1,
         message: "provider failed".to_owned(),
+        code: None,
+        retry_after: None,
     }));
     assert!(events.contains(&AgentEvent::MessageFinished {
         turn: 1,
