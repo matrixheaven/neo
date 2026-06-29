@@ -27,3 +27,6 @@ pub use permissions::{
 };
 pub use runtime::*;
 pub use tools::*;
+
+pub use neo_ai::error_info;
+pub use neo_ai::NeoErrorInfo;

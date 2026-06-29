@@ -211,8 +211,37 @@ impl TranscriptPane {
             AgentEvent::SteeringQueued { .. }
             | AgentEvent::FollowUpQueued { .. }
             | AgentEvent::QueueDrained { .. } => true,
-            AgentEvent::Error { message, .. } => {
-                self.push_status(format!("Error: {message}"));
+            AgentEvent::Error {
+                message,
+                code,
+                retry_after,
+                ..
+            } => {
+                use crate::transcript::entry::StatusSeverity;
+
+                let severity = match code.as_deref() {
+                    Some("provider.rate_limit")
+                    | Some("provider.server_error")
+                    | Some("provider.network_error") => StatusSeverity::Warning,
+                    _ => StatusSeverity::Error,
+                };
+
+                let text = match (code.as_deref(), retry_after) {
+                    (Some("provider.rate_limit"), Some(secs)) => {
+                        format!("⚠ Rate Limited — retry in {secs}s")
+                    }
+                    (Some(c), _) => {
+                        let info = neo_agent_core::error_info(c);
+                        if let Some(action) = info.action {
+                            format!("✗ {} — {}", info.title, action)
+                        } else {
+                            format!("Error: {message}")
+                        }
+                    }
+                    _ => format!("Error: {message}"),
+                };
+
+                self.push_status_with_severity(text, severity);
                 true
             }
             AgentEvent::RunFinished { turn, stop_reason } => {

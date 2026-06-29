@@ -188,6 +188,18 @@ impl TranscriptPane {
         self.push_transcript(TranscriptEntry::status(content));
     }
 
+    /// Push a status entry with explicit severity.
+    pub fn push_status_with_severity(
+        &mut self,
+        content: impl Into<String>,
+        severity: crate::transcript::entry::StatusSeverity,
+    ) {
+        self.push_transcript(TranscriptEntry::Status {
+            text: content.into(),
+            severity: Some(severity),
+        });
+    }
+
     pub fn replay_message(&mut self, message: &AgentMessage) {
         match message {
             AgentMessage::User { content } => {
