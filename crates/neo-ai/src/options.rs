@@ -99,11 +99,22 @@ impl Default for RequestOptions {
             timeout: None,
             reasoning_effort: None,
             replay_reasoning: true,
-            retries: Some(0),
+            retries: Some(2),
             cache: CacheRetention::Short,
             session_id: None,
             metadata: RequestMetadata::default(),
             cancel_token: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_retries_is_two() {
+        let opts = RequestOptions::default();
+        assert_eq!(opts.retries, Some(2));
     }
 }
