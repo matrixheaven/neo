@@ -39,6 +39,81 @@ fn should_recover_from_overflow(err: &AgentRuntimeError) -> bool {
     matches!(ai_err, AiError::ContextOverflow { .. })
 }
 
+/// Run `run_model_turn`, recovering from `ContextOverflow` via forced
+/// compaction + a single retry. Non-recoverable errors are propagated.
+async fn run_model_turn_with_recovery(
+    model: &Arc<dyn ModelClient>,
+    config: &AgentConfig,
+    request: neo_ai::ChatRequest,
+    turn: u32,
+    emitter: &mut EventEmitter,
+    cancel_token: &CancellationToken,
+) -> Result<Option<AgentMessage>, AgentRuntimeError> {
+    let model_result = run_model_turn(
+        Arc::clone(model),
+        config,
+        request,
+        turn,
+        emitter,
+        cancel_token.clone(),
+    )
+    .await;
+
+    match model_result {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            if !should_recover_from_overflow(&e) {
+                return Err(e);
+            }
+            recover_from_overflow(model, config, emitter, cancel_token, turn).await
+        }
+    }
+}
+
+/// Attempt forced compaction and a single retry after a context overflow.
+async fn recover_from_overflow(
+    model: &Arc<dyn ModelClient>,
+    config: &AgentConfig,
+    emitter: &mut EventEmitter,
+    cancel_token: &CancellationToken,
+    turn: u32,
+) -> Result<Option<AgentMessage>, AgentRuntimeError> {
+    // Record observed overflow for adaptive threshold.
+    let messages_snapshot = emitter.context.messages().to_vec();
+    let estimated = estimate_messages_tokens(&messages_snapshot);
+    super::config::observe_context_overflow(config, estimated);
+
+    // Trigger forced compaction via the live path. Setting the
+    // manual_compact_request mutex is the same mechanism `/compact`
+    // uses — `evaluate_compaction_need` reads it and sets
+    // `force = true` in the trigger.
+    {
+        let mut guard = config
+            .manual_compact_request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(String::new());
+    }
+    maybe_compact(model, config, emitter, cancel_token).await;
+
+    // Rebuild request with compacted context and retry once.
+    let retry_request = chat_request(config, &emitter.context).await;
+    run_model_turn(
+        Arc::clone(model),
+        config,
+        retry_request,
+        turn,
+        emitter,
+        cancel_token.clone(),
+    )
+    .await
+    .map_err(|_| {
+        AgentRuntimeError::Model(AiError::Stream {
+            message: "compaction recovery failed after context overflow".into(),
+        })
+    })
+}
+
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(super) async fn run_agent_turn(
     model: Arc<dyn ModelClient>,
@@ -77,67 +152,15 @@ pub(super) async fn run_agent_turn(
             estimate_chat_messages_tokens(&request.messages),
         );
         validate_model_capabilities(&request)?;
-        let assistant = {
-            let model_result = run_model_turn(
-                Arc::clone(&model),
-                &config,
-                request,
-                turn,
-                emitter,
-                cancel_token.clone(),
-            )
-            .await;
-
-            match model_result {
-                Ok(result) => result,
-                Err(e) => {
-                    if !should_recover_from_overflow(&e) {
-                        return Err(e);
-                    }
-
-                    // Record observed overflow for adaptive threshold.
-                    let messages_snapshot = emitter.context.messages().to_vec();
-                    let estimated = estimate_messages_tokens(&messages_snapshot);
-                    super::config::observe_context_overflow(&config, estimated);
-
-                    // Trigger forced compaction via the live path. Setting the
-                    // manual_compact_request mutex is the same mechanism `/compact`
-                    // uses — `evaluate_compaction_need` reads it and sets
-                    // `force = true` in the trigger.
-                    {
-                        let mut guard = config
-                            .manual_compact_request
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        *guard = Some(String::new());
-                    }
-                    maybe_compact(&model, &config, emitter, &cancel_token).await;
-
-                    // Rebuild request with compacted context and retry once.
-                    let retry_request = chat_request(&config, &emitter.context).await;
-                    match run_model_turn(
-                        Arc::clone(&model),
-                        &config,
-                        retry_request,
-                        turn,
-                        emitter,
-                        cancel_token.clone(),
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => {
-                            // Recovery failed — return a synthetic error
-                            // (can't clone the original non-Clone error).
-                            return Err(AgentRuntimeError::Model(AiError::Stream {
-                                message: "compaction recovery failed after context overflow"
-                                    .into(),
-                            }));
-                        }
-                    }
-                }
-            }
-        };
+        let assistant = run_model_turn_with_recovery(
+            &model,
+            &config,
+            request,
+            turn,
+            emitter,
+            &cancel_token,
+        )
+        .await?;
         final_turn = turn;
         if let Some(AgentMessage::Assistant { stop_reason, .. }) = &assistant {
             final_stop_reason = *stop_reason;

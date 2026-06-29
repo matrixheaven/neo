@@ -601,13 +601,12 @@ where
         if compacted_count == 0 {
             return Err(CompactionError::NoBoundary);
         }
-
         if cancel_token.is_cancelled() {
             return Err(CompactionError::Cancelled);
         }
 
         let prefix = &messages[..compacted_count];
-        match generate_compaction_summary(
+        let result = generate_compaction_summary(
             model,
             config,
             prefix,
@@ -615,30 +614,39 @@ where
             cancel_token,
             |len| on_progress(len),
         )
-        .await
-        {
-            Ok(summary) if !summary.trim().is_empty() => {
-                return Ok((summary, compacted_count));
-            }
-            Ok(_) => {
-                // Empty summary → shrink prefix
-                let reduced = reduce_compact_count(messages, compacted_count);
-                if reduced == 0 {
-                    return Err(CompactionError::Truncated(attempt + 1));
-                }
-                compacted_count = reduced;
-            }
+        .await;
+
+        match result {
+            Ok(summary) if !summary.trim().is_empty() => return Ok((summary, compacted_count)),
+            Ok(_) => match shrink_prefix(messages, compacted_count, attempt) {
+                Ok(reduced) => compacted_count = reduced,
+                Err(e) => return Err(e),
+            },
             Err(CompactionError::Llm(msg)) if is_retryable_compaction_error(&msg) => {
-                let reduced = reduce_compact_count(messages, compacted_count);
-                if reduced == 0 {
-                    return Err(CompactionError::Truncated(attempt + 1));
+                match shrink_prefix(messages, compacted_count, attempt) {
+                    Ok(reduced) => compacted_count = reduced,
+                    Err(e) => return Err(e),
                 }
-                compacted_count = reduced;
             }
             Err(e) => return Err(e),
         }
     }
     Err(CompactionError::Truncated(max_retry_attempts))
+}
+
+/// Shrink the compaction prefix to a smaller safe boundary.
+/// Returns the new count, or `Truncated` if no smaller split exists.
+fn shrink_prefix(
+    messages: &[AgentMessage],
+    current_count: usize,
+    attempt: u32,
+) -> Result<usize, CompactionError> {
+    let reduced = reduce_compact_count(messages, current_count);
+    if reduced == 0 {
+        Err(CompactionError::Truncated(attempt + 1))
+    } else {
+        Ok(reduced)
+    }
 }
 
 /// Run LLM-driven compaction and emit the lifecycle events.
