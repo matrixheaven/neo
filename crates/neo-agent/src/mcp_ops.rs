@@ -1,18 +1,17 @@
 use std::{
     collections::BTreeMap,
     path::PathBuf,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
 use anyhow::Context;
 use neo_agent_core::{
-    ManagedMcpTransport, McpConnectionManager, McpReconnectPolicy, McpResourceListEntry,
-    McpResourceRead, McpServerSnapshot, McpServerStatus, ProcessSupervisor,
+    ManagedMcpTransport, McpConnectionManager, McpOAuthIdentity, McpOAuthMigrationOutcome,
+    McpOAuthService, McpOAuthServiceConfig, McpOAuthTransportKind, McpReconnectPolicy,
+    McpResourceListEntry, McpResourceRead, McpServerSnapshot, McpServerStatus, ProcessSupervisor,
     build_authorization_manager,
     oauth::{callback_server::CallbackServer, store::OAuthStore},
 };
-use tokio::sync::RwLock;
 
 use crate::config::{McpServerConfig, McpTransport, neo_home};
 
@@ -59,6 +58,7 @@ pub enum McpToolDiscovery {
     SkippedDisabled,
     NotRequested,
     Success(Vec<String>),
+    NeedsAuth(String),
     Failed(String),
 }
 
@@ -297,11 +297,10 @@ pub async fn reload_mcp_manager_from_config(
     config: &crate::config::AppConfig,
     manager: &McpConnectionManager,
 ) -> anyhow::Result<Vec<McpServerSnapshot>> {
-    if let Some(home) = neo_home() {
-        let store_path = home.join("oauth.json");
-        let store = Arc::new(RwLock::new(OAuthStore::load(&store_path)?));
-        manager.set_oauth_store(store, Some(store_path)).await;
-    }
+    let service = mcp_oauth_service_for_current_home();
+    migrate_legacy_oauth_for_config(&service, &config.mcp.servers).await?;
+    manager.set_oauth_service(service).await;
+
     let managed_configs = to_managed_configs(&config.mcp.servers)?;
     Ok(manager.apply_config(managed_configs).await)
 }
@@ -324,6 +323,12 @@ pub fn summarize_mcp_servers_from_snapshots(
         };
         summary.tools = match snapshot.status {
             McpServerStatus::Connected => McpToolDiscovery::Success(snapshot.tool_names.clone()),
+            McpServerStatus::NeedsAuth => {
+                McpToolDiscovery::NeedsAuth(snapshot.error.as_ref().map_or_else(
+                    || "OAuth authentication required".to_owned(),
+                    |d| d.message.clone(),
+                ))
+            }
             McpServerStatus::Failed => McpToolDiscovery::Failed(
                 snapshot
                     .error
@@ -337,6 +342,86 @@ pub fn summarize_mcp_servers_from_snapshots(
         };
     }
     summaries
+}
+
+#[must_use]
+pub fn format_mcp_startup_message(snapshot: &McpServerSnapshot) -> String {
+    match snapshot.status {
+        McpServerStatus::Connected => format!(
+            "MCP server \"{}\" connected · {} tools ({})",
+            snapshot.id, snapshot.tool_count, snapshot.transport
+        ),
+        McpServerStatus::NeedsAuth => format!(
+            "MCP server \"{}\" needs OAuth · {}",
+            snapshot.id,
+            snapshot
+                .error
+                .as_ref()
+                .map_or("Run /mcp to authenticate.", |diagnostic| {
+                    diagnostic
+                        .hint
+                        .as_deref()
+                        .unwrap_or(diagnostic.message.as_str())
+                })
+        ),
+        McpServerStatus::Failed => format!(
+            "MCP server \"{}\" failed · {}",
+            snapshot.id,
+            snapshot
+                .error
+                .as_ref()
+                .map_or("connection failed", |diagnostic| diagnostic
+                    .message
+                    .as_str())
+        ),
+        McpServerStatus::Pending | McpServerStatus::Reconnecting => format!(
+            "MCP server \"{}\" still connecting ({})",
+            snapshot.id, snapshot.transport
+        ),
+        McpServerStatus::Disabled => {
+            format!(
+                "MCP server \"{}\" disabled ({})",
+                snapshot.id, snapshot.transport
+            )
+        }
+    }
+}
+
+pub async fn wait_for_mcp_manager_probe(
+    manager: &McpConnectionManager,
+    config: &crate::config::AppConfig,
+) -> Vec<McpServerSnapshot> {
+    let enabled_count = config
+        .mcp
+        .servers
+        .iter()
+        .filter(|server| server.enabled)
+        .count();
+    if enabled_count == 0 {
+        return Vec::new();
+    }
+    loop {
+        let snapshots = manager.snapshots().await;
+        let settled = snapshots.iter().all(|snapshot| {
+            !matches!(
+                snapshot.status,
+                McpServerStatus::Pending | McpServerStatus::Reconnecting
+            )
+        });
+        if settled {
+            return snapshots
+                .into_iter()
+                .filter(|snapshot| {
+                    config
+                        .mcp
+                        .servers
+                        .iter()
+                        .any(|server| server.enabled && server.id == snapshot.id)
+                })
+                .collect();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 /// Connect to every configured MCP server and return settled snapshots.
@@ -462,8 +547,7 @@ fn endpoint_summary(server: &McpServerConfig) -> String {
 ///
 /// This discovers OAuth metadata from the MCP server URL, dynamically registers
 /// a client, and performs a browser-based PKCE authorization-code flow. The
-/// resulting token is persisted to `~/.neo/oauth.json` via rmcp's credential
-/// store.
+/// resulting token is imported into Neo's per-MCP credential store.
 pub async fn authenticate_mcp_server_oauth(
     server_id: &str,
     server: &McpServerConfig,
@@ -474,7 +558,15 @@ pub async fn authenticate_mcp_server_oauth(
         .as_deref()
         .with_context(|| format!("missing MCP server url for {server_id}"))?;
 
-    let oauth_store_path = neo_home.join("oauth.json");
+    let service = McpOAuthService::new(McpOAuthServiceConfig {
+        neo_home: Some(neo_home.to_path_buf()),
+    });
+    let identity = mcp_oauth_identity_for_server(server_id, server)?;
+    let temp_store_dir = tempfile::Builder::new()
+        .prefix("neo-mcp-oauth-")
+        .tempdir()
+        .context("failed to create temporary OAuth credential store")?;
+    let oauth_store_path = temp_store_dir.path().join("oauth.json");
 
     // Build rmcp AuthorizationManager (performs discovery from server URL).
     let manager = build_authorization_manager(url, &oauth_store_path, server_id)
@@ -536,7 +628,79 @@ pub async fn authenticate_mcp_server_oauth(
             .context("failed to exchange authorization code for token")?;
     }
 
+    let temp_store = OAuthStore::load(&oauth_store_path)
+        .context("failed to load temporary OAuth credentials after authorization")?;
+    let credentials = temp_store
+        .get(&format!("mcp:{server_id}"))
+        .cloned()
+        .context("OAuth authorization did not persist credentials")?;
+    service
+        .persist_rmcp_credentials(&identity, credentials)
+        .await
+        .context("failed to persist OAuth credentials to Neo MCP credential store")?;
+
     Ok(())
+}
+
+#[must_use]
+pub(crate) fn mcp_oauth_service_for_current_home() -> McpOAuthService {
+    McpOAuthService::new(McpOAuthServiceConfig {
+        neo_home: neo_home(),
+    })
+}
+
+pub(crate) async fn migrate_legacy_oauth_for_config(
+    service: &McpOAuthService,
+    servers: &[McpServerConfig],
+) -> anyhow::Result<()> {
+    let Some(home) = neo_home() else {
+        return Ok(());
+    };
+    let legacy_path = home.join("oauth.json");
+    if !legacy_path.exists() {
+        return Ok(());
+    }
+
+    for server in servers {
+        if server.transport != McpTransport::Http && server.transport != McpTransport::Sse {
+            continue;
+        }
+        let identity = mcp_oauth_identity_for_server(&server.id, server)?;
+        match service
+            .migrate_legacy_tokens(&legacy_path, &server.id, &identity)
+            .await
+        {
+            Ok(
+                McpOAuthMigrationOutcome::NotFound
+                | McpOAuthMigrationOutcome::AlreadyMigrated
+                | McpOAuthMigrationOutcome::TokensMigrated
+                | McpOAuthMigrationOutcome::Unusable,
+            ) => {}
+            Err(err) => anyhow::bail!("failed to migrate legacy OAuth credentials: {err}"),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn mcp_oauth_identity_for_server(
+    server_id: &str,
+    server: &McpServerConfig,
+) -> anyhow::Result<McpOAuthIdentity> {
+    let url = server
+        .url
+        .as_deref()
+        .with_context(|| format!("missing MCP server url for {server_id}"))?;
+    let transport_kind = match server.transport {
+        McpTransport::Http => McpOAuthTransportKind::Http,
+        McpTransport::Sse => McpOAuthTransportKind::Sse,
+        McpTransport::Stdio => {
+            anyhow::bail!(
+                "MCP server '{server_id}' does not use an HTTP/SSE OAuth-capable transport"
+            )
+        }
+    };
+    McpOAuthIdentity::new(server_id, url, transport_kind)
+        .map_err(|err| anyhow::anyhow!("invalid MCP OAuth identity for '{server_id}': {err}"))
 }
 
 #[cfg(test)]
@@ -731,6 +895,127 @@ mod tests {
         assert_eq!(
             summaries[0].tools,
             McpToolDiscovery::Success(vec!["read_doc".to_owned(), "search_doc".to_owned()])
+        );
+    }
+
+    #[test]
+    fn snapshot_summary_maps_needs_auth() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_dir = temp.path().join("project");
+        let config = crate::config::AppConfig {
+            default_model: "gpt-4.1".to_owned(),
+            default_provider: "openai".to_owned(),
+            api_key_env: None,
+            providers: BTreeMap::new(),
+            models: BTreeMap::new(),
+            model_scope: Vec::new(),
+            sessions_dir: project_dir.join(".neo/sessions"),
+            permission_mode: neo_agent_core::PermissionMode::Ask,
+            live_permission_mode: std::sync::Arc::new(std::sync::RwLock::new(
+                neo_agent_core::PermissionMode::Ask,
+            )),
+            defaults: crate::config::Defaults {
+                mode: "interactive".to_owned(),
+            },
+            runtime: crate::config::RuntimeConfig::default(),
+            background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            tui: crate::config::TuiConfig::default(),
+            theme: crate::themes::ResolvedTheme::default(),
+            mcp: crate::config::McpConfig {
+                servers: vec![McpServerConfig {
+                    id: "linear".to_owned(),
+                    enabled: true,
+                    transport: McpTransport::Http,
+                    command: None,
+                    url: Some("https://mcp.example.com/mcp".to_owned()),
+                    args: Vec::new(),
+                    env: BTreeMap::new(),
+                    headers: BTreeMap::new(),
+                    cwd: None,
+                    enabled_tools: Vec::new(),
+                    disabled_tools: Vec::new(),
+                    startup_timeout_ms: None,
+                    tool_timeout_ms: None,
+                }],
+            },
+            prompt_templates: Vec::new(),
+            extra_skill_dirs: Vec::new(),
+            skill_path: Vec::new(),
+            project_trusted: true,
+            project_trust: crate::trust::ProjectTrustState::NotRequired,
+            project_dir,
+            config_path: temp.path().join("config.toml"),
+        };
+        let summaries = summarize_mcp_servers_from_snapshots(
+            &config,
+            &[McpServerSnapshot {
+                id: "linear".to_owned(),
+                transport: "http".to_owned(),
+                status: McpServerStatus::NeedsAuth,
+                tool_count: 0,
+                tool_names: Vec::new(),
+                resource_count: None,
+                error: Some(neo_agent_core::McpDiagnostic {
+                    server_id: "linear".to_owned(),
+                    transport: "http".to_owned(),
+                    message: "OAuth authentication required".to_owned(),
+                    hint: Some("Run /mcp and authenticate this server.".to_owned()),
+                    stderr_tail: None,
+                }),
+                reconnect_attempt: 0,
+                next_retry_ms: None,
+            }],
+        );
+
+        assert_eq!(
+            summaries[0].tools,
+            McpToolDiscovery::NeedsAuth("OAuth authentication required".to_owned())
+        );
+    }
+
+    #[test]
+    fn startup_message_formats_connected_server_like_kimi() {
+        let snapshot = McpServerSnapshot {
+            id: "linear".to_owned(),
+            transport: "http".to_owned(),
+            status: McpServerStatus::Connected,
+            tool_count: 38,
+            tool_names: Vec::new(),
+            resource_count: None,
+            error: None,
+            reconnect_attempt: 0,
+            next_retry_ms: None,
+        };
+
+        assert_eq!(
+            format_mcp_startup_message(&snapshot),
+            "MCP server \"linear\" connected · 38 tools (http)"
+        );
+    }
+
+    #[test]
+    fn startup_message_formats_needs_auth_with_hint() {
+        let snapshot = McpServerSnapshot {
+            id: "linear".to_owned(),
+            transport: "http".to_owned(),
+            status: McpServerStatus::NeedsAuth,
+            tool_count: 0,
+            tool_names: Vec::new(),
+            resource_count: None,
+            error: Some(neo_agent_core::McpDiagnostic {
+                server_id: "linear".to_owned(),
+                transport: "http".to_owned(),
+                message: "OAuth authentication required".to_owned(),
+                hint: Some("Run /mcp to authenticate.".to_owned()),
+                stderr_tail: None,
+            }),
+            reconnect_attempt: 0,
+            next_retry_ms: None,
+        };
+
+        assert_eq!(
+            format_mcp_startup_message(&snapshot),
+            "MCP server \"linear\" needs OAuth · Run /mcp to authenticate."
         );
     }
 }

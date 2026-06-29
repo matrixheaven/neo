@@ -1,17 +1,19 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use neo_agent_core::{
-    AgentConfig, CompactionSettings, McpClient, McpConnectionManager, McpServerStatus,
-    ProcessSupervisor, StdioConfig, ToolRegistry, build_http_client_with_oauth, build_stdio_client,
-};
 use neo_agent_core::skills::SkillStore;
-use tokio::sync::{mpsc, oneshot};
 use neo_agent_core::{
-    PermissionApprovalDecision, PermissionOperation,
+    AgentConfig, CompactionSettings, HttpConfig, HttpOAuthConfig, McpClient, McpConnectionManager,
+    ProcessSupervisor, StdioConfig, ToolRegistry, build_http_client, build_stdio_client,
 };
+use neo_agent_core::{PermissionApprovalDecision, PermissionOperation};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{AppConfig, McpServerConfig, McpTransport, neo_home};
+use crate::mcp_ops::{
+    mcp_oauth_identity_for_server, mcp_oauth_service_for_current_home,
+    migrate_legacy_oauth_for_config,
+};
 use crate::modes::run::PromptApprovalRequest;
 use crate::resources;
 
@@ -185,7 +187,10 @@ pub(crate) async fn tool_registry_for_config(
     if let Err(error) = crate::mcp_ops::reload_mcp_manager_from_config(config, manager_ref).await {
         tracing::warn!(?error, "failed to load MCP manager config");
     } else {
-        wait_for_mcp_manager_probe(manager_ref, config).await;
+        let snapshots = crate::mcp_ops::wait_for_mcp_manager_probe(manager_ref, config).await;
+        for snapshot in snapshots {
+            tracing::info!("{}", crate::mcp_ops::format_mcp_startup_message(&snapshot));
+        }
         for diagnostic in manager_ref
             .register_connected_tools_into(&mut registry)
             .await
@@ -200,48 +205,11 @@ pub(crate) async fn tool_registry_for_config(
     Ok(registry)
 }
 
-async fn wait_for_mcp_manager_probe(manager: &McpConnectionManager, config: &AppConfig) {
-    let enabled_count = config
-        .mcp
-        .servers
-        .iter()
-        .filter(|server| server.enabled)
-        .count();
-    if enabled_count == 0 {
-        return;
-    }
-    let max_configured_timeout = config
-        .mcp
-        .servers
-        .iter()
-        .filter(|server| server.enabled)
-        .filter_map(|server| server.startup_timeout_ms)
-        .max()
-        .unwrap_or(500);
-    let deadline = tokio::time::Instant::now()
-        + std::time::Duration::from_millis(max_configured_timeout.min(1_000));
-    loop {
-        let snapshots = manager.snapshots().await;
-        let settled = snapshots.iter().all(|snapshot| {
-            !matches!(
-                snapshot.status,
-                McpServerStatus::Pending | McpServerStatus::Reconnecting
-            )
-        });
-        if settled || tokio::time::Instant::now() >= deadline {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-}
-
 /// Build a one-off [`McpClient`] for a short-lived CLI command.
 ///
 /// This is used only by CLI operations such as `mcp add --probe` and
-/// post-add tool listing. For HTTP/SSE servers it goes through
-/// [`build_http_client_with_oauth`], which creates a *standalone*
-/// `AuthorizationManager` that is not shared with the long-lived
-/// [`McpConnectionManager`] credential store.
+/// post-add tool listing. For HTTP/SSE servers it uses the same per-MCP OAuth
+/// credential store as the long-lived [`McpConnectionManager`].
 ///
 /// For long-lived connections (e.g. inside `tool_registry_for_config`),
 /// use [`McpConnectionManager`] directly so that OAuth credentials persist
@@ -277,15 +245,16 @@ pub(crate) async fn build_mcp_client(
                 .url
                 .clone()
                 .with_context(|| format!("missing MCP url for {}", server.id))?;
-            let oauth_store_path = neo_home().map(|home| home.join("oauth.json"));
-            let client = build_http_client_with_oauth(
+            let service = mcp_oauth_service_for_current_home();
+            migrate_legacy_oauth_for_config(&service, std::slice::from_ref(server)).await?;
+            let identity = mcp_oauth_identity_for_server(&server.id, server)?;
+            let client = build_http_client(HttpConfig {
                 url,
-                server.headers.clone(),
-                server.startup_timeout_ms,
-                server.tool_timeout_ms,
-                oauth_store_path,
-                &server.id,
-            )
+                headers: server.headers.clone(),
+                startup_timeout_ms: server.startup_timeout_ms,
+                request_timeout_ms: server.tool_timeout_ms,
+                oauth: Some(HttpOAuthConfig { service, identity }),
+            })
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(client)

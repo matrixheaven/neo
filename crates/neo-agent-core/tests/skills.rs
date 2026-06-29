@@ -326,6 +326,7 @@ fn builtin_skills_load() {
     let names: Vec<_> = skills.iter().map(|skill| skill.name.as_str()).collect();
 
     assert!(!names.contains(&"define-goal"));
+    assert!(names.contains(&"mcp-config"));
     assert!(names.contains(&"sub-skill"));
 }
 

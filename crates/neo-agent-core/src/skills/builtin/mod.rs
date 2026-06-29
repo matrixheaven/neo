@@ -7,8 +7,9 @@ use crate::skills::{LoadedSkill, SkillManifest, SkillSource};
 
 const SUB_SKILL: &str = include_str!("sub-skill.md");
 const SELF_EVO: &str = include_str!("self-evo.md");
+const MCP_CONFIG: &str = include_str!("mcp-config.md");
 
-const BUILTIN_SOURCES: &[&str] = &[SUB_SKILL, SELF_EVO];
+const BUILTIN_SOURCES: &[&str] = &[SUB_SKILL, SELF_EVO, MCP_CONFIG];
 const REMOVED_BUILTINS: &[&str] = &["define-goal"];
 
 #[derive(Debug, thiserror::Error)]

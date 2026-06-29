@@ -137,7 +137,6 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
         .chrome_mut()
         .set_thinking_enabled(controller.current_thinking);
     controller.local_config = Some(config.clone());
-    controller.spawn_sync_mcp_manager();
     let skill_store = resources::load_skill_store(
         neo_home().as_deref(),
         &config.extra_skill_dirs,
@@ -171,7 +170,6 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     controller
 }
 
-
 #[cfg(test)]
 pub(super) fn empty_session_loader(session_id: String) -> Ready<Result<LoadedSessionTranscript>> {
     ready(Ok(LoadedSessionTranscript::new(
@@ -181,7 +179,6 @@ pub(super) fn empty_session_loader(session_id: String) -> Ready<Result<LoadedSes
     )))
 }
 
-
 #[cfg(test)]
 pub(super) fn empty_session_forker(session_id: String) -> Ready<Result<ForkedSessionTranscript>> {
     ready(Ok(ForkedSessionTranscript::new(
@@ -190,14 +187,12 @@ pub(super) fn empty_session_forker(session_id: String) -> Ready<Result<ForkedSes
     )))
 }
 
-
 pub(super) const fn dialog_result_may_close(result: InputResult) -> bool {
     matches!(
         result,
         InputResult::Submitted | InputResult::Cancelled | InputResult::Handled
     )
 }
-
 
 pub(super) fn startup_notices(config: &AppConfig) -> Vec<String> {
     let model_scope = if config.model_scope.is_empty() {
@@ -229,16 +224,17 @@ pub(super) fn startup_notices(config: &AppConfig) -> Vec<String> {
     notices
 }
 
-
 pub(super) fn enabled_label(enabled: bool) -> &'static str {
     if enabled { "enabled" } else { "disabled" }
 }
 
-
-pub(super) const fn pluralize(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
+pub(super) const fn pluralize(
+    count: usize,
+    singular: &'static str,
+    plural: &'static str,
+) -> &'static str {
     if count == 1 { singular } else { plural }
 }
-
 
 pub(super) fn same_work_dir(left: &Path, right: &Path) -> bool {
     if left == right {
@@ -249,7 +245,6 @@ pub(super) fn same_work_dir(left: &Path, right: &Path) -> bool {
         _ => false,
     }
 }
-
 
 pub(super) async fn create_interactive_session_path(config: &AppConfig) -> Result<PathBuf> {
     let bucket_dir = workspace_sessions_dir(config);
@@ -279,7 +274,6 @@ pub(super) async fn create_interactive_session_path(config: &AppConfig) -> Resul
     }
 }
 
-
 pub(super) fn session_id_from_transcript_path(path: &Path) -> Result<String> {
     let session_dir = path
         .parent()
@@ -291,14 +285,12 @@ pub(super) fn session_id_from_transcript_path(path: &Path) -> Result<String> {
     Ok(id.to_owned())
 }
 
-
 pub(super) fn current_unix_timestamp() -> String {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs().to_string())
         .unwrap_or_else(|_| "0".to_owned())
 }
-
 
 /// Parse a timestamp string (epoch millis, epoch secs, or RFC3339) into `SystemTime`.
 pub(super) fn parse_timestamp(ts: &str) -> std::time::SystemTime {
@@ -320,5 +312,3 @@ pub(super) fn parse_timestamp(ts: &str) -> std::time::SystemTime {
     }
     std::time::UNIX_EPOCH
 }
-
-

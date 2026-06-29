@@ -1,16 +1,12 @@
-use std::{
-    collections::BTreeMap,
-    fmt::Write as _,
-    path::PathBuf,
-};
+use std::{collections::BTreeMap, fmt::Write as _, path::PathBuf};
 
 use anyhow::Context;
 use neo_agent_core::ProcessSupervisor;
 
+use crate::config::{self, AppConfig, McpServerConfig, McpTransport, neo_home};
 use crate::mcp_ops::{
     authenticate_mcp_server_oauth, display_mcp_kind, parse_command_string, parse_mcp_kind,
 };
-use crate::config::{self, AppConfig, McpServerConfig, McpTransport, neo_home};
 
 pub(crate) async fn list_mcp(config: &AppConfig) -> String {
     if config.mcp.servers.is_empty() {
@@ -141,8 +137,11 @@ pub(crate) async fn add_mcp_server(
 }
 
 /// Run the OAuth authorization-code flow for a configured MCP server and save
-/// the resulting token to `~/.neo/oauth.json`.
-pub(crate) async fn auth_mcp_server(server_id: String, config: &AppConfig) -> anyhow::Result<String> {
+/// the resulting token to Neo's per-MCP credential store.
+pub(crate) async fn auth_mcp_server(
+    server_id: String,
+    config: &AppConfig,
+) -> anyhow::Result<String> {
     let server = config
         .mcp
         .servers

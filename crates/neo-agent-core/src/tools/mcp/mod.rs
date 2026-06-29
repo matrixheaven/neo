@@ -8,53 +8,9 @@ pub mod oauth;
 pub mod stdio;
 
 pub use client::McpClient;
-pub use http::{HttpConfig, build_http_client};
+pub use http::{HttpConfig, HttpOAuthConfig, build_http_client};
 pub use oauth::build_authorization_manager;
 pub use stdio::{StdioConfig, build_stdio_client};
-
-/// Build an HTTP/SSE MCP client with local OAuth integration from the persisted local OAuth store.
-///
-/// This is a convenience wrapper around [`build_http_client`] that automatically
-/// creates an [`AuthorizationManager`](rmcp::transport::auth::AuthorizationManager)
-/// from the Neo OAuth store when `oauth_store_path` is provided.
-///
-/// # When to use this vs. `McpConnectionManager`
-///
-/// This function is intended for **short-lived, one-off CLI operations** such as
-/// `mcp add --probe` or post-add tool listing. It creates a standalone
-/// `AuthorizationManager` that is *not* shared with the long-lived
-/// [`McpConnectionManager`](crate::tools::mcp_manager::McpConnectionManager)
-/// credential store. Consequently, tokens obtained or refreshed through this path
-/// do not propagate back to the shared store.
-///
-/// For long-lived connections — anything that feeds into `AgentRuntime` via
-/// `tool_registry_for_config` — use
-/// [`McpConnectionManager::build_client_for_config`] instead, which builds the
-/// `AuthorizationManager` from the shared `OAuthStore` so credentials persist
-/// across reconnects and are available to other parts of the runtime.
-pub async fn build_http_client_with_oauth(
-    url: String,
-    headers: std::collections::BTreeMap<String, String>,
-    startup_timeout_ms: Option<u64>,
-    request_timeout_ms: Option<u64>,
-    oauth_store_path: Option<std::path::PathBuf>,
-    server_id: &str,
-) -> Result<std::sync::Arc<dyn McpClient>, McpError> {
-    let auth_manager = match oauth_store_path {
-        Some(path) => oauth::build_authorization_manager(&url, &path, server_id)
-            .await
-            .ok(),
-        None => None,
-    };
-    build_http_client(HttpConfig {
-        url,
-        headers,
-        startup_timeout_ms,
-        request_timeout_ms,
-        auth_manager,
-    })
-    .await
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpToolDefinition {
@@ -175,9 +131,16 @@ impl From<CallToolResult> for McpToolResponse {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpErrorKind {
+    Protocol,
+    NeedsAuth,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{message}")]
 pub struct McpError {
+    kind: McpErrorKind,
     message: String,
 }
 
@@ -185,8 +148,27 @@ impl McpError {
     #[must_use]
     pub fn protocol(message: impl Into<String>) -> Self {
         Self {
+            kind: McpErrorKind::Protocol,
             message: message.into(),
         }
+    }
+
+    #[must_use]
+    pub fn needs_auth(message: impl Into<String>) -> Self {
+        Self {
+            kind: McpErrorKind::NeedsAuth,
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> McpErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn is_needs_auth(&self) -> bool {
+        matches!(self.kind, McpErrorKind::NeedsAuth)
     }
 
     #[must_use]
@@ -318,5 +300,19 @@ mod tests {
         assert_eq!(def.name, "foo");
         assert_eq!(def.description, Some("a file".to_string()));
         assert_eq!(def.mime_type, Some("text/plain".to_string()));
+    }
+
+    #[test]
+    fn mcp_error_needs_auth_preserves_message_and_kind() {
+        let err = McpError::needs_auth("login required");
+
+        assert_eq!(err.kind(), McpErrorKind::NeedsAuth);
+        assert!(err.is_needs_auth());
+        assert_eq!(err.message(), "login required");
+        assert_eq!(err.to_string(), "login required");
+
+        let protocol = McpError::protocol("plain failure");
+        assert_eq!(protocol.kind(), McpErrorKind::Protocol);
+        assert!(!protocol.is_needs_auth());
     }
 }

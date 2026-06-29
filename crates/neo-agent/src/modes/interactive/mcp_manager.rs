@@ -65,6 +65,9 @@ impl InteractiveController {
                     mcp_ops::McpToolDiscovery::SkippedDisabled => McpToolStatus::SkippedDisabled,
                     mcp_ops::McpToolDiscovery::NotRequested => McpToolStatus::NotDiscovered,
                     mcp_ops::McpToolDiscovery::Success(names) => McpToolStatus::Discovered(names),
+                    mcp_ops::McpToolDiscovery::NeedsAuth(reason) => {
+                        McpToolStatus::NeedsAuth(reason)
+                    }
                     mcp_ops::McpToolDiscovery::Failed(reason) => McpToolStatus::Failed(reason),
                 },
             })
@@ -174,12 +177,10 @@ impl InteractiveController {
             "sse" => "Add Remote SSE MCP Server",
             _ => "Add MCP Server",
         };
-        self.tui
-            .chrome_mut()
-            .open_mcp_add_form(McpAddFormOptions {
-                title: title.to_owned(),
-                transport: transport.to_owned(),
-            });
+        self.tui.chrome_mut().open_mcp_add_form(McpAddFormOptions {
+            title: title.to_owned(),
+            transport: transport.to_owned(),
+        });
         true
     }
 

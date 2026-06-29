@@ -6,20 +6,18 @@ use std::{
 };
 
 use anyhow::Context;
-use rmcp::transport::auth::AuthorizationManager;
-use tokio::{
-    sync::{Mutex, RwLock},
-    task::JoinHandle,
-};
+use tokio::{sync::RwLock, task::JoinHandle};
 
 use super::{
     ProcessSupervisor, ToolRegistry,
     mcp::{
         HttpConfig, McpClient, McpError, McpResourceDefinition, McpResourceRead, McpToolDefinition,
-        StdioConfig, http, oauth, stdio,
+        StdioConfig, http,
+        http::HttpOAuthConfig,
+        oauth::{McpOAuthIdentity, McpOAuthService, McpOAuthServiceConfig, McpOAuthTransportKind},
+        stdio,
     },
 };
-use crate::oauth::OAuthStore;
 
 /// Runtime configuration for an MCP server managed by [`McpConnectionManager`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +89,7 @@ pub enum McpServerStatus {
     Disabled,
     Pending,
     Connected,
+    NeedsAuth,
     Failed,
     Reconnecting,
 }
@@ -102,6 +101,7 @@ impl McpServerStatus {
             Self::Disabled => "disabled",
             Self::Pending => "pending",
             Self::Connected => "connected",
+            Self::NeedsAuth => "needs_auth",
             Self::Failed => "failed",
             Self::Reconnecting => "reconnecting",
         }
@@ -146,7 +146,7 @@ struct ManagedMcpEntry {
     attempt_id: u64,
     status: McpServerStatus,
     client: Option<Arc<dyn McpClient>>,
-    auth_manager: Option<Arc<Mutex<AuthorizationManager>>>,
+    oauth_identity: Option<McpOAuthIdentity>,
     tools: Vec<McpToolDefinition>,
     resources: Vec<McpResourceDefinition>,
     error: Option<McpDiagnostic>,
@@ -160,8 +160,7 @@ struct McpConnectionManagerState {
     supervisor: ProcessSupervisor,
     entries: BTreeMap<String, ManagedMcpEntry>,
     next_attempt_id: u64,
-    oauth_store: Arc<RwLock<OAuthStore>>,
-    oauth_store_path: Option<PathBuf>,
+    oauth_service: McpOAuthService,
 }
 
 /// Owns configured MCP server state and exposes snapshots, resource operations,
@@ -179,39 +178,30 @@ impl McpConnectionManager {
                 supervisor,
                 entries: BTreeMap::new(),
                 next_attempt_id: 1,
-                oauth_store: Arc::new(RwLock::new(OAuthStore::default())),
-                oauth_store_path: None,
+                oauth_service: McpOAuthService::new(McpOAuthServiceConfig { neo_home: None }),
             })),
         }
     }
 
     #[must_use]
-    pub fn with_oauth_store(
+    pub fn with_oauth_service(
         supervisor: ProcessSupervisor,
-        oauth_store: Arc<RwLock<OAuthStore>>,
-        oauth_store_path: Option<PathBuf>,
+        oauth_service: McpOAuthService,
     ) -> Self {
         Self {
             inner: Arc::new(RwLock::new(McpConnectionManagerState {
                 supervisor,
                 entries: BTreeMap::new(),
                 next_attempt_id: 1,
-                oauth_store,
-                oauth_store_path,
+                oauth_service,
             })),
         }
     }
 
-    /// Replace the OAuth store and optional persistence path used for managed
-    /// HTTP/SSE adapters.
-    pub async fn set_oauth_store(
-        &self,
-        oauth_store: Arc<RwLock<OAuthStore>>,
-        oauth_store_path: Option<PathBuf>,
-    ) {
+    /// Replace the OAuth service used for managed HTTP/SSE adapters.
+    pub async fn set_oauth_service(&self, oauth_service: McpOAuthService) {
         let mut state = self.inner.write().await;
-        state.oauth_store = oauth_store;
-        state.oauth_store_path = oauth_store_path;
+        state.oauth_service = oauth_service;
     }
 
     /// Apply a new set of server configurations. Removed servers are shut down,
@@ -248,7 +238,7 @@ impl McpConnectionManager {
                 existing.attempt_id = attempt_id;
                 existing.status = McpServerStatus::Pending;
                 existing.client = None;
-                existing.auth_manager = None;
+                existing.oauth_identity = None;
                 existing.tools.clear();
                 existing.resources.clear();
                 existing.error = None;
@@ -266,7 +256,7 @@ impl McpConnectionManager {
                     attempt_id,
                     status,
                     client: None,
-                    auth_manager: None,
+                    oauth_identity: None,
                     tools: Vec::new(),
                     resources: Vec::new(),
                     error: None,
@@ -278,14 +268,8 @@ impl McpConnectionManager {
             };
 
             if server.enabled {
-                let oauth_store = Arc::clone(&state.oauth_store);
-                let oauth_store_path = state.oauth_store_path.clone();
-                let handle = spawn_connect(
-                    server.clone(),
-                    state.supervisor.clone(),
-                    oauth_store,
-                    oauth_store_path,
-                );
+                let oauth_service = state.oauth_service.clone();
+                let handle = spawn_connect(server.clone(), state.supervisor.clone(), oauth_service);
                 entry.connect_task = Some(handle);
             } else {
                 entry.status = McpServerStatus::Disabled;
@@ -329,7 +313,7 @@ impl McpConnectionManager {
 
     /// Force an immediate reconnect for the given server.
     pub async fn reconnect_now(&self, id: &str) -> anyhow::Result<McpServerSnapshot> {
-        let (config, supervisor, oauth_store, oauth_store_path) = {
+        let (config, supervisor, oauth_service) = {
             let mut state = self.inner.write().await;
             let Some(mut entry) = state.entries.remove(id) else {
                 anyhow::bail!("MCP server '{id}' not found");
@@ -344,21 +328,20 @@ impl McpConnectionManager {
             entry.attempt_id = attempt_id;
             entry.status = McpServerStatus::Pending;
             entry.client = None;
-            entry.auth_manager = None;
+            entry.oauth_identity = None;
             entry.tools.clear();
             entry.resources.clear();
             entry.error = None;
             entry.reconnect_attempt = 0;
             entry.next_retry_ms = None;
             let supervisor = state.supervisor.clone();
-            let oauth_store = Arc::clone(&state.oauth_store);
-            let oauth_store_path = state.oauth_store_path.clone();
+            let oauth_service = state.oauth_service.clone();
             let config = entry.config.clone();
             state.entries.insert(id.to_owned(), entry);
-            (config, supervisor, oauth_store, oauth_store_path)
+            (config, supervisor, oauth_service)
         };
 
-        let handle = spawn_connect(config.clone(), supervisor, oauth_store, oauth_store_path);
+        let handle = spawn_connect(config.clone(), supervisor, oauth_service);
         {
             let mut state = self.inner.write().await;
             if let Some(entry) = state.entries.get_mut(id) {
@@ -407,7 +390,12 @@ impl McpConnectionManager {
                 }
                 Err(err) => {
                     let diagnostic = diagnostic_from_error(&err, &entry.config, None);
-                    set_failed(entry, diagnostic)
+                    if err.is_needs_auth() {
+                        set_needs_auth(entry, diagnostic);
+                        false
+                    } else {
+                        set_failed(entry, diagnostic)
+                    }
                 }
             };
             (snapshot_for_entry(entry), need_reconnect)
@@ -449,6 +437,50 @@ impl McpConnectionManager {
         })
     }
 
+    /// Start OAuth authentication for an HTTP/SSE MCP server.
+    pub async fn authenticate_oauth(&self, server_id: &str) -> anyhow::Result<super::ToolResult> {
+        let (identity, oauth_service) = {
+            let state = self.inner.read().await;
+            let Some(entry) = state.entries.get(server_id) else {
+                anyhow::bail!("MCP server '{server_id}' not found");
+            };
+            if !entry.config.enabled {
+                anyhow::bail!("MCP server '{server_id}' is disabled");
+            }
+            if !matches!(
+                entry.config.transport,
+                ManagedMcpTransport::Http { .. } | ManagedMcpTransport::Sse { .. }
+            ) {
+                anyhow::bail!(
+                    "MCP server '{server_id}' does not use an HTTP/SSE OAuth-capable transport"
+                );
+            }
+            let identity = oauth_identity_for_config(&entry.config)?
+                .context("HTTP/SSE MCP server is missing an OAuth identity")?;
+            (identity, state.oauth_service.clone())
+        };
+
+        let flow = match oauth_service.begin_authorization(identity).await {
+            Ok(flow) => flow,
+            Err(err) => {
+                return Ok(super::ToolResult::error(format!(
+                    "Could not start OAuth authentication for MCP server '{server_id}': {err}. Authentication may require `/mcp` or CLI completion because callback completion is not wired in core yet."
+                )));
+            }
+        };
+
+        let authorization_url = flow.authorization_url().to_string();
+        Ok(super::ToolResult::ok(format!(
+            "OAuth authentication started for MCP server '{server_id}'. Open this authorization URL:\n\n{authorization_url}\n\nCallback completion and reconnect are not wired in core yet, so finish authentication through `/mcp` or the CLI when available. Neo will not claim this server is authenticated or reconnect it until credentials are actually persisted."
+        ))
+        .with_details(serde_json::json!({
+            "authorization_url": authorization_url,
+            "server_id": server_id,
+            "callback_completion_wired": false,
+            "reconnected": false
+        })))
+    }
+
     /// Register tools from connected servers into the given registry.
     /// Returns diagnostics for any failures or collisions.
     pub async fn register_connected_tools_into(
@@ -461,6 +493,29 @@ impl McpConnectionManager {
         let mut taken_names = BTreeSet::<String>::new();
 
         for entry in state.entries.values() {
+            if matches!(entry.status, McpServerStatus::NeedsAuth) {
+                let exposed_name = namespaced_tool_name(&entry.config.id, "authenticate");
+                if taken_names.insert(exposed_name.clone()) {
+                    registry.register(McpAuthenticateTool {
+                        server_id: entry.config.id.clone(),
+                        exposed_name,
+                        manager: self.clone(),
+                    });
+                } else {
+                    diagnostics.push(McpDiagnostic {
+                        server_id: entry.config.id.clone(),
+                        transport: entry.config.transport.label().to_owned(),
+                        message: "authenticate tool collides with an existing tool; skipping"
+                            .to_owned(),
+                        hint: Some("Rename the MCP server id or adjust configuration.".to_owned()),
+                        stderr_tail: None,
+                    });
+                }
+                if let Some(error) = &entry.error {
+                    diagnostics.push(error.clone());
+                }
+                continue;
+            }
             if !matches!(entry.status, McpServerStatus::Connected) {
                 if let Some(error) = &entry.error {
                     diagnostics.push(error.clone());
@@ -564,7 +619,7 @@ impl McpConnectionManager {
         for entry in state.entries.values_mut() {
             abort_tasks(entry);
             entry.client = None;
-            entry.auth_manager = None;
+            entry.oauth_identity = None;
             entry.status = McpServerStatus::Disabled;
         }
         state.supervisor.cleanup_all().await;
@@ -575,7 +630,7 @@ impl McpConnectionManager {
     /// `connect_one`. Its result is later consumed by
     /// [`poll_finished_connections`].
     async fn schedule_reconnect(&self, id: &str) {
-        let (config, supervisor, oauth_store, oauth_store_path, delay_ms) = {
+        let (config, supervisor, oauth_service, delay_ms) = {
             let state = self.inner.read().await;
             let Some(entry) = state.entries.get(id) else {
                 return;
@@ -589,15 +644,14 @@ impl McpConnectionManager {
             (
                 entry.config.clone(),
                 state.supervisor.clone(),
-                Arc::clone(&state.oauth_store),
-                state.oauth_store_path.clone(),
+                state.oauth_service.clone(),
                 delay_ms,
             )
         };
 
         let handle = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            connect_one(config, supervisor, oauth_store, oauth_store_path).await
+            connect_one(config, supervisor, oauth_service).await
         });
 
         let mut state = self.inner.write().await;
@@ -653,7 +707,7 @@ impl McpConnectionManager {
                         continue;
                     }
                     entry.client = Some(outcome.client);
-                    entry.auth_manager = outcome.auth_manager;
+                    entry.oauth_identity = outcome.oauth_identity;
                     entry.tools = outcome.tools;
                     entry.resources = outcome.resources;
                     entry.status = McpServerStatus::Connected;
@@ -669,8 +723,7 @@ impl McpConnectionManager {
                     if entry.attempt_id != attempt_id {
                         continue;
                     }
-                    let diagnostic = diagnostic_from_error(&err, &entry.config, None);
-                    if set_failed(entry, diagnostic) {
+                    if apply_connect_error(entry, &err) {
                         need_reconnect.push(id.clone());
                     }
                 }
@@ -718,7 +771,7 @@ impl McpConnectionManager {
                         continue;
                     }
                     entry.client = Some(outcome.client);
-                    entry.auth_manager = outcome.auth_manager;
+                    entry.oauth_identity = outcome.oauth_identity;
                     entry.tools = outcome.tools;
                     entry.resources = outcome.resources;
                     entry.status = McpServerStatus::Connected;
@@ -734,8 +787,7 @@ impl McpConnectionManager {
                     if entry.attempt_id != attempt_id {
                         continue;
                     }
-                    let diagnostic = diagnostic_from_error(&err, &entry.config, None);
-                    if set_failed(entry, diagnostic) {
+                    if apply_connect_error(entry, &err) {
                         need_reconnect.push(id.clone());
                     }
                 }
@@ -771,17 +823,14 @@ impl McpConnectionManager {
 fn spawn_connect(
     config: ManagedMcpServerConfig,
     supervisor: ProcessSupervisor,
-    oauth_store: Arc<RwLock<OAuthStore>>,
-    oauth_store_path: Option<PathBuf>,
+    oauth_service: McpOAuthService,
 ) -> JoinHandle<Result<ConnectOutcome, McpError>> {
-    tokio::spawn(
-        async move { connect_one(config, supervisor, oauth_store, oauth_store_path).await },
-    )
+    tokio::spawn(async move { connect_one(config, supervisor, oauth_service).await })
 }
 
 struct ConnectOutcome {
     client: Arc<dyn McpClient>,
-    auth_manager: Option<Arc<tokio::sync::Mutex<AuthorizationManager>>>,
+    oauth_identity: Option<McpOAuthIdentity>,
     tools: Vec<McpToolDefinition>,
     resources: Vec<McpResourceDefinition>,
 }
@@ -789,26 +838,19 @@ struct ConnectOutcome {
 async fn connect_one(
     config: ManagedMcpServerConfig,
     supervisor: ProcessSupervisor,
-    oauth_store: Arc<RwLock<OAuthStore>>,
-    oauth_store_path: Option<PathBuf>,
+    oauth_service: McpOAuthService,
 ) -> Result<ConnectOutcome, McpError> {
-    let (client, auth_manager) = build_client_for_config(
-        &config,
-        &supervisor,
-        &oauth_store,
-        oauth_store_path.as_ref(),
-    )
-    .await?;
+    let built = build_client_for_config(&config, &supervisor, oauth_service).await?;
     let timeout_ms = config.startup_timeout_ms.unwrap_or(5_000);
     let (tools, resources) = tokio::time::timeout(
         Duration::from_millis(timeout_ms),
-        discover_tools(&client, &config),
+        discover_tools(&built.client, &config),
     )
     .await
     .map_err(|_| McpError::protocol(format!("timeout connecting to MCP server {}", config.id)))??;
     Ok(ConnectOutcome {
-        client,
-        auth_manager,
+        client: built.client,
+        oauth_identity: built.oauth_identity,
         tools,
         resources,
     })
@@ -834,12 +876,16 @@ async fn discover_tools(
     Ok((filtered, resources))
 }
 
+struct BuiltClient {
+    client: Arc<dyn McpClient>,
+    oauth_identity: Option<McpOAuthIdentity>,
+}
+
 async fn build_client_for_config(
     config: &ManagedMcpServerConfig,
     supervisor: &ProcessSupervisor,
-    _oauth_store: &Arc<RwLock<OAuthStore>>,
-    oauth_store_path: Option<&PathBuf>,
-) -> Result<(Arc<dyn McpClient>, Option<Arc<Mutex<AuthorizationManager>>>), McpError> {
+    oauth_service: McpOAuthService,
+) -> Result<BuiltClient, McpError> {
     match &config.transport {
         ManagedMcpTransport::Stdio {
             command,
@@ -860,27 +906,53 @@ async fn build_client_for_config(
                 supervisor,
             )
             .await?;
-            Ok((client, None))
+            Ok(BuiltClient {
+                client,
+                oauth_identity: None,
+            })
         }
         ManagedMcpTransport::Http { url, headers } | ManagedMcpTransport::Sse { url, headers } => {
-            // Try to build an AuthorizationManager for OAuth support.
-            let auth_manager = match oauth_store_path {
-                Some(path) => oauth::build_authorization_manager(url, path, &config.id)
-                    .await
-                    .ok(),
-                None => None,
-            };
+            let identity = oauth_identity_for_config(config)?.ok_or_else(|| {
+                McpError::protocol(format!(
+                    "HTTP/SSE MCP server '{}' is missing an OAuth identity",
+                    config.id
+                ))
+            })?;
 
             let client = http::build_http_client(HttpConfig {
                 url: url.clone(),
                 headers: headers.clone(),
                 startup_timeout_ms: config.startup_timeout_ms,
                 request_timeout_ms: config.tool_timeout_ms,
-                auth_manager: auth_manager.clone(),
+                oauth: Some(HttpOAuthConfig {
+                    service: oauth_service,
+                    identity: identity.clone(),
+                }),
             })
             .await?;
-            Ok((client, auth_manager))
+            Ok(BuiltClient {
+                client,
+                oauth_identity: Some(identity),
+            })
         }
+    }
+}
+
+fn oauth_identity_for_config(
+    config: &ManagedMcpServerConfig,
+) -> Result<Option<McpOAuthIdentity>, McpError> {
+    match &config.transport {
+        ManagedMcpTransport::Http { url, .. } => {
+            McpOAuthIdentity::new(config.id.clone(), url, McpOAuthTransportKind::Http)
+                .map(Some)
+                .map_err(|err| McpError::protocol(err.to_string()))
+        }
+        ManagedMcpTransport::Sse { url, .. } => {
+            McpOAuthIdentity::new(config.id.clone(), url, McpOAuthTransportKind::Sse)
+                .map(Some)
+                .map_err(|err| McpError::protocol(err.to_string()))
+        }
+        ManagedMcpTransport::Stdio { .. } => Ok(None),
     }
 }
 
@@ -913,7 +985,7 @@ fn diagnostic_hint(message: &str, config: &ManagedMcpServerConfig) -> Option<Str
             ManagedMcpTransport::Http { .. } | ManagedMcpTransport::Sse { .. }
         ) {
             return Some(
-                "This server requires OAuth. Run `neo mcp auth <server_id>` to authorize."
+                "This server requires OAuth. Run `/mcp-config login <server_id>` or `neo mcp auth <server_id>` to authorize."
                     .to_owned(),
             );
         }
@@ -938,7 +1010,7 @@ fn set_failed(entry: &mut ManagedMcpEntry, diagnostic: McpDiagnostic) -> bool {
     entry.status = McpServerStatus::Failed;
     entry.error = Some(diagnostic);
     entry.client = None;
-    entry.auth_manager = None;
+    entry.oauth_identity = None;
     entry.tools.clear();
     entry.resources.clear();
 
@@ -957,6 +1029,26 @@ fn set_failed(entry: &mut ManagedMcpEntry, diagnostic: McpDiagnostic) -> bool {
         return true;
     }
     false
+}
+
+fn set_needs_auth(entry: &mut ManagedMcpEntry, diagnostic: McpDiagnostic) {
+    entry.status = McpServerStatus::NeedsAuth;
+    entry.error = Some(diagnostic);
+    entry.client = None;
+    entry.oauth_identity = None;
+    entry.tools.clear();
+    entry.resources.clear();
+    entry.next_retry_ms = None;
+}
+
+fn apply_connect_error(entry: &mut ManagedMcpEntry, err: &McpError) -> bool {
+    let diagnostic = diagnostic_from_error(err, &entry.config, None);
+    if err.is_needs_auth() {
+        set_needs_auth(entry, diagnostic);
+        false
+    } else {
+        set_failed(entry, diagnostic)
+    }
 }
 
 fn reconnect_delay_ms(policy: McpReconnectPolicy, attempt: u32) -> u64 {
@@ -1057,6 +1149,48 @@ impl super::Tool for ManagedMcpTool {
     }
 }
 
+struct McpAuthenticateTool {
+    server_id: String,
+    exposed_name: String,
+    manager: McpConnectionManager,
+}
+
+impl super::Tool for McpAuthenticateTool {
+    fn name(&self) -> &str {
+        &self.exposed_name
+    }
+
+    fn description(&self) -> &str {
+        "Starts OAuth authentication for this MCP server and returns an authorization URL. Callback completion and reconnect are not wired in core yet."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _ctx: &'a super::ToolContext,
+        _input: serde_json::Value,
+    ) -> super::ToolFuture<'a> {
+        let manager = self.manager.clone();
+        let server_id = self.server_id.clone();
+        Box::pin(async move {
+            manager
+                .authenticate_oauth(&server_id)
+                .await
+                .map_err(|err| super::ToolError::Mcp {
+                    server_id,
+                    tool_name: "authenticate".to_owned(),
+                    message: err.to_string(),
+                })
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{Tool, ToolContext, ToolError};
@@ -1079,6 +1213,162 @@ mod tests {
             tool_timeout_ms: None,
             reconnect: McpReconnectPolicy::default(),
         }
+    }
+
+    fn http_server(id: &str) -> ManagedMcpServerConfig {
+        ManagedMcpServerConfig {
+            id: id.to_owned(),
+            enabled: true,
+            transport: ManagedMcpTransport::Http {
+                url: "https://mcp.example.com/mcp#ignored".to_owned(),
+                headers: BTreeMap::new(),
+            },
+            enabled_tools: Vec::new(),
+            disabled_tools: Vec::new(),
+            startup_timeout_ms: None,
+            tool_timeout_ms: None,
+            reconnect: McpReconnectPolicy::default(),
+        }
+    }
+
+    fn entry_for_status(status: McpServerStatus) -> ManagedMcpEntry {
+        ManagedMcpEntry {
+            config: disabled_server("auth-server"),
+            attempt_id: 1,
+            status,
+            client: Some(Arc::new(MockMcpClient {
+                tool_name: "echo".to_owned(),
+                echo_text: "mock".to_owned(),
+            })),
+            oauth_identity: McpOAuthIdentity::new(
+                "auth-server",
+                "https://mcp.example.com/mcp",
+                McpOAuthTransportKind::Http,
+            )
+            .ok(),
+            tools: vec![McpToolDefinition::new(
+                "echo",
+                "mock tool",
+                serde_json::json!({"type": "object"}),
+            )],
+            resources: vec![McpResourceDefinition {
+                uri: "file:///tmp/mock".to_owned(),
+                name: "mock".to_owned(),
+                description: None,
+                mime_type: None,
+            }],
+            error: None,
+            reconnect_attempt: 0,
+            next_retry_ms: Some(250),
+            reconnect_task: None,
+            connect_task: None,
+        }
+    }
+
+    async fn insert_entry(manager: &McpConnectionManager, entry: ManagedMcpEntry) {
+        manager
+            .inner
+            .write()
+            .await
+            .entries
+            .insert(entry.config.id.clone(), entry);
+    }
+
+    fn registry_tool_names(registry: &ToolRegistry) -> Vec<String> {
+        registry.specs().into_iter().map(|spec| spec.name).collect()
+    }
+
+    #[test]
+    fn needs_auth_status_has_stable_string() {
+        assert_eq!(McpServerStatus::NeedsAuth.as_str(), "needs_auth");
+    }
+
+    #[test]
+    fn set_needs_auth_clears_runtime_state_without_retry() {
+        let mut entry = entry_for_status(McpServerStatus::Connected);
+        let diagnostic = McpDiagnostic {
+            server_id: "auth-server".to_owned(),
+            transport: "http".to_owned(),
+            message: "OAuth required".to_owned(),
+            hint: Some("login".to_owned()),
+            stderr_tail: None,
+        };
+
+        set_needs_auth(&mut entry, diagnostic.clone());
+
+        assert_eq!(entry.status, McpServerStatus::NeedsAuth);
+        assert_eq!(entry.error, Some(diagnostic));
+        assert!(entry.client.is_none());
+        assert!(entry.oauth_identity.is_none());
+        assert!(entry.tools.is_empty());
+        assert!(entry.resources.is_empty());
+        assert_eq!(entry.next_retry_ms, None);
+    }
+
+    #[test]
+    fn set_failed_schedules_reconnect_for_non_auth_failure() {
+        let mut entry = entry_for_status(McpServerStatus::Connected);
+        entry.config.reconnect = McpReconnectPolicy {
+            enabled: true,
+            initial_delay_ms: 100,
+            max_delay_ms: 1_000,
+            max_attempts: Some(3),
+        };
+        let diagnostic = McpDiagnostic {
+            server_id: "auth-server".to_owned(),
+            transport: "stdio".to_owned(),
+            message: "boom".to_owned(),
+            hint: None,
+            stderr_tail: None,
+        };
+
+        assert!(set_failed(&mut entry, diagnostic));
+
+        assert_eq!(entry.status, McpServerStatus::Reconnecting);
+        assert_eq!(entry.next_retry_ms, Some(100));
+        assert_eq!(entry.reconnect_attempt, 1);
+    }
+
+    #[test]
+    fn http_oauth_identity_uses_server_url_and_transport_kind() {
+        let config = http_server("remote-auth");
+
+        let identity = oauth_identity_for_config(&config).unwrap().unwrap();
+
+        assert_eq!(identity.server_id, "remote-auth");
+        assert_eq!(
+            identity.canonical_resource_url,
+            "https://mcp.example.com/mcp"
+        );
+        assert_eq!(identity.transport_kind, McpOAuthTransportKind::Http);
+    }
+
+    #[test]
+    fn diagnostic_hint_for_http_auth_mentions_login_command() {
+        let config = http_server("remote-auth");
+
+        let hint = diagnostic_hint("OAuth required: missing token", &config).unwrap();
+
+        assert!(hint.contains("/mcp-config login <server_id>"));
+        assert!(hint.contains("neo mcp auth <server_id>"));
+    }
+
+    #[test]
+    fn needs_auth_connect_error_settles_without_reconnect() {
+        let mut entry = entry_for_status(McpServerStatus::Pending);
+        entry.config.reconnect = McpReconnectPolicy {
+            enabled: true,
+            initial_delay_ms: 100,
+            max_delay_ms: 1_000,
+            max_attempts: Some(3),
+        };
+        let err = McpError::needs_auth("OAuth required: missing token");
+
+        assert!(!apply_connect_error(&mut entry, &err));
+
+        assert_eq!(entry.status, McpServerStatus::NeedsAuth);
+        assert_eq!(entry.next_retry_ms, None);
+        assert_eq!(entry.reconnect_attempt, 0);
     }
 
     #[test]
@@ -1123,6 +1413,162 @@ mod tests {
             .map(|snapshot| snapshot.id)
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["one", "three", "two"]);
+    }
+
+    #[tokio::test]
+    async fn needs_auth_entry_registers_authenticate_tool_only() {
+        let manager = McpConnectionManager::new(ProcessSupervisor::default());
+        let mut entry = entry_for_status(McpServerStatus::NeedsAuth);
+        entry.config = http_server("linear");
+        entry.error = Some(McpDiagnostic {
+            server_id: "linear".to_owned(),
+            transport: "http".to_owned(),
+            message: "OAuth required".to_owned(),
+            hint: Some("authorize".to_owned()),
+            stderr_tail: None,
+        });
+        insert_entry(&manager, entry).await;
+
+        let mut registry = ToolRegistry::new();
+        let diagnostics = manager.register_connected_tools_into(&mut registry).await;
+
+        assert_eq!(
+            registry_tool_names(&registry),
+            vec!["mcp__linear__authenticate"]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].server_id, "linear");
+    }
+
+    #[tokio::test]
+    async fn failed_entry_does_not_register_authenticate_tool() {
+        let manager = McpConnectionManager::new(ProcessSupervisor::default());
+        let mut entry = entry_for_status(McpServerStatus::Failed);
+        entry.config = http_server("linear");
+        entry.error = Some(McpDiagnostic {
+            server_id: "linear".to_owned(),
+            transport: "http".to_owned(),
+            message: "connect failed".to_owned(),
+            hint: None,
+            stderr_tail: None,
+        });
+        insert_entry(&manager, entry).await;
+
+        let mut registry = ToolRegistry::new();
+        let diagnostics = manager.register_connected_tools_into(&mut registry).await;
+
+        assert!(registry_tool_names(&registry).is_empty());
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn connected_entry_registers_real_tools_not_authenticate_tool() {
+        let manager = McpConnectionManager::new(ProcessSupervisor::default());
+        let mut entry = entry_for_status(McpServerStatus::Connected);
+        entry.config.id = "linear".to_owned();
+        insert_entry(&manager, entry).await;
+
+        let mut registry = ToolRegistry::new();
+        let diagnostics = manager.register_connected_tools_into(&mut registry).await;
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(registry_tool_names(&registry), vec!["mcp__linear__echo"]);
+    }
+
+    #[test]
+    fn authenticate_tool_schema_is_empty_object() {
+        let tool = McpAuthenticateTool {
+            server_id: "linear".to_owned(),
+            exposed_name: "mcp__linear__authenticate".to_owned(),
+            manager: McpConnectionManager::new(ProcessSupervisor::default()),
+        };
+
+        assert_eq!(
+            tool.input_schema(),
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": false
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticate_tool_reports_clear_errors_for_unusable_servers() {
+        let manager = McpConnectionManager::new(ProcessSupervisor::default());
+        manager
+            .apply_config(vec![disabled_server("disabled")])
+            .await;
+        let ctx = ToolContext::new(std::env::temp_dir()).unwrap();
+
+        let disabled_tool = McpAuthenticateTool {
+            server_id: "disabled".to_owned(),
+            exposed_name: "mcp__disabled__authenticate".to_owned(),
+            manager: manager.clone(),
+        };
+        let disabled_err = disabled_tool
+            .execute(&ctx, serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(disabled_err.to_string().contains("disabled"));
+
+        let stdio_config = ManagedMcpServerConfig {
+            enabled: true,
+            ..disabled_server("stdio")
+        };
+        manager
+            .apply_config(vec![disabled_server("disabled"), stdio_config])
+            .await;
+        let stdio_tool = McpAuthenticateTool {
+            server_id: "stdio".to_owned(),
+            exposed_name: "mcp__stdio__authenticate".to_owned(),
+            manager: manager.clone(),
+        };
+        let stdio_err = stdio_tool
+            .execute(&ctx, serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(stdio_err.to_string().contains("HTTP/SSE"));
+
+        let missing_tool = McpAuthenticateTool {
+            server_id: "missing".to_owned(),
+            exposed_name: "mcp__missing__authenticate".to_owned(),
+            manager,
+        };
+        let missing_err = missing_tool
+            .execute(&ctx, serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(missing_err.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn authenticate_tool_reports_unwired_oauth_flow_without_success_claim() {
+        let manager = McpConnectionManager::new(ProcessSupervisor::default());
+        let mut entry = entry_for_status(McpServerStatus::NeedsAuth);
+        entry.config = http_server("linear");
+        insert_entry(&manager, entry).await;
+        let mut registry = ToolRegistry::new();
+        manager.register_connected_tools_into(&mut registry).await;
+        let ctx = ToolContext::new(std::env::temp_dir()).unwrap();
+
+        let result = registry
+            .run("mcp__linear__authenticate", &ctx, serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(
+            result
+                .content
+                .contains("Could not start OAuth authentication")
+        );
+        assert!(result.content.contains("callback completion is not wired"));
+        assert!(!result.content.contains("authenticated"));
+        assert!(!result.content.contains("reconnected"));
+        assert_eq!(
+            manager.snapshot("linear").await.unwrap().status,
+            McpServerStatus::NeedsAuth
+        );
     }
 
     /// A minimal mock MCP client used to verify that `ManagedMcpTool` correctly

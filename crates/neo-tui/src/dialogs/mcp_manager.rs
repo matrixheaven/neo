@@ -1,8 +1,8 @@
 use crate::input::{InputEvent, KeybindingAction};
 use crate::primitive::InputResult;
+use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Style, paint};
 use crate::primitive::{truncate_width, visible_width};
-use crate::primitive::theme::TuiTheme;
 
 /// Row data passed in from the controller for one configured MCP server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +23,7 @@ pub enum McpToolStatus {
     NotDiscovered,
     Discovering,
     Discovered(Vec<String>),
+    NeedsAuth(String),
     Failed(String),
     SkippedDisabled,
 }
@@ -33,6 +34,7 @@ impl McpToolStatus {
             Self::NotDiscovered => "tools: not discovered".to_owned(),
             Self::Discovering => "tools: discovering...".to_owned(),
             Self::Discovered(names) => format!("tools: {} discovered", names.len()),
+            Self::NeedsAuth(reason) => format!("tools: OAuth required - {reason}"),
             Self::Failed(reason) => format!("tools: {reason}"),
             Self::SkippedDisabled => "tools: disabled".to_owned(),
         }
@@ -466,7 +468,7 @@ fn render_row(
 
             let tool_status = row.tool_status.summary();
             let tool_style = match &row.tool_status {
-                McpToolStatus::Failed(_) => status_error,
+                McpToolStatus::NeedsAuth(_) | McpToolStatus::Failed(_) => status_error,
                 _ => muted_style,
             };
 
