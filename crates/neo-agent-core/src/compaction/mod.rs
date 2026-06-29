@@ -530,6 +530,36 @@ fn render_instruction(custom_instruction: Option<&str>) -> String {
     COMPACTION_INSTRUCTION.replace("{{ customInstruction }}", custom)
 }
 
+/// Find a safe compaction split point smaller than `current_count`.
+///
+/// Walks backward from `current_count - 1` looking for a valid
+/// [`can_split_after`] boundary. Returns 0 if no smaller safe split exists.
+#[must_use]
+pub(crate) fn reduce_compact_count(messages: &[AgentMessage], current_count: usize) -> usize {
+    if current_count <= 1 {
+        return 0;
+    }
+    for index in (0..current_count - 1).rev() {
+        if can_split_after(messages, index) {
+            return index + 1;
+        }
+    }
+    0
+}
+
+/// Whether the current context messages differ from a snapshot taken
+/// before compaction began. Used to detect undo/clear during the LLM call.
+#[must_use]
+pub(crate) fn is_stale(snapshot: &[AgentMessage], current: &[AgentMessage]) -> bool {
+    if current.len() < snapshot.len() {
+        return true;
+    }
+    snapshot
+        .iter()
+        .zip(current.iter())
+        .any(|(a, b)| a != b)
+}
+
 /// Run LLM-driven compaction and emit the lifecycle events.
 ///
 /// This replaces the old `maybe_compact` counter logic.  It:
@@ -911,6 +941,56 @@ mod tests {
         let err = CompactionError::Stale;
         let msg = err.to_string();
         assert!(msg.contains("stale"));
+    }
+
+    #[test]
+    fn reduce_compact_count_finds_smaller_safe_boundary() {
+        let messages = vec![
+            user_msg("task 1"),
+            assistant_text("done 1"),
+            user_msg("task 2"),
+            assistant_text("done 2"),
+            user_msg("task 3"),
+            assistant_text("done 3"),
+        ];
+        // Current count = 4 (split after index 3). Should find index 1 as smaller safe split.
+        let reduced = reduce_compact_count(&messages, 4);
+        assert_eq!(reduced, 2);
+    }
+
+    #[test]
+    fn reduce_compact_count_returns_zero_when_no_smaller_split() {
+        let messages = vec![user_msg("only"), assistant_text("reply")];
+        // Current count = 1. Can't reduce below 1 safely.
+        let reduced = reduce_compact_count(&messages, 1);
+        assert_eq!(reduced, 0);
+    }
+
+    #[test]
+    fn is_stale_detects_shorter_history() {
+        let snapshot = vec![user_msg("a"), assistant_text("b"), user_msg("c")];
+        let current = vec![user_msg("a")];
+        assert!(is_stale(&snapshot, &current));
+    }
+
+    #[test]
+    fn is_stale_detects_modified_message() {
+        let snapshot = vec![user_msg("original"), assistant_text("reply")];
+        let current = vec![user_msg("changed"), assistant_text("reply")];
+        assert!(is_stale(&snapshot, &current));
+    }
+
+    #[test]
+    fn is_stale_allows_append() {
+        let snapshot = vec![user_msg("a"), assistant_text("b")];
+        let current = vec![user_msg("a"), assistant_text("b"), user_msg("follow-up")];
+        assert!(!is_stale(&snapshot, &current));
+    }
+
+    #[test]
+    fn is_stale_returns_false_for_identical() {
+        let messages = vec![user_msg("a"), assistant_text("b")];
+        assert!(!is_stale(&messages, &messages));
     }
 
     #[test]
