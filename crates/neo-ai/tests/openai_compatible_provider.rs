@@ -365,6 +365,6 @@ async fn openai_compatible_client_reports_non_retryable_http_failures() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap_err();
 
-    assert!(err.to_string().contains("http status 401"));
+    assert!(err.to_string().contains("authentication error"));
     assert_eq!(server.requests().len(), 1);
 }
