@@ -26,11 +26,10 @@ use std::future::{Ready, ready};
 use anyhow::{Context, Result};
 use crossterm::terminal::size;
 use neo_agent_core::{
-    AgentEvent, AgentMessage, Content, McpConnectionManager, PendingQuestion,
-    PermissionApprovalDecision, PermissionMode, ProcessSupervisor, QuestionResponse,
-    ShellCommandOrigin, ShellCommandOutcome,
+    AgentEvent, AgentMessage, Content, McpConnectionManager, McpOAuthService,
+    McpOAuthServiceConfig, PendingQuestion, PermissionApprovalDecision, PermissionMode,
+    ProcessSupervisor, QuestionResponse, ShellCommandOrigin, ShellCommandOutcome,
     mode::PlanMode,
-    oauth::OAuthStore,
     session::{JsonlSessionReader, SessionMetadataStore, SessionSummary},
 };
 use neo_tui::tasks_browser::TaskBrowserAction;
@@ -164,27 +163,12 @@ const SHELL_FOREGROUND_TIMEOUT: Duration = Duration::from_secs(120);
 const SHELL_BACKGROUND_TIMEOUT: Duration = Duration::from_secs(600);
 const SHELL_MAX_OUTPUT_BYTES: usize = 200_000;
 
-fn mcp_manager_with_oauth_store() -> McpConnectionManager {
+fn mcp_manager_with_oauth_service() -> McpConnectionManager {
     let supervisor = ProcessSupervisor::default();
-    if let Some(home) = neo_home() {
-        let path = home.join("oauth.json");
-        match OAuthStore::load(&path) {
-            Ok(store) => {
-                return McpConnectionManager::with_oauth_store(
-                    supervisor,
-                    Arc::new(tokio::sync::RwLock::new(store)),
-                    Some(path),
-                );
-            }
-            Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    "failed to load OAuth store; continuing with empty store"
-                );
-            }
-        }
-    }
-    McpConnectionManager::new(supervisor)
+    let oauth_service = McpOAuthService::new(McpOAuthServiceConfig {
+        neo_home: neo_home(),
+    });
+    McpConnectionManager::with_oauth_service(supervisor, oauth_service)
 }
 
 fn approval_number(character: char) -> Option<usize> {
@@ -284,6 +268,7 @@ pub async fn execute_tty_with_startup(
     } else {
         controller.apply_startup_action(&startup);
     }
+    controller.connect_mcp_at_startup().await;
     let events = RawStdinEvents::new(controller.keybindings.clone());
     controller
         .run_terminal_loop_with_suspend(
@@ -698,7 +683,7 @@ impl InteractiveController {
             pending_catalog_fetch: None,
             pending_mcp_probe: None,
             pending_mcp_add_transport: None,
-            mcp_manager: Some(mcp_manager_with_oauth_store()),
+            mcp_manager: Some(mcp_manager_with_oauth_service()),
             skill_store: None,
             pending_skill_context: None,
             goal_manager: None,
@@ -923,6 +908,26 @@ impl InteractiveController {
 
     fn push_status(&mut self, message: impl Into<String>) {
         self.transcript_mut().push_status(message);
+    }
+
+    async fn connect_mcp_at_startup(&mut self) {
+        let Some(config) = self.local_config.clone() else {
+            return;
+        };
+        let Some(manager) = self.mcp_manager.clone() else {
+            return;
+        };
+        match mcp_ops::reload_mcp_manager_from_config(&config, &manager).await {
+            Ok(_) => {
+                let snapshots = mcp_ops::wait_for_mcp_manager_probe(&manager, &config).await;
+                for snapshot in snapshots {
+                    self.push_status(mcp_ops::format_mcp_startup_message(&snapshot));
+                }
+            }
+            Err(error) => {
+                self.push_status(format!("MCP startup failed: {error}"));
+            }
+        }
     }
 
     #[cfg(test)]
