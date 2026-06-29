@@ -376,8 +376,8 @@ fn select_visible_prioritises_in_progress_and_latest_done() {
     ];
 
     let visible = select_visible_todos(&todos, 5);
-    assert_eq!(visible.len(), 5);
-    assert!(visible.contains(&2));
-    assert!(visible.contains(&5));
-    assert_eq!(visible, vec![0, 1, 2, 3, 5]);
+    assert_eq!(visible.indices.len(), 5);
+    assert!(visible.indices.contains(&2));
+    assert!(visible.indices.contains(&5));
+    assert_eq!(visible.indices, vec![0, 1, 2, 3, 5]);
 }

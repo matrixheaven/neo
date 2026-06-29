@@ -29,7 +29,7 @@ impl NeoChromeState {
             }
             StreamUpdate::PlanModeChanged { active } => self.set_plan_mode(active),
             StreamUpdate::TodoUpdated { todos } => {
-                self.todo_items = todos;
+                self.apply_todo_items(todos);
             }
             StreamUpdate::QuestionRequested { id, questions } => {
                 self.push_question_overlay(id, questions);
@@ -205,7 +205,7 @@ impl NeoChromeState {
                         },
                     })
                     .collect();
-                self.todo_items = display;
+                self.apply_todo_items(display);
             }
             AgentEvent::QuestionRequested { id, questions, .. } => {
                 let display: Vec<QuestionDisplayData> = questions
@@ -227,6 +227,14 @@ impl NeoChromeState {
                     .collect();
                 self.push_question_overlay(id, display);
             }
+        }
+    }
+
+    fn apply_todo_items(&mut self, todos: Vec<TodoDisplayItem>) {
+        if todos.is_empty() {
+            self.clear_todos();
+        } else {
+            self.set_todo_items(todos);
         }
     }
 }

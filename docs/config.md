@@ -226,6 +226,9 @@ Custom keybindings can be configured in `config.toml`:
 Available actions include `session_picker_open`, `model_picker_open`,
 `transcript_copy_selection`, and `session_fork`.
 
+`tui.todo.toggle` defaults to `ctrl+t` and expands or collapses the todo panel
+when more than five todo items exist.
+
 ## Importing from models.dev
 
 Neo integrates with [models.dev](https://models.dev) for provider discovery:

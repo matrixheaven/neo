@@ -55,6 +55,14 @@ fn keybinding_manager_matches_defaults_overrides_and_conflicts() {
         &KeyId::new("ctrl+o").expect("valid key"),
         KeybindingAction::ToolOutputToggle
     ));
+    assert!(manager.matches(
+        &KeyId::new("ctrl+t").expect("valid key"),
+        KeybindingAction::TodoPanelToggle
+    ));
+    assert_eq!(
+        KeybindingAction::from_id("tui.todo.toggle"),
+        Some(KeybindingAction::TodoPanelToggle)
+    );
     assert!(!manager.matches(
         &KeyId::new("ctrl+o").expect("valid key"),
         KeybindingAction::ModelPickerOpen

@@ -752,6 +752,7 @@ fn question_key_for_action(action: KeybindingAction) -> Option<KeyEvent> {
         | KeybindingAction::SessionPickerToggleScope
         | KeybindingAction::SessionFork
         | KeybindingAction::ToolOutputToggle
+        | KeybindingAction::TodoPanelToggle
         | KeybindingAction::ModelPickerOpen
         | KeybindingAction::TogglePlanMode
         | KeybindingAction::CycleDevelopmentMode

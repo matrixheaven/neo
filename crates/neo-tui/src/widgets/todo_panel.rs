@@ -1,6 +1,7 @@
+use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
 use crate::primitive::{Style, paint, truncate_width};
-use crate::primitive::theme::TuiTheme;
+use std::collections::BTreeSet;
 
 /// Maximum number of todo items visible without truncation.
 pub const MAX_VISIBLE_TODOS: usize = 5;
@@ -28,66 +29,120 @@ impl TodoDisplayItem {
     }
 }
 
-/// Smart truncation algorithm matching Neo's `todo-panel.ts`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TodoHiddenCounts {
+    pub done: usize,
+    pub in_progress: usize,
+    pub pending: usize,
+}
+
+impl TodoHiddenCounts {
+    fn add(&mut self, status: TodoDisplayStatus) {
+        match status {
+            TodoDisplayStatus::Pending => self.pending += 1,
+            TodoDisplayStatus::InProgress => self.in_progress += 1,
+            TodoDisplayStatus::Done => self.done += 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleTodos {
+    pub indices: Vec<usize>,
+    pub hidden: usize,
+    pub hidden_counts: TodoHiddenCounts,
+}
+
+/// Smart truncation algorithm matching Kimi's collapsed todo selector.
 ///
 /// 1. Include ALL `in_progress` items (capped at `max_visible`).
-/// 2. If slots remain: include 1 latest done item.
-/// 3. Fill remaining with earliest pending items.
-/// 4. Re-sort to original order.
-///
-/// Returns the **indices** of visible items.
+/// 2. If slots remain: balance latest done items with earliest pending items.
+/// 3. Re-sort to original order and count hidden statuses.
 #[must_use]
-pub fn select_visible_todos(todos: &[TodoDisplayItem], max_visible: usize) -> Vec<usize> {
+pub fn select_visible_todos(todos: &[TodoDisplayItem], max_visible: usize) -> VisibleTodos {
     if todos.is_empty() || max_visible == 0 {
-        return Vec::new();
+        return visible_todos(Vec::new(), todos);
     }
     if todos.len() <= max_visible {
-        return (0..todos.len()).collect();
+        return VisibleTodos {
+            indices: (0..todos.len()).collect(),
+            hidden: 0,
+            hidden_counts: TodoHiddenCounts::default(),
+        };
     }
 
     let mut selected: Vec<usize> = Vec::new();
+    let mut in_progress = Vec::new();
+    let mut pending = Vec::new();
+    let mut done = Vec::new();
 
-    // 1. All in_progress (capped).
-    for (i, todo) in todos.iter().enumerate() {
+    for (index, todo) in todos.iter().enumerate() {
+        match todo.status {
+            TodoDisplayStatus::Pending => pending.push(index),
+            TodoDisplayStatus::InProgress => in_progress.push(index),
+            TodoDisplayStatus::Done => done.push(index),
+        }
+    }
+
+    for index in in_progress {
         if selected.len() >= max_visible {
             break;
         }
-        if todo.status == TodoDisplayStatus::InProgress {
-            selected.push(i);
+        selected.push(index);
+    }
+
+    let slots = max_visible.saturating_sub(selected.len());
+    if slots > 0 {
+        if pending.is_empty() {
+            selected.extend(done.iter().rev().take(slots));
+        } else if done.is_empty() {
+            selected.extend(pending.iter().take(slots));
+        } else {
+            if let Some(&latest_done) = done.last() {
+                selected.push(latest_done);
+            }
+
+            let pending_slots = max_visible.saturating_sub(selected.len());
+            selected.extend(pending.iter().take(pending_slots));
+
+            if selected.len() < max_visible {
+                let selected_set: BTreeSet<usize> = selected.iter().copied().collect();
+                selected.extend(
+                    done.iter()
+                        .rev()
+                        .copied()
+                        .filter(|index| !selected_set.contains(index))
+                        .take(max_visible - selected.len()),
+                );
+            }
         }
     }
 
-    // 2. One latest done.
-    if selected.len() < max_visible
-        && let Some(done_idx) = todos
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, t)| t.status == TodoDisplayStatus::Done)
-            .map(|(i, _)| i)
-        && !selected.contains(&done_idx)
-    {
-        selected.push(done_idx);
-    }
-
-    // 3. Earliest pending to fill.
-    for (i, todo) in todos.iter().enumerate() {
-        if selected.len() >= max_visible {
-            break;
-        }
-        if todo.status == TodoDisplayStatus::Pending && !selected.contains(&i) {
-            selected.push(i);
-        }
-    }
-
-    // 4. Re-sort.
     selected.sort_unstable();
-    selected
+    visible_todos(selected, todos)
+}
+
+fn visible_todos(indices: Vec<usize>, todos: &[TodoDisplayItem]) -> VisibleTodos {
+    let selected: BTreeSet<usize> = indices.iter().copied().collect();
+    let mut hidden_counts = TodoHiddenCounts::default();
+
+    for (index, todo) in todos.iter().enumerate() {
+        if !selected.contains(&index) {
+            hidden_counts.add(todo.status);
+        }
+    }
+
+    VisibleTodos {
+        indices,
+        hidden: todos.len().saturating_sub(selected.len()),
+        hidden_counts,
+    }
 }
 
 pub struct TodoPanel<'a> {
     todos: &'a [TodoDisplayItem],
     theme: TuiTheme,
+    expanded: bool,
 }
 
 impl<'a> TodoPanel<'a> {
@@ -96,12 +151,19 @@ impl<'a> TodoPanel<'a> {
         Self {
             todos,
             theme: TuiTheme::default(),
+            expanded: false,
         }
     }
 
     #[must_use]
     pub const fn with_theme(mut self, theme: TuiTheme) -> Self {
         self.theme = theme;
+        self
+    }
+
+    #[must_use]
+    pub const fn expanded(mut self, expanded: bool) -> Self {
+        self.expanded = expanded;
         self
     }
 
@@ -112,14 +174,27 @@ impl<'a> TodoPanel<'a> {
         if self.todos.is_empty() {
             return 0;
         }
-        let visible = select_visible_todos(self.todos, MAX_VISIBLE_TODOS);
+        let visible = if self.expanded {
+            VisibleTodos {
+                indices: (0..self.todos.len()).collect(),
+                hidden: 0,
+                hidden_counts: TodoHiddenCounts::default(),
+            }
+        } else {
+            select_visible_todos(self.todos, MAX_VISIBLE_TODOS)
+        };
         let inner_width = usize::from(width.saturating_sub(6).max(1));
         let item_lines: usize = visible
+            .indices
             .iter()
             .map(|&i| wrap_width(&self.todos[i].title, inner_width).len().max(1))
             .sum();
-        let hidden = self.todos.len() > visible.len();
-        let total = 2 + 1 + item_lines + usize::from(hidden);
+        let has_footer = if self.expanded {
+            self.todos.len() > MAX_VISIBLE_TODOS
+        } else {
+            visible.hidden > 0
+        };
+        let total = 2 + item_lines + usize::from(has_footer);
         u16::try_from(total).unwrap_or(u16::MAX)
     }
 
@@ -129,7 +204,15 @@ impl<'a> TodoPanel<'a> {
             return Vec::new();
         }
 
-        let visible = select_visible_todos(self.todos, MAX_VISIBLE_TODOS);
+        let visible = if self.expanded {
+            VisibleTodos {
+                indices: (0..self.todos.len()).collect(),
+                hidden: 0,
+                hidden_counts: TodoHiddenCounts::default(),
+            }
+        } else {
+            select_visible_todos(self.todos, MAX_VISIBLE_TODOS)
+        };
         let inner_width = width.saturating_sub(6).max(1);
         let mut lines = vec![
             paint(
@@ -139,14 +222,27 @@ impl<'a> TodoPanel<'a> {
             paint("  Todo", Style::default().fg(self.theme.brand).bold()),
         ];
 
-        for &index in &visible {
+        for &index in &visible.indices {
             lines.extend(render_item(&self.todos[index], inner_width, self.theme));
         }
 
-        let hidden = self.todos.len().saturating_sub(visible.len());
-        if hidden > 0 {
+        if self.expanded && self.todos.len() > MAX_VISIBLE_TODOS {
             lines.push(paint(
-                &format!("  \u{2026} +{hidden} more"),
+                &format!("  all {} items \u{b7} ctrl+t to collapse", self.todos.len()),
+                Style::default().fg(self.theme.text_muted),
+            ));
+        } else if visible.hidden > 0 {
+            let hidden_counts = format_hidden_counts(visible.hidden_counts);
+            let distribution = if hidden_counts.is_empty() {
+                String::new()
+            } else {
+                format!(" ({hidden_counts})")
+            };
+            lines.push(paint(
+                &format!(
+                    "  \u{2026} +{} more{} \u{b7} ctrl+t to expand",
+                    visible.hidden, distribution
+                ),
                 Style::default().fg(self.theme.text_muted),
             ));
         }
@@ -156,6 +252,20 @@ impl<'a> TodoPanel<'a> {
             .map(|line| truncate_width(&line, width, "", false))
             .collect()
     }
+}
+
+fn format_hidden_counts(counts: TodoHiddenCounts) -> String {
+    let mut parts = Vec::new();
+    if counts.done > 0 {
+        parts.push(format!("{} done", counts.done));
+    }
+    if counts.in_progress > 0 {
+        parts.push(format!("{} in progress", counts.in_progress));
+    }
+    if counts.pending > 0 {
+        parts.push(format!("{} pending", counts.pending));
+    }
+    parts.join(" \u{b7} ")
 }
 
 fn render_item(item: &TodoDisplayItem, inner_width: usize, theme: TuiTheme) -> Vec<String> {
@@ -204,77 +314,176 @@ mod tests {
     }
 
     #[test]
-    fn no_truncation_when_under_limit() {
-        let todos = vec![
-            item("a", TodoDisplayStatus::Pending),
-            item("b", TodoDisplayStatus::InProgress),
-            item("c", TodoDisplayStatus::Done),
-        ];
-        let visible = select_visible_todos(&todos, 5);
-        assert_eq!(visible, vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn prioritises_in_progress() {
-        let todos = vec![
-            item("a", TodoDisplayStatus::Pending),
-            item("b", TodoDisplayStatus::Pending),
-            item("c", TodoDisplayStatus::InProgress),
-            item("d", TodoDisplayStatus::Pending),
-            item("e", TodoDisplayStatus::Done),
-            item("f", TodoDisplayStatus::Done),
-            item("g", TodoDisplayStatus::Pending),
-        ];
-        let visible = select_visible_todos(&todos, 5);
-        // c (in_progress), e or f (latest done), then earliest pending a, b, d
-        assert!(visible.contains(&2)); // in_progress
-        assert_eq!(visible.len(), 5);
-        // Should be sorted
-        assert_eq!(visible, vec![0, 1, 2, 3, 5]); // a, b, c, d, f(latest done)
-    }
-
-    #[test]
-    fn all_done_returns_all_when_under_limit() {
+    fn selector_returns_all_items_when_count_fits() {
         let todos = vec![
             item("a", TodoDisplayStatus::Done),
-            item("b", TodoDisplayStatus::Done),
+            item("b", TodoDisplayStatus::InProgress),
+            item("c", TodoDisplayStatus::Pending),
         ];
+
         let visible = select_visible_todos(&todos, 5);
-        assert_eq!(visible, vec![0, 1]);
+
+        assert_eq!(visible.indices, vec![0, 1, 2]);
+        assert_eq!(visible.hidden, 0);
+        assert_eq!(visible.hidden_counts.done, 0);
+        assert_eq!(visible.hidden_counts.in_progress, 0);
+        assert_eq!(visible.hidden_counts.pending, 0);
     }
 
     #[test]
-    fn all_pending_truncates_earliest() {
-        let todos: Vec<TodoDisplayItem> = (0..7)
-            .map(|i| item(&format!("task-{i}"), TodoDisplayStatus::Pending))
+    fn selector_shows_latest_done_active_and_earliest_pending() {
+        let todos = vec![
+            item("d1", TodoDisplayStatus::Done),
+            item("d2", TodoDisplayStatus::Done),
+            item("d3", TodoDisplayStatus::Done),
+            item("ip", TodoDisplayStatus::InProgress),
+            item("p1", TodoDisplayStatus::Pending),
+            item("p2", TodoDisplayStatus::Pending),
+            item("p3", TodoDisplayStatus::Pending),
+            item("p4", TodoDisplayStatus::Pending),
+            item("p5", TodoDisplayStatus::Pending),
+        ];
+
+        let visible = select_visible_todos(&todos, 5);
+        let titles: Vec<&str> = visible
+            .indices
+            .iter()
+            .map(|&index| todos[index].title.as_str())
             .collect();
-        let visible = select_visible_todos(&todos, 5);
-        assert_eq!(visible.len(), 5);
-        assert_eq!(visible, vec![0, 1, 2, 3, 4]);
+
+        assert_eq!(visible.indices, vec![2, 3, 4, 5, 6]);
+        assert_eq!(titles, vec!["d3", "ip", "p1", "p2", "p3"]);
+        assert_eq!(visible.hidden, 4);
     }
 
     #[test]
-    fn empty_input_returns_empty() {
-        let todos: Vec<TodoDisplayItem> = vec![];
+    fn selector_expands_done_when_pending_has_too_few_items() {
+        let todos = vec![
+            item("d1", TodoDisplayStatus::Done),
+            item("d2", TodoDisplayStatus::Done),
+            item("d3", TodoDisplayStatus::Done),
+            item("d4", TodoDisplayStatus::Done),
+            item("d5", TodoDisplayStatus::Done),
+            item("ip", TodoDisplayStatus::InProgress),
+            item("p1", TodoDisplayStatus::Pending),
+        ];
+
         let visible = select_visible_todos(&todos, 5);
-        assert!(visible.is_empty());
+
+        assert_eq!(visible.indices, vec![2, 3, 4, 5, 6]);
     }
 
     #[test]
-    fn max_visible_zero_returns_empty() {
-        let todos = vec![item("a", TodoDisplayStatus::InProgress)];
+    fn selector_all_pending_shows_first_five() {
+        let todos: Vec<TodoDisplayItem> = (0..8)
+            .map(|i| item(&format!("p{i}"), TodoDisplayStatus::Pending))
+            .collect();
+
+        let visible = select_visible_todos(&todos, 5);
+
+        assert_eq!(visible.indices, vec![0, 1, 2, 3, 4]);
+        assert_eq!(visible.hidden, 3);
+        assert_eq!(visible.hidden_counts.pending, 3);
+    }
+
+    #[test]
+    fn selector_all_done_shows_last_five() {
+        let todos: Vec<TodoDisplayItem> = (0..8)
+            .map(|i| item(&format!("d{i}"), TodoDisplayStatus::Done))
+            .collect();
+
+        let visible = select_visible_todos(&todos, 5);
+
+        assert_eq!(visible.indices, vec![3, 4, 5, 6, 7]);
+        assert_eq!(visible.hidden, 3);
+        assert_eq!(visible.hidden_counts.done, 3);
+    }
+
+    #[test]
+    fn selector_mixed_done_pending_without_active_keeps_one_recent_done() {
+        let todos = vec![
+            item("d1", TodoDisplayStatus::Done),
+            item("d2", TodoDisplayStatus::Done),
+            item("d3", TodoDisplayStatus::Done),
+            item("p1", TodoDisplayStatus::Pending),
+            item("p2", TodoDisplayStatus::Pending),
+            item("p3", TodoDisplayStatus::Pending),
+            item("p4", TodoDisplayStatus::Pending),
+            item("p5", TodoDisplayStatus::Pending),
+        ];
+
+        let visible = select_visible_todos(&todos, 5);
+
+        assert_eq!(visible.indices, vec![2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn selector_hidden_counts_reflect_hidden_items() {
+        let todos = vec![
+            item("ip0", TodoDisplayStatus::InProgress),
+            item("ip1", TodoDisplayStatus::InProgress),
+            item("ip2", TodoDisplayStatus::InProgress),
+            item("ip3", TodoDisplayStatus::InProgress),
+            item("ip4", TodoDisplayStatus::InProgress),
+            item("ip5", TodoDisplayStatus::InProgress),
+            item("d0", TodoDisplayStatus::Done),
+            item("d1", TodoDisplayStatus::Done),
+            item("d2", TodoDisplayStatus::Done),
+            item("p0", TodoDisplayStatus::Pending),
+            item("p1", TodoDisplayStatus::Pending),
+            item("p2", TodoDisplayStatus::Pending),
+        ];
+
+        let visible = select_visible_todos(&todos, 5);
+
+        assert_eq!(visible.indices, vec![0, 1, 2, 3, 4]);
+        assert_eq!(visible.hidden, 7);
+        assert_eq!(visible.hidden_counts.done, 3);
+        assert_eq!(visible.hidden_counts.in_progress, 1);
+        assert_eq!(visible.hidden_counts.pending, 3);
+    }
+
+    #[test]
+    fn selector_max_visible_zero_hides_all_items_with_counts() {
+        let todos = vec![
+            item("done", TodoDisplayStatus::Done),
+            item("active", TodoDisplayStatus::InProgress),
+            item("pending", TodoDisplayStatus::Pending),
+            item("pending 2", TodoDisplayStatus::Pending),
+        ];
+
         let visible = select_visible_todos(&todos, 0);
-        assert!(visible.is_empty());
+
+        assert_eq!(visible.indices, Vec::<usize>::new());
+        assert_eq!(visible.hidden, todos.len());
+        assert_eq!(visible.hidden_counts.done, 1);
+        assert_eq!(visible.hidden_counts.in_progress, 1);
+        assert_eq!(visible.hidden_counts.pending, 2);
     }
 
     #[test]
-    fn exactly_max_visible() {
-        let todos: Vec<TodoDisplayItem> = (0..5)
-            .map(|i| item(&format!("t{i}"), TodoDisplayStatus::Pending))
-            .collect();
+    fn selector_empty_todos_returns_empty_visible_state() {
+        let todos: Vec<TodoDisplayItem> = Vec::new();
+
         let visible = select_visible_todos(&todos, 5);
-        assert_eq!(visible.len(), 5);
-        assert_eq!(visible, vec![0, 1, 2, 3, 4]);
+
+        assert_eq!(visible.indices, Vec::<usize>::new());
+        assert_eq!(visible.hidden, 0);
+        assert_eq!(visible.hidden_counts.done, 0);
+        assert_eq!(visible.hidden_counts.in_progress, 0);
+        assert_eq!(visible.hidden_counts.pending, 0);
+    }
+
+    #[test]
+    fn selector_types_are_exported_from_widgets_surface() {
+        let counts = crate::widgets::TodoHiddenCounts::default();
+        let visible = crate::widgets::VisibleTodos {
+            indices: Vec::new(),
+            hidden: 0,
+            hidden_counts: counts,
+        };
+
+        assert_eq!(visible.hidden_counts, counts);
     }
 
     #[test]
@@ -300,5 +509,77 @@ mod tests {
         assert!(plain.contains("\u{25CF} active task"));
         assert!(plain.contains("\u{25CB} pending one"));
         assert!(plain.contains("\u{2026} +1 more"));
+    }
+
+    #[test]
+    fn collapsed_footer_advertises_ctrl_t_and_hidden_distribution() {
+        let todos = vec![
+            item("ip0", TodoDisplayStatus::InProgress),
+            item("ip1", TodoDisplayStatus::InProgress),
+            item("ip2", TodoDisplayStatus::InProgress),
+            item("ip3", TodoDisplayStatus::InProgress),
+            item("ip4", TodoDisplayStatus::InProgress),
+            item("ip5", TodoDisplayStatus::InProgress),
+            item("d0", TodoDisplayStatus::Done),
+            item("d1", TodoDisplayStatus::Done),
+            item("d2", TodoDisplayStatus::Done),
+            item("p0", TodoDisplayStatus::Pending),
+            item("p1", TodoDisplayStatus::Pending),
+            item("p2", TodoDisplayStatus::Pending),
+        ];
+
+        let lines = TodoPanel::new(&todos).render(80);
+        let plain = lines
+            .iter()
+            .map(|line| crate::primitive::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains(
+            "\u{2026} +7 more (3 done \u{b7} 1 in progress \u{b7} 3 pending) \u{b7} ctrl+t to expand"
+        ));
+    }
+
+    #[test]
+    fn expanded_panel_renders_all_items_and_collapse_hint() {
+        let todos: Vec<TodoDisplayItem> = (0..7)
+            .map(|i| item(&format!("task-{i}"), TodoDisplayStatus::Pending))
+            .collect();
+
+        let lines = TodoPanel::new(&todos).expanded(true).render(80);
+        let plain = lines
+            .iter()
+            .map(|line| crate::primitive::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("task-0"));
+        assert!(plain.contains("task-6"));
+        assert!(plain.contains("all 7 items \u{b7} ctrl+t to collapse"));
+        assert!(!plain.contains("+2 more"));
+    }
+
+    #[test]
+    fn todo_panel_height_matches_rendered_lines() {
+        let mut todos: Vec<TodoDisplayItem> = (0..7)
+            .map(|i| item(&format!("task-{i}"), TodoDisplayStatus::Pending))
+            .collect();
+        todos[0] = item(
+            "task-0 has a deliberately long title that wraps at a narrow width",
+            TodoDisplayStatus::Pending,
+        );
+        let width = 40;
+
+        let collapsed = TodoPanel::new(&todos);
+        assert_eq!(
+            usize::from(collapsed.height(width)),
+            collapsed.render(usize::from(width)).len()
+        );
+
+        let expanded = TodoPanel::new(&todos).expanded(true);
+        assert_eq!(
+            usize::from(expanded.height(width)),
+            expanded.render(usize::from(width)).len()
+        );
     }
 }

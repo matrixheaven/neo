@@ -33,6 +33,13 @@ fn render_app(width: u16, app: &NeoChromeState) -> Vec<String> {
         .collect()
 }
 
+fn todo_item(
+    title: &str,
+    status: neo_tui::widgets::TodoDisplayStatus,
+) -> neo_tui::widgets::TodoDisplayItem {
+    neo_tui::widgets::TodoDisplayItem::new(title, status)
+}
+
 fn render_transcript(width: usize, height: usize, transcript: &mut TranscriptPane) -> Vec<String> {
     transcript
         .render_frame(width, height)
@@ -1232,6 +1239,119 @@ fn todo_panel_offsets_prompt_start_row() {
         "lines: {:?}",
         chrome.lines
     );
+}
+
+#[test]
+fn todo_panel_expanded_state_renders_all_items_before_prompt() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_todo_items(
+        (0..7)
+            .map(|i| {
+                todo_item(
+                    &format!("task-{i}"),
+                    neo_tui::widgets::TodoDisplayStatus::Pending,
+                )
+            })
+            .collect(),
+    );
+    app.set_todo_panel_expanded(true);
+    app.prompt_mut()
+        .apply_edit(PromptEdit::Insert("next prompt"));
+
+    let lines = render_app(80, &app);
+    let plain = lines.join("\n");
+
+    assert!(plain.contains("task-0"));
+    assert!(plain.contains("task-6"));
+    assert!(plain.contains("all 7 items \u{b7} ctrl+t to collapse"));
+    assert!(plain.contains("next prompt"));
+}
+
+#[test]
+fn todo_panel_clear_resets_expanded_state() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_todo_items(
+        (0..7)
+            .map(|i| {
+                todo_item(
+                    &format!("task-{i}"),
+                    neo_tui::widgets::TodoDisplayStatus::Pending,
+                )
+            })
+            .collect(),
+    );
+    app.set_todo_panel_expanded(true);
+    app.clear_todos();
+    app.set_todo_items(
+        (0..7)
+            .map(|i| {
+                todo_item(
+                    &format!("new-{i}"),
+                    neo_tui::widgets::TodoDisplayStatus::Pending,
+                )
+            })
+            .collect(),
+    );
+
+    let plain = render_app(80, &app).join("\n");
+
+    assert!(plain.contains("\u{2026} +2 more"));
+    assert!(plain.contains("ctrl+t to expand"));
+    assert!(!plain.contains("new-6"));
+}
+
+#[test]
+fn empty_todo_events_reset_expanded_state() {
+    let mut app = NeoChromeState::new("neo", "session-a", "openai/gpt-4.1", "/tmp/neo-ws");
+    app.set_todo_items(
+        (0..7)
+            .map(|i| {
+                todo_item(
+                    &format!("agent-{i}"),
+                    neo_tui::widgets::TodoDisplayStatus::Pending,
+                )
+            })
+            .collect(),
+    );
+    app.set_todo_panel_expanded(true);
+    app.apply_agent_event(neo_agent_core::AgentEvent::TodoUpdated {
+        turn: 2,
+        todos: vec![],
+    });
+    app.apply_agent_event(neo_agent_core::AgentEvent::TodoUpdated {
+        turn: 3,
+        todos: (0..7)
+            .map(|i| neo_agent_core::TodoEventData {
+                title: format!("new-agent-{i}"),
+                status: "pending".to_owned(),
+            })
+            .collect(),
+    });
+
+    let plain = render_app(80, &app).join("\n");
+
+    assert!(plain.contains("\u{2026} +2 more"));
+    assert!(plain.contains("ctrl+t to expand"));
+    assert!(!plain.contains("new-agent-6"));
+
+    app.set_todo_panel_expanded(true);
+    app.apply_stream_update(StreamUpdate::TodoUpdated { todos: vec![] });
+    app.apply_stream_update(StreamUpdate::TodoUpdated {
+        todos: (0..7)
+            .map(|i| {
+                todo_item(
+                    &format!("new-stream-{i}"),
+                    neo_tui::widgets::TodoDisplayStatus::Pending,
+                )
+            })
+            .collect(),
+    });
+
+    let plain = render_app(80, &app).join("\n");
+
+    assert!(plain.contains("\u{2026} +2 more"));
+    assert!(plain.contains("ctrl+t to expand"));
+    assert!(!plain.contains("new-stream-6"));
 }
 
 #[test]

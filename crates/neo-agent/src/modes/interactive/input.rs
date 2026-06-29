@@ -435,6 +435,12 @@ impl InteractiveController {
             KeybindingAction::ToolOutputToggle => {
                 self.transcript_mut().toggle_tool_output_expanded();
             }
+            KeybindingAction::TodoPanelToggle => {
+                if self.tui.chrome().todo_panel_has_overflow() {
+                    self.clear_pending_exit_confirmation();
+                    self.tui.chrome_mut().toggle_todo_panel_expanded();
+                }
+            }
             KeybindingAction::ModelPickerOpen => {
                 self.open_model_picker();
             }

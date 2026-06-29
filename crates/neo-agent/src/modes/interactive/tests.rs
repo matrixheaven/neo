@@ -2528,6 +2528,67 @@ command = "python3"
     }
 
     #[tokio::test]
+    async fn event_loop_ctrl_t_expands_overflowing_todo_panel() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller.tui.chrome_mut().set_todo_items(
+            (0..7)
+                .map(|index| {
+                    neo_tui::widgets::TodoDisplayItem::new(
+                        format!("todo {index}"),
+                        neo_tui::widgets::TodoDisplayStatus::Pending,
+                    )
+                })
+                .collect(),
+        );
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+t").expect("valid key")))
+            .await
+            .expect("ctrl-t expands overflowing todo panel");
+
+        assert!(controller.chrome().todo_panel_expanded());
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+t").expect("valid key")))
+            .await
+            .expect("ctrl-t collapses overflowing todo panel");
+
+        assert!(!controller.chrome().todo_panel_expanded());
+    }
+
+    #[tokio::test]
+    async fn event_loop_ctrl_t_is_noop_when_todo_panel_does_not_overflow() {
+        let mut controller = InteractiveController::new_for_test(
+            "neo",
+            "test-session",
+            "openai/gpt-4.1",
+            test_workspace_root(),
+            |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+        );
+        controller
+            .tui
+            .chrome_mut()
+            .set_todo_items(vec![neo_tui::widgets::TodoDisplayItem::new(
+                "todo",
+                neo_tui::widgets::TodoDisplayStatus::Pending,
+            )]);
+
+        controller
+            .handle_input_event(InputEvent::Key(KeyId::new("ctrl+t").expect("valid key")))
+            .await
+            .expect("ctrl-t no-ops without todo overflow");
+
+        assert!(!controller.chrome().todo_panel_expanded());
+        assert!(controller.chrome().prompt().text.is_empty());
+    }
+
+    #[tokio::test]
     async fn event_loop_model_picker_action_opens_model_picker() {
         let mut controller = InteractiveController::new_with_event_driver(
             "neo",

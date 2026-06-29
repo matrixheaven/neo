@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use neo_agent_core::PermissionMode;
 
-use crate::primitive::theme::{ChromeMode, DevelopmentMode, TuiTheme};
 use crate::primitive::Color;
+use crate::primitive::theme::{ChromeMode, DevelopmentMode, TuiTheme};
 use crate::terminal_image::{ImageRenderPolicy, TerminalImageCapabilities};
 use crate::widgets::TodoDisplayItem;
 
@@ -39,6 +39,8 @@ pub struct NeoChromeState {
     pub(super) development_mode: DevelopmentMode,
     /// Current todo list for the `TodoPanel`.
     pub(super) todo_items: Vec<TodoDisplayItem>,
+    /// Whether the todo panel renders all items instead of the collapsed subset.
+    pub(super) todo_panel_expanded: bool,
     /// Optional `/btw` sidecar panel state.
     pub(super) btw_panel_state: Option<crate::widgets::btw_panel::BtwPanelState>,
     /// Optional custom label shown in the footer as a working indicator.
@@ -85,6 +87,7 @@ impl NeoChromeState {
             plan_mode_active: false,
             development_mode: DevelopmentMode::Normal,
             todo_items: Vec::new(),
+            todo_panel_expanded: false,
             btw_panel_state: None,
             custom_working_label: None,
             thinking_enabled: false,
@@ -304,9 +307,28 @@ impl NeoChromeState {
         !self.todo_items.is_empty()
     }
 
+    #[must_use]
+    pub const fn todo_panel_expanded(&self) -> bool {
+        self.todo_panel_expanded
+    }
+
+    #[must_use]
+    pub fn todo_panel_has_overflow(&self) -> bool {
+        self.todo_items.len() > crate::widgets::todo_panel::MAX_VISIBLE_TODOS
+    }
+
+    pub const fn set_todo_panel_expanded(&mut self, expanded: bool) {
+        self.todo_panel_expanded = expanded;
+    }
+
+    pub const fn toggle_todo_panel_expanded(&mut self) {
+        self.todo_panel_expanded = !self.todo_panel_expanded;
+    }
+
     /// Clear the todo panel (e.g. when all items are done).
     pub fn clear_todos(&mut self) {
         self.todo_items.clear();
+        self.todo_panel_expanded = false;
     }
 
     #[must_use]

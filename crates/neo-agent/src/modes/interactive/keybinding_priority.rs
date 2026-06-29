@@ -19,6 +19,7 @@ pub(super) const EDITING_ACTION_PRIORITY: &[KeybindingAction] = &[
     KeybindingAction::CommandPaletteOpen,
     KeybindingAction::SessionPickerOpen,
     KeybindingAction::ToolOutputToggle,
+    KeybindingAction::TodoPanelToggle,
     KeybindingAction::ModelPickerOpen,
     KeybindingAction::EditorCursorUp,
     KeybindingAction::EditorCursorDown,

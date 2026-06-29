@@ -1,14 +1,10 @@
-use crate::primitive::wrap_width;
-use crate::primitive::{Color, Style, paint, truncate_to_width, visible_width};
 use crate::primitive::Line;
 use crate::primitive::theme::{DevelopmentMode, GoalModeStatus, TuiTheme};
+use crate::primitive::wrap_width;
+use crate::primitive::{Color, Style, paint, truncate_to_width, visible_width};
 use crate::screen_output::{CURSOR_MARKER, CursorPos};
-use crate::shell::{
-    MAX_PROMPT_VISIBLE_LINES, NeoChromeState, PromptState,
-};
-use crate::transcript::{
-    ToolCallComponent, ToolCallState, ToolGroup, render_tool_group,
-};
+use crate::shell::{MAX_PROMPT_VISIBLE_LINES, NeoChromeState, PromptState};
+use crate::transcript::{ToolCallComponent, ToolCallState, ToolGroup, render_tool_group};
 use crate::widgets::box_draw::{ROUNDED, repeat_char};
 use crate::widgets::{PendingInputPreview, TodoPanel, box_draw};
 
@@ -117,6 +113,7 @@ pub fn render_chrome_lines(app: &NeoChromeState, width: usize, height: usize) ->
         lines.extend(
             TodoPanel::new(app.todo_items())
                 .with_theme(app.theme())
+                .expanded(app.todo_panel_expanded())
                 .render(content_width),
         );
     }
@@ -177,6 +174,7 @@ pub fn render_chrome_lines_mut(
         lines.extend(
             TodoPanel::new(app.todo_items())
                 .with_theme(app.theme())
+                .expanded(app.todo_panel_expanded())
                 .render(content_width),
         );
     }
