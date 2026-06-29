@@ -366,6 +366,8 @@ pub(crate) struct InteractiveController {
     /// Optional receiver for captured tracing WARN/ERROR events, surfaced as
     /// transcript status lines. `None` in tests that don't exercise this path.
     log_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::log_capture::CapturedEvent>>,
+    completion_notification: neo_tui::notify::NotificationMode,
+    question_notification: neo_tui::notify::NotificationMode,
 }
 
 pub(crate) struct TurnChannels {
@@ -697,6 +699,25 @@ impl InteractiveController {
             image_attachment_store: neo_tui::paste::ImageAttachmentStore::new(),
             model_capabilities: std::collections::HashMap::new(),
             log_event_rx: None,
+            completion_notification: neo_tui::notify::NotificationMode::Bell,
+            question_notification: neo_tui::notify::NotificationMode::None,
+        }
+    }
+
+    /// Fire a notification for the given event based on the controller's
+    /// configured notification modes. Called from `drain_active_turn`.
+    fn notify_for_event(&self, event: &AgentEvent) {
+        use neo_agent_core::StopReason;
+        if let AgentEvent::RunFinished { stop_reason, .. } = event {
+            if matches!(
+                stop_reason,
+                StopReason::EndTurn | StopReason::ToolUse | StopReason::MaxTokens
+            ) {
+                neo_tui::notify::notify_event(
+                    self.completion_notification,
+                    neo_tui::notify::EventKind::Completion,
+                );
+            }
         }
     }
 
@@ -766,7 +787,7 @@ impl InteractiveController {
                 Ok(TurnOutcome::default())
             })
         });
-        Self::new(
+        let controller = Self::new(
             title,
             session_label,
             model_label,
@@ -775,7 +796,12 @@ impl InteractiveController {
             catalogs,
             Arc::new(move |session_id| Box::pin(load_session(session_id))),
             Arc::new(move |session_id| Box::pin(fork_session(session_id))),
-        )
+        );
+        // Tests must not ring bells or spawn desktop notifications.
+        let mut controller = controller;
+        controller.completion_notification = neo_tui::notify::NotificationMode::None;
+        controller.question_notification = neo_tui::notify::NotificationMode::None;
+        controller
     }
 
     #[cfg(test)]

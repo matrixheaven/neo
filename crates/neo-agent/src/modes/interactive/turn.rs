@@ -130,11 +130,18 @@ impl InteractiveController {
             self.register_pending_approval(approval);
         }
         while let Ok(pending) = turn.questions.try_recv() {
+            neo_tui::notify::notify_event(
+                self.question_notification,
+                neo_tui::notify::EventKind::Question,
+            );
             self.register_pending_question(pending);
         }
         while let Ok(event) = turn.events.try_recv() {
             match event {
-                Ok(event) => self.apply_turn_event(event),
+                Ok(event) => {
+                    self.notify_for_event(&event);
+                    self.apply_turn_event(event);
+                }
                 Err(error) => {
                     self.push_status(format!("Error: {error}"));
                 }
@@ -153,11 +160,18 @@ impl InteractiveController {
                 self.register_pending_approval(approval);
             }
             while let Ok(pending) = turn.questions.try_recv() {
+                neo_tui::notify::notify_event(
+                    self.question_notification,
+                    neo_tui::notify::EventKind::Question,
+                );
                 self.register_pending_question(pending);
             }
             while let Ok(event) = turn.events.try_recv() {
                 match event {
-                    Ok(event) => self.apply_turn_event(event),
+                    Ok(event) => {
+                        self.notify_for_event(&event);
+                        self.apply_turn_event(event);
+                    }
                     Err(error) => {
                         self.push_status(format!("Error: {error}"));
                     }

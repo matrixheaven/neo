@@ -167,6 +167,8 @@ pub fn controller_for_config(config: &AppConfig) -> InteractiveController {
     ));
     controller.load_prompt_history();
     controller.trust_store = crate::trust::ProjectTrustStore::from_home().ok();
+    controller.completion_notification = config.tui.completion_notification;
+    controller.question_notification = config.tui.question_notification;
     controller
 }
 
