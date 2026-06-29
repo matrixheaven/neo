@@ -274,6 +274,7 @@ fn friendly_http_init_error(err: rmcp::service::ClientInitializeError) -> McpErr
     // OAuth required — the most common case for remote MCP servers.
     if display.contains("AuthRequired")
         || display.contains("AuthRequiredError")
+        || display.contains("Auth required")
         || display.contains("auth_required")
         || display.contains("401")
         || display.contains("Unauthorized")
@@ -354,6 +355,16 @@ mod tests {
             err.message(),
             "Server requires OAuth authorization. Run /mcp-config login <server_id> to authenticate."
         );
+    }
+
+    #[test]
+    fn friendly_http_init_error_maps_rmcp_auth_required_text_to_needs_auth() {
+        let err = friendly_http_init_error(rmcp::service::ClientInitializeError::ConnectionClosed(
+            "Send message error Transport [rmcp::transport::worker::WorkerTransport<rmcp::transport::streamable_http_client::StreamableHttpClientWorker<neo_agent_core::tools::mcp::http::OAuthStreamableHttpClient>>] error: Auth required, when send initialize request".to_owned(),
+        ));
+
+        assert_eq!(err.kind(), McpErrorKind::NeedsAuth);
+        assert!(err.is_needs_auth());
     }
 
     #[test]
