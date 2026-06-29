@@ -582,6 +582,7 @@ pub(crate) async fn generate_with_retry(
     messages: &[AgentMessage],
     strategy: &CompactionStrategy,
     max_context_tokens: usize,
+    instruction: Option<&str>,
     cancel_token: &CancellationToken,
     max_retry_attempts: u32,
 ) -> Result<(String, usize), CompactionError> {
@@ -602,7 +603,8 @@ pub(crate) async fn generate_with_retry(
         }
 
         let prefix = &messages[..compacted_count];
-        match generate_compaction_summary(model, config, prefix, None, cancel_token, |_| {}).await
+        match generate_compaction_summary(model, config, prefix, instruction, cancel_token, |_| {})
+            .await
         {
             Ok(summary) if !summary.trim().is_empty() => {
                 return Ok((summary, compacted_count));
@@ -1023,6 +1025,7 @@ mod tests {
             messages: &'a [AgentMessage],
             strategy: &'a CompactionStrategy,
             max_context_tokens: usize,
+            instruction: Option<&'a str>,
             cancel_token: &'a CancellationToken,
             max_retry_attempts: u32,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(String, usize), CompactionError>> + Send + 'a>>
@@ -1033,6 +1036,7 @@ mod tests {
                 messages,
                 strategy,
                 max_context_tokens,
+                instruction,
                 cancel_token,
                 max_retry_attempts,
             ))

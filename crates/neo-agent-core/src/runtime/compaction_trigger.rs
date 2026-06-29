@@ -35,7 +35,7 @@ pub(super) async fn maybe_compact(
         return;
     }
 
-    let (messages_to_compact, target_summary_chars) = emit_compaction_started(
+    let (_messages_to_compact, target_summary_chars) = emit_compaction_started(
         emitter,
         &trigger.messages,
         compacted_count,
@@ -44,21 +44,22 @@ pub(super) async fn maybe_compact(
     )
     .await;
 
+    let strategy = build_compaction_strategy(&trigger.settings);
     let (mut progress_rx, mut summary_rx) = spawn_summary_task(
         model,
         config,
-        &messages_to_compact,
+        // Pass the full message history — generate_with_retry computes its own
+        // split boundary internally (which may shrink on retry).
+        &trigger.messages,
         trigger.custom_instruction.as_deref(),
         cancel_token,
+        &strategy,
+        trigger.max_context_tokens,
     );
 
-    let Some((summary_text, progress_percent)) = run_summary_progress_loop(
-        emitter,
-        &mut progress_rx,
-        &mut summary_rx,
-        target_summary_chars,
-    )
-    .await
+    let Some(((summary_text, actual_compacted_count), progress_percent)) =
+        run_summary_progress_loop(emitter, &mut progress_rx, &mut summary_rx, target_summary_chars)
+            .await
     else {
         return;
     };
@@ -67,7 +68,7 @@ pub(super) async fn maybe_compact(
         emitter,
         config,
         &trigger.messages,
-        compacted_count,
+        actual_compacted_count,
         summary_text,
         trigger.used_tokens,
         progress_percent,
@@ -227,51 +228,61 @@ async fn emit_compaction_started(
 
 /// Spawn the summary LLM in its own task and return the progress and result
 /// channels.
+///
+/// Uses [`compaction::generate_with_retry`] internally, which retries on
+/// empty/truncated summaries by shrinking the prefix. The result carries both
+/// the summary text and the actual compacted count (which may differ from the
+/// initial count after prefix shrink).
 #[allow(clippy::type_complexity)]
 fn spawn_summary_task(
     model: &Arc<dyn ModelClient>,
     config: &AgentConfig,
-    messages_to_compact: &[AgentMessage],
+    messages: &[AgentMessage],
     custom_instruction: Option<&str>,
     cancel_token: &CancellationToken,
+    strategy: &CompactionStrategy,
+    max_context_tokens: usize,
 ) -> (
     mpsc::UnboundedReceiver<usize>,
-    oneshot::Receiver<Result<String, compaction::CompactionError>>,
+    oneshot::Receiver<Result<(String, usize), compaction::CompactionError>>,
 ) {
     let (progress_tx, progress_rx) = mpsc::unbounded_channel::<usize>();
     let (summary_tx, summary_rx) =
-        oneshot::channel::<Result<String, compaction::CompactionError>>();
+        oneshot::channel::<Result<(String, usize), compaction::CompactionError>>();
     let summary_model = Arc::clone(model);
     let summary_config = config.clone();
-    let summary_messages = messages_to_compact.to_vec();
+    let summary_messages = messages.to_vec();
     let summary_instruction = custom_instruction.map(str::to_owned);
     let summary_cancel = cancel_token.child_token();
+    let summary_strategy = strategy.clone();
     tokio::spawn(async move {
-        let result = compaction::generate_compaction_summary(
+        let result = compaction::generate_with_retry(
             &summary_model,
             &summary_config,
             &summary_messages,
+            &summary_strategy,
+            max_context_tokens,
             summary_instruction.as_deref(),
             &summary_cancel,
-            |summary_chars| {
-                let _ = progress_tx.send(summary_chars);
-            },
+            // Hardcoded until Task 10 makes it configurable.
+            5,
         )
         .await;
         let _ = summary_tx.send(result);
+        drop(progress_tx);
     });
     (progress_rx, summary_rx)
 }
 
 /// Drive the progress bar while waiting for the summary LLM to complete.
-/// Returns `None` (after sending an error) on failure, or `Some((text,
-/// progress_percent))` on success.
+/// Returns `None` (after sending an error) on failure, or `Some(((text,
+/// actual_compacted_count), progress_percent))` on success.
 async fn run_summary_progress_loop(
     emitter: &mut EventEmitter,
     progress_rx: &mut mpsc::UnboundedReceiver<usize>,
-    summary_rx: &mut oneshot::Receiver<Result<String, compaction::CompactionError>>,
+    summary_rx: &mut oneshot::Receiver<Result<(String, usize), compaction::CompactionError>>,
     target_summary_chars: usize,
-) -> Option<(String, u8)> {
+) -> Option<((String, usize), u8)> {
     let mut progress_percent: u8 = 15;
     let mut last_emitted_percent = progress_percent;
     let mut progress_tick = tokio::time::interval(Duration::from_millis(200));
@@ -279,7 +290,7 @@ async fn run_summary_progress_loop(
     // Skip the immediate first tick.
     let _ = progress_tick.tick().await;
 
-    let summary_text: String;
+    let summary_result: (String, usize);
     loop {
         tokio::select! {
             _ = progress_tick.tick() => {
@@ -311,7 +322,7 @@ async fn run_summary_progress_loop(
             }
             result = &mut *summary_rx => {
                 match result {
-                    Ok(Ok(text)) => summary_text = text,
+                    Ok(Ok(summary)) => summary_result = summary,
                     Ok(Err(err)) => {
                         let _ = emitter.send_error(AgentRuntimeError::Compaction(err));
                         return None;
@@ -344,7 +355,7 @@ async fn run_summary_progress_loop(
         }
     }
 
-    Some((summary_text, progress_percent))
+    Some((summary_result, progress_percent))
 }
 
 /// Build the [`CompactionSummary`], animate the progress bar to 100%, emit
