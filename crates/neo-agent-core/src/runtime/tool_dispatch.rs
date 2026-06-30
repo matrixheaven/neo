@@ -1,13 +1,15 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use futures::{StreamExt, stream::FuturesUnordered};
+use neo_ai::ModelClient;
 use tokio_util::sync::CancellationToken;
 
 use super::config::{AgentConfig, ToolExecutionMode};
 use super::error::AgentRuntimeError;
 use super::events::{
     EventEmitter, emit_shell_finished, emit_shell_started, emit_terminal_events,
-    make_tool_update_callback,
+    make_tool_event_callback, make_tool_update_callback,
 };
 use super::permission::{
     PermissionPreparation, current_permission_mode, permission_preparation_for_mode,
@@ -66,7 +68,8 @@ pub(super) fn continues_after_terminating_batch(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_tool_calls(
     config: &AgentConfig,
-    registry: &ToolRegistry,
+    model: Arc<dyn ModelClient>,
+    registry: Arc<ToolRegistry>,
     skills: Option<&SkillStore>,
     turn: u32,
     tool_calls: &[AgentToolCall],
@@ -77,7 +80,8 @@ pub(super) async fn execute_tool_calls(
     if matches!(config.tool_execution_mode, ToolExecutionMode::Sequential) {
         return execute_tool_calls_sequential(
             config,
-            registry,
+            Arc::clone(&model),
+            Arc::clone(&registry),
             skills,
             turn,
             tool_calls,
@@ -94,7 +98,8 @@ pub(super) async fn execute_tool_calls(
     }) {
         return execute_tool_calls_sequential(
             config,
-            registry,
+            Arc::clone(&model),
+            Arc::clone(&registry),
             skills,
             turn,
             tool_calls,
@@ -111,7 +116,8 @@ pub(super) async fn execute_tool_calls(
     }) {
         return execute_tool_calls_sequential(
             config,
-            registry,
+            Arc::clone(&model),
+            Arc::clone(&registry),
             skills,
             turn,
             tool_calls,
@@ -124,6 +130,7 @@ pub(super) async fn execute_tool_calls(
 
     execute_tool_calls_parallel(
         config,
+        model,
         registry,
         skills,
         turn,
@@ -175,7 +182,8 @@ pub(super) fn ask_user_runs_in_background(tool_call: &AgentToolCall) -> bool {
 #[allow(clippy::too_many_arguments)]
 async fn execute_tool_calls_sequential(
     config: &AgentConfig,
-    registry: &ToolRegistry,
+    model: Arc<dyn ModelClient>,
+    registry: Arc<ToolRegistry>,
     skills: Option<&SkillStore>,
     turn: u32,
     tool_calls: &[AgentToolCall],
@@ -183,7 +191,14 @@ async fn execute_tool_calls_sequential(
     cancel_token: &CancellationToken,
     process_supervisor: &ProcessSupervisor,
 ) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
-    let tool_context = default_tool_context(config, cancel_token, process_supervisor.clone())?;
+    let tool_context = default_tool_context(
+        config,
+        model,
+        Arc::clone(&registry),
+        turn,
+        cancel_token,
+        process_supervisor.clone(),
+    )?;
     let mut results = Vec::new();
     for tool_call in tool_calls {
         emitter.emit(AgentEvent::ToolExecutionStarted {
@@ -198,7 +213,7 @@ async fn execute_tool_calls_sequential(
             } else {
                 prepare_and_run_tool(
                     config,
-                    registry,
+                    registry.as_ref(),
                     skills,
                     &tool_context,
                     turn,
@@ -230,7 +245,8 @@ async fn execute_tool_calls_sequential(
 #[allow(clippy::too_many_arguments)]
 async fn execute_tool_calls_parallel(
     config: &AgentConfig,
-    registry: &ToolRegistry,
+    model: Arc<dyn ModelClient>,
+    registry: Arc<ToolRegistry>,
     skills: Option<&SkillStore>,
     turn: u32,
     tool_calls: &[AgentToolCall],
@@ -238,7 +254,14 @@ async fn execute_tool_calls_parallel(
     cancel_token: &CancellationToken,
     process_supervisor: &ProcessSupervisor,
 ) -> Result<Vec<(AgentToolCall, ToolResult)>, AgentRuntimeError> {
-    let tool_context = default_tool_context(config, cancel_token, process_supervisor.clone())?;
+    let tool_context = default_tool_context(
+        config,
+        model,
+        Arc::clone(&registry),
+        turn,
+        cancel_token,
+        process_supervisor.clone(),
+    )?;
     let mut completed = Vec::with_capacity(tool_calls.len());
     let mut running = FuturesUnordered::new();
 
@@ -286,19 +309,27 @@ async fn execute_tool_calls_parallel(
         }
 
         let config = config.clone();
+        let registry = Arc::clone(&registry);
         let tool_context = tool_context.clone().with_access(prepared.access);
         let cancel_token = cancel_token.clone();
         let sink = emitter.sink();
         running.push(async move {
-            let tool_context = tool_context.with_tool_update(make_tool_update_callback(
-                sink.clone(),
-                turn,
-                tool_call.id.clone(),
-                tool_call.name.clone(),
-            ));
-            let mut result =
-                run_tool_with_cancel(skills, registry, &tool_call, &tool_context, &cancel_token)
-                    .await;
+            let tool_context = tool_context
+                .with_tool_update(make_tool_update_callback(
+                    sink.clone(),
+                    turn,
+                    tool_call.id.clone(),
+                    tool_call.name.clone(),
+                ))
+                .with_tool_event(make_tool_event_callback(sink));
+            let mut result = run_tool_with_cancel(
+                skills,
+                registry.as_ref(),
+                &tool_call,
+                &tool_context,
+                &cancel_token,
+            )
+            .await;
             if !cancel_token.is_cancelled() {
                 result = after_tool_result(&config, &tool_call, result, &cancel_token).await;
             }
@@ -378,15 +409,17 @@ async fn prepare_and_run_tool(
     match prepared.result {
         PreparedToolCallResult::Skip(result) => Ok(result),
         PreparedToolCallResult::Run => {
+            let sink = emitter.sink();
             let context = tool_context
                 .clone()
                 .with_access(prepared.access)
                 .with_tool_update(make_tool_update_callback(
-                    emitter.sink(),
+                    sink.clone(),
                     turn,
                     tool_call.id.clone(),
                     tool_call.name.clone(),
-                ));
+                ))
+                .with_tool_event(make_tool_event_callback(sink));
             if tool_call.name == "Bash" {
                 emit_shell_started(turn, tool_call, &context, emitter);
             }
@@ -450,6 +483,9 @@ async fn run_model_bash_with_cancel(
 
 fn default_tool_context(
     config: &AgentConfig,
+    model: Arc<dyn ModelClient>,
+    registry: Arc<ToolRegistry>,
+    turn: u32,
     cancel_token: &CancellationToken,
     process_supervisor: ProcessSupervisor,
 ) -> Result<ToolContext, AgentRuntimeError> {
@@ -465,6 +501,8 @@ fn default_tool_context(
                 .with_cancel_token(cancel_token.clone())
                 .with_process_supervisor(process_supervisor)
                 .with_background_tasks(config.background_tasks.clone())
+                .with_multi_agent(config.multi_agent.clone())
+                .with_child_runtime(config.clone(), model, registry, turn)
         })
         .map(|context| {
             // The active plan file lives under the NEO_HOME sessions bucket

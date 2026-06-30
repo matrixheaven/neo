@@ -1,6 +1,8 @@
 mod ask_user;
 mod background_tasks;
 mod bash;
+mod delegate;
+mod delegate_controls;
 mod diff;
 mod edit;
 pub mod extensions;
@@ -29,6 +31,7 @@ use std::{
     time::Duration,
 };
 
+use neo_ai::ModelClient;
 use neo_ai::ToolSpec;
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -38,6 +41,10 @@ use tokio_util::sync::CancellationToken;
 use crate::TodoEventData;
 use crate::ToolAccess;
 use crate::goal::GoalManager;
+use crate::multi_agent::MultiAgentRuntime;
+use crate::runtime::AgentConfig;
+
+use crate::AgentEvent;
 
 pub const DEFAULT_BASH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
@@ -65,6 +72,12 @@ pub use bash::{
     ShellExecutionRequest, ShellExecutionResult, execute_model_bash_for_runtime,
     execute_shell_command,
 };
+mod workflow;
+
+pub use delegate_controls::{
+    InterruptDelegateTool, ListDelegatesTool, MessageDelegateTool, WaitDelegateTool,
+};
+pub use workflow::RunWorkflowTool;
 // Re-export Todo tool types.
 pub use todo::{TodoInput, TodoItem, TodoStatus, TodoTool};
 // Re-export Goal tool types.
@@ -86,6 +99,12 @@ pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolResult, ToolErr
 /// This is intentionally a simple boxed closure rather than a channel so that
 /// tools don't need to know about `AgentEvent` — they just push text.
 pub type ToolUpdateCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Callback for emitting structured `AgentEvent` values from tools during
+/// execution (e.g. delegate/swarm lifecycle events). Set by the runtime via
+/// `with_tool_event` so tools can emit normalized events without depending on
+/// TUI types or holding a mutable emitter reference.
+pub type ToolEventCallback = Arc<dyn Fn(AgentEvent) + Send + Sync>;
 
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -123,9 +142,23 @@ pub struct ToolContext {
     pub cancel_token: CancellationToken,
     pub process_supervisor: ProcessSupervisor,
     pub background_tasks: BackgroundTaskManager,
+    /// Shared multi-agent runtime for Delegate and DelegateSwarm tools.
+    pub multi_agent: MultiAgentRuntime,
+    /// Parent runtime config used to construct real child AgentRuntime instances.
+    pub child_config: Option<AgentConfig>,
+    /// Parent model client shared by child AgentRuntime instances.
+    pub child_model: Option<Arc<dyn ModelClient>>,
+    /// Parent tool registry shared by child AgentRuntime instances.
+    pub child_tools: Option<Arc<ToolRegistry>>,
+    /// Current parent turn for lifecycle events emitted by tools.
+    pub current_turn: Option<u32>,
     /// Optional callback for streaming intermediate tool output (e.g. bash
     /// stdout lines). Set by the runtime so tools can emit live updates.
     pub tool_update: Option<ToolUpdateCallback>,
+    /// Optional callback for emitting structured `AgentEvent` values from
+    /// tools (e.g. delegate lifecycle events). Set by the runtime so delegate
+    /// tools can emit `DelegateStarted`/`DelegateFinished` events.
+    pub tool_event: Option<ToolEventCallback>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -142,7 +175,13 @@ impl std::fmt::Debug for ToolContext {
             .field("cancel_token", &self.cancel_token)
             .field("process_supervisor", &self.process_supervisor)
             .field("background_tasks", &self.background_tasks)
+            .field("multi_agent", &self.multi_agent)
+            .field("child_config", &self.child_config.is_some())
+            .field("child_model", &self.child_model.is_some())
+            .field("child_tools", &self.child_tools.is_some())
+            .field("current_turn", &self.current_turn)
             .field("tool_update", &self.tool_update.is_some())
+            .field("tool_event", &self.tool_event.is_some())
             .finish()
     }
 }
@@ -159,7 +198,13 @@ impl ToolContext {
             cancel_token: CancellationToken::new(),
             process_supervisor: ProcessSupervisor::default(),
             background_tasks: BackgroundTaskManager::new(),
+            multi_agent: MultiAgentRuntime::new(),
+            child_config: None,
+            child_model: None,
+            child_tools: None,
+            current_turn: None,
             tool_update: None,
+            tool_event: None,
         })
     }
 
@@ -206,8 +251,35 @@ impl ToolContext {
     }
 
     #[must_use]
+    pub fn with_multi_agent(mut self, multi_agent: MultiAgentRuntime) -> Self {
+        self.multi_agent = multi_agent;
+        self
+    }
+
+    #[must_use]
+    pub fn with_child_runtime(
+        mut self,
+        config: AgentConfig,
+        model: Arc<dyn ModelClient>,
+        tools: Arc<ToolRegistry>,
+        current_turn: u32,
+    ) -> Self {
+        self.child_config = Some(config);
+        self.child_model = Some(model);
+        self.child_tools = Some(tools);
+        self.current_turn = Some(current_turn);
+        self
+    }
+
+    #[must_use]
     pub fn with_tool_update(mut self, callback: ToolUpdateCallback) -> Self {
         self.tool_update = Some(callback);
+        self
+    }
+
+    #[must_use]
+    pub fn with_tool_event(mut self, callback: ToolEventCallback) -> Self {
+        self.tool_event = Some(callback);
         self
     }
 
@@ -221,6 +293,14 @@ impl ToolContext {
     pub fn emit_update(&self, partial: &str) {
         if let Some(callback) = &self.tool_update {
             callback(partial);
+        }
+    }
+
+    /// Emit a structured `AgentEvent` through the tool event callback (if set).
+    /// Used by delegate/swarm tools to announce lifecycle transitions.
+    pub fn emit_event(&self, event: AgentEvent) {
+        if let Some(callback) = &self.tool_event {
+            callback(event);
         }
     }
 
@@ -373,6 +453,30 @@ impl ToolRegistry {
     }
 
     #[must_use]
+    pub fn with_builtin_child_tools() -> Self {
+        let mut registry = Self::new();
+        registry.register(read::ReadTool);
+        registry.register(list::ListTool);
+        registry.register(grep::GrepTool);
+        registry.register(find::FindTool);
+        registry.register(glob::GlobTool);
+        registry.register(self::todo::TodoTool::with_state(Arc::new(Mutex::new(
+            Vec::new(),
+        ))));
+        registry.register(write::WriteTool);
+        registry.register(edit::EditTool);
+        registry.register(bash::BashTool);
+        registry.register(background_tasks::TaskListTool);
+        registry.register(background_tasks::TaskOutputTool);
+        registry.register(background_tasks::TaskStopTool);
+        registry.register(terminal::TerminalTool);
+        registry.register(plan_mode::EnterPlanModeTool);
+        registry.register(plan_mode::ExitPlanModeTool);
+        registry.register(workflow::RunWorkflowTool);
+        registry
+    }
+
+    #[must_use]
     pub fn with_builtin_tools_and_todos(todos: Arc<Mutex<Vec<TodoEventData>>>) -> Self {
         let mut registry = Self::new();
         registry.register(read::ReadTool);
@@ -390,6 +494,13 @@ impl ToolRegistry {
         registry.register(terminal::TerminalTool);
         registry.register(plan_mode::EnterPlanModeTool);
         registry.register(plan_mode::ExitPlanModeTool);
+        registry.register(delegate::DelegateTool);
+        registry.register(delegate::DelegateSwarmTool);
+        registry.register(delegate_controls::ListDelegatesTool);
+        registry.register(delegate_controls::WaitDelegateTool);
+        registry.register(delegate_controls::InterruptDelegateTool);
+        registry.register(delegate_controls::MessageDelegateTool);
+        registry.register(workflow::RunWorkflowTool);
         registry
     }
 

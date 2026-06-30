@@ -12,6 +12,9 @@ pub(super) async fn chat_request(config: &AgentConfig, context: &AgentContext) -
     if let Some(system_prompt) = &config.system_prompt {
         messages.push(AgentMessage::system_text(system_prompt).to_chat_message());
     }
+    if let Some(tool_schema_catalog) = tool_schema_catalog_message(&config.tools) {
+        messages.push(tool_schema_catalog.to_chat_message());
+    }
     if let Some(workspace_context) = workspace_context_message(config) {
         messages.push(workspace_context.to_chat_message());
     }
@@ -90,6 +93,16 @@ fn workspace_context_message(config: &AgentConfig) -> Option<AgentMessage> {
     )))
 }
 
+fn tool_schema_catalog_message(tools: &[neo_ai::ToolSpec]) -> Option<AgentMessage> {
+    if tools.is_empty() {
+        return None;
+    }
+    let catalog = serde_json::to_string(tools).expect("tool specs should serialize");
+    Some(AgentMessage::system_text(format!(
+        "<available_tools_schema>\n{catalog}\n</available_tools_schema>\n\nUse these exact tool names and JSON schemas when calling tools. Do not invent alternate parameters, aliases, or simplified payloads."
+    )))
+}
+
 fn without_reasoning_content(message: ChatMessage) -> ChatMessage {
     match message {
         ChatMessage::System { content } => ChatMessage::System {
@@ -127,22 +140,28 @@ fn filter_reasoning(content: Vec<neo_ai::ContentPart>) -> Vec<neo_ai::ContentPar
 pub(super) fn validate_model_capabilities(request: &ChatRequest) -> Result<(), AiError> {
     let capabilities = &request.model.capabilities;
     if !request.tools.is_empty() && !capabilities.tools {
-        return Err(AiError::Configuration { message: format!(
-            "model {}/{} does not support tools",
-            request.model.provider.0, request.model.model
-        ) });
+        return Err(AiError::Configuration {
+            message: format!(
+                "model {}/{} does not support tools",
+                request.model.provider.0, request.model.model
+            ),
+        });
     }
     if request.options.reasoning_effort.is_some() && !capabilities.reasoning {
-        return Err(AiError::Configuration { message: format!(
-            "model {}/{} does not support reasoning",
-            request.model.provider.0, request.model.model
-        ) });
+        return Err(AiError::Configuration {
+            message: format!(
+                "model {}/{} does not support reasoning",
+                request.model.provider.0, request.model.model
+            ),
+        });
     }
     if request_messages_contain_image(&request.messages) && !capabilities.images {
-        return Err(AiError::Configuration { message: format!(
-            "model {}/{} does not support image input",
-            request.model.provider.0, request.model.model
-        ) });
+        return Err(AiError::Configuration {
+            message: format!(
+                "model {}/{} does not support image input",
+                request.model.provider.0, request.model.model
+            ),
+        });
     }
     Ok(())
 }
@@ -173,4 +192,90 @@ pub(super) async fn chat_request_for_context_estimate(
         .clone();
     config.plan_mode = Arc::new(RwLock::new(plan_mode));
     chat_request(&config, context).await
+}
+
+#[cfg(test)]
+mod tests {
+    use neo_ai::{ApiKind, ChatMessage, ContentPart, ModelCapabilities, ModelSpec, ProviderId};
+
+    use super::*;
+    use crate::tools::ToolRegistry;
+
+    fn tool_model() -> ModelSpec {
+        ModelSpec {
+            provider: ProviderId("test".to_owned()),
+            model: "tool-model".to_owned(),
+            api: ApiKind::Local,
+            capabilities: ModelCapabilities::tool_chat(),
+        }
+    }
+
+    fn system_texts(request: &ChatRequest) -> String {
+        request
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                ChatMessage::System { content } => Some(content),
+                _ => None,
+            })
+            .flat_map(|content| content.iter())
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn chat_request_injects_complete_tool_schema_catalog_into_system_context() {
+        let tools = ToolRegistry::with_builtin_tools().specs();
+        let config = AgentConfig::for_model(tool_model())
+            .with_system_prompt("Base system")
+            .with_tools(tools);
+        let context = AgentContext::new();
+
+        let request = chat_request(&config, &context).await;
+        let system_text = system_texts(&request);
+
+        assert!(
+            system_text.contains("<available_tools_schema>"),
+            "{system_text}"
+        );
+        assert!(
+            system_text.contains("\"name\":\"Delegate\""),
+            "{system_text}"
+        );
+        assert!(
+            system_text.contains("\"name\":\"DelegateSwarm\""),
+            "{system_text}"
+        );
+        assert!(system_text.contains("\"prompt_template\""), "{system_text}");
+        assert!(system_text.contains("\"max_concurrency\""), "{system_text}");
+        assert!(
+            system_text.contains("\"name\":\"TodoList\""),
+            "{system_text}"
+        );
+        assert!(system_text.contains("\"todos\""), "{system_text}");
+        assert!(
+            system_text.contains("\"name\":\"TaskList\""),
+            "{system_text}"
+        );
+        assert!(system_text.contains("\"active_only\""), "{system_text}");
+    }
+
+    #[tokio::test]
+    async fn chat_request_omits_tool_schema_catalog_when_no_tools_are_available() {
+        let config = AgentConfig::for_model(tool_model()).with_system_prompt("Base system");
+        let context = AgentContext::new();
+
+        let request = chat_request(&config, &context).await;
+        let system_text = system_texts(&request);
+
+        assert!(
+            !system_text.contains("<available_tools_schema>"),
+            "{system_text}"
+        );
+        assert!(request.tools.is_empty());
+    }
 }

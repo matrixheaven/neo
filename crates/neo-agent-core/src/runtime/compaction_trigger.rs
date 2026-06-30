@@ -67,8 +67,13 @@ pub(super) async fn maybe_compact(
         );
 
         let Some(((summary_text, actual_compacted_count), progress_percent)) =
-            run_summary_progress_loop(emitter, &mut progress_rx, &mut summary_rx, target_summary_chars)
-                .await
+            run_summary_progress_loop(
+                emitter,
+                &mut progress_rx,
+                &mut summary_rx,
+                target_summary_chars,
+            )
+            .await
         else {
             break;
         };

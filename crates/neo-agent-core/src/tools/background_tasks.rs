@@ -19,6 +19,8 @@ use crate::QuestionEventData;
 pub enum BackgroundTaskKind {
     Bash,
     Question,
+    Delegate,
+    DelegateSwarm,
 }
 
 impl BackgroundTaskKind {
@@ -27,6 +29,8 @@ impl BackgroundTaskKind {
         match self {
             Self::Bash => "bash",
             Self::Question => "question",
+            Self::Delegate => "delegate",
+            Self::DelegateSwarm => "delegate-swarm",
         }
     }
 }
@@ -90,6 +94,8 @@ pub struct BackgroundTaskSnapshot {
     pub elapsed: Duration,
     pub output: Option<CommandOutput>,
     pub answers: Option<Vec<String>>,
+    pub delegate: Option<crate::multi_agent::AgentSnapshot>,
+    pub swarm: Option<crate::multi_agent::SwarmSnapshot>,
 }
 
 enum BackgroundTaskState {
@@ -102,6 +108,20 @@ enum BackgroundTaskState {
     QuestionFinished {
         status: BackgroundTaskStatus,
         answers: Option<Vec<String>>,
+    },
+    DelegateRunning {
+        snapshot: crate::multi_agent::AgentSnapshot,
+    },
+    DelegateFinished {
+        status: BackgroundTaskStatus,
+        snapshot: crate::multi_agent::AgentSnapshot,
+    },
+    DelegateSwarmRunning {
+        snapshot: crate::multi_agent::SwarmSnapshot,
+    },
+    DelegateSwarmFinished {
+        status: BackgroundTaskStatus,
+        snapshot: crate::multi_agent::SwarmSnapshot,
     },
 }
 
@@ -224,6 +244,136 @@ impl BackgroundTaskManager {
         }
     }
 
+    /// Register a delegate agent as a background task. Returns the task ID
+    /// (the agent ID).
+    pub async fn start_delegate(&self, snapshot: crate::multi_agent::AgentSnapshot) -> String {
+        let task_id = snapshot.id.as_str().to_owned();
+        self.inner.lock().await.insert(
+            task_id.clone(),
+            BackgroundTaskRecord {
+                description: snapshot.task.clone(),
+                started_at: Instant::now(),
+                state: BackgroundTaskState::DelegateRunning { snapshot },
+                detached: true,
+                deadline: None,
+                detach_timeout: None,
+            },
+        );
+        task_id
+    }
+
+    /// Mark a running delegate as completed.
+    pub async fn complete_delegate(
+        &self,
+        task_id: &str,
+        snapshot: crate::multi_agent::AgentSnapshot,
+    ) {
+        let mut tasks = self.inner.lock().await;
+        if let Some(record) = tasks.get_mut(task_id)
+            && matches!(record.state, BackgroundTaskState::DelegateRunning { .. })
+        {
+            record.state = BackgroundTaskState::DelegateFinished {
+                status: BackgroundTaskStatus::Completed,
+                snapshot,
+            };
+        }
+    }
+
+    /// Mark a running delegate as cancelled.
+    pub async fn cancel_delegate(
+        &self,
+        task_id: &str,
+        snapshot: crate::multi_agent::AgentSnapshot,
+    ) {
+        let mut tasks = self.inner.lock().await;
+        if let Some(record) = tasks.get_mut(task_id)
+            && matches!(record.state, BackgroundTaskState::DelegateRunning { .. })
+        {
+            record.state = BackgroundTaskState::DelegateFinished {
+                status: BackgroundTaskStatus::Stopped,
+                snapshot,
+            };
+        }
+    }
+
+    /// Register a delegate swarm as a background task. Returns the task ID
+    /// (the swarm ID).
+    pub async fn start_delegate_swarm(
+        &self,
+        snapshot: crate::multi_agent::SwarmSnapshot,
+    ) -> String {
+        let task_id = snapshot.swarm_id.clone();
+        self.inner.lock().await.insert(
+            task_id.clone(),
+            BackgroundTaskRecord {
+                description: snapshot.description.clone(),
+                started_at: Instant::now(),
+                state: BackgroundTaskState::DelegateSwarmRunning { snapshot },
+                detached: true,
+                deadline: None,
+                detach_timeout: None,
+            },
+        );
+        task_id
+    }
+
+    /// Update a running delegate swarm's snapshot.
+    pub async fn update_delegate_swarm(
+        &self,
+        task_id: &str,
+        snapshot: crate::multi_agent::SwarmSnapshot,
+    ) {
+        let mut tasks = self.inner.lock().await;
+        if let Some(record) = tasks.get_mut(task_id)
+            && matches!(
+                record.state,
+                BackgroundTaskState::DelegateSwarmRunning { .. }
+            )
+        {
+            record.state = BackgroundTaskState::DelegateSwarmRunning { snapshot };
+        }
+    }
+
+    /// Mark a running delegate swarm as completed.
+    pub async fn complete_delegate_swarm(
+        &self,
+        task_id: &str,
+        snapshot: crate::multi_agent::SwarmSnapshot,
+    ) {
+        let mut tasks = self.inner.lock().await;
+        if let Some(record) = tasks.get_mut(task_id)
+            && matches!(
+                record.state,
+                BackgroundTaskState::DelegateSwarmRunning { .. }
+            )
+        {
+            record.state = BackgroundTaskState::DelegateSwarmFinished {
+                status: BackgroundTaskStatus::Completed,
+                snapshot,
+            };
+        }
+    }
+
+    /// Mark a running delegate swarm as cancelled.
+    pub async fn cancel_delegate_swarm(
+        &self,
+        task_id: &str,
+        snapshot: crate::multi_agent::SwarmSnapshot,
+    ) {
+        let mut tasks = self.inner.lock().await;
+        if let Some(record) = tasks.get_mut(task_id)
+            && matches!(
+                record.state,
+                BackgroundTaskState::DelegateSwarmRunning { .. }
+            )
+        {
+            record.state = BackgroundTaskState::DelegateSwarmFinished {
+                status: BackgroundTaskStatus::Stopped,
+                snapshot,
+            };
+        }
+    }
+
     pub async fn start_bash_foreground(
         &self,
         description: String,
@@ -339,6 +489,8 @@ impl BackgroundTaskManager {
                         elapsed: record.started_at.elapsed(),
                         output: Some(output.clone()),
                         answers: None,
+                        delegate: None,
+                        swarm: None,
                     })
                 }
                 BackgroundTaskState::QuestionFinished { status, answers } => {
@@ -350,6 +502,34 @@ impl BackgroundTaskManager {
                         elapsed: record.started_at.elapsed(),
                         output: None,
                         answers: answers.clone(),
+                        delegate: None,
+                        swarm: None,
+                    })
+                }
+                BackgroundTaskState::DelegateFinished { status, snapshot } => {
+                    StopAction::Already(BackgroundTaskSnapshot {
+                        task_id: task_id.to_owned(),
+                        kind: BackgroundTaskKind::Delegate,
+                        status: *status,
+                        description: record.description.clone(),
+                        elapsed: record.started_at.elapsed(),
+                        output: None,
+                        answers: None,
+                        delegate: Some(snapshot.clone()),
+                        swarm: None,
+                    })
+                }
+                BackgroundTaskState::DelegateSwarmFinished { status, snapshot } => {
+                    StopAction::Already(BackgroundTaskSnapshot {
+                        task_id: task_id.to_owned(),
+                        kind: BackgroundTaskKind::DelegateSwarm,
+                        status: *status,
+                        description: record.description.clone(),
+                        elapsed: record.started_at.elapsed(),
+                        output: None,
+                        answers: None,
+                        delegate: None,
+                        swarm: Some(snapshot.clone()),
                     })
                 }
                 BackgroundTaskState::QuestionWaiting => {
@@ -362,6 +542,53 @@ impl BackgroundTaskManager {
                         started_at: record.started_at,
                         description: record.description.clone(),
                     }
+                }
+                BackgroundTaskState::DelegateRunning { snapshot: _ } => {
+                    let record = tasks.get_mut(task_id).expect("record still exists");
+                    let mut snapshot = match &record.state {
+                        BackgroundTaskState::DelegateRunning { snapshot } => snapshot.clone(),
+                        _ => unreachable!(),
+                    };
+                    snapshot.state = crate::multi_agent::AgentLifecycleState::Cancelled;
+                    record.state = BackgroundTaskState::DelegateFinished {
+                        status: BackgroundTaskStatus::Stopped,
+                        snapshot: snapshot.clone(),
+                    };
+                    let snap = BackgroundTaskSnapshot {
+                        task_id: task_id.to_owned(),
+                        kind: BackgroundTaskKind::Delegate,
+                        status: BackgroundTaskStatus::Stopped,
+                        description: record.description.clone(),
+                        elapsed: record.started_at.elapsed(),
+                        output: None,
+                        answers: None,
+                        delegate: Some(snapshot),
+                        swarm: None,
+                    };
+                    return Ok(snapshot_result(&snap, max_output_bytes));
+                }
+                BackgroundTaskState::DelegateSwarmRunning { snapshot: _ } => {
+                    let record = tasks.get_mut(task_id).expect("record still exists");
+                    let snapshot = match &record.state {
+                        BackgroundTaskState::DelegateSwarmRunning { snapshot } => snapshot.clone(),
+                        _ => unreachable!(),
+                    };
+                    record.state = BackgroundTaskState::DelegateSwarmFinished {
+                        status: BackgroundTaskStatus::Stopped,
+                        snapshot: snapshot.clone(),
+                    };
+                    let snap = BackgroundTaskSnapshot {
+                        task_id: task_id.to_owned(),
+                        kind: BackgroundTaskKind::DelegateSwarm,
+                        status: BackgroundTaskStatus::Stopped,
+                        description: record.description.clone(),
+                        elapsed: record.started_at.elapsed(),
+                        output: None,
+                        answers: None,
+                        delegate: None,
+                        swarm: Some(snapshot),
+                    };
+                    return Ok(snapshot_result(&snap, max_output_bytes));
                 }
                 BackgroundTaskState::BashRunning(_) => {
                     let record = tasks.remove(task_id).expect("record still exists");
@@ -391,6 +618,8 @@ impl BackgroundTaskManager {
                     elapsed: started_at.elapsed(),
                     output: None,
                     answers: None,
+                    delegate: None,
+                    swarm: None,
                 };
                 let mut result = snapshot_result(&snapshot, max_output_bytes);
                 result.details = Some(json!({
@@ -427,6 +656,8 @@ impl BackgroundTaskManager {
                     elapsed: started_at.elapsed(),
                     output: Some(output.clone()),
                     answers: None,
+                    delegate: None,
+                    swarm: None,
                 };
                 self.inner.lock().await.insert(
                     task_id.to_owned(),
@@ -516,6 +747,8 @@ impl BackgroundTaskManager {
                         elapsed: record.started_at.elapsed(),
                         output: Some(output.clone()),
                         answers: None,
+                        delegate: None,
+                        swarm: None,
                     })
                 }
                 BackgroundTaskState::QuestionWaiting => {
@@ -527,6 +760,8 @@ impl BackgroundTaskManager {
                         elapsed: record.started_at.elapsed(),
                         output: None,
                         answers: None,
+                        delegate: None,
+                        swarm: None,
                     })
                 }
                 BackgroundTaskState::QuestionFinished { status, answers } => {
@@ -538,6 +773,60 @@ impl BackgroundTaskManager {
                         elapsed: record.started_at.elapsed(),
                         output: None,
                         answers: answers.clone(),
+                        delegate: None,
+                        swarm: None,
+                    })
+                }
+                BackgroundTaskState::DelegateRunning { snapshot } => {
+                    SnapshotAction::Ready(BackgroundTaskSnapshot {
+                        task_id: task_id.to_owned(),
+                        kind: BackgroundTaskKind::Delegate,
+                        status: BackgroundTaskStatus::Running,
+                        description: record.description.clone(),
+                        elapsed: record.started_at.elapsed(),
+                        output: None,
+                        answers: None,
+                        delegate: Some(snapshot.clone()),
+                        swarm: None,
+                    })
+                }
+                BackgroundTaskState::DelegateFinished { status, snapshot } => {
+                    SnapshotAction::Ready(BackgroundTaskSnapshot {
+                        task_id: task_id.to_owned(),
+                        kind: BackgroundTaskKind::Delegate,
+                        status: *status,
+                        description: record.description.clone(),
+                        elapsed: record.started_at.elapsed(),
+                        output: None,
+                        answers: None,
+                        delegate: Some(snapshot.clone()),
+                        swarm: None,
+                    })
+                }
+                BackgroundTaskState::DelegateSwarmRunning { snapshot } => {
+                    SnapshotAction::Ready(BackgroundTaskSnapshot {
+                        task_id: task_id.to_owned(),
+                        kind: BackgroundTaskKind::DelegateSwarm,
+                        status: BackgroundTaskStatus::Running,
+                        description: record.description.clone(),
+                        elapsed: record.started_at.elapsed(),
+                        output: None,
+                        answers: None,
+                        delegate: None,
+                        swarm: Some(snapshot.clone()),
+                    })
+                }
+                BackgroundTaskState::DelegateSwarmFinished { status, snapshot } => {
+                    SnapshotAction::Ready(BackgroundTaskSnapshot {
+                        task_id: task_id.to_owned(),
+                        kind: BackgroundTaskKind::DelegateSwarm,
+                        status: *status,
+                        description: record.description.clone(),
+                        elapsed: record.started_at.elapsed(),
+                        output: None,
+                        answers: None,
+                        delegate: None,
+                        swarm: Some(snapshot.clone()),
                     })
                 }
                 BackgroundTaskState::BashRunning(command)
@@ -609,6 +898,8 @@ impl BackgroundTaskManager {
                         stderr_truncated,
                     )),
                     answers: None,
+                    delegate: None,
+                    swarm: None,
                 })
             }
             SnapshotAction::Timeout {
@@ -635,6 +926,8 @@ impl BackgroundTaskManager {
                     elapsed: started_at.elapsed(),
                     output: Some(output.clone()),
                     answers: None,
+                    delegate: None,
+                    swarm: None,
                 };
                 self.inner.lock().await.insert(
                     task_id.to_owned(),
@@ -681,6 +974,8 @@ impl BackgroundTaskManager {
                     elapsed: started_at.elapsed(),
                     output: Some(output.clone()),
                     answers: None,
+                    delegate: None,
+                    swarm: None,
                 };
                 self.inner.lock().await.insert(
                     task_id.to_owned(),
@@ -869,6 +1164,16 @@ impl Tool for TaskStopTool {
             ctx.ensure_shell_allowed()?;
             let input: TaskStopInput = parse_input(self.name(), input)?;
             let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
+            if let Some(snapshot) = ctx.multi_agent.cancel_agent_by_id(&input.task_id) {
+                ctx.background_tasks
+                    .cancel_delegate(&input.task_id, snapshot)
+                    .await;
+            }
+            if let Some(snapshot) = ctx.multi_agent.cancel_swarm_by_id(&input.task_id) {
+                ctx.background_tasks
+                    .cancel_delegate_swarm(&input.task_id, snapshot)
+                    .await;
+            }
             ctx.background_tasks
                 .stop(
                     &input.task_id,
@@ -1214,6 +1519,8 @@ mod tests {
             elapsed: Duration::from_secs(5),
             output: None,
             answers: None,
+            delegate: None,
+            swarm: None,
         };
         let result = task_list_result(&[snapshot], true);
         assert!(result.content.contains("active_background_tasks: 1"));

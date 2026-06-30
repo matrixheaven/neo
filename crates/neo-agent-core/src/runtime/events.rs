@@ -122,6 +122,15 @@ impl EventPublisher for EventSink {
     }
 }
 
+/// Build a `ToolEventCallback` that forwards structured `AgentEvent` values
+/// through the event sink. Used by `tool_dispatch` so delegate/swarm tools can
+/// emit lifecycle events without holding a mutable emitter reference.
+pub(super) fn make_tool_event_callback(sink: EventSink) -> crate::tools::ToolEventCallback {
+    std::sync::Arc::new(move |event: AgentEvent| {
+        sink.emit_event(event);
+    })
+}
+
 pub(super) fn emit_todo_event(
     turn: u32,
     config: &AgentConfig,

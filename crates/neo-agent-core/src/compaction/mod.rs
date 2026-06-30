@@ -554,10 +554,7 @@ pub(crate) fn is_stale(snapshot: &[AgentMessage], current: &[AgentMessage]) -> b
     if current.len() < snapshot.len() {
         return true;
     }
-    snapshot
-        .iter()
-        .zip(current.iter())
-        .any(|(a, b)| a != b)
+    snapshot.iter().zip(current.iter()).any(|(a, b)| a != b)
 }
 
 /// Whether a compaction LLM error is worth retrying (rate limit, timeout, etc.).
@@ -606,15 +603,11 @@ where
         }
 
         let prefix = &messages[..compacted_count];
-        let result = generate_compaction_summary(
-            model,
-            config,
-            prefix,
-            instruction,
-            cancel_token,
-            |len| on_progress(len),
-        )
-        .await;
+        let result =
+            generate_compaction_summary(model, config, prefix, instruction, cancel_token, |len| {
+                on_progress(len)
+            })
+            .await;
 
         match result {
             Ok(summary) if !summary.trim().is_empty() => return Ok((summary, compacted_count)),
@@ -1048,8 +1041,13 @@ mod tests {
             cancel_token: &'a CancellationToken,
             max_retry_attempts: u32,
             _on_progress: &'a dyn Fn(usize),
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(String, usize), CompactionError>> + Send + 'a>>
-        {
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(String, usize), CompactionError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
             Box::pin(generate_with_retry(
                 model,
                 config,

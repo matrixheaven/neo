@@ -152,15 +152,9 @@ pub(super) async fn run_agent_turn(
             estimate_chat_messages_tokens(&request.messages),
         );
         validate_model_capabilities(&request)?;
-        let assistant = run_model_turn_with_recovery(
-            &model,
-            &config,
-            request,
-            turn,
-            emitter,
-            &cancel_token,
-        )
-        .await?;
+        let assistant =
+            run_model_turn_with_recovery(&model, &config, request, turn, emitter, &cancel_token)
+                .await?;
         final_turn = turn;
         if let Some(AgentMessage::Assistant { stop_reason, .. }) = &assistant {
             final_stop_reason = *stop_reason;
@@ -188,7 +182,8 @@ pub(super) async fn run_agent_turn(
         };
         let mut tool_results = execute_tool_calls(
             &config,
-            registry,
+            Arc::clone(&model),
+            Arc::clone(registry),
             skills.as_deref(),
             turn,
             &tool_calls,

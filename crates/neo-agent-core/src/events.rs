@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use std::path::PathBuf;
 
+use crate::multi_agent::{AgentSnapshot, SwarmSnapshot};
 use crate::{AgentMessage, AgentToolCall, PermissionOperation, ShellCommandOutcome, ToolResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -270,6 +271,42 @@ pub enum AgentEvent {
         turn: u32,
         id: String,
         questions: Vec<QuestionEventData>,
+    },
+    DelegateStarted {
+        turn: u32,
+        agent: AgentSnapshot,
+    },
+    DelegateUpdated {
+        turn: u32,
+        agent: AgentSnapshot,
+    },
+    DelegateFinished {
+        turn: u32,
+        agent: AgentSnapshot,
+    },
+    DelegateSwarmStarted {
+        turn: u32,
+        swarm: SwarmSnapshot,
+    },
+    DelegateSwarmUpdated {
+        turn: u32,
+        swarm: SwarmSnapshot,
+    },
+    DelegateSwarmFinished {
+        turn: u32,
+        swarm: SwarmSnapshot,
+    },
+    WorkflowStarted {
+        turn: u32,
+        workflow: crate::workflow::WorkflowSnapshot,
+    },
+    WorkflowUpdated {
+        turn: u32,
+        workflow: crate::workflow::WorkflowSnapshot,
+    },
+    WorkflowFinished {
+        turn: u32,
+        workflow: crate::workflow::WorkflowSnapshot,
     },
 }
 

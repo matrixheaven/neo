@@ -62,6 +62,32 @@ impl AgentRuntime {
     }
 
     #[must_use]
+    pub fn with_shared_tools(
+        mut config: AgentConfig,
+        model: Arc<dyn ModelClient>,
+        tools: Arc<ToolRegistry>,
+    ) -> Self {
+        config.tools = tools.specs();
+        Self::with_shared_tools_and_configured_specs(config, model, tools)
+    }
+
+    #[must_use]
+    pub fn with_shared_tools_and_configured_specs(
+        config: AgentConfig,
+        model: Arc<dyn ModelClient>,
+        tools: Arc<ToolRegistry>,
+    ) -> Self {
+        Self {
+            config,
+            model,
+            tools: Some(tools),
+            skills: None,
+            goal_manager: None,
+            steer_input: SteerInputHandle::new(),
+        }
+    }
+
+    #[must_use]
     pub fn with_tools_and_skills(
         mut config: AgentConfig,
         model: Arc<dyn ModelClient>,

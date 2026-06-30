@@ -4,6 +4,7 @@ pub mod goal;
 pub mod harness;
 pub mod messages;
 pub mod mode;
+pub mod multi_agent;
 pub mod oauth;
 pub mod permissions;
 pub mod rpc;
@@ -12,6 +13,7 @@ pub mod session;
 pub mod sidecar;
 pub mod skills;
 pub mod tools;
+pub mod workflow;
 
 pub use compaction::{
     CompactionError, CompactionSource, CompactionStrategy, can_split_after, compute_compact_count,
@@ -28,5 +30,5 @@ pub use permissions::{
 pub use runtime::*;
 pub use tools::*;
 
-pub use neo_ai::error_info;
 pub use neo_ai::NeoErrorInfo;
+pub use neo_ai::error_info;

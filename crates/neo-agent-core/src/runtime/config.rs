@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use super::permission::ApprovalRequest;
+use crate::multi_agent::MultiAgentRuntime;
 use crate::permissions::{ApprovalRuleStore, SessionApprovalKey};
 use crate::tools::BackgroundTaskManager;
 use crate::{
@@ -157,6 +158,10 @@ pub struct AgentConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub manual_compact_request: Arc<std::sync::Mutex<Option<String>>>,
+    /// Shared multi-agent runtime for Delegate and DelegateSwarm tools.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub multi_agent: MultiAgentRuntime,
 }
 
 impl AgentConfig {
@@ -196,6 +201,7 @@ impl AgentConfig {
             todos: Arc::new(Mutex::new(Vec::new())),
             background_tasks: BackgroundTaskManager::new(),
             manual_compact_request: Arc::new(std::sync::Mutex::new(None)),
+            multi_agent: MultiAgentRuntime::new(),
         }
     }
 
@@ -429,6 +435,13 @@ impl AgentConfig {
         self.background_tasks = background_tasks;
         self
     }
+
+    /// Replace the shared multi-agent runtime.
+    #[must_use]
+    pub fn with_multi_agent(mut self, multi_agent: MultiAgentRuntime) -> Self {
+        self.multi_agent = multi_agent;
+        self
+    }
 }
 
 /// Safety ratio: observed overflow point × this = safe effective max.
@@ -439,11 +452,7 @@ const OVERFLOW_SAFETY_RATIO: f64 = 0.85;
 /// Returns `min(configured, observed × 0.85)`.
 #[must_use]
 pub fn effective_max_context_tokens(config: &AgentConfig) -> usize {
-    let configured = config
-        .model
-        .capabilities
-        .max_context_tokens
-        .unwrap_or(0) as usize;
+    let configured = config.model.capabilities.max_context_tokens.unwrap_or(0) as usize;
     let observed = config
         .observed_max_context_tokens
         .lock()
