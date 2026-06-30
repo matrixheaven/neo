@@ -316,7 +316,7 @@ async fn terminal_tool_start_write_read_resize_and_stop_uses_real_pty() {
         .expect("terminal stop should succeed");
     assert_eq!(
         stopped.details.as_ref().expect("stop details")["status"],
-        "stopped"
+        "cancelled"
     );
     assert_eq!(supervisor.active_count().await, 0);
 

@@ -683,7 +683,7 @@ mod tests {
             .await
             .expect("TaskOutput result");
         let details = output.details.unwrap();
-        assert_eq!(details["status"], "stopped");
+        assert_eq!(details["status"], "cancelled");
         assert!(details.get("answers").is_none());
     }
 }

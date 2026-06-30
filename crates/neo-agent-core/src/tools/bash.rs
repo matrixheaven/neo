@@ -438,7 +438,7 @@ async fn execute_manager_owned_shell_command(
             let output = snapshot.output.unwrap_or_else(empty_command_output);
             let outcome = match snapshot.status {
                 BackgroundTaskStatus::TimedOut => ShellCommandOutcome::TimedOut,
-                BackgroundTaskStatus::Stopped => ShellCommandOutcome::Cancelled,
+                BackgroundTaskStatus::Cancelled => ShellCommandOutcome::Cancelled,
                 _ => ShellCommandOutcome::Completed,
             };
             return Ok(shell_result_from_output(

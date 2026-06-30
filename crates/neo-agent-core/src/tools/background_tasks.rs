@@ -7,7 +7,7 @@ use std::{
 
 use futures::future::BoxFuture;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{sync::Mutex, task::JoinHandle};
 use uuid::Uuid;
@@ -35,13 +35,14 @@ impl BackgroundTaskKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum BackgroundTaskStatus {
     Running,
     WaitingForUser,
     Completed,
     Failed,
-    Stopped,
+    Cancelled,
     TimedOut,
 }
 
@@ -53,7 +54,7 @@ impl BackgroundTaskStatus {
             Self::WaitingForUser => "waiting_for_user",
             Self::Completed => "completed",
             Self::Failed => "failed",
-            Self::Stopped => "stopped",
+            Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
         }
     }
@@ -248,12 +249,29 @@ impl BackgroundTaskManager {
     /// (the agent ID).
     pub async fn start_delegate(&self, snapshot: crate::multi_agent::AgentSnapshot) -> String {
         let task_id = snapshot.id.as_str().to_owned();
+        let description = snapshot.task.clone();
+        let state = if snapshot.state.is_terminal() {
+            let status = match snapshot.state {
+                crate::multi_agent::AgentLifecycleState::Completed => {
+                    BackgroundTaskStatus::Completed
+                }
+                crate::multi_agent::AgentLifecycleState::Failed => BackgroundTaskStatus::Failed,
+                crate::multi_agent::AgentLifecycleState::Cancelled => {
+                    BackgroundTaskStatus::Cancelled
+                }
+                crate::multi_agent::AgentLifecycleState::TimedOut => BackgroundTaskStatus::TimedOut,
+                _ => unreachable!(),
+            };
+            BackgroundTaskState::DelegateFinished { status, snapshot }
+        } else {
+            BackgroundTaskState::DelegateRunning { snapshot }
+        };
         self.inner.lock().await.insert(
             task_id.clone(),
             BackgroundTaskRecord {
-                description: snapshot.task.clone(),
+                description,
                 started_at: Instant::now(),
-                state: BackgroundTaskState::DelegateRunning { snapshot },
+                state,
                 detached: true,
                 deadline: None,
                 detach_timeout: None,
@@ -290,7 +308,7 @@ impl BackgroundTaskManager {
             && matches!(record.state, BackgroundTaskState::DelegateRunning { .. })
         {
             record.state = BackgroundTaskState::DelegateFinished {
-                status: BackgroundTaskStatus::Stopped,
+                status: BackgroundTaskStatus::Cancelled,
                 snapshot,
             };
         }
@@ -368,7 +386,7 @@ impl BackgroundTaskManager {
             )
         {
             record.state = BackgroundTaskState::DelegateSwarmFinished {
-                status: BackgroundTaskStatus::Stopped,
+                status: BackgroundTaskStatus::Cancelled,
                 snapshot,
             };
         }
@@ -459,7 +477,7 @@ impl BackgroundTaskManager {
         max_output_bytes: usize,
     ) -> Result<ToolResult, ToolError> {
         enum StopAction {
-            Already(BackgroundTaskSnapshot),
+            AlreadyTerminal(Box<BackgroundTaskSnapshot>),
             StopQuestion {
                 started_at: Instant,
                 description: String,
@@ -481,7 +499,7 @@ impl BackgroundTaskManager {
             };
             match &record.state {
                 BackgroundTaskState::BashFinished { status, output } => {
-                    StopAction::Already(BackgroundTaskSnapshot {
+                    StopAction::AlreadyTerminal(Box::new(BackgroundTaskSnapshot {
                         task_id: task_id.to_owned(),
                         kind: BackgroundTaskKind::Bash,
                         status: *status,
@@ -491,10 +509,10 @@ impl BackgroundTaskManager {
                         answers: None,
                         delegate: None,
                         swarm: None,
-                    })
+                    }))
                 }
                 BackgroundTaskState::QuestionFinished { status, answers } => {
-                    StopAction::Already(BackgroundTaskSnapshot {
+                    StopAction::AlreadyTerminal(Box::new(BackgroundTaskSnapshot {
                         task_id: task_id.to_owned(),
                         kind: BackgroundTaskKind::Question,
                         status: *status,
@@ -504,38 +522,41 @@ impl BackgroundTaskManager {
                         answers: answers.clone(),
                         delegate: None,
                         swarm: None,
-                    })
+                    }))
                 }
                 BackgroundTaskState::DelegateFinished { status, snapshot } => {
-                    StopAction::Already(BackgroundTaskSnapshot {
-                        task_id: task_id.to_owned(),
-                        kind: BackgroundTaskKind::Delegate,
-                        status: *status,
-                        description: record.description.clone(),
-                        elapsed: record.started_at.elapsed(),
-                        output: None,
-                        answers: None,
-                        delegate: Some(snapshot.clone()),
-                        swarm: None,
-                    })
+                    return Ok(ToolResult::error(format!(
+                        "agent already {}; terminal delegate state is immutable. To continue it, call Delegate with resume=\"{}\".",
+                        status.as_str(),
+                        snapshot.id.as_str()
+                    ))
+                    .with_details(serde_json::json!({
+                        "task_id": task_id,
+                        "kind": "delegate",
+                        "status": status.as_str(),
+                        "agent_id": snapshot.id.as_str(),
+                        "terminal": true,
+                        "resume_hint": format!("Delegate with resume=\"{}\"", snapshot.id.as_str()),
+                    })));
                 }
                 BackgroundTaskState::DelegateSwarmFinished { status, snapshot } => {
-                    StopAction::Already(BackgroundTaskSnapshot {
-                        task_id: task_id.to_owned(),
-                        kind: BackgroundTaskKind::DelegateSwarm,
-                        status: *status,
-                        description: record.description.clone(),
-                        elapsed: record.started_at.elapsed(),
-                        output: None,
-                        answers: None,
-                        delegate: None,
-                        swarm: Some(snapshot.clone()),
-                    })
+                    return Ok(ToolResult::error(format!(
+                        "swarm already {}; terminal delegate state is immutable. To continue unfinished children, call DelegateSwarm with resume_agent_ids.",
+                        status.as_str()
+                    ))
+                    .with_details(serde_json::json!({
+                        "task_id": task_id,
+                        "kind": "delegate-swarm",
+                        "status": status.as_str(),
+                        "swarm_id": snapshot.swarm_id.as_str(),
+                        "terminal": true,
+                        "resume_hint": "DelegateSwarm with resume_agent_ids",
+                    })));
                 }
                 BackgroundTaskState::QuestionWaiting => {
                     let record = tasks.get_mut(task_id).expect("record still exists");
                     record.state = BackgroundTaskState::QuestionFinished {
-                        status: BackgroundTaskStatus::Stopped,
+                        status: BackgroundTaskStatus::Cancelled,
                         answers: None,
                     };
                     StopAction::StopQuestion {
@@ -551,13 +572,13 @@ impl BackgroundTaskManager {
                     };
                     snapshot.state = crate::multi_agent::AgentLifecycleState::Cancelled;
                     record.state = BackgroundTaskState::DelegateFinished {
-                        status: BackgroundTaskStatus::Stopped,
+                        status: BackgroundTaskStatus::Cancelled,
                         snapshot: snapshot.clone(),
                     };
                     let snap = BackgroundTaskSnapshot {
                         task_id: task_id.to_owned(),
                         kind: BackgroundTaskKind::Delegate,
-                        status: BackgroundTaskStatus::Stopped,
+                        status: BackgroundTaskStatus::Cancelled,
                         description: record.description.clone(),
                         elapsed: record.started_at.elapsed(),
                         output: None,
@@ -574,13 +595,13 @@ impl BackgroundTaskManager {
                         _ => unreachable!(),
                     };
                     record.state = BackgroundTaskState::DelegateSwarmFinished {
-                        status: BackgroundTaskStatus::Stopped,
+                        status: BackgroundTaskStatus::Cancelled,
                         snapshot: snapshot.clone(),
                     };
                     let snap = BackgroundTaskSnapshot {
                         task_id: task_id.to_owned(),
                         kind: BackgroundTaskKind::DelegateSwarm,
-                        status: BackgroundTaskStatus::Stopped,
+                        status: BackgroundTaskStatus::Cancelled,
                         description: record.description.clone(),
                         elapsed: record.started_at.elapsed(),
                         output: None,
@@ -605,7 +626,9 @@ impl BackgroundTaskManager {
         };
 
         match action {
-            StopAction::Already(snapshot) => Ok(snapshot_result(&snapshot, max_output_bytes)),
+            StopAction::AlreadyTerminal(snapshot) => {
+                Ok(snapshot_result(&snapshot, max_output_bytes))
+            }
             StopAction::StopQuestion {
                 started_at,
                 description,
@@ -613,7 +636,7 @@ impl BackgroundTaskManager {
                 let snapshot = BackgroundTaskSnapshot {
                     task_id: task_id.to_owned(),
                     kind: BackgroundTaskKind::Question,
-                    status: BackgroundTaskStatus::Stopped,
+                    status: BackgroundTaskStatus::Cancelled,
                     description,
                     elapsed: started_at.elapsed(),
                     output: None,
@@ -625,7 +648,7 @@ impl BackgroundTaskManager {
                 result.details = Some(json!({
                     "task_id": task_id,
                     "kind": "question",
-                    "status": "stopped",
+                    "status": "cancelled",
                     "description": snapshot.description,
                     "elapsed_ms": snapshot.elapsed.as_millis(),
                     "reason": reason,
@@ -651,7 +674,7 @@ impl BackgroundTaskManager {
                 let snapshot = BackgroundTaskSnapshot {
                     task_id: task_id.to_owned(),
                     kind: BackgroundTaskKind::Bash,
-                    status: BackgroundTaskStatus::Stopped,
+                    status: BackgroundTaskStatus::Cancelled,
                     description: description.clone(),
                     elapsed: started_at.elapsed(),
                     output: Some(output.clone()),
@@ -665,7 +688,7 @@ impl BackgroundTaskManager {
                         description,
                         started_at,
                         state: BackgroundTaskState::BashFinished {
-                            status: BackgroundTaskStatus::Stopped,
+                            status: BackgroundTaskStatus::Cancelled,
                             output,
                         },
                         detached: true,
@@ -711,6 +734,7 @@ impl BackgroundTaskManager {
 
     #[allow(clippy::too_many_lines)]
     async fn snapshot_inner(&self, task_id: &str) -> Option<BackgroundTaskSnapshot> {
+        #[allow(clippy::large_enum_variant)]
         enum SnapshotAction {
             Ready(BackgroundTaskSnapshot),
             Running {
@@ -1036,9 +1060,9 @@ struct TaskStopInput {
     /// The background task ID to stop.
     #[schemars(description = "The background task ID to stop.")]
     task_id: String,
-    /// Short reason recorded when the task is stopped.
+    /// Short reason recorded when the task is cancelled.
     #[schemars(
-        description = "Short reason recorded when the task is stopped. Defaults to 'Stopped by TaskStop'."
+        description = "Short reason recorded when the task is cancelled. Defaults to 'Cancelled by TaskStop'."
     )]
     reason: Option<String>,
     /// Maximum bytes of output to include in the result.
@@ -1067,7 +1091,7 @@ impl Tool for TaskListTool {
          Return format:\n\
          Returns a list of background tasks. Each entry includes:\n\
          - task_id: Unique identifier for the task (use this with TaskOutput/TaskStop).\n\
-         - status: \"running\", \"completed\", \"failed\", or \"stopped\".\n\
+         - status: \"running\", \"completed\", \"failed\", \"cancelled\", or \"timed_out\".\n\
          - kind: The type of background task (e.g. \"bash\", \"question\").\n\
          - description: Short human-readable description provided at creation time.\n\
          - elapsed: Time since the task was started (e.g. \"2m 30s\")."
@@ -1107,10 +1131,10 @@ impl Tool for TaskOutputTool {
          - This tool works with the generic background task system and should remain the primary read path for future task types.\n\n\
          Return fields:\n\
          - status: One of \"running\" (the task is still executing), \"completed\" (the task \
-         finished successfully), \"failed\" (the task exited with a non-zero exit code), or \
-         \"stopped\" (the task was cancelled via TaskStop).\n\
+         finished successfully), \"failed\" (the task exited with a non-zero exit code), \
+         \"cancelled\" (the task was cancelled via TaskStop), or \"timed_out\" (the task timed out).\n\
          - exit_code: The process exit code for terminal tasks. 0 means success; non-zero means \
-         failure. Only present when status is \"completed\", \"failed\", or \"stopped\".\n\
+         failure. Only present when status is \"completed\", \"failed\", \"cancelled\", or \"timed_out\".\n\
          - output: A preview of the task's stdout/stderr, capped at max_output_bytes."
     }
 
@@ -1122,6 +1146,53 @@ impl Tool for TaskOutputTool {
         Box::pin(async move {
             let input: TaskOutputInput = parse_input(self.name(), input)?;
             let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
+
+            // Route swarm IDs to rich swarm output from the runtime.
+            if input.task_id.starts_with("swarm_")
+                && let Some(swarm) = ctx.multi_agent.swarm_snapshot(&input.task_id)
+            {
+                let mut content = format!(
+                    "kind: swarm\nswarm_id: {}\nstatus: {}\naggregate: total={} queued={} running={} completed={} failed={} cancelled={} timed_out={}\nitems:",
+                    swarm.swarm_id,
+                    swarm.state.as_str(),
+                    swarm.aggregate.total,
+                    swarm.aggregate.queued,
+                    swarm.aggregate.running,
+                    swarm.aggregate.completed,
+                    swarm.aggregate.failed,
+                    swarm.aggregate.cancelled,
+                    swarm.aggregate.timed_out,
+                );
+                for child in &swarm.children {
+                    content.push_str(&format!(
+                        "\n- index: {} agent_id: {} status: {}",
+                        child.item_index,
+                        child.agent.id.as_str(),
+                        child.agent.state.as_str(),
+                    ));
+                }
+                let items: Vec<serde_json::Value> = swarm
+                    .children
+                    .iter()
+                    .map(|child| {
+                        serde_json::json!({
+                            "index": child.item_index,
+                            "item": child.item,
+                            "agent_id": child.agent.id.as_str(),
+                            "status": child.agent.state.as_str(),
+                            "summary": child.agent.outcome.as_ref().map(|o| o.summary.clone()),
+                        })
+                    })
+                    .collect();
+                return Ok(ToolResult::ok(content).with_details(serde_json::json!({
+                    "kind": "swarm",
+                    "swarm_id": swarm.swarm_id,
+                    "status": swarm.state.as_str(),
+                    "aggregate": swarm.aggregate,
+                    "items": items,
+                })));
+            }
+
             ctx.background_tasks
                 .output(
                     &input.task_id,
@@ -1147,12 +1218,12 @@ impl Tool for TaskStopTool {
          Guidelines:\n\
          - This is a general-purpose stop capability for any background task. It is not a bash-specific kill.\n\
          - Stopping a task is destructive: it may leave partial side effects behind. Use it with care.\n\
-         - If the task has already finished, this tool simply returns its current status.\n\
-         - Provide a short `reason` so the task history records why it was stopped.\n\n\
+         - If a terminal `bash` or `question` task has already finished, this tool returns its current status.\n\
+         - If a terminal `delegate` or `delegate-swarm` task has already finished, this tool returns an `already <state>` error with a resume hint.\n\
+         - Provide a short `reason` so the task history records why it was cancelled.\n\n\
          Return format:\n\
          Returns the task's final status after the stop attempt. If the task was still running, it \
-         is stopped and the output collected so far is included. If the task had already finished, \
-         the current status and output are returned without any action taken."
+         is cancelled and the output collected so far is included."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -1164,23 +1235,54 @@ impl Tool for TaskStopTool {
             ctx.ensure_shell_allowed()?;
             let input: TaskStopInput = parse_input(self.name(), input)?;
             let max_output_bytes = input.max_output_bytes.unwrap_or(ctx.max_output_bytes);
-            if let Some(snapshot) = ctx.multi_agent.cancel_agent_by_id(&input.task_id) {
+            // For swarms, cancel non-terminal children via the runtime and update
+            // the background task record, then return the result.
+            if input.task_id.starts_with("swarm_") {
+                match ctx.multi_agent.cancel_swarm(&input.task_id) {
+                    Ok(swarm) => {
+                        let _ = ctx
+                            .background_tasks
+                            .cancel_delegate_swarm(&input.task_id, swarm.clone())
+                            .await;
+                        // The background task record is now terminal; return its output.
+                        return ctx
+                            .background_tasks
+                            .output(
+                                &input.task_id,
+                                false,
+                                Duration::from_secs(0),
+                                max_output_bytes,
+                            )
+                            .await;
+                    }
+                    Err(message) => {
+                        if ctx.background_tasks.snapshot(&input.task_id).await.is_err() {
+                            return Ok(ToolResult::error(message));
+                        }
+                        // Swarm is terminal in runtime but has a background task
+                        // record; let the task manager return its richer
+                        // already-terminal result.
+                    }
+                }
+            }
+            let result = ctx
+                .background_tasks
+                .stop(
+                    &input.task_id,
+                    input.reason.as_deref().unwrap_or("Cancelled by TaskStop"),
+                    max_output_bytes,
+                )
+                .await?;
+            // For agents, stop already finalizes the record with a cancelled snapshot;
+            // cancel_agent_by_id only updates runtime state if it is still running.
+            if !input.task_id.starts_with("swarm_")
+                && let Some(snapshot) = ctx.multi_agent.cancel_agent_by_id(&input.task_id)
+            {
                 ctx.background_tasks
                     .cancel_delegate(&input.task_id, snapshot)
                     .await;
             }
-            if let Some(snapshot) = ctx.multi_agent.cancel_swarm_by_id(&input.task_id) {
-                ctx.background_tasks
-                    .cancel_delegate_swarm(&input.task_id, snapshot)
-                    .await;
-            }
-            ctx.background_tasks
-                .stop(
-                    &input.task_id,
-                    input.reason.as_deref().unwrap_or("Stopped by TaskStop"),
-                    max_output_bytes,
-                )
-                .await
+            Ok(result)
         })
     }
 }
@@ -1217,7 +1319,10 @@ pub fn snapshot_result(snapshot: &BackgroundTaskSnapshot, max_output_bytes: usiz
     if let Some(output) = &snapshot.output {
         let (stdout_capped, stdout_truncated) = cap_plain_output(&output.stdout, max_output_bytes);
         let (stderr_capped, stderr_truncated) = cap_plain_output(&output.stderr, max_output_bytes);
-        let truncated = stdout_truncated || stderr_truncated;
+        let truncated = output.stdout_truncated
+            || output.stderr_truncated
+            || stdout_truncated
+            || stderr_truncated;
         if !stdout_capped.is_empty() || !stderr_capped.is_empty() {
             content.push_str("\n\n[output]\n");
             content.push_str(&stdout_capped);
@@ -1244,8 +1349,7 @@ pub fn snapshot_result(snapshot: &BackgroundTaskSnapshot, max_output_bytes: usiz
         details["stderr"] = json!(cap_output_details(&output.stderr, max_output_bytes));
         details["stdout_truncated"] = json!(output.stdout_truncated || stdout_truncated);
         details["stderr_truncated"] = json!(output.stderr_truncated || stderr_truncated);
-        details["truncated"] =
-            json!(output.stdout_truncated || output.stderr_truncated || truncated);
+        details["truncated"] = json!(truncated);
     }
     if let Some(answers) = &snapshot.answers {
         details["answers"] = json!(answers);
@@ -1454,10 +1558,10 @@ mod tests {
             .await;
 
         let stopped = manager
-            .stop("question-stop", "Stopped by test", 1024)
+            .stop("question-stop", "Cancelled by test", 1024)
             .await
             .expect("question should stop");
-        assert_eq!(stopped.details.as_ref().unwrap()["status"], "stopped");
+        assert_eq!(stopped.details.as_ref().unwrap()["status"], "cancelled");
 
         manager
             .complete_question("question-stop", vec!["Too late".to_owned()])
@@ -1468,7 +1572,7 @@ mod tests {
             .await
             .expect("stopped question should be readable");
         let details = output.details.expect("details");
-        assert_eq!(details["status"], "stopped");
+        assert_eq!(details["status"], "cancelled");
         assert!(details.get("answers").is_none());
     }
 
@@ -1595,7 +1699,7 @@ mod tests {
             .expect("execute");
         assert!(!result.is_error);
         assert!(result.content.contains("task_id:"));
-        assert!(result.content.contains("status: stopped"));
+        assert!(result.content.contains("status: cancelled"));
     }
 
     #[tokio::test]

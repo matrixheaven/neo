@@ -1,26 +1,16 @@
 use std::time::Duration;
 
 use neo_agent_core::multi_agent::{
-    AgentLifecycleState, DelegateMailbox, MultiAgentRuntime, SwarmProgressInput, SwarmScheduler,
+    AgentLifecycleState, MultiAgentRuntime, SwarmProgressInput, SwarmScheduler,
     SwarmSchedulerConfig, estimate_swarm_progress,
 };
 use neo_agent_core::tools::{ToolContext, ToolRegistry};
 use tempfile::tempdir;
 
-// --- Mailbox tests ---
-
-#[test]
-fn delegate_mailbox_tracks_pending_delivery() {
-    let mut mailbox = DelegateMailbox::default();
-    let message = mailbox.push("check the failed test".to_owned());
-
-    assert_eq!(mailbox.pending().len(), 1);
-    mailbox.mark_delivered(&message.id);
-    assert!(mailbox.pending().is_empty());
-}
+// --- Live message tests ---
 
 #[tokio::test]
-async fn message_delegate_queues_mailbox_message() {
+async fn message_delegate_non_live_agent_returns_resume_hint() {
     let dir = tempdir().unwrap();
     let ctx = ToolContext::new(dir.path()).unwrap();
     let agent = ctx
@@ -35,14 +25,14 @@ async fn message_delegate_queues_mailbox_message() {
             serde_json::json!({ "id": agent.id.as_str(), "message": "check the error" }),
         )
         .await
-        .expect("message should succeed");
+        .expect("message should return a tool result");
 
-    assert!(result.content.contains("status: queued"));
-    assert!(result.content.contains("message_id:"));
-
-    let pending = ctx.multi_agent.pending_mailbox(agent.id.as_str());
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].text, "check the error");
+    assert!(result.is_error);
+    assert!(
+        result
+            .content
+            .contains("agent is not running; use Delegate with resume")
+    );
 }
 
 // --- Scheduler tests ---

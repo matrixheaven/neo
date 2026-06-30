@@ -3766,7 +3766,7 @@ async fn runtime_emits_terminal_lifecycle_events_for_terminal_tool() {
                 handle: event_handle,
                 status,
                 ..
-            } if event_handle == &handle && status == "stopped"
+            } if event_handle == &handle && status == "cancelled"
         )
     });
     assert!(
@@ -5952,7 +5952,7 @@ fn terminal_streaming_events_for_request(request: &ChatRequest) -> Vec<AiStreamE
                 "rows": 24
             }),
         ),
-        Some(handle) if !last.contains("status: stopped") && !last.contains("output:") => {
+        Some(handle) if !last.contains("status: cancelled") && !last.contains("output:") => {
             terminal_tool_turn(
                 turn_index,
                 "tool_2",
@@ -5987,7 +5987,7 @@ fn capped_terminal_output_events_for_request(request: &ChatRequest) -> Vec<AiStr
                 "command": "printf term; printf '%s%s%s%s' inal -runtime -leak -tail; sleep 1"
             }),
         ),
-        Some(_) if last.contains("status: stopped") => vec![
+        Some(_) if last.contains("status: cancelled") => vec![
             AiStreamEvent::MessageStart {
                 id: format!("msg_{turn_index}"),
             },
@@ -6015,7 +6015,7 @@ fn capped_terminal_output_events_for_request(request: &ChatRequest) -> Vec<AiStr
                 "command": "sleep 0.05; printf waited"
             }),
         ),
-        Some(handle) if !last.contains("status: stopped") => terminal_tool_turn(
+        Some(handle) if !last.contains("status: cancelled") => terminal_tool_turn(
             turn_index,
             "tool_read",
             json!({
@@ -6076,7 +6076,7 @@ fn terminal_lifecycle_events_for_request(request: &ChatRequest) -> Vec<AiStreamE
         Some(_)
             if tool_results
                 .last()
-                .is_some_and(|content| content.contains("status: stopped")) =>
+                .is_some_and(|content| content.contains("status: cancelled")) =>
         {
             end_turn_done(turn_index)
         }

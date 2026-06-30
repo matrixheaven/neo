@@ -53,19 +53,26 @@ fn builtin_tool_names_use_model_facing_kimi_style_casing() {
         names,
         vec![
             "Bash",
+            "Delegate",
+            "DelegateSwarm",
             "Edit",
             "EnterPlanMode",
             "ExitPlanMode",
             "Find",
             "Glob",
             "Grep",
+            "InterruptDelegate",
             "List",
+            "ListDelegates",
+            "MessageDelegate",
             "Read",
+            "RunWorkflow",
             "TaskList",
             "TaskOutput",
             "TaskStop",
             "Terminal",
             "TodoList",
+            "WaitDelegate",
             "Write",
         ]
     );
@@ -633,14 +640,14 @@ async fn task_stop_kills_descendant_process_group() {
     }
     let stopped = stopped.expect("TaskStop should succeed");
     let stopped_details = stopped.details.as_ref().expect("stop details");
-    assert_eq!(stopped_details["status"], "stopped");
+    assert_eq!(stopped_details["status"], "cancelled");
 
     let output_after_stop = registry
         .run("TaskOutput", &context, json!({ "task_id": task_id }))
         .await
-        .expect("TaskOutput should retain stopped task");
+        .expect("TaskOutput should retain cancelled task");
     let output_details = output_after_stop.details.expect("output details");
-    assert_eq!(output_details["status"], "stopped");
+    assert_eq!(output_details["status"], "cancelled");
 
     let descendant_exited = wait_for_process_exit(&descendant_pid).await;
     if !descendant_exited {

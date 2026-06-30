@@ -13,25 +13,47 @@ use uuid::Uuid;
 use crate::runtime::{ActiveTurnInput, AgentConfig, AgentContext, SteerInputHandle};
 use crate::{AgentEvent, AgentMessage, AgentRuntime, AgentToolCall, Content, ToolRegistry};
 
+use super::state::derive_title;
 use super::{
     AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
-    AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome, DelegateMailbox,
-    DisplayNamePool,
+    AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome, DisplayNamePool,
+    SwarmAggregate,
 };
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DelegateRequest {
-    #[schemars(description = "Required non-empty task for the subagent.")]
+    #[schemars(
+        description = "Required non-empty task for the subagent. For resume, this is the next user prompt for the same child agent."
+    )]
     pub task: String,
     #[serde(default)]
-    #[schemars(description = "Subagent role. Defaults to coder.")]
-    pub role: AgentRole,
+    #[schemars(
+        description = "Existing agent_id to continue. Must be omitted for a new agent. Must start with agent_, not swarm_."
+    )]
+    pub resume: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Short UI title. If omitted, Neo derives a deterministic local title from task."
+    )]
+    pub title: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Subagent role for new agents only. Defaults to coder. Must be omitted when resume is set."
+    )]
+    pub role: Option<AgentRole>,
     #[serde(default)]
     #[schemars(description = "Run mode. Defaults to foreground.")]
     pub mode: AgentRunMode,
     #[serde(default = "default_context")]
     #[schemars(description = "Context mode: inherit, summary, or none. Defaults to inherit.")]
     pub context: DelegateContext,
+}
+
+impl DelegateRequest {
+    #[must_use]
+    pub fn actual_role(&self) -> AgentRole {
+        self.role.unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
@@ -48,14 +70,21 @@ pub struct DelegateSwarmRequest {
         description = "Required non-empty human title for the swarm. Not injected into every child task."
     )]
     pub description: String,
-    #[schemars(description = "Required non-empty list of child task items.")]
-    pub items: Vec<String>,
-    #[schemars(
-        description = "Required child task template. It must contain {{item}} exactly once or more; each swarm item replaces {{item}}. Optionally include {{description}} to inject the swarm description. No other placeholders are supported."
-    )]
-    pub prompt_template: String,
     #[serde(default)]
-    #[schemars(description = "Subagent role for each child. Defaults to coder.")]
+    #[schemars(
+        description = "New child task items. When present, prompt_template is required and must contain {{item}}."
+    )]
+    pub items: Vec<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Template for new child tasks. Supports exactly {{item}} and optional {{description}}. Required when items is present."
+    )]
+    pub prompt_template: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Existing agent_id to prompt mapping for resumed child agents.")]
+    pub resume_agent_ids: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    #[schemars(description = "Subagent role for new children. Defaults to coder.")]
     pub role: AgentRole,
     #[serde(default)]
     #[schemars(description = "Run mode. Defaults to foreground.")]
@@ -73,10 +102,34 @@ fn default_context() -> DelegateContext {
 #[derive(Debug, Default)]
 struct MultiAgentState {
     names: DisplayNamePool,
+    next_created_index: u64,
+    agent_order: BTreeMap<String, u64>,
+    swarm_order: BTreeMap<String, u64>,
     agents: BTreeMap<String, AgentSnapshot>,
     swarms: BTreeMap<String, super::SwarmSnapshot>,
-    mailboxes: BTreeMap<String, DelegateMailbox>,
     steer_handles: BTreeMap<String, SteerInputHandle>,
+}
+
+impl MultiAgentState {
+    fn next_created_index(&mut self) -> u64 {
+        let index = self.next_created_index;
+        self.next_created_index = self.next_created_index.saturating_add(1);
+        index
+    }
+
+    fn register_agent_order(&mut self, agent_id: &str) {
+        if !self.agent_order.contains_key(agent_id) {
+            let index = self.next_created_index();
+            self.agent_order.insert(agent_id.to_owned(), index);
+        }
+    }
+
+    fn register_swarm_order(&mut self, swarm_id: &str) {
+        if !self.swarm_order.contains_key(swarm_id) {
+            let index = self.next_created_index();
+            self.swarm_order.insert(swarm_id.to_owned(), index);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -103,6 +156,7 @@ impl MultiAgentRuntime {
             mode: AgentRunMode::Foreground,
             state: AgentLifecycleState::Running,
             task: task.to_owned(),
+            task_title: derive_title(task, None),
             tool_count: 0,
             token_count: 0,
             elapsed: std::time::Duration::ZERO,
@@ -110,6 +164,7 @@ impl MultiAgentRuntime {
             activity: Vec::new(),
             outcome: None,
         };
+        state.register_agent_order(id.as_str());
         state
             .agents
             .insert(id.as_str().to_owned(), snapshot.clone());
@@ -119,26 +174,29 @@ impl MultiAgentRuntime {
     pub fn start_delegate(
         &self,
         task: &str,
+        title: Option<&str>,
         role: AgentRole,
         mode: AgentRunMode,
         path: AgentPathKind<'_>,
     ) -> AgentSnapshot {
-        self.create_delegate(task, role, mode, path, AgentLifecycleState::Running)
+        self.create_delegate(task, title, role, mode, path, AgentLifecycleState::Running)
     }
 
     pub fn queue_delegate(
         &self,
         task: &str,
+        title: Option<&str>,
         role: AgentRole,
         mode: AgentRunMode,
         path: AgentPathKind<'_>,
     ) -> AgentSnapshot {
-        self.create_delegate(task, role, mode, path, AgentLifecycleState::Queued)
+        self.create_delegate(task, title, role, mode, path, AgentLifecycleState::Queued)
     }
 
     fn create_delegate(
         &self,
         task: &str,
+        title: Option<&str>,
         role: AgentRole,
         mode: AgentRunMode,
         path: AgentPathKind<'_>,
@@ -159,6 +217,7 @@ impl MultiAgentRuntime {
             mode,
             state: lifecycle_state,
             task: task.to_owned(),
+            task_title: derive_title(task, title),
             tool_count: 0,
             token_count: 0,
             elapsed: Duration::ZERO,
@@ -166,6 +225,7 @@ impl MultiAgentRuntime {
             activity: Vec::new(),
             outcome: None,
         };
+        state.register_agent_order(id.as_str());
         state
             .agents
             .insert(id.as_str().to_owned(), snapshot.clone());
@@ -262,11 +322,9 @@ impl MultiAgentRuntime {
     /// Register a swarm snapshot in the runtime state.
     pub fn register_swarm(&self, snapshot: super::SwarmSnapshot) {
         let swarm_id = snapshot.swarm_id.clone();
-        self.state
-            .lock()
-            .expect("multi-agent state poisoned")
-            .swarms
-            .insert(swarm_id, snapshot);
+        let mut state = self.state.lock().expect("multi-agent state poisoned");
+        state.register_swarm_order(&swarm_id);
+        state.swarms.insert(swarm_id, snapshot);
     }
 
     pub fn new_swarm_id(&self) -> String {
@@ -280,32 +338,56 @@ impl MultiAgentRuntime {
     }
 
     /// Mark a running agent as cancelled.
+    ///
+    /// Returns `None` and leaves the state unchanged if the agent is already
+    /// terminal.
     pub fn cancel_agent(&self, id: &AgentId) -> Option<AgentSnapshot> {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         let snapshot = state.agents.get_mut(id.as_str())?;
+        if snapshot.state.is_terminal() {
+            return None;
+        }
         snapshot.state = AgentLifecycleState::Cancelled;
         Some(snapshot.clone())
     }
 
     /// Mark a running agent as cancelled by its string ID.
+    ///
+    /// Returns `None` and leaves the state unchanged if the agent is already
+    /// terminal.
     pub fn cancel_agent_by_id(&self, id: &str) -> Option<AgentSnapshot> {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         let snapshot = state.agents.get_mut(id)?;
+        if snapshot.state.is_terminal() {
+            return None;
+        }
         snapshot.state = AgentLifecycleState::Cancelled;
         Some(snapshot.clone())
     }
 
-    /// Mark every child in a swarm as cancelled.
+    /// Mark every non-terminal child in a swarm as cancelled.
+    ///
+    /// Returns `None` and leaves the state unchanged if the swarm does not
+    /// exist or all of its children are already terminal.
     pub fn cancel_swarm_by_id(&self, swarm_id: &str) -> Option<super::SwarmSnapshot> {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
         let mut snapshot = state.swarms.get(swarm_id)?.clone();
+        let mut changed = false;
         for child in &mut snapshot.children {
+            if child.agent.state.is_terminal() {
+                continue;
+            }
             child.agent.state = AgentLifecycleState::Cancelled;
             if let Some(agent) = state.agents.get_mut(child.agent.id.as_str()) {
                 agent.state = AgentLifecycleState::Cancelled;
                 child.agent = agent.clone();
             }
+            changed = true;
         }
+        if !changed {
+            return None;
+        }
+        state.register_swarm_order(swarm_id);
         state.swarms.insert(swarm_id.to_owned(), snapshot.clone());
         Some(snapshot)
     }
@@ -318,31 +400,96 @@ impl MultiAgentRuntime {
         state
             .agents
             .values()
-            .filter(|agent| {
-                include_completed
-                    || !matches!(
-                        agent.state,
-                        AgentLifecycleState::Completed
-                            | AgentLifecycleState::Failed
-                            | AgentLifecycleState::Cancelled
-                    )
-            })
+            .filter(|agent| include_completed || !agent.state.is_terminal())
             .cloned()
             .collect()
     }
 
-    /// Push a message to an existing agent's mailbox.
-    pub fn push_mailbox_message(
+    #[must_use]
+    pub fn agent_created_index(&self, agent_id: &str) -> Option<u64> {
+        self.state
+            .lock()
+            .expect("multi-agent state poisoned")
+            .agent_order
+            .get(agent_id)
+            .copied()
+    }
+
+    #[must_use]
+    pub fn swarm_created_index(&self, swarm_id: &str) -> Option<u64> {
+        self.state
+            .lock()
+            .expect("multi-agent state poisoned")
+            .swarm_order
+            .get(swarm_id)
+            .copied()
+    }
+
+    #[must_use]
+    pub fn agent_snapshot(&self, agent_id: &str) -> Option<AgentSnapshot> {
+        self.state
+            .lock()
+            .expect("multi-agent state poisoned")
+            .agents
+            .get(agent_id)
+            .cloned()
+    }
+
+    pub fn start_resume_delegate(
         &self,
         agent_id: &str,
-        text: String,
-    ) -> Option<super::DelegateMailboxMessage> {
+        request: &DelegateRequest,
+    ) -> Result<AgentSnapshot, String> {
         let mut state = self.state.lock().expect("multi-agent state poisoned");
-        if !state.agents.contains_key(agent_id) {
-            return None;
+        let Some(agent) = state.agents.get_mut(agent_id) else {
+            return Err(format!("unknown delegate target `{agent_id}`"));
+        };
+        if matches!(
+            agent.state,
+            AgentLifecycleState::Queued | AgentLifecycleState::Running
+        ) {
+            return Err(
+                "agent is already running; use MessageDelegate for live follow-up".to_owned(),
+            );
         }
-        let mailbox = state.mailboxes.entry(agent_id.to_owned()).or_default();
-        Some(mailbox.push(text))
+        agent.state = AgentLifecycleState::Running;
+        agent.mode = request.mode;
+        agent.task = request.task.clone();
+        agent.task_title = derive_title(&request.task, request.title.as_deref());
+        agent.elapsed = Duration::ZERO;
+        agent.latest_text = None;
+        agent.activity.clear();
+        agent.outcome = None;
+        Ok(agent.clone())
+    }
+
+    pub fn deliver_live_agent_message(
+        &self,
+        agent_id: &str,
+        message: String,
+    ) -> Result<(), String> {
+        let Some(agent) = self.agent_snapshot(agent_id) else {
+            return Err(format!("unknown delegate target `{agent_id}`"));
+        };
+        if !matches!(agent.state, AgentLifecycleState::Running) {
+            return Err(format!(
+                "agent is not running; use Delegate with resume=\"{}\" to continue it",
+                agent.id.as_str()
+            ));
+        }
+        let mailbox_message = super::DelegateMailboxMessage {
+            id: format!("live_{}", uuid::Uuid::new_v4().simple()),
+            text: message,
+            delivered: false,
+        };
+        if self.deliver_live_message(agent_id, &mailbox_message) {
+            Ok(())
+        } else {
+            Err(format!(
+                "agent is not running; use Delegate with resume=\"{}\" to continue it",
+                agent.id.as_str()
+            ))
+        }
     }
 
     pub fn deliver_live_message(
@@ -367,47 +514,6 @@ impl MultiAgentRuntime {
         true
     }
 
-    pub fn mark_mailbox_message_delivered(&self, agent_id: &str, message_id: &str) {
-        let mut state = self.state.lock().expect("multi-agent state poisoned");
-        if let Some(mailbox) = state.mailboxes.get_mut(agent_id) {
-            mailbox.mark_delivered(message_id);
-        }
-    }
-
-    pub fn take_pending_mailbox(&self, agent_id: &str) -> Vec<super::DelegateMailboxMessage> {
-        let mut state = self.state.lock().expect("multi-agent state poisoned");
-        state
-            .mailboxes
-            .get_mut(agent_id)
-            .map_or_else(Vec::new, DelegateMailbox::take_pending)
-    }
-
-    pub fn pending_mailbox(&self, agent_id: &str) -> Vec<super::DelegateMailboxMessage> {
-        let state = self.state.lock().expect("multi-agent state poisoned");
-        state
-            .mailboxes
-            .get(agent_id)
-            .map_or_else(Vec::new, DelegateMailbox::pending)
-    }
-
-    #[must_use]
-    pub fn mailbox_pending_count(&self, agent_id: &str) -> usize {
-        let state = self.state.lock().expect("multi-agent state poisoned");
-        state
-            .mailboxes
-            .get(agent_id)
-            .map_or(0, DelegateMailbox::pending_count)
-    }
-
-    #[must_use]
-    pub fn latest_mailbox_message_id(&self, agent_id: &str) -> Option<String> {
-        let state = self.state.lock().expect("multi-agent state poisoned");
-        state
-            .mailboxes
-            .get(agent_id)
-            .and_then(DelegateMailbox::latest_message_id)
-    }
-
     /// Return the item indices of children that can be resumed (queued, failed,
     /// or cancelled). Completed and running children are skipped.
     #[must_use]
@@ -425,6 +531,7 @@ impl MultiAgentRuntime {
                     AgentLifecycleState::Queued
                         | AgentLifecycleState::Failed
                         | AgentLifecycleState::Cancelled
+                        | AgentLifecycleState::TimedOut
                 )
             })
             .map(|child| child.item_index)
@@ -451,6 +558,7 @@ impl MultiAgentRuntime {
                         mode: AgentRunMode::Foreground,
                         state: lifecycle_state,
                         task: item.to_owned(),
+                        task_title: derive_title(item, None),
                         tool_count: 0,
                         token_count: 0,
                         elapsed: std::time::Duration::ZERO,
@@ -461,16 +569,140 @@ impl MultiAgentRuntime {
                 }
             })
             .collect();
+        let aggregate =
+            SwarmAggregate::from_states(child_snapshots.iter().map(|child| child.agent.state));
         let swarm = super::SwarmSnapshot {
             swarm_id: swarm_id.clone(),
             description: "test swarm".to_owned(),
+            role: AgentRole::Coder,
             mode: AgentRunMode::Foreground,
+            state: AgentLifecycleState::Running,
             max_concurrency: child_snapshots.len().max(1),
+            aggregate,
             children: child_snapshots,
         };
+        state.register_swarm_order(&swarm_id);
         state.swarms.insert(swarm_id.clone(), swarm);
         swarm_id
     }
+
+    /// Look up a swarm snapshot by id.
+    #[must_use]
+    pub fn swarm_snapshot(&self, swarm_id: &str) -> Option<super::SwarmSnapshot> {
+        let mut swarm = self
+            .state
+            .lock()
+            .expect("multi-agent state poisoned")
+            .swarms
+            .get(swarm_id)?
+            .clone();
+        refresh_swarm(&mut swarm);
+        Some(swarm)
+    }
+
+    /// List all swarm snapshots in the runtime.
+    #[must_use]
+    pub fn list_swarms(&self) -> Vec<super::SwarmSnapshot> {
+        let state = self.state.lock().expect("multi-agent state poisoned");
+        let mut swarms: Vec<_> = state.swarms.values().cloned().collect();
+        for swarm in &mut swarms {
+            refresh_swarm(swarm);
+        }
+        swarms
+    }
+
+    /// Cancel all non-terminal children in a swarm.
+    ///
+    /// Returns the refreshed snapshot, or an error message if the swarm is
+    /// unknown or already terminal.
+    pub fn cancel_swarm(&self, swarm_id: &str) -> Result<super::SwarmSnapshot, String> {
+        let mut state = self.state.lock().expect("multi-agent state poisoned");
+        let swarm = state
+            .swarms
+            .get_mut(swarm_id)
+            .ok_or_else(|| format!("unknown delegate target `{swarm_id}`"))?;
+        if swarm.state.is_terminal() {
+            return Err(format!(
+                "swarm already {}; terminal swarm state is immutable",
+                swarm.state.as_str()
+            ));
+        }
+        // Collect the child agent ids that need cancelling before borrowing
+        // state.agents separately.
+        let cancelled_ids: Vec<String> = swarm
+            .children
+            .iter()
+            .filter(|child| !child.agent.state.is_terminal())
+            .map(|child| child.agent.id.as_str().to_owned())
+            .collect();
+        for child in &mut swarm.children {
+            if !child.agent.state.is_terminal() {
+                child.agent.state = AgentLifecycleState::Cancelled;
+                child.agent.outcome = Some(AgentTerminalOutcome {
+                    summary: "Cancelled by user.".to_owned(),
+                    is_error: true,
+                });
+            }
+        }
+        for agent_id in &cancelled_ids {
+            if let Some(agent) = state.agents.get_mut(agent_id) {
+                agent.state = AgentLifecycleState::Cancelled;
+                agent.outcome = Some(AgentTerminalOutcome {
+                    summary: "Cancelled by user.".to_owned(),
+                    is_error: true,
+                });
+            }
+        }
+        let swarm = state.swarms.get_mut(swarm_id).expect("swarm exists");
+        refresh_swarm(swarm);
+        Ok(swarm.clone())
+    }
+
+    /// Broadcast a live message to all running children in a swarm.
+    ///
+    /// Returns `(delivered, skipped)` on success, or an error if the swarm is
+    /// unknown or has no running children.
+    pub fn broadcast_live_swarm_message(
+        &self,
+        swarm_id: &str,
+        message: String,
+    ) -> LiveSwarmMessageResult {
+        let Some(swarm) = self.swarm_snapshot(swarm_id) else {
+            return Err(format!("unknown delegate target `{swarm_id}`"));
+        };
+        let mut delivered = Vec::new();
+        let mut skipped = Vec::new();
+        for child in &swarm.children {
+            if child.agent.state == AgentLifecycleState::Running {
+                let mailbox_message = super::DelegateMailboxMessage {
+                    id: format!("live_{}", uuid::Uuid::new_v4().simple()),
+                    text: message.clone(),
+                    delivered: false,
+                };
+                if self.deliver_live_message(child.agent.id.as_str(), &mailbox_message) {
+                    delivered.push(child.agent.id.as_str().to_owned());
+                } else {
+                    skipped.push((child.agent.id.as_str().to_owned(), child.agent.state));
+                }
+            } else {
+                skipped.push((child.agent.id.as_str().to_owned(), child.agent.state));
+            }
+        }
+        if delivered.is_empty() {
+            return Err(
+                "swarm has no running children; use DelegateSwarm with resume_agent_ids to continue unfinished children"
+                    .to_owned(),
+            );
+        }
+        Ok((delivered, skipped))
+    }
+}
+
+/// Refresh the aggregate and state of a swarm snapshot from its children.
+fn refresh_swarm(snapshot: &mut super::SwarmSnapshot) {
+    snapshot.aggregate =
+        SwarmAggregate::from_states(snapshot.children.iter().map(|child| child.agent.state));
+    snapshot.state = snapshot.aggregate.status();
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -495,11 +727,14 @@ pub struct ChildRunOutput {
     pub events: Vec<AgentEvent>,
 }
 
+type LiveSwarmMessageResult = Result<(Vec<String>, Vec<(String, AgentLifecycleState)>), String>;
+
 #[derive(Clone)]
 pub struct ChildRuntimeDeps {
     pub config: AgentConfig,
     pub model: Arc<dyn ModelClient>,
     pub tools: Arc<ToolRegistry>,
+    pub role: AgentRole,
 }
 
 impl ChildRuntimeDeps {
@@ -509,7 +744,15 @@ impl ChildRuntimeDeps {
             config,
             model,
             tools,
+            role: AgentRole::Coder,
         }
+    }
+
+    /// Set the subagent role for tool filtering and profile enforcement.
+    #[must_use]
+    pub fn with_role(mut self, role: AgentRole) -> Self {
+        self.role = role;
+        self
     }
 }
 
@@ -520,9 +763,15 @@ impl MultiAgentRuntime {
         request: &DelegateRequest,
         mode: AgentRunMode,
     ) -> Result<ChildRunOutput, String> {
-        let snapshot = self.start_delegate(&request.task, request.role, mode, AgentPathKind::Root);
+        let snapshot = self.start_delegate(
+            &request.task,
+            request.title.as_deref(),
+            request.actual_role(),
+            mode,
+            AgentPathKind::Root,
+        );
         let started_at = Instant::now();
-        let prompt = child_prompt(&request.task, request.context, request.role, &[]);
+        let prompt = child_prompt(&request.task, request.context, request.actual_role());
         let run = run_agent_snapshot(deps, prompt, SteerInputHandle::new(), |_| {}).await;
         Ok(self.finish_child_run(snapshot, started_at, run))
     }
@@ -540,8 +789,7 @@ impl MultiAgentRuntime {
         let started_at = Instant::now();
         let snapshot = self.mark_delegate_running(&snapshot.id).unwrap_or(snapshot);
         on_update(snapshot.clone());
-        let mailbox_messages = self.take_pending_mailbox(snapshot.id.as_str());
-        let prompt = child_prompt(&snapshot.task, context, snapshot.role, &mailbox_messages);
+        let prompt = child_prompt(&snapshot.task, context, snapshot.role);
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
         let steer_input = self.register_live_steer(agent_id.as_str());
@@ -563,15 +811,16 @@ impl MultiAgentRuntime {
         item: &str,
         mode: AgentRunMode,
     ) -> Result<ChildRunOutput, String> {
-        let task = swarm_child_task(&request.prompt_template, item);
+        let task = swarm_child_task(request.prompt_template.as_deref().unwrap_or(""), item);
         let snapshot = self.start_delegate(
             &task,
+            None,
             request.role,
             mode,
             AgentPathKind::SwarmChild(swarm_id),
         );
         let started_at = Instant::now();
-        let prompt = child_prompt(&task, DelegateContext::None, request.role, &[]);
+        let prompt = child_prompt(&task, DelegateContext::None, request.role);
         let run = run_agent_snapshot(deps, prompt, SteerInputHandle::new(), |_| {}).await;
         Ok(self.finish_child_run(snapshot, started_at, run))
     }
@@ -589,8 +838,7 @@ impl MultiAgentRuntime {
         let started_at = Instant::now();
         let snapshot = self.mark_delegate_running(&snapshot.id).unwrap_or(snapshot);
         on_update(snapshot.clone());
-        let mailbox_messages = self.take_pending_mailbox(snapshot.id.as_str());
-        let prompt = child_prompt(&snapshot.task, context, snapshot.role, &mailbox_messages);
+        let prompt = child_prompt(&snapshot.task, context, snapshot.role);
         let runtime = self.clone();
         let agent_id = snapshot.id.clone();
         let steer_input = self.register_live_steer(agent_id.as_str());
@@ -770,9 +1018,10 @@ async fn run_agent_snapshot(
     steer_input: SteerInputHandle,
     mut on_event: impl FnMut(&AgentEvent) + Send,
 ) -> Result<Vec<AgentEvent>, String> {
-    let child_config = child_config(deps.config);
+    let child_config = child_config(deps.config, deps.role);
+    let child_tools = Arc::new(deps.tools.filtered_for_agent_role(deps.role));
     let child_runtime =
-        AgentRuntime::with_shared_tools_and_configured_specs(child_config, deps.model, deps.tools)
+        AgentRuntime::with_shared_tools_and_configured_specs(child_config, deps.model, child_tools)
             .with_steer_input(steer_input);
     let mut context = AgentContext::new();
     let mut stream = child_runtime.run_turn(&mut context, AgentMessage::user_text(prompt));
@@ -785,51 +1034,55 @@ async fn run_agent_snapshot(
     Ok(events)
 }
 
-fn child_config(mut config: AgentConfig) -> AgentConfig {
-    config.system_prompt = Some(match config.system_prompt {
-        Some(prompt) => format!("{prompt}\n\n{}", subagent_system_constraints()),
-        None => subagent_system_constraints().to_owned(),
-    });
+fn child_config(mut config: AgentConfig, role: AgentRole) -> AgentConfig {
+    let profile = super::profile::AgentProfile::for_role(role);
+    let base = config
+        .system_prompt
+        .as_deref()
+        .unwrap_or_else(|| subagent_system_constraints());
+    config.system_prompt = Some(format!(
+        "{base}\n\n<subagent_profile>\n{}\n\nDo not repeat or acknowledge this profile text in your final answer. Return only the requested findings or summary.\n</subagent_profile>",
+        profile.prompt_addendum
+    ));
+    // Filter model-visible tool specs: remove standard Neo tools not in the
+    // role's allowed set. Keep unknown/custom tools so test probes and
+    // extension tools are not stripped.
     config.tools = config
         .tools
         .iter()
-        .filter(|spec| !is_parent_orchestration_tool(&spec.name))
+        .filter(|spec| {
+            if !is_standard_neo_tool(&spec.name) {
+                return true;
+            }
+            profile.allowed_tools.contains(spec.name.as_str())
+        })
         .cloned()
         .collect();
-    config.with_before_tool_call(block_forbidden_subagent_tool_call)
+    let profile_clone = super::profile::AgentProfile::for_role(role);
+    config.with_before_tool_call(move |tool_call| {
+        block_forbidden_subagent_tool_call(tool_call, &profile_clone)
+    })
 }
 
-fn block_forbidden_subagent_tool_call(tool_call: &AgentToolCall) -> Option<crate::ToolResult> {
-    if is_parent_orchestration_tool(&tool_call.name) {
-        return Some(crate::ToolResult::error(format!(
-            "Subagents may not call parent orchestration tool `{}`.",
-            tool_call.name
-        )));
-    }
-
-    let command = match tool_call.name.as_str() {
-        "Bash" => tool_call
-            .arguments
-            .get("command")
-            .and_then(serde_json::Value::as_str),
-        "Terminal" => tool_call
-            .arguments
-            .get("command")
-            .and_then(serde_json::Value::as_str),
-        _ => None,
-    }?;
-    if is_forbidden_subagent_git_command(command) {
-        return Some(crate::ToolResult::error(format!(
-            "Subagents may not run git mutation commands: {command}"
-        )));
-    }
-    None
-}
-
-fn is_parent_orchestration_tool(name: &str) -> bool {
+fn is_standard_neo_tool(name: &str) -> bool {
     matches!(
         name,
-        "Delegate"
+        "Read"
+            | "List"
+            | "Grep"
+            | "Find"
+            | "Glob"
+            | "Bash"
+            | "Write"
+            | "Edit"
+            | "TodoList"
+            | "Terminal"
+            | "TaskList"
+            | "TaskOutput"
+            | "TaskStop"
+            | "EnterPlanMode"
+            | "ExitPlanMode"
+            | "Delegate"
             | "DelegateSwarm"
             | "ListDelegates"
             | "WaitDelegate"
@@ -837,6 +1090,66 @@ fn is_parent_orchestration_tool(name: &str) -> bool {
             | "MessageDelegate"
             | "RunWorkflow"
     )
+}
+
+fn block_forbidden_subagent_tool_call(
+    tool_call: &AgentToolCall,
+    profile: &super::profile::AgentProfile,
+) -> Option<crate::ToolResult> {
+    // Deny git mutation for ALL subagents regardless of role.
+    let command = tool_call
+        .arguments
+        .get("command")
+        .and_then(serde_json::Value::as_str);
+    if let Some(cmd) = command
+        && super::profile::is_git_mutation_command(cmd)
+    {
+        return Some(crate::ToolResult::error(format!(
+            "subagents may not mutate git state: {cmd}"
+        )));
+    }
+
+    // Enforce tool policy for Bash/Terminal.
+    let is_shell = matches!(tool_call.name.as_str(), "Bash" | "Terminal");
+    if is_shell {
+        match profile.tool_policy {
+            super::profile::ToolPolicy::ReadOnlyShell => {
+                if let Some(cmd) = command
+                    && !super::profile::is_read_only_shell_command(cmd)
+                {
+                    return Some(crate::ToolResult::error(format!(
+                        "{} agents may only run read-only shell commands: {cmd}",
+                        profile.display_label
+                    )));
+                }
+            }
+            super::profile::ToolPolicy::NoShell => {
+                return Some(crate::ToolResult::error(format!(
+                    "{} agents may not run shell commands",
+                    profile.display_label
+                )));
+            }
+            super::profile::ToolPolicy::Orchestrator => {
+                return Some(crate::ToolResult::error(format!(
+                    "{} agents may not run shell commands directly",
+                    profile.display_label
+                )));
+            }
+            super::profile::ToolPolicy::FullCoder => {}
+        }
+    }
+
+    // Block Write/Edit for non-coder roles.
+    if matches!(tool_call.name.as_str(), "Write" | "Edit")
+        && profile.tool_policy != super::profile::ToolPolicy::FullCoder
+    {
+        return Some(crate::ToolResult::error(format!(
+            "{} agents may not edit or write files",
+            profile.display_label
+        )));
+    }
+
+    None
 }
 
 fn summarize_child_events(events: &[AgentEvent], elapsed: Duration) -> AgentRunUpdate {
@@ -1084,23 +1397,11 @@ fn trim_activity(activity: &mut Vec<AgentActivityEntry>) {
     }
 }
 
-fn child_prompt(
-    task: &str,
-    context: DelegateContext,
-    role: AgentRole,
-    mailbox_messages: &[super::DelegateMailboxMessage],
-) -> String {
-    let mut prompt = format!(
+fn child_prompt(task: &str, context: DelegateContext, role: AgentRole) -> String {
+    format!(
         "You are a bounded Neo subagent.\n\nRole: {role:?}\nTask: {task}\nContext mode: {}\n\nReturn a concise result for the parent agent. Do not perform git mutations. Do not run git add, git commit, git reset, git checkout, git restore, git stash, git clean, git rebase, git push, git rm, git branch, git switch, git merge, git cherry-pick, git tag, or git worktree.",
         context.as_str()
-    );
-    if !mailbox_messages.is_empty() {
-        prompt.push_str("\n\nFollow-up messages delivered before this run:");
-        for message in mailbox_messages {
-            prompt.push_str(&format!("\n- [{}] {}", message.id, message.text));
-        }
-    }
-    prompt
+    )
 }
 
 fn subagent_system_constraints() -> &'static str {
@@ -1133,36 +1434,7 @@ pub fn apply_swarm_template(template: &str, item: &str, description: &str) -> St
 /// Read-only commands (`status`, `diff`, `log`, `blame`, etc.) are allowed.
 #[must_use]
 pub fn is_forbidden_subagent_git_command(command: &str) -> bool {
-    let trimmed = command.trim();
-    let Some(rest) = trimmed.strip_prefix("git ") else {
-        return false;
-    };
-    let first = rest.split_whitespace().next().unwrap_or_default();
-    matches!(
-        first,
-        "add"
-            | "am"
-            | "apply"
-            | "branch"
-            | "checkout"
-            | "cherry-pick"
-            | "clean"
-            | "commit"
-            | "filter-branch"
-            | "gc"
-            | "merge"
-            | "mv"
-            | "push"
-            | "rebase"
-            | "reflog"
-            | "reset"
-            | "restore"
-            | "rm"
-            | "stash"
-            | "switch"
-            | "tag"
-            | "worktree"
-    )
+    super::profile::is_git_mutation_command(command)
 }
 
 // Keep `Instant` imported for future elapsed-time tracking in P2.

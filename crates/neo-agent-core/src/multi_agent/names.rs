@@ -40,19 +40,10 @@ pub const DEFAULT_AGENT_NAMES: &[&str] = &[
     "Freya",
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DisplayNamePool {
     next_index: usize,
     assigned: HashSet<String>,
-}
-
-impl Default for DisplayNamePool {
-    fn default() -> Self {
-        Self {
-            next_index: 0,
-            assigned: HashSet::new(),
-        }
-    }
 }
 
 impl DisplayNamePool {

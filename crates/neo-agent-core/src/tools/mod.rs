@@ -438,7 +438,7 @@ pub trait Tool: Send + Sync {
 
 #[derive(Default)]
 pub struct ToolRegistry {
-    tools: BTreeMap<String, Box<dyn Tool>>,
+    tools: BTreeMap<String, Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
@@ -508,7 +508,7 @@ impl ToolRegistry {
     where
         T: Tool + 'static,
     {
-        self.tools.insert(tool.name().to_owned(), Box::new(tool));
+        self.tools.insert(tool.name().to_owned(), Arc::new(tool));
     }
 
     pub fn register_goal_tools(&mut self, manager: Arc<GoalManager>) {
@@ -534,6 +534,48 @@ impl ToolRegistry {
         })?;
         tool.execute(ctx, input).await
     }
+
+    /// Return a new registry containing only the tools allowed for the given
+    /// subagent role.
+    #[must_use]
+    pub fn filtered_for_agent_role(&self, role: crate::multi_agent::AgentRole) -> Self {
+        let profile = crate::multi_agent::AgentProfile::for_role(role);
+        let mut filtered = Self::default();
+        for (name, tool) in &self.tools {
+            if !is_standard_neo_tool_name(name) || profile.allowed_tools.contains(name.as_str()) {
+                filtered.tools.insert(name.clone(), Arc::clone(tool));
+            }
+        }
+        filtered
+    }
+}
+
+fn is_standard_neo_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Read"
+            | "List"
+            | "Grep"
+            | "Find"
+            | "Glob"
+            | "Bash"
+            | "Write"
+            | "Edit"
+            | "TodoList"
+            | "Terminal"
+            | "TaskList"
+            | "TaskOutput"
+            | "TaskStop"
+            | "EnterPlanMode"
+            | "ExitPlanMode"
+            | "Delegate"
+            | "DelegateSwarm"
+            | "ListDelegates"
+            | "WaitDelegate"
+            | "InterruptDelegate"
+            | "MessageDelegate"
+            | "RunWorkflow"
+    )
 }
 
 fn parse_input<T>(tool: &str, input: serde_json::Value) -> Result<T, ToolError>

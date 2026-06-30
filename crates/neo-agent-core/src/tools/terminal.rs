@@ -21,7 +21,7 @@ use super::{
     parse_input, schema,
 };
 
-const TERMINAL_READ_MAX_WAIT: Duration = Duration::from_millis(250);
+const TERMINAL_READ_MAX_WAIT: Duration = Duration::from_secs(3);
 const TERMINAL_READ_QUIET_PERIOD: Duration = Duration::from_millis(50);
 const TERMINAL_READ_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -447,7 +447,7 @@ async fn stop_terminal(
     Ok(stop_session_blocking(
         handle.to_owned(),
         session,
-        "stopped",
+        "cancelled",
         max_output_bytes,
         ctx.tool_update.clone(),
     )
@@ -458,7 +458,7 @@ async fn cleanup_terminal_session(handle: &str) {
     let Some(session) = TERMINALS.lock().await.remove(handle) else {
         return;
     };
-    let _ = stop_session_blocking(handle.to_owned(), session, "stopped", 0, None).await;
+    let _ = stop_session_blocking(handle.to_owned(), session, "cancelled", 0, None).await;
 }
 
 async fn stop_session_blocking(

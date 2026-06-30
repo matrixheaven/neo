@@ -189,7 +189,7 @@ async fn task_stop_can_cancel_question_with_shell_permission() {
         .await
         .expect("TaskStop should cancel question after shell approval");
 
-    assert!(stopped.content.contains("status: stopped"));
+    assert!(stopped.content.contains("status: cancelled"));
     assert_eq!(stopped.details.as_ref().unwrap()["kind"], "question");
 }
 

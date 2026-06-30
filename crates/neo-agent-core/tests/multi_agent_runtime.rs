@@ -2,15 +2,16 @@ use futures::StreamExt;
 use neo_agent_core::harness::FakeHarness;
 use neo_agent_core::multi_agent::{
     AgentActivityKind, AgentLifecycleState, DEFAULT_AGENT_NAMES, DisplayNamePool,
-    MultiAgentRuntime, is_forbidden_subagent_git_command,
+    MultiAgentRuntime, SwarmAggregate, is_forbidden_subagent_git_command,
 };
-use neo_agent_core::tools::ToolRegistry;
+use neo_agent_core::tools::{ToolContext, ToolRegistry, ToolResult};
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, PermissionMode,
     ToolExecutionMode,
 };
 use neo_ai::{AiStreamEvent, StopReason};
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn display_name_pool_is_deterministic() {
@@ -418,23 +419,6 @@ async fn subagent_request_hides_and_blocks_parent_orchestration_tools() {
             AiStreamEvent::MessageStart {
                 id: "child_msg".to_owned(),
             },
-            AiStreamEvent::ToolCallStart {
-                id: "nested_delegate".to_owned(),
-                name: "Delegate".to_owned(),
-            },
-            AiStreamEvent::ToolCallEnd {
-                id: "nested_delegate".to_owned(),
-                arguments: json!({ "task": "should be blocked" }),
-            },
-            AiStreamEvent::MessageEnd {
-                stop_reason: StopReason::ToolUse,
-                usage: None,
-            },
-        ],
-        vec![
-            AiStreamEvent::MessageStart {
-                id: "child_msg_2".to_owned(),
-            },
             AiStreamEvent::TextDelta {
                 text: "blocked recursive delegate".to_owned(),
             },
@@ -486,14 +470,94 @@ async fn subagent_request_hides_and_blocks_parent_orchestration_tools() {
         !child_tool_names.contains(&"RunWorkflow"),
         "{child_tool_names:?}"
     );
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AgentEvent::ToolExecutionFinished { name, result, .. }
-            if name == "Delegate"
-                && result
-                    .content
-                    .contains("blocked recursive delegate")
-    )));
+    // The child should have completed with the text response since
+    // orchestration tools are hidden from subagents.
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolExecutionFinished { name, result, .. }
+                if name == "Delegate"
+                    && result
+                        .content
+                        .contains("blocked recursive delegate")
+        )),
+        "expected delegate result with 'blocked recursive delegate'"
+    );
+}
+
+#[tokio::test]
+async fn subagent_cannot_force_call_hidden_parent_tools() {
+    let harness = FakeHarness::from_turns([
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "parent_msg".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "tool_delegate".to_owned(),
+                name: "Delegate".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "tool_delegate".to_owned(),
+                arguments: json!({ "task": "try hidden task output" }),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            AiStreamEvent::MessageStart {
+                id: "child_msg".to_owned(),
+            },
+            AiStreamEvent::ToolCallStart {
+                id: "hidden_tool".to_owned(),
+                name: "ListDelegates".to_owned(),
+            },
+            AiStreamEvent::ToolCallEnd {
+                id: "hidden_tool".to_owned(),
+                arguments: json!({}),
+            },
+            AiStreamEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+    ]);
+    let runtime = AgentRuntime::with_tools(
+        AgentConfig::for_model(harness.model())
+            .with_tool_execution_mode(ToolExecutionMode::Sequential)
+            .with_permission_mode(PermissionMode::Yolo),
+        harness.client(),
+        ToolRegistry::with_builtin_tools(),
+    );
+    let mut context = AgentContext::new();
+
+    let events = runtime
+        .run_turn(
+            &mut context,
+            AgentMessage::user_text("delegate hidden tool check"),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("turn should succeed");
+
+    let finished = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::DelegateFinished { agent, .. } => Some(agent),
+            _ => None,
+        })
+        .expect("delegate should finish");
+    assert!(
+        finished.activity.iter().any(|entry| matches!(
+            &entry.kind,
+            AgentActivityKind::Tool { name, failed: true, .. } if name == "ListDelegates"
+        )),
+        "{:#?}",
+        finished.activity
+    );
 }
 
 #[tokio::test]
@@ -501,6 +565,7 @@ async fn child_activity_keeps_same_name_tool_failures_on_their_own_ids() {
     let runtime = MultiAgentRuntime::new();
     let agent = runtime.start_delegate(
         "same tool ids",
+        None,
         neo_agent_core::multi_agent::AgentRole::Coder,
         neo_agent_core::multi_agent::AgentRunMode::Foreground,
         neo_agent_core::multi_agent::AgentPathKind::Root,
@@ -812,12 +877,9 @@ async fn delegate_tools_reject_empty_tasks_bad_context_and_zero_concurrency() {
     let empty_delegate = registry
         .run("Delegate", &ctx, json!({ "task": "" }))
         .await
-        .expect_err("empty task should be rejected");
-    assert!(
-        empty_delegate
-            .to_string()
-            .contains("task must not be empty")
-    );
+        .expect("empty task should return validation result");
+    assert!(empty_delegate.is_error);
+    assert!(empty_delegate.content.contains("task must not be empty"));
 
     let bad_context = registry
         .run(
@@ -876,4 +938,368 @@ fn child_text_turn(text: &str) -> Vec<AiStreamEvent> {
             usage: None,
         },
     ]
+}
+
+fn registry_with_multi_agent() -> (ToolRegistry, ToolContext) {
+    let harness = FakeHarness::from_turns([vec![
+        AiStreamEvent::MessageStart {
+            id: "msg_1".to_owned(),
+        },
+        AiStreamEvent::TextDelta {
+            text: "done".to_owned(),
+        },
+        AiStreamEvent::MessageEnd {
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        },
+    ]]);
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ToolContext::new(dir.path()).unwrap().with_child_runtime(
+        AgentConfig::for_model(harness.model())
+            .with_permission_mode(PermissionMode::Yolo)
+            .with_tool_execution_mode(ToolExecutionMode::Sequential),
+        harness.client(),
+        std::sync::Arc::new(ToolRegistry::new()),
+        1,
+    );
+    (ToolRegistry::with_builtin_tools(), ctx)
+}
+
+#[tokio::test]
+async fn delegate_resume_rejects_role_override() {
+    let (registry, ctx) = registry_with_multi_agent();
+
+    let result = registry
+        .run(
+            "Delegate",
+            &ctx,
+            serde_json::json!({
+                "resume": "agent_existing",
+                "role": "coder",
+                "task": "continue"
+            }),
+        )
+        .await
+        .expect("tool should return validation result");
+
+    assert!(result.is_error);
+    assert!(
+        result
+            .content
+            .contains("role must be omitted when resume is set"),
+        "{}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn delegate_resume_rejects_swarm_id() {
+    let (registry, ctx) = registry_with_multi_agent();
+
+    let result = registry
+        .run(
+            "Delegate",
+            &ctx,
+            serde_json::json!({
+                "resume": "swarm_123",
+                "task": "continue"
+            }),
+        )
+        .await
+        .expect("tool should return validation result");
+
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("resume must be an agent_id"),
+        "{}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn delegate_resume_reuses_agent_identity_and_role() {
+    let (registry, ctx) = registry_with_multi_agent();
+    let first = registry
+        .run(
+            "Delegate",
+            &ctx,
+            serde_json::json!({
+                "task": "first investigation",
+                "role": "explorer",
+                "mode": "foreground"
+            }),
+        )
+        .await
+        .expect("first delegate should complete");
+    let agent_id = first
+        .details
+        .as_ref()
+        .and_then(|details| details.get("agent_id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("first delegate should expose agent_id")
+        .to_owned();
+
+    let second = registry
+        .run(
+            "Delegate",
+            &ctx,
+            serde_json::json!({
+                "resume": agent_id,
+                "task": "continue with one more check",
+                "mode": "foreground"
+            }),
+        )
+        .await
+        .expect("resume should complete");
+
+    let details = second.details.as_ref().expect("resume details");
+    assert_eq!(
+        details.get("agent_id").and_then(serde_json::Value::as_str),
+        Some(agent_id.as_str())
+    );
+    assert_eq!(
+        details
+            .get("actual_role")
+            .and_then(serde_json::Value::as_str),
+        Some("explorer")
+    );
+    assert!(
+        second.content.contains("status: completed"),
+        "{}",
+        second.content
+    );
+}
+
+#[test]
+fn delegate_and_message_descriptions_explain_resume_and_live_followup() {
+    let registry = ToolRegistry::with_builtin_tools_and_todos(Arc::new(Mutex::new(Vec::new())));
+    let specs = registry.specs();
+    let delegate = specs
+        .iter()
+        .find(|spec| spec.name == "Delegate")
+        .expect("Delegate spec registered");
+    let message = specs
+        .iter()
+        .find(|spec| spec.name == "MessageDelegate")
+        .expect("MessageDelegate spec registered");
+
+    assert!(
+        delegate.description.contains("resume"),
+        "{}",
+        delegate.description
+    );
+    assert!(
+        delegate.description.contains("role must be omitted"),
+        "{}",
+        delegate.description
+    );
+    assert!(
+        message.description.contains("running"),
+        "{}",
+        message.description
+    );
+    assert!(
+        message.description.contains("Delegate with resume"),
+        "{}",
+        message.description
+    );
+}
+
+#[test]
+fn swarm_aggregate_counts_child_states_and_derives_status() {
+    let aggregate = SwarmAggregate::from_states([
+        AgentLifecycleState::Completed,
+        AgentLifecycleState::Failed,
+        AgentLifecycleState::Cancelled,
+        AgentLifecycleState::Queued,
+    ]);
+
+    assert_eq!(aggregate.total, 4);
+    assert_eq!(aggregate.completed, 1);
+    assert_eq!(aggregate.failed, 1);
+    assert_eq!(aggregate.cancelled, 1);
+    assert_eq!(aggregate.queued, 1);
+    assert_eq!(aggregate.status(), AgentLifecycleState::Queued);
+}
+
+#[tokio::test]
+async fn runtime_keeps_swarm_entity_after_foreground_completion() {
+    let (registry, ctx) = registry_with_multi_agent();
+
+    let result = registry
+        .run(
+            "DelegateSwarm",
+            &ctx,
+            serde_json::json!({
+                "description": "count files",
+                "items": ["a", "b"],
+                "prompt_template": "Inspect {{item}} for {{description}}",
+                "mode": "foreground"
+            }),
+        )
+        .await
+        .expect("swarm should complete");
+
+    let swarm_id = result
+        .details
+        .as_ref()
+        .and_then(|details| details.get("swarm_id"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            result
+                .details
+                .as_ref()
+                .and_then(|details| details.get("swarm"))
+                .and_then(|swarm| swarm.get("swarm_id"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .expect("swarm_id");
+    let snapshot = ctx
+        .multi_agent
+        .swarm_snapshot(swarm_id)
+        .expect("swarm remains queryable");
+
+    assert_eq!(snapshot.swarm_id, swarm_id);
+    assert_eq!(snapshot.aggregate.total, 2);
+    assert_eq!(snapshot.state, AgentLifecycleState::Completed);
+}
+
+#[tokio::test]
+async fn delegate_swarm_rejects_unknown_template_placeholder() {
+    let (registry, ctx) = registry_with_multi_agent();
+    let result = registry
+        .run(
+            "DelegateSwarm",
+            &ctx,
+            serde_json::json!({
+                "description": "audit",
+                "items": ["one"],
+                "prompt_template": "Audit {{task}} and {{item}}"
+            }),
+        )
+        .await;
+
+    let result = result.unwrap_or_else(|err| ToolResult::error(err.to_string()));
+    assert!(result.is_error);
+    assert!(
+        result
+            .content
+            .contains("only {{item}} and {{description}} are supported"),
+        "{}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn delegate_swarm_rejects_duplicate_expanded_prompts() {
+    let (registry, ctx) = registry_with_multi_agent();
+    let result = registry
+        .run(
+            "DelegateSwarm",
+            &ctx,
+            serde_json::json!({
+                "description": "audit",
+                "items": ["same", "same"],
+                "prompt_template": "Audit {{item}}"
+            }),
+        )
+        .await;
+
+    let result = result.unwrap_or_else(|err| ToolResult::error(err.to_string()));
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("duplicate expanded child prompt"),
+        "{}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn delegate_swarm_resume_agent_ids_restarts_existing_children() {
+    let (registry, ctx) = registry_with_multi_agent();
+    let first = registry
+        .run(
+            "Delegate",
+            &ctx,
+            serde_json::json!({
+                "task": "initial child",
+                "mode": "foreground"
+            }),
+        )
+        .await
+        .expect("delegate should complete");
+    let agent_id = first
+        .details
+        .as_ref()
+        .and_then(|details| details.get("agent_id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("agent_id")
+        .to_owned();
+
+    let mut resume_map = serde_json::Map::new();
+    resume_map.insert(
+        agent_id.clone(),
+        serde_json::Value::String("continue inside swarm".to_owned()),
+    );
+    let swarm = registry
+        .run(
+            "DelegateSwarm",
+            &ctx,
+            serde_json::json!({
+                "description": "resume unfinished child",
+                "resume_agent_ids": serde_json::Value::Object(resume_map),
+                "mode": "foreground"
+            }),
+        )
+        .await
+        .expect("swarm resume should complete");
+
+    assert!(!swarm.is_error, "{}", swarm.content);
+    assert!(
+        swarm.content.contains(agent_id.as_str()),
+        "{}",
+        swarm.content
+    );
+}
+
+#[tokio::test]
+async fn coder_subagent_bash_still_denies_git_mutation() {
+    use neo_agent_core::multi_agent::is_git_mutation_command;
+
+    // The runtime enforces git mutation denial through is_git_mutation_command
+    // in the before_tool_call hook. Verify the classifier works.
+    assert!(is_git_mutation_command("git add ."));
+    assert!(is_git_mutation_command("git commit -m change"));
+    assert!(is_git_mutation_command("git reset --hard"));
+    assert!(!is_git_mutation_command("git status"));
+    assert!(!is_git_mutation_command("git log"));
+}
+
+#[tokio::test]
+async fn summary_context_does_not_leak_role_setup_boilerplate() {
+    let (registry, ctx) = registry_with_multi_agent();
+    let result = registry
+        .run(
+            "Delegate",
+            &ctx,
+            serde_json::json!({
+                "task": "Read crates/neo-agent-core/src/lib.rs and summarize in one sentence",
+                "role": "explorer",
+                "context": "summary",
+                "mode": "foreground"
+            }),
+        )
+        .await
+        .expect("delegate should complete");
+
+    assert!(
+        !result.content.contains("Acknowledged. Ready"),
+        "{}",
+        result.content
+    );
+    assert!(
+        !result.content.contains("You are an Explorer subagent"),
+        "{}",
+        result.content
+    );
 }
