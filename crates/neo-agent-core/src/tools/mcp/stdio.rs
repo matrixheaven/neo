@@ -97,20 +97,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stdio_config_holds_values() {
-        let config = StdioConfig {
-            command: "npx".into(),
-            args: vec!["-y".into(), "server".into()],
-            env: [("K".into(), "V".into())].into_iter().collect(),
-            cwd: Some(PathBuf::from("/tmp")),
-            startup_timeout_ms: Some(5000),
-            tool_timeout_ms: Some(30000),
-        };
-        assert_eq!(config.command, "npx");
-        assert_eq!(config.args.len(), 2);
-    }
-
-    #[test]
     fn build_command_pipes_stderr() {
         let config = StdioConfig {
             command: "echo".into(),

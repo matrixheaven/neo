@@ -580,7 +580,7 @@ pub async fn authenticate_mcp_server_oauth(
     let port = callback_server.local_port;
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
 
-    {
+    let (client_config, discovery_metadata) = {
         let mut mgr = manager.lock().await;
 
         // Discover OAuth metadata (RFC 8414 / RFC 9728) from the server.
@@ -589,10 +589,11 @@ pub async fn authenticate_mcp_server_oauth(
             .discover_metadata()
             .await
             .context("failed to discover OAuth metadata from server")?;
-        mgr.set_metadata(metadata);
+        mgr.set_metadata(metadata.clone());
 
         // Dynamically register the client with the redirect URI.
-        mgr.register_client("neo", &redirect_uri, &[])
+        let client_config = mgr
+            .register_client("neo", &redirect_uri, &[])
             .await
             .context("OAuth dynamic client registration failed")?;
 
@@ -603,7 +604,8 @@ pub async fn authenticate_mcp_server_oauth(
             .context("failed to build OAuth authorization URL")?;
 
         let _ = webbrowser::open(&auth_url);
-    }
+        (client_config, metadata)
+    };
 
     // Wait for the browser callback.
     let code = callback_server
@@ -633,6 +635,9 @@ pub async fn authenticate_mcp_server_oauth(
         .get(&format!("mcp:{server_id}"))
         .cloned()
         .context("OAuth authorization did not persist credentials")?;
+    service
+        .persist_client_and_discovery(&identity, &client_config, discovery_metadata)
+        .context("failed to persist OAuth client metadata to Neo MCP credential store")?;
     service
         .persist_rmcp_credentials(&identity, credentials)
         .await

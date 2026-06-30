@@ -30,9 +30,8 @@ pub struct McpOAuthTokenRecord {
     pub raw: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpOAuthDiscoveryRecord {
-    pub resource_metadata: serde_json::Value,
     pub authorization_server_metadata: serde_json::Value,
     pub discovered_at: String,
 }
@@ -341,8 +340,10 @@ mod tests {
 
     fn discovery_record() -> McpOAuthDiscoveryRecord {
         McpOAuthDiscoveryRecord {
-            resource_metadata: serde_json::json!({"resource": "https://mcp.example.com/sse"}),
             authorization_server_metadata: serde_json::json!({
+                "authorization_endpoint": "https://auth.example.com/authorize",
+                "token_endpoint": "https://auth.example.com/token",
+                "registration_endpoint": "https://auth.example.com/register",
                 "issuer": "https://auth.example.com"
             }),
             discovered_at: "2026-06-29T00:00:00Z".to_owned(),
@@ -396,7 +397,12 @@ mod tests {
 
         store.save_discovery(&identity, &discovery).unwrap();
 
-        assert_eq!(store.load_discovery(&identity).unwrap(), Some(discovery));
+        let loaded = store.load_discovery(&identity).unwrap().unwrap();
+        assert_eq!(
+            loaded.authorization_server_metadata,
+            discovery.authorization_server_metadata
+        );
+        assert_eq!(loaded.discovered_at, discovery.discovered_at);
     }
 
     #[test]

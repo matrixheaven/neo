@@ -4,12 +4,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rmcp::transport::auth::{AuthorizationManager, OAuthClientConfig, StoredCredentials};
+use async_trait::async_trait;
+use rmcp::transport::auth::{
+    AuthError, AuthorizationManager, CredentialStore, OAuthClientConfig, StoredCredentials,
+};
 use tokio::sync::Mutex;
 
 use super::{
-    InMemoryStateStore, InvalidateScope, McpOAuthClientRecord, McpOAuthError, McpOAuthFlow,
-    McpOAuthIdentity, McpOAuthStore, McpOAuthTokenRecord,
+    InMemoryStateStore, InvalidateScope, McpOAuthClientRecord, McpOAuthDiscoveryRecord,
+    McpOAuthError, McpOAuthFlow, McpOAuthIdentity, McpOAuthStore, McpOAuthTokenRecord,
 };
 
 const TOKEN_EXPIRY_SKEW_SECS: u64 = 60;
@@ -85,25 +88,48 @@ impl McpOAuthService {
             .store
             .load_client(identity)
             .map_err(|err| McpOAuthError::Store(err.to_string()))?;
-        if client.is_none() {
+        let Some(client) = client else {
             return Err(McpOAuthError::NeedsAuth(
                 "OAuth client registration is missing".to_owned(),
             ));
-        }
+        };
 
         let discovery = self
             .store
             .load_discovery(identity)
             .map_err(|err| McpOAuthError::Store(err.to_string()))?;
-        if discovery.is_none() {
+        let Some(discovery) = discovery else {
             return Err(McpOAuthError::NeedsAuth(
                 "OAuth discovery metadata is missing".to_owned(),
             ));
-        }
+        };
 
-        Err(McpOAuthError::NeedsAuth(
-            "OAuth token refresh is not implemented yet".to_owned(),
-        ))
+        let metadata =
+            serde_json::from_value(discovery.authorization_server_metadata).map_err(|err| {
+                McpOAuthError::Store(format!("invalid OAuth discovery metadata: {err}"))
+            })?;
+        let mut manager = AuthorizationManager::new(identity.canonical_resource_url.as_str())
+            .await
+            .map_err(|err| McpOAuthError::Flow(format!("failed to build OAuth manager: {err}")))?;
+        manager.set_metadata(metadata);
+        manager.set_credential_store(CanonicalCredentialStore::new(
+            self.store.clone(),
+            identity.clone(),
+        ));
+        manager
+            .configure_client(oauth_client_config_from_record(&client)?)
+            .map_err(|err| {
+                McpOAuthError::Flow(format!("stored OAuth client is unusable: {err}"))
+            })?;
+        manager
+            .refresh_token()
+            .await
+            .map_err(refresh_error_to_oauth)?;
+
+        self.store
+            .load_tokens(identity)
+            .map_err(|err| McpOAuthError::Store(err.to_string()))?
+            .ok_or(McpOAuthError::MissingTokens)
     }
 
     pub async fn invalidate(
@@ -205,6 +231,99 @@ impl McpOAuthService {
         }
         Ok(())
     }
+
+    pub fn persist_client_and_discovery(
+        &self,
+        identity: &McpOAuthIdentity,
+        client: &OAuthClientConfig,
+        discovery: rmcp::transport::auth::AuthorizationMetadata,
+    ) -> Result<(), McpOAuthError> {
+        self.store
+            .save_client(identity, &client_record_from_config(client))?;
+        self.store.save_discovery(
+            identity,
+            &McpOAuthDiscoveryRecord {
+                authorization_server_metadata: serde_json::to_value(discovery)
+                    .map_err(|err| McpOAuthError::Store(err.to_string()))?,
+                discovered_at: unix_now_secs().to_string(),
+            },
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CanonicalCredentialStore {
+    store: McpOAuthStore,
+    identity: McpOAuthIdentity,
+}
+
+impl CanonicalCredentialStore {
+    const fn new(store: McpOAuthStore, identity: McpOAuthIdentity) -> Self {
+        Self { store, identity }
+    }
+}
+
+#[async_trait]
+impl CredentialStore for CanonicalCredentialStore {
+    async fn load(&self) -> Result<Option<StoredCredentials>, AuthError> {
+        let Some(tokens) = self
+            .store
+            .load_tokens(&self.identity)
+            .map_err(|err| AuthError::InternalError(err.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let Some(client) = self
+            .store
+            .load_client(&self.identity)
+            .map_err(|err| AuthError::InternalError(err.to_string()))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(stored_credentials_from_records(&client, &tokens)?))
+    }
+
+    async fn save(&self, credentials: StoredCredentials) -> Result<(), AuthError> {
+        let Some(tokens) = token_record_from_credentials(&credentials) else {
+            return Err(AuthError::InternalError(
+                "OAuth credentials did not include a token response".to_owned(),
+            ));
+        };
+        let tokens = self.tokens_preserving_refresh_token(tokens)?;
+        self.store
+            .save_tokens(&self.identity, &tokens)
+            .map_err(|err| AuthError::InternalError(err.to_string()))
+    }
+
+    async fn clear(&self) -> Result<(), AuthError> {
+        self.store
+            .clear_tokens(&self.identity)
+            .map_err(|err| AuthError::InternalError(err.to_string()))
+    }
+}
+
+impl CanonicalCredentialStore {
+    fn tokens_preserving_refresh_token(
+        &self,
+        mut tokens: McpOAuthTokenRecord,
+    ) -> Result<McpOAuthTokenRecord, AuthError> {
+        if tokens.refresh_token.is_none() {
+            let previous = self
+                .store
+                .load_tokens(&self.identity)
+                .map_err(|err| AuthError::InternalError(err.to_string()))?;
+            if let Some(previous_refresh_token) = previous.and_then(|record| record.refresh_token) {
+                tokens.refresh_token = Some(previous_refresh_token.clone());
+                if let Some(raw) = tokens.raw.as_object_mut() {
+                    raw.insert(
+                        "refresh_token".to_owned(),
+                        serde_json::Value::String(previous_refresh_token),
+                    );
+                }
+            }
+        }
+        Ok(tokens)
+    }
 }
 
 fn default_neo_home() -> PathBuf {
@@ -262,6 +381,20 @@ fn token_record_from_credentials(
     })
 }
 
+fn stored_credentials_from_records(
+    client: &McpOAuthClientRecord,
+    tokens: &McpOAuthTokenRecord,
+) -> Result<StoredCredentials, AuthError> {
+    let token_response = serde_json::from_value(tokens.raw.clone())
+        .map_err(|err| AuthError::InternalError(format!("invalid stored OAuth token: {err}")))?;
+    Ok(StoredCredentials::new(
+        client.client_id.clone(),
+        Some(token_response),
+        tokens.granted_scopes.clone(),
+        Some(tokens.token_received_at),
+    ))
+}
+
 fn client_record_from_credentials(credentials: &StoredCredentials) -> McpOAuthClientRecord {
     McpOAuthClientRecord {
         client_id: credentials.client_id.clone(),
@@ -298,6 +431,28 @@ fn client_record_from_config(config: &OAuthClientConfig) -> McpOAuthClientRecord
             "scopes": config.scopes,
             "application_type": config.application_type,
         }),
+    }
+}
+
+fn oauth_client_config_from_record(
+    client: &McpOAuthClientRecord,
+) -> Result<OAuthClientConfig, McpOAuthError> {
+    let mut config = OAuthClientConfig::new(
+        client.client_id.clone(),
+        redirect_uri_from_stored_client(client)?,
+    );
+    if let Some(client_secret) = client.client_secret.clone() {
+        config = config.with_client_secret(client_secret);
+    }
+    Ok(config)
+}
+
+fn refresh_error_to_oauth(err: AuthError) -> McpOAuthError {
+    match err {
+        AuthError::AuthorizationRequired | AuthError::TokenRefreshFailed(_) => {
+            McpOAuthError::NeedsAuth(err.to_string())
+        }
+        other => McpOAuthError::Flow(format!("OAuth token refresh failed: {other}")),
     }
 }
 
@@ -401,12 +556,29 @@ mod tests {
 
     fn discovery_record() -> McpOAuthDiscoveryRecord {
         McpOAuthDiscoveryRecord {
-            resource_metadata: serde_json::json!({"resource": "https://mcp.example.com/sse"}),
-            authorization_server_metadata: serde_json::json!({
-                "issuer": "https://auth.example.com"
-            }),
+            authorization_server_metadata: authorization_metadata_json(
+                "https://auth.example.com/token",
+            ),
             discovered_at: "2026-06-29T00:00:00Z".to_owned(),
         }
+    }
+
+    fn authorization_metadata(
+        token_endpoint: &str,
+    ) -> rmcp::transport::auth::AuthorizationMetadata {
+        serde_json::from_value(authorization_metadata_json(token_endpoint)).unwrap()
+    }
+
+    fn authorization_metadata_json(token_endpoint: &str) -> serde_json::Value {
+        serde_json::json!({
+            "authorization_endpoint": "https://auth.example.com/authorize",
+            "token_endpoint": token_endpoint,
+            "registration_endpoint": "https://auth.example.com/register",
+            "issuer": "https://auth.example.com",
+            "scopes_supported": ["read", "write"],
+            "response_types_supported": ["code"],
+            "code_challenge_methods_supported": ["S256"]
+        })
     }
 
     fn service() -> (tempfile::TempDir, McpOAuthService, McpOAuthIdentity) {
@@ -435,6 +607,54 @@ mod tests {
 
     fn stored_credentials_without_token_response() -> StoredCredentials {
         StoredCredentials::new("client-id".to_owned(), None, Vec::new(), None)
+    }
+
+    async fn token_endpoint(response: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0; 1024];
+            loop {
+                let n = stream.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                let request = String::from_utf8_lossy(&buf);
+                let header_end = request.find("\r\n\r\n");
+                let content_length = request
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .map(str::trim)
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .or_else(|| {
+                        request
+                            .lines()
+                            .find_map(|line| line.strip_prefix("Content-Length: "))
+                            .map(str::trim)
+                            .and_then(|value| value.parse::<usize>().ok())
+                    });
+                if let (Some(header_end), Some(content_length)) = (header_end, content_length)
+                    && buf.len() >= header_end + 4 + content_length
+                {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&buf).into_owned();
+            let body = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            );
+            stream.write_all(body.as_bytes()).await.unwrap();
+            request
+        });
+        (url, handle)
     }
 
     #[test]
@@ -531,6 +751,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn access_token_refreshes_stale_token_and_persists_rotated_credentials() {
+        let (_dir, service, identity) = service();
+        let (token_url, request) = token_endpoint(
+            r#"{"access_token":"rotated-token","token_type":"Bearer","refresh_token":"rotated-refresh-token","expires_in":7200,"scope":"read write"}"#,
+        )
+        .await;
+        let mut tokens = token_record("expired-token");
+        tokens.expires_in = Some(1);
+        tokens.token_received_at = unix_now_secs().saturating_sub(120);
+        service.store().save_tokens(&identity, &tokens).unwrap();
+        service
+            .store()
+            .save_client(&identity, &client_record())
+            .unwrap();
+        service
+            .store()
+            .save_discovery(
+                &identity,
+                &McpOAuthDiscoveryRecord {
+                    authorization_server_metadata: authorization_metadata_json(&token_url),
+                    discovered_at: unix_now_secs().to_string(),
+                },
+            )
+            .unwrap();
+
+        let access_token = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            service.access_token(&identity),
+        )
+        .await
+        .expect("refresh should complete within timeout");
+        if access_token.is_err() {
+            request.abort();
+        }
+        let access_token = access_token.unwrap();
+
+        assert_eq!(access_token, Some("rotated-token".to_owned()));
+        let stored = service.store().load_tokens(&identity).unwrap().unwrap();
+        assert_eq!(stored.access_token, "rotated-token");
+        assert_eq!(
+            stored.refresh_token.as_deref(),
+            Some("rotated-refresh-token")
+        );
+        assert_eq!(stored.expires_in, Some(7200));
+        let request = request.await.unwrap();
+        assert!(request.contains("grant_type=refresh_token"));
+        assert!(request.contains("refresh_token=refresh-token"));
+    }
+
+    #[tokio::test]
+    async fn access_token_refresh_preserves_existing_refresh_token_when_response_omits_one() {
+        let (_dir, service, identity) = service();
+        let (token_url, request) = token_endpoint(
+            r#"{"access_token":"rotated-token","token_type":"Bearer","expires_in":7200,"scope":"read write"}"#,
+        )
+        .await;
+        let mut tokens = token_record("expired-token");
+        tokens.expires_in = Some(1);
+        tokens.token_received_at = unix_now_secs().saturating_sub(120);
+        service.store().save_tokens(&identity, &tokens).unwrap();
+        service
+            .store()
+            .save_client(&identity, &client_record())
+            .unwrap();
+        service
+            .store()
+            .save_discovery(
+                &identity,
+                &McpOAuthDiscoveryRecord {
+                    authorization_server_metadata: authorization_metadata_json(&token_url),
+                    discovered_at: unix_now_secs().to_string(),
+                },
+            )
+            .unwrap();
+
+        let access_token = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            service.access_token(&identity),
+        )
+        .await
+        .expect("refresh should complete within timeout")
+        .unwrap();
+
+        assert_eq!(access_token, Some("rotated-token".to_owned()));
+        let stored = service.store().load_tokens(&identity).unwrap().unwrap();
+        assert_eq!(stored.refresh_token.as_deref(), Some("refresh-token"));
+        assert_eq!(
+            stored
+                .raw
+                .get("refresh_token")
+                .and_then(serde_json::Value::as_str),
+            Some("refresh-token")
+        );
+        let request = request.await.unwrap();
+        assert!(request.contains("refresh_token=refresh-token"));
+    }
+
+    #[tokio::test]
     async fn invalidate_tokens_only_removes_only_tokens() {
         let (_dir, service, identity) = service();
         service
@@ -606,6 +924,34 @@ mod tests {
         assert!(client.redirect_uris.is_empty());
         assert!(client.token_endpoint_auth_method.is_none());
         assert!(service.store().load_discovery(&identity).unwrap().is_none());
+    }
+
+    #[test]
+    fn persist_client_and_discovery_writes_refresh_prerequisites() {
+        let (_dir, service, identity) = service();
+        let config = OAuthClientConfig::new("client-id", "http://127.0.0.1:14500/callback")
+            .with_client_secret("client-secret");
+        let metadata = authorization_metadata("https://auth.example.com/token");
+
+        service
+            .persist_client_and_discovery(&identity, &config, metadata.clone())
+            .unwrap();
+
+        let client = service.store().load_client(&identity).unwrap().unwrap();
+        assert_eq!(client.client_id, "client-id");
+        assert_eq!(client.client_secret.as_deref(), Some("client-secret"));
+        assert_eq!(
+            client.redirect_uris,
+            vec!["http://127.0.0.1:14500/callback".to_owned()]
+        );
+        let discovery = service.store().load_discovery(&identity).unwrap().unwrap();
+        assert_eq!(
+            discovery
+                .authorization_server_metadata
+                .get("token_endpoint")
+                .and_then(serde_json::Value::as_str),
+            Some(metadata.token_endpoint.as_str())
+        );
     }
 
     #[tokio::test]
