@@ -57,7 +57,10 @@ pub(super) fn event_should_refresh_git_status(event: &AgentEvent) -> bool {
     )
 }
 
-pub(super) fn git_status_label_with_program(program: &str, workspace_root: &Path) -> Option<String> {
+pub(super) fn git_status_label_with_program(
+    program: &str,
+    workspace_root: &Path,
+) -> Option<String> {
     let status_output = Command::new(program)
         .arg("-C")
         .arg(workspace_root)

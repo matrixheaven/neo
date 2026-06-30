@@ -6,7 +6,10 @@ use crate::config::{AppConfig, ModelConfig};
 ///
 /// Unlike `list_models_with_options`, built-in seeded models are excluded so
 /// the output reflects exactly what the user has configured.
-pub(crate) fn list_configured_models(config: &AppConfig, json_output: bool) -> anyhow::Result<String> {
+pub(crate) fn list_configured_models(
+    config: &AppConfig,
+    json_output: bool,
+) -> anyhow::Result<String> {
     if config.models.is_empty() {
         return list_empty_configured_models(config, json_output);
     }

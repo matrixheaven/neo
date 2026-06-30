@@ -9,7 +9,7 @@ use neo_tui::transcript::TranscriptPane;
 use crate::modes::sessions::{SessionPickerScope as SessionDataScope, session_summaries};
 
 use super::InteractiveController;
-use super::{LoadedSessionTranscript, same_work_dir, replay_session_into_transcript};
+use super::{LoadedSessionTranscript, replay_session_into_transcript, same_work_dir};
 
 impl InteractiveController {
     pub(super) async fn load_selected_session(&mut self) -> Result<()> {

@@ -248,8 +248,12 @@ fn dispatch_model_command(config: &AppConfig, command: ModelCommand) -> anyhow::
                 display_name,
             },
         ),
-        ModelCommand::Remove { alias } => config::mutations::remove_model(&config.config_path, &alias),
-        ModelCommand::Set { alias } => config::mutations::set_default_model(&config.config_path, &alias),
+        ModelCommand::Remove { alias } => {
+            config::mutations::remove_model(&config.config_path, &alias)
+        }
+        ModelCommand::Set { alias } => {
+            config::mutations::set_default_model(&config.config_path, &alias)
+        }
     }
 }
 
@@ -376,9 +380,10 @@ async fn dispatch_mcp_command(config: &AppConfig, command: McpCommand) -> anyhow
             )
             .await?)
         }
-        McpCommand::Del { mcp_name } => {
-            Ok(config::mutations::remove_mcp_server(&mcp_name, &config.config_path)?)
-        }
+        McpCommand::Del { mcp_name } => Ok(config::mutations::remove_mcp_server(
+            &mcp_name,
+            &config.config_path,
+        )?),
         McpCommand::Disable { mcp_name } => Ok(config::mutations::set_mcp_server_enabled(
             &mcp_name,
             false,

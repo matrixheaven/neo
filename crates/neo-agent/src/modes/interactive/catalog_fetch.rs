@@ -85,10 +85,12 @@ impl InteractiveController {
 
     pub(super) fn open_catalog_api_key_input(&mut self, provider_id: &str) {
         self.pending_catalog_provider_id = Some(provider_id.to_owned());
-        self.tui.chrome_mut().open_api_key_input(ApiKeyInputOptions {
-            title: "API Key".to_owned(),
-            provider_name: provider_id.to_owned(),
-        });
+        self.tui
+            .chrome_mut()
+            .open_api_key_input(ApiKeyInputOptions {
+                title: "API Key".to_owned(),
+                provider_name: provider_id.to_owned(),
+            });
     }
 
     pub(super) fn import_custom_catalog_provider(&mut self, provider_id: &str) {

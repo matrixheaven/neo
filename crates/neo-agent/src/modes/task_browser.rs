@@ -17,6 +17,8 @@ pub fn snapshot_to_item(snapshot: &BackgroundTaskSnapshot) -> TaskBrowserItem {
     let kind = match snapshot.kind {
         BackgroundTaskKind::Bash => TaskBrowserKind::Bash,
         BackgroundTaskKind::Question => TaskBrowserKind::Question,
+        BackgroundTaskKind::Delegate => TaskBrowserKind::Delegate,
+        BackgroundTaskKind::DelegateSwarm => TaskBrowserKind::DelegateSwarm,
     };
     let status = map_status(snapshot.status);
     TaskBrowserItem {
@@ -33,17 +35,68 @@ pub fn snapshot_to_item(snapshot: &BackgroundTaskSnapshot) -> TaskBrowserItem {
 }
 
 fn detail_lines(snapshot: &BackgroundTaskSnapshot, status: TaskBrowserStatus) -> Vec<String> {
-    let description_label = match snapshot.kind {
-        BackgroundTaskKind::Bash => "description",
-        BackgroundTaskKind::Question => "prompt",
-    };
-    vec![
-        format!("id:          {}", snapshot.task_id),
-        format!("kind:        {}", snapshot.kind.as_str()),
-        format!("status:      {}", status.label()),
-        format!("elapsed:     {}", format_elapsed(snapshot.elapsed)),
-        format!("{description_label}: {}", snapshot.description),
-    ]
+    match snapshot.kind {
+        BackgroundTaskKind::Bash | BackgroundTaskKind::Question => {
+            let description_label = match snapshot.kind {
+                BackgroundTaskKind::Bash => "description",
+                BackgroundTaskKind::Question => "prompt",
+                _ => unreachable!(),
+            };
+            vec![
+                format!("id:          {}", snapshot.task_id),
+                format!("kind:        {}", snapshot.kind.as_str()),
+                format!("status:      {}", status.label()),
+                format!("elapsed:     {}", format_elapsed(snapshot.elapsed)),
+                format!("{description_label}: {}", snapshot.description),
+            ]
+        }
+        BackgroundTaskKind::Delegate => {
+            let mut lines = vec![
+                format!("id:          {}", snapshot.task_id),
+                format!("kind:        {}", snapshot.kind.as_str()),
+                format!("status:      {}", status.label()),
+                format!("elapsed:     {}", format_elapsed(snapshot.elapsed)),
+            ];
+            if let Some(agent) = &snapshot.delegate {
+                lines.push(format!("name:        {}", agent.display_name.as_str()));
+                lines.push(format!("mode:        {:?}", agent.mode));
+                lines.push(format!("tokens:      {}", agent.token_count));
+                lines.push(format!("tools:       {}", agent.tool_count));
+                lines.push(format!("task:        {}", agent.task));
+                if let Some(text) = &agent.latest_text {
+                    lines.push(format!("latest:      {text}"));
+                }
+            }
+            lines
+        }
+        BackgroundTaskKind::DelegateSwarm => {
+            let mut lines = vec![
+                format!("id:          {}", snapshot.task_id),
+                format!("kind:        {}", snapshot.kind.as_str()),
+                format!("status:      {}", status.label()),
+                format!("elapsed:     {}", format_elapsed(snapshot.elapsed)),
+            ];
+            if let Some(swarm) = &snapshot.swarm {
+                let completed = swarm
+                    .children
+                    .iter()
+                    .filter(|c| {
+                        matches!(
+                            c.agent.state,
+                            neo_agent_core::multi_agent::AgentLifecycleState::Completed
+                        )
+                    })
+                    .count();
+                lines.push(format!(
+                    "progress:    {}/{}",
+                    completed,
+                    swarm.children.len()
+                ));
+                lines.push(format!("children:    {}", swarm.children.len()));
+            }
+            lines
+        }
+    }
 }
 
 fn preview_lines(snapshot: &BackgroundTaskSnapshot) -> Vec<String> {
@@ -63,6 +116,50 @@ fn preview_lines(snapshot: &BackgroundTaskSnapshot) -> Vec<String> {
     match snapshot.kind {
         BackgroundTaskKind::Bash => vec!["No output yet.".to_owned()],
         BackgroundTaskKind::Question => vec![snapshot.description.clone()],
+        BackgroundTaskKind::Delegate => {
+            if let Some(agent) = &snapshot.delegate {
+                if let Some(text) = &agent.latest_text {
+                    vec![format!("latest: {text}")]
+                } else if let Some(outcome) = &agent.outcome {
+                    vec![format!("result: {}", outcome.summary)]
+                } else {
+                    vec!["Agent running...".to_owned()]
+                }
+            } else {
+                vec!["No agent data.".to_owned()]
+            }
+        }
+        BackgroundTaskKind::DelegateSwarm => {
+            if let Some(swarm) = &snapshot.swarm {
+                let all_queued = swarm.children.iter().all(|c| {
+                    matches!(
+                        c.agent.state,
+                        neo_agent_core::multi_agent::AgentLifecycleState::Queued
+                    )
+                });
+                if all_queued {
+                    vec!["Orchestrating...".to_owned()]
+                } else {
+                    let completed = swarm
+                        .children
+                        .iter()
+                        .filter(|c| {
+                            matches!(
+                                c.agent.state,
+                                neo_agent_core::multi_agent::AgentLifecycleState::Completed
+                            )
+                        })
+                        .count();
+                    vec![format!(
+                        "Working... {}/{} children done",
+                        completed,
+                        swarm.children.len()
+                    )]
+                }
+            } else {
+                vec!["No swarm data.".to_owned()]
+            }
+        }
     }
 }
 
@@ -137,6 +234,8 @@ mod tests {
                 stderr_truncated: false,
             }),
             answers: None,
+            delegate: None,
+            swarm: None,
         }
     }
 
@@ -187,6 +286,8 @@ mod tests {
             elapsed: Duration::from_secs(2),
             output: None,
             answers: Some(vec!["yes".to_owned()]),
+            delegate: None,
+            swarm: None,
         };
 
         let item = snapshot_to_item(&snapshot);
@@ -207,6 +308,8 @@ mod tests {
             elapsed: Duration::from_secs(2),
             output: None,
             answers: None,
+            delegate: None,
+            swarm: None,
         };
 
         let item = snapshot_to_item(&snapshot);
@@ -226,5 +329,93 @@ mod tests {
 
         assert_eq!(browser_snapshot.items().len(), 1);
         assert_eq!(browser_snapshot.items()[0].id, "bash-1");
+    }
+
+    #[test]
+    fn task_browser_adapter_maps_delegate_snapshot() {
+        use neo_agent_core::multi_agent::{
+            AgentDisplayName, AgentId, AgentLifecycleState, AgentPath, AgentRole, AgentRunMode,
+            AgentSnapshot,
+        };
+        let name = AgentDisplayName::new("Gibbs");
+        let agent = AgentSnapshot {
+            id: AgentId::from_suffix_for_test("del-1"),
+            display_name: name.clone(),
+            path: AgentPath::root_child(&name),
+            role: AgentRole::Coder,
+            mode: AgentRunMode::Background,
+            state: AgentLifecycleState::Running,
+            task: "fix the border".to_owned(),
+            tool_count: 2,
+            token_count: 1000,
+            elapsed: Duration::from_secs(10),
+            latest_text: Some("reading file...".to_owned()),
+            activity: Vec::new(),
+            outcome: None,
+        };
+        let snapshot = BackgroundTaskSnapshot {
+            task_id: agent.id.as_str().to_owned(),
+            kind: BackgroundTaskKind::Delegate,
+            status: BackgroundTaskStatus::Running,
+            description: agent.task.clone(),
+            elapsed: Duration::from_secs(10),
+            output: None,
+            answers: None,
+            delegate: Some(agent),
+            swarm: None,
+        };
+        let item = snapshot_to_item(&snapshot);
+        assert_eq!(item.kind, TaskBrowserKind::Delegate);
+        assert!(item.detail_lines.iter().any(|l| l.contains("name:")));
+        assert!(item.preview_lines.iter().any(|l| l.contains("latest")));
+    }
+
+    #[test]
+    fn task_browser_adapter_maps_swarm_snapshot() {
+        use neo_agent_core::multi_agent::{
+            AgentDisplayName, AgentId, AgentLifecycleState, AgentPath, AgentRole, AgentRunMode,
+            AgentSnapshot, SwarmChildSnapshot, SwarmSnapshot,
+        };
+        let name = AgentDisplayName::new("Zeno");
+        let agent = AgentSnapshot {
+            id: AgentId::from_suffix_for_test("sw-0"),
+            display_name: name.clone(),
+            path: AgentPath::root_child(&name),
+            role: AgentRole::Coder,
+            mode: AgentRunMode::Background,
+            state: AgentLifecycleState::Running,
+            task: "item 0".to_owned(),
+            tool_count: 0,
+            token_count: 0,
+            elapsed: Duration::from_secs(5),
+            latest_text: None,
+            activity: Vec::new(),
+            outcome: None,
+        };
+        let swarm = SwarmSnapshot {
+            swarm_id: "swarm-1".to_owned(),
+            description: "audit schemas".to_owned(),
+            mode: AgentRunMode::Background,
+            max_concurrency: 1,
+            children: vec![SwarmChildSnapshot {
+                item_index: 0,
+                item: "check grep".to_owned(),
+                agent,
+            }],
+        };
+        let snapshot = BackgroundTaskSnapshot {
+            task_id: swarm.swarm_id.clone(),
+            kind: BackgroundTaskKind::DelegateSwarm,
+            status: BackgroundTaskStatus::Running,
+            description: swarm.description.clone(),
+            elapsed: Duration::from_secs(5),
+            output: None,
+            answers: None,
+            delegate: None,
+            swarm: Some(swarm),
+        };
+        let item = snapshot_to_item(&snapshot);
+        assert_eq!(item.kind, TaskBrowserKind::DelegateSwarm);
+        assert!(item.detail_lines.iter().any(|l| l.contains("children:")));
     }
 }

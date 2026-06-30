@@ -29,6 +29,7 @@ pub(crate) fn agent_config_for_app(
         )
         .with_tool_execution_mode(config.runtime.tool_execution_mode)
         .with_background_tasks(config.background_tasks.clone())
+        .with_multi_agent(config.multi_agent.clone())
         .with_workspace_root(&config.project_dir)?;
     if let Some(home) = neo_home() {
         agent_config = agent_config.with_home_dir(home);

@@ -4,9 +4,12 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 
-use super::task_browser;
 use super::InteractiveController;
-use super::{slash_arg, slash_permission_mode, split_skill_invocation, expand_slash_skill, skill_invocation_args};
+use super::task_browser;
+use super::{
+    expand_slash_skill, skill_invocation_args, slash_arg, slash_permission_mode,
+    split_skill_invocation,
+};
 
 impl InteractiveController {
     /// Handle slash commands. Returns `true` if the prompt was consumed and should

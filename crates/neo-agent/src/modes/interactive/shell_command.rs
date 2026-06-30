@@ -53,7 +53,8 @@ impl From<anyhow::Error> for ShellDriverError {
 pub(super) struct RunningShellCommand {
     pub(super) id: String,
     pub(super) command: String,
-    pub(super) task: JoinHandle<Result<neo_agent_core::tools::ShellExecutionResult, ShellDriverError>>,
+    pub(super) task:
+        JoinHandle<Result<neo_agent_core::tools::ShellExecutionResult, ShellDriverError>>,
     pub(super) cancel_token: CancellationToken,
     pub(super) background_tasks: neo_agent_core::tools::BackgroundTaskManager,
     pub(super) foreground_task_id: Option<String>,
@@ -239,7 +240,10 @@ impl InteractiveController {
         Ok(())
     }
 
-    pub(super) async fn ensure_shell_session_path(&mut self, config: &AppConfig) -> Result<PathBuf> {
+    pub(super) async fn ensure_shell_session_path(
+        &mut self,
+        config: &AppConfig,
+    ) -> Result<PathBuf> {
         if let Some(session_id) = self.active_session_id.as_deref() {
             return crate::modes::sessions::session_path(session_id, config);
         }

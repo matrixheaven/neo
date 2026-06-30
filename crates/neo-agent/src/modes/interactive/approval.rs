@@ -2,7 +2,7 @@
 
 use tokio::sync::oneshot;
 
-use neo_agent_core::{PermissionApprovalDecision};
+use neo_agent_core::PermissionApprovalDecision;
 use neo_tui::shell::{ApprovalChoice, ApprovalResult};
 
 use super::InteractiveController;

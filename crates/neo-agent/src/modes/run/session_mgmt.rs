@@ -120,7 +120,11 @@ pub(super) fn record_session_activity(config: &AppConfig, session_id: &str, prom
     );
 }
 
-pub(super) async fn record_initial_session_title(config: &AppConfig, turn: &PromptTurn, prompt: &str) {
+pub(super) async fn record_initial_session_title(
+    config: &AppConfig,
+    turn: &PromptTurn,
+    prompt: &str,
+) {
     let bucket_dir = workspace_sessions_dir(config);
     let store = SessionMetadataStore::new(&bucket_dir);
     let Ok(sessions) = store.list() else {

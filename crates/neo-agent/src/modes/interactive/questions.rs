@@ -37,11 +37,7 @@ impl InteractiveController {
 
     /// Resolve a pending question by sending the user's answers through the
     /// stored oneshot channel.
-    pub(super) async fn resolve_question(
-        &mut self,
-        id: &str,
-        answers: Vec<String>,
-    ) -> Result<()> {
+    pub(super) async fn resolve_question(&mut self, id: &str, answers: Vec<String>) -> Result<()> {
         if let Some(questions) = self.pending_question_prompts.remove(id) {
             self.transcript_mut()
                 .push_transcript(neo_tui::transcript::TranscriptEntry::status(

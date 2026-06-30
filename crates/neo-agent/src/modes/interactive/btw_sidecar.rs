@@ -29,9 +29,12 @@ impl InteractiveController {
                 self.update_btw_panel_error("BTW sidecar is already open.");
                 return;
             }
-            if self.tui.chrome().btw_panel_state().is_some_and(|state| {
-                state.sidecar.phase == BtwPhase::Running
-            }) {
+            if self
+                .tui
+                .chrome()
+                .btw_panel_state()
+                .is_some_and(|state| state.sidecar.phase == BtwPhase::Running)
+            {
                 self.update_btw_panel_error(
                     "Wait for /btw to finish before sending another question.",
                 );
@@ -188,9 +191,12 @@ impl InteractiveController {
     pub(super) async fn submit_btw_prompt(&mut self) -> Result<()> {
         // If a sidecar turn is already running, preserve the user's typed text
         // and show a busy notice instead of starting a second concurrent turn.
-        if self.tui.chrome().btw_panel_state().is_some_and(|state| {
-            state.sidecar.phase == BtwPhase::Running
-        }) {
+        if self
+            .tui
+            .chrome()
+            .btw_panel_state()
+            .is_some_and(|state| state.sidecar.phase == BtwPhase::Running)
+        {
             if let Some(state) = self.tui.chrome_mut().btw_panel_state_mut() {
                 state.status_message =
                     Some("Wait for /btw to finish before sending another question.".to_owned());

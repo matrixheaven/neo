@@ -17,8 +17,10 @@ pub(super) fn content_to_display_text(content: &[Content]) -> String {
     out
 }
 
-
-pub(super) fn image_dimensions_from_data(mime_type: &str, data: &neo_agent_core::ImageRef) -> (u32, u32) {
+pub(super) fn image_dimensions_from_data(
+    mime_type: &str,
+    data: &neo_agent_core::ImageRef,
+) -> (u32, u32) {
     let bytes = match data {
         neo_agent_core::ImageRef::Base64(b64) => {
             base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).ok()
@@ -31,14 +33,12 @@ pub(super) fn image_dimensions_from_data(mime_type: &str, data: &neo_agent_core:
         .unwrap_or((0, 0))
 }
 
-
 pub(super) fn split_skill_invocation(input: &str) -> (&str, &str) {
     match input.find(' ') {
         Some(pos) => (&input[..pos], &input[pos + 1..]),
         None => (input, ""),
     }
 }
-
 
 pub(super) fn expand_slash_skill(
     name: &str,
@@ -53,7 +53,6 @@ pub(super) fn expand_slash_skill(
     Ok((expanded, invocation.raw_arguments))
 }
 
-
 pub(super) fn skill_invocation_args(raw_arguments: &str) -> Option<String> {
     if raw_arguments.trim().is_empty() {
         None
@@ -62,16 +61,18 @@ pub(super) fn skill_invocation_args(raw_arguments: &str) -> Option<String> {
     }
 }
 
-
-pub(super) const fn prompt_edit_for_action(action: KeybindingAction) -> Option<PromptEdit<'static>> {
+pub(super) const fn prompt_edit_for_action(
+    action: KeybindingAction,
+) -> Option<PromptEdit<'static>> {
     if let Some(edit) = prompt_cursor_edit_for_action(action) {
         return Some(edit);
     }
     prompt_delete_edit_for_action(action)
 }
 
-
-pub(super) const fn prompt_cursor_edit_for_action(action: KeybindingAction) -> Option<PromptEdit<'static>> {
+pub(super) const fn prompt_cursor_edit_for_action(
+    action: KeybindingAction,
+) -> Option<PromptEdit<'static>> {
     match action {
         KeybindingAction::EditorCursorLeft => Some(PromptEdit::MoveLeft),
         KeybindingAction::EditorCursorRight => Some(PromptEdit::MoveRight),
@@ -85,14 +86,14 @@ pub(super) const fn prompt_cursor_edit_for_action(action: KeybindingAction) -> O
     }
 }
 
-
-pub(super) const fn prompt_delete_edit_for_action(action: KeybindingAction) -> Option<PromptEdit<'static>> {
+pub(super) const fn prompt_delete_edit_for_action(
+    action: KeybindingAction,
+) -> Option<PromptEdit<'static>> {
     if let Some(edit) = prompt_delete_range_edit_for_action(action) {
         return Some(edit);
     }
     prompt_undo_yank_edit_for_action(action)
 }
-
 
 pub(super) const fn prompt_delete_range_edit_for_action(
     action: KeybindingAction,
@@ -106,7 +107,6 @@ pub(super) const fn prompt_delete_range_edit_for_action(
     prompt_delete_line_edit_for_action(action)
 }
 
-
 pub(super) const fn prompt_delete_char_edit_for_action(
     action: KeybindingAction,
 ) -> Option<PromptEdit<'static>> {
@@ -116,7 +116,6 @@ pub(super) const fn prompt_delete_char_edit_for_action(
         _ => None,
     }
 }
-
 
 pub(super) const fn prompt_delete_word_edit_for_action(
     action: KeybindingAction,
@@ -128,7 +127,6 @@ pub(super) const fn prompt_delete_word_edit_for_action(
     }
 }
 
-
 pub(super) const fn prompt_delete_line_edit_for_action(
     action: KeybindingAction,
 ) -> Option<PromptEdit<'static>> {
@@ -139,15 +137,15 @@ pub(super) const fn prompt_delete_line_edit_for_action(
     }
 }
 
-
-pub(super) const fn prompt_undo_yank_edit_for_action(action: KeybindingAction) -> Option<PromptEdit<'static>> {
+pub(super) const fn prompt_undo_yank_edit_for_action(
+    action: KeybindingAction,
+) -> Option<PromptEdit<'static>> {
     match action {
         KeybindingAction::EditorYank => Some(PromptEdit::Yank),
         KeybindingAction::EditorUndo => Some(PromptEdit::Undo),
         _ => None,
     }
 }
-
 
 impl InteractiveController {
     pub(super) fn handle_prompt_edit_event(&mut self, event: &InputEvent) -> bool {
@@ -496,5 +494,4 @@ impl InteractiveController {
             self.push_status(format!("Clipboard copy failed: {error}"));
         }
     }
-
 }

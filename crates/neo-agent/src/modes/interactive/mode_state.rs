@@ -3,10 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use neo_agent_core::{
-    PermissionMode,
-    goal::GoalManager,
-};
+use neo_agent_core::{PermissionMode, goal::GoalManager};
 use neo_tui::shell::{DevelopmentMode, GoalModeStatus};
 
 use super::InteractiveController;

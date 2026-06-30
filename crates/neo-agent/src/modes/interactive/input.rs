@@ -67,7 +67,10 @@ impl InteractiveController {
         Ok(false)
     }
 
-    pub(super) async fn handle_pending_approval_event(&mut self, event: &InputEvent) -> Result<bool> {
+    pub(super) async fn handle_pending_approval_event(
+        &mut self,
+        event: &InputEvent,
+    ) -> Result<bool> {
         if !self.tui.chrome().approval_is_pending() {
             return Ok(false);
         }
@@ -125,7 +128,10 @@ impl InteractiveController {
         Ok(true)
     }
 
-    pub(super) fn task_browser_action_for_event(&self, event: InputEvent) -> Option<TaskBrowserAction> {
+    pub(super) fn task_browser_action_for_event(
+        &self,
+        event: InputEvent,
+    ) -> Option<TaskBrowserAction> {
         match event {
             InputEvent::Action(KeybindingAction::SelectUp) => Some(TaskBrowserAction::SelectUp),
             InputEvent::Action(KeybindingAction::SelectDown) => Some(TaskBrowserAction::SelectDown),
@@ -173,7 +179,10 @@ impl InteractiveController {
         }
     }
 
-    pub(super) async fn apply_task_browser_action(&mut self, action: TaskBrowserAction) -> Result<()> {
+    pub(super) async fn apply_task_browser_action(
+        &mut self,
+        action: TaskBrowserAction,
+    ) -> Result<()> {
         match action {
             TaskBrowserAction::Refresh => {
                 self.refresh_task_browser().await;
@@ -246,6 +255,12 @@ impl InteractiveController {
             }
             return;
         };
+        if let Some(snapshot) = config.multi_agent.cancel_agent_by_id(&task_id) {
+            config
+                .background_tasks
+                .cancel_delegate(&task_id, snapshot)
+                .await;
+        }
         let result = config
             .background_tasks
             .stop(
@@ -313,10 +328,44 @@ impl InteractiveController {
         Ok(self.handle_app_clear())
     }
 
+    /// Detach any running foreground delegate agent to background mode.
+    /// Returns `true` if a delegate was detached, `false` if there's nothing
+    /// to detach (so the caller can fall through to other Ctrl+B handling).
+    pub(super) async fn detach_foreground_delegate(&mut self) -> Result<bool> {
+        let Some(config) = self.local_config.as_ref() else {
+            return Ok(false);
+        };
+        let agents = config.multi_agent.list_agents(false);
+        let foreground_agent = agents.into_iter().find(|agent| {
+            agent.mode == neo_agent_core::multi_agent::AgentRunMode::Foreground
+                && agent.state == neo_agent_core::multi_agent::AgentLifecycleState::Running
+        });
+
+        let Some(agent) = foreground_agent else {
+            return Ok(false);
+        };
+
+        let agent_id = agent.id.clone();
+        let detached = config
+            .multi_agent
+            .detach_agent(&agent_id)
+            .expect("agent existed a moment ago");
+
+        config.background_tasks.start_delegate(detached).await;
+
+        self.push_status("Moved to background. Use /tasks to view.");
+        Ok(true)
+    }
+
     pub(super) async fn handle_keybinding_key(&mut self, key: &KeyId) -> Result<bool> {
         if self.tui.chrome().shell_running() && key.as_str() == "ctrl+b" {
             self.detach_shell_command().await?;
             return Ok(false);
+        }
+        if key.as_str() == "ctrl+b" {
+            if self.detach_foreground_delegate().await? {
+                return Ok(false);
+            }
         }
         let actions = self.keybindings.matching_actions(key);
         for action in self.keybinding_priority() {
@@ -364,7 +413,10 @@ impl InteractiveController {
         }
     }
 
-    pub(super) async fn handle_keybinding_action(&mut self, action: KeybindingAction) -> Result<bool> {
+    pub(super) async fn handle_keybinding_action(
+        &mut self,
+        action: KeybindingAction,
+    ) -> Result<bool> {
         if action == KeybindingAction::PasteImage {
             self.handle_paste_image().await?;
             return Ok(false);
@@ -454,7 +506,10 @@ impl InteractiveController {
         Ok(Some(false))
     }
 
-    pub(super) async fn handle_overlay_keybinding_action(&mut self, action: KeybindingAction) -> Result<bool> {
+    pub(super) async fn handle_overlay_keybinding_action(
+        &mut self,
+        action: KeybindingAction,
+    ) -> Result<bool> {
         match action {
             KeybindingAction::InputSubmit => {
                 self.clear_pending_exit_confirmation();
@@ -694,5 +749,4 @@ impl InteractiveController {
         self.pending_exit_confirmation = Some(ExitConfirmation::new(gesture));
         false
     }
-
 }

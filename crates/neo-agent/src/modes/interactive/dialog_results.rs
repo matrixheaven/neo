@@ -109,7 +109,8 @@ impl InteractiveController {
         // Persist the selection to disk so the next session opens on the same
         // model the user chose, instead of reverting to a stale default.
         if let Some(config_path) = self.config_path()
-            && let Err(error) = crate::config::mutations::set_default_model(&config_path, &selection.alias)
+            && let Err(error) =
+                crate::config::mutations::set_default_model(&config_path, &selection.alias)
         {
             tracing::warn!("failed to persist default model: {error}");
         }
@@ -268,5 +269,4 @@ impl InteractiveController {
             neo_tui::dialogs::TextInputResult::Cancelled => {}
         }
     }
-
 }

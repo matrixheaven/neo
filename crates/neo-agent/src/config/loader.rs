@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::{env, fs};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
+use std::{env, fs};
 
 use anyhow::Context;
 use neo_agent_core::BackgroundTaskManager;
+use neo_agent_core::multi_agent::MultiAgentRuntime;
 use neo_agent_core::{PermissionMode, QueueMode, ToolExecutionMode};
 use neo_tui::input::{KeyId, KeybindingAction, KeybindingsManager};
 use neo_tui::notify::NotificationMode;
@@ -17,10 +18,7 @@ use super::{
     AppConfig, ConfigOverrides, Defaults, ProviderConfig, RuntimeCompactionConfig, RuntimeConfig,
     TuiConfig, default_config_path, expand_user_path, neo_home,
 };
-use crate::{
-    themes,
-    trust,
-};
+use crate::{themes, trust};
 
 const DEFAULT_MODEL: &str = "gpt-4.1";
 const DEFAULT_PROVIDER: &str = "openai";
@@ -102,6 +100,7 @@ impl AppConfig {
             defaults: Defaults { mode },
             runtime,
             background_tasks: BackgroundTaskManager::new(),
+            multi_agent: MultiAgentRuntime::new(),
             tui,
             theme,
             mcp,
@@ -210,9 +209,7 @@ fn tui_from_file(tui: Option<FileTuiConfig>) -> TuiConfig {
         fetch_remote_images: tui.fetch_remote_images.unwrap_or(false),
         keybindings: tui.keybindings.unwrap_or_default(),
         completion_notification: tui.completion_notification.unwrap_or_default(),
-        question_notification: tui
-            .question_notification
-            .unwrap_or(NotificationMode::None),
+        question_notification: tui.question_notification.unwrap_or(NotificationMode::None),
     }
 }
 

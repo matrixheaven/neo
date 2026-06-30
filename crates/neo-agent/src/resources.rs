@@ -15,7 +15,7 @@ use std::{
 use crate::config::expand_user_path;
 #[cfg(test)]
 use crate::config::expand_user_path_with_home;
-use crate::trust::CONTEXT_FILE_CANDIDATES;
+use crate::trust::find_context_files_in_dir;
 
 use anyhow::Context;
 use neo_agent_core::skills::{LoadedSkill, SkillStore, builtin::builtin_skills, discovery};
@@ -127,16 +127,12 @@ fn project_context_directories(project_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn load_context_file_from_dir(dir: &Path) -> anyhow::Result<Option<ContextFile>> {
-    for file_name in CONTEXT_FILE_CANDIDATES {
-        let path = dir.join(file_name);
-        if !path.exists() {
-            continue;
-        }
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read context file {}", path.display()))?;
-        return Ok(Some(ContextFile { path, content }));
-    }
-    Ok(None)
+    let Some(path) = find_context_files_in_dir(dir).into_iter().next() else {
+        return Ok(None);
+    };
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read context file {}", path.display()))?;
+    Ok(Some(ContextFile { path, content }))
 }
 
 fn format_project_context(context_files: &[ContextFile]) -> Option<String> {

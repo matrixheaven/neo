@@ -5,17 +5,14 @@ use std::{
 };
 
 use neo_agent_core::BackgroundTaskManager;
+use neo_agent_core::multi_agent::MultiAgentRuntime;
 use neo_agent_core::{PermissionMode, QueueMode, ToolExecutionMode};
 use neo_ai::ReasoningEffort;
 use neo_tui::notify::NotificationMode;
 use neo_tui::terminal_image::ImageProtocolPreference;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    cli::Cli,
-    themes::ResolvedTheme,
-    trust,
-};
+use crate::{cli::Cli, themes::ResolvedTheme, trust};
 
 mod loader;
 mod matching;
@@ -23,17 +20,17 @@ pub(crate) mod mutations;
 mod paths;
 mod types;
 
+pub(crate) use matching::scoped_models;
 #[allow(unused_imports)]
 pub(crate) use paths::{
     default_config_path, expand_user_path, expand_user_path_with_home, global_prompts_dir,
     neo_home, workspace_sessions_dir,
 };
-pub(crate) use matching::scoped_models;
 
 // Re-export config types for callers that access them via `crate::config::*`.
-pub use types::{McpConfig, McpServerConfig, McpTransport, ModelConfig, ProviderConfig};
-pub(crate) use types::FileConfig;
 pub(crate) use loader::{read_file_config, write_file_config};
+pub(crate) use types::FileConfig;
+pub use types::{McpConfig, McpServerConfig, McpTransport, ModelConfig, ProviderConfig};
 
 #[derive(Debug, Clone, Default)]
 pub struct ConfigOverrides {
@@ -84,6 +81,9 @@ pub struct AppConfig {
     /// `TaskList`/`TaskOutput` can observe them on later turns.
     #[serde(skip)]
     pub background_tasks: BackgroundTaskManager,
+    /// Shared multi-agent runtime for Delegate/DelegateSwarm tasks in this app session.
+    #[serde(skip)]
+    pub multi_agent: MultiAgentRuntime,
     pub tui: TuiConfig,
     #[serde(skip)]
     pub theme: ResolvedTheme,

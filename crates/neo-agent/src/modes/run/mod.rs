@@ -32,22 +32,16 @@ use futures::StreamExt;
 use neo_agent_core::goal::GoalManager;
 use neo_agent_core::session::{JsonlSessionReader, JsonlSessionWriter};
 use neo_agent_core::{
-    AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool,
-    Content, CreateSkillTool, ListSkillsTool, McpConnectionManager,
-    MoveSkillTool, PendingQuestion, PermissionApprovalDecision,
-    SteerInputHandle, SummarizeSessionsTool,
-    mode::PlanMode,
+    AgentContext, AgentEvent, AgentMessage, AgentRuntime, AskUserTool, Content, CreateSkillTool,
+    ListSkillsTool, McpConnectionManager, MoveSkillTool, PendingQuestion,
+    PermissionApprovalDecision, SteerInputHandle, SummarizeSessionsTool, mode::PlanMode,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     cli::RunOutput,
-    config::{
-        AppConfig,
-        neo_home,
-        workspace_sessions_dir,
-    },
+    config::{AppConfig, neo_home, workspace_sessions_dir},
     modes::sessions,
     resources,
 };
@@ -772,17 +766,14 @@ mod tests {
         ProviderId, StopReason, providers::fake::FakeModelClient,
     };
 
-    use super::{
-        PromptApprovalRequest,
-        run_prompt_with_runtime,
-    };
     use super::mcp_cli::auth_mcp_server;
     use super::models_cli::list_configured_models;
-    use super::session_mgmt::create_session_path;
     use super::runtime::{
         agent_config_for_app, model_registry_for_config, select_config_model,
         tool_registry_for_config,
     };
+    use super::session_mgmt::create_session_path;
+    use super::{PromptApprovalRequest, run_prompt_with_runtime};
     use crate::config::{
         AppConfig, Defaults, McpConfig, McpTransport, ModelConfig, ProviderConfig,
         RuntimeCompactionConfig, RuntimeConfig, TuiConfig,
@@ -828,6 +819,7 @@ mod tests {
                 }),
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
@@ -909,6 +901,7 @@ mod tests {
                 compaction: None,
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
@@ -955,6 +948,7 @@ mod tests {
             },
             runtime: RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
@@ -1022,6 +1016,7 @@ mod tests {
                 }),
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
@@ -1101,6 +1096,7 @@ mod tests {
                 }),
             },
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
@@ -1160,6 +1156,7 @@ mod tests {
             },
             runtime: RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),
@@ -1549,6 +1546,7 @@ mod tests {
             },
             runtime: RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: McpConfig::default(),

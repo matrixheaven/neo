@@ -76,7 +76,11 @@ fn model_spec_matches_default(model: &ModelSpec, config: &AppConfig) -> bool {
         || (model.provider.0 == config.default_provider && model.model == config.default_model)
 }
 
-pub(crate) fn model_config_matches_default(alias: &str, model_cfg: &ModelConfig, config: &AppConfig) -> bool {
+pub(crate) fn model_config_matches_default(
+    alias: &str,
+    model_cfg: &ModelConfig,
+    config: &AppConfig,
+) -> bool {
     alias == config.default_model
         || (model_cfg.provider == config.default_provider
             && model_cfg.model == config.default_model)
@@ -175,7 +179,8 @@ pub(crate) fn resolve_model_client(
 fn provider_registry_for_config(config: &AppConfig) -> ProviderRegistry {
     let mut registry = ProviderRegistry::production();
     apply_configured_provider_overrides(&mut registry, config);
-    if let Some(env_name) = &config.api_key_env        && let Some(mut provider) = registry.get(&config.default_provider).cloned()
+    if let Some(env_name) = &config.api_key_env
+        && let Some(mut provider) = registry.get(&config.default_provider).cloned()
     {
         provider.api_key_env_vars = vec![env_name.clone()];
         registry.register(provider);

@@ -816,6 +816,7 @@ mod tests {
             },
             runtime: crate::config::RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: crate::config::TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: crate::config::McpConfig {
@@ -885,6 +886,7 @@ mod tests {
             },
             runtime: crate::config::RuntimeConfig::default(),
             background_tasks: neo_agent_core::BackgroundTaskManager::new(),
+            multi_agent: neo_agent_core::multi_agent::MultiAgentRuntime::new(),
             tui: crate::config::TuiConfig::default(),
             theme: crate::themes::ResolvedTheme::default(),
             mcp: crate::config::McpConfig {
