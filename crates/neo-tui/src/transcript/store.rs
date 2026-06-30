@@ -459,8 +459,11 @@ fn merge_swarm_snapshot(current: &SwarmSnapshot, incoming: SwarmSnapshot) -> Swa
     SwarmSnapshot {
         swarm_id: current.swarm_id.clone(),
         description: incoming.description,
+        role: current.role,
         mode: incoming.mode,
+        state: incoming.state,
         max_concurrency: incoming.max_concurrency.max(current.max_concurrency).max(1),
+        aggregate: incoming.aggregate,
         children,
     }
 }
@@ -488,6 +491,7 @@ fn child_progress_rank(state: AgentLifecycleState) -> u8 {
         AgentLifecycleState::Running => 1,
         AgentLifecycleState::Completed
         | AgentLifecycleState::Failed
-        | AgentLifecycleState::Cancelled => 2,
+        | AgentLifecycleState::Cancelled
+        | AgentLifecycleState::TimedOut => 2,
     }
 }

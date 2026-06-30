@@ -3,8 +3,8 @@ use std::time::Duration;
 use neo_agent_core::AgentEvent;
 use neo_agent_core::multi_agent::{
     AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
-    AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome, SwarmChildSnapshot,
-    SwarmSnapshot,
+    AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome, SwarmAggregate,
+    SwarmChildSnapshot, SwarmSnapshot,
 };
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Color, Component, Expandable, Line, strip_ansi};
@@ -20,6 +20,7 @@ fn running_delegate() -> AgentSnapshot {
         mode: AgentRunMode::Foreground,
         state: AgentLifecycleState::Running,
         task: "Implement Task 1: PlanBox border fix".to_owned(),
+        task_title: "Implement Task 1: PlanBox border fix".to_owned(),
         tool_count: 3,
         token_count: 25_600,
         elapsed: Duration::from_secs(24),
@@ -86,7 +87,10 @@ fn delegate_card_renders_kimi_style_running_summary() {
     let rows = plain(card.render(120));
     let text = rows.join("\n");
 
-    assert!(text.contains("\u{25cf} Gibbs Agent Running"), "{text}");
+    assert!(
+        text.contains("\u{25cf} Gibbs Coder Agent Running"),
+        "{text}"
+    );
     assert!(text.contains("3 tools"), "{text}");
     assert!(text.contains("24s"), "{text}");
     assert!(text.contains("25.6k tok"), "{text}");
@@ -107,8 +111,8 @@ fn delegate_card_uses_short_title_and_keeps_stats_visible_for_long_prompts() {
         plain(DelegateCardComponent::new(snapshot).render_with_theme(120, &TuiTheme::default()));
     let text = rows.join("\n");
 
-    assert!(text.contains("Gibbs Agent Running"), "{text}");
-    assert!(text.contains("1m?") == false, "{text}");
+    assert!(text.contains("Gibbs Coder Agent Running"), "{text}");
+    assert!(!text.contains("1m?"), "{text}");
     assert!(text.contains("3 tools"), "{text}");
     assert!(text.contains("24s"), "{text}");
     assert!(text.contains("25.6k tok"), "{text}");
@@ -148,16 +152,21 @@ fn swarm_card_renders_orchestrating_before_children_run() {
         state: AgentLifecycleState::Queued,
         ..running_delegate()
     };
+    let children = vec![SwarmChildSnapshot {
+        item_index: 0,
+        item: "Search tools: Grep, Find".to_owned(),
+        agent: child,
+    }];
+    let aggregate = SwarmAggregate::from_states(children.iter().map(|c| c.agent.state));
     let snapshot = SwarmSnapshot {
         swarm_id: "swarm-1".to_owned(),
         description: "Audit and fix Neo tool schemas".to_owned(),
+        role: AgentRole::Coder,
         mode: AgentRunMode::Foreground,
+        state: aggregate.status(),
         max_concurrency: 1,
-        children: vec![SwarmChildSnapshot {
-            item_index: 0,
-            item: "Search tools: Grep, Find".to_owned(),
-            agent: child,
-        }],
+        aggregate,
+        children,
     };
     let mut card = SwarmCardComponent::new(snapshot);
 
@@ -172,16 +181,21 @@ fn swarm_card_renders_orchestrating_before_children_run() {
 
 #[test]
 fn swarm_card_renders_working_after_child_runs() {
+    let children = vec![SwarmChildSnapshot {
+        item_index: 0,
+        item: "Search tools: Grep, Find".to_owned(),
+        agent: running_delegate(),
+    }];
+    let aggregate = SwarmAggregate::from_states(children.iter().map(|c| c.agent.state));
     let snapshot = SwarmSnapshot {
         swarm_id: "swarm-1".to_owned(),
         description: "Audit and fix Neo tool schemas".to_owned(),
+        role: AgentRole::Coder,
         mode: AgentRunMode::Foreground,
+        state: aggregate.status(),
         max_concurrency: 1,
-        children: vec![SwarmChildSnapshot {
-            item_index: 0,
-            item: "Search tools: Grep, Find".to_owned(),
-            agent: running_delegate(),
-        }],
+        aggregate,
+        children,
     };
     let mut card = SwarmCardComponent::new(snapshot);
 
@@ -218,28 +232,33 @@ fn swarm_card_renders_scheduling_status_when_children_are_queued() {
         activity: Vec::new(),
         ..running_delegate()
     };
+    let children = vec![
+        SwarmChildSnapshot {
+            item_index: 0,
+            item: "count AGENTS.md".to_owned(),
+            agent: running,
+        },
+        SwarmChildSnapshot {
+            item_index: 1,
+            item: "count README.md".to_owned(),
+            agent: queued_a,
+        },
+        SwarmChildSnapshot {
+            item_index: 2,
+            item: "count Cargo.toml".to_owned(),
+            agent: queued_b,
+        },
+    ];
+    let aggregate = SwarmAggregate::from_states(children.iter().map(|c| c.agent.state));
     let snapshot = SwarmSnapshot {
         swarm_id: "swarm-queued".to_owned(),
         description: "single-file counts".to_owned(),
+        role: AgentRole::Coder,
         mode: AgentRunMode::Foreground,
+        state: aggregate.status(),
         max_concurrency: 1,
-        children: vec![
-            SwarmChildSnapshot {
-                item_index: 0,
-                item: "count AGENTS.md".to_owned(),
-                agent: running,
-            },
-            SwarmChildSnapshot {
-                item_index: 1,
-                item: "count README.md".to_owned(),
-                agent: queued_a,
-            },
-            SwarmChildSnapshot {
-                item_index: 2,
-                item: "count Cargo.toml".to_owned(),
-                agent: queued_b,
-            },
-        ],
+        aggregate,
+        children,
     };
 
     let rows =
@@ -260,16 +279,21 @@ fn swarm_card_prefers_child_activity_over_original_item_text() {
         summary: "34 lines".to_owned(),
         is_error: false,
     });
+    let children = vec![SwarmChildSnapshot {
+        item_index: 0,
+        item: "Look up the line count of crates/neo-agent-core/src/lib.rs using `wc -l` and report back. Reply with exactly one line: `<count> lines` where <count> is the actual number from wc -l. Do not modify any files.".to_owned(),
+        agent: child,
+    }];
+    let aggregate = SwarmAggregate::from_states(children.iter().map(|c| c.agent.state));
     let snapshot = SwarmSnapshot {
         swarm_id: "swarm-1".to_owned(),
         description: "Read-only codebase investigations".to_owned(),
+        role: AgentRole::Coder,
         mode: AgentRunMode::Foreground,
+        state: aggregate.status(),
         max_concurrency: 1,
-        children: vec![SwarmChildSnapshot {
-            item_index: 0,
-            item: "Look up the line count of crates/neo-agent-core/src/lib.rs using `wc -l` and report back. Reply with exactly one line: `<count> lines` where <count> is the actual number from wc -l. Do not modify any files.".to_owned(),
-            agent: child,
-        }],
+        aggregate,
+        children,
     };
 
     let rows =
@@ -300,7 +324,7 @@ fn transcript_pane_upserts_delegate_card_from_events() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(text.contains("Gibbs Agent Running"), "{text}");
+    assert!(text.contains("Gibbs Coder Agent Running"), "{text}");
 }
 
 #[test]
@@ -321,31 +345,36 @@ fn transcript_pane_merges_out_of_order_swarm_updates_without_regressing_children
         activity: Vec::new(),
         ..running_delegate()
     };
+    let children = vec![
+        SwarmChildSnapshot {
+            item_index: 0,
+            item: "alpha prompt".to_owned(),
+            agent: AgentSnapshot {
+                state: AgentLifecycleState::Queued,
+                latest_text: None,
+                ..first.clone()
+            },
+        },
+        SwarmChildSnapshot {
+            item_index: 1,
+            item: "beta prompt".to_owned(),
+            agent: AgentSnapshot {
+                state: AgentLifecycleState::Queued,
+                latest_text: None,
+                ..second.clone()
+            },
+        },
+    ];
+    let aggregate = SwarmAggregate::from_states(children.iter().map(|c| c.agent.state));
     let started = SwarmSnapshot {
         swarm_id: "swarm-out-of-order".to_owned(),
         description: "merge test".to_owned(),
+        role: AgentRole::Coder,
         mode: AgentRunMode::Foreground,
+        state: aggregate.status(),
         max_concurrency: 2,
-        children: vec![
-            SwarmChildSnapshot {
-                item_index: 0,
-                item: "alpha prompt".to_owned(),
-                agent: AgentSnapshot {
-                    state: AgentLifecycleState::Queued,
-                    latest_text: None,
-                    ..first.clone()
-                },
-            },
-            SwarmChildSnapshot {
-                item_index: 1,
-                item: "beta prompt".to_owned(),
-                agent: AgentSnapshot {
-                    state: AgentLifecycleState::Queued,
-                    latest_text: None,
-                    ..second.clone()
-                },
-            },
-        ],
+        aggregate,
+        children,
     };
     let newer = SwarmSnapshot {
         children: vec![
@@ -506,23 +535,28 @@ fn swarm_card_uses_theme_styles_and_expanded_child_details() {
         }),
         ..running_delegate()
     };
+    let children = vec![
+        SwarmChildSnapshot {
+            item_index: 0,
+            item: "audit transcript".to_owned(),
+            agent: completed,
+        },
+        SwarmChildSnapshot {
+            item_index: 1,
+            item: "fix workflow".to_owned(),
+            agent: failed,
+        },
+    ];
+    let aggregate = SwarmAggregate::from_states(children.iter().map(|c| c.agent.state));
     let snapshot = SwarmSnapshot {
         swarm_id: "swarm-style".to_owned(),
         description: "Style-rich swarm".to_owned(),
+        role: AgentRole::Coder,
         mode: AgentRunMode::Foreground,
+        state: aggregate.status(),
         max_concurrency: 2,
-        children: vec![
-            SwarmChildSnapshot {
-                item_index: 0,
-                item: "audit transcript".to_owned(),
-                agent: completed,
-            },
-            SwarmChildSnapshot {
-                item_index: 1,
-                item: "fix workflow".to_owned(),
-                agent: failed,
-            },
-        ],
+        aggregate,
+        children,
     };
     let mut card = SwarmCardComponent::new(snapshot);
     let collapsed = card.render_with_theme(140, &theme);
@@ -569,23 +603,28 @@ fn swarm_card_renders_progress_percent() {
         state: AgentLifecycleState::Running,
         ..running_delegate()
     };
+    let children = vec![
+        SwarmChildSnapshot {
+            item_index: 0,
+            item: "done item".to_owned(),
+            agent: child,
+        },
+        SwarmChildSnapshot {
+            item_index: 1,
+            item: "running item".to_owned(),
+            agent: child2,
+        },
+    ];
+    let aggregate = SwarmAggregate::from_states(children.iter().map(|c| c.agent.state));
     let snapshot = SwarmSnapshot {
         swarm_id: "swarm-1".to_owned(),
         description: "Progress test".to_owned(),
+        role: AgentRole::Coder,
         mode: AgentRunMode::Foreground,
+        state: aggregate.status(),
         max_concurrency: 2,
-        children: vec![
-            SwarmChildSnapshot {
-                item_index: 0,
-                item: "done item".to_owned(),
-                agent: child,
-            },
-            SwarmChildSnapshot {
-                item_index: 1,
-                item: "running item".to_owned(),
-                agent: child2,
-            },
-        ],
+        aggregate,
+        children,
     };
     let mut card = SwarmCardComponent::new(snapshot);
 
@@ -605,16 +644,21 @@ fn swarm_card_renders_suspended_rate_limit() {
         latest_text: Some("suspended".to_owned()),
         ..running_delegate()
     };
+    let children = vec![SwarmChildSnapshot {
+        item_index: 0,
+        item: "rate limited".to_owned(),
+        agent: child,
+    }];
+    let aggregate = SwarmAggregate::from_states(children.iter().map(|c| c.agent.state));
     let snapshot = SwarmSnapshot {
         swarm_id: "swarm-susp".to_owned(),
         description: "Suspended test".to_owned(),
+        role: AgentRole::Coder,
         mode: AgentRunMode::Foreground,
+        state: aggregate.status(),
         max_concurrency: 1,
-        children: vec![SwarmChildSnapshot {
-            item_index: 0,
-            item: "rate limited".to_owned(),
-            agent: child,
-        }],
+        aggregate,
+        children,
     };
     let mut card = SwarmCardComponent::new(snapshot);
 
@@ -622,4 +666,197 @@ fn swarm_card_renders_suspended_rate_limit() {
     let text = rows.join("\n");
 
     assert!(text.contains("Suspended"), "{text}");
+}
+
+fn completed_delegate() -> AgentSnapshot {
+    AgentSnapshot {
+        state: AgentLifecycleState::Completed,
+        outcome: Some(AgentTerminalOutcome {
+            summary: "Done".to_owned(),
+            is_error: false,
+        }),
+        ..running_delegate()
+    }
+}
+
+fn swarm_with_child_states(states: Vec<AgentLifecycleState>) -> SwarmSnapshot {
+    let aggregate = SwarmAggregate::from_states(states.iter().copied());
+    SwarmSnapshot {
+        swarm_id: "swarm_test".to_owned(),
+        description: "Test swarm".to_owned(),
+        role: AgentRole::Coder,
+        mode: AgentRunMode::Foreground,
+        state: aggregate.status(),
+        max_concurrency: states.len().max(1),
+        aggregate,
+        children: states
+            .into_iter()
+            .enumerate()
+            .map(|(index, state)| {
+                let name = AgentDisplayName::new(format!("Agent{index}"));
+                SwarmChildSnapshot {
+                    item_index: index + 1,
+                    item: format!("item-{index}"),
+                    agent: AgentSnapshot {
+                        id: AgentId::from_suffix_for_test(&format!("swarm_child_{index}")),
+                        display_name: name.clone(),
+                        path: AgentPath::swarm_child("swarm_test", &name),
+                        role: AgentRole::Coder,
+                        mode: AgentRunMode::Foreground,
+                        state,
+                        task_title: format!("Child {index}"),
+                        task: format!("Child prompt {index}"),
+                        tool_count: 0,
+                        token_count: 0,
+                        elapsed: Duration::from_secs(0),
+                        latest_text: None,
+                        activity: Vec::new(),
+                        outcome: None,
+                    },
+                }
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn delegate_card_header_uses_task_title_not_full_prompt() {
+    let mut snapshot = running_delegate();
+    snapshot.task = "Read crates/neo-agent-core/src/lib.rs, count the public modules, then explain every module in detail with exact line references".to_owned();
+    snapshot.task_title = "Count public modules".to_owned();
+
+    let text =
+        plain(DelegateCardComponent::new(snapshot).render_with_theme(80, &TuiTheme::default()))
+            .join("\n");
+
+    assert!(text.contains("(Count public modules)"), "{text}");
+    assert!(!text.contains("explain every module in detail"), "{text}");
+    assert!(text.contains("tools"), "{text}");
+}
+
+#[test]
+fn delegate_card_keeps_only_recent_activity_rows_when_collapsed() {
+    let mut snapshot = running_delegate();
+    snapshot.activity = (0..8)
+        .map(|index| AgentActivityEntry {
+            kind: AgentActivityKind::Text {
+                text: format!("activity row {index}"),
+                thinking: index % 2 == 0,
+            },
+        })
+        .collect();
+
+    let text =
+        plain(DelegateCardComponent::new(snapshot).render_with_theme(120, &TuiTheme::default()));
+
+    assert!(
+        !text.iter().any(|l| l.contains("activity row 0")),
+        "{text:?}"
+    );
+    assert!(
+        !text.iter().any(|l| l.contains("activity row 1")),
+        "{text:?}"
+    );
+    assert!(
+        text.iter().any(|l| l.contains("activity row 7")),
+        "{text:?}"
+    );
+    assert!(text.len() <= 7, "{text:?}");
+}
+
+#[test]
+fn completed_delegate_card_does_not_duplicate_identical_latest_text_and_summary() {
+    let mut snapshot = completed_delegate();
+    snapshot.latest_text = Some("34 lines".to_owned());
+    snapshot.activity.push(AgentActivityEntry {
+        kind: AgentActivityKind::Text {
+            text: "34 lines".to_owned(),
+            thinking: false,
+        },
+    });
+    snapshot.outcome = Some(AgentTerminalOutcome {
+        summary: "34 lines".to_owned(),
+        is_error: false,
+    });
+
+    let text =
+        plain(DelegateCardComponent::new(snapshot).render_with_theme(120, &TuiTheme::default()));
+
+    let count: usize = text.iter().map(|l| l.matches("34 lines").count()).sum();
+    assert_eq!(count, 1, "{text:?}");
+}
+
+#[test]
+fn delegate_card_header_uses_role_display_label() {
+    let mut snapshot = running_delegate();
+    snapshot.display_name = AgentDisplayName::new("Hypatia");
+    snapshot.role = AgentRole::Explorer;
+    snapshot.task_title = "Map auth module".to_owned();
+
+    let text =
+        plain(DelegateCardComponent::new(snapshot).render_with_theme(120, &TuiTheme::default()))
+            .join("\n");
+
+    assert!(text.contains("Hypatia Explorer Agent Running"), "{text}");
+}
+
+#[test]
+fn swarm_card_progress_starts_near_zero_when_all_children_queued() {
+    let snapshot = swarm_with_child_states(vec![
+        AgentLifecycleState::Queued,
+        AgentLifecycleState::Queued,
+        AgentLifecycleState::Queued,
+    ]);
+
+    let text =
+        plain(SwarmCardComponent::new(snapshot).render_with_theme(140, &TuiTheme::default()));
+
+    let joined = text.join("\n");
+    assert!(
+        joined.contains("Running") || joined.contains("Queued"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("0%") || joined.contains("1%") || joined.contains("2%"),
+        "{joined}"
+    );
+    assert!(!joined.contains("100%"), "{joined}");
+}
+
+#[test]
+fn swarm_card_child_row_prefers_latest_activity_over_full_prompt() {
+    let mut snapshot = swarm_with_child_states(vec![AgentLifecycleState::Running]);
+    snapshot.children[0].agent.task = "Run a very long investigation prompt that should not remain visible after activity arrives".to_owned();
+    snapshot.children[0]
+        .agent
+        .activity
+        .push(AgentActivityEntry {
+            kind: AgentActivityKind::Tool {
+                id: "call_1".to_owned(),
+                name: "Read".to_owned(),
+                summary: Some("crates/neo-agent-core/src/lib.rs".to_owned()),
+                failed: false,
+            },
+        });
+
+    let text =
+        plain(SwarmCardComponent::new(snapshot).render_with_theme(140, &TuiTheme::default()));
+
+    let joined = text.join("\n");
+    assert!(joined.contains("Used Read"), "{joined}");
+    assert!(
+        !joined.contains("very long investigation prompt"),
+        "{joined}"
+    );
+}
+
+#[test]
+fn swarm_card_uses_theme_colors_for_status_and_progress() {
+    let theme = TuiTheme::default();
+    let snapshot = swarm_with_child_states(vec![AgentLifecycleState::Running]);
+    let rows = SwarmCardComponent::new(snapshot).render_with_theme(140, &theme);
+    let rendered = ansi(&rows);
+
+    assert_ansi_contains_color(&rendered, theme.brand);
+    assert_ansi_contains_color(&rendered, theme.status_warn);
 }

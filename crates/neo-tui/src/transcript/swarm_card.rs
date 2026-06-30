@@ -197,7 +197,12 @@ impl SwarmCardComponent {
             .snapshot
             .children
             .iter()
-            .filter(|c| matches!(c.agent.state, AgentLifecycleState::Failed))
+            .filter(|c| {
+                matches!(
+                    c.agent.state,
+                    AgentLifecycleState::Failed | AgentLifecycleState::TimedOut
+                )
+            })
             .count();
         let running = self
             .snapshot
@@ -224,7 +229,9 @@ impl SwarmCardComponent {
             .filter(|c| {
                 matches!(
                     c.agent.state,
-                    AgentLifecycleState::Completed | AgentLifecycleState::Failed
+                    AgentLifecycleState::Completed
+                        | AgentLifecycleState::Failed
+                        | AgentLifecycleState::TimedOut
                 )
             })
             .map(|c| c.agent.elapsed)
@@ -270,6 +277,7 @@ impl Component for SwarmCardComponent {
                 AgentLifecycleState::Completed
                     | AgentLifecycleState::Failed
                     | AgentLifecycleState::Cancelled
+                    | AgentLifecycleState::TimedOut
             )
         }) {
             Finalization::Finalized
@@ -297,7 +305,9 @@ fn progress_bar_text(state: AgentLifecycleState) -> &'static str {
         AgentLifecycleState::Completed => {
             "\u{25a0}\u{25a0}\u{25a0}\u{25a0}\u{25a0}\u{25a0}\u{25a0}\u{25a0}\u{25a0}\u{25a0}"
         }
-        AgentLifecycleState::Failed | AgentLifecycleState::Cancelled => {
+        AgentLifecycleState::Failed
+        | AgentLifecycleState::Cancelled
+        | AgentLifecycleState::TimedOut => {
             "\u{2715}\u{2715}\u{2715}\u{00b7}\u{00b7}\u{00b7}\u{00b7}\u{00b7}\u{00b7}\u{00b7}"
         }
     }
@@ -318,6 +328,10 @@ fn child_activity_summary(agent: &AgentSnapshot, fallback_item: &str) -> String 
         && !text.trim().is_empty()
     {
         return compact_to_chars(&one_line(text), 96);
+    }
+    let title_fallback = agent.task_title.as_str();
+    if !title_fallback.is_empty() {
+        return compact_to_chars(&one_line(title_fallback), 96);
     }
     compact_to_chars(&one_line(fallback_item), 96)
 }
@@ -451,11 +465,12 @@ fn swarm_status_label(snapshot: &SwarmSnapshot) -> &'static str {
         .any(|child| child.agent.latest_text.as_deref() == Some("suspended"))
     {
         "Suspended"
-    } else if snapshot
-        .children
-        .iter()
-        .any(|child| matches!(child.agent.state, AgentLifecycleState::Failed))
-    {
+    } else if snapshot.children.iter().any(|child| {
+        matches!(
+            child.agent.state,
+            AgentLifecycleState::Failed | AgentLifecycleState::TimedOut
+        )
+    }) {
         "Failed"
     } else if snapshot
         .children
@@ -487,7 +502,7 @@ fn swarm_status_style(snapshot: &SwarmSnapshot, theme: &TuiTheme) -> Style {
 fn agent_status_color(state: AgentLifecycleState, theme: &TuiTheme) -> Color {
     match state {
         AgentLifecycleState::Completed => theme.status_ok,
-        AgentLifecycleState::Failed => theme.status_error,
+        AgentLifecycleState::Failed | AgentLifecycleState::TimedOut => theme.status_error,
         AgentLifecycleState::Cancelled => theme.status_warn,
         AgentLifecycleState::Queued => theme.text_muted,
         AgentLifecycleState::Running => theme.brand,
@@ -530,7 +545,7 @@ fn marker(state: AgentLifecycleState) -> &'static str {
     match state {
         AgentLifecycleState::Running => "\u{25cf}",
         AgentLifecycleState::Completed => "\u{2713}",
-        AgentLifecycleState::Failed => "\u{2717}",
+        AgentLifecycleState::Failed | AgentLifecycleState::TimedOut => "\u{2717}",
         AgentLifecycleState::Queued | AgentLifecycleState::Cancelled => "\u{25cc}",
     }
 }
@@ -542,5 +557,6 @@ fn state_label(state: AgentLifecycleState) -> &'static str {
         AgentLifecycleState::Completed => "done",
         AgentLifecycleState::Failed => "failed",
         AgentLifecycleState::Cancelled => "cancelled",
+        AgentLifecycleState::TimedOut => "timed out",
     }
 }

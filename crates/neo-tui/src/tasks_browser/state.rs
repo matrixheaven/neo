@@ -186,9 +186,7 @@ impl TaskBrowserState {
                 };
             }
             TaskBrowserAction::RequestStop => {
-                let Some(item) = self.selected_item() else {
-                    return None;
-                };
+                let item = self.selected_item()?;
                 if !item.can_stop {
                     self.footer_message = Some("Task already finished.".to_owned());
                     return None;

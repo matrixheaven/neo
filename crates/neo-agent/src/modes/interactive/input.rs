@@ -362,10 +362,8 @@ impl InteractiveController {
             self.detach_shell_command().await?;
             return Ok(false);
         }
-        if key.as_str() == "ctrl+b" {
-            if self.detach_foreground_delegate().await? {
-                return Ok(false);
-            }
+        if key.as_str() == "ctrl+b" && self.detach_foreground_delegate().await? {
+            return Ok(false);
         }
         let actions = self.keybindings.matching_actions(key);
         for action in self.keybinding_priority() {

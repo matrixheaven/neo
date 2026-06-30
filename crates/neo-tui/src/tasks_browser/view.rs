@@ -24,7 +24,7 @@ pub enum TaskBrowserStatus {
     Waiting,
     Completed,
     Failed,
-    Stopped,
+    Cancelled,
     TimedOut,
 }
 
@@ -41,7 +41,7 @@ impl TaskBrowserStatus {
             Self::Waiting => "waiting",
             Self::Completed => "done",
             Self::Failed => "failed",
-            Self::Stopped => "stopped",
+            Self::Cancelled => "cancelled",
             Self::TimedOut => "timed out",
         }
     }
@@ -52,13 +52,13 @@ impl TaskBrowserStatus {
             Self::Running => "●",
             Self::Waiting => "◼",
             Self::Completed => "✓",
-            Self::Failed | Self::Stopped | Self::TimedOut => "✕",
+            Self::Failed | Self::Cancelled | Self::TimedOut => "✕",
         }
     }
 
     #[must_use]
     pub const fn is_interrupted(self) -> bool {
-        matches!(self, Self::Failed | Self::Stopped | Self::TimedOut)
+        matches!(self, Self::Failed | Self::Cancelled | Self::TimedOut)
     }
 }
 

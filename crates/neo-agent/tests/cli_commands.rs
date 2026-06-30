@@ -294,25 +294,6 @@ fn root_resume_flag_rejects_options_that_conflict_with_the_picker() {
 }
 
 #[test]
-fn run_text_command_without_credentials_fails_without_local_response() {
-    let temp = TempDir::new().expect("tempdir");
-    let mut command = neo();
-    command
-        .current_dir(temp.path())
-        .env_remove("OPENAI_API_KEY")
-        .args(["run", "--output", "text", "hello", "neo"]);
-
-    let output = command.output().expect("neo command should run");
-
-    assert!(!output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!stdout.contains("fake response"));
-    assert!(!stderr.contains("fake response"));
-    assert!(stderr.contains("OPENAI_API_KEY"));
-}
-
-#[test]
 fn run_command_without_credentials_fails_without_local_response() {
     let temp = TempDir::new().expect("tempdir");
     let mut command = neo();
@@ -331,6 +312,18 @@ fn run_command_without_credentials_fails_without_local_response() {
     assert!(!stdout.contains("placeholder"));
     assert!(!stderr.contains("placeholder"));
     assert!(stderr.contains("OPENAI_API_KEY"));
+
+    // Also verify --output text mode behaves identically.
+    let mut text_command = neo();
+    text_command
+        .current_dir(temp.path())
+        .env_remove("OPENAI_API_KEY")
+        .args(["run", "--output", "text", "hello", "neo"]);
+
+    let text_output = text_command.output().expect("neo command should run");
+    assert!(!text_output.status.success());
+    let text_stderr = String::from_utf8_lossy(&text_output.stderr);
+    assert!(text_stderr.contains("OPENAI_API_KEY"));
 }
 
 #[test]

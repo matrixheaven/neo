@@ -1,6 +1,24 @@
 use super::{BannerData, Style, TuiTheme};
-use crate::primitive::{Line, paint, visible_width, wrap_width};
+use crate::primitive::{Color, Line, paint, visible_width, wrap_width};
 use crate::widgets::box_draw;
+
+const NEON_CYAN: Color = Color::Rgb(63, 247, 255);
+const NEON_MAGENTA: Color = Color::Rgb(255, 79, 216);
+const NEON_VIOLET: Color = Color::Rgb(138, 92, 255);
+
+fn neon_logo_row(row: usize) -> String {
+    let (left, center, right) = match row {
+        0 => ("\u{2590}\u{2588}", "\u{259a}\u{259e}", "\u{2588}\u{258c}"),
+        1 => ("\u{2590}\u{2588}", "\u{2597}\u{2596}", "\u{2588}\u{258c}"),
+        _ => return String::new(),
+    };
+    format!(
+        "{}{}{}",
+        paint(left, Style::default().fg(NEON_CYAN).bold()),
+        paint(center, Style::default().fg(NEON_MAGENTA).bold()),
+        paint(right, Style::default().fg(NEON_VIOLET).bold()),
+    )
+}
 
 /// Wrap `text` and apply a bullet prefix to the first row, indenting the rest
 /// to align under the body (prefix width of spaces). This is the Neo
@@ -29,15 +47,15 @@ fn bulleted_wrap(text: &str, width: usize, prefix: &str, style: Style) -> Vec<Li
     rows
 }
 
-/// Render the welcome banner as a rounded box with an ASCII-art logo and
-/// aligned metadata, matching Neo's `welcome.ts`.
+/// Render the welcome banner as a rounded box with Neo's neon-N logo and
+/// aligned metadata.
 ///
 /// Layout:
 /// ```text
 /// ╭──────╮
 /// │      │
-/// │  ▐█▛█▛█▌  Welcome to Neo!
-/// │  ▐█████▌  Send /help for help.
+/// │  ▐█▚▞█▌  Welcome to Neo!
+/// │  ▐█▗▖█▌  Send /help for help.
 /// │      │
 /// │  Directory: /path
 /// │  Session:   abc
@@ -52,14 +70,9 @@ pub(super) fn render_welcome_banner(
     theme: &TuiTheme,
 ) -> Vec<Line> {
     use std::fmt::Write as _;
-    let logo = [
-        "\u{2590}\u{2588}\u{259b}\u{2588}\u{259b}\u{2588}\u{258c}",
-        "\u{2590}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{258c}",
-    ];
     let gap = "  ";
 
     // Build the content lines (plain text with ANSI via paint, to be padded).
-    let logo_color = Style::default().fg(theme.brand);
     let title_style = Style::default().fg(theme.brand).bold();
     let subtitle_style = Style::default().fg(theme.text_muted);
     let label_style = Style::default().fg(theme.text_muted).bold();
@@ -70,14 +83,14 @@ pub(super) fn render_welcome_banner(
     content.push(String::new());
     // logo + title / subtitle
     let mut line0 = String::new();
-    let _ = write!(line0, "{}{}", paint(logo[0], logo_color), gap);
+    let _ = write!(line0, "{}{}", neon_logo_row(0), gap);
     let mut rest0 = String::new();
     if !data.title.is_empty() {
         rest0.push_str(&paint(&data.title, title_style));
     }
     content.push(format!("{line0}{rest0}"));
     let mut line1 = String::new();
-    let _ = write!(line1, "{}{}", paint(logo[1], logo_color), gap);
+    let _ = write!(line1, "{}{}", neon_logo_row(1), gap);
     let mut rest1 = String::new();
     if !data.subtitle.is_empty() {
         rest1.push_str(&paint(&data.subtitle, subtitle_style));

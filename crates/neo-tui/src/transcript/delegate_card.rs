@@ -1,9 +1,10 @@
 use neo_agent_core::multi_agent::{
-    AgentActivityEntry, AgentActivityKind, AgentLifecycleState, AgentRunMode, AgentSnapshot,
+    AgentActivityEntry, AgentActivityKind, AgentLifecycleState, AgentRole, AgentRunMode,
+    AgentSnapshot, AgentTerminalOutcome,
 };
 
 use crate::primitive::theme::TuiTheme;
-use crate::primitive::{Component, Expandable, Finalization, Line, Style};
+use crate::primitive::{Component, Expandable, Finalization, Line, Style, strip_ansi};
 
 const MAX_SINGLE_AGENT_ACTIVITY_ROWS: usize = 4;
 
@@ -44,9 +45,10 @@ impl DelegateCardComponent {
             Span::styled(self.snapshot.display_name.as_str(), accent),
             Span::styled(
                 format!(
-                    " Agent {} ({}) · {} tools · {} · {} tok",
+                    " {} Agent {} ({}) · {} tools · {} · {} tok",
+                    role_label(self.snapshot.role),
                     state_label(self.snapshot.state),
-                    short_task_title(&self.snapshot.task),
+                    self.snapshot.task_title,
                     self.snapshot.tool_count,
                     format_elapsed(self.snapshot.elapsed.as_secs()),
                     format_token_count(self.snapshot.token_count)
@@ -63,7 +65,7 @@ impl DelegateCardComponent {
             lines.push(Line::styled("  Press Ctrl+B to run in background", muted));
         }
 
-        for activity in recent_activity(&self.snapshot.activity) {
+        for activity in recent_activity(&self.snapshot.activity, self.snapshot.outcome.as_ref()) {
             lines.push(render_activity(activity, width, theme));
         }
 
@@ -74,15 +76,20 @@ impl DelegateCardComponent {
         }
 
         if let Some(outcome) = &self.snapshot.outcome {
-            let outcome_style = if outcome.is_error {
-                Style::default().fg(theme.status_error)
-            } else {
-                Style::default().fg(theme.status_ok)
-            };
-            lines.push(
-                Line::styled(format!("  \u{2514} {}", outcome.summary), outcome_style)
-                    .truncate_to_width(width),
-            );
+            let already_rendered = lines
+                .iter()
+                .any(|line| strip_ansi(&line.to_ansi()).contains(outcome.summary.trim()));
+            if !already_rendered {
+                let outcome_style = if outcome.is_error {
+                    Style::default().fg(theme.status_error)
+                } else {
+                    Style::default().fg(theme.status_ok)
+                };
+                lines.push(
+                    Line::styled(format!("  \u{2514} {}", outcome.summary), outcome_style)
+                        .truncate_to_width(width),
+                );
+            }
         }
 
         lines
@@ -104,7 +111,8 @@ impl Component for DelegateCardComponent {
         match self.snapshot.state {
             AgentLifecycleState::Completed
             | AgentLifecycleState::Failed
-            | AgentLifecycleState::Cancelled => Finalization::Finalized,
+            | AgentLifecycleState::Cancelled
+            | AgentLifecycleState::TimedOut => Finalization::Finalized,
             AgentLifecycleState::Queued | AgentLifecycleState::Running => Finalization::Live,
         }
     }
@@ -115,7 +123,7 @@ use crate::primitive::Span;
 fn status_color(state: AgentLifecycleState, theme: &TuiTheme) -> crate::primitive::Color {
     match state {
         AgentLifecycleState::Completed => theme.status_ok,
-        AgentLifecycleState::Failed => theme.status_error,
+        AgentLifecycleState::Failed | AgentLifecycleState::TimedOut => theme.status_error,
         AgentLifecycleState::Cancelled => theme.status_warn,
         AgentLifecycleState::Queued | AgentLifecycleState::Running => theme.brand,
     }
@@ -125,7 +133,7 @@ fn status_marker(state: AgentLifecycleState) -> &'static str {
     match state {
         AgentLifecycleState::Running => "\u{25cf}",
         AgentLifecycleState::Completed => "\u{2713}",
-        AgentLifecycleState::Failed => "\u{2717}",
+        AgentLifecycleState::Failed | AgentLifecycleState::TimedOut => "\u{2717}",
         AgentLifecycleState::Queued | AgentLifecycleState::Cancelled => "\u{25cc}",
     }
 }
@@ -137,6 +145,7 @@ fn state_label(state: AgentLifecycleState) -> &'static str {
         AgentLifecycleState::Completed => "Completed",
         AgentLifecycleState::Failed => "Failed",
         AgentLifecycleState::Cancelled => "Cancelled",
+        AgentLifecycleState::TimedOut => "Timed Out",
     }
 }
 
@@ -156,12 +165,26 @@ fn format_token_count(tokens: usize) -> String {
     }
 }
 
-fn recent_activity(activity: &[AgentActivityEntry]) -> &[AgentActivityEntry] {
-    if activity.len() <= MAX_SINGLE_AGENT_ACTIVITY_ROWS {
-        activity
-    } else {
-        &activity[activity.len() - MAX_SINGLE_AGENT_ACTIVITY_ROWS..]
-    }
+fn recent_activity<'a>(
+    activity: &'a [AgentActivityEntry],
+    outcome: Option<&AgentTerminalOutcome>,
+) -> Vec<&'a AgentActivityEntry> {
+    let duplicate_summary = outcome.map(|outcome| outcome.summary.trim());
+    let filtered = activity
+        .iter()
+        .filter(|entry| match &entry.kind {
+            AgentActivityKind::Text { text, .. } => Some(text.trim()) != duplicate_summary,
+            AgentActivityKind::Tool { .. } => true,
+        })
+        .collect::<Vec<_>>();
+    let start = filtered
+        .len()
+        .saturating_sub(MAX_SINGLE_AGENT_ACTIVITY_ROWS);
+    filtered[start..].to_vec()
+}
+
+fn role_label(role: AgentRole) -> &'static str {
+    neo_agent_core::multi_agent::AgentProfile::for_role(role).display_label
 }
 
 fn render_activity(activity: &AgentActivityEntry, width: usize, theme: &TuiTheme) -> Line {
@@ -201,20 +224,6 @@ fn render_activity(activity: &AgentActivityEntry, width: usize, theme: &TuiTheme
             .truncate_to_width(width)
         }
     }
-}
-
-fn short_task_title(task: &str) -> String {
-    let first_line = task
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or(task);
-    let sentence = first_line
-        .split(". ")
-        .next()
-        .unwrap_or(first_line)
-        .trim()
-        .trim_end_matches('.');
-    compact_to_chars(sentence, 64)
 }
 
 fn compact_display_line(text: &str) -> String {

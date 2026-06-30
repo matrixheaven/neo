@@ -21,11 +21,15 @@ pub fn snapshot_to_item(snapshot: &BackgroundTaskSnapshot) -> TaskBrowserItem {
         BackgroundTaskKind::DelegateSwarm => TaskBrowserKind::DelegateSwarm,
     };
     let status = map_status(snapshot.status);
+    let title = snapshot.delegate.as_ref().map_or_else(
+        || snapshot.description.clone(),
+        |agent| agent.task_title.clone(),
+    );
     TaskBrowserItem {
         id: snapshot.task_id.clone(),
         kind,
         status,
-        title: snapshot.description.clone(),
+        title,
         description: snapshot.description.clone(),
         elapsed: format_elapsed(snapshot.elapsed),
         detail_lines: detail_lines(snapshot, status),
@@ -62,9 +66,15 @@ fn detail_lines(snapshot: &BackgroundTaskSnapshot, status: TaskBrowserStatus) ->
                 lines.push(format!("mode:        {:?}", agent.mode));
                 lines.push(format!("tokens:      {}", agent.token_count));
                 lines.push(format!("tools:       {}", agent.tool_count));
-                lines.push(format!("task:        {}", agent.task));
+                lines.push(format!("task:        {}", agent.task_title));
+                if let Some(outcome) = &agent.outcome {
+                    lines.push(format!("summary:     {}", outcome.summary));
+                }
                 if let Some(text) = &agent.latest_text {
                     lines.push(format!("latest:      {text}"));
+                }
+                for activity in agent.activity.iter().rev().take(4).rev() {
+                    lines.push(format!("activity:    {}", format_agent_activity(activity)));
                 }
             }
             lines
@@ -77,22 +87,40 @@ fn detail_lines(snapshot: &BackgroundTaskSnapshot, status: TaskBrowserStatus) ->
                 format!("elapsed:     {}", format_elapsed(snapshot.elapsed)),
             ];
             if let Some(swarm) = &snapshot.swarm {
-                let completed = swarm
-                    .children
-                    .iter()
-                    .filter(|c| {
-                        matches!(
-                            c.agent.state,
-                            neo_agent_core::multi_agent::AgentLifecycleState::Completed
-                        )
-                    })
-                    .count();
+                lines.push(format!("swarm_id:    {}", swarm.swarm_id));
+                lines.push(format!("status:      {}", swarm.state.as_str()));
+                lines.push(format!(
+                    "aggregate:   total={} queued={} running={} completed={} failed={} cancelled={} timed_out={}",
+                    swarm.aggregate.total,
+                    swarm.aggregate.queued,
+                    swarm.aggregate.running,
+                    swarm.aggregate.completed,
+                    swarm.aggregate.failed,
+                    swarm.aggregate.cancelled,
+                    swarm.aggregate.timed_out,
+                ));
+                let completed = swarm.aggregate.completed;
                 lines.push(format!(
                     "progress:    {}/{}",
                     completed,
                     swarm.children.len()
                 ));
                 lines.push(format!("children:    {}", swarm.children.len()));
+                for child in &swarm.children {
+                    let result = child
+                        .agent
+                        .outcome
+                        .as_ref()
+                        .map(|outcome| outcome.summary.as_str())
+                        .unwrap_or(child.agent.task_title.as_str());
+                    lines.push(format!(
+                        "  {} {} {} {}",
+                        child.item_index,
+                        child.agent.id.as_str(),
+                        child.agent.state.as_str(),
+                        result
+                    ));
+                }
             }
             lines
         }
@@ -203,7 +231,7 @@ fn map_status(status: BackgroundTaskStatus) -> TaskBrowserStatus {
         BackgroundTaskStatus::WaitingForUser => TaskBrowserStatus::Waiting,
         BackgroundTaskStatus::Completed => TaskBrowserStatus::Completed,
         BackgroundTaskStatus::Failed => TaskBrowserStatus::Failed,
-        BackgroundTaskStatus::Stopped => TaskBrowserStatus::Stopped,
+        BackgroundTaskStatus::Cancelled => TaskBrowserStatus::Cancelled,
         BackgroundTaskStatus::TimedOut => TaskBrowserStatus::TimedOut,
     }
 }
@@ -213,6 +241,25 @@ fn format_elapsed(elapsed: Duration) -> String {
     let minutes = seconds / 60;
     let seconds = seconds % 60;
     format!("{minutes:02}:{seconds:02}")
+}
+
+fn format_agent_activity(activity: &neo_agent_core::multi_agent::AgentActivityEntry) -> String {
+    use neo_agent_core::multi_agent::AgentActivityKind;
+    match &activity.kind {
+        AgentActivityKind::Tool {
+            name,
+            summary,
+            failed,
+            ..
+        } => {
+            let verb = if *failed { "Failed" } else { "Used" };
+            match summary {
+                Some(summary) => format!("{verb} {name} ({summary})"),
+                None => format!("{verb} {name}"),
+            }
+        }
+        AgentActivityKind::Text { text, .. } => text.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -263,16 +310,16 @@ mod tests {
     fn task_browser_adapter_maps_terminal_statuses() {
         let completed = snapshot_to_item(&bash_snapshot(BackgroundTaskStatus::Completed));
         let failed = snapshot_to_item(&bash_snapshot(BackgroundTaskStatus::Failed));
-        let stopped = snapshot_to_item(&bash_snapshot(BackgroundTaskStatus::Stopped));
+        let cancelled = snapshot_to_item(&bash_snapshot(BackgroundTaskStatus::Cancelled));
         let timed_out = snapshot_to_item(&bash_snapshot(BackgroundTaskStatus::TimedOut));
 
         assert_eq!(completed.status, TaskBrowserStatus::Completed);
         assert_eq!(failed.status, TaskBrowserStatus::Failed);
-        assert_eq!(stopped.status, TaskBrowserStatus::Stopped);
+        assert_eq!(cancelled.status, TaskBrowserStatus::Cancelled);
         assert_eq!(timed_out.status, TaskBrowserStatus::TimedOut);
         assert!(!completed.can_stop);
         assert!(failed.status.is_interrupted());
-        assert!(stopped.status.is_interrupted());
+        assert!(cancelled.status.is_interrupted());
         assert!(timed_out.status.is_interrupted());
     }
 
@@ -346,6 +393,7 @@ mod tests {
             mode: AgentRunMode::Background,
             state: AgentLifecycleState::Running,
             task: "fix the border".to_owned(),
+            task_title: "fix the border".to_owned(),
             tool_count: 2,
             token_count: 1000,
             elapsed: Duration::from_secs(10),
@@ -374,7 +422,7 @@ mod tests {
     fn task_browser_adapter_maps_swarm_snapshot() {
         use neo_agent_core::multi_agent::{
             AgentDisplayName, AgentId, AgentLifecycleState, AgentPath, AgentRole, AgentRunMode,
-            AgentSnapshot, SwarmChildSnapshot, SwarmSnapshot,
+            AgentSnapshot, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
         };
         let name = AgentDisplayName::new("Zeno");
         let agent = AgentSnapshot {
@@ -385,6 +433,7 @@ mod tests {
             mode: AgentRunMode::Background,
             state: AgentLifecycleState::Running,
             task: "item 0".to_owned(),
+            task_title: "item 0".to_owned(),
             tool_count: 0,
             token_count: 0,
             elapsed: Duration::from_secs(5),
@@ -392,16 +441,21 @@ mod tests {
             activity: Vec::new(),
             outcome: None,
         };
+        let children = vec![SwarmChildSnapshot {
+            item_index: 0,
+            item: "check grep".to_owned(),
+            agent,
+        }];
+        let aggregate = SwarmAggregate::from_states(children.iter().map(|c| c.agent.state));
         let swarm = SwarmSnapshot {
             swarm_id: "swarm-1".to_owned(),
             description: "audit schemas".to_owned(),
+            role: AgentRole::Coder,
             mode: AgentRunMode::Background,
+            state: AgentLifecycleState::Running,
             max_concurrency: 1,
-            children: vec![SwarmChildSnapshot {
-                item_index: 0,
-                item: "check grep".to_owned(),
-                agent,
-            }],
+            aggregate,
+            children,
         };
         let snapshot = BackgroundTaskSnapshot {
             task_id: swarm.swarm_id.clone(),
@@ -417,5 +471,105 @@ mod tests {
         let item = snapshot_to_item(&snapshot);
         assert_eq!(item.kind, TaskBrowserKind::DelegateSwarm);
         assert!(item.detail_lines.iter().any(|l| l.contains("children:")));
+    }
+
+    fn delegate_swarm_snapshot_with_completed_children() -> BackgroundTaskSnapshot {
+        use neo_agent_core::multi_agent::{
+            AgentDisplayName, AgentId, AgentLifecycleState, AgentPath, AgentRole, AgentRunMode,
+            AgentSnapshot, AgentTerminalOutcome, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
+        };
+        let name_a = AgentDisplayName::new("Alpha");
+        let name_b = AgentDisplayName::new("Beta");
+        let child_a = AgentSnapshot {
+            id: AgentId::from_suffix_for_test("sw-comp-a"),
+            display_name: name_a.clone(),
+            path: AgentPath::swarm_child("swarm_comp", &name_a),
+            role: AgentRole::Coder,
+            mode: AgentRunMode::Background,
+            state: AgentLifecycleState::Completed,
+            task: "child A prompt".to_owned(),
+            task_title: "Child A".to_owned(),
+            tool_count: 2,
+            token_count: 500,
+            elapsed: Duration::from_secs(10),
+            latest_text: None,
+            activity: Vec::new(),
+            outcome: Some(AgentTerminalOutcome {
+                summary: "All good".to_owned(),
+                is_error: false,
+            }),
+        };
+        let child_b = AgentSnapshot {
+            id: AgentId::from_suffix_for_test("sw-comp-b"),
+            display_name: name_b.clone(),
+            path: AgentPath::swarm_child("swarm_comp", &name_b),
+            role: AgentRole::Coder,
+            mode: AgentRunMode::Background,
+            state: AgentLifecycleState::Completed,
+            task: "child B prompt".to_owned(),
+            task_title: "Child B".to_owned(),
+            tool_count: 1,
+            token_count: 300,
+            elapsed: Duration::from_secs(8),
+            latest_text: None,
+            activity: Vec::new(),
+            outcome: Some(AgentTerminalOutcome {
+                summary: "Done too".to_owned(),
+                is_error: false,
+            }),
+        };
+        let children = vec![
+            SwarmChildSnapshot {
+                item_index: 0,
+                item: "item-a".to_owned(),
+                agent: child_a,
+            },
+            SwarmChildSnapshot {
+                item_index: 1,
+                item: "item-b".to_owned(),
+                agent: child_b,
+            },
+        ];
+        let aggregate = SwarmAggregate::from_states(children.iter().map(|c| c.agent.state));
+        let swarm = SwarmSnapshot {
+            swarm_id: "swarm_comp".to_owned(),
+            description: "completed swarm".to_owned(),
+            role: AgentRole::Coder,
+            mode: AgentRunMode::Background,
+            state: AgentLifecycleState::Completed,
+            max_concurrency: 2,
+            aggregate,
+            children,
+        };
+        BackgroundTaskSnapshot {
+            task_id: swarm.swarm_id.clone(),
+            kind: BackgroundTaskKind::DelegateSwarm,
+            status: BackgroundTaskStatus::Completed,
+            description: swarm.description.clone(),
+            elapsed: Duration::from_secs(20),
+            output: None,
+            answers: None,
+            delegate: None,
+            swarm: Some(swarm),
+        }
+    }
+
+    #[test]
+    fn task_browser_uses_cancelled_vocabulary_for_interrupted_tasks() {
+        let cancelled = snapshot_to_item(&bash_snapshot(BackgroundTaskStatus::Cancelled));
+
+        assert_eq!(cancelled.status, TaskBrowserStatus::Cancelled);
+        assert_eq!(cancelled.status.label(), "cancelled");
+        assert!(cancelled.status.is_interrupted());
+    }
+
+    #[test]
+    fn task_browser_swarm_details_include_aggregate_and_child_results() {
+        let item = snapshot_to_item(&delegate_swarm_snapshot_with_completed_children());
+        let details = item.detail_lines.join("\n");
+
+        assert!(details.contains("aggregate:"), "{details}");
+        assert!(details.contains("completed"), "{details}");
+        assert!(details.contains("agent_"), "{details}");
     }
 }

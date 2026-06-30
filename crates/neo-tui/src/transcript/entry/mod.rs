@@ -737,6 +737,18 @@ mod tests {
         for logo_line in [&lines[2], &lines[3]] {
             assert!(!logo_line.text().contains('┐'));
         }
+        assert!(
+            lines[2]
+                .text()
+                .contains("\u{2590}\u{2588}\u{259a}\u{259e}\u{2588}\u{258c}  Welcome to Neo!")
+        );
+        assert!(lines[3].text().contains(
+            "\u{2590}\u{2588}\u{2597}\u{2596}\u{2588}\u{258c}  Send /help for help information."
+        ));
+        let ansi = lines[2].to_ansi();
+        assert!(ansi.contains("\x1b[38;2;63;247;255m"));
+        assert!(ansi.contains("\x1b[38;2;255;79;216m"));
+        assert!(ansi.contains("\x1b[38;2;138;92;255m"));
     }
 
     #[test]
