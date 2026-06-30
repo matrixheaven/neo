@@ -1,9 +1,16 @@
 use crate::primitive::Line;
-use crate::shell::ToolStatusKind;
 use crate::primitive::theme::TuiTheme;
-use crate::transcript::{ShellRunComponent, ToolCallComponent, ToolCallState};
+use crate::shell::ToolStatusKind;
+use crate::transcript::{
+    DelegateCardComponent, ShellRunComponent, SwarmCardComponent, ToolCallComponent, ToolCallState,
+    WorkflowCardComponent,
+};
 
 use super::entry::{ApprovalPromptData, ThinkingPhase, TranscriptEntry};
+use neo_agent_core::multi_agent::{
+    AgentLifecycleState, AgentSnapshot, SwarmChildSnapshot, SwarmSnapshot,
+};
+use neo_agent_core::workflow::WorkflowSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TranscriptSelection {
@@ -274,6 +281,56 @@ impl TranscriptStore {
         )
     }
 
+    /// Upsert a delegate card by agent ID. If a card for this agent already
+    /// exists, update it in place; otherwise append a new entry.
+    pub fn upsert_delegate(&mut self, snapshot: AgentSnapshot) {
+        let id = snapshot.id.as_str().to_owned();
+        if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
+            TranscriptEntry::Delegate { component } if component.id() == id => Some(component),
+            _ => None,
+        }) {
+            entry.update(snapshot);
+            return;
+        }
+        self.push(TranscriptEntry::Delegate {
+            component: DelegateCardComponent::new(snapshot),
+        });
+    }
+
+    /// Upsert a swarm card by swarm ID. If a card for this swarm already
+    /// exists, update it in place; otherwise append a new entry.
+    pub fn upsert_delegate_swarm(&mut self, snapshot: SwarmSnapshot) {
+        let id = snapshot.swarm_id.clone();
+        if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
+            TranscriptEntry::DelegateSwarm { component } if component.swarm_id() == id => {
+                Some(component)
+            }
+            _ => None,
+        }) {
+            let merged = merge_swarm_snapshot(entry.snapshot(), snapshot);
+            entry.update(merged);
+            return;
+        }
+        self.push(TranscriptEntry::DelegateSwarm {
+            component: SwarmCardComponent::new(snapshot),
+        });
+    }
+
+    /// Upsert a workflow card by workflow ID.
+    pub fn upsert_workflow(&mut self, snapshot: WorkflowSnapshot) {
+        let id = snapshot.id.0.clone();
+        if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
+            TranscriptEntry::Workflow { component } if component.id() == id => Some(component),
+            _ => None,
+        }) {
+            entry.update(snapshot);
+            return;
+        }
+        self.push(TranscriptEntry::Workflow {
+            component: WorkflowCardComponent::new(snapshot),
+        });
+    }
+
     #[must_use]
     pub fn entries(&self) -> &[TranscriptEntry] {
         &self.entries
@@ -368,5 +425,69 @@ impl TranscriptStore {
             .iter()
             .flat_map(|entry| entry.render(width, theme))
             .collect()
+    }
+}
+
+fn merge_swarm_snapshot(current: &SwarmSnapshot, incoming: SwarmSnapshot) -> SwarmSnapshot {
+    if current.swarm_id != incoming.swarm_id {
+        return incoming;
+    }
+
+    let mut children = incoming
+        .children
+        .into_iter()
+        .map(|incoming_child| {
+            let current_child = current.children.iter().find(|child| {
+                child.item_index == incoming_child.item_index
+                    || child.agent.id == incoming_child.agent.id
+            });
+            current_child.map_or(incoming_child.clone(), |current_child| {
+                merge_swarm_child(current_child, incoming_child)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for current_child in &current.children {
+        if !children.iter().any(|child| {
+            child.item_index == current_child.item_index || child.agent.id == current_child.agent.id
+        }) {
+            children.push(current_child.clone());
+        }
+    }
+    children.sort_by_key(|child| child.item_index);
+
+    SwarmSnapshot {
+        swarm_id: current.swarm_id.clone(),
+        description: incoming.description,
+        mode: incoming.mode,
+        max_concurrency: incoming.max_concurrency.max(current.max_concurrency).max(1),
+        children,
+    }
+}
+
+fn merge_swarm_child(
+    current: &SwarmChildSnapshot,
+    incoming: SwarmChildSnapshot,
+) -> SwarmChildSnapshot {
+    if child_progress_rank(incoming.agent.state) < child_progress_rank(current.agent.state) {
+        return current.clone();
+    }
+    if child_progress_rank(incoming.agent.state) == child_progress_rank(current.agent.state)
+        && incoming.agent.activity.len() < current.agent.activity.len()
+        && incoming.agent.latest_text.is_none()
+        && incoming.agent.outcome.is_none()
+    {
+        return current.clone();
+    }
+    incoming
+}
+
+fn child_progress_rank(state: AgentLifecycleState) -> u8 {
+    match state {
+        AgentLifecycleState::Queued => 0,
+        AgentLifecycleState::Running => 1,
+        AgentLifecycleState::Completed
+        | AgentLifecycleState::Failed
+        | AgentLifecycleState::Cancelled => 2,
     }
 }

@@ -24,6 +24,9 @@ impl TranscriptPane {
         if self.apply_thinking_event(event) {
             return;
         }
+        if self.apply_delegate_event(event) {
+            return;
+        }
         if self.apply_tool_event(event) {
             return;
         }
@@ -66,6 +69,36 @@ impl TranscriptPane {
             }
             AgentEvent::ThinkingFinished { .. } => {
                 self.finish_thinking_block();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn apply_delegate_event(&mut self, event: &AgentEvent) -> bool {
+        match event {
+            AgentEvent::DelegateStarted { agent, .. }
+            | AgentEvent::DelegateUpdated { agent, .. }
+            | AgentEvent::DelegateFinished { agent, .. } => {
+                self.finish_active_text_blocks();
+                self.transcript.upsert_delegate(agent.clone());
+                self.mark_dirty();
+                true
+            }
+            AgentEvent::DelegateSwarmStarted { swarm, .. }
+            | AgentEvent::DelegateSwarmUpdated { swarm, .. }
+            | AgentEvent::DelegateSwarmFinished { swarm, .. } => {
+                self.finish_active_text_blocks();
+                self.transcript.upsert_delegate_swarm(swarm.clone());
+                self.mark_dirty();
+                true
+            }
+            AgentEvent::WorkflowStarted { workflow, .. }
+            | AgentEvent::WorkflowUpdated { workflow, .. }
+            | AgentEvent::WorkflowFinished { workflow, .. } => {
+                self.finish_active_text_blocks();
+                self.transcript.upsert_workflow(workflow.clone());
+                self.mark_dirty();
                 true
             }
             _ => false,

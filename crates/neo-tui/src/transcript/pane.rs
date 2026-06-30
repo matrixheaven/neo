@@ -1,12 +1,10 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 
-use neo_agent_core::{
-    AgentEvent, AgentMessage, Content, ImageRef, skills::SkillStore,
-};
+use neo_agent_core::{AgentEvent, AgentMessage, Content, ImageRef, skills::SkillStore};
 
-use crate::primitive::{Expandable, Line};
 use crate::primitive::theme::TuiTheme;
+use crate::primitive::{Expandable, Line};
 use crate::shell::ToolStatusKind;
 use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
@@ -462,6 +460,9 @@ impl TranscriptPane {
                     expanded: thinking_expanded,
                     ..
                 } => *thinking_expanded = expanded,
+                TranscriptEntry::Delegate { component } => component.set_expanded(expanded),
+                TranscriptEntry::DelegateSwarm { component } => component.set_expanded(expanded),
+                TranscriptEntry::Workflow { component } => component.set_expanded(expanded),
                 _ => {}
             }
         }

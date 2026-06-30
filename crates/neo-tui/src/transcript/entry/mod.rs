@@ -5,9 +5,12 @@ use crate::primitive::{Line, Span};
 use crate::terminal_image::{
     ImageRenderPolicy, ImageSource, InlineImage, TerminalImageCapabilities,
 };
+use crate::transcript::DelegateCardComponent;
 use crate::transcript::PlanBoxComponent;
 use crate::transcript::ShellRunComponent;
+use crate::transcript::SwarmCardComponent;
 use crate::transcript::ToolCallComponent;
+use crate::transcript::WorkflowCardComponent;
 use serde::{Deserialize, Serialize};
 
 mod copy;
@@ -114,6 +117,15 @@ pub enum TranscriptEntry {
         name: String,
         description: Option<String>,
         args: Option<String>,
+    },
+    Delegate {
+        component: DelegateCardComponent,
+    },
+    DelegateSwarm {
+        component: SwarmCardComponent,
+    },
+    Workflow {
+        component: WorkflowCardComponent,
     },
 }
 
@@ -398,6 +410,9 @@ impl TranscriptEntry {
                 inner_width,
                 theme,
             ),
+            Self::Delegate { component } => render_delegate_card(component, inner_width, theme),
+            Self::DelegateSwarm { component } => render_swarm_card(component, inner_width, theme),
+            Self::Workflow { component } => render_workflow_card(component, inner_width, theme),
             Self::Banner(_)
             | Self::UserMessage(_)
             | Self::Status { .. }
@@ -628,6 +643,26 @@ fn styled_wrap_with_prefix(
 
 fn render_tool_run(component: &ToolCallComponent, width: usize, theme: &TuiTheme) -> Vec<Line> {
     let mut component = component.clone();
+    component.render_with_theme(width, theme)
+}
+
+fn render_delegate_card(
+    component: &DelegateCardComponent,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
+    component.render_with_theme(width, theme)
+}
+
+fn render_swarm_card(component: &SwarmCardComponent, width: usize, theme: &TuiTheme) -> Vec<Line> {
+    component.render_with_theme(width, theme)
+}
+
+fn render_workflow_card(
+    component: &WorkflowCardComponent,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
     component.render_with_theme(width, theme)
 }
 

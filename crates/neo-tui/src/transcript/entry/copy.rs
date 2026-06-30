@@ -1,5 +1,8 @@
 use super::{BannerData, GoalCardKind, TranscriptEntry};
-use crate::transcript::ToolCallComponent;
+use crate::primitive::theme::TuiTheme;
+use crate::transcript::{
+    DelegateCardComponent, SwarmCardComponent, ToolCallComponent, WorkflowCardComponent,
+};
 
 pub(super) fn complex_copy_parts(entry: &TranscriptEntry) -> (&'static str, String) {
     if let Some(parts) = utility_copy_parts(entry) {
@@ -56,6 +59,9 @@ fn card_copy_parts(entry: &TranscriptEntry) -> (&'static str, String) {
         | TranscriptEntry::ToolRun { .. }
         | TranscriptEntry::ShellRun { .. }
         | TranscriptEntry::Compaction { .. } => unreachable!("utility copy parts handled above"),
+        TranscriptEntry::Delegate { component } => ("Agent", copy_delegate(component)),
+        TranscriptEntry::DelegateSwarm { component } => ("Swarm", copy_swarm(component)),
+        TranscriptEntry::Workflow { component } => ("Workflow", copy_workflow(component)),
     }
 }
 
@@ -149,4 +155,31 @@ fn copy_skill(name: &str, description: Option<&str>, args: Option<&str>) -> Stri
     } else {
         format!("Used Skill: {name}\n{body}")
     }
+}
+
+fn copy_delegate(component: &DelegateCardComponent) -> String {
+    let lines = component.render_with_theme(200, &TuiTheme::default());
+    lines
+        .into_iter()
+        .map(|line| line.text().clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn copy_swarm(component: &SwarmCardComponent) -> String {
+    let lines = component.render_with_theme(200, &TuiTheme::default());
+    lines
+        .into_iter()
+        .map(|line| line.text().clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn copy_workflow(component: &WorkflowCardComponent) -> String {
+    let lines = component.render_with_theme(200, &TuiTheme::default());
+    lines
+        .into_iter()
+        .map(|line| line.text().clone())
+        .collect::<Vec<_>>()
+        .join("\n")
 }

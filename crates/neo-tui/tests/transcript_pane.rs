@@ -1,6 +1,6 @@
+use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{strip_ansi, visible_width};
 use neo_tui::shell::ToolStatusKind;
-use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::transcript::TranscriptEntry;
 use neo_tui::transcript::TranscriptPane;
 

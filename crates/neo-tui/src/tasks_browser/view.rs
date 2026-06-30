@@ -2,6 +2,8 @@
 pub enum TaskBrowserKind {
     Bash,
     Question,
+    Delegate,
+    DelegateSwarm,
 }
 
 impl TaskBrowserKind {
@@ -10,6 +12,8 @@ impl TaskBrowserKind {
         match self {
             Self::Bash => "bash",
             Self::Question => "question",
+            Self::Delegate => "delegate",
+            Self::DelegateSwarm => "delegate-swarm",
         }
     }
 }
