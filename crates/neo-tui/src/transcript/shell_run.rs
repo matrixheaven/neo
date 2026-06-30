@@ -197,6 +197,7 @@ impl ShellRunComponent {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_finished_output(
     stdout: &str,
     stderr: &str,

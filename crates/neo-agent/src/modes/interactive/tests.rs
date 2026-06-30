@@ -13,9 +13,9 @@ use neo_tui::{
 };
 
 use super::git_status::{
-    GitStatusBadge, git_status_label_with_program, parse_git_numstat, parse_git_status_porcelain,
+    git_status_label_with_program, parse_git_numstat, parse_git_status_porcelain,
 };
-use super::snapshot::{compose_tui_frame, render_overlay_snapshot, render_picker_snapshot};
+use super::snapshot::{compose_tui_frame, render_overlay_snapshot};
 use super::*;
 use crate::config::{Defaults, McpConfig, ModelConfig, RuntimeConfig, TuiConfig};
 
@@ -7837,7 +7837,7 @@ async fn shell_mode_ctrl_b_detaches_current_shell_task_not_other_background_task
         .snapshot("question-1")
         .await
         .expect("question remains");
-    assert_eq!(question_after.elapsed >= question_before.elapsed, true);
+    assert!(question_after.elapsed >= question_before.elapsed);
     assert!(
         controller.session_messages.iter().any(|message| matches!(
             message,
@@ -8253,7 +8253,7 @@ async fn task_browser_stop_confirmation_stops_selected_task() {
         .expect("browser remains open");
     assert_eq!(
         browser.snapshot().items()[0].status,
-        neo_tui::tasks_browser::TaskBrowserStatus::Stopped
+        neo_tui::tasks_browser::TaskBrowserStatus::Cancelled
     );
     assert_eq!(
         controller
@@ -8265,7 +8265,7 @@ async fn task_browser_stop_confirmation_stops_selected_task() {
             .await
             .expect("snapshot")
             .status,
-        neo_agent_core::tools::BackgroundTaskStatus::Stopped
+        neo_agent_core::tools::BackgroundTaskStatus::Cancelled
     );
 }
 

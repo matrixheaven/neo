@@ -573,6 +573,7 @@ fn is_retryable_compaction_error(msg: &str) -> bool {
 ///
 /// Returns `(summary_text, actual_compacted_count)` so the caller knows
 /// exactly which messages were summarized.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_with_retry<F>(
     model: &Arc<dyn ModelClient>,
     config: &AgentConfig,

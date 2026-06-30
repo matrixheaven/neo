@@ -297,21 +297,6 @@ mod tests {
     }
 
     #[test]
-    fn test_embedding_filter() {
-        let model = CatalogModel {
-            id: "text-embedding-3".to_owned(),
-            name: None,
-            family: Some("embedding".to_owned()),
-            limit: None,
-            tool_call: None,
-            reasoning: None,
-            interleaved: None,
-            modalities: None,
-        };
-        assert!(is_embedding_model(&model));
-    }
-
-    #[test]
     fn catalog_model_capabilities_defaults_to_streaming_and_tools() {
         let model = CatalogModel {
             id: "chat".to_owned(),

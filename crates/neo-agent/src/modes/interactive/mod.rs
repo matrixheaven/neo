@@ -20,9 +20,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(test)]
-use std::future::{Ready, ready};
-
 use anyhow::{Context, Result};
 use crossterm::terminal::size;
 use neo_agent_core::{
@@ -79,8 +76,7 @@ use prompt_completion::{longest_common_completion_prefix, prompt_completions};
 
 #[cfg(test)]
 use prompt_completion::{
-    CompletionCandidate, CompletionCatalog, CompletionSource, completion_source_candidates,
-    session_completion_items,
+    CompletionCatalog, CompletionSource, completion_source_candidates, session_completion_items,
 };
 
 mod mode_state;
@@ -708,16 +704,16 @@ impl InteractiveController {
     /// configured notification modes. Called from `drain_active_turn`.
     fn notify_for_event(&self, event: &AgentEvent) {
         use neo_agent_core::StopReason;
-        if let AgentEvent::RunFinished { stop_reason, .. } = event {
-            if matches!(
+        if let AgentEvent::RunFinished { stop_reason, .. } = event
+            && matches!(
                 stop_reason,
                 StopReason::EndTurn | StopReason::ToolUse | StopReason::MaxTokens
-            ) {
-                neo_tui::notify::notify_event(
-                    self.completion_notification,
-                    neo_tui::notify::EventKind::Completion,
-                );
-            }
+            )
+        {
+            neo_tui::notify::notify_event(
+                self.completion_notification,
+                neo_tui::notify::EventKind::Completion,
+            );
         }
     }
 
@@ -1362,10 +1358,10 @@ impl InteractiveController {
 
     fn apply_turn_event(&mut self, event: AgentEvent) {
         let should_refresh_git_status = event_should_refresh_git_status(&event);
-        if let AgentEvent::MessageAppended { message } = &event {
-            if self.session_messages.last() != Some(message) {
-                self.session_messages.push(message.clone());
-            }
+        if let AgentEvent::MessageAppended { message } = &event
+            && self.session_messages.last() != Some(message)
+        {
+            self.session_messages.push(message.clone());
         }
         if let AgentEvent::ToolExecutionFinished { name, result, .. } = &event
             && name == "TaskStop"

@@ -89,10 +89,8 @@ fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
         return Some("image/gif");
     }
     // TIFF: big-endian (MM\x00\x2a) or little-endian (II\x2a\x00)
-    if bytes.len() >= 4 {
-        if &bytes[..4] == b"MM\x00\x2a" || &bytes[..4] == b"II\x2a\x00" {
-            return Some("image/tiff");
-        }
+    if bytes.len() >= 4 && (&bytes[..4] == b"MM\x00\x2a" || &bytes[..4] == b"II\x2a\x00") {
+        return Some("image/tiff");
     }
     None
 }

@@ -79,12 +79,8 @@ impl InteractiveController {
         };
 
         let inherited_messages = self.load_btw_inherited_messages(&config).await;
-        let Some(model) = self.resolve_btw_model(&config) else {
-            return None;
-        };
-        let Some(client) = self.resolve_btw_client(&config, &model) else {
-            return None;
-        };
+        let model = self.resolve_btw_model(&config)?;
+        let client = self.resolve_btw_client(&config, &model)?;
 
         Some(crate::modes::btw::BtwRunner::new(
             model,

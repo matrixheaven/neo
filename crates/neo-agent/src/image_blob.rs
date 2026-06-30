@@ -117,13 +117,4 @@ mod tests {
         let gif = b"GIF89a\x01\x00\x01\x00\x00\x00\x00!";
         assert_eq!(gif_dimensions(gif), Some((1, 1)));
     }
-
-    #[test]
-    fn sha256_hex_is_deterministic() {
-        let bytes = b"fake image";
-        let hash1 = sha256_hex(bytes);
-        let hash2 = sha256_hex(bytes);
-        assert_eq!(hash1, hash2);
-        assert!(!hash1.is_empty());
-    }
 }

@@ -1,12 +1,12 @@
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::terminal::size;
 use neo_tui::input::{InputEvent, InputParser, KeybindingsManager};
 use neo_tui::screen_output::TuiRenderer;
 
-pub(super) trait TerminalEvents {
+pub(crate) trait TerminalEvents {
     fn next_input_event(&mut self) -> Result<InputEvent>;
 
     fn poll_input_event(&mut self, _timeout: Duration) -> Result<Option<InputEvent>> {
@@ -81,14 +81,9 @@ impl TerminalEvents for RawStdinEvents {
             return Ok(None);
         }
 
-        let deadline = Instant::now() + timeout;
         let mut got_data = false;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match self.rx.recv_timeout(remaining) {
+        if !timeout.is_zero() {
+            match self.rx.recv_timeout(timeout) {
                 Ok(bytes) => {
                     self.pending.extend(self.parser.feed_bytes(&bytes));
                     // Drain any more immediately available bytes
@@ -96,12 +91,10 @@ impl TerminalEvents for RawStdinEvents {
                         self.pending.extend(self.parser.feed_bytes(&more_bytes));
                     }
                     got_data = true;
-                    break;
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     self.disconnected = true;
-                    break;
                 }
             }
         }

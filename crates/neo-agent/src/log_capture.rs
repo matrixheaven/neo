@@ -270,7 +270,6 @@ impl tracing::field::Visit for MessageVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracing_subscriber::prelude::*;
 
     fn make_capture(capacity: usize) -> (LogCapture, mpsc::UnboundedReceiver<CapturedEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();

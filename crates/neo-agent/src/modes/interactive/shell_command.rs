@@ -91,7 +91,7 @@ impl InteractiveController {
             .local_config
             .as_ref()
             .map(|config| config.background_tasks.clone())
-            .unwrap_or_else(neo_agent_core::tools::BackgroundTaskManager::new);
+            .unwrap_or_default();
         let (event_tx, events) = mpsc::unbounded_channel();
         let request = ShellRunRequest {
             id: id.clone(),

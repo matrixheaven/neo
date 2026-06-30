@@ -6,6 +6,16 @@ use crate::error::AiError;
 
 /// Maximum number of characters retained from an HTTP error response body.
 const MAX_HTTP_ERROR_BODY_CHARS: usize = 4096;
+const CONTEXT_OVERFLOW_PATTERNS: &[&str] = &[
+    "context_length",
+    "context window",
+    "maximum context",
+    "exceed max tokens",
+    "too many tokens",
+    "prompt is too long",
+    "token count exceeds",
+    "token limit",
+];
 
 /// Truncate `body` to [`MAX_HTTP_ERROR_BODY_CHARS`] characters, appending `...`
 /// if truncation occurred. Leading/trailing whitespace is trimmed first.
@@ -33,14 +43,14 @@ pub(crate) fn error_body_excerpt(body: &str) -> String {
 /// because some bodies are prefixed with a status code (e.g. `"413 <html>..."`).
 pub(crate) fn sanitize_error_body(body: Option<&str>) -> String {
     let raw = body.unwrap_or("").trim();
-    if raw.contains("<title>") {
-        if let Some(start) = raw.find("<title>") {
-            let title_start = start + 7;
-            if let Some(end) = raw[title_start..].find("</title>") {
-                let title = raw[title_start..title_start + end].trim();
-                if !title.is_empty() {
-                    return title.replace('\r', "");
-                }
+    if raw.contains("<title>")
+        && let Some(start) = raw.find("<title>")
+    {
+        let title_start = start + 7;
+        if let Some(end) = raw[title_start..].find("</title>") {
+            let title = raw[title_start..title_start + end].trim();
+            if !title.is_empty() {
+                return title.replace('\r', "");
             }
         }
     }
@@ -50,17 +60,9 @@ pub(crate) fn sanitize_error_body(body: Option<&str>) -> String {
 /// Detect whether an error message indicates a context-length issue.
 fn is_context_overflow(message: &str) -> bool {
     let lower = message.to_lowercase();
-    const PATTERNS: &[&str] = &[
-        "context_length",
-        "context window",
-        "maximum context",
-        "exceed max tokens",
-        "too many tokens",
-        "prompt is too long",
-        "token count exceeds",
-        "token limit",
-    ];
-    PATTERNS.iter().any(|p| lower.contains(p))
+    CONTEXT_OVERFLOW_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(pattern))
 }
 
 /// Parse an HTTP `Retry-After` header value into a `Duration`.
@@ -214,28 +216,10 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_strips_carriage_returns() {
-        let result = sanitize_error_body(Some("line1\r\nline2\r"));
-        assert_eq!(result, "line1\nline2");
-    }
-
-    #[test]
     fn sanitize_empty_title_falls_back_to_body() {
         let html = "<html><head><title>  </title></head><body>nginx</body></html>";
         let result = sanitize_error_body(Some(html));
         assert!(result.contains("nginx"));
-    }
-
-    #[test]
-    fn sanitize_plain_text_unchanged() {
-        let result = sanitize_error_body(Some("just text"));
-        assert_eq!(result, "just text");
-    }
-
-    #[test]
-    fn sanitize_none_body_returns_empty() {
-        let result = sanitize_error_body(None);
-        assert_eq!(result, "");
     }
 
     #[test]

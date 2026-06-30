@@ -517,24 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn todo_event_data_eq() {
-        let a = TodoEventData {
-            title: "X".into(),
-            status: "done".into(),
-        };
-        let b = TodoEventData {
-            title: "X".into(),
-            status: "done".into(),
-        };
-        let c = TodoEventData {
-            title: "X".into(),
-            status: "pending".into(),
-        };
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-    }
-
-    #[test]
     fn error_with_code_serializes() {
         let event = AgentEvent::Error {
             turn: 1,

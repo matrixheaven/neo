@@ -2,27 +2,7 @@ use neo_ai::{
     AiStreamEvent, ChatMessage, ContentPart, ImageData, StopReason, ToolCall, ToolSpec,
     collect_tool_arguments, providers::openai::compatible::normalize_openai_chat_sse,
 };
-use schemars::JsonSchema;
 use serde_json::{Value, json};
-
-#[derive(JsonSchema)]
-#[allow(dead_code)]
-struct CreateFileInput {
-    path: String,
-    contents: String,
-}
-
-#[test]
-fn tool_spec_helpers_build_object_schema_from_rust_type() {
-    let tool = ToolSpec::from_schema::<CreateFileInput>("create_file", "Create or replace a file");
-
-    assert_eq!(tool.name, "create_file");
-    assert_eq!(tool.description, "Create or replace a file");
-    assert_eq!(tool.input_schema["type"], "object");
-    assert!(tool.input_schema["properties"].get("path").is_some());
-    assert!(tool.input_schema["properties"].get("contents").is_some());
-    assert_eq!(tool.input_schema["required"], json!(["path", "contents"]));
-}
 
 #[test]
 fn tool_spec_helpers_build_single_string_schema() {

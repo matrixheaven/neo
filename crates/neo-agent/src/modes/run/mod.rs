@@ -418,6 +418,7 @@ async fn run_prepared_streaming_turn(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn runtime_for_config(
     config: &AppConfig,
     session_directory: Option<PathBuf>,

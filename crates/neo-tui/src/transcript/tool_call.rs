@@ -54,10 +54,11 @@ impl ToolCallComponent {
     }
 
     pub fn update_call(&mut self, arguments: Option<String>) {
-        if let Some(args) = &arguments {
-            if !args.is_empty() && self.streaming_started_at.is_none() {
-                self.streaming_started_at = Some(std::time::Instant::now());
-            }
+        if let Some(args) = &arguments
+            && !args.is_empty()
+            && self.streaming_started_at.is_none()
+        {
+            self.streaming_started_at = Some(std::time::Instant::now());
         }
         self.state.arguments = arguments;
     }

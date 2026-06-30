@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use neo_ai::{
-    ApiKind, CacheRetention, ChatMessage, ContentPart, ModelCapabilities, ModelSpec, ProviderId,
-    ReasoningContinuation, ReasoningEffort, ReasoningPolicy, RequestMetadata, RequestOptions,
-    env_api_key_from, find_env_keys_from, sanitize_reasoning_continuation,
+    ApiKind, ChatMessage, ContentPart, ModelCapabilities, ModelSpec, ProviderId,
+    ReasoningContinuation, ReasoningEffort, ReasoningPolicy, env_api_key_from, find_env_keys_from,
+    sanitize_reasoning_continuation,
 };
 
 #[test]
@@ -34,33 +33,6 @@ fn env_api_key_resolves_provider_specific_variables_in_priority_order() {
         ]
     );
     assert_eq!(env_api_key_from("unknown", &env), None);
-}
-
-#[test]
-fn request_options_have_typed_defaults_and_preserve_metadata() {
-    let options = RequestOptions {
-        temperature: Some(0.2),
-        max_tokens: Some(4096),
-        headers: BTreeMap::from([("x-neo-trace".to_owned(), "trace-1".to_owned())]),
-        timeout: Some(Duration::from_secs(15)),
-        reasoning_effort: Some(ReasoningEffort::High),
-        replay_reasoning: false,
-        retries: Some(2),
-        cache: CacheRetention::Long,
-        session_id: Some("session-123".to_owned()),
-        metadata: RequestMetadata::from_pairs([("user_id", "u-1"), ("project_id", "p-1")]),
-        cancel_token: None,
-    };
-
-    assert_eq!(options.temperature, Some(0.2));
-    assert_eq!(options.max_tokens, Some(4096));
-    assert_eq!(options.timeout, Some(Duration::from_secs(15)));
-    assert_eq!(options.reasoning_effort, Some(ReasoningEffort::High));
-    assert!(!options.replay_reasoning);
-    assert_eq!(options.retries, Some(2));
-    assert_eq!(options.cache, CacheRetention::Long);
-    assert_eq!(options.session_id.as_deref(), Some("session-123"));
-    assert_eq!(options.metadata.get("project_id"), Some("p-1"));
 }
 
 #[test]

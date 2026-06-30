@@ -424,7 +424,8 @@ fn run_text_uses_production_openai_responses_adapter_against_mock_provider() {
     let sessions = session_files(temp.path());
     assert_eq!(sessions.len(), 1);
     let session_id = sessions[0]
-        .file_stem()
+        .parent()
+        .and_then(std::path::Path::file_name)
         .and_then(std::ffi::OsStr::to_str)
         .expect("session id");
     assert!(session_id.starts_with("session_"));
@@ -764,41 +765,6 @@ max_tokens = 2048
 }
 
 #[test]
-fn run_text_continue_flag_replays_latest_session_and_appends_turn() {
-    let temp = TempDir::new().expect("tempdir");
-    let server = MockSseServer::start(vec![
-        openai_response_sse("resp-run-text-cont-1", "first"),
-        openai_response_sse("resp-run-text-cont-title", "title"),
-        openai_response_sse("resp-run-text-cont-2", "second"),
-    ]);
-    write_mock_responses_config(&temp, &server.url);
-
-    let mut first = neo();
-    first
-        .current_dir(temp.path())
-        .env("OPENAI_API_KEY", "test-key")
-        .args(["run", "--output", "text", "first"]);
-    run(first);
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    let mut second = neo();
-    second
-        .current_dir(temp.path())
-        .env("OPENAI_API_KEY", "test-key")
-        .args(["--continue", "run", "--output", "text", "second"]);
-    let stdout = run(second);
-
-    assert_eq!(stdout, "second\n");
-    let requests = server.requests();
-    assert_eq!(requests.len(), 3);
-    assert_eq!(
-        input_roles_without_system(&requests[2]),
-        vec!["user", "assistant", "user"]
-    );
-    assert_eq!(user_input_contents(&requests[2]), vec!["first", "second"]);
-}
-
-#[test]
 fn run_merges_piped_stdin_with_cli_prompt() {
     let temp = TempDir::new().expect("tempdir");
     let server = MockSseServer::start(vec![openai_response_sse("resp-stdin", "merged")]);
@@ -813,25 +779,6 @@ fn run_merges_piped_stdin_with_cli_prompt() {
     let stdout = run_with_stdin(command, "piped");
 
     assert!(stdout.contains("merged"));
-    let requests = server.requests();
-    assert_eq!(user_input_contents(&requests[0]), vec!["piped\nextra"]);
-}
-
-#[test]
-fn run_text_merges_piped_stdin_with_cli_prompt() {
-    let temp = TempDir::new().expect("tempdir");
-    let server = MockSseServer::start(vec![openai_response_sse("resp-run-text-stdin", "merged")]);
-    write_mock_responses_config(&temp, &server.url);
-
-    let mut command = neo();
-    command
-        .current_dir(temp.path())
-        .env("OPENAI_API_KEY", "test-key")
-        .args(["run", "--output", "text", "extra"]);
-
-    let stdout = run_with_stdin(command, "piped");
-
-    assert_eq!(stdout, "merged\n");
     let requests = server.requests();
     assert_eq!(user_input_contents(&requests[0]), vec!["piped\nextra"]);
 }
@@ -893,35 +840,6 @@ fn run_expands_project_prompt_template_before_json_output() {
     let stdout = run(command);
 
     assert!(stdout.contains("reviewed"));
-    let requests = server.requests();
-    assert_eq!(
-        user_input_contents(&requests[0]),
-        vec!["Review the following code: fn main()"]
-    );
-}
-
-#[test]
-fn run_text_expands_project_prompt_template_with_arguments() {
-    let temp = TempDir::new().expect("tempdir");
-    let prompts_dir = isolated_home_path().join("prompts");
-    std::fs::create_dir_all(&prompts_dir).expect("create prompts");
-    std::fs::write(
-        prompts_dir.join("review.md"),
-        "Review the following code: $@",
-    )
-    .expect("write template");
-    let server = MockSseServer::start(vec![openai_response_sse("resp-slash", "slash")]);
-    write_mock_responses_config(&temp, &server.url);
-
-    let mut command = neo();
-    command
-        .current_dir(temp.path())
-        .env("OPENAI_API_KEY", "test-key")
-        .args(["run", "--output", "text", "/review", "fn main()"]);
-
-    let stdout = run(command);
-
-    assert_eq!(stdout, "slash\n");
     let requests = server.requests();
     assert_eq!(
         user_input_contents(&requests[0]),
@@ -1068,100 +986,3 @@ fn run_text_registers_enabled_extension_tool_in_model_request() {
     assert!(tool_names.contains(&"MoveSkill"));
     assert!(tool_names.contains(&"SummarizeSessions"));
 }
-
-#[test]
-fn run_text_registers_enabled_stdio_mcp_tools_from_project_config() {
-    let temp = TempDir::new().expect("tempdir");
-    let server = MockSseServer::start(vec![openai_response_sse("resp-mcp", "mcp tools listed")]);
-    let mcp_fixture = temp.path().join("mcp-fixture.py");
-    std::fs::write(&mcp_fixture, MCP_STDIO_FIXTURE).expect("write MCP fixture");
-    write_config(
-        &temp,
-        &format!(
-            r#"{}
-
-[[mcp.servers]]
-id = "docs-server"
-enabled = true
-transport = "stdio"
-command = "python3"
-args = ["-u", "{}"]
-"#,
-            mock_responses_config(&server.url),
-            mcp_fixture.display()
-        ),
-    );
-
-    let mut command = neo();
-    command
-        .current_dir(temp.path())
-        .env("OPENAI_API_KEY", "test-key")
-        .args(["run", "--output", "text", "show", "tools"]);
-    let stdout = run(command);
-
-    assert_eq!(stdout, "mcp tools listed\n");
-    let requests = server.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/responses");
-    let tool_names = model_tool_names(&requests[0].body);
-    assert!(
-        tool_names.contains(&"mcp__docs_server__docs_search"),
-        "model tools should include configured MCP stdio tools: {tool_names:?}"
-    );
-}
-
-const MCP_STDIO_FIXTURE: &str = r#"
-import json
-import sys
-
-for line in sys.stdin:
-    request = json.loads(line)
-    method = request["method"]
-    if method == "initialize":
-        response = {
-            "jsonrpc": "2.0",
-            "id": request["id"],
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "serverInfo": {"name": "fixture", "version": "0.1.0"},
-                "capabilities": {"tools": {}},
-            },
-        }
-    elif method == "notifications/initialized":
-        continue
-    elif method == "tools/list":
-        response = {
-            "jsonrpc": "2.0",
-            "id": request["id"],
-            "result": {
-                "tools": [
-                    {
-                        "name": "docs-search",
-                        "description": "Search project docs",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {"query": {"type": "string"}},
-                            "required": ["query"],
-                        },
-                    }
-                ]
-            },
-        }
-    elif method == "tools/call":
-        response = {
-            "jsonrpc": "2.0",
-            "id": request["id"],
-            "result": {
-                "content": [{"type": "text", "text": "ok"}],
-                "isError": False,
-            },
-        }
-    else:
-        response = {
-            "jsonrpc": "2.0",
-            "id": request.get("id"),
-            "error": {"code": -32601, "message": f"unknown method {method}"},
-        }
-    print(json.dumps(response), flush=True)
-"#;

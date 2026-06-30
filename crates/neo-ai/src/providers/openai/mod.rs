@@ -1,9 +1,9 @@
 //! OpenAI-family provider wire clients.
 //!
-//! This module groups the three OpenAI-compatible API flavors:
-//! - [`responses`]: OpenAI Responses API (`/responses` endpoint)
-//! - [`compatible`]: OpenAI Chat Completions API (`/chat/completions` endpoint)
-//! - [`images`]: OpenAI Images API (image generation)
+//! This module groups the three `OpenAI`-compatible API flavors:
+//! - [`responses`]: `OpenAI` Responses API (`/responses` endpoint)
+//! - [`compatible`]: `OpenAI` Chat Completions API (`/chat/completions` endpoint)
+//! - [`images`]: `OpenAI` Images API (image generation)
 
 use std::collections::BTreeMap;
 
@@ -17,7 +17,7 @@ pub mod compatible;
 pub mod images;
 pub mod responses;
 
-/// Build HTTP headers for OpenAI API requests.
+/// Build HTTP headers for `OpenAI` API requests.
 ///
 /// Inserts the `Authorization: Bearer {api_key}` header, applies any extra
 /// headers from the request options, and optionally sets `x-client-request-id`
@@ -43,7 +43,7 @@ pub(crate) fn headers(
     Ok(headers)
 }
 
-/// Construct an OpenAI image URL value from base64-encoded data or a URL.
+/// Construct an `OpenAI` image URL value from base64-encoded data or a URL.
 pub(crate) fn image_url(mime_type: &str, data: &ImageData) -> String {
     match data {
         ImageData::Base64(data) => format!("data:{mime_type};base64,{data}"),

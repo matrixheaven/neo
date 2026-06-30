@@ -273,16 +273,15 @@ fn session_id_from_jsonl_path(
     }
 
     // New layout: .../session_<uuid>/transcript.jsonl
-    if path.file_name().and_then(|n| n.to_str()) == Some("transcript.jsonl") {
-        if let Some(session_id) = path
+    if path.file_name().and_then(|n| n.to_str()) == Some("transcript.jsonl")
+        && let Some(session_id) = path
             .parent()
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-        {
-            validate_session_id(session_id)
-                .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
-            return Ok(Some(session_id.to_owned()));
-        }
+    {
+        validate_session_id(session_id)
+            .map_err(|_| anyhow::anyhow!("invalid session id {session_id:?}"))?;
+        return Ok(Some(session_id.to_owned()));
     }
 
     Ok(None)

@@ -48,7 +48,7 @@ const FIELD_HEADERS: usize = 3;
 /// Split a raw env/headers buffer into individual `KEY=value` entries.
 /// Supports commas and newlines as separators.
 fn split_key_value_entries(text: &str) -> Vec<String> {
-    text.split(|c: char| c == ',' || c == '\n')
+    text.split([',', '\n'])
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)

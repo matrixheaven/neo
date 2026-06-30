@@ -19,8 +19,6 @@ use crate::{AiError, ChatRequest};
 const RETRY_MIN_MS: u64 = 300;
 /// Maximum backoff delay cap.
 const RETRY_MAX_MS: u64 = 5_000;
-/// Exponential growth factor.
-const RETRY_FACTOR: f64 = 2.0;
 /// Default total attempts when `request.options.retries` is unset.
 const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 
@@ -38,21 +36,20 @@ fn compute_backoff_delay(err: &ProviderError, attempt: u32) -> Duration {
     {
         return (*ra).min(Duration::from_millis(RETRY_MAX_MS));
     }
-    // 2. Exponential backoff
-    let base = RETRY_MIN_MS as f64;
-    let exp = RETRY_FACTOR.powi(attempt as i32);
-    let raw = (base * exp).min(RETRY_MAX_MS as f64);
-    // 3. Jitter: ±25% (rand 0.9 API: rand::rng())
-    let jitter = rand::rng().random_range(0.75..1.25);
-    Duration::from_millis((raw * jitter) as u64)
+    // 2. Exponential backoff, capped before jitter.
+    let multiplier = 1_u64.checked_shl(attempt.min(16)).unwrap_or(u64::MAX);
+    let raw = RETRY_MIN_MS.saturating_mul(multiplier).min(RETRY_MAX_MS);
+    // 3. Jitter: ±25% as an integer percentage.
+    let jitter_percent = rand::rng().random_range(75..=125);
+    Duration::from_millis(raw.saturating_mul(jitter_percent) / 100)
 }
 
 /// Sleep for `duration`, but abort early if `cancel_token` is cancelled.
 async fn sleep_cancellable(duration: Duration, token: &CancellationToken) -> Result<(), ()> {
     tokio::select! {
         biased;
-        _ = token.cancelled() => Err(()),
-        _ = tokio::time::sleep(duration) => Ok(()),
+        () = token.cancelled() => Err(()),
+        () = tokio::time::sleep(duration) => Ok(()),
     }
 }
 
@@ -72,8 +69,7 @@ pub(crate) async fn open_response<'a>(
     let max_attempts = request
         .options
         .retries
-        .map(|r| r.saturating_add(1))
-        .unwrap_or(DEFAULT_MAX_ATTEMPTS);
+        .map_or(DEFAULT_MAX_ATTEMPTS, |r| r.saturating_add(1));
 
     // Extract cancel token from RequestOptions (set by the runtime).
     // If unset, create a standalone token that never fires.
@@ -139,9 +135,9 @@ mod tests {
         let d0 = compute_backoff_delay(&err, 0).as_millis();
         let d2 = compute_backoff_delay(&err, 2).as_millis();
         // d0 should be roughly 300ms (225–375ms with ±25% jitter)
-        assert!(d0 >= 200 && d0 <= 400, "d0={d0}");
+        assert!((200..=400).contains(&d0), "d0={d0}");
         // d2 should be roughly 1200ms (900–1500ms with ±25% jitter)
-        assert!(d2 >= 800 && d2 <= 1600, "d2={d2}");
+        assert!((800..=1600).contains(&d2), "d2={d2}");
     }
 
     #[test]

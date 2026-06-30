@@ -155,10 +155,10 @@ impl NeoChromeState {
         let existing_id =
             self.find_overlay_by_kind(|kind| matches!(kind, OverlayKind::ProviderManager(_)));
         if let Some(id) = existing_id {
-            if let Some(overlay) = self.overlays.iter_mut().find(|o| o.id == id) {
-                if let OverlayKind::ProviderManager(state) = &mut overlay.kind {
-                    state.set_options(opts);
-                }
+            if let Some(overlay) = self.overlays.iter_mut().find(|o| o.id == id)
+                && let OverlayKind::ProviderManager(state) = &mut overlay.kind
+            {
+                state.set_options(opts);
             }
             self.focus_overlay(id);
             return id;
@@ -176,10 +176,10 @@ impl NeoChromeState {
         let existing_id =
             self.find_overlay_by_kind(|kind| matches!(kind, OverlayKind::McpManager(_)));
         if let Some(id) = existing_id {
-            if let Some(overlay) = self.overlays.iter_mut().find(|o| o.id == id) {
-                if let OverlayKind::McpManager(state) = &mut overlay.kind {
-                    state.set_options(opts);
-                }
+            if let Some(overlay) = self.overlays.iter_mut().find(|o| o.id == id)
+                && let OverlayKind::McpManager(state) = &mut overlay.kind
+            {
+                state.set_options(opts);
             }
             self.focus_overlay(id);
             return id;

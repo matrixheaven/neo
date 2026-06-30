@@ -33,6 +33,7 @@ fn compaction_pulse_char(activity_frame: usize) -> char {
     PULSE[activity_frame % PULSE.len()]
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_compaction(
     phase: Option<neo_agent_core::CompactionPhase>,
     percent: u8,

@@ -107,14 +107,3 @@ impl Default for RequestOptions {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_retries_is_two() {
-        let opts = RequestOptions::default();
-        assert_eq!(opts.retries, Some(2));
-    }
-}

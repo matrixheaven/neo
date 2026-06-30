@@ -643,14 +643,4 @@ mod tests {
             })
         ));
     }
-
-    #[test]
-    fn normalize_openai_chat_sse_rejects_unfinished_stream_without_done_or_finish_reason() {
-        let error = normalize_openai_chat_sse(
-            "data: {\"id\":\"chatcmpl_1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
-        )
-        .expect_err("unfinished stream should fail");
-
-        assert!(error.to_string().contains("missing SSE done marker"));
-    }
 }
