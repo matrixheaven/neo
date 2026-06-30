@@ -305,20 +305,43 @@ fn wrapped_inline_code_keeps_brand_color_on_continuation_lines() {
 }
 
 #[test]
-fn table_truncates_long_cell_content_to_column_width() {
-    // A narrow terminal with a long body cell must truncate, not overflow.
+fn table_wraps_long_cells_without_truncating_content() {
     let md = "| h\n|---|\n| this is a very long body cell that exceeds the column |";
     let lines = plain(md, 24);
     let joined = lines.join("\n");
-    // The table should still render with box borders (not the raw fallback).
     assert!(joined.contains('┌'), "box border present: {joined}");
-    // No line should exceed the width (24) — truncation keeps it in bounds.
     for line in &lines {
         let w = neo_tui::primitive::visible_width(line);
         assert!(w <= 24, "line within width ({w} > 24): {line:?}");
     }
-    // The long content is truncated with an ellipsis.
-    assert!(joined.contains('…'), "truncated with ellipsis: {joined}");
+    assert!(!joined.contains('…'), "long content should wrap: {joined}");
+    assert!(
+        joined.contains("this is a very"),
+        "first wrapped row: {joined}"
+    );
+    assert!(
+        joined.contains("body cell that"),
+        "middle wrapped row: {joined}"
+    );
+    assert!(
+        joined.contains("exceeds the column"),
+        "table cells should prefer word boundaries: {joined}"
+    );
+}
+
+#[test]
+fn table_inserts_separator_between_every_body_row() {
+    let md = "| 项目 | 结果 |\n|---|---|\n| alpha | ✅ |\n| beta | ✅ |";
+    let lines = plain(md, 40);
+    let joined = lines.join("\n");
+    let separator_count = lines
+        .iter()
+        .filter(|line| line.starts_with('├') && line.ends_with('┤'))
+        .count();
+    assert_eq!(
+        separator_count, 2,
+        "header separator plus separator between body rows: {joined}"
+    );
 }
 
 #[test]

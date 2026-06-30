@@ -7,11 +7,11 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+use crate::primitive::theme::TuiTheme;
 use crate::primitive::{
     Color, Line, Span, Style, clip_plain_to_width, clip_visible_to_width, pad_to_width,
-    truncate_to_width, visible_width,
+    truncate_to_width, visible_width, wrap_width,
 };
-use crate::primitive::theme::TuiTheme;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 /// Inner horizontal padding between the side border and code content.
@@ -755,42 +755,42 @@ fn render_table(
     let header_style = Style::default().fg(theme.text_primary).bold();
     let body_style = Style::default().fg(theme.text_primary);
 
-    let border_line = |joiners: &[char; 2]| -> String {
+    let border_line = |joiners: &[char; 3]| -> String {
         let mut s = String::from(joiners[0]);
         for (i, w) in col_widths.iter().enumerate() {
             s.push_str(&"─".repeat(w + 2));
             s.push(if i + 1 == ncols {
-                joiners[1]
+                joiners[2]
             } else {
-                match joiners[0] {
-                    '├' => '┼',
-                    '└' => '┴',
-                    _ => '┬',
-                }
+                joiners[1]
             });
         }
         s
     };
 
-    out.push(Line::styled(border_line(&['┌', '┐']), border_style));
-    out.push(make_table_row(
+    out.push(Line::styled(border_line(&['┌', '┬', '┐']), border_style));
+    out.extend(make_table_row(
         head,
         &col_widths,
         ncols,
         header_style,
         border_style,
     ));
-    out.push(Line::styled(border_line(&['├', '┤']), border_style));
-    for row in rows {
-        out.push(make_table_row(
+    let separator = Line::styled(border_line(&['├', '┼', '┤']), border_style);
+    out.push(separator.clone());
+    for (index, row) in rows.iter().enumerate() {
+        out.extend(make_table_row(
             row,
             &col_widths,
             ncols,
             body_style,
             border_style,
         ));
+        if index + 1 < rows.len() {
+            out.push(separator.clone());
+        }
     }
-    out.push(Line::styled(border_line(&['└', '┘']), border_style));
+    out.push(Line::styled(border_line(&['└', '┴', '┘']), border_style));
 }
 
 fn make_table_row(
@@ -799,35 +799,88 @@ fn make_table_row(
     ncols: usize,
     cell_style: Style,
     border_style: Style,
-) -> Line {
-    let mut spans = vec![Span::styled("│", border_style)];
-    for (i, w) in widths.iter().enumerate().take(ncols) {
-        let content = cells.get(i).map_or("", String::as_str);
-        // Truncate the cell to the column width (visible-width aware), adding
-        // an ellipsis when it overflows. This keeps CJK + long content from
-        // blowing out the table grid.
-        let displayed = truncate_visible(content, *w);
-        let vw = visible_width(&displayed);
-        let pad = w.saturating_sub(vw);
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(displayed, cell_style));
-        spans.push(Span::raw(" ".repeat(pad)));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled("│", border_style));
+) -> Vec<Line> {
+    let wrapped_cells = wrap_table_cells(cells, widths, ncols);
+    let row_height = wrapped_cells.iter().map(Vec::len).max().unwrap_or(1);
+    let mut lines = Vec::with_capacity(row_height);
+
+    for line_index in 0..row_height {
+        let mut spans = vec![Span::styled("│", border_style)];
+        for (i, w) in widths.iter().enumerate().take(ncols) {
+            let displayed = wrapped_cells
+                .get(i)
+                .and_then(|cell| cell.get(line_index))
+                .map_or("", String::as_str);
+            let vw = visible_width(displayed);
+            let pad = w.saturating_sub(vw);
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(displayed.to_owned(), cell_style));
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled("│", border_style));
+        }
+        lines.push(Line::from_spans(spans));
     }
-    Line::from_spans(spans)
+
+    lines
 }
 
-/// Truncate `s` to at most `width` visible columns. If it overflows, the last
-/// column is replaced with `…`.
-fn truncate_visible(s: &str, width: usize) -> String {
-    if visible_width(s) <= width {
-        return s.to_owned();
+fn wrap_table_cells(cells: &[String], widths: &[usize], ncols: usize) -> Vec<Vec<String>> {
+    let mut wrapped = Vec::with_capacity(ncols);
+    for (i, w) in widths.iter().enumerate().take(ncols) {
+        let content = cells.get(i).map_or("", String::as_str);
+        let mut lines = wrap_table_cell(content, (*w).max(1));
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        wrapped.push(lines);
     }
-    // Reserve one column for the ellipsis so the result fits in `width`.
-    let mut out = clip_plain_to_width(s, width.saturating_sub(1));
-    out.push('…');
-    out
+    wrapped
+}
+
+fn wrap_table_cell(content: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for logical_line in content.lines() {
+        wrap_table_cell_logical_line(logical_line, width, &mut lines);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn wrap_table_cell_logical_line(line: &str, width: usize, out: &mut Vec<String>) {
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for word in line.split_whitespace() {
+        let word_width = visible_width(word);
+        if current_width == 0 {
+            if word_width <= width {
+                current.push_str(word);
+                current_width = word_width;
+            } else {
+                out.extend(wrap_width(word, width));
+            }
+        } else if current_width + 1 + word_width <= width {
+            current.push(' ');
+            current.push_str(word);
+            current_width += 1 + word_width;
+        } else {
+            out.push(std::mem::take(&mut current));
+            current_width = 0;
+            if word_width <= width {
+                current.push_str(word);
+                current_width = word_width;
+            } else {
+                out.extend(wrap_width(word, width));
+            }
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    } else if line.is_empty() {
+        out.push(String::new());
+    }
 }
 
 /// Pad or hard-truncate an ANSI-styled line to exactly `width` visible columns.
