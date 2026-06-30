@@ -1,6 +1,6 @@
 use crate::markdown::render_markdown;
-use crate::primitive::{Line, Span, Style, pad_to_width, truncate_to_width, visible_width};
 use crate::primitive::theme::TuiTheme;
+use crate::primitive::{Line, Span, Style, pad_to_width, truncate_to_width, visible_width};
 
 /// Uniform left margin so the plan box aligns with other tool-card children.
 const LEFT_MARGIN: usize = 2;

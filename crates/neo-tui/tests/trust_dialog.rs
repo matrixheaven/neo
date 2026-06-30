@@ -40,7 +40,10 @@ fn render_lines(state: &TrustDialogState, width: usize) -> Vec<String> {
 
 #[test]
 fn trust_dialog_defaults_to_continue_untrusted() {
-    let state = TrustDialogState::new(sample_data(), neo_tui::primitive::theme::TuiTheme::default());
+    let state = TrustDialogState::new(
+        sample_data(),
+        neo_tui::primitive::theme::TuiTheme::default(),
+    );
     assert_eq!(
         state.selected_choice(),
         TrustDialogChoice::ContinueUntrusted
@@ -49,7 +52,10 @@ fn trust_dialog_defaults_to_continue_untrusted() {
 
 #[test]
 fn trust_dialog_renders_detected_inputs_without_file_contents() {
-    let state = TrustDialogState::new(sample_data(), neo_tui::primitive::theme::TuiTheme::default());
+    let state = TrustDialogState::new(
+        sample_data(),
+        neo_tui::primitive::theme::TuiTheme::default(),
+    );
     let lines = render_lines(&state, 80);
     let text = lines.join("\n");
 
@@ -69,7 +75,10 @@ fn trust_dialog_renders_detected_inputs_without_file_contents() {
 
 #[test]
 fn trust_dialog_renders_parent_selection_step() {
-    let mut state = TrustDialogState::new(sample_data(), neo_tui::primitive::theme::TuiTheme::default());
+    let mut state = TrustDialogState::new(
+        sample_data(),
+        neo_tui::primitive::theme::TuiTheme::default(),
+    );
 
     // Move up once from ContinueUntrusted to TrustParent.
     state.handle_input(&InputEvent::Action(KeybindingAction::SelectUp));

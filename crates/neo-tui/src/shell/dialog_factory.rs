@@ -2,9 +2,7 @@ use crate::tasks_browser::TaskBrowserState;
 
 use super::command_palette::{CommandPaletteState, CommandSpec};
 use super::overlay::{Overlay, OverlayId, OverlayKind};
-use super::pickers::{
-    ModelPickerState, PickerItem, PromptCompletionPrefix, PromptCompletionState,
-};
+use super::pickers::{ModelPickerState, PickerItem, PromptCompletionPrefix, PromptCompletionState};
 use super::session_picker::{SessionPickerItem, SessionPickerScope, SessionPickerState};
 use super::state::NeoChromeState;
 

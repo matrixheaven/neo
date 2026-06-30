@@ -33,8 +33,8 @@ use crate::primitive::{truncate_width, wrap_width};
 
 use super::debug_log::{check_line_widths, debug_log_enabled, write_debug_log, write_output_log};
 use super::kitty_image::{
-    collect_kitty_image_ids, delete_kitty_images, get_kitty_image_reserved_rows,
-    image_block_fits, is_image_line, push_image_block, reserved_render_rows,
+    collect_kitty_image_ids, delete_kitty_images, get_kitty_image_reserved_rows, image_block_fits,
+    is_image_line, push_image_block, reserved_render_rows,
 };
 
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";

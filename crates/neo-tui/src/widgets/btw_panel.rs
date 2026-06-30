@@ -1,9 +1,9 @@
 use std::fmt::Write as _;
 
 use crate::markdown::render_markdown;
+use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
 use crate::primitive::{RESET, Style, paint, visible_width};
-use crate::primitive::theme::TuiTheme;
 use crate::widgets::box_draw::{ROUNDED, bottom_border, content_line};
 
 /// Stable identifier for a `/btw` sidecar session.

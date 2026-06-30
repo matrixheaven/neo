@@ -1,8 +1,8 @@
 use crate::input::{InputEvent, KeybindingAction};
 use crate::primitive::InputResult;
+use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Style, paint};
 use crate::primitive::{truncate_width, visible_width};
-use crate::primitive::theme::TuiTheme;
 
 /// A group of providers treated as a single row in the provider manager.
 #[derive(Debug, Clone, PartialEq, Eq)]

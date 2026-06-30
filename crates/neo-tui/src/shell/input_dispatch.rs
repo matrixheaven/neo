@@ -1,7 +1,7 @@
 use crate::dialogs::{QuestionDialogAction, QuestionResult};
 use crate::input::{InputEvent, KeybindingAction};
-use crate::primitive::theme::ChromeMode;
 use crate::primitive::InputResult;
+use crate::primitive::theme::ChromeMode;
 
 use super::approval::{self, ApprovalResult};
 use super::overlay::{Overlay, OverlayKind};

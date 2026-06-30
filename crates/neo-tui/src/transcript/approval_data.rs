@@ -1,9 +1,7 @@
 use neo_agent_core::PermissionOperation;
 
-use crate::transcript::{
-    ApprovalPromptData, TranscriptEntry,
-};
 use crate::transcript::pane::TranscriptPane;
+use crate::transcript::{ApprovalPromptData, TranscriptEntry};
 
 struct ApprovalPromptSummary {
     title: String,

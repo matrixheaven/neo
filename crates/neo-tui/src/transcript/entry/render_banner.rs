@@ -46,7 +46,11 @@ fn bulleted_wrap(text: &str, width: usize, prefix: &str, style: Style) -> Vec<Li
 /// │      │
 /// ╰──────╯
 /// ```
-pub(super) fn render_welcome_banner(data: &BannerData, width: usize, theme: &TuiTheme) -> Vec<Line> {
+pub(super) fn render_welcome_banner(
+    data: &BannerData,
+    width: usize,
+    theme: &TuiTheme,
+) -> Vec<Line> {
     use std::fmt::Write as _;
     let logo = [
         "\u{2590}\u{2588}\u{259b}\u{2588}\u{259b}\u{2588}\u{258c}",

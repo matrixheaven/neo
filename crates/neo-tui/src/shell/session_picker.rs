@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::primitive::theme::TuiTheme;
 use crate::primitive::Color;
+use crate::primitive::theme::TuiTheme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionPickerScope {

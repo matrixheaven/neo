@@ -3,8 +3,8 @@
 use crate::input::{InputEvent, KeybindingAction};
 use crate::primitive::Color;
 use crate::primitive::InputResult;
-use crate::primitive::visible_width;
 use crate::primitive::theme::TuiTheme;
+use crate::primitive::visible_width;
 
 pub struct CustomRegistryImportOptions {
     pub title: String,

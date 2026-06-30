@@ -6,9 +6,9 @@
 //! consecutive reads renders as one card instead of N cards.
 
 use crate::primitive::Style;
+use crate::primitive::theme::TuiTheme;
 use crate::primitive::{Line, Span};
 use crate::shell::ToolStatusKind;
-use crate::primitive::theme::TuiTheme;
 
 use super::tool_call::ToolCallState;
 use super::tool_renderers::key_argument;

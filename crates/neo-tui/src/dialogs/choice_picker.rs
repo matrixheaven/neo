@@ -5,8 +5,8 @@ use std::fmt::Write as _;
 use crate::input::{InputEvent, KeybindingAction};
 use crate::primitive::Color;
 use crate::primitive::InputResult;
-use crate::primitive::visible_width;
 use crate::primitive::theme::TuiTheme;
+use crate::primitive::visible_width;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChoiceItem {

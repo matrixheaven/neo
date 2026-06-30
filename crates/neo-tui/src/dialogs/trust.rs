@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use crate::input::{InputEvent, KeybindingAction};
 use crate::primitive::InputResult;
-use crate::primitive::truncate_width;
 use crate::primitive::theme::TuiTheme;
+use crate::primitive::truncate_width;
 
 /// Inputs shown in the trust dialog. Built from `neo_agent::trust` data but
 /// kept independent so `neo-tui` does not depend on `neo-agent`.

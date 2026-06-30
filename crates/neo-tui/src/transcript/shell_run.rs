@@ -1,8 +1,8 @@
 use neo_agent_core::ShellCommandOutcome;
 
+use crate::primitive::theme::TuiTheme;
 use crate::primitive::wrap_width;
 use crate::primitive::{Line, Span, Style};
-use crate::primitive::theme::TuiTheme;
 use crate::utils::shell_output::{sanitize_shell_output, split_sanitized_shell_lines};
 
 const MAX_LIVE_OUTPUT_LINES: usize = 12;

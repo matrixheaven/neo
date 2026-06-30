@@ -4,9 +4,9 @@ use crate::dialogs::choice_picker::{dialog_rgb, dialog_sgr_bg, dialog_sgr_fg};
 use crate::input::{InputEvent, KeybindingAction};
 use crate::primitive::Color;
 use crate::primitive::InputResult;
+use crate::primitive::theme::TuiTheme;
 use crate::primitive::{truncate_width, visible_width};
 use crate::searchable_list::SearchableList;
-use crate::primitive::theme::TuiTheme;
 
 /// One model entry in the picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
