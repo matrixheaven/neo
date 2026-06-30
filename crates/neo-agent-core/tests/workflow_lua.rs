@@ -56,7 +56,7 @@ fn lua_workflow_runner_does_not_stub_runtime_host_apis() {
             local audit = neo.swarm({ description = "audit", items = {"a"}, prompt_template = "{{item}}" })
             assert(audit:has_failures() == false)
             local fix = neo.delegate({ task = "fix issue" })
-            neo.verify("cargo nextest run -p neo-agent-core --test workflow_lua workflow")
+            neo.verify(true, "cargo nextest run passes")
             neo.report({ audit = audit:summary(), fix = fix:summary() })
             "#,
         )
@@ -109,11 +109,16 @@ async fn run_workflow_returns_reports_and_top_level_result() {
         .expect("execute should succeed");
 
     assert!(!result.is_error, "{}", result.content);
-    assert!(result.content.contains("reports: 2"), "{}", result.content);
+    assert!(result.content.contains("reports:"), "{}", result.content);
+    assert!(
+        result.content.contains("first report"),
+        "{}",
+        result.content
+    );
     assert!(result.content.contains("result:"), "{}", result.content);
     let details = result.details.as_ref().expect("workflow details");
-    assert_eq!(details["reports"][0], "first report");
-    assert_eq!(details["reports"][1]["second"], "report");
+    assert_eq!(details["reports"][0]["value"], "first report");
+    assert_eq!(details["reports"][1]["value"]["second"], "report");
     assert_eq!(details["result"]["answer"], 42);
 }
 
@@ -164,7 +169,7 @@ async fn run_workflow_delegate_handle_tostring_is_agent_id() {
     let reports = result.details.as_ref().unwrap()["reports"]
         .as_array()
         .expect("reports");
-    let report = &reports[0];
+    let report = &reports[0]["value"];
     let id = report["id"].as_str().expect("id string");
     assert!(id.starts_with("agent_"), "{id}");
     assert_eq!(report["tostring"], id);
@@ -225,7 +230,7 @@ async fn run_workflow_delegate_runs_child_model_turn_and_returns_summary() {
 }
 
 #[tokio::test]
-async fn run_workflow_verify_uses_bash_tool_success_and_failure() {
+async fn run_workflow_verify_command_uses_bash_tool_success_and_failure() {
     let dir = tempfile::tempdir().unwrap();
     let harness = FakeHarness::from_turns([]);
     let ctx = workflow_ctx(dir.path(), &harness).with_access(ToolAccess::all());
@@ -237,7 +242,7 @@ async fn run_workflow_verify_uses_bash_tool_success_and_failure() {
             json!({
                 "title": "verify success",
                 "script": r#"
-                    local ok = neo.verify("printf workflow-verify-ok")
+                    local ok = neo.verify_command("printf workflow-verify-ok")
                     assert(ok == true)
                 "#,
             }),
@@ -258,7 +263,7 @@ async fn run_workflow_verify_uses_bash_tool_success_and_failure() {
             json!({
                 "title": "verify failure",
                 "script": r#"
-                    local ok = neo.verify("printf workflow-verify-fail; exit 7")
+                    local ok = neo.verify_command("printf workflow-verify-fail; exit 7")
                     assert(ok == false)
                 "#,
             }),
@@ -332,6 +337,35 @@ fn workflow_ctx(path: &std::path::Path, harness: &FakeHarness) -> ToolContext {
         .with_child_runtime(config, harness.client(), registry, 1)
 }
 
+fn workflow_tool_context_with_fake_model() -> (ToolContext, Arc<FakeHarness>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let harness = Arc::new(FakeHarness::from_turns([child_text_turn(
+        "child completed workflow",
+    )]));
+    let ctx = workflow_ctx(dir.path(), &harness).with_access(ToolAccess::all());
+    (ctx, harness)
+}
+
+fn workflow_tool_context_denying_bash() -> (ToolContext, Arc<FakeHarness>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let harness = Arc::new(FakeHarness::from_turns([]));
+    let registry = Arc::new(ToolRegistry::with_builtin_tools());
+    let config = AgentConfig::for_model(harness.model())
+        .with_tool_execution_mode(ToolExecutionMode::Sequential)
+        .with_permission_mode(PermissionMode::Yolo);
+    let ctx = ToolContext::new(dir.path())
+        .expect("tool context")
+        .with_access(ToolAccess {
+            file_read: true,
+            file_write: false,
+            shell: false,
+            tool: true,
+            user_question: false,
+        })
+        .with_child_runtime(config, harness.client(), registry, 1);
+    (ctx, harness)
+}
+
 fn child_text_turn(text: &str) -> Vec<AiStreamEvent> {
     vec![
         AiStreamEvent::MessageStart {
@@ -345,4 +379,218 @@ fn child_text_turn(text: &str) -> Vec<AiStreamEvent> {
             usage: None,
         },
     ]
+}
+
+#[tokio::test]
+async fn workflow_can_return_delegate_handle_as_table() {
+    let tool = neo_agent_core::tools::RunWorkflowTool;
+    let (ctx, _model) = workflow_tool_context_with_fake_model();
+
+    let result = tool
+        .execute(
+            &ctx,
+            json!({
+                "title": "delegate return",
+                "script": "return neo.delegate({ task = 'inspect one file', mode = 'foreground' })"
+            }),
+        )
+        .await
+        .expect("workflow should run");
+
+    assert!(!result.is_error, "{}", result.content);
+    let details = result.details.as_ref().expect("details");
+    let returned = details.get("result").expect("result");
+    assert_eq!(
+        returned.get("kind").and_then(serde_json::Value::as_str),
+        Some("delegate")
+    );
+    assert!(
+        returned
+            .get("agent_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+    );
+    assert!(
+        returned
+            .get("summary")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn workflow_swarm_handle_exposes_items_and_serializes() {
+    let tool = neo_agent_core::tools::RunWorkflowTool;
+    let harness = Arc::new(FakeHarness::from_turns([
+        child_text_turn("core ok"),
+        child_text_turn("tui ok"),
+    ]));
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = workflow_ctx(dir.path(), &harness).with_access(ToolAccess::all());
+
+    let result = tool
+        .execute(
+            &ctx,
+            json!({
+                "title": "swarm return",
+                "script": r#"
+                    local s = neo.swarm({
+                        description = "audit",
+                        items = { "core", "tui" },
+                        prompt_template = "Audit {{item}}",
+                        mode = "foreground"
+                    })
+                    local items = s:items()
+                    return { id = s:id(), status = s:status(), summary = s:summary(), items = items, table = s:to_table() }
+                "#
+            }),
+        )
+        .await
+        .expect("workflow should run");
+
+    assert!(!result.is_error, "{}", result.content);
+    let returned = result.details.as_ref().unwrap().get("result").unwrap();
+    assert_eq!(
+        returned
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        returned.get("status").and_then(serde_json::Value::as_str),
+        Some("completed")
+    );
+    assert_eq!(
+        returned
+            .pointer("/table/kind")
+            .and_then(serde_json::Value::as_str),
+        Some("swarm")
+    );
+}
+
+#[tokio::test]
+async fn workflow_verify_is_boolean_assertion() {
+    let tool = neo_agent_core::tools::RunWorkflowTool;
+    let (ctx, _model) = workflow_tool_context_with_fake_model();
+
+    let ok = tool
+        .execute(
+            &ctx,
+            json!({
+                "title": "verify assertion ok",
+                "script": "neo.verify(true, 'should pass'); return 'ok'"
+            }),
+        )
+        .await
+        .expect("workflow should run");
+    assert!(!ok.is_error, "{}", ok.content);
+
+    let failed = tool
+        .execute(
+            &ctx,
+            json!({
+                "title": "verify assertion fail",
+                "script": "neo.verify(false, 'expected three completed children')"
+            }),
+        )
+        .await
+        .expect("workflow returns failure result");
+    assert!(failed.is_error);
+    assert!(
+        failed.content.contains("expected three completed children"),
+        "{}",
+        failed.content
+    );
+}
+
+#[tokio::test]
+async fn workflow_verify_command_reports_bash_permission_denial_clearly() {
+    let tool = neo_agent_core::tools::RunWorkflowTool;
+    let (ctx, _model) = workflow_tool_context_denying_bash();
+
+    let result = tool
+        .execute(
+            &ctx,
+            json!({
+                "title": "verify command denied",
+                "script": "return neo.verify_command('printf denied', 'verify failed')"
+            }),
+        )
+        .await
+        .expect("workflow returns failure result");
+
+    assert!(result.is_error);
+    assert!(
+        result
+            .content
+            .contains("verify_command denied by Bash permission policy"),
+        "{}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn run_workflow_output_includes_report_values() {
+    let tool = neo_agent_core::tools::RunWorkflowTool;
+    let (ctx, _model) = workflow_tool_context_with_fake_model();
+
+    let result = tool
+        .execute(
+            &ctx,
+            json!({
+                "title": "reports",
+                "script": r#"
+                    neo.report("first report")
+                    neo.report({ completed = 3 })
+                    return "done"
+                "#
+            }),
+        )
+        .await
+        .expect("workflow should run");
+
+    assert!(!result.is_error, "{}", result.content);
+    assert!(
+        result.content.contains("first report"),
+        "{}",
+        result.content
+    );
+    assert!(result.content.contains("completed"), "{}", result.content);
+    let reports = result
+        .details
+        .as_ref()
+        .and_then(|details| details.get("reports"))
+        .and_then(serde_json::Value::as_array)
+        .expect("reports array");
+    assert_eq!(reports.len(), 2);
+}
+
+#[tokio::test]
+async fn workflow_lua_errors_do_not_expose_rust_source_paths() {
+    let tool = neo_agent_core::tools::RunWorkflowTool;
+    let (ctx, _model) = workflow_tool_context_with_fake_model();
+
+    let result = tool
+        .execute(
+            &ctx,
+            json!({
+                "title": "bad lua",
+                "script": "error('plain workflow failure')"
+            }),
+        )
+        .await
+        .expect("workflow returns failure result");
+
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("plain workflow failure"),
+        "{}",
+        result.content
+    );
+    assert!(
+        !result.content.contains("crates/neo-agent-core/src"),
+        "{}",
+        result.content
+    );
 }

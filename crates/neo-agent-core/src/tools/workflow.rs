@@ -57,6 +57,7 @@ impl Tool for RunWorkflowTool {
                 Ok(return_value) => {
                     let steps = runner.recorder().steps();
                     let reports = runner.recorder().reports();
+                    let report_preview = format_report_preview(&reports);
                     let failed = steps.iter().any(|step| step.state == WorkflowState::Failed);
                     let state = if failed {
                         WorkflowState::Failed
@@ -69,22 +70,37 @@ impl Tool for RunWorkflowTool {
                         turn,
                         workflow: snapshot.clone(),
                     });
+                    let reports_details: Vec<serde_json::Value> = reports
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| json!({ "index": index + 1, "value": value }))
+                        .collect();
                     let result = if failed {
-                        ToolResult::error(format!(
-                            "workflow: {}\nstatus: failed\nsteps: {}\nreports: {}\nresult: {}",
+                        let content = format!(
+                            "workflow: {}\nstatus: failed\nsteps: {}\n{}result: {}",
                             input.title,
                             steps.len(),
-                            reports.len(),
+                            if report_preview.is_empty() {
+                                String::new()
+                            } else {
+                                format!("reports:\n{report_preview}\n")
+                            },
                             format_workflow_result(return_value.as_ref()),
-                        ))
+                        );
+                        ToolResult::error(content)
                     } else {
-                        ToolResult::ok(format!(
-                            "workflow: {}\nstatus: completed\nsteps: {}\nreports: {}\nresult: {}",
+                        let content = format!(
+                            "workflow: {}\nstatus: completed\nsteps: {}\n{}result: {}",
                             input.title,
                             steps.len(),
-                            reports.len(),
+                            if report_preview.is_empty() {
+                                String::new()
+                            } else {
+                                format!("reports:\n{report_preview}\n")
+                            },
                             format_workflow_result(return_value.as_ref()),
-                        ))
+                        );
+                        ToolResult::ok(content)
                     };
                     Ok(result.with_details(json!({
                         "kind": "workflow",
@@ -92,13 +108,19 @@ impl Tool for RunWorkflowTool {
                         "id": snapshot.id.0,
                         "status": if failed { "failed" } else { "completed" },
                         "steps": steps,
-                        "reports": reports,
+                        "reports": reports_details,
                         "result": return_value,
                     })))
                 }
                 Err(err) => {
                     let steps = runner.recorder().steps();
                     let reports = runner.recorder().reports();
+                    let report_preview = format_report_preview(&reports);
+                    let reports_details: Vec<serde_json::Value> = reports
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| json!({ "index": index + 1, "value": value }))
+                        .collect();
                     let snapshot = workflow_snapshot(
                         workflow_id,
                         input.title.clone(),
@@ -109,18 +131,22 @@ impl Tool for RunWorkflowTool {
                         turn,
                         workflow: snapshot.clone(),
                     });
-                    Ok(ToolResult::error(format!(
-                        "workflow: {}\nstatus: failed\nerror: {}",
-                        input.title, err
-                    ))
-                    .with_details(json!({
+                    let content = if report_preview.is_empty() {
+                        format!("workflow: {}\nstatus: failed\nerror: {}", input.title, err)
+                    } else {
+                        format!(
+                            "workflow: {}\nstatus: failed\nerror: {}\nreports:\n{}",
+                            input.title, err, report_preview
+                        )
+                    };
+                    Ok(ToolResult::error(content).with_details(json!({
                         "kind": "workflow",
                         "title": input.title,
                         "id": snapshot.id.0,
                         "status": "failed",
                         "error": err.to_string(),
                         "steps": steps,
-                        "reports": reports,
+                        "reports": reports_details,
                     })))
                 }
             }
@@ -130,6 +156,25 @@ impl Tool for RunWorkflowTool {
 
 fn format_workflow_result(result: Option<&serde_json::Value>) -> String {
     result.map_or_else(|| "null".to_owned(), serde_json::Value::to_string)
+}
+
+fn format_report_preview(reports: &[serde_json::Value]) -> String {
+    reports
+        .iter()
+        .take(5)
+        .enumerate()
+        .map(|(index, value)| format!("report {}: {}", index + 1, compact_json(value)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn compact_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => {
+            serde_json::to_string(other).unwrap_or_else(|_| "<unserializable report>".to_owned())
+        }
+    }
 }
 
 fn workflow_snapshot(

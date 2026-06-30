@@ -35,7 +35,7 @@ impl LuaWorkflowRunner {
         self.install_recorder_neo_table(&lua)?;
         lua.load(source)
             .exec()
-            .map_err(|err| WorkflowError::Lua(err.to_string()))
+            .map_err(|err| WorkflowError::Lua(sanitize_lua_error(err)))
     }
 
     pub async fn run_script_with_context(
@@ -50,8 +50,8 @@ impl LuaWorkflowRunner {
             .load(source)
             .eval_async::<Value>()
             .await
-            .map_err(|err| WorkflowError::Lua(err.to_string()))?;
-        Ok(lua_return_to_json(&lua, value).map_err(|err| WorkflowError::Lua(err.to_string()))?)
+            .map_err(|err| WorkflowError::Lua(sanitize_lua_error(err)))?;
+        lua_return_to_json(&lua, value).map_err(|err| WorkflowError::Lua(sanitize_lua_error(err)))
     }
 
     fn install_recorder_neo_table(&self, lua: &Lua) -> Result<(), WorkflowError> {
@@ -213,11 +213,26 @@ impl LuaWorkflowRunner {
                         .and_then(|swarm| {
                             serde_json::from_value::<SwarmSnapshot>(swarm.clone()).ok()
                         });
-                    let has_failures = swarm
-                        .as_ref()
-                        .is_some_and(|snapshot| swarm_has_failures(snapshot))
-                        || result.is_error;
+                    let has_failures =
+                        swarm.as_ref().is_some_and(swarm_has_failures) || result.is_error;
                     let summary = swarm_summary(&result, swarm.as_ref(), has_failures);
+                    let items = result
+                        .details
+                        .as_ref()
+                        .and_then(|details| details.get("items"))
+                        .and_then(serde_json::Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let swarm_id = result
+                        .details
+                        .as_ref()
+                        .and_then(|details| details.get("swarm_id"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                    let status = swarm.as_ref().map_or_else(
+                        || status_from_result(&result).to_owned(),
+                        |swarm| swarm.state.as_str().to_owned(),
+                    );
                     recorder.push_step(workflow_step(
                         format!("swarm: {description}"),
                         if has_failures {
@@ -233,8 +248,13 @@ impl LuaWorkflowRunner {
                     ));
                     emit_workflow_update(&ctx, &event_context, &recorder);
                     Ok(SwarmHandle {
+                        kind: "swarm",
+                        swarm_id,
+                        status,
                         summary,
+                        items,
                         has_failures,
+                        result: result.details.clone().unwrap_or_else(|| json!({})),
                     })
                 }
             })
@@ -242,37 +262,108 @@ impl LuaWorkflowRunner {
         neo.set("swarm", swarm)
             .map_err(|e| WorkflowError::Host(e.to_string()))?;
 
+        let recorder_verify = self.recorder.clone();
+        let verify_events = event_context.clone();
         let verify_ctx = ctx.clone();
-        let recorder_vf = self.recorder.clone();
-        let verify_events = event_context;
         let verify = lua
-            .create_async_function(move |_, command: String| {
-                let ctx = verify_ctx.clone();
-                let recorder = recorder_vf.clone();
-                let event_context = verify_events.clone();
-                async move {
-                    recorder.record(format!("verify: {command}"));
-                    let result = run_tool(&ctx, "Bash", json!({ "command": command })).await?;
-                    let passed = !result.is_error;
-                    recorder.push_step(workflow_step(
-                        "verify",
-                        if passed {
-                            WorkflowState::Completed
-                        } else {
-                            WorkflowState::Failed
-                        },
-                        Some(result.content.clone()),
-                        result.details,
-                        None,
-                        None,
-                        None,
-                    ));
-                    emit_workflow_update(&ctx, &event_context, &recorder);
-                    Ok(passed)
-                }
-            })
+            .create_function(
+                move |_, (condition, message): (bool, String)| -> mlua::Result<()> {
+                    if condition {
+                        recorder_verify.push_step(workflow_step(
+                            "verify",
+                            WorkflowState::Completed,
+                            Some(message.clone()),
+                            Some(json!({ "condition": true, "message": message })),
+                            None,
+                            None,
+                            None,
+                        ));
+                        emit_workflow_update(&verify_ctx, &verify_events, &recorder_verify);
+                        Ok(())
+                    } else {
+                        recorder_verify.push_step(workflow_step(
+                            "verify",
+                            WorkflowState::Failed,
+                            Some(message.clone()),
+                            Some(json!({ "condition": false, "message": message.clone() })),
+                            None,
+                            None,
+                            None,
+                        ));
+                        emit_workflow_update(&verify_ctx, &verify_events, &recorder_verify);
+                        Err(mlua::Error::RuntimeError(message))
+                    }
+                },
+            )
             .map_err(|e| WorkflowError::Host(e.to_string()))?;
         neo.set("verify", verify)
+            .map_err(|e| WorkflowError::Host(e.to_string()))?;
+
+        let verify_command_ctx = ctx.clone();
+        let verify_command_recorder = self.recorder.clone();
+        let verify_command_events = event_context;
+        let verify_command = lua
+            .create_async_function(
+                move |_, (command, failure_message): (String, Option<String>)| {
+                    let ctx = verify_command_ctx.clone();
+                    let recorder = verify_command_recorder.clone();
+                    let event_context = verify_command_events.clone();
+                    async move {
+                        recorder.record(format!("verify_command: {command}"));
+                        let result = run_tool(&ctx, "Bash", json!({ "command": command })).await;
+                        match result {
+                            Ok(result) if !result.is_error => {
+                                recorder.push_step(workflow_step(
+                                    "verify_command",
+                                    WorkflowState::Completed,
+                                    Some(result.content.clone()),
+                                    result.details,
+                                    None,
+                                    None,
+                                    None,
+                                ));
+                                emit_workflow_update(&ctx, &event_context, &recorder);
+                                Ok(true)
+                            }
+                            Ok(result) => {
+                                let message = failure_message.unwrap_or(result.content);
+                                recorder.push_step(workflow_step(
+                                    "verify_command",
+                                    WorkflowState::Failed,
+                                    Some(message.clone()),
+                                    result.details,
+                                    None,
+                                    None,
+                                    None,
+                                ));
+                                emit_workflow_update(&ctx, &event_context, &recorder);
+                                Err(mlua::Error::RuntimeError(message))
+                            }
+                            Err(err) => {
+                                let raw = err.to_string();
+                                let message = if raw.to_ascii_lowercase().contains("permission") {
+                                    "verify_command denied by Bash permission policy".to_owned()
+                                } else {
+                                    failure_message.unwrap_or(raw)
+                                };
+                                recorder.push_step(workflow_step(
+                                    "verify_command",
+                                    WorkflowState::Failed,
+                                    Some(message.clone()),
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                ));
+                                emit_workflow_update(&ctx, &event_context, &recorder);
+                                Err(mlua::Error::RuntimeError(message))
+                            }
+                        }
+                    }
+                },
+            )
+            .map_err(|e| WorkflowError::Host(e.to_string()))?;
+        neo.set("verify_command", verify_command)
             .map_err(|e| WorkflowError::Host(e.to_string()))?;
 
         lua.globals()
@@ -290,37 +381,80 @@ pub struct WorkflowEventContext {
 }
 
 /// Handle returned by `neo.delegate()`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 struct DelegateHandle {
-    summary: String,
-    status: String,
+    kind: &'static str,
+    agent_id: Option<String>,
     name: Option<String>,
-    id: Option<String>,
+    status: String,
+    summary: String,
+    result: serde_json::Value,
+}
+
+impl DelegateHandle {
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("delegate handle serializes")
+    }
+
+    fn to_lua_table(&self, lua: &Lua) -> mlua::Result<Value> {
+        lua.to_value(&self.to_json())
+    }
 }
 
 impl mlua::UserData for DelegateHandle {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("summary", |_, this, _: ()| Ok(this.summary.clone()));
+        methods.add_method("id", |_, this, _: ()| Ok(this.agent_id.clone()));
         methods.add_method("status", |_, this, _: ()| Ok(this.status.clone()));
+        methods.add_method("summary", |_, this, _: ()| Ok(this.summary.clone()));
         methods.add_method("name", |_, this, _: ()| Ok(this.name.clone()));
-        methods.add_method("id", |_, this, _: ()| Ok(this.id.clone()));
+        methods.add_method("result", |lua, this, _: ()| lua.to_value(&this.result));
+        methods.add_method("to_table", |lua, this, _: ()| this.to_lua_table(lua));
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, _: ()| {
-            Ok(this.id.clone().unwrap_or_else(|| this.summary.clone()))
+            Ok(this
+                .agent_id
+                .clone()
+                .unwrap_or_else(|| this.summary.clone()))
         });
     }
 }
 
 /// Handle returned by `neo.swarm()`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 struct SwarmHandle {
+    kind: &'static str,
+    swarm_id: Option<String>,
+    status: String,
     summary: String,
+    items: Vec<serde_json::Value>,
     has_failures: bool,
+    result: serde_json::Value,
+}
+
+impl SwarmHandle {
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("swarm handle serializes")
+    }
+
+    fn to_lua_table(&self, lua: &Lua) -> mlua::Result<Value> {
+        lua.to_value(&self.to_json())
+    }
 }
 
 impl mlua::UserData for SwarmHandle {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("id", |_, this, _: ()| Ok(this.swarm_id.clone()));
+        methods.add_method("status", |_, this, _: ()| Ok(this.status.clone()));
         methods.add_method("summary", |_, this, _: ()| Ok(this.summary.clone()));
+        methods.add_method("items", |lua, this, _: ()| lua.to_value(&this.items));
+        methods.add_method("results", |lua, this, _: ()| lua.to_value(&this.items));
         methods.add_method("has_failures", |_, this, _: ()| Ok(this.has_failures));
+        methods.add_method("to_table", |lua, this, _: ()| this.to_lua_table(lua));
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, _: ()| {
+            Ok(this
+                .swarm_id
+                .clone()
+                .unwrap_or_else(|| this.summary.clone()))
+        });
     }
 }
 
@@ -383,10 +517,21 @@ fn lua_value_to_json(lua: &Lua, value: Value) -> mlua::Result<serde_json::Value>
 }
 
 fn lua_return_to_json(lua: &Lua, value: Value) -> mlua::Result<Option<serde_json::Value>> {
-    if matches!(value, Value::Nil) {
-        return Ok(None);
+    match value {
+        Value::Nil => Ok(None),
+        Value::UserData(userdata) => {
+            if let Ok(handle) = userdata.borrow::<DelegateHandle>() {
+                return Ok(Some(handle.to_json()));
+            }
+            if let Ok(handle) = userdata.borrow::<SwarmHandle>() {
+                return Ok(Some(handle.to_json()));
+            }
+            Err(mlua::Error::external(
+                "unsupported workflow return userdata",
+            ))
+        }
+        other => lua_value_to_json(lua, other).map(Some),
     }
-    lua_value_to_json(lua, value).map(Some)
 }
 
 fn report_summary(value: &serde_json::Value) -> String {
@@ -404,13 +549,15 @@ fn delegate_handle_from_result(
         .and_then(|agent| agent.outcome.as_ref())
         .map_or_else(|| result.content.clone(), |outcome| outcome.summary.clone());
     DelegateHandle {
-        summary,
+        kind: "delegate",
+        agent_id: agent.map(|agent| agent.id.as_str().to_owned()),
+        name: agent.map(|agent| agent.display_name.as_str().to_owned()),
         status: agent.map_or_else(
             || status_from_result(result).to_owned(),
-            |agent| agent_state_name(agent.state).to_owned(),
+            |agent| agent.state.as_str().to_owned(),
         ),
-        name: agent.map(|agent| agent.display_name.as_str().to_owned()),
-        id: agent.map(|agent| agent.id.as_str().to_owned()),
+        summary,
+        result: result.details.clone().unwrap_or_else(|| json!({})),
     }
 }
 
@@ -422,7 +569,11 @@ fn workflow_state_from_tool_and_agent(
         return WorkflowState::Failed;
     }
     match agent.map(|agent| agent.state) {
-        Some(AgentLifecycleState::Failed | AgentLifecycleState::Cancelled) => WorkflowState::Failed,
+        Some(
+            AgentLifecycleState::Failed
+            | AgentLifecycleState::Cancelled
+            | AgentLifecycleState::TimedOut,
+        ) => WorkflowState::Failed,
         Some(AgentLifecycleState::Queued | AgentLifecycleState::Running) => WorkflowState::Running,
         _ => WorkflowState::Completed,
     }
@@ -432,7 +583,9 @@ fn swarm_has_failures(swarm: &SwarmSnapshot) -> bool {
     swarm.children.iter().any(|child| {
         matches!(
             child.agent.state,
-            AgentLifecycleState::Failed | AgentLifecycleState::Cancelled
+            AgentLifecycleState::Failed
+                | AgentLifecycleState::Cancelled
+                | AgentLifecycleState::TimedOut
         ) || child
             .agent
             .outcome
@@ -443,7 +596,11 @@ fn swarm_has_failures(swarm: &SwarmSnapshot) -> bool {
 
 fn swarm_summary(result: &ToolResult, swarm: Option<&SwarmSnapshot>, has_failures: bool) -> String {
     if let Some(swarm) = swarm {
-        let status = if has_failures { "failed" } else { "completed" };
+        let status = if has_failures {
+            "failed"
+        } else {
+            swarm.state.as_str()
+        };
         return format!(
             "{}: {status} ({} items)",
             swarm.description,
@@ -461,12 +618,11 @@ fn status_from_result(result: &ToolResult) -> &'static str {
     }
 }
 
-fn agent_state_name(state: AgentLifecycleState) -> &'static str {
-    match state {
-        AgentLifecycleState::Queued => "queued",
-        AgentLifecycleState::Running => "running",
-        AgentLifecycleState::Completed => "completed",
-        AgentLifecycleState::Failed => "failed",
-        AgentLifecycleState::Cancelled => "cancelled",
-    }
+fn sanitize_lua_error(err: impl ToString) -> String {
+    let raw = err.to_string();
+    // mlua embeds the Rust source file path as the Lua chunk name
+    // (e.g. `[string "crates/neo-agent-core/src/workflow/lua.rs:36:..."]`).
+    // Replace every occurrence of the path so the actual error message survives
+    // while no internal source path leaks to the user.
+    raw.replace("crates/neo-agent-core/src/", "<workflow>")
 }
