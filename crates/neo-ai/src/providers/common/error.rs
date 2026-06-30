@@ -207,7 +207,8 @@ mod tests {
     fn sanitize_extracts_title_from_html() {
         // Body starts with "413 " not "<", so starts_with('<') would miss this.
         // contains("<title>") detects HTML anywhere in the body.
-        let html = "413 <html>\r\n<head><title>413 Request Entity Too Large</title></head>\r\n</html>\r\n";
+        let html =
+            "413 <html>\r\n<head><title>413 Request Entity Too Large</title></head>\r\n</html>\r\n";
         let result = sanitize_error_body(Some(html));
         assert_eq!(result, "413 Request Entity Too Large");
     }
@@ -240,7 +241,9 @@ mod tests {
     #[test]
     fn is_context_overflow_detects_patterns() {
         assert!(is_context_overflow("Request exceeds context_length limit"));
-        assert!(is_context_overflow("prompt is too long for maximum context"));
+        assert!(is_context_overflow(
+            "prompt is too long for maximum context"
+        ));
         assert!(!is_context_overflow("Payload Too Large"));
     }
 

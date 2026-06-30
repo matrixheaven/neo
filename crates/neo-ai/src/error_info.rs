@@ -30,7 +30,11 @@ impl NeoErrorInfo {
 #[must_use]
 pub fn error_info(code: &str) -> NeoErrorInfo {
     match code {
-        "config.invalid" => info("Configuration Error", false, Some("Check ~/.neo/config.toml")),
+        "config.invalid" => info(
+            "Configuration Error",
+            false,
+            Some("Check ~/.neo/config.toml"),
+        ),
         "provider.rate_limit" => info("Rate Limited", true, Some("Will auto-retry with backoff")),
         "provider.auth_error" => info("Authentication Failed", false, Some("Check API key")),
         "provider.context_overflow" => info("Context Overflow", false, Some("Run /compact")),
@@ -42,11 +46,7 @@ pub fn error_info(code: &str) -> NeoErrorInfo {
     }
 }
 
-const fn info(
-    title: &'static str,
-    retryable: bool,
-    action: Option<&'static str>,
-) -> NeoErrorInfo {
+const fn info(title: &'static str, retryable: bool, action: Option<&'static str>) -> NeoErrorInfo {
     NeoErrorInfo {
         title,
         retryable,

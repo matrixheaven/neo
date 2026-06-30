@@ -183,18 +183,19 @@ pub struct ProviderResolver {
 impl ProviderResolver {
     pub fn resolve(&self, model: &ModelSpec) -> Result<Arc<dyn ModelClient>, AiError> {
         let provider = self.registry.get(&model.provider.0).ok_or_else(|| {
-            AiError::Configuration { message: format!(
-                "provider {} is not registered. Define it in config.toml with [providers.{}]",
-                model.provider.0, model.provider.0
-            ) }
+            AiError::Configuration {
+                message: format!(
+                    "provider {} is not registered. Define it in config.toml with [providers.{}]",
+                    model.provider.0, model.provider.0
+                ),
+            }
         })?;
 
-        let provider_type = provider.provider_type.ok_or_else(|| {
-            AiError::Configuration { message: format!(
-                "provider {} must declare a provider type",
-                provider.id
-            ) }
-        })?;
+        let provider_type = provider
+            .provider_type
+            .ok_or_else(|| AiError::Configuration {
+                message: format!("provider {} must declare a provider type", provider.id),
+            })?;
         let effective_api = provider_type.to_api_kind();
 
         // Credential: inline api_key > env vars > ambient auth
@@ -204,18 +205,20 @@ impl ProviderResolver {
             .or_else(|| api_key_from_provider(provider, &self.env))
             .ok_or_else(|| {
                 let reason = missing_reason(provider);
-                AiError::Configuration { message: format!(
-                    "missing credentials for provider {} ({reason})",
-                    provider.id
-                ) }
+                AiError::Configuration {
+                    message: format!(
+                        "missing credentials for provider {} ({reason})",
+                        provider.id
+                    ),
+                }
             })?;
 
-        let base_url = provider.base_url.as_deref().ok_or_else(|| {
-            AiError::Configuration { message: format!(
-                "provider {} does not define a base URL",
-                provider.id
-            ) }
-        })?;
+        let base_url = provider
+            .base_url
+            .as_deref()
+            .ok_or_else(|| AiError::Configuration {
+                message: format!("provider {} does not define a base URL", provider.id),
+            })?;
 
         match effective_api {
             ApiKind::OpenAiResponses => Ok(Arc::new(OpenAiResponsesClient::new(base_url, api_key))),
@@ -228,10 +231,12 @@ impl ProviderResolver {
             ApiKind::GoogleGenerativeAi => {
                 Ok(Arc::new(GoogleGenerativeAiClient::new(base_url, api_key)))
             }
-            ApiKind::Local => Err(AiError::Configuration { message: format!(
-                "provider {} model API {:?} is not supported by production resolver",
-                provider.id, model.api
-            ) }),
+            ApiKind::Local => Err(AiError::Configuration {
+                message: format!(
+                    "provider {} model API {:?} is not supported by production resolver",
+                    provider.id, model.api
+                ),
+            }),
         }
     }
 }

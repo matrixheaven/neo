@@ -208,7 +208,10 @@ fn provider_resolver_rejects_model_api_mismatches() {
     )) else {
         panic!("untyped provider must be rejected");
     };
-    assert!(matches!(missing_type, AiError::Configuration { message: _ }));
+    assert!(matches!(
+        missing_type,
+        AiError::Configuration { message: _ }
+    ));
     assert!(
         missing_type
             .to_string()

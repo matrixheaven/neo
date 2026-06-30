@@ -31,7 +31,8 @@ impl GoogleGenerativeAiClient {
     }
 
     async fn open_response(&self, request: ChatRequest) -> Result<reqwest::Response, AiError> {
-        super::common::http::open_response(&request, |req| Box::pin(self.open_response_once(req))).await
+        super::common::http::open_response(&request, |req| Box::pin(self.open_response_once(req)))
+            .await
     }
 
     async fn open_response_once(
@@ -199,20 +200,22 @@ fn content_body(
             tool_call_id,
             content,
             is_error,
-        } => Some(reject_images(content, "Google Generative AI", "tool result").map(|()| {
-            json!({
-                "role": "function",
-                "parts": [{
-                    "functionResponse": {
-                        "name": tool_call_id,
-                        "response": {
-                            "result": content_text(content),
-                            "is_error": is_error,
+        } => Some(
+            reject_images(content, "Google Generative AI", "tool result").map(|()| {
+                json!({
+                    "role": "function",
+                    "parts": [{
+                        "functionResponse": {
+                            "name": tool_call_id,
+                            "response": {
+                                "result": content_text(content),
+                                "is_error": is_error,
+                            },
                         },
-                    },
-                }],
-            })
-        })),
+                    }],
+                })
+            }),
+        ),
     }
 }
 
@@ -303,7 +306,6 @@ fn tool_body(tool: &ToolSpec) -> Value {
     })
 }
 
-
 fn stream_response(
     response: reqwest::Response,
 ) -> futures::stream::BoxStream<'static, Result<AiStreamEvent, AiError>> {
@@ -315,7 +317,9 @@ fn stream_response(
             future::ready(Some(match chunk {
                 StreamChunk::Data(Ok(bytes)) => state.push_chunk(&bytes),
                 StreamChunk::Data(Err(err)) => {
-                    vec![Err(AiError::Stream { message: format!("transport error: {err}") })]
+                    vec![Err(AiError::Stream {
+                        message: format!("transport error: {err}"),
+                    })]
                 }
                 StreamChunk::End => state.finish(),
             }))
@@ -370,8 +374,9 @@ impl IncrementalSse {
         payload: &str,
         out: &mut Vec<Result<AiStreamEvent, AiError>>,
     ) -> Result<(), AiError> {
-        let value = serde_json::from_str::<Value>(payload)
-            .map_err(|err| AiError::Stream { message: format!("invalid SSE JSON: {err}") })?;
+        let value = serde_json::from_str::<Value>(payload).map_err(|err| AiError::Stream {
+            message: format!("invalid SSE JSON: {err}"),
+        })?;
         self.parser.ingest(&value)?;
         out.extend(self.parser.drain_events().into_iter().map(Ok));
         Ok(())
@@ -386,7 +391,6 @@ impl IncrementalSse {
         self.parser.finish_events().into_iter().map(Ok).collect()
     }
 }
-
 
 struct ParseState {
     events: Vec<AiStreamEvent>,
@@ -529,8 +533,9 @@ impl ParseState {
             .get("args")
             .cloned()
             .unwrap_or_else(|| json!({}));
-        let fragment = serde_json::to_string(&args)
-            .map_err(|err| AiError::Stream { message: format!("invalid tool arguments: {err}") })?;
+        let fragment = serde_json::to_string(&args).map_err(|err| AiError::Stream {
+            message: format!("invalid tool arguments: {err}"),
+        })?;
 
         self.ensure_started();
         if self.open_tool_ids.insert(name.clone()) {

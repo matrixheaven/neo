@@ -13,7 +13,11 @@ pub(crate) fn rounded_f64(value: f64) -> f64 {
 /// Extract [`TokenUsage`] from a JSON object using provider-specific keys.
 ///
 /// `value` should already point at the inner usage object (e.g. `value.get("usage")`).
-pub(crate) fn token_usage_from(value: &Value, input_key: &str, output_key: &str) -> Option<TokenUsage> {
+pub(crate) fn token_usage_from(
+    value: &Value,
+    input_key: &str,
+    output_key: &str,
+) -> Option<TokenUsage> {
     Some(TokenUsage {
         input_tokens: u32::try_from(value.get(input_key)?.as_u64()?).ok()?,
         output_tokens: u32::try_from(value.get(output_key)?.as_u64()?).ok()?,

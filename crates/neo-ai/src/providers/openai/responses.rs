@@ -8,8 +8,8 @@ use crate::providers::common::helpers::{reject_images, rounded_f64, token_usage_
 use crate::providers::common::sse::{StreamChunk, find_frame_end, parse_sse_frame};
 
 use crate::{
-    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart,
-    ModelClient, StopReason, TokenUsage, ToolSpec,
+    AiError, AiStreamEvent, CacheRetention, ChatMessage, ChatRequest, ContentPart, ModelClient,
+    StopReason, TokenUsage, ToolSpec,
 };
 
 #[derive(Clone)]
@@ -30,7 +30,10 @@ impl OpenAiResponsesClient {
     }
 
     async fn open_response(&self, request: ChatRequest) -> Result<reqwest::Response, AiError> {
-        crate::providers::common::http::open_response(&request, |req| Box::pin(self.open_response_once(req))).await
+        crate::providers::common::http::open_response(&request, |req| {
+            Box::pin(self.open_response_once(req))
+        })
+        .await
     }
 
     async fn open_response_once(
@@ -301,7 +304,6 @@ fn tool_body(tool: &ToolSpec) -> Value {
     })
 }
 
-
 fn stream_response(
     response: reqwest::Response,
 ) -> futures::stream::BoxStream<'static, Result<AiStreamEvent, AiError>> {
@@ -313,7 +315,9 @@ fn stream_response(
             future::ready(Some(match chunk {
                 StreamChunk::Data(Ok(bytes)) => state.push_chunk(&bytes),
                 StreamChunk::Data(Err(err)) => {
-                    vec![Err(AiError::Stream { message: format!("transport error: {err}") })]
+                    vec![Err(AiError::Stream {
+                        message: format!("transport error: {err}"),
+                    })]
                 }
                 StreamChunk::End => state.finish(),
             }))
@@ -375,8 +379,9 @@ impl IncrementalSse {
         payload: &str,
         out: &mut Vec<Result<AiStreamEvent, AiError>>,
     ) -> Result<(), AiError> {
-        let value = serde_json::from_str::<Value>(payload)
-            .map_err(|err| AiError::Stream { message: format!("invalid SSE JSON: {err}") })?;
+        let value = serde_json::from_str::<Value>(payload).map_err(|err| AiError::Stream {
+            message: format!("invalid SSE JSON: {err}"),
+        })?;
         self.parser.ingest(&value);
         out.extend(self.parser.drain_events().into_iter().map(Ok));
         Ok(())
@@ -389,7 +394,9 @@ impl IncrementalSse {
 
         self.stopped = true;
         if !self.saw_done && !self.parser.saw_terminal() {
-            return vec![Err(AiError::Stream { message: "missing SSE done marker".to_owned() })];
+            return vec![Err(AiError::Stream {
+                message: "missing SSE done marker".to_owned(),
+            })];
         }
 
         self.parser.finish_events().map_or_else(
@@ -398,7 +405,6 @@ impl IncrementalSse {
         )
     }
 }
-
 
 struct ParseState {
     events: Vec<AiStreamEvent>,

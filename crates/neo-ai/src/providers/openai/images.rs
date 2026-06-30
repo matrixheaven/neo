@@ -46,15 +46,21 @@ impl ImageGenerationClient for OpenAiImagesClient {
             .json(&body)
             .send()
             .await
-            .map_err(|err| AiError::Stream { message: format!("transport error: {err}") })?;
+            .map_err(|err| AiError::Stream {
+                message: format!("transport error: {err}"),
+            })?;
         let status = response.status();
         if !status.is_success() {
-            return Err(AiError::Stream { message: format!("http status {}", status.as_u16()) });
+            return Err(AiError::Stream {
+                message: format!("http status {}", status.as_u16()),
+            });
         }
         let response = response
             .json::<OpenAiImagesResponse>()
             .await
-            .map_err(|err| AiError::Stream { message: format!("invalid image response: {err}") })?;
+            .map_err(|err| AiError::Stream {
+                message: format!("invalid image response: {err}"),
+            })?;
         let images = response
             .data
             .into_iter()
@@ -63,7 +69,9 @@ impl ImageGenerationClient for OpenAiImagesClient {
                     (Some(value), _) if !value.is_empty() => ImageData::Base64(value),
                     (_, Some(value)) if !value.is_empty() => ImageData::Url(value),
                     _ => {
-                        return Err(AiError::Stream { message: "image response did not include b64_json or url".to_owned(), });
+                        return Err(AiError::Stream {
+                            message: "image response did not include b64_json or url".to_owned(),
+                        });
                     }
                 };
                 Ok(ImageGenerationResponseImage {
@@ -94,8 +102,10 @@ struct OpenAiImage {
 
 fn headers(api_key: &str) -> Result<HeaderMap, AiError> {
     let mut headers = HeaderMap::new();
-    let authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
-        .map_err(|err| AiError::Stream { message: format!("invalid authorization header: {err}") })?;
+    let authorization =
+        HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|err| AiError::Stream {
+            message: format!("invalid authorization header: {err}"),
+        })?;
     headers.insert(AUTHORIZATION, authorization);
     Ok(headers)
 }

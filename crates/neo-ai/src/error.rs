@@ -69,21 +69,77 @@ mod tests {
 
     #[test]
     fn code_returns_domain_dot_reason() {
-        assert_eq!(AiError::Configuration { message: "x".into() }.code(), "config.invalid");
-        assert_eq!(AiError::RateLimit { message: "x".into(), retry_after: None }.code(), "provider.rate_limit");
-        assert_eq!(AiError::Auth { message: "x".into() }.code(), "provider.auth_error");
-        assert_eq!(AiError::ContextOverflow { message: "x".into() }.code(), "provider.context_overflow");
-        assert_eq!(AiError::Server { status: 500, message: "x".into() }.code(), "provider.server_error");
-        assert_eq!(AiError::Stream { message: "x".into() }.code(), "provider.stream_error");
-        assert_eq!(AiError::Network { message: "x".into() }.code(), "provider.network_error");
+        assert_eq!(
+            AiError::Configuration {
+                message: "x".into()
+            }
+            .code(),
+            "config.invalid"
+        );
+        assert_eq!(
+            AiError::RateLimit {
+                message: "x".into(),
+                retry_after: None
+            }
+            .code(),
+            "provider.rate_limit"
+        );
+        assert_eq!(
+            AiError::Auth {
+                message: "x".into()
+            }
+            .code(),
+            "provider.auth_error"
+        );
+        assert_eq!(
+            AiError::ContextOverflow {
+                message: "x".into()
+            }
+            .code(),
+            "provider.context_overflow"
+        );
+        assert_eq!(
+            AiError::Server {
+                status: 500,
+                message: "x".into()
+            }
+            .code(),
+            "provider.server_error"
+        );
+        assert_eq!(
+            AiError::Stream {
+                message: "x".into()
+            }
+            .code(),
+            "provider.stream_error"
+        );
+        assert_eq!(
+            AiError::Network {
+                message: "x".into()
+            }
+            .code(),
+            "provider.network_error"
+        );
         assert_eq!(AiError::Cancelled.code(), "request.cancelled");
     }
 
     #[test]
     fn is_retryable_for_each_variant() {
-        assert!(AiError::RateLimit { message: "".into(), retry_after: Some(Duration::from_secs(5)) }.is_retryable());
+        assert!(
+            AiError::RateLimit {
+                message: "".into(),
+                retry_after: Some(Duration::from_secs(5))
+            }
+            .is_retryable()
+        );
         assert!(AiError::Network { message: "".into() }.is_retryable());
-        assert!(AiError::Server { status: 503, message: "".into() }.is_retryable());
+        assert!(
+            AiError::Server {
+                status: 503,
+                message: "".into()
+            }
+            .is_retryable()
+        );
         assert!(!AiError::Configuration { message: "".into() }.is_retryable());
         assert!(!AiError::Auth { message: "".into() }.is_retryable());
         assert!(!AiError::ContextOverflow { message: "".into() }.is_retryable());

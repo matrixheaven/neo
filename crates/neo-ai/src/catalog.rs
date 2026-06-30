@@ -115,18 +115,21 @@ pub async fn fetch_catalog_from(
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| crate::error::AiError::Network { message: e.to_string() })?;
+        .map_err(|e| crate::error::AiError::Network {
+            message: e.to_string(),
+        })?;
 
     if !resp.status().is_success() {
-        return Err(crate::error::AiError::Network { message: format!(
-            "catalog fetch returned {}",
-            resp.status()
-        ) });
+        return Err(crate::error::AiError::Network {
+            message: format!("catalog fetch returned {}", resp.status()),
+        });
     }
 
     resp.json::<BTreeMap<String, CatalogEntry>>()
         .await
-        .map_err(|e| crate::error::AiError::Network { message: e.to_string() })
+        .map_err(|e| crate::error::AiError::Network {
+            message: e.to_string(),
+        })
 }
 
 /// Infer the provider wire type from catalog entry metadata.
