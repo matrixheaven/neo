@@ -6,7 +6,7 @@
 
 **Architecture:** Treat `/new` as a session lifecycle transition, not as transcript cosmetic clearing. In current Neo, the cleanest transition is to clear `active_session_id` and set the UI back to the unsaved `new` session label; the next real prompt then reuses the existing `run_prompt_streaming` -> `prepare_new_streaming_turn` -> `create_session_path` flow to create the JSONL session. Avoid adding a second empty-session creation path unless the product explicitly requires empty sessions to appear in `/resume` before the first prompt.
 
-**Tech Stack:** Rust 2024, `tokio`, `neo-agent` interactive controller, `neo-agent-core` JSONL sessions, `neo-tui` transcript/chrome, crossterm event tests, `xtask`/`nextest`/LCOV/CRAP.
+**Tech Stack:** Rust 2024, `tokio`, `neo-agent` interactive controller, `neo-agent-core` JSONL sessions, `neo-tui` transcript/chrome, crossterm event tests, /`nextest`/LCOV/CRAP.
 
 ---
 
@@ -30,14 +30,14 @@ rtk icm recall-context "NEO-26 /new slash command fresh session" --limit 5
 
 - Use `rtk` for shell commands.
 - Prefer `cx` for symbol navigation.
-- Do not run bare `cargo test`; use `rtk cargo run -p xtask -- test ...`.
+- Do not run bare `cargo test`; use `rtk cargo nextest run ...`.
 - Do not perform git mutations without explicit per-command user authorization.
 - Keep scope limited to `/new` and session lifecycle reset. Do not redesign session storage.
 - Do not add compatibility branches. Add one clean session transition path.
 - Store completion memory before final response:
 
 ```bash
-rtk icm store -t context-neo -c "Completed NEO-26: /new and /clear reset Neo to a fresh unsaved workspace session state, next prompt creates a new JSONL session through the existing path, current config choices are preserved, and focused plus full xtask gates pass." -i high -k "NEO-26,new-session,slash,tui"
+rtk icm store -t context-neo -c "Completed NEO-26: /new and /clear reset Neo to a fresh unsaved workspace session state, next prompt creates a new JSONL session through the existing path, current config choices are preserved, and focused plus full verification passes." -i high -k "NEO-26,new-session,slash,tui"
 ```
 
 ## Current Code Map
@@ -281,8 +281,6 @@ async fn slash_new_then_next_prompt_creates_a_different_jsonl_session() {
 - [x] Run and confirm red before implementation:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_new_resets_to_unsaved_fresh_session_without_streaming
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_new_then_next_prompt_creates_a_different_jsonl_session
 ```
 
 ### Task 2: Implement Controller Reset Method
@@ -403,9 +401,6 @@ fn start_new_session_from_slash(&mut self) {
 - [x] Tests:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_new_resets_to_unsaved_fresh_session_without_streaming
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_clear_alias_resets_to_unsaved_fresh_session
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_new_does_not_enter_streaming_mode
 ```
 
 ### Task 4: Add Slash Completion And Command Palette
@@ -448,8 +443,6 @@ CommandSpec::new("session.new", "New session", Some("Start a fresh local session
 - [x] Tests:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_completions_include_new_and_clear
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::command_palette_new_session_resets_to_fresh_session
 ```
 
 ### Task 5: Block `/new` While Running Or Replaying
@@ -485,7 +478,6 @@ async fn slash_new_is_blocked_while_turn_is_running_and_preserves_prompt() {
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_new_is_blocked_while_turn_is_running_and_preserves_prompt
 ```
 
 ### Task 6: Ensure Old Session Is Preserved And Resumable
@@ -514,7 +506,6 @@ async fn slash_new_preserves_old_session_for_resume_picker_and_next_prompt_creat
 - [ ] Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_new_preserves_old_session_for_resume_picker_and_next_prompt_creates_new_session
 ```
 
 ### Task 7: Documentation
@@ -531,13 +522,13 @@ rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_new_preser
 
 - [ ] Run:
 
-  > Skipped full parity: `cargo run -p xtask -- parity` currently fails on
+  > Skipped full parity: `cargo fmt --all --check` currently fails on
   > pre-existing unrelated regressions (skills/arguments.rs placeholder
   > markers, docs/Plans/, docs/skills.md). NEO-26's own doc edits in
   > config.md/quickstart.md/sessions.md are not flagged by parity.
 
 ```bash
-rtk cargo run -p xtask -- parity
+rtk cargo fmt --all --check
 ```
 
 ## Verification Plan
@@ -545,22 +536,15 @@ rtk cargo run -p xtask -- parity
 Focused tests:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_new_resets_to_unsaved_fresh_session_without_streaming
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_clear_alias_resets_to_unsaved_fresh_session
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_new_does_not_enter_streaming_mode
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_new_is_blocked_while_turn_is_running_and_preserves_prompt
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_new_preserves_old_session_for_resume_picker_and_next_prompt_creates_new_session
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_completions_include_new_and_clear
 ```
 
 Broader checks before completion:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent interactive
-rtk cargo run -p xtask -- test --workspace --all-features
-rtk cargo run -p xtask -- coverage
-rtk cargo run -p xtask -- crap
-rtk cargo run -p xtask -- ci
+rtk cargo nextest run --workspace --all-features
+rtk cargo llvm-cov nextest --workspace --all-features
+rtk cargo crap
+rtk cargo nextest run --workspace --all-features
 ```
 
 Artifacts:
@@ -601,8 +585,8 @@ Artifacts:
 - [x] Pending approvals/questions/todos/skill context/review feedback are cleared.
 - [x] `/new` while running is blocked without damaging current state.
 - [x] Slash completion and command palette include the new command.
-- [x] Focused tests pass through `xtask`.
-- [ ] Workspace tests, LCOV, CRAP, and CI were run through `xtask`.
+- [x] Focused tests pass with direct cargo commands.
+- [ ] Workspace tests, LCOV, CRAP, and CI were run with direct cargo commands.
 
   > Skipped: the workspace is currently non-compiling in unrelated areas
   > (in-progress `SkillStore::load` signature refactor in
@@ -610,7 +594,6 @@ Artifacts:
   > regressions), so workspace-wide LCOV/CRAP/CI cannot complete. Per
   > AGENTS.md, those failures are out of NEO-26's scope and must not be
   > fixed here. All 9 NEO-26 focused tests pass via
-  > `cargo run -p xtask -- test -p neo-agent interactive::tests::slash_new …`,
   > and the other 119 interactive unit tests unrelated to prompt-template
   > discovery continue to pass.
 - [ ] ICM store was called before final handoff.

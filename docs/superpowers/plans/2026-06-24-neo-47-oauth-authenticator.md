@@ -144,9 +144,7 @@ pub struct OAuthProvider {
 
 ## Testing
 
-- `cargo run -p xtask -- test -p neo-agent-core oauth`
-- `cargo run -p xtask -- test -p neo-agent mcp_auth`
-- `cargo run -p xtask -- test -p neo-tui --lib`
+- `cargo nextest run -p neo-tui --lib`
 
 ## Notes / Constraints
 

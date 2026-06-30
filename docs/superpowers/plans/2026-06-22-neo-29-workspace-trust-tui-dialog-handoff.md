@@ -6,7 +6,7 @@
 
 **Architecture:** Treat trust as a startup security gate, not a normal preferences dialog. Resolve project trust as a three-state decision (`trusted`, `untrusted`, `unknown`), show the TUI dialog only for `unknown`, persist both trust and untrusted decisions, and keep project context disabled in restricted mode. Borrow Codex's trust model for unknown/untrusted project handling and VS Code's workspace-trust UX; Kimi Code is a negative reference because it loads project instructions unconditionally.
 
-**Tech Stack:** Rust 2024, `clap`, `crossterm`, `neo-agent` config/trust startup flow, `neo-tui` blocking overlays, JSON trust store at `~/.neo/trust.json`, Codex workspace trust references, `xtask`/`nextest`/`llvm-cov`/CRAP gates.
+**Tech Stack:** Rust 2024, `clap`, `crossterm`, `neo-agent` config/trust startup flow, `neo-tui` blocking overlays, JSON trust store at `~/.neo/trust.json`, Codex workspace trust references, /`nextest`/`llvm-cov`/CRAP gates.
 
 ---
 
@@ -303,7 +303,6 @@ fn trust_parent_candidates_include_ancestors_with_inputs() {}
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent trust
 ```
 
 Expected before implementation: tests fail because the trust API collapses unknown to false and does not expose parent candidates.
@@ -508,10 +507,6 @@ Document:
 Focused tests:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent trust
-rtk cargo run -p xtask -- test -p neo-tui trust
-rtk cargo run -p xtask -- test -p neo-agent interactive_trust
-rtk cargo run -p xtask -- test -p neo-agent cli_commands::trust
 ```
 
 Adjust filters to real test names.
@@ -519,9 +514,9 @@ Adjust filters to real test names.
 Required repository gates before completion:
 
 ```bash
-rtk cargo run -p xtask -- coverage
-rtk cargo run -p xtask -- crap
-rtk cargo run -p xtask -- ci
+rtk cargo llvm-cov nextest --workspace --all-features
+rtk cargo crap
+rtk cargo nextest run --workspace --all-features
 ```
 
 Artifacts to inspect:
@@ -557,7 +552,7 @@ Artifacts to inspect:
 - [ ] CLI trust status/approve/deny/clear work.
 - [ ] Project resource loading is gated by trust.
 - [ ] Tests cover trust store, config, TUI render/input, interactive startup, and CLI.
-- [ ] Verification commands ran through `xtask`.
+- [ ] Verification commands ran with direct cargo commands.
 
 ## Suggested ICM Store On Completion
 

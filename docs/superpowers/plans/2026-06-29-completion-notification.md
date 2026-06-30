@@ -172,7 +172,6 @@ pub mod notify;
 
 - [ ] **Step 3: Run tests to verify they pass**
 
-Run: `cargo run -p xtask -- test -p neo-tui notification_mode`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -221,7 +220,6 @@ Add to `crates/neo-agent/src/config/mod.rs` test module. This test deserializes 
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo run -p xtask -- test -p neo-agent tui_config_parses_notification_fields`
 Expected: FAIL — `TuiConfig` does not yet have `completion_notification` / `question_notification` fields.
 
 - [ ] **Step 3: Add fields to `TuiConfig`**
@@ -311,7 +309,6 @@ fn tui_from_file(tui: Option<FileTuiConfig>) -> TuiConfig {
 - [ ] **Step 6: Run build and focused tests**
 
 Run: `cargo build -p neo-agent`
-Run: `cargo run -p xtask -- test -p neo-agent tui_config`
 Expected: PASS
 
 - [ ] **Step 7: Commit**
@@ -477,7 +474,6 @@ Expected: PASS
 
 - [ ] **Step 7: Run focused tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent`
 Expected: PASS — existing interactive-mode tests must still pass; test constructors initialize notification modes to `None` so they won't fire.
 
 - [ ] **Step 8: Commit**

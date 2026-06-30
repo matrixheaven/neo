@@ -79,7 +79,6 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo run -p xtask -- test -p neo-ai error`
 Expected: FAIL — `AiError` variants don't have named fields, `code()` method doesn't exist.
 
 - [ ] **Step 3: Replace `AiError` enum and add methods**
@@ -203,7 +202,6 @@ Fix every match arm and construction site to use named fields.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cargo run -p xtask -- test -p neo-ai`
 Expected: PASS
 
 - [ ] **Step 6: Commit**
@@ -327,7 +325,6 @@ pub use error_info::{NeoErrorInfo, error_info};
 
 - [ ] **Step 3: Run tests to verify they pass**
 
-Run: `cargo run -p xtask -- test -p neo-ai error_info`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -469,7 +466,6 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo run -p xtask -- test -p neo-ai tests`
 Expected: FAIL — `ProviderError::HttpStatus` doesn't have `retry_after` field; `sanitize_error_body`, `is_context_overflow`, and `parse_retry_after` don't exist.
 
 - [ ] **Step 3: Add `httpdate` dependency**
@@ -819,7 +815,6 @@ Apply the same change to **`crates/neo-ai/src/providers/openai/responses.rs`**, 
 
 - [ ] **Step 6: Run tests and fix compilation**
 
-Run: `cargo run -p xtask -- test -p neo-ai`
 Expected: PASS — all provider compilation fixed and tests green.
 
 - [ ] **Step 7: Commit**
@@ -992,7 +987,6 @@ mod tests {
 
 - [ ] **Step 4: Run tests to verify they fail**
 
-Run: `cargo run -p xtask -- test -p neo-ai backoff`
 Expected: FAIL — `compute_backoff_delay` doesn't exist.
 
 - [ ] **Step 5: Implement the upgraded `open_response`**
@@ -1175,7 +1169,6 @@ mod tests {
 
 - [ ] **Step 6: Run tests and fix compilation**
 
-Run: `cargo run -p xtask -- test -p neo-ai`
 Expected: PASS
 
 - [ ] **Step 7: Commit**
@@ -1235,7 +1228,6 @@ Add to the existing test module in `crates/neo-agent-core/src/events.rs`:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core error_with_code`
 Expected: FAIL — `AgentEvent::Error` doesn't have `code` or `retry_after` fields.
 
 - [ ] **Step 3: Add fields to `AgentEvent::Error`**
@@ -1344,7 +1336,6 @@ grep -rn 'AgentEvent::Error' crates/neo-agent/src/ --include='*.rs'
 
 - [ ] **Step 9: Run tests to verify they pass**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core error`
 Expected: PASS
 
 Run: `cargo build -p neo-agent -p neo-tui`
@@ -1401,7 +1392,6 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core model_error_code`
 Expected: FAIL — `code()` method doesn't exist on `AgentRuntimeError`.
 
 - [ ] **Step 3: Implement `code()` on `AgentRuntimeError`**
@@ -1475,7 +1465,6 @@ mod tests {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core model_error_code`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -1613,7 +1602,6 @@ Expected: PASS
 
 - [ ] **Step 5: Run focused tests**
 
-Run: `cargo run -p xtask -- test -p neo-tui`
 Expected: PASS
 
 - [ ] **Step 6: Commit**
@@ -1650,7 +1638,6 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo run -p xtask -- test -p neo-ai default_retries`
 Expected: FAIL — current default is `Some(0)`, test expects `Some(2)`.
 
 - [ ] **Step 3: Change default from `Some(0)` to `Some(2)`**
@@ -1669,14 +1656,12 @@ to:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo run -p xtask -- test -p neo-ai`
 Expected: PASS
 
 - [ ] **Step 5: Run workspace tests to check for regressions**
 
 Some tests may assert specific retry counts or rely on the old default. Run a broader check:
 
-Run: `cargo run -p xtask -- test -p neo-ai -p neo-agent-core`
 Expected: PASS
 
 If any test fails because it assumed `retries == Some(0)`, update the test to explicitly set `retries: Some(0)` in its `RequestOptions` construction rather than relying on the default.
@@ -1695,8 +1680,7 @@ git commit -m "feat(neo-ai): default retries from 0 to 2 (3 total attempts)"
 After all 8 tasks are complete, run the full verification gate:
 
 ```bash
-cargo run -p xtask -- check --workspace
-cargo run -p xtask -- test -p neo-ai -p neo-agent-core -p neo-tui -p neo-agent
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 Expected: All checks and tests pass.

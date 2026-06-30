@@ -6,7 +6,7 @@
 
 **Architecture:** Add a pure `neo-tui` task-browser module for state, view models, input handling, and rendering. Integrate it as a blocking rich overlay in `NeoChromeState`, while `neo-agent` owns async refresh and stop actions through the shared `BackgroundTaskManager`. Keep `TaskList`, `TaskOutput`, and `TaskStop` tool behavior as model APIs; do not build compatibility branches around the old `/tasks` transcript output.
 
-**Tech Stack:** Rust, tokio, `neo-agent-core` background task manager, `neo-agent` interactive controller, `neo-tui` overlay/rendering tests, `cargo nextest` via `cargo run -p xtask -- test`.
+**Tech Stack:** Rust, tokio, `neo-agent-core` background task manager, `neo-agent` interactive controller, `neo-tui` overlay/rendering tests, `cargo nextest` via `cargo nextest run`.
 
 **Spec:** `docs/superpowers/specs/2026-06-28-task-browser-design.md`
 
@@ -153,7 +153,6 @@ fn stop_confirmation_requires_confirm_or_cancel() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui task_browser
 ```
 
 Expected: compile failure because `neo_tui::tasks_browser` does not exist.
@@ -557,7 +556,6 @@ impl<'a> TaskBrowserRenderer<'a> {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui task_browser
 ```
 
 Expected: PASS for the state tests. Renderer assertions will be added in Task 2.
@@ -691,7 +689,6 @@ fn populated_renderer_shows_counts_detail_preview_and_footer() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui task_browser
 ```
 
 Expected: FAIL because the stub renderer only emits `TASK BROWSER`.
@@ -988,7 +985,6 @@ If the renderer cannot access `selected_task_id`, `footer_message`, `stop_confir
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui task_browser
 ```
 
 Expected: PASS. The `left_tasks_pane_consumes_full_content_height` test must pass by rendering the left pane down to the Task Browser shortcut footer, not by weakening the assertion.
@@ -1065,7 +1061,6 @@ fn task_browser_overlay_blocks_prompt_and_renders_footer() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui task_browser_overlay_blocks_prompt_and_renders_footer
 ```
 
 Expected: compile failure because `push_task_browser_overlay` and `OverlayKind::TaskBrowser` do not exist.
@@ -1250,7 +1245,6 @@ This handles pure state input; Task 5 will add controller-side stop/refresh effe
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui task_browser task_browser_overlay_blocks_prompt_and_renders_footer
 ```
 
 Expected: PASS.
@@ -1289,7 +1283,7 @@ mod tests {
             task_id: "bash-abc".to_owned(),
             kind: BackgroundTaskKind::Bash,
             status,
-            description: "cargo run -p xtask -- check".to_owned(),
+            description: "cargo fmt --all --check".to_owned(),
             elapsed: Duration::from_secs(125),
             output: Some(CommandOutput {
                 exit_code: Some(0),
@@ -1362,7 +1356,6 @@ mod tests {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent task_browser
 ```
 
 Expected: compile failure because `snapshot_to_item` is not defined or module is not wired.
@@ -1486,7 +1479,6 @@ or, if `crates/neo-agent/src/modes/mod.rs` owns module exports, add it there.
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent task_browser
 ```
 
 Expected: PASS.
@@ -1548,7 +1540,6 @@ assert!(
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent slash_tasks shell_mode_slash_tasks
 ```
 
 Expected: FAIL because `/tasks` still appends transcript status.
@@ -1605,7 +1596,6 @@ Important: use `list(false, 100)` so default `ALL` includes terminal tasks.
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent slash_tasks shell_mode_slash_tasks
 ```
 
 Expected: PASS.
@@ -1615,7 +1605,6 @@ Expected: PASS.
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core tool_bash task_list_result
 ```
 
 Expected: PASS. `TaskList` must still return `active_background_tasks: 0` and `No background tasks found.` for model/tool use.
@@ -1726,7 +1715,6 @@ use neo_tui::input::KeybindingAction;
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent task_browser_
 ```
 
 Expected: FAIL because rich-dialog input handling currently consumes task browser events without async controller effects or close behavior.
@@ -1882,7 +1870,6 @@ Because `InteractiveController` now handles task browser events first, remove `O
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent task_browser_ slash_tasks shell_mode_slash_tasks
 ```
 
 Expected: PASS.
@@ -1952,7 +1939,6 @@ async fn task_browser_manual_refresh_keeps_completed_tasks_visible_under_all() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent task_browser_manual_refresh
 ```
 
 Expected: PASS after Task 6. This guards the default `ALL` behavior.
@@ -2000,7 +1986,6 @@ If there is no clean periodic tick location, do not create a new background task
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent task_browser_ slash_tasks
 ```
 
 Expected: PASS.
@@ -2063,7 +2048,6 @@ If `unicode_width` is not already available to the test crate, replace that asse
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui narrow_renderer low_height_renderer
 ```
 
 Expected: PASS if Task 2 already handled this; otherwise FAIL with overflow or missing footer.
@@ -2084,7 +2068,6 @@ Use existing `truncate_width` and `visible_width`; do not introduce a second wid
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui task_browser
 ```
 
 Expected: PASS.
@@ -2120,7 +2103,6 @@ Expected:
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui task_browser app_shell
 ```
 
 Expected: PASS.
@@ -2130,7 +2112,6 @@ Expected: PASS.
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent task_browser_ slash_tasks shell_mode_slash_tasks
 ```
 
 Expected: PASS.
@@ -2140,7 +2121,6 @@ Expected: PASS.
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core tool_bash task_list_result
 ```
 
 Expected: PASS.
@@ -2160,7 +2140,7 @@ Expected: PASS.
 Run:
 
 ```bash
-cargo run -p xtask -- check
+cargo fmt --all --check
 ```
 
 Expected: PASS.
@@ -2191,7 +2171,7 @@ If a background task is available:
 
 - [ ] **Checkpoint**
 
-Before reporting completion, include exact verification commands and results. If `cargo run -p xtask -- check --workspace` is attempted and fails on unrelated existing warnings, report that separately; do not widen this task to fix unrelated workspace issues.
+Before reporting completion, include exact verification commands and results. If `cargo clippy --workspace --all-targets --all-features -- -D warnings` is attempted and fails on unrelated existing warnings, report that separately; do not widen this task to fix unrelated workspace issues.
 
 ---
 

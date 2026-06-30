@@ -108,12 +108,10 @@ With tasks:
 │   ✓ bash-a83f  done      rg ...   │ │ kind:        bash                                       │
 │   ✕ bash-ef20  failed    npm ...  │ │ status:      running                                    │
 │   ◼ ask-918a   waiting   Pick...  │ │ elapsed:     02:14                                      │
-│                                   │ │ command:     cargo run -p xtask -- test -p neo-tui ...  │
 │                                   │ │ detached:    yes                                        │
 │                                   │ └──────────────────────────────────────────────────────────┘
 │                                   │ ┌─ Preview Output ─────────────────────────────────────────┐
 │                                   │ │ Compiling neo-tui v0.1.0                                 │
-│                                   │ │ running: cargo nextest run -p neo-tui shell_mode ...      │
 │                                   │ │ ...                                                      │
 │                                   │ │                                                          │
 └───────────────────────────────────┘ └──────────────────────────────────────────────────────────┘
@@ -235,7 +233,6 @@ id:          bash-72d1
 kind:        bash
 status:      running
 elapsed:     02:14
-command:     cargo run -p xtask -- test -p neo-tui ...
 detached:    yes
 timeout:     10:00
 ```

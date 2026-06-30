@@ -6,7 +6,7 @@
 
 **Architecture:** Add a `multi_agent` runtime subsystem in `neo-agent-core` that owns agent IDs, display names, lifecycle state, foreground joins, and aggregate results. Register `Delegate` and `DelegateSwarm` as normal Neo tools, but execute them through the runtime-owned manager so they can emit normalized events and later evolve into background agents without a rewrite. V1 is intentionally foreground-only at execution time, while data structures already include `foreground/background` mode fields for later plans.
 
-**Tech Stack:** Rust 2024, `tokio`, `serde`, `schemars`, `uuid`, `neo-ai::FakeModelClient`, `AgentRuntime`, `ToolRegistry`, `cargo run -p xtask -- test`.
+**Tech Stack:** Rust 2024, `tokio`, `serde`, `schemars`, `uuid`, `neo-ai::FakeModelClient`, `AgentRuntime`, `ToolRegistry`, `cargo nextest run`.
 
 ---
 
@@ -15,7 +15,7 @@
 - Follow `/Users/chenyuanhao/Workspace/neo/AGENTS.md`.
 - Start implementation with `icm recall-context "Neo Multi-Agent P1 core foreground runtime" --limit 5`.
 - Use CodeGraph before grep/read when locating runtime symbols in this indexed repo.
-- Do not run bare `cargo test`; use `cargo run -p xtask -- test ...`.
+- Do not run bare `cargo test`; use `cargo nextest run ...`.
 - Do not mutate git unless the user explicitly authorizes that exact command.
 - Do not preserve obsolete experimental names. Canonical tool names in this plan are `Delegate` and `DelegateSwarm`.
 - Subagents must not execute git mutation commands. This is a hard product rule, not a later polish item.
@@ -116,7 +116,6 @@ pub mod multi_agent;
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core multi_agent
 ```
 
 Expected: compilation fails because `identity`, `names`, `runtime`, and `state` exports are not implemented yet.
@@ -201,7 +200,7 @@ pub enum AgentRole {
     Explorer,
     Planner,
     Reviewer,
-    Harness,
+    Orchestrator,
 }
 
 impl Default for AgentRole {
@@ -216,7 +215,6 @@ impl Default for AgentRole {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core multi_agent
 ```
 
 Expected: compilation still fails because remaining modules are empty.
@@ -319,7 +317,6 @@ fn display_name_pool_suffixes_after_exhaustion() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core display_name_pool
 ```
 
 Expected: tests pass after remaining module compile errors are resolved in the next task.
@@ -405,7 +402,6 @@ pub struct SwarmSnapshot {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core display_name_pool
 ```
 
 Expected: display name tests pass, or fail only because `runtime.rs` is not implemented.
@@ -558,7 +554,6 @@ fn foreground_delegate_lifecycle_records_running_and_completed_state() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core foreground_delegate_lifecycle_records_running_and_completed_state
 ```
 
 Expected: PASS.
@@ -596,7 +591,6 @@ multi_agent: MultiAgentRuntime::new(),
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core foreground_delegate_lifecycle_records_running_and_completed_state
 ```
 
 Expected: PASS.
@@ -652,7 +646,6 @@ Add to `AgentEvent`:
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core AgentEvent
 ```
 
 Expected: compile succeeds. Existing tests may run if they match `AgentEvent`.
@@ -818,7 +811,6 @@ fn builtin_tools_register_delegate_tools() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core builtin_tools_register_delegate_tools
 ```
 
 Expected: PASS.
@@ -903,7 +895,6 @@ fn subagent_git_guard_denies_mutations_and_allows_read_only_commands() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core subagent_git_guard_denies_mutations
 ```
 
 Expected: PASS.
@@ -917,7 +908,6 @@ Expected: PASS.
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core multi_agent
 ```
 
 Expected: PASS.
@@ -927,7 +917,6 @@ Expected: PASS.
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core builtin_tools_register_delegate_tools
 ```
 
 Expected: PASS.
@@ -937,7 +926,7 @@ Expected: PASS.
 Run:
 
 ```bash
-cargo run -p xtask -- check
+cargo fmt --all --check
 ```
 
 Expected: PASS, unless unrelated dirty-worktree changes outside this plan break the check. If unrelated breakage appears, record the exact error and do not revert any file.

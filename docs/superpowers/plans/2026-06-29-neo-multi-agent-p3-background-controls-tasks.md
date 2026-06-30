@@ -6,7 +6,7 @@
 
 **Architecture:** Extend the existing `BackgroundTaskManager` rather than building a second background agent UI. Background delegates and swarms become new task kinds with snapshots that the existing Task Browser adapter can map into rows/details/previews. Runtime control tools operate on the `MultiAgentRuntime` registry and return model-facing summaries without dumping full child transcripts into context.
 
-**Tech Stack:** Rust 2024, `tokio`, `CancellationToken`, `BackgroundTaskManager`, `TaskBrowser`, `AgentEvent`, `ToolRegistry`, `cargo run -p xtask -- test`.
+**Tech Stack:** Rust 2024, `tokio`, `CancellationToken`, `BackgroundTaskManager`, `TaskBrowser`, `AgentEvent`, `ToolRegistry`, `cargo nextest run`.
 
 ---
 
@@ -117,7 +117,6 @@ swarm: None,
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core background_tasks
 ```
 
 Expected: existing background task tests pass after snapshot constructors are updated.
@@ -229,7 +228,6 @@ Use `manager.list(false, 10).await` to retrieve snapshots.
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core background_manager_lists_delegate_tasks
 ```
 
 Expected: PASS.
@@ -288,7 +286,6 @@ Add a test that executes `Delegate` with `mode=background` through `ToolRegistry
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core delegate_background_registers_task
 ```
 
 Expected: PASS.
@@ -413,7 +410,6 @@ async fn interrupt_delegate_marks_running_agent_cancelled() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core delegate_controls
 ```
 
 Expected: PASS.
@@ -487,7 +483,6 @@ async fn ctrl_b_detach_preserves_agent_id_and_registers_background_task() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent ctrl_b_detach
 ```
 
 Expected: PASS if an interactive test exists; otherwise run the core detach test in `neo-agent-core`.
@@ -572,8 +567,6 @@ assert!(item.detail_lines.iter().any(|line| line.contains("children:")));
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent task_browser_adapter_maps_delegate
-cargo run -p xtask -- test -p neo-tui task_browser
 ```
 
 Expected: PASS.
@@ -583,7 +576,6 @@ Expected: PASS.
 - [ ] Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core multi_agent_background
 ```
 
 Expected: PASS.
@@ -591,7 +583,6 @@ Expected: PASS.
 - [ ] Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent task_browser_adapter
 ```
 
 Expected: PASS.
@@ -599,7 +590,7 @@ Expected: PASS.
 - [ ] Run:
 
 ```bash
-cargo run -p xtask -- check
+cargo fmt --all --check
 ```
 
 Expected: PASS unless unrelated dirty-worktree changes break the global check. Report unrelated breakage without reverting files.

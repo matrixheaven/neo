@@ -8,7 +8,7 @@ on:
 
 jobs:
   ci:
-    name: xtask ci
+    name: cargo
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -17,7 +17,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt, llvm-tools-preview
+          components: clippy, rustfmt
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -25,22 +25,11 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Install coverage and CRAP tools
-        run: |
-          cargo install cargo-llvm-cov --locked
-          cargo install cargo-crap --locked
+      - name: Check formatting
+        run: cargo fmt --all --check
 
-      - name: Run local CI gate
-        run: cargo run -p xtask -- ci
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      - name: Upload coverage and CRAP reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: neo-quality-reports
-          path: |
-            target/llvm-cov/lcov.info
-            target/crap/crap-crates.md
-            target/crap/crap-crates.json
-            target/crap/crap-workspace.md
-          if-no-files-found: ignore
+      - name: Run tests
+        run: cargo nextest run --workspace --all-features

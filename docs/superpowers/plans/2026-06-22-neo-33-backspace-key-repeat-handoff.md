@@ -6,7 +6,7 @@
 
 **Architecture:** Treat crossterm `KeyEventKind::Repeat` as a real input event in the shared `neo-tui` input layer, while continuing to ignore `Release`. Centralize the accepted-key-event-kind predicate so `InputEvent`, `InputParser`, and `KeyId` cannot drift. Add focused tests that reproduce the current Backspace failure and verify prompt/dialog paths consume repeated Backspace events.
 
-**Tech Stack:** Rust 2024, `crossterm` keyboard events, Neo `InputEvent` / `InputParser`, `neo-tui` rich dialogs and prompt state, `nextest` through `cargo run -p xtask -- test`.
+**Tech Stack:** Rust 2024, `crossterm` keyboard events, Neo `InputEvent` / `InputParser`, `neo-tui` rich dialogs and prompt state, `nextest` through `cargo nextest run`.
 
 ---
 
@@ -96,7 +96,7 @@ rtk icm recall-context "Neo TUI backspace key repeat KeyEventKind Repeat InputPa
 
 - Use `rtk` for shell commands.
 - Prefer `cx` for symbol navigation before broad reads.
-- Do not run bare `cargo test`; use `rtk cargo run -p xtask -- test ...`.
+- Do not run bare `cargo test`; use `rtk cargo nextest run ...`.
 - Do not perform git mutations unless the user gives explicit per-command authorization. This includes `git add`, `git commit`, `git push`, `git switch`, `git checkout`, `git reset`, `git stash`, `git clean`, `git rm`, `git merge`, and `git rebase`.
 - Preserve unrelated worktree changes.
 - Keep the fix in the shared input layer. Do not patch each dialog separately unless tests reveal a dialog-specific bug after the shared fix.
@@ -250,8 +250,6 @@ Expected before implementation: FAIL, because `feed_crossterm_event` currently f
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-tui repeat_backspace_maps_to_backspace_input_event
-rtk cargo run -p xtask -- test -p neo-tui input_parser_accepts_repeated_backspace_events
 ```
 
 Expected before implementation: both fail.
@@ -378,7 +376,6 @@ Do not allow `Repeat` Esc to keep resetting the pending-esc timer. This avoids t
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-tui repeat_backspace_maps_to_backspace_input_event repeat_keybinding_maps_to_key_event repeat_key_id_maps_like_press release_key_id_is_still_ignored
 ```
 
 Expected: PASS.
@@ -458,8 +455,6 @@ fn input_parser_ignores_release_events() {
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-tui input_parser_accepts_repeated
-rtk cargo run -p xtask -- test -p neo-tui input_parser_ignores_release_events
 ```
 
 Expected: PASS.
@@ -512,7 +507,6 @@ This does not test crossterm Repeat directly, but paired with `neo-tui` parser t
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent repeated_backspace_input_events_delete_multiple_prompt_chars
 ```
 
 Expected: PASS after Task 2.
@@ -580,7 +574,6 @@ Again, adapt to existing helper/accessor names.
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-tui repeated_backspace
 ```
 
 Expected: PASS.
@@ -653,8 +646,6 @@ fn repeat_escape_does_not_reset_pending_escape_timer() {
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-tui input_event
-rtk cargo run -p xtask -- test -p neo-tui esc_
 ```
 
 Expected: PASS.
@@ -693,18 +684,12 @@ If manual verification is not practical, state that in the final response and re
 Run the minimum focused set:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-tui repeat_backspace
-rtk cargo run -p xtask -- test -p neo-tui input_parser_accepts_repeated
-rtk cargo run -p xtask -- test -p neo-tui input_parser_ignores_release_events
-rtk cargo run -p xtask -- test -p neo-agent repeated_backspace_input_events_delete_multiple_prompt_chars
 rtk cargo fmt --all --check
 ```
 
 If test name filters do not match due to exact names, use:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-tui input
-rtk cargo run -p xtask -- test -p neo-agent backspace
 ```
 
 Do not run workspace CI for this localized input-layer bug.
@@ -740,7 +725,7 @@ Before final handoff/PR, verify:
 - [ ] Existing bracketed paste tests pass.
 - [ ] Existing Shift+Enter, Alt+Enter, Ctrl+J tests pass.
 - [ ] No secrets are exposed by test helpers.
-- [ ] Focused tests were run with `xtask`.
+- [ ] Focused tests were run with .
 - [ ] No unrelated files were edited.
 
 ## Suggested Implementation Order

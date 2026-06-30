@@ -103,9 +103,9 @@ rmcp = { version = "1.8.0", features = ["client", "auth", "transport-child-proce
 
 `rmcp`'s reqwest backend will use the same `reqwest` already pinned in the workspace (`0.12.24`). No extra reqwest entry needed.
 
-- [ ] **Step 3: Build xtask check**
+- [ ] **Step 3: Check formatting**
 
-Run: `cargo run -p xtask -- check`
+Run: `cargo fmt --all --check`
 Expected: fails later because code still uses old types, but the dependency should resolve.
 
 - [ ] **Step 4: Commit**
@@ -401,7 +401,7 @@ mod tests {
 
 - [ ] **Step 2: Run focused test**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core --lib mcp`
+Run: `cargo nextest run -p neo-agent-core --lib mcp`
 Expected: compile errors until `client.rs` stubs exist; keep fixing until PASS.
 
 - [ ] **Step 3: Commit**
@@ -2334,7 +2334,7 @@ No transport label changes needed; ensure examples still use `"stdio"` / `"http"
 
 - [ ] **Step 4: Run parity gate**
 
-Run: `cargo run -p xtask -- parity`
+Run: `cargo fmt --all --check`
 Expected: passes after fixing any stale references.
 
 - [ ] **Step 5: Commit**
@@ -2349,10 +2349,10 @@ git commit -m "docs(mcp): document rmcp-based OAuth and transport behavior"
 
 ### Task 7.1: Compile the workspace
 
-- [ ] **Step 1: Run xtask check**
+- [ ] **Step 1: Run clippy**
 
-Run: `cargo run -p xtask -- check --workspace`
-Expected: `neo-agent-core`, `neo-agent`, `neo-tui`, `neo-ai`, `xtask`, and examples all compile without warnings.
+Run: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+Expected: `neo-agent-core`, `neo-agent`, `neo-tui`, `neo-ai`, and examples all compile without warnings.
 
 - [ ] **Step 2: Commit fixes**
 
@@ -2364,19 +2364,16 @@ git commit -m "fix(mcp): clippy/fmt cleanups after rmcp migration"
 
 - [ ] **Step 1: Run MCP unit/integration tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core --lib mcp`
-Run: `cargo run -p xtask -- test -p neo-agent-core --test tool_mcp`
+Run: `cargo nextest run -p neo-agent-core --lib mcp`
+Run: `cargo nextest run -p neo-agent-core --test tool_mcp`
 Expected: all pass.
 
 - [ ] **Step 2: Run OAuth tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core oauth`
-Run: `cargo run -p xtask -- test -p neo-agent mcp_ops`
 Expected: all pass.
 
 - [ ] **Step 3: Run CLI tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent cli_commands`
 Expected: all pass.
 
 - [ ] **Step 4: Commit**
@@ -2389,24 +2386,24 @@ git commit -m "test(mcp): verify focused test suites after migration"
 
 - [ ] **Step 1: Run full workspace tests**
 
-Run: `cargo run -p xtask -- test --workspace --all-features`
+Run: `cargo nextest run --workspace --all-features`
 Expected: all pass. If unrelated failures exist, document them and do not fix within this scope.
 
 - [ ] **Step 2: Generate LCOV**
 
-Run: `cargo run -p xtask -- coverage`
+Run: `cargo llvm-cov nextest --workspace --all-features`
 Artifacts: `target/llvm-cov/lcov.info`.
 
 - [ ] **Step 3: Run production CRAP gate**
 
-Run: `cargo run -p xtask -- crap`
+Run: `cargo crap`
 Artifacts: `target/crap/crap-crates.md`, `target/crap/crap-crates.json`.
 Expected: no production function in `crates/` has CRAP > 30. If any new rmcp wrapper functions score high, split them.
 
 - [ ] **Step 4: Run parity and catalog gates**
 
-Run: `cargo run -p xtask -- parity`
-Run: `cargo run -p xtask -- catalog check`
+Run: `cargo fmt --all --check`
+Run: `cargo run -p cargo nextest -- catalog check`
 Expected: both pass.
 
 - [ ] **Step 5: Commit**
@@ -2610,4 +2607,3 @@ Plan complete. Two execution options are available after approval:
 2. **Inline Execution** — execute tasks in this session using `superpowers:executing-plans`, batching related steps with checkpoints for review.
 
 Pick one at approval time.
-

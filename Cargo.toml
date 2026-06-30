@@ -4,8 +4,7 @@ members = [
     "crates/neo-agent-core",
     "crates/neo-tui",
     "crates/neo-agent",
-    "examples/rust",
-    "xtask"
+    "examples/rust"
 ]
 resolver = "2"
 

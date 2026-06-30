@@ -6,7 +6,7 @@
 
 **Architecture:** Replace `PermissionMode::Manual` with `PermissionMode::Ask` across core, TUI, config, docs, and tests. Add shared live permission state to `AgentConfig` / `TurnRequest` so permission preparation reads the current mode at each tool call instead of only using the value copied at turn start. Reorder TUI slash-command handling so permission commands are dispatchable while `active_turn` is running.
 
-**Tech Stack:** Rust 2024, `Arc<RwLock<PermissionMode>>` shared runtime state, Neo `AgentRuntime`, TUI slash command routing, `crossterm` overlays, `serde` config parsing, focused `nextest` through `cargo run -p xtask -- test`.
+**Tech Stack:** Rust 2024, `Arc<RwLock<PermissionMode>>` shared runtime state, Neo `AgentRuntime`, TUI slash command routing, `crossterm` overlays, `serde` config parsing, focused `nextest` through `cargo nextest run`.
 
 ---
 
@@ -104,7 +104,7 @@ rtk icm recall-context "Neo permission mode manual ask auto yolo live switching 
 
 - Use `rtk` for shell commands.
 - Prefer `cx` for symbol navigation before broad reads.
-- Do not run bare `cargo test`; use `rtk cargo run -p xtask -- test ...`.
+- Do not run bare `cargo test`; use `rtk cargo nextest run ...`.
 - Do not perform git mutations unless the user gives explicit per-command authorization.
 - Preserve unrelated worktree changes.
 - Do not keep a long-term dual naming model. `ask` is the new name. `manual` may only exist as a documented migration read alias if needed.
@@ -263,13 +263,11 @@ Replace every occurrence with `PermissionMode::Ask`.
 - [ ] Run focused compile/tests after code rename:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core PermissionMode
 ```
 
 If the test filter is too narrow, use:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core permission
 ```
 
 Expected after updates: no compile errors from `PermissionMode::Manual`.
@@ -350,8 +348,6 @@ assert!(lines.iter().any(|line| line.contains("[ask]")));
 - [ ] Run focused TUI tests:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-tui footer_renders_permission_mode_badge
-rtk cargo run -p xtask -- test -p neo-agent slash_ask_sets_ask_permission_mode permissions_picker_selects_auto_mode
 ```
 
 Expected: PASS.
@@ -739,18 +735,12 @@ Only unrelated uses of "manual" should remain, such as "manual invocation" in sk
 Run focused tests:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core permission
-rtk cargo run -p xtask -- test -p neo-agent slash_ask_sets_ask_permission_mode slash_auto_updates_permission_mode_while_turn_is_running
-rtk cargo run -p xtask -- test -p neo-tui footer_renders_permission_mode_badge
 rtk cargo fmt --all --check
 ```
 
 If filters are too narrow:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core runtime_turn permission
-rtk cargo run -p xtask -- test -p neo-agent permissions
-rtk cargo run -p xtask -- test -p neo-tui app_shell
 ```
 
 Do not run full workspace CI unless this turns into a broader runtime refactor.
@@ -789,7 +779,7 @@ Before final handoff/PR, verify:
 - [ ] Switching ask -> auto affects later tool calls in same turn.
 - [ ] Switching auto -> ask affects later tool calls in same turn.
 - [ ] Docs use ask/auto/yolo.
-- [ ] Focused tests ran through `xtask`.
+- [ ] Focused tests ran with direct cargo commands.
 
 ## Suggested Implementation Order
 

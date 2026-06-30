@@ -719,7 +719,7 @@ fn long_command_header_keeps_closing_paren() {
         name: "Bash".to_owned(),
         arguments: Some(
             serde_json::json!({
-                "command": "cargo run -p xtask -- test -p neo-agent-core runtime_turn_and_then_some_more_stuff",
+                "command": "cargo nextest run -p neo-agent-core --test runtime_turn runtime_turn_and_then_some_more_stuff",
             })
             .to_string(),
         ),

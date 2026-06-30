@@ -12,25 +12,13 @@ Rust-native local AI agent monorepo inspired by pi. The workspace contains:
 ```bash
 cargo run -p neo-agent -- print "hello from neo"
 cargo run -p neo-agent -- models list
-cargo run -p xtask -- check --docs
-cargo run -p xtask -- release-smoke
+cargo fmt --all --check
+cargo clippy -p neo-agent --bin neo -- -D warnings
+cargo nextest run -p neo-agent --bin neo cli_commands
 ```
 
-The default maintenance gate intentionally checks the stable `xtask` slice while
-other workers are building adjacent crates. Use
-`cargo run -p xtask -- check --workspace` when you want the full workspace fmt,
-clippy, and nextest gate.
-Use `cargo run -p xtask -- test ...` for focused unit and integration tests; the
-test entrypoint is backed by cargo-nextest and the repo's `.config/nextest.toml`.
-Use `cargo run -p xtask -- coverage` to generate `target/llvm-cov/lcov.info`,
-then `cargo run -p xtask -- crap` to enforce the production CRAP gate. The full
-local CI entrypoint is `cargo run -p xtask -- ci`.
-`cargo run -p xtask -- check --docs` also runs the docs/examples parity gate,
-including local Markdown link checks, production fake/local/placeholder guidance
-scans, and example TOML/JSON validation.
-`cargo run -p xtask -- release-smoke` is a local-only smoke flow for CLI help,
-models, local sessions/export, local extensions, MCP fixtures, catalog, and
-docs checks. It does not start cloud services or marketplace fixtures.
+For focused test evidence, use cargo-nextest with one package, one explicit
+target selector, and one test-name filter.
 
 ## Documentation
 

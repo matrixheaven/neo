@@ -6,7 +6,6 @@
 
 **Architecture:** Six independent phases, each scoped to one crate or one cross-cutting concern. Each phase produces working, testable software on its own. Phases are ordered by risk (lowest first) and can be executed in parallel if they touch different crates.
 
-**Tech Stack:** Rust edition 2024, min 1.88. Cargo workspace. Test runner: `cargo-nextest` via `cargo run -p xtask -- test -p <crate>`.
 
 ---
 
@@ -23,9 +22,8 @@
 
 **Verification commands (all phases):**
 - Build: `cargo build -p <crate>`
-- Test: `cargo run -p xtask -- test -p <crate>`
-- Full check: `cargo run -p xtask -- check`
-- Full CI: `cargo run -p xtask -- ci`
+- Full check: `cargo fmt --all --check`
+- Full CI: `cargo nextest run --workspace --all-features`
 
 ---
 
@@ -219,7 +217,6 @@ Delete local copies. Replace call sites with the imported versions, passing the 
 - [ ] **Step 5: Build + test**
 
 ```bash
-cargo run -p xtask -- test -p neo-ai
 ```
 
 - [ ] **Step 6: Commit**
@@ -264,7 +261,6 @@ Replace extra-headers injection loops in each `fn headers` with `inject_extra_he
 - [ ] **Step 4: Build + test + commit**
 
 ```bash
-cargo run -p xtask -- test -p neo-ai
 git commit -am "refactor(neo-ai): extract shared HTTP retry loop and header injection"
 ```
 
@@ -312,7 +308,6 @@ impl SsePayloadParser for ParseState {
 - [ ] **Step 3: Build + test + commit**
 
 ```bash
-cargo run -p xtask -- test -p neo-ai
 git commit -am "refactor(neo-ai): extract shared SSE infrastructure with SsePayloadParser trait"
 ```
 
@@ -363,7 +358,6 @@ pub mod responses;
 - [ ] **Step 3: Build + test + commit**
 
 ```bash
-cargo run -p xtask -- test -p neo-ai
 git commit -am "refactor(neo-ai): extract shared OpenAI headers and image_url"
 ```
 
@@ -499,7 +493,6 @@ Move: `estimate_messages_tokens`, `estimate_chat_messages_tokens`, `estimate_cha
 - [ ] **Step 5: Build + test**
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core
 ```
 
 - [ ] **Step 6: Commit**
@@ -636,8 +629,7 @@ pub use self::context::ActiveTurnInput;  // if not already in queue
 - [ ] **Step 4: Full build + test + clippy**
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core
-cargo run -p xtask -- check
+cargo fmt --all --check
 ```
 
 - [ ] **Step 5: Commit**
@@ -841,7 +833,6 @@ Split tests by domain:
 - [ ] **Step 3: Build + test + commit**
 
 ```bash
-cargo run -p xtask -- test -p neo-agent
 git commit -am "refactor(neo-agent): extract interactive tests into domain test modules"
 ```
 
@@ -856,8 +847,7 @@ git commit -am "refactor(neo-agent): extract interactive tests into domain test 
 - [ ] **Step 3: Full build + test + clippy**
 
 ```bash
-cargo run -p xtask -- test -p neo-agent
-cargo run -p xtask -- check
+cargo fmt --all --check
 ```
 
 - [ ] **Step 4: Commit**
@@ -1042,8 +1032,7 @@ Note: `match` is a reserved word in Rust. Use `config/matching.rs` instead.
 - [ ] **Step 2: Full build + test**
 
 ```bash
-cargo run -p xtask -- test -p neo-agent
-cargo run -p xtask -- check
+cargo fmt --all --check
 ```
 
 - [ ] **Step 3: Commit**
@@ -1264,7 +1253,6 @@ Move raw mode functions (lines 55–68, 376–465, 1269–1273): `is_termux_sess
 - [ ] **Step 4: Build + test**
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core
 ```
 
 - [ ] **Step 5: Commit**
@@ -1400,13 +1388,13 @@ cargo build -p neo-agent
 - [ ] **Step 2: Full workspace test**
 
 ```bash
-cargo run -p xtask -- test --workspace
+cargo nextest run --workspace
 ```
 
 - [ ] **Step 3: Full CI check**
 
 ```bash
-cargo run -p xtask -- check
+cargo fmt --all --check
 ```
 
 - [ ] **Step 4: Verify line counts improved**

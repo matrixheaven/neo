@@ -6,7 +6,7 @@
 
 **Architecture:** Replace the short-lived rmcp `AuthorizationManager` runtime path with a Neo-owned `McpOAuthService` inside `McpConnectionManager`. The service owns per-server/resource OAuth identity, durable credential files, refresh, authorization flow, and invalidation. HTTP/SSE transports ask the service for tokens. Manager state maps auth-required connection errors to `NeedsAuth`, registers one synthetic `mcp__<server>__authenticate` tool, and reconnects after successful auth. CLI, TUI `/mcp`, and built-in `mcp-config` all call the same service path.
 
-**Tech Stack:** Rust 2024, `tokio`, `serde`, `serde_json`, `url`, `sha2`, `rmcp`, `reqwest`, `tempfile`, `wiremock` or an in-crate hyper test server, `cargo run -p xtask -- test`.
+**Tech Stack:** Rust 2024, `tokio`, `serde`, `serde_json`, `url`, `sha2`, `rmcp`, `reqwest`, `tempfile`, `wiremock` or an in-crate hyper test server, `cargo nextest run`.
 
 ---
 
@@ -16,7 +16,7 @@
 - Start every execution session with `icm recall-context "Neo MCP OAuth lifecycle implementation" --limit 5`.
 - Use CodeGraph before grep/read when locating code in this indexed repository.
 - Use `rtk` command wrappers for shell exploration.
-- Do not run bare `cargo test`; verification uses `cargo run -p xtask -- test`.
+- Do not run bare `cargo test`; verification uses `cargo nextest run`.
 - Do not use git mutations unless the user explicitly authorizes that exact command. This plan contains optional commit checkpoints, but each one is gated by explicit per-command authorization.
 - Do not preserve the old MCP OAuth runtime model as a second live path. The new code may read old `~/.neo/oauth.json` once for migration, but it writes only the new MCP credential store.
 
@@ -121,7 +121,6 @@ Task tracking:
 - [ ] Create the new OAuth module directory and files listed below.
 - [ ] Move the existing transient state-store implementation into `oauth/flow.rs`.
 - [ ] Delete `crates/neo-agent-core/src/tools/mcp/oauth.rs` after the module directory compiles.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core oauth` and expect the OAuth module tests to compile or fail only on tests that later tasks intentionally add.
 
 Create these files:
 
@@ -154,7 +153,6 @@ pub use store::{McpOAuthClientRecord, McpOAuthDiscoveryRecord, McpOAuthStore, Mc
 
 - [ ] Write the `McpOAuthIdentity` implementation in `crates/neo-agent-core/src/tools/mcp/oauth/identity.rs`.
 - [ ] Add the three unit tests shown in this task.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core canonical_url_removes_fragment_and_keeps_query`.
 - [ ] Expected result: PASS for the identity canonicalization test.
 
 Implement `identity.rs`:
@@ -297,7 +295,6 @@ mod tests {
 
 - [ ] Write the durable store record structs and `McpOAuthStore` in `crates/neo-agent-core/src/tools/mcp/oauth/store.rs`.
 - [ ] Add the `round_trips_tokens` and `clear_tokens_is_idempotent` tests.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core round_trips_tokens`.
 - [ ] Expected result: PASS and a tempdir-backed `tokens.json` round trip.
 
 Implement `store.rs` with these records:
@@ -522,7 +519,6 @@ mod tests {
 ### Task 1.4: Add OAuth Error Types
 
 - [ ] Write `InvalidateScope` and `McpOAuthError` in `crates/neo-agent-core/src/tools/mcp/oauth/error.rs`.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core oauth`.
 - [ ] Expected result: PASS for identity, store, and state-store tests added so far.
 
 Implement `error.rs`:
@@ -565,7 +561,6 @@ impl McpOAuthError {
 
 - [ ] Write the `McpOAuthServiceConfig` and `McpOAuthService` shell in `crates/neo-agent-core/src/tools/mcp/oauth/service.rs`.
 - [ ] Prefer `neo_home` passed from `neo-agent`; add a crate dependency only if no existing helper can provide the default Neo home.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core mcp_oauth`.
 - [ ] Expected result: service compiles and existing OAuth tests still pass.
 
 Implement the top of `service.rs`:
@@ -632,7 +627,6 @@ If `dirs` is not already in `neo-agent-core` dependencies, add it to `crates/neo
 
 - [ ] Add `has_tokens()`, `access_token()`, `refresh()`, `invalidate()`, and expiry helpers to `service.rs`.
 - [ ] Add freshness tests for no expiry, future expiry, and expiry within 60 seconds.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core token_is_fresh`.
 - [ ] Expected result: PASS for all token freshness cases.
 
 Continue `service.rs`:
@@ -735,7 +729,6 @@ Add a unit test for `token_is_fresh()` covering:
 
 - [ ] Move `InMemoryStateStore` from the deleted `oauth.rs` file to `oauth/flow.rs`.
 - [ ] Keep save/load/delete behavior exactly as the existing tests expect.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core InMemoryStateStore`.
 - [ ] Expected result: PASS for transient state save, load, and delete behavior.
 
 Move the existing `InMemoryStateStore` from old `oauth.rs` into `flow.rs` unchanged in behavior. Keep its tests for save/load/delete CSRF state.
@@ -745,7 +738,6 @@ Move the existing `InMemoryStateStore` from old `oauth.rs` into `flow.rs` unchan
 - [ ] Add `McpOAuthFlow` to `oauth/flow.rs`.
 - [ ] Add `begin_authorization()` to `McpOAuthService`.
 - [ ] Persist client, token, and discovery records when the flow completes.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core mcp_oauth`.
 - [ ] Expected result: OAuth service tests compile without printing secrets.
 
 `McpOAuthFlow` must be the only path that opens the browser/local callback server. It must persist:
@@ -832,7 +824,6 @@ If rmcp exposes a different method name for generating the authorization URL, us
 
 - [ ] Add migration code in `service.rs` or `oauth/migration.rs`.
 - [ ] Add tests for missing old file, migrated old token response, and expired migrated token without client metadata.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core migration`.
 - [ ] Expected result: migration writes only new `tokens.json` and does not keep old runtime store reads alive.
 
 Add `crates/neo-agent-core/src/tools/mcp/oauth/migration.rs` only if the logic is too large for `service.rs`; otherwise keep it private in `service.rs`.
@@ -867,7 +858,6 @@ Tests:
 - [ ] Modify `crates/neo-agent-core/src/tools/mcp/http.rs` to add `HttpOAuthConfig`.
 - [ ] Replace `HttpConfig.auth_manager` with `HttpConfig.oauth`.
 - [ ] Update `Debug` output to show only whether OAuth is configured.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core http_config_holds_values`.
 - [ ] Expected result: test is updated to assert `oauth: false` behavior and no token values are rendered.
 
 Modify `crates/neo-agent-core/src/tools/mcp/http.rs`:
@@ -909,7 +899,6 @@ pub struct NeoStreamableHttpClient {
 - [ ] Update `auth_header()` to call `McpOAuthService::access_token()`.
 - [ ] Add `OAuthHttpError::NeedsAuth`.
 - [ ] Map rmcp auth-required initialization errors to `McpError::needs_auth()`.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core friendly_http_init_error`.
 - [ ] Expected result: auth-required strings map to `McpErrorKind::NeedsAuth`.
 
 Update `auth_header()`:
@@ -972,7 +961,6 @@ if display.contains("AuthRequired")
 
 - [ ] Add `McpErrorKind` and preserve `McpError::protocol()` callers.
 - [ ] Add `McpError::needs_auth()`, `kind()`, and `is_needs_auth()`.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core mcp_error`.
 - [ ] Expected result: existing MCP tests still compile and new kind tests pass.
 
 Modify `crates/neo-agent-core/src/tools/mcp/mod.rs` or wherever `McpError` is defined:
@@ -1033,7 +1021,6 @@ Tests:
 
 - [ ] Add `McpServerStatus::NeedsAuth`.
 - [ ] Update `as_str()` and all exhaustive matches.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core mcp_manager`.
 - [ ] Expected result: compile errors identify every match that still needs explicit `NeedsAuth` handling.
 
 In `crates/neo-agent-core/src/tools/mcp_manager.rs` add:
@@ -1060,7 +1047,6 @@ Self::NeedsAuth => "needs_auth",
 - [ ] Replace `auth_manager` with `oauth_identity` in `ManagedMcpEntry`.
 - [ ] Replace old OAuth store fields with `oauth_service` in `McpConnectionManagerState`.
 - [ ] Update constructors and remove old `with_oauth_store()` and `set_oauth_store()` after callers are migrated.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core mcp_manager`.
 - [ ] Expected result: manager compiles after callers are updated in the same phase.
 
 Change `ManagedMcpEntry`:
@@ -1123,7 +1109,6 @@ Remove `with_oauth_store()` and `set_oauth_store()` after updating all callers.
 - [ ] Pass `McpOAuthService` through `spawn_connect()`, `connect_one()`, and `build_client_for_config()`.
 - [ ] Create OAuth identity for HTTP and SSE transports.
 - [ ] Return `BuiltClient` with `oauth_identity`.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core mcp_manager`.
 - [ ] Expected result: HTTP/SSE manager code no longer references `AuthorizationManager`.
 
 Change `spawn_connect()` and `connect_one()` to pass `McpOAuthService` instead of old OAuth store pieces.
@@ -1169,7 +1154,6 @@ Ok(BuiltClient {
 - [ ] Add `set_needs_auth()`.
 - [ ] Use it in connect and refresh error handling when `err.is_needs_auth()`.
 - [ ] Confirm `NeedsAuth` does not increment reconnect attempts or schedule backoff.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core needs_auth`.
 - [ ] Expected result: `NeedsAuth` is a settled state.
 
 Add helper:
@@ -1204,7 +1188,6 @@ Update `refresh_tools()`:
 - [ ] Add `McpAuthenticateTool`.
 - [ ] Add `McpConnectionManager::authenticate_oauth()` or a core flow-returning equivalent if browser opening remains in `neo-agent`.
 - [ ] Register exactly one authenticate tool for `NeedsAuth`.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core needs_auth_registers_authenticate_tool_only`.
 - [ ] Expected result: the registry contains `mcp__linear__authenticate` and no real tools for the needs-auth server.
 
 Add `McpAuthenticateTool` near `ManagedMcpTool`:
@@ -1312,7 +1295,6 @@ Tests:
 - [ ] Modify `mcp_ops.rs` to create `McpOAuthService` from `AppConfig`.
 - [ ] Remove runtime loading of `~/.neo/oauth.json` into manager state.
 - [ ] Keep only explicit one-time migration reads.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent mcp_ops`.
 - [ ] Expected result: manager setup compiles without old OAuth store wiring.
 
 Modify `crates/neo-agent/src/mcp_ops.rs`:
@@ -1337,7 +1319,6 @@ fn mcp_oauth_service_for_config(config: &AppConfig) -> McpOAuthService {
 - [ ] Replace `build_authorization_manager()` with `McpOAuthService::begin_authorization()`.
 - [ ] Open the returned authorization URL.
 - [ ] Complete the flow and persist credentials through the service.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent authenticate_mcp_server_oauth`.
 - [ ] Expected result: tests use fake flow/server state and do not open a real browser.
 
 Current function calls `build_authorization_manager()`. Replace it with service flow:
@@ -1369,7 +1350,6 @@ Return value can remain the opened URL if existing callers display it. Do not pr
 - [ ] Add `McpToolDiscovery::NeedsAuth(String)`.
 - [ ] Map `McpServerStatus::NeedsAuth` to that discovery value.
 - [ ] Ensure wait loops still wait only on `Pending` and `Reconnecting`.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent mcp_tool_discovery`.
 - [ ] Expected result: `NeedsAuth` is visible to CLI/TUI and never blocks startup wait loops.
 
 Update `McpToolDiscovery`:
@@ -1409,8 +1389,6 @@ This expression already excludes `NeedsAuth`; add tests to lock that in.
 - [ ] Add `McpToolStatus::NeedsAuth`.
 - [ ] Map `McpToolDiscovery::NeedsAuth` to the new TUI status.
 - [ ] After manual auth succeeds, reconnect and refresh rows.
-- [ ] Run `cargo run -p xtask -- test -p neo-tui mcp_manager`.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent interactive_mcp`.
 - [ ] Expected result: `/mcp` renders OAuth-required rows and preserves `O auth`.
 
 Modify `crates/neo-agent/src/modes/interactive/mcp_manager.rs`:
@@ -1455,7 +1433,6 @@ Tests:
 
 - [ ] Add `McpStartupStatus`, `McpStartupStatusEvent`, and `AgentEvent::McpServerStatus`.
 - [ ] Add serde round-trip test.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core mcp_server_status_event_round_trips`.
 - [ ] Expected result: event serializes and deserializes unchanged.
 
 Modify `crates/neo-agent-core/src/events.rs`:
@@ -1511,7 +1488,6 @@ fn mcp_server_status_event_round_trips() {
 - [ ] Emit one MCP startup status event for each enabled server after the manager has settled.
 - [ ] Keep `NeedsAuth` settled and non-blocking.
 - [ ] Pass `None` for call sites that cannot display startup events.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent mcp_startup`.
 - [ ] Expected result: startup events are emitted before the first model turn in interactive/run paths.
 
 Modify `crates/neo-agent/src/modes/run/runtime/agent.rs`.
@@ -1559,8 +1535,6 @@ If changing `tool_registry_for_config()` would cascade too far, emit the events 
 
 - [ ] Render connected, needs-auth, and failed MCP startup rows in transcript.
 - [ ] Add JSON lifecycle output mapping.
-- [ ] Run `cargo run -p xtask -- test -p neo-tui mcp_server_status`.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent json`.
 - [ ] Expected result: status rows and JSON event fields match this plan.
 
 Modify `crates/neo-tui/src/transcript/event_handler.rs` to map `AgentEvent::McpServerStatus`:
@@ -1612,7 +1586,6 @@ Tests:
 
 - [ ] Replace `crates/neo-agent-core/src/skills/builtin/mcp-config.md` with the manifest and body below.
 - [ ] Confirm the body never asks the model to print secrets.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core mcp_config`.
 - [ ] Expected result: skill parses with `disableModelInvocation: true` after Task 7.2 registers it.
 
 Modify `crates/neo-agent-core/src/skills/builtin/mcp-config.md`:
@@ -1646,7 +1619,6 @@ Never print OAuth access tokens, refresh tokens, client secrets, or authorizatio
 
 - [ ] Add `MCP_CONFIG` to built-in skill sources.
 - [ ] Add tests for presence, manual invocation, and auto-invocation exclusion.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core builtin_skill_names`.
 - [ ] Expected result: `mcp-config` is loaded and not auto-invokable.
 
 Modify `crates/neo-agent-core/src/skills/builtin/mod.rs`:
@@ -1668,7 +1640,6 @@ Tests:
 
 - [ ] Remove old OAuth manager exports from `mcp/mod.rs`.
 - [ ] Export the new OAuth service types.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core mcp`.
 - [ ] Expected result: no code imports `build_authorization_manager` from production runtime.
 
 Modify `crates/neo-agent-core/src/tools/mcp/mod.rs`:
@@ -1692,7 +1663,6 @@ pub use oauth::{
 - [ ] Remove `build_http_client_with_oauth` import and usage from run runtime code.
 - [ ] Route configured MCP startup through `McpConnectionManager`.
 - [ ] Replace fallback-dependent tests with manager-based tests.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent runtime`.
 - [ ] Expected result: run mode compiles without standalone HTTP OAuth fallback.
 
 Modify `crates/neo-agent/src/modes/run/runtime/agent.rs`:
@@ -1743,7 +1713,6 @@ The command must show no production runtime references.
 
 - [ ] Add a test-only needs-auth entry helper or construct `ManagedMcpEntry` directly in the module test.
 - [ ] Add the registry assertion shown below.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core needs_auth_registers_authenticate_tool_only`.
 - [ ] Expected result: only `mcp__linear__authenticate` is registered.
 
 Add or extend tests in `crates/neo-agent-core/src/tools/mcp_manager.rs` using a mock connect path if available. If connect path is not injectable, add a small private helper test for state transitions.
@@ -1781,7 +1750,6 @@ If adding `insert_test_entry_needs_auth()` is too invasive, construct `ManagedMc
 - [ ] Add an async HTTP initialization test in `http.rs`.
 - [ ] Return auth-required initialize response or HTTP 401 from a local test server.
 - [ ] Assert `McpErrorKind::NeedsAuth`.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core http_401_maps_to_needs_auth`.
 - [ ] Expected result: auth-required startup is classified as `NeedsAuth`.
 
 Add a focused async test in `http.rs`:
@@ -1796,7 +1764,6 @@ Add a focused async test in `http.rs`:
 - [ ] Write stale `tokens.json` without `client.json` or `discovery.json`.
 - [ ] Call `McpOAuthService::access_token()`.
 - [ ] Assert `McpOAuthError::NeedsAuth`.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent-core expired_token_with_missing_client_returns_needs_auth`.
 - [ ] Expected result: the old `OAuth client not configured` condition is represented as Neo `NeedsAuth`.
 
 Add test in `service.rs`:
@@ -1810,7 +1777,6 @@ Add test in `service.rs`:
 - [ ] Add a controller-level test using fake service or fake manager behavior.
 - [ ] Trigger `McpManagerAction::Auth("linear")`.
 - [ ] Assert authentication and row refresh were requested.
-- [ ] Run `cargo run -p xtask -- test -p neo-agent manual_auth_reconnect`.
 - [ ] Expected result: manual `/mcp` auth path reconnects without requiring a real browser.
 
 Add a test in `crates/neo-agent/src/modes/interactive/mcp_manager.rs` or `mcp_ops.rs`:
@@ -1826,31 +1792,23 @@ Keep this test at the controller boundary; do not require opening a browser.
 Run focused tests first:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core mcp_oauth
-cargo run -p xtask -- test -p neo-agent-core mcp_manager
-cargo run -p xtask -- test -p neo-agent-core mcp::http
-cargo run -p xtask -- test -p neo-tui mcp_manager
-cargo run -p xtask -- test -p neo-agent mcp_ops
 ```
 
 Then run crate-level focused checks:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core
-cargo run -p xtask -- test -p neo-agent
-cargo run -p xtask -- test -p neo-tui
 ```
 
 Run formatting and lint gate:
 
 ```bash
-cargo run -p xtask -- check
+cargo fmt --all --check
 ```
 
 If the change touches shared runtime code beyond MCP, run:
 
 ```bash
-cargo run -p xtask -- test --workspace --all-features
+cargo nextest run --workspace --all-features
 ```
 
 Do not broaden verification to `ci` unless focused tests reveal a cross-crate risk that cannot be bounded.

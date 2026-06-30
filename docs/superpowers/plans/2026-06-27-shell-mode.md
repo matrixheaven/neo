@@ -78,7 +78,6 @@ fn shell_mode_color_has_builder() {
 
 - [ ] **Step 2: Run the failing test**
 
-Run: `cargo run -p xtask -- test -p neo-tui shell_mode_theme`
 
 Expected: compile failure because `shell_mode` does not exist.
 
@@ -114,7 +113,6 @@ In `crates/neo-agent/src/themes.rs`, add `shell_mode: Option<String>` to the the
 
 - [ ] **Step 5: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-tui shell_mode_theme`
 
 Expected: PASS.
 
@@ -166,7 +164,6 @@ fn shell_running_toggle_controls_working_label() {
 
 - [ ] **Step 2: Run the failing test**
 
-Run: `cargo run -p xtask -- test -p neo-tui shell_mode_state`
 
 Expected: compile failure because methods do not exist.
 
@@ -217,7 +214,6 @@ if self.shell_running {
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-tui shell_mode_state`
 
 Expected: PASS.
 
@@ -257,7 +253,6 @@ fn preserves_newline_and_tab_but_strips_other_c0_controls() {
 
 - [ ] **Step 2: Run the failing test**
 
-Run: `cargo run -p xtask -- test -p neo-tui shell_output`
 
 Expected: compile failure because the module does not exist.
 
@@ -295,7 +290,6 @@ Add `pub mod shell_output;` to `crates/neo-tui/src/utils/mod.rs`.
 
 - [ ] **Step 5: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-tui shell_output`
 
 Expected: PASS.
 
@@ -332,7 +326,6 @@ fn shell_queue_counts_as_pending_input() {
 
 - [ ] **Step 2: Run failing tests**
 
-Run: `cargo run -p xtask -- test -p neo-tui shell_queue`
 
 Expected: compile failure because queue APIs do not exist.
 
@@ -374,7 +367,6 @@ Update `is_empty()` to include shell commands.
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-tui shell_queue`
 
 Expected: PASS.
 
@@ -413,7 +405,6 @@ fn top_border_with_too_long_label_falls_back_to_plain_border() {
 
 - [ ] **Step 2: Run failing test**
 
-Run: `cargo run -p xtask -- test -p neo-tui top_border_with_label`
 
 Expected: compile failure.
 
@@ -452,7 +443,6 @@ Use existing local border constants/helpers if present instead of duplicating gl
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-tui top_border_with_label`
 
 Expected: PASS.
 
@@ -514,7 +504,6 @@ fn queued_shell_command_preview_uses_dollar_prompt_and_non_steer_hint() {
 
 - [ ] **Step 2: Run failing tests**
 
-Run: `cargo run -p xtask -- test -p neo-tui shell_mode_render`
 
 Expected: failures for missing render behavior.
 
@@ -544,7 +533,6 @@ Use `theme.shell_mode` for `$ command`.
 
 - [ ] **Step 6: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-tui shell_mode_render`
 
 Expected: PASS.
 
@@ -592,7 +580,6 @@ Adjust helper calls to match existing `neo_ai::ChatMessage` APIs.
 
 - [ ] **Step 2: Run failing tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core shell_command_message`
 
 Expected: compile failure.
 
@@ -664,7 +651,6 @@ Escape at least `&`, `<`, and `>`.
 
 - [ ] **Step 5: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core shell_command_message`
 
 Expected: PASS.
 
@@ -712,7 +698,6 @@ fn shell_events_include_origin_and_outcome() {
 
 - [ ] **Step 2: Run failing tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core shell_events_include_origin`
 
 Expected: compile failure.
 
@@ -748,7 +733,6 @@ In `event_handler.rs`, branch on `origin`:
 
 - [ ] **Step 6: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core shell_events_include_origin`
 
 Expected: PASS.
 
@@ -815,7 +799,6 @@ Adjust `ToolContext::default()` setup if existing tests use a helper.
 
 - [ ] **Step 2: Run failing tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core shell_runner`
 
 Expected: compile failure.
 
@@ -879,11 +862,9 @@ Do not leave the old `run_command()` as a separate execution path.
 
 - [ ] **Step 6: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core shell_runner`
 
 Expected: PASS.
 
-Run: `cargo run -p xtask -- test -p neo-agent-core bash`
 
 Expected: existing Bash tests pass.
 
@@ -937,7 +918,6 @@ Use existing test helpers for `ManagedBackgroundCommand`, or add focused local h
 
 - [ ] **Step 2: Run failing tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core foreground_bash_task_can_be_detached`
 
 Expected: compile failure because foreground registration/detach APIs do not exist.
 
@@ -985,7 +965,6 @@ The shared runner registers shell-mode foreground commands with `start_bash_fore
 
 - [ ] **Step 7: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core background_tasks foreground_bash`
 
 Expected: PASS.
 
@@ -1039,7 +1018,6 @@ Adjust line conversion to match the local `Line` type.
 
 - [ ] **Step 2: Run failing tests**
 
-Run: `cargo run -p xtask -- test -p neo-tui shell_run`
 
 Expected: compile failure.
 
@@ -1075,7 +1053,6 @@ Add copy/render support in `entry.rs` and `pane.rs`.
 
 - [ ] **Step 5: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-tui shell_run`
 
 Expected: PASS.
 
@@ -1140,7 +1117,6 @@ Use existing transcript snapshot helpers if there is no `rendered_text_for_test`
 
 - [ ] **Step 2: Run failing tests**
 
-Run: `cargo run -p xtask -- test -p neo-tui shell_events`
 
 Expected: failure because routing does not exist.
 
@@ -1155,7 +1131,6 @@ In `apply_tool_event()`:
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-tui shell_events`
 
 Expected: PASS.
 
@@ -1199,7 +1174,6 @@ async fn backspace_on_empty_shell_prompt_exits_shell_mode() {
 
 - [ ] **Step 2: Run failing tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent shell_mode`
 
 Expected: failures.
 
@@ -1227,7 +1201,6 @@ Backspace and Esc on empty shell prompt call `exit_shell_mode()` and consume the
 
 - [ ] **Step 5: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-agent shell_mode`
 
 Expected: the new entry/exit tests pass.
 
@@ -1275,7 +1248,6 @@ Build test helpers around the existing `TurnDriver`; shell executor injection sh
 
 - [ ] **Step 2: Run failing tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent shell_command`
 
 Expected: compile failure until shell executor exists.
 
@@ -1336,7 +1308,6 @@ After shell completion:
 
 - [ ] **Step 7: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-agent shell_command`
 
 Expected: PASS.
 
@@ -1377,7 +1348,6 @@ async fn ctrl_b_detaches_running_shell_command() {
 
 - [ ] **Step 2: Run failing test**
 
-Run: `cargo run -p xtask -- test -p neo-agent ctrl_b_detaches_running_shell_command`
 
 Expected: compile failure until action/executor support exists.
 
@@ -1407,7 +1377,6 @@ If the keybinding layer requires an action, add `KeybindingAction::BackgroundTas
 
 - [ ] **Step 5: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-agent ctrl_b_detaches_running_shell_command`
 
 Expected: PASS.
 
@@ -1440,7 +1409,6 @@ async fn esc_cancels_running_shell_command() {
 
 - [ ] **Step 2: Run failing test**
 
-Run: `cargo run -p xtask -- test -p neo-agent esc_cancels_running_shell_command`
 
 Expected: failure until cancel path exists.
 
@@ -1463,7 +1431,6 @@ On cancellation, append `AgentMessage::ShellCommand { outcome: Cancelled, ... }`
 
 - [ ] **Step 5: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-agent esc_cancels_running_shell_command`
 
 Expected: PASS.
 
@@ -1502,7 +1469,6 @@ async fn alt_up_edits_latest_shell_command_before_followups() {
 
 - [ ] **Step 2: Run failing tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent ctrl_s_in_shell_mode`
 
 Expected: failure until behavior is added.
 
@@ -1519,7 +1485,6 @@ In the `EditLastQueuedMessage` action:
 
 - [ ] **Step 5: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-agent ctrl_s_in_shell_mode alt_up_edits_latest_shell_command`
 
 Expected: PASS.
 
@@ -1563,7 +1528,6 @@ Use local snapshot helpers already present in `interactive.rs` tests.
 
 - [ ] **Step 2: Run failing test**
 
-Run: `cargo run -p xtask -- test -p neo-agent replay_shell_command_message`
 
 Expected: failure until replay handles the structured variant.
 
@@ -1579,7 +1543,6 @@ Do not parse XML from normal text messages.
 
 - [ ] **Step 5: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-agent replay_shell_command_message`
 
 Expected: PASS.
 
@@ -1611,7 +1574,6 @@ Use existing prompt-history test helpers.
 
 - [ ] **Step 2: Run failing/passing guard**
 
-Run: `cargo run -p xtask -- test -p neo-agent shell_commands_are_not_added_to_prompt_history`
 
 Expected: PASS if Task 14 routed shell commands around `append_prompt_history`; otherwise fix.
 
@@ -1653,10 +1615,6 @@ Add a controller test that covers:
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui shell_mode
-cargo run -p xtask -- test -p neo-agent shell_mode
-cargo run -p xtask -- test -p neo-agent-core shell_runner
-cargo run -p xtask -- test -p neo-agent-core background_tasks
 ```
 
 Expected: PASS.
@@ -1676,16 +1634,13 @@ Expected: build succeeds.
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui shell_mode
-cargo run -p xtask -- test -p neo-agent shell_mode
-cargo run -p xtask -- test -p neo-agent-core shell
 ```
 
 Expected: focused tests pass.
 
 - [ ] **Step 3: Project check**
 
-Run: `cargo run -p xtask -- check`
+Run: `cargo fmt --all --check`
 
 Expected: no new warnings or formatting failures.
 

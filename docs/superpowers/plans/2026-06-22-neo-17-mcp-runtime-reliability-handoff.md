@@ -6,7 +6,7 @@
 
 **Architecture:** Keep protocol adapters in `neo-agent-core`, add a manager layer that owns configured MCP server state and exposes snapshots, resource operations, and model-visible MCP tools. Keep config parsing and persistence in `neo-agent`, with a small `mcp_ops` service bridge shared by CLI and TUI. NEO-32 should consume the NEO-17 manager/service APIs instead of building a second probe/discovery path.
 
-**Tech Stack:** Rust 2024, `tokio`, `reqwest`, Neo `ToolRegistry`, Neo MCP adapters, global `~/.neo/config.toml` / `$NEO_HOME/config.toml`, focused `xtask`/nextest verification.
+**Tech Stack:** Rust 2024, `tokio`, `reqwest`, Neo `ToolRegistry`, Neo MCP adapters, global `~/.neo/config.toml` / `$NEO_HOME/config.toml`, focused `cargo nextest` verification.
 
 ---
 
@@ -742,7 +742,6 @@ pub struct AddMcpServerInput {
 - [ ] Add focused tests:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent mcp_ops
 ```
 
 Required assertions:
@@ -806,7 +805,6 @@ fn diagnostic_hint(error: &McpError, config: &ManagedMcpServerConfig) -> Option<
 - [ ] Add tests:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core tool_mcp_manager
 ```
 
 Expected:
@@ -1275,24 +1273,17 @@ tools at the next request boundary.
 Focused commands:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core tool_mcp
-rtk cargo run -p xtask -- test -p neo-agent-core tool_mcp_manager
-rtk cargo run -p xtask -- test -p neo-agent-core runtime_turn
-rtk cargo run -p xtask -- test -p neo-agent mcp_ops
-rtk cargo run -p xtask -- test -p neo-agent --test cli_commands mcp
+rtk cargo nextest run -p neo-agent --test cli_commands mcp
 ```
 
 If Task 6 changes runtime request construction, include:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core runtime_turn
 ```
 
 If NEO-32 is implemented in the same branch, include:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-tui mcp_manager
-rtk cargo run -p xtask -- test -p neo-agent interactive mcp
 ```
 
 Do not use bare `cargo test` as completion evidence.

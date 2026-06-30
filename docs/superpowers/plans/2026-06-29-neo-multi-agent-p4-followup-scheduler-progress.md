@@ -6,7 +6,7 @@
 
 **Architecture:** Extend `MultiAgentRuntime` from a task registry into a session-tree collaboration controller. Add bounded mailbox queues per agent, resumable swarm item records, scheduler phases, and a progress estimator that uses completed child durations plus live activity instead of naive item counts. Keep all data normalized in Neo state so transcript and `/tasks` can render the same source of truth.
 
-**Tech Stack:** Rust 2024, `tokio`, `CancellationToken`, `serde`, `AgentEvent`, `BackgroundTaskManager`, `neo-tui` transcript components, focused `cargo run -p xtask -- test`.
+**Tech Stack:** Rust 2024, `tokio`, `CancellationToken`, `serde`, `AgentEvent`, `BackgroundTaskManager`, `neo-tui` transcript components, focused `cargo nextest run`.
 
 ---
 
@@ -148,7 +148,6 @@ fn delegate_mailbox_tracks_pending_delivery() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core delegate_mailbox_tracks_pending_delivery
 ```
 
 Expected: PASS.
@@ -200,7 +199,6 @@ registry.register(delegate_controls::MessageDelegateTool);
 Add and run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core message_delegate_queues_mailbox_message
 ```
 
 Expected: PASS.
@@ -320,7 +318,6 @@ fn swarm_scheduler_retry_delay_grows_exponentially() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core swarm_scheduler
 ```
 
 Expected: PASS.
@@ -377,7 +374,6 @@ fn partial_swarm_resume_skips_completed_items() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core partial_swarm_resume_skips_completed_items
 ```
 
 Expected: PASS.
@@ -466,7 +462,6 @@ fn progress_estimate_never_claims_completion_while_items_are_active() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core progress_estimate
 ```
 
 Expected: PASS.
@@ -507,8 +502,6 @@ Use `estimate_swarm_progress` from runtime state, not a local TUI-only guess.
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui swarm_card_renders_suspended_rate_limit
-cargo run -p xtask -- test -p neo-agent task_browser_adapter_maps_swarm_progress
 ```
 
 Expected: PASS.
@@ -518,7 +511,6 @@ Expected: PASS.
 - [ ] Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core multi_agent_scheduler
 ```
 
 Expected: PASS.
@@ -526,7 +518,6 @@ Expected: PASS.
 - [ ] Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui multi_agent_transcript
 ```
 
 Expected: PASS.
@@ -534,7 +525,7 @@ Expected: PASS.
 - [ ] Run:
 
 ```bash
-cargo run -p xtask -- check
+cargo fmt --all --check
 ```
 
 Expected: PASS unless unrelated dirty-worktree changes break the global check. Report unrelated breakage without reverting files.

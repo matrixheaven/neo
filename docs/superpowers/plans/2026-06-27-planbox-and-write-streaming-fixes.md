@@ -81,7 +81,6 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo run -p xtask -- test -p neo-tui plan_box`
 Expected: FAIL — `top_border_has_right_corner` and `bottom_border_has_right_corner` fail.
 
 - [ ] **Step 3: Rewrite the `render` method**
@@ -183,7 +182,6 @@ use crate::shell::TuiTheme;
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cargo run -p xtask -- test -p neo-tui plan_box`
 Expected: PASS — all 5 tests including the two new corner tests.
 
 - [ ] **Step 6: Build check**
@@ -357,7 +355,6 @@ Add to the test module in `plan_box.rs`:
 
 - [ ] **Step 5: Run tests**
 
-Run: `cargo run -p xtask -- test -p neo-tui plan_box`
 Expected: PASS.
 
 ---
@@ -516,10 +513,8 @@ Expected: No remaining callers except possibly tests. If unused, mark them with 
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo run -p xtask -- test -p neo-tui tool_cards`
 Expected: PASS. If any test asserts the old progress line format, update it.
 
-Run: `cargo run -p xtask -- test -p neo-tui`
 Expected: All tests pass except pre-existing `scope_less_tool_approval_omits_approve_for_session_option`.
 
 - [ ] **Step 5: Build check**

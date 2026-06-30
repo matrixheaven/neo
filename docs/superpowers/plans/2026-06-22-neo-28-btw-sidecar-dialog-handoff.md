@@ -6,7 +6,7 @@
 
 **Architecture:** Prefer the Kimi Code design: create a same-session, in-memory side agent from a stable snapshot of the parent projected history, keep parent tool definitions for prompt-cache prefix stability, deny all side-agent tool calls, and render the side conversation in a bounded TUI panel between the transcript and composer. Do not create a persistent session or append sidecar messages to the main JSONL file.
 
-**Tech Stack:** Rust 2024, `tokio`, `crossterm`, `neo-agent-core` runtime/context/types, `neo-agent` interactive mode, `neo-tui` transcript/chrome rendering, Kimi Code `/btw` reference implementation, `xtask`/`nextest`/`llvm-cov`/CRAP gates.
+**Tech Stack:** Rust 2024, `tokio`, `crossterm`, `neo-agent-core` runtime/context/types, `neo-agent` interactive mode, `neo-tui` transcript/chrome rendering, Kimi Code `/btw` reference implementation, /`nextest`/`llvm-cov`/CRAP gates.
 
 ---
 
@@ -412,7 +412,6 @@ fn btw_sidecar_appends_side_question_system_reminder() {}
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core btw_sidecar
 ```
 
 Expected before implementation: tests fail because no sidecar projection API exists.
@@ -590,9 +589,6 @@ Document:
 Focused tests:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core btw_sidecar
-rtk cargo run -p xtask -- test -p neo-tui btw_panel
-rtk cargo run -p xtask -- test -p neo-agent btw
 ```
 
 Adjust filters to actual names.
@@ -600,9 +596,9 @@ Adjust filters to actual names.
 Required repository gates before completion:
 
 ```bash
-rtk cargo run -p xtask -- coverage
-rtk cargo run -p xtask -- crap
-rtk cargo run -p xtask -- ci
+rtk cargo llvm-cov nextest --workspace --all-features
+rtk cargo crap
+rtk cargo nextest run --workspace --all-features
 ```
 
 Artifacts to inspect:
@@ -639,7 +635,7 @@ Artifacts to inspect:
 - [ ] Busy notice preserves the user's typed text.
 - [ ] Panel render is stable at narrow and short terminal sizes.
 - [ ] Tests cover core context, TUI rendering, interactive routing, and persistence isolation.
-- [ ] Verification commands ran through `xtask`.
+- [ ] Verification commands ran with direct cargo commands.
 
 ## Suggested ICM Store On Completion
 

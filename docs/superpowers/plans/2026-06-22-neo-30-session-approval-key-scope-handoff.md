@@ -6,7 +6,7 @@
 
 **Architecture:** Treat session approval as a reusable permission grant over explicit operation scopes, not over tools. The runtime should derive stable `SessionApprovalKey` values from the tool call, workspace/cwd, operation, and normalized target. The TUI must show the scope it is about to cache, so the user can tell whether they are approving one exact command, one file path, or another narrow reusable target.
 
-**Tech Stack:** Rust 2024, `neo-agent-core` permission preparation/runtime, `neo-agent` interactive/run approval plumbing, `neo-tui` approval modal/transcript rendering, Codex approval-key references, `xtask`/`nextest` focused verification.
+**Tech Stack:** Rust 2024, `neo-agent-core` permission preparation/runtime, `neo-agent` interactive/run approval plumbing, `neo-tui` approval modal/transcript rendering, Codex approval-key references, /`nextest` focused verification.
 
 ---
 
@@ -60,7 +60,7 @@ rtk icm recall-context "NEO-30 session approval key scope Approve for this sessi
 
 - Use `rtk` for shell commands.
 - Use `cx` before broad file reads when navigating symbols.
-- Do not run bare `cargo test`; use `cargo run -p xtask -- test ...` through `rtk`.
+- Do not run bare `cargo test`; use `cargo nextest run ...` through `rtk`.
 - Do not perform git mutations unless the user gives explicit per-command authorization. This includes `git add`, `git commit`, `git push`, `git switch`, `git checkout`, `git reset`, `git stash`, `git clean`, `git rm`, `git merge`, and `git rebase`.
 - Do not preserve obsolete compatibility branches or duplicate approval stores. Replace the old tool-name model.
 - Stay inside NEO-30 scope. Do not redesign all permission modes.
@@ -715,16 +715,12 @@ Session/JSONL tests:
 Use focused commands only:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core runtime_turn session_approval
-rtk cargo run -p xtask -- test -p neo-agent interactive approval
 rtk cargo fmt --all --check
 ```
 
 If test names differ, use:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core approval
-rtk cargo run -p xtask -- test -p neo-agent approval
 ```
 
 This is a medium-sized permission/runtime/UI task. Full workspace CI is not required unless the patch grows into a broader approval refactor.
@@ -757,7 +753,7 @@ This is a medium-sized permission/runtime/UI task. Full workspace CI is not requ
 - [ ] Does numeric shortcut behavior remain predictable after dynamic options?
 - [ ] Does old session JSONL still replay?
 - [ ] Did I avoid broad git/read-only command families in the first patch?
-- [ ] Did I run focused `xtask` tests and report exact commands/results?
+- [ ] Did I run focused  tests and report exact commands/results?
 - [ ] Did I store an ICM completion memory before the final response?
 
 ## Expected Outcome

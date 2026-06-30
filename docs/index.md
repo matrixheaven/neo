@@ -2,7 +2,7 @@
 
 Neo is a Rust-native local coding-agent workspace. The repository is
 intentionally split into small crates so provider adapters, agent runtime
-policy, terminal UI, and developer tooling can evolve independently.
+policy, and terminal UI can evolve independently.
 
 ## Start Here
 
@@ -22,7 +22,6 @@ policy, terminal UI, and developer tooling can evolve independently.
 - `crates/neo-agent-core` owns runtime loops, tools, permissions, sessions, MCP adapters, local extensions, skill loading, JSONL RPC, and HTML export.
 - `crates/neo-tui` owns reusable terminal UI primitives.
 - `crates/neo-agent` is the CLI/TUI binary.
-- `xtask` contains repository maintenance commands.
 - `docs` and `examples` contain the public operating model for contributors.
 
 ## Stability Notes

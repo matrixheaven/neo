@@ -104,7 +104,6 @@ Add to the test module in `crates/neo-agent-core/src/compaction/mod.rs`:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core truncated_error`
 Expected: FAIL — `CompactionError::Truncated` doesn't exist.
 
 - [ ] **Step 3: Add the new variants**
@@ -131,7 +130,6 @@ pub enum CompactionError {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core truncated_error`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -233,7 +231,6 @@ Add to the test module in `crates/neo-agent-core/src/compaction/mod.rs`:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core reduce_compact_count`
 Expected: FAIL — `reduce_compact_count` and `is_stale` don't exist.
 
 - [ ] **Step 3: Implement the helpers**
@@ -273,7 +270,6 @@ pub(crate) fn is_stale(snapshot: &[AgentMessage], current: &[AgentMessage]) -> b
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core reduce_compact_count`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -330,7 +326,6 @@ Note: If the `Future` import is not already present in the test module, add `use
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core generate_with_retry`
 Expected: FAIL — `generate_with_retry` doesn't exist.
 
 - [ ] **Step 3: Implement `generate_with_retry`**
@@ -518,7 +513,6 @@ Adjust the test helper to match the actual constructor signature. If `for_model`
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core effective_max`
 Expected: FAIL — `observed_max_context_tokens` field and functions don't exist.
 
 - [ ] **Step 3: Add the field to `AgentConfig` struct**
@@ -599,7 +593,6 @@ pub fn observe_context_overflow(config: &AgentConfig, estimated_tokens: usize) {
 
 - [ ] **Step 6: Run tests and fix compilation**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core effective_max`
 Expected: PASS
 
 - [ ] **Step 7: Commit**
@@ -651,7 +644,6 @@ Expected: PASS
 
 - [ ] **Step 5: Run tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core`
 Expected: PASS
 
 - [ ] **Step 6: Commit**
@@ -802,7 +794,6 @@ Expected: PASS — fix any borrow/channel type issues.
 
 - [ ] **Step 7: Run tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core`
 Expected: PASS
 
 - [ ] **Step 8: Commit**
@@ -864,7 +855,6 @@ Expected: PASS
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -975,7 +965,6 @@ The key borrow challenge: `emitter.context.messages()` borrows `emitter`, but `e
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -1030,7 +1019,6 @@ Add to the test module in `turn_loop.rs`:
 
 - [ ] **Step 3: Run tests to verify they fail**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core should_recover_from`
 Expected: FAIL — function doesn't exist (or Plan A not done — see prerequisite).
 
 - [ ] **Step 4: Implement `should_recover_from_overflow`**
@@ -1156,7 +1144,6 @@ If the variant is named differently (e.g., `AiError::Other` or `AiError::Custom`
 
 - [ ] **Step 8: Run tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core`
 Expected: PASS
 
 - [ ] **Step 9: Commit**
@@ -1266,7 +1253,6 @@ let max_retry_attempts = config
 
 - [ ] **Step 6: Run build and tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core`
 Expected: PASS
 
 Run: `cargo build -p neo-agent`
@@ -1285,12 +1271,11 @@ git commit -m "feat(compaction): configurable max_rounds and max_retry_attempts"
 
 - [ ] **Step 1: Run focused tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core`
 Expected: PASS
 
 - [ ] **Step 2: Run CRAP gate**
 
-Run: `cargo run -p xtask -- crap`
+Run: `cargo crap`
 Expected: No function with CRAP > 30. If any new function exceeds, simplify it.
 
 Check the artifacts:
@@ -1299,12 +1284,12 @@ Check the artifacts:
 
 - [ ] **Step 3: Run coverage**
 
-Run: `cargo run -p xtask -- coverage`
+Run: `cargo llvm-cov nextest --workspace --all-features`
 Expected: LCOV file generated at `target/llvm-cov/lcov.info`.
 
 - [ ] **Step 4: Run parity check**
 
-Run: `cargo run -p xtask -- parity`
+Run: `cargo fmt --all --check`
 Expected: PASS — ensure any new config examples in `examples/` match.
 
 - [ ] **Step 5: Final commit if any cleanup**

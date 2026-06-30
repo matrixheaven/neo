@@ -198,7 +198,6 @@ fn code_block_in_list_renders_within_width() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui code_block
 ```
 
 Expected: tests fail because the new behavior is not implemented yet.
@@ -366,7 +365,6 @@ fn fit_ansi_line_to_width(line: &str, width: usize) -> String {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui code_block
 ```
 
 Expected: tests pass.
@@ -388,7 +386,6 @@ git commit -m "feat(neo-tui): render markdown code blocks as rounded boxes"
 - [ ] **Step 1: Run all markdown tests**
 
 ```bash
-cargo run -p xtask -- test -p neo-tui markdown
 ```
 
 Expected: all tests pass. If existing tests asserted on `` ``` `` markers, update
@@ -397,7 +394,7 @@ those assertions to match the new box style.
 - [ ] **Step 2: Run the neo-tui check**
 
 ```bash
-cargo run -p xtask -- check --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 Expected: fmt, clippy, and nextest all pass. Fix any formatting or clippy

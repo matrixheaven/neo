@@ -6,7 +6,6 @@
 
 **Architecture:** Five-phase refactoring ordered by blast radius — low-risk renames first, then primitive consolidation, then module splits, then the chrome.rs decomposition, and finally the transcript event handler extraction. Every phase produces a compilable, tested crate. Cross-crate impact is limited to 2 files in neo-agent (`themes.rs`, `modes/interactive.rs`) with ~12 total references.
 
-**Tech Stack:** Rust edition 2024, `cargo run -p xtask -- test -p neo-tui` for verification, `cargo fmt --all --check` for formatting, `cargo check -p neo-agent` for cross-crate verification.
 
 ---
 
@@ -114,7 +113,6 @@ src/
 Before starting, establish the test baseline:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui
 ```
 
 Expected: All neo-tui tests pass. Record the pass count for later comparison.
@@ -199,7 +197,6 @@ use crate::diff_model::{DiffModel, DiffRenderLine, DiffRenderLineKind, DiffRende
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo check -p neo-tui && cargo run -p xtask -- test -p neo-tui`
 Expected: Zero errors, all tests pass.
 
 - [ ] **Step 5: Commit**
@@ -279,7 +276,6 @@ In `crates/neo-tui/src/transcript/pane.rs` around line 963 (doc comment), change
 
 - [ ] **Step 5: Verify**
 
-Run: `cargo check -p neo-tui && cargo run -p xtask -- test -p neo-tui`
 Expected: Zero errors, all tests pass.
 
 - [ ] **Step 6: Commit**
@@ -330,7 +326,6 @@ Note: Some tests may reference `neo_tui::` as the crate name (e.g., in `use neo_
 
 - [ ] **Step 5: Verify**
 
-Run: `cargo check -p neo-tui && cargo run -p xtask -- test -p neo-tui`
 Expected: Zero errors, all tests pass.
 
 - [ ] **Step 6: Commit**
@@ -414,7 +409,6 @@ Update any matches to `crate::dialogs::Question*`.
 
 - [ ] **Step 5: Verify**
 
-Run: `cargo check -p neo-tui && cargo run -p xtask -- test -p neo-tui`
 Expected: Zero errors, all tests pass.
 
 - [ ] **Step 6: Commit**
@@ -626,7 +620,6 @@ Fix errors iteratively until `cargo check -p neo-tui` passes.
 
 - [ ] **Step 13: Full verification**
 
-Run: `cargo check -p neo-tui && cargo check -p neo-agent && cargo run -p xtask -- test -p neo-tui && cargo fmt --all --check`
 Expected: Zero errors, all tests pass, formatting clean.
 
 - [ ] **Step 14: Commit**
@@ -740,7 +733,6 @@ Expected: Zero errors. All existing `crate::input::InputEvent`, `crate::input::K
 
 - [ ] **Step 6: Full verification**
 
-Run: `cargo run -p xtask -- test -p neo-tui && cargo fmt --all --check`
 Expected: All tests pass.
 
 - [ ] **Step 7: Commit**
@@ -826,7 +818,6 @@ find crates/neo-tui/src -name '*.rs' -exec sed -i '' 's/crate::image::/crate::te
 
 - [ ] **Step 9: Verify**
 
-Run: `cargo check -p neo-tui && cargo run -p xtask -- test -p neo-tui && cargo fmt --all --check`
 Expected: Zero errors, all tests pass.
 
 - [ ] **Step 10: Commit**
@@ -1147,7 +1138,6 @@ Fix iteratively.
 
 - [ ] **Step 22: Full verification**
 
-Run: `cargo check -p neo-tui && cargo check -p neo-agent && cargo run -p xtask -- test -p neo-tui && cargo fmt --all --check`
 Expected: Zero errors, all tests pass.
 
 - [ ] **Step 23: Commit**
@@ -1237,7 +1227,6 @@ Delete lines 501–937 (the `apply_agent_event` method) from `crates/neo-tui/src
 
 - [ ] **Step 5: Verify**
 
-Run: `cargo check -p neo-tui && cargo check -p neo-agent && cargo run -p xtask -- test -p neo-tui && cargo fmt --all --check`
 Expected: Zero errors, all tests pass. No API changes.
 
 - [ ] **Step 6: Commit**
@@ -1258,7 +1247,6 @@ public with the same signature — only the impl location changes."
 
 ```bash
 cargo check --workspace --all-features
-cargo run -p xtask -- test -p neo-tui
 cargo check -p neo-agent
 cargo fmt --all --check
 ```

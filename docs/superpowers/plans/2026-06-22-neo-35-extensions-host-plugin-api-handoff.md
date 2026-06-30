@@ -6,7 +6,7 @@
 
 **Architecture:** Build a first-class extension subsystem in `neo-agent-core` around an `ExtensionManager`, a stable process/JSON-RPC host protocol, explicit capability grants, and a contribution registry. The product API should feel like `docs/pi` host plugins, but the runtime should remain language-agnostic and process-isolated rather than embedding a JS/TS module loader.
 
-**Tech Stack:** Rust 2024, `tokio`, JSONL/JSON-RPC primitives from `neo_agent_core::rpc`, existing Neo TUI dialog infrastructure, `serde`/`schemars` for wire types, `crossterm` input handling, and focused `nextest` runs through `cargo run -p xtask -- test`.
+**Tech Stack:** Rust 2024, `tokio`, JSONL/JSON-RPC primitives from `neo_agent_core::rpc`, existing Neo TUI dialog infrastructure, `serde`/`schemars` for wire types, `crossterm` input handling, and focused `nextest` runs through `cargo nextest run`.
 
 ---
 
@@ -1381,7 +1381,6 @@ The example should:
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core extension_
 ```
 
 Expected: extension manifest, process, manager, lifecycle, and event tests pass.
@@ -1391,7 +1390,6 @@ Expected: extension manifest, process, manager, lifecycle, and event tests pass.
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent cli_commands extensions
 ```
 
 Expected:
@@ -1406,7 +1404,6 @@ Expected:
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent mock_provider_e2e extension
 ```
 
 Expected:
@@ -1430,8 +1427,6 @@ Expected: clean formatting.
 If runtime changes touch common tool execution, permissions, or interactive input routing, run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core runtime_turn
-cargo run -p xtask -- test -p neo-agent interactive
 ```
 
 Do not run full CI for this task unless the implementation becomes a cross-workspace refactor beyond the files above.
@@ -1470,7 +1465,7 @@ Before marking NEO-35 complete, verify:
 - Extension tools use normal Neo tool approval.
 - Event failures are isolated.
 - Disabled or unhealthy extensions do not contribute tools/commands/shortcuts.
-- Tests use `cargo run -p xtask -- test`, not bare `cargo test`.
+- Tests use `cargo nextest run`, not bare `cargo test`.
 - No git mutation commands are run unless the user explicitly authorizes the exact command.
 
 ## Execution Notes

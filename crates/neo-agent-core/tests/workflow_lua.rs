@@ -56,7 +56,7 @@ fn lua_workflow_runner_does_not_stub_runtime_host_apis() {
             local audit = neo.swarm({ description = "audit", items = {"a"}, prompt_template = "{{item}}" })
             assert(audit:has_failures() == false)
             local fix = neo.delegate({ task = "fix issue" })
-            neo.verify("cargo run -p xtask -- test -p neo-agent-core workflow")
+            neo.verify("cargo nextest run -p neo-agent-core --test workflow_lua workflow")
             neo.report({ audit = audit:summary(), fix = fix:summary() })
             "#,
         )

@@ -65,7 +65,6 @@ fn empty_json_args_do_not_show_parens() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo run -p xtask -- test -p neo-tui empty_json_args`
 Expected: FAIL — the header contains `({})`.
 
 - [ ] **Step 3: Fix `extract_key_argument`**
@@ -106,12 +105,10 @@ fn extract_key_argument(arguments: Option<&str>) -> Option<(String, bool)> {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo run -p xtask -- test -p neo-tui empty_json_args`
 Expected: PASS.
 
 - [ ] **Step 5: Run broader tool card tests to check no regressions**
 
-Run: `cargo run -p xtask -- test -p neo-tui tool_cards`
 Expected: All existing tests still pass (tools with real arguments still show them).
 
 ---
@@ -184,7 +181,6 @@ fn result_chip(state: &ToolCallState) -> String {
 
 - [ ] **Step 3: Run tool card tests**
 
-Run: `cargo run -p xtask -- test -p neo-tui tool_cards`
 Expected: PASS. If any existing test asserts `+N -M` for Write, update it to assert `N lines` instead.
 
 - [ ] **Step 4: Build check**
@@ -403,7 +399,6 @@ This goes between the existing `rows.push(Line::raw(""));` after details and the
 Run: `cargo build -p neo-tui`
 Expected: Clean build. Fix any `ApprovalPromptData` construction sites that are missing the new fields (search for `ApprovalPromptData {` across the codebase).
 
-Run: `cargo run -p xtask -- test -p neo-tui`
 Expected: All tests pass.
 
 ---
@@ -421,7 +416,6 @@ Expected: No matches in `pane.rs` (the string was replaced). If found elsewhere,
 
 - [ ] **Step 2: Run full TUI test suite**
 
-Run: `cargo run -p xtask -- test -p neo-tui`
 Expected: PASS.
 
 ---
@@ -554,7 +548,6 @@ In `crates/neo-tui/src/transcript/mod.rs`, ensure `exit_plan_mode_header_spans` 
 Run: `cargo build -p neo-tui`
 Expected: Clean build.
 
-Run: `cargo run -p xtask -- test -p neo-tui`
 Expected: All tests pass. Add a test for the new header:
 
 ```rust
@@ -587,8 +580,6 @@ fn exit_plan_mode_header_shows_current_plan() {
 
 - [ ] **Step 7: Run full check**
 
-Run: `cargo run -p xtask -- test -p neo-tui`
-Run: `cargo run -p xtask -- test -p neo-agent-core`
 Expected: All tests pass.
 
 ---

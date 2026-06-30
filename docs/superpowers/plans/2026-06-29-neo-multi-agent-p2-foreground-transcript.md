@@ -6,7 +6,6 @@
 
 **Architecture:** Keep runtime state in `neo-agent-core`, but make the TUI consume normalized `AgentEvent` variants through `TranscriptPane::apply_agent_event`. Add focused transcript components for single delegates and swarms instead of overloading generic tool body rendering. `ToolCallComponent` remains the normal tool card path, but delegate events upsert child-agent components inside the transcript store.
 
-**Tech Stack:** Rust 2024, `neo-tui` components, `AgentEvent`, `TranscriptPane`, `Line`/`Span`, `TuiTheme`, focused `cargo run -p xtask -- test -p neo-tui <filter>`.
 
 ---
 
@@ -264,7 +263,6 @@ fn delegate_card_renders_kimi_style_running_summary() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui delegate_card_renders_kimi_style_running_summary
 ```
 
 Expected: PASS.
@@ -491,7 +489,6 @@ fn swarm_card_renders_working_after_child_runs() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui swarm_card_renders
 ```
 
 Expected: PASS.
@@ -598,7 +595,6 @@ Add a test-only helper named `render_to_plain_text_for_test` on `TranscriptPane`
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui transcript_pane_upserts_delegate_card_from_events
 ```
 
 Expected: PASS.
@@ -653,7 +649,6 @@ assert!(events.iter().any(|event| matches!(event, AgentEvent::DelegateFinished {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core delegate_emits_foreground_events
 ```
 
 Expected: PASS.
@@ -665,7 +660,6 @@ Expected: PASS.
 - [ ] Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui multi_agent_transcript
 ```
 
 Expected: PASS.
@@ -673,7 +667,6 @@ Expected: PASS.
 - [ ] Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core delegate_emits_foreground_events
 ```
 
 Expected: PASS.
@@ -681,7 +674,7 @@ Expected: PASS.
 - [ ] Run:
 
 ```bash
-cargo run -p xtask -- check
+cargo fmt --all --check
 ```
 
 Expected: PASS unless unrelated dirty-worktree work breaks the global check. Report unrelated breakage without reverting files.

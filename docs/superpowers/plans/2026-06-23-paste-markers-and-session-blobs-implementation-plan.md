@@ -6,7 +6,7 @@
 
 **Architecture:** 先重构 session 存储路径（从平铺 `.jsonl` 改为 `session_<uuid>/transcript.jsonl`，并把 `plans/` 迁到 session 目录），再基于新目录引入 blob 存储。输入框仍用纯字符串，通过 marker 正则把占位符识别为单个 grapheme；图片粘贴键触发时读取系统剪贴板，支持识图的模型保存 blob 并插入占位符，否则走普通粘贴或 footer 提示。
 
-**Tech Stack:** Rust 2024, `tokio`, `crossterm`, `serde_json`, `neo-tui`, `neo-agent-core`, `neo-ai`, `xtask`/`nextest`。
+**Tech Stack:** Rust 2024, `tokio`, `crossterm`, `serde_json`, `neo-tui`, `neo-agent-core`, `neo-ai`, /`nextest`。
 
 ---
 
@@ -22,7 +22,7 @@
 
 - 不要运行 `git reset`, `git checkout`, `git restore`, `git stash`, `git clean`, `git rebase`, `git rm` 等会修改 worktree 的命令。
 - `git add`/`git commit` 必须得到用户逐条授权。
-- 测试统一通过 `cargo run -p xtask -- test ...` 运行，禁止用裸 `cargo test` 作为完成证据。
+- 测试统一通过 `cargo nextest run ...` 运行，禁止用裸 `cargo test` 作为完成证据。
 - 运行测试前先 `icm recall-context "paste markers session blobs" --limit 5`。
 - 如果解决了一个有意义的错误，先用 `icm store -t errors-resolved ...` 保存。
 - 任务完成后用 `icm store -t context-neo ...` 保存总结。
@@ -268,7 +268,6 @@ Ok(transcript_path)
 
 - [ ] **Step 3: 运行相关测试**
 
-Run: `cargo run -p xtask -- test -p neo-agent sessions 2>&1 | tail -40`
 Expected: 已有测试需要同步更新，可能会失败，先记录失败点。
 
 ### Task 1.3：更新 `session_id_from_path`
@@ -308,7 +307,6 @@ fn session_id_from_path(path: &Path) -> Option<String> {
 
 - [ ] **Step 3: 运行 focused 测试**
 
-Run: `cargo run -p xtask -- test -p neo-agent session_jsonl 2>&1 | tail -40`
 
 ### Task 1.4：更新 `load_session_transcript` / `fork_session_transcript`
 
@@ -333,7 +331,6 @@ let session_path = bucket_dir.join(&session_id).join("transcript.jsonl");
 
 - [ ] **Step 3: 运行 focused 测试**
 
-Run: `cargo run -p xtask -- test -p neo-agent sessions 2>&1 | tail -60`
 
 ### Task 1.5：更新 prompt-history 收集逻辑
 
@@ -362,7 +359,6 @@ if entry.is_dir() && name.starts_with("session_") {
 
 - [ ] **Step 3: 运行相关测试**
 
-Run: `cargo run -p xtask -- test -p neo-agent prompt_history 2>&1 | tail -40`
 
 ### Task 1.6：更新 Plan Mode 路径
 
@@ -393,7 +389,6 @@ Plan mode 需要知道当前 session 的目录。`AgentConfig` 或 plan tool con
 
 - [ ] **Step 4: 运行 plan mode 测试**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core plan_mode 2>&1 | tail -60`
 
 ### Task 1.7：更新 CLI session 管理命令
 
@@ -414,7 +409,6 @@ cx grep --pattern "session_" --path crates/neo-agent/src --output-mode files_wit
 
 - [ ] **Step 3: 运行 CLI 测试**
 
-Run: `cargo run -p xtask -- test -p neo-agent cli_commands 2>&1 | tail -60`
 
 ### Task 1.8：Session 目录化集成测试
 
@@ -435,7 +429,6 @@ async fn new_session_uses_directory_layout() {
 
 - [ ] **Step 2: 运行测试**
 
-Run: `cargo run -p xtask -- test -p neo-agent sessions 2>&1 | tail -60`
 
 ---
 
@@ -538,7 +531,6 @@ mod tests {
 
 - [ ] **Step 3: 运行测试**
 
-Run: `cargo run -p xtask -- test -p neo-tui paste 2>&1 | tail -40`
 
 ### Task 2.2：把 `neo-tui/src/paste.rs` 接入 `lib.rs`
 
@@ -553,7 +545,7 @@ pub mod paste;
 
 - [ ] **Step 2: 运行编译检查**
 
-Run: `cargo run -p xtask -- check --workspace 2>&1 | tail -60`
+Run: `cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1 | tail -60`
 
 ### Task 2.3：实现 `ImageAttachmentStore`
 
@@ -623,7 +615,6 @@ fn attachment_store_assigns_incrementing_ids() {
 
 - [ ] **Step 3: 运行测试**
 
-Run: `cargo run -p xtask -- test -p neo-tui paste 2>&1 | tail -40`
 
 ### Task 2.4：修改 `PromptState` 支持 marker 整体删除
 
@@ -721,7 +712,6 @@ fn backspace_selects_marker_first_then_deletes() {
 
 - [ ] **Step 7: 运行测试**
 
-Run: `cargo run -p xtask -- test -p neo-tui chrome 2>&1 | tail -60`
 
 ### Task 2.5：输入框渲染 marker 高亮
 
@@ -747,7 +737,6 @@ let highlighted = if let Some((start, end)) = prompt.selected_marker {
 
 - [ ] **Step 2: 运行渲染测试**
 
-Run: `cargo run -p xtask -- test -p neo-tui transcript_pane 2>&1 | tail -60`
 
 ### Task 2.6：多行文本粘贴折叠
 
@@ -823,7 +812,6 @@ async fn large_paste_becomes_paste_marker() {
 
 - [ ] **Step 5: 运行测试**
 
-Run: `cargo run -p xtask -- test -p neo-agent interactive 2>&1 | tail -60`
 
 ### Task 2.7：展开 paste marker 再次粘贴
 
@@ -881,7 +869,6 @@ async fn repaste_expands_existing_marker() {
 
 - [ ] **Step 4: 运行测试**
 
-Run: `cargo run -p xtask -- test -p neo-agent interactive 2>&1 | tail -60`
 
 ### Task 2.8：图片粘贴键绑定
 
@@ -920,7 +907,6 @@ KeybindingAction::PasteImage => {
 
 - [ ] **Step 4: 运行 keybindings 测试**
 
-Run: `cargo run -p xtask -- test -p neo-tui input 2>&1 | tail -60`
 
 ### Task 2.9：跨平台剪贴板图片读取
 
@@ -1057,7 +1043,7 @@ mod clipboard;
 
 - [ ] **Step 6: 运行编译**
 
-Run: `cargo run -p xtask -- check -p neo-agent 2>&1 | tail -60`
+Run: `cargo fmt --all --check -p neo-agent 2>&1 | tail -60`
 
 ### Task 2.10：图片保存为 blob
 
@@ -1114,7 +1100,7 @@ sha2 = "0.10"
 
 - [ ] **Step 3: 运行编译**
 
-Run: `cargo run -p xtask -- check -p neo-agent 2>&1 | tail -60`
+Run: `cargo fmt --all --check -p neo-agent 2>&1 | tail -60`
 
 ### Task 2.11：处理图片粘贴键流程
 
@@ -1180,8 +1166,7 @@ fn model_supports_images(&self) -> bool {
 
 - [ ] **Step 4: 运行编译与 focused 测试**
 
-Run: `cargo run -p xtask -- check -p neo-agent 2>&1 | tail -60`
-Run: `cargo run -p xtask -- test -p neo-agent interactive 2>&1 | tail -60`
+Run: `cargo fmt --all --check -p neo-agent 2>&1 | tail -60`
 
 ### Task 2.12：图片尺寸检测
 
@@ -1210,7 +1195,6 @@ JPEG：使用 `image` crate 或简单解析 SOF marker。
 
 - [ ] **Step 3: 运行测试**
 
-Run: `cargo run -p xtask -- test -p neo-agent image_blob 2>&1 | tail -40`
 
 ### Task 2.13：扩展 `AgentMessage` / `ImageRef` 支持 Blob
 
@@ -1250,7 +1234,7 @@ impl AgentMessage {
 
 - [ ] **Step 4: 运行编译**
 
-Run: `cargo run -p xtask -- check -p neo-agent-core 2>&1 | tail -60`
+Run: `cargo fmt --all --check -p neo-agent-core 2>&1 | tail -60`
 
 ### Task 2.14：把占位符展开为 `Vec<Content>`
 
@@ -1331,7 +1315,6 @@ fn expand_mixed_text_and_image() {
 
 - [ ] **Step 4: 运行测试**
 
-Run: `cargo run -p xtask -- test -p neo-agent prompt_parts 2>&1 | tail -40`
 
 ### Task 2.15：改造 `TurnRequest.prompt` 为 `Vec<Content>`
 
@@ -1375,7 +1358,7 @@ async fn append_user_event(
 
 - [ ] **Step 5: 运行编译**
 
-Run: `cargo run -p xtask -- check -p neo-agent -p neo-agent-core 2>&1 | tail -80`
+Run: `cargo fmt --all --check -p neo-agent -p neo-agent-core 2>&1 | tail -80`
 
 ### Task 2.16：Runtime 中把 `ImageRef::Blob` 解析为 base64
 
@@ -1421,7 +1404,6 @@ fn resolve_image_blobs(content: Vec<Content>, session_dir: Option<&Path>) -> Vec
 
 - [ ] **Step 4: 运行 runtime 测试**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core runtime 2>&1 | tail -80`
 
 ### Task 2.17：Transcript 支持图文混合用户消息
 
@@ -1468,7 +1450,6 @@ pub fn push_user_message_parts(&mut self, parts: Vec<UserMessagePart>) {
 
 - [ ] **Step 5: 运行测试**
 
-Run: `cargo run -p xtask -- test -p neo-tui transcript 2>&1 | tail -80`
 
 ### Task 2.18：把用户消息以 parts 形式推入 transcript
 
@@ -1500,7 +1481,6 @@ self.tui.transcript_mut().push_user_message_parts(parts);
 
 - [ ] **Step 3: 运行集成测试**
 
-Run: `cargo run -p xtask -- test -p neo-agent interactive 2>&1 | tail -80`
 
 ### Task 2.19：JSONL 反序列化时恢复占位符
 
@@ -1541,7 +1521,6 @@ impl AgentMessage {
 
 - [ ] **Step 3: 运行测试**
 
-Run: `cargo run -p xtask -- test -p neo-tui session_jsonl 2>&1 | tail -80`
 
 ### Task 2.20：缺失 blob 时回退到占位符文本
 
@@ -1588,7 +1567,6 @@ fn resolve_user_parts(
 
 - [ ] **Step 3: 运行测试**
 
-Run: `cargo run -p xtask -- test -p neo-tui image_protocols 2>&1 | tail -60`
 
 ### Task 2.21：集成测试覆盖图片粘贴
 
@@ -1614,7 +1592,6 @@ async fn image_placeholder_submitted_as_user_image_content() {
 
 - [ ] **Step 2: 运行测试**
 
-Run: `cargo run -p xtask -- test -p neo-agent paste_image 2>&1 | tail -80`
 
 ---
 
@@ -1628,31 +1605,28 @@ Run: `cargo fmt --all`
 
 - [ ] **Step 2: 运行 clippy**
 
-Run: `cargo run -p xtask -- check --workspace 2>&1 | tail -80`
+Run: `cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1 | tail -80`
 
 ### Task 3.2：Focused 测试
 
 - [ ] **Step 1: neo-tui**
 
-Run: `cargo run -p xtask -- test -p neo-tui 2>&1 | tail -60`
 
 - [ ] **Step 2: neo-agent-core**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core 2>&1 | tail -60`
 
 - [ ] **Step 3: neo-agent**
 
-Run: `cargo run -p xtask -- test -p neo-agent 2>&1 | tail -60`
 
 ### Task 3.3：覆盖率与 CRAP（仅当生产代码行为改变时）
 
 - [ ] **Step 1: LCOV**
 
-Run: `cargo run -p xtask -- coverage 2>&1 | tail -60`
+Run: `cargo llvm-cov nextest --workspace --all-features 2>&1 | tail -60`
 
 - [ ] **Step 2: CRAP**
 
-Run: `cargo run -p xtask -- crap 2>&1 | tail -60`
+Run: `cargo crap 2>&1 | tail -60`
 
 ### Task 3.4：迁移脚本测试
 
@@ -1680,11 +1654,11 @@ Expected: 输出 sessions_moved: 1, plans_moved: 1
 Run: `find /tmp/neo-migrate-fixture -type f`
 Expected: `wd_test_123/session_00000000-.../transcript.jsonl` 和 `wd_test_123/session_00000000-.../plans/...`
 
-### Task 3.5：最终 CI Gate
+### Task 3.5：最终验证
 
-- [ ] **Step 1: 运行 xtask ci**
+- [ ] **Step 1: 运行 nextest**
 
-Run: `cargo run -p xtask -- ci 2>&1 | tail -80`
+Run: `cargo nextest run --workspace --all-features 2>&1 | tail -80`
 Expected: 全部通过
 
 ---

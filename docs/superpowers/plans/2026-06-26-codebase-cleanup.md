@@ -6,14 +6,14 @@
 
 **Architecture:** Cleanup proceeds in 14 phases ordered by risk: pure deletions first (P1–P4), stale comment fixes (P5), test cleanup (P6–P8), then logic consolidation (P9–P14). Each phase compiles independently. Dead-code deletions verify via `cargo check`; consolidation tasks verify via focused tests.
 
-**Tech Stack:** Rust 2024 edition, `cargo check` for compilation, `cargo run -p xtask -- test` for test verification, `cargo clippy` for lint.
+**Tech Stack:** Rust 2024 edition, `cargo check` for compilation, `cargo nextest run` for test verification, `cargo clippy` for lint.
 
 ---
 
 ## Pre-Flight
 
 **Before starting any task, read these files:**
-- `AGENTS.md` — workspace rules (especially: never `git checkout`/`git restore` files; use `xtask test`)
+- `AGENTS.md` — workspace rules (especially: never `git checkout`/`git restore` files; use `cargo nextest run`)
 - `crates/neo-ai/src/lib.rs` — re-export map for neo-ai
 - `crates/neo-agent-core/src/lib.rs` — re-export map for agent-core
 - `crates/neo-agent-core/src/mode/mod.rs` — explicit re-export list to edit
@@ -24,7 +24,6 @@
 cargo check -p <crate-name> 2>&1 | head -30
 
 # After test-modifying tasks:
-cargo run -p xtask -- test -p <crate-name> <test-filter>
 
 # After each phase completion:
 cargo clippy -p <crate-name> -- -D warnings 2>&1 | head -30
@@ -369,7 +368,6 @@ In `crates/neo-tui/src/chrome.rs`, search for `PlanModeCancelled`. Delete the ma
 Run: `cargo check --workspace 2>&1 | head -50`
 Expected: PASS — the compiler will surface any remaining references.
 
-Run: `cargo run -p xtask -- test -p neo-agent-core events`
 Expected: PASS
 
 - [ ] **Step 7: Commit**
@@ -790,7 +788,7 @@ Ensure `tempfile` is available as a dev-dependency (check `Cargo.toml`).
 
 - [ ] **Step 3: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core --lib todo`
+Run: `cargo nextest run -p neo-agent-core --lib todo`
 Expected: PASS
 
 - [ ] **Step 4: Commit**
@@ -814,7 +812,7 @@ Same pattern as Task 7.1 — replace all `std::env::current_dir()` with `tempfil
 
 - [ ] **Step 2: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core --lib background_tasks`
+Run: `cargo nextest run -p neo-agent-core --lib background_tasks`
 Expected: PASS
 
 - [ ] **Step 3: Commit**
@@ -842,9 +840,9 @@ let dir = tempfile::tempdir().unwrap();
 
 - [ ] **Step 2: Verify**
 
-Run: `cargo run -p xtask -- test -p neo-agent-core --lib skills_manager`
-Run: `cargo run -p xtask -- test -p neo-agent-core --lib sessions`
-Run: `cargo run -p xtask -- test -p neo-agent-core --lib ask_user`
+Run: `cargo nextest run -p neo-agent-core --lib skills_manager`
+Run: `cargo nextest run -p neo-agent-core --lib sessions`
+Run: `cargo nextest run -p neo-agent-core --lib ask_user`
 Expected: PASS for all.
 
 - [ ] **Step 3: Commit**
@@ -943,7 +941,6 @@ use crate::config::{expand_user_path, user_home};
 Run: `cargo check -p neo-agent 2>&1 | head -30`
 Expected: PASS
 
-Run: `cargo run -p xtask -- test -p neo-agent`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -1014,8 +1011,7 @@ Same — replace `message_text(message)` with `message.text()`. Delete local fun
 Run: `cargo check --workspace 2>&1 | head -30`
 Expected: PASS
 
-Run: `cargo run -p xtask -- test -p neo-agent-core --lib`
-Run: `cargo run -p xtask -- test -p neo-agent`
+Run: `cargo nextest run -p neo-agent-core --lib`
 Expected: PASS
 
 - [ ] **Step 7: Commit**
@@ -1055,7 +1051,6 @@ Search for calls to `validate_mcp_server(` in config.rs and surrounding code. Re
 Run: `cargo check -p neo-agent 2>&1 | head -30`
 Expected: PASS
 
-Run: `cargo run -p xtask -- test -p neo-agent`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -1184,8 +1179,6 @@ Expected: PASS
 
 - [ ] **Step 7: Run tests**
 
-Run: `cargo run -p xtask -- test -p neo-agent`
-Run: `cargo run -p xtask -- test -p neo-tui`
 Expected: PASS
 
 - [ ] **Step 8: Commit**
@@ -1241,7 +1234,6 @@ Update all code that imports or references `DynamicInjector`, `InjectionManager`
 Run: `cargo check --workspace 2>&1 | head -30`
 Expected: PASS
 
-Run: `cargo run -p xtask -- test -p neo-agent-core`
 Expected: PASS
 
 - [ ] **Step 6: Commit**
@@ -1283,7 +1275,7 @@ Expected: Zero hits in production code (non-test).
 
 - [ ] **Step 5: Focused test run**
 
-Run: `cargo run -p xtask -- test --workspace --all-features`
+Run: `cargo nextest run --workspace --all-features`
 Expected: PASS — all tests green.
 
 - [ ] **Step 6: Final commit**

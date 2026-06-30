@@ -35,7 +35,6 @@ markers (`` ``` ``) are removed entirely.
   正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文
 
   ╭─ bash ───────────────────────────────────────────────────╮
-  │  cargo run -p xtask -- test -p neo-tui plan_box          │
   │                                                          │
   │  # 11 tests run: 11 passed, 492 skipped                  │
   ╰──────────────────────────────────────────────────────────╯
@@ -217,7 +216,6 @@ Add tests to the `#[cfg(test)]` module in `crates/neo-tui/src/markdown.rs`:
 Run focused tests with:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui markdown
 ```
 
 ## Trade-offs Considered

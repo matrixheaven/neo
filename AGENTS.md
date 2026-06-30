@@ -15,7 +15,7 @@ Read [CX.md](../../.kimi-code/CX.md) and [RTK.md](../../.kimi-code/RTK.md). Use 
 
 1. Recall: `icm recall-context "<task>" --limit 5`.
 2. Scope your own work only.
-3. Verify proportionally (tiers below). Use `cargo run -p xtask -- test ...`; never use bare `cargo test` as evidence.
+3. Verify proportionally (tiers below). Use the narrowest direct `cargo nextest run ...` target; never use bare `cargo test` as evidence.
 4. Commit: after verification passes, commit the changes with a conventional commit message (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:` prefix). One logical task = one commit. Don't batch unrelated changes.
 
 ### Verification tiers — err toward less testing
@@ -23,14 +23,10 @@ Read [CX.md](../../.kimi-code/CX.md) and [RTK.md](../../.kimi-code/RTK.md). Use 
 | Tier | When | What to run |
 |------|------|-------------|
 | **Trivial** | typo, doc edit, rename, config-only | No tests. Build check optional. |
-| **Medium** | single function, localized fix, small feature | Focused tests for touched crate only: `cargo run -p xtask -- test -p <crate> <filter>` |
-| **Complex** | cross-module refactor, arch change, new subsystem | Focused tests → `cargo run -p xtask -- coverage` → `cargo run -p xtask -- crap`. `ci` only as final gate. |
+| **Medium** | single function, localized fix, small feature | One explicit target: `cargo nextest run -p <crate> --test <target> <filter>` or `--lib <filter>` / `--bin <bin> <filter>` |
+| **Complex** | cross-module refactor, arch change, new subsystem | Start with the smallest explicit targets for each touched boundary. Add more explicit targets only when evidence points there. |
 
-Never widen scope to "make sure nothing broke" — that's CI's job.
-
-**CRAP policy:** production code under `crates/` must have no function with CRAP > 30 (scored from `target/llvm-cov/lcov.info`). No allowlists or threshold hikes. Simplify, delete obsolete paths, or add real behavior tests.
-
-Artifacts: `target/llvm-cov/lcov.info`, `target/crap/crap-crates.md`, `target/crap/crap-crates.json`.
+Never widen scope to "make sure nothing broke" — that's CI's job. A package plus filter is not evidence unless the command also names `--lib`, `--bin <bin>`, or `--test <target>`.
 
 ## Crates
 
@@ -40,24 +36,19 @@ Artifacts: `target/llvm-cov/lcov.info`, `target/crap/crap-crates.md`, `target/cr
 | `neo-agent-core` | `AgentRuntime`, `ToolRegistry`, built-in tools, `PermissionMode`, sessions, MCP/extension adapters, skills, RPC, export. |
 | `neo-tui` | Terminal UI components, input, diff rendering, inline image encoding. |
 | `neo-agent` | The `neo` binary: CLI parsing, config, dispatch to print/run/resume/TUI modes. |
-| `xtask` | Maintenance: check, test, coverage, crap, ci, parity, release-smoke. |
-
 ## Build & test commands
 
 ```bash
 cargo build -p neo-agent                    # build binary
-cargo run -p xtask -- check                 # default gate (xtask only)
-cargo run -p xtask -- check --workspace     # full fmt/clippy/nextest
-cargo run -p xtask -- test -p <crate> [filter]  # focused tests
-cargo run -p xtask -- test --workspace --all-features  # all tests
-cargo run -p xtask -- coverage              # LCOV
-cargo run -p xtask -- crap                  # CRAP gate
-cargo run -p xtask -- ci                    # full local CI
-cargo run -p xtask -- parity                # docs/examples parity
-cargo run -p xtask -- release-smoke         # local release check
+cargo fmt --all --check                     # formatting
+cargo clippy -p <crate> --lib -- -D warnings           # library lint
+cargo clippy -p <crate> --test <target> -- -D warnings # integration-test lint
+cargo nextest run -p <crate> --test <target> <filter>  # integration test
+cargo nextest run -p <crate> --lib <filter>            # library unit test
+cargo nextest run -p <crate> --bin <bin> <filter>      # binary target test
 ```
 
-Test runner is `cargo-nextest` (install if missing; never fall back to `cargo test`). Deterministic model tests: `FakeModelClient` / `FakeHarness`. Resource-sensitive tests must be classified in `.config/nextest.toml`. Tests must not depend on shared cwd, ambient env, fixed ports, or other tests' side effects. Fixture lines in docs/examples: prefix `# xtask-parity: allow <reason>`.
+Test runner is `cargo-nextest` (install if missing; never fall back to `cargo test`). Test evidence must name exactly one package, exactly one target selector (`--lib`, `--bin <bin>`, or `--test <target>`), and at least one test-name filter. Deterministic model tests: `FakeModelClient` / `FakeHarness`. Resource-sensitive tests must be classified in `.config/nextest.toml`. Tests must not depend on shared cwd, ambient env, fixed ports, or other tests' side effects.
 
 ## Code style
 

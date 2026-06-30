@@ -6,7 +6,7 @@
 
 **Architecture:** Keep MCP configuration and connection behavior in `neo-agent`, not `neo-tui`. Extract the existing CLI MCP logic from `crates/neo-agent/src/modes/run.rs` into a reusable MCP service module, then build a `neo-tui` overlay state machine modeled after `ProviderManagerState`. `interactive.rs` should become the coordinator: slash command -> open overlay -> process actions -> call MCP service/config functions -> refresh local config -> update the overlay.
 
-**Tech Stack:** Rust 2024, `crossterm`-style Neo TUI overlays, `neo-tui` dialog components, `neo-agent` config helpers, existing MCP adapters from `neo-agent-core`, `tokio` for async tool discovery/probe, `nextest` through `cargo run -p xtask -- test`.
+**Tech Stack:** Rust 2024, `crossterm`-style Neo TUI overlays, `neo-tui` dialog components, `neo-agent` config helpers, existing MCP adapters from `neo-agent-core`, `tokio` for async tool discovery/probe, `nextest` through `cargo nextest run`.
 
 ---
 
@@ -93,7 +93,7 @@ If ICM fails because the sandbox cannot open its database, continue and mention 
 
 - Use `rtk` for shell commands.
 - Prefer `cx` for symbol navigation before broad reads.
-- Do not run bare `cargo test`; use `rtk cargo run -p xtask -- test ...`.
+- Do not run bare `cargo test`; use `rtk cargo nextest run ...`.
 - Do not run broad workspace tests for this task unless the implementation becomes cross-cutting enough to warrant them.
 - Do not perform git mutations unless the user gives explicit per-command authorization. This includes `git add`, `git commit`, `git push`, `git switch`, `git checkout`, `git reset`, `git stash`, `git clean`, `git rm`, `git merge`, and `git rebase`.
 - Preserve unrelated worktree changes. This repository is shared by multiple AI agents.
@@ -533,7 +533,6 @@ pub struct AddMcpServerInput {
 - [ ] Add focused tests for parsing and redaction:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent mcp_ops
 ```
 
 Use unit tests in `mcp_ops.rs` where possible:
@@ -618,7 +617,6 @@ pub enum McpManagerAction {
 - [ ] Add unit tests similar to `provider_manager.rs`:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-tui mcp_manager
 ```
 
 Required test cases:
@@ -954,21 +952,17 @@ Run only focused tests unless the implementation touches broader runtime code.
 Recommended commands:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-tui mcp_manager
-rtk cargo run -p xtask -- test -p neo-agent mcp
 rtk cargo fmt --all --check
 ```
 
 If you create a new generic form component:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-tui mcp_server_form
 ```
 
 If you touch runtime MCP registration:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core mcp
 ```
 
 Do not run full CI for this feature unless you significantly refactor MCP runtime or config loading.
@@ -1009,7 +1003,7 @@ Before final handoff/PR, verify:
 - [ ] Config refresh updates `local_config`.
 - [ ] Next agent turn can see newly saved enabled MCP servers.
 - [ ] CLI `neo mcp` behavior remains compatible.
-- [ ] Focused tests pass through `xtask`.
+- [ ] Focused tests pass with direct cargo commands.
 - [ ] Formatting check passes.
 - [ ] No unrelated files were edited.
 

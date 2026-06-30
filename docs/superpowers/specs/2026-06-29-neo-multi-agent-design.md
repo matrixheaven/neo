@@ -113,7 +113,7 @@ AgentIdentity
   display_name: String        # from built-in pool, e.g. Gibbs
   path: AgentPath             # /root/Gibbs or /root/swarm-1/Gibbs
   parent_id: AgentId | root
-  role: AgentRole             # coder, explorer, planner, harness, reviewer
+  role: AgentRole             # coder, explorer, planner, reviewer, orchestrator
 ```
 
 Internal IDs drive storage, resume, mailbox routing, and event correlation.
@@ -151,7 +151,7 @@ Rules:
 ```text
 Delegate
   task: string
-  role?: coder | explorer | planner | reviewer | harness
+  role?: coder | explorer | planner | reviewer | orchestrator
   mode?: foreground | background   # default foreground
   context?: inherit | summary | none
 ```
@@ -486,7 +486,7 @@ Initial profiles:
 | `explorer` | read/search/analyze only | no write/bash mutation by default |
 | `planner` | produce design or implementation plan | no write/bash mutation by default |
 | `reviewer` | inspect diffs, risks, tests | no write/bash mutation by default |
-| `harness` | run scripted workflow steps | host-controlled capabilities |
+| `orchestrator` | run scripted workflow steps | host-controlled capabilities |
 
 Permission rules:
 
@@ -582,7 +582,6 @@ local fix = neo.delegate({
   task = "Fix the highest-confidence issue from the audit summary."
 })
 
-neo.verify("cargo run -p xtask -- test -p neo-agent-core runtime")
 neo.report({ audit = audit:summary(), fix = fix:summary() })
 ```
 
@@ -758,7 +757,6 @@ V5 tests:
 - workflow failures persist enough state for clear reporting
 - verification helpers go through Neo's normal permission path
 
-Use focused `cargo run -p xtask -- test -p <crate> <filter>` targets during
 implementation. Do not widen to broad workspace gates unless the touched surface
 requires it.
 

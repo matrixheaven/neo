@@ -6,7 +6,7 @@
 
 **Architecture:** Neo already has runtime-level `steering_queue` and `follow_up_queue` support in `neo-agent-core`; this task should complete the product surface around that foundation. Keep the runtime append-only, route active-turn TUI input into the running runtime through an explicit side channel, render queue state in the TUI, and preserve JSONL replay semantics.
 
-**Tech Stack:** Rust 2024, `tokio`, `crossterm`, `neo-agent-core` runtime events, `neo-tui` transcript/chrome rendering, JSONL session replay, `xtask`/`nextest`/`llvm-cov`/CRAP gates.
+**Tech Stack:** Rust 2024, `tokio`, `crossterm`, `neo-agent-core` runtime events, `neo-tui` transcript/chrome rendering, JSONL session replay, /`nextest`/`llvm-cov`/CRAP gates.
 
 ---
 
@@ -55,7 +55,7 @@ rtk icm recall-context "NEO-24 message queue ctrl-s steer implementation" --limi
 
 - Use `rtk` for shell commands.
 - Use `cx` before broad file reads when navigating symbols.
-- Do not run bare `cargo test`; use `cargo run -p xtask -- test ...` through `rtk`.
+- Do not run bare `cargo test`; use `cargo nextest run ...` through `rtk`.
 - Do not perform git mutations unless the user gives explicit per-command authorization. This includes `git add`, `git commit`, `git push`, `git switch`, `git checkout`, `git reset`, `git stash`, `git clean`, `git rm`, `git merge`, and `git rebase`.
 - Do not preserve obsolete compatibility branches or duplicate models. Make one clean model.
 - Stay inside NEO-24 scope. Do not fix unrelated failures.
@@ -514,9 +514,6 @@ Suggested files:
 Required focused checks:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core queue
-rtk cargo run -p xtask -- test -p neo-agent interactive
-rtk cargo run -p xtask -- test -p neo-tui queue
 ```
 
 Adjust filters to actual test names after adding tests. Do not use bare `cargo test` as completion evidence.
@@ -524,9 +521,9 @@ Adjust filters to actual test names after adding tests. Do not use bare `cargo t
 Required repository gates before final completion:
 
 ```bash
-rtk cargo run -p xtask -- coverage
-rtk cargo run -p xtask -- crap
-rtk cargo run -p xtask -- ci
+rtk cargo llvm-cov nextest --workspace --all-features
+rtk cargo crap
+rtk cargo nextest run --workspace --all-features
 ```
 
 Artifacts to inspect:
@@ -559,7 +556,7 @@ Artifacts to inspect:
 - [ ] Queue state survives JSONL replay.
 - [ ] Transcript/chrome rendering shows count and FIFO order clearly.
 - [ ] Focused tests cover runtime, interactive routing, and rendering.
-- [ ] Verification commands ran through `xtask`.
+- [ ] Verification commands ran with direct cargo commands.
 
 ## Suggested ICM Store On Completion
 

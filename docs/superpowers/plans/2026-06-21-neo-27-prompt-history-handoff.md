@@ -6,7 +6,7 @@
 
 **Architecture:** Neo already has in-memory `PromptState` history and Up/Down keybindings. Add a small append-only JSONL prompt history store under the workspace session bucket, load it into `PromptState` during controller construction, and append successful user prompts after real submission. Keep history workspace-scoped, ordered by submission time, trim empty entries, and deduplicate consecutive repeats.
 
-**Tech Stack:** Rust 2024, `serde_json`, workspace-scoped session paths, `neo-agent` interactive controller, `neo-tui` prompt state and keybindings, `xtask`/`nextest`/LCOV/CRAP.
+**Tech Stack:** Rust 2024, `serde_json`, workspace-scoped session paths, `neo-agent` interactive controller, `neo-tui` prompt state and keybindings, /`nextest`/LCOV/CRAP.
 
 ---
 
@@ -31,13 +31,13 @@ rtk icm recall-context "NEO-27 cross-session prompt history" --limit 5
 
 - Use `rtk` for shell commands.
 - Prefer `cx` for symbol navigation.
-- Do not run bare `cargo test`; use `rtk cargo run -p xtask -- test ...`.
+- Do not run bare `cargo test`; use `rtk cargo nextest run ...`.
 - Do not perform git mutations without explicit per-command user authorization.
 - Keep scope limited to prompt history. Do not add Ctrl+R search in this issue.
 - Store completion memory before final response:
 
 ```bash
-rtk icm store -t context-neo -c "Completed NEO-27: workspace-scoped prompt-history JSONL loads across TUI sessions, Up/Down recalls from empty composer, consecutive duplicate/blank prompts are skipped, blocking dialogs do not leak into PromptState, and xtask gates pass." -i high -k "NEO-27,prompt-history,tui"
+rtk icm store -t context-neo -c "Completed NEO-27: workspace-scoped prompt-history JSONL loads across TUI sessions, Up/Down recalls from empty composer, consecutive duplicate/blank prompts are skipped, blocking dialogs do not leak into PromptState, and verification passes." -i high -k "NEO-27,prompt-history,tui"
 ```
 
 ## Current Code Map
@@ -309,7 +309,6 @@ pub fn remember_history(&mut self, entry: impl Into<String>) {
 - [ ] Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-tui prompt_history
 ```
 
 ### Task 2: Add Workspace Prompt History Store
@@ -396,7 +395,6 @@ fn prompt_history_store_uses_distinct_workspace_buckets() { ... }
 - [ ] Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent prompt_history
 ```
 
 ### Task 3: Load Persistent History Into TUI Controller
@@ -435,7 +433,6 @@ async fn controller_loads_workspace_prompt_history_on_startup() {
 - [ ] Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::controller_loads_workspace_prompt_history_on_startup
 ```
 
 ### Task 4: Append Submitted Prompts To Persistent History
@@ -473,8 +470,6 @@ async fn slash_commands_are_not_persisted_to_prompt_history() {
 - [ ] Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::submitted_prompt_is_persisted_to_workspace_history
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::slash_commands_are_not_persisted_to_prompt_history
 ```
 
 ### Task 5: Cross-Session And Cross-Workspace Regression Tests
@@ -509,8 +504,6 @@ async fn prompt_history_is_isolated_by_workspace_bucket() {
 - [ ] Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::prompt_history_is_shared_across_sessions_in_same_workspace
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::prompt_history_is_isolated_by_workspace_bucket
 ```
 
 ### Task 6: Blocking Dialog Regression Tests
@@ -542,7 +535,6 @@ async fn question_up_down_does_not_recall_prompt_history() {
 - [ ] Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent approval_uses_selection_priority_for_real_keys question_dialog_prioritizes_real_keybindings_before_prompt_editing
 ```
 
 ### Task 7: Documentation
@@ -563,7 +555,7 @@ rtk cargo run -p xtask -- test -p neo-agent approval_uses_selection_priority_for
 - [ ] Run:
 
 ```bash
-rtk cargo run -p xtask -- parity
+rtk cargo fmt --all --check
 ```
 
 ## Verification Plan
@@ -571,19 +563,15 @@ rtk cargo run -p xtask -- parity
 Focused:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-tui prompt_history
-rtk cargo run -p xtask -- test -p neo-agent prompt_history
-rtk cargo run -p xtask -- test -p neo-agent interactive::tests::event_loop_uses_up_down_keys_for_prompt_history
-rtk cargo run -p xtask -- test -p neo-agent approval_uses_selection_priority_for_real_keys question_dialog_prioritizes_real_keybindings_before_prompt_editing
 ```
 
 Before claiming completion:
 
 ```bash
-rtk cargo run -p xtask -- test --workspace --all-features
-rtk cargo run -p xtask -- coverage
-rtk cargo run -p xtask -- crap
-rtk cargo run -p xtask -- ci
+rtk cargo nextest run --workspace --all-features
+rtk cargo llvm-cov nextest --workspace --all-features
+rtk cargo crap
+rtk cargo nextest run --workspace --all-features
 ```
 
 Artifacts:
@@ -618,6 +606,6 @@ Artifacts:
 - [ ] First Up from non-empty draft does not overwrite it.
 - [ ] Down restores the draft after navigating past newest.
 - [ ] Blocking dialogs consume Up/Down before prompt history.
-- [ ] Focused tests pass through `xtask`.
-- [ ] Workspace tests, LCOV, CRAP, and CI were run through `xtask`.
+- [ ] Focused tests pass with direct cargo commands.
+- [ ] Workspace tests, LCOV, CRAP, and CI were run with direct cargo commands.
 - [ ] ICM store was called before final handoff.

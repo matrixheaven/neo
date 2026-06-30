@@ -34,7 +34,7 @@ Use `neo_ai::tool_schema::schema_for<T>()` to generate JSON Schema from small se
 | `Glob` | `{ "pattern": "**/*.rs", "path": "crates", "max_matches": 50 }` | file read |
 | `Write` | `{ "path": "tmp.txt", "content": "hello" }` | file write |
 | `Edit` | `{ "path": "tmp.txt", "old": "hello", "new": "hi", "replace_all": false }` | file write |
-| `Bash` | `{ "command": "cargo run -p xtask -- test -p xtask", "cwd": ".", "timeout": 300, "max_output_bytes": 65536 }` or `{ "command": "cargo run -p xtask -- test -p xtask", "run_in_background": true, "description": "test xtask" }` | shell |
+| `Bash` | `{ "command": "cargo nextest run -p neo-agent-core --test tool_bash task_list_result", "cwd": ".", "timeout": 300, "max_output_bytes": 65536 }` or `{ "command": "cargo nextest run -p neo-agent-core --test tool_bash task_list_result", "run_in_background": true, "description": "test bash task output" }` | shell |
 | `TaskList` | `{ "active_only": true, "limit": 20 }` | tool |
 | `TaskOutput` | `{ "task_id": "bash-...", "block": false, "timeout": 30 }` or `{ "task_id": "question-..." }` | tool |
 | `TaskStop` | `{ "task_id": "bash-...", "reason": "no longer needed" }` or `{ "task_id": "question-..." }` | tool |

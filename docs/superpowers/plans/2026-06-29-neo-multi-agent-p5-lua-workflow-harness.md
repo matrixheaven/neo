@@ -6,7 +6,7 @@
 
 **Architecture:** Embed Lua through `mlua` behind a small Neo-owned host API. Lua scripts cannot access arbitrary OS capabilities; they can call `neo.delegate`, `neo.swarm`, `neo.wait`, `neo.verify`, `neo.report`, and `neo.fail`. Workflow state persists at Neo step boundaries, not by checkpointing the Lua VM stack. No YAML or JS compatibility layer is introduced.
 
-**Tech Stack:** Rust 2024, `mlua`, `serde`, `tokio`, `AgentEvent`, `ToolRegistry`, `MultiAgentRuntime`, focused `cargo run -p xtask -- test`.
+**Tech Stack:** Rust 2024, `mlua`, `serde`, `tokio`, `AgentEvent`, `ToolRegistry`, `MultiAgentRuntime`, focused `cargo nextest run`.
 
 ---
 
@@ -86,7 +86,6 @@ local fix = neo.delegate({
   task = "Fix the highest-confidence issue from the audit summary."
 })
 
-neo.verify("cargo run -p xtask -- test -p neo-agent-core runtime")
 neo.report({ audit = audit:summary(), fix = fix:summary() })
 ```
 
@@ -176,7 +175,6 @@ pub mod workflow;
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core workflow
 ```
 
 Expected: compile fails only until Lua files are implemented in the next task.
@@ -243,7 +241,6 @@ fn lua_workflow_runner_reports_lua_errors() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core lua_workflow_runner
 ```
 
 Expected: PASS.
@@ -320,7 +317,6 @@ fn lua_workflow_exposes_neo_fail() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core lua_workflow_exposes_neo
 ```
 
 Expected: PASS.
@@ -353,7 +349,6 @@ fn lua_workflow_can_call_delegate_swarm_and_verify() {
             local audit = neo.swarm({ description = "audit", items = {"a"}, prompt_template = "{{item}}" })
             assert(audit:has_failures() == false)
             local fix = neo.delegate({ task = "fix issue" })
-            neo.verify("cargo run -p xtask -- test -p neo-agent-core workflow")
             neo.report({ audit = audit:summary(), fix = fix:summary() })
             "#,
         )
@@ -364,7 +359,6 @@ fn lua_workflow_can_call_delegate_swarm_and_verify() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core lua_workflow_can_call_delegate_swarm_and_verify
 ```
 
 Expected: PASS.
@@ -418,7 +412,6 @@ registry.register(workflow::RunWorkflowTool);
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core run_workflow_tool_executes_lua
 ```
 
 Expected: PASS.
@@ -439,7 +432,7 @@ Render:
 ▸ Workflow  Runtime audit and fix             running
   ✓ swarm: audit
   ✓ delegate: fix issue
-  ● verify: cargo run -p xtask -- test ...
+  ● verify: cargo nextest run ...
 ```
 
 - [ ] **Step 2: Add events**
@@ -451,7 +444,6 @@ Add `AgentEvent::WorkflowStarted`, `WorkflowUpdated`, `WorkflowFinished` carryin
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui workflow_transcript
 ```
 
 Expected: PASS.
@@ -461,7 +453,6 @@ Expected: PASS.
 - [ ] Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core workflow
 ```
 
 Expected: PASS.
@@ -469,7 +460,6 @@ Expected: PASS.
 - [ ] Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui workflow_transcript
 ```
 
 Expected: PASS.
@@ -477,7 +467,7 @@ Expected: PASS.
 - [ ] Run:
 
 ```bash
-cargo run -p xtask -- check
+cargo fmt --all --check
 ```
 
 Expected: PASS unless unrelated dirty-worktree changes break the global check. Report unrelated breakage without reverting files.

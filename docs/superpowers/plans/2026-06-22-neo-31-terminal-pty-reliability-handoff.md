@@ -6,7 +6,7 @@
 
 **Architecture:** Keep `Terminal` as a real PTY tool in `neo-agent-core`, but make its read contract stateful and observable. Replace the current "return immediately when any fresh byte exists" read wait with a quiet-period settle loop, add structured read diagnostics, stream PTY output updates through the existing `ToolUpdateCallback`, and harden stop/cleanup around process-group-like behavior and handle removal. Tests must reproduce the Minimax M3 report before implementation: prompt text not surfaced, black-box state after writes, and stale process/lock cleanup.
 
-**Tech Stack:** Rust 2024, `portable-pty`, `tokio`, `neo-agent-core` tool registry, `ProcessSupervisor`, `nextest` via `cargo run -p xtask -- test`, real-process PTY tests in `crates/neo-agent-core/tests/tool_terminal.rs`.
+**Tech Stack:** Rust 2024, `portable-pty`, `tokio`, `neo-agent-core` tool registry, `ProcessSupervisor`, `nextest` via `cargo nextest run`, real-process PTY tests in `crates/neo-agent-core/tests/tool_terminal.rs`.
 
 ---
 
@@ -58,7 +58,7 @@ rtk icm recall-context "Neo Terminal PTY git add -p prompt read stale process in
 
 - Use `rtk` for shell commands.
 - Prefer `cx` for symbol navigation before broad reads.
-- Do not run bare `cargo test`; use `rtk cargo run -p xtask -- test ...`.
+- Do not run bare `cargo test`; use `rtk cargo nextest run ...`.
 - Do not perform git mutations unless the user gives explicit per-command authorization. This includes `git add`, `git commit`, `git push`, `git switch`, `git checkout`, `git reset`, `git stash`, `git clean`, `git rm`, `git merge`, and `git rebase`.
 - Tests may create and mutate temporary Git repositories under `tempfile::TempDir`; they must never run git mutations against the real Neo checkout.
 - PTY/real-process tests must be deterministic and must not depend on a fixed port, shared home, ambient git config, or test execution order.
@@ -171,7 +171,6 @@ async fn terminal_read_waits_for_prompt_after_initial_output_burst() {
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core terminal_read_waits_for_prompt_after_initial_output_burst
 ```
 
 Expected before implementation: FAIL because the current read path returns as soon as any fresh output exists and can miss the delayed prompt.
@@ -250,7 +249,6 @@ if status.is_none() {
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core terminal_read_waits_for_prompt_after_initial_output_burst
 ```
 
 Expected after implementation: PASS.
@@ -326,7 +324,6 @@ async fn terminal_read_details_expose_state_for_interactive_debugging() {
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core terminal_read_details_expose_state_for_interactive_debugging
 ```
 
 Expected before implementation: FAIL because the detail fields do not exist.
@@ -372,7 +369,6 @@ Then extend `with_details(json!({ ... }))` with:
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core terminal_read_details_expose_state_for_interactive_debugging
 ```
 
 Expected after implementation: PASS.
@@ -515,7 +511,6 @@ async fn runtime_streams_terminal_prompt_updates_before_read() {
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core runtime_streams_terminal_prompt_updates_before_read
 ```
 
 Expected after implementation: PASS.
@@ -605,7 +600,6 @@ async fn terminal_stop_cleans_interactive_git_add_patch_and_index_lock() {
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core terminal_stop_cleans_interactive_git_add_patch_and_index_lock
 ```
 
 Expected before hardening may fail by timeout or by leaving `.git/index.lock`.
@@ -626,7 +620,7 @@ If the test fails, implement the smallest proven fix:
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core --test tool_terminal
+rtk cargo nextest run -p neo-agent-core --test tool_terminal
 ```
 
 Expected: all `tool_terminal` tests PASS.
@@ -651,7 +645,7 @@ In the `Terminal` section, document that:
 For this doc-only step, run:
 
 ```bash
-rtk cargo run -p xtask -- parity
+rtk cargo fmt --all --check
 ```
 
 Expected: PASS, unless unrelated docs parity failures already exist in the dirty worktree. If unrelated failures appear, do not fix them in this task; report them.
@@ -676,7 +670,7 @@ Expected: PASS.
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core --test tool_terminal
+rtk cargo nextest run -p neo-agent-core --test tool_terminal
 ```
 
 Expected: PASS.
@@ -686,7 +680,6 @@ Expected: PASS.
 Run:
 
 ```bash
-rtk cargo run -p xtask -- test -p neo-agent-core terminal
 ```
 
 Expected: PASS for Terminal-related tests. If this filter picks up unrelated tests, record that in the final handoff.
@@ -706,7 +699,7 @@ Run this checklist before final response:
 - [ ] Spec coverage: the plan/test changes cover prompt visibility, state observability, and stale cleanup from the Minimax M3 report.
 - [ ] Placeholder scan: no task says "TODO", "TBD", "add tests", or "handle edge cases" without exact code or commands.
 - [ ] Type consistency: `ToolUpdateCallback`, `ToolContext`, `ToolRegistry`, `ToolResult`, and `TerminalSession` names match current code.
-- [ ] Test scope: verification uses `xtask` and stays within `neo-agent-core` Terminal/runtime tests.
+- [ ] Test scope: verification uses  and stays within `neo-agent-core` Terminal/runtime tests.
 - [ ] Safety: any git commands are inside temp repositories created by tests, not the Neo checkout.
 - [ ] Git policy: no plan step performs `git add`, `git commit`, `git reset`, `git restore`, `git stash`, or other repository mutations without explicit user authorization.
 

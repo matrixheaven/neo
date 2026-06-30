@@ -175,16 +175,15 @@ controlled separately by `tui.fetch_remote_images`.
 
 ## Development Checks
 
-Use the stable maintenance slice while other crates are under active
-construction:
+Use direct Cargo commands:
 
 ```bash
-cargo run -p xtask -- check
-cargo run -p xtask -- check --docs
-cargo run -p xtask -- release-smoke
+cargo fmt --all --check
+cargo clippy -p neo-agent --bin neo -- -D warnings
+cargo nextest run -p neo-agent --bin neo cli_commands
 ```
 
-`check --docs` runs Markdown link validation, docs/examples parity checks,
-example TOML/JSON validation, generated catalog schema checks, and Rust example
-compilation. `release-smoke` is local-only: it does not start cloud services or
-marketplace fixtures.
+Focused test evidence should use `cargo nextest` with one package, one explicit
+target selector (`--lib`, `--bin <bin>`, or `--test <target>`), and one
+test-name filter. Avoid package-wide or workspace-wide local test runs unless
+CI or the user explicitly asks for them.

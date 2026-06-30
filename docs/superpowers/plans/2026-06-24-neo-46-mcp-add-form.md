@@ -6,7 +6,7 @@
 
 **Architecture:** Add a new `McpAddFormState` dialog component in `neo-tui`. Keep transport selection as the existing `ChoicePicker` step. After the user selects a transport, `interactive.rs` opens one `McpAddFormState` overlay preconfigured for that transport. Form submission is handled in `interactive.rs` by calling the existing MCP config helpers in `crates/neo-agent/src/mcp_ops.rs` and `config.rs`.
 
-**Tech Stack:** Rust 2024, `crossterm`-style Neo TUI overlays, `neo-tui` dialog components, existing MCP config helpers, `nextest` through `cargo run -p xtask -- test`.
+**Tech Stack:** Rust 2024, `crossterm`-style Neo TUI overlays, `neo-tui` dialog components, existing MCP config helpers, `nextest` through `cargo nextest run`.
 
 ---
 
@@ -121,9 +121,7 @@ Navigation:
 
 ## Testing
 
-- Run focused tests: `cargo run -p xtask -- test -p neo-tui mcp_add_form`
-- Run integration tests: `cargo run -p xtask -- test -p neo-agent mcp_add`
-- Ensure no regressions: `cargo run -p xtask -- test -p neo-tui --lib`
+- Ensure no regressions: `cargo nextest run -p neo-tui --lib`
 
 ## Notes / Constraints
 

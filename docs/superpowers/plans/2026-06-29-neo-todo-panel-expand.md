@@ -6,7 +6,7 @@
 
 **Architecture:** Keep todo display logic inside `neo-tui` and route keyboard control through Neo's existing configurable keybinding system. `NeoChromeState` owns the todo expansion state, `TodoPanel` renders collapsed or expanded views from that state, and `neo-agent` handles the action only when the todo panel overflows.
 
-**Tech Stack:** Rust 2024, `neo-tui` widgets/chrome/input keybindings, `neo-agent` interactive controller, `xtask` nextest wrapper.
+**Tech Stack:** Rust 2024, `neo-tui` widgets/chrome/input keybindings, `neo-agent` interactive controller,  nextest wrapper.
 
 ---
 
@@ -196,7 +196,6 @@ In `crates/neo-tui/src/widgets/todo_panel.rs`, inside the existing `#[cfg(test)]
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui selector_
 ```
 
 Expected: FAIL. The first failure should mention `no field indices on type Vec<usize>` or a mismatch from the current `Vec<usize>` selector. This confirms the tests are exercising the new selector contract.
@@ -337,7 +336,6 @@ for &index in &visible.indices {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui todo_panel
 ```
 
 Expected: PASS.
@@ -469,7 +467,6 @@ fn todo_panel_clear_resets_expanded_state() {
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui expanded_panel collapsed_footer todo_panel_expanded_state todo_panel_clear_resets
 ```
 
 Expected: FAIL. The failures should mention missing `expanded`, `set_todo_panel_expanded`, or old footer text.
@@ -647,7 +644,6 @@ TodoPanel::new(app.todo_items())
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui todo_panel_expanded_state todo_panel_clear_resets collapsed_footer expanded_panel todo_panel
 ```
 
 Expected: PASS.
@@ -754,8 +750,6 @@ In `crates/neo-agent/src/modes/interactive/tests.rs`, near the existing `ctrl+o`
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui keybinding_manager_matches_defaults_overrides_and_conflicts
-cargo run -p xtask -- test -p neo-agent event_loop_ctrl_t_
 ```
 
 Expected: FAIL. The keybinding test should fail because `TodoPanelToggle` does not exist.
@@ -818,8 +812,6 @@ The action returns `Ok(Some(false))` through the existing match tail. This consu
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui keybinding_manager_matches_defaults_overrides_and_conflicts keybinding_action_ids_round_trip
-cargo run -p xtask -- test -p neo-agent event_loop_ctrl_t_
 ```
 
 Expected: PASS.
@@ -862,7 +854,6 @@ If the existing section uses prose instead of TOML-only examples, add this sente
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-agent keybinding
 ```
 
 Expected: PASS. This catches unsupported action id regressions through config loader tests.
@@ -872,8 +863,6 @@ Expected: PASS. This catches unsupported action id regressions through config lo
 Run:
 
 ```bash
-cargo run -p xtask -- test -p neo-tui todo_panel app_shell keybinding_manager_matches_defaults_overrides_and_conflicts keybinding_action_ids_round_trip
-cargo run -p xtask -- test -p neo-agent event_loop_ctrl_t_
 ```
 
 Expected: PASS.
@@ -883,7 +872,7 @@ Expected: PASS.
 Run:
 
 ```bash
-cargo run -p xtask -- check
+cargo fmt --all --check
 ```
 
 Expected: PASS.

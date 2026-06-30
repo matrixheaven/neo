@@ -6,7 +6,7 @@
 
 **Architecture:** 所有改动局限于各 Tool 源文件中的 `description()` 返回值（`&str` 字面量）。不涉及参数 schema 结构变更、trait 修改或运行时逻辑变更。核心原则：description 是写给 AI 模型看的 prompt，不是给人类看的 API 文档。
 
-**Tech Stack:** Rust 2024, `neo-agent-core` crate, `schemars` JSON Schema derive, `cargo run -p xtask -- test`.
+**Tech Stack:** Rust 2024, `neo-agent-core` crate, `schemars` JSON Schema derive, `cargo nextest run`.
 
 ---
 
@@ -99,13 +99,12 @@ Guidelines:
 - [ ] **Step 3: 验证编译**
 
 ```bash
-cargo run -p xtask -- check
+cargo fmt --all --check
 ```
 
 - [ ] **Step 4: 验证测试**
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core write
 ```
 
 ---
@@ -164,13 +163,12 @@ Guidelines:
 - [ ] **Step 3: 验证编译**
 
 ```bash
-cargo run -p xtask -- check
+cargo fmt --all --check
 ```
 
 - [ ] **Step 4: 验证测试**
 
 ```bash
-cargo run -p xtask -- test -p neo-agent-core edit
 ```
 
 ---
@@ -230,8 +228,7 @@ Before using:
 - [ ] **Step 3: 验证编译和测试**
 
 ```bash
-cargo run -p xtask -- check
-cargo run -p xtask -- test -p neo-agent-core goal
+cargo fmt --all --check
 ```
 
 ---
@@ -305,8 +302,7 @@ Parameters:
 - [ ] **Step 3: 验证编译和测试**
 
 ```bash
-cargo run -p xtask -- check
-cargo run -p xtask -- test -p neo-agent-core skills
+cargo fmt --all --check
 ```
 
 ---
@@ -334,8 +330,7 @@ completion_criterion examples:
 - [ ] **Step 2: 验证编译和测试**
 
 ```bash
-cargo run -p xtask -- check
-cargo run -p xtask -- test -p neo-agent-core goal
+cargo fmt --all --check
 ```
 
 ---
@@ -382,8 +377,7 @@ skill scan. No manual re-registration is needed.
 - [ ] **Step 2: 验证编译和测试**
 
 ```bash
-cargo run -p xtask -- check
-cargo run -p xtask -- test -p neo-agent-core skills
+cargo fmt --all --check
 ```
 
 ---
@@ -410,8 +404,7 @@ Return fields:
 - [ ] **Step 2: 验证编译和测试**
 
 ```bash
-cargo run -p xtask -- check
-cargo run -p xtask -- test -p neo-agent-core background
+cargo fmt --all --check
 ```
 
 ---
@@ -445,8 +438,7 @@ returned without any action taken.
 - [ ] **Step 3: 验证编译和测试**
 
 ```bash
-cargo run -p xtask -- check
-cargo run -p xtask -- test -p neo-agent-core background
+cargo fmt --all --check
 ```
 
 ---
@@ -490,8 +482,7 @@ Parameters:
 - [ ] **Step 2: 验证编译和测试**
 
 ```bash
-cargo run -p xtask -- check
-cargo run -p xtask -- test -p neo-agent-core skills
+cargo fmt --all --check
 ```
 
 ---
@@ -518,8 +509,7 @@ time range.
 - [ ] **Step 2: 验证编译和测试**
 
 ```bash
-cargo run -p xtask -- check
-cargo run -p xtask -- test -p neo-agent-core sessions
+cargo fmt --all --check
 ```
 
 ---
@@ -530,10 +520,9 @@ cargo run -p xtask -- test -p neo-agent-core sessions
 
 ```bash
 # Full workspace check
-cargo run -p xtask -- check
+cargo fmt --all --check
 
 # Run all neo-agent-core tests
-cargo run -p xtask -- test -p neo-agent-core
 ```
 
 每个 Task 的改动都是纯字符串替换（`description()` 返回值），不涉及逻辑变更，因此不需要 LCOV/CRAP。

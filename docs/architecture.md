@@ -11,7 +11,6 @@ neo-agent CLI/TUI
      skill loading, JSONL RPC, and HTML export
       -> neo-ai provider-neutral model and stream contracts
   -> neo-tui terminal UI primitives (crossterm-based component tree)
-xtask maintenance commands
 ```
 
 ## Implemented Today
@@ -37,8 +36,6 @@ xtask maintenance commands
     lifecycle rendering, per-tool-type renderers, LCS-based inline diff preview.
   - `widgets/`: `QuestionStateMachine` (multi-question dialog), `TodoPanel`.
   - `image.rs`: Kitty, iTerm2, and Sixel inline image encoding.
-- `xtask check` verifies the stable developer tooling slice, and
-  `xtask release-smoke` exercises local-only CLI surfaces.
 
 ## Intended Runtime Flow
 
