@@ -8,7 +8,34 @@ use std::{
 use anyhow::{Context, bail};
 
 const TRUST_FILE: &str = "trust.json";
-pub(crate) const CONTEXT_FILE_CANDIDATES: &[&str] = &["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
+
+/// Canonical (lowercase) base names of context files recognized by neo.
+/// Matching is case-insensitive so any casing (e.g. `agents.md`, `Agents.MD`)
+/// is detected on case-sensitive filesystems.
+pub(crate) const CONTEXT_FILE_CANDIDATES: &[&str] = &["agents.md", "claude.md"];
+
+/// Scan `directory` for context files (AGENTS.md, CLAUDE.md) using
+/// case-insensitive name matching.
+///
+/// Returns paths ordered by the priority in [`CONTEXT_FILE_CANDIDATES`].
+/// If `directory` cannot be read, returns an empty vector.
+pub(crate) fn find_context_files_in_dir(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut by_lower: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name_str) = file_name.to_str() else {
+            continue;
+        };
+        by_lower.insert(name_str.to_lowercase(), entry.path());
+    }
+    CONTEXT_FILE_CANDIDATES
+        .iter()
+        .filter_map(|candidate| by_lower.get(*candidate).cloned())
+        .collect()
+}
 
 /// Where a trust decision originates: the current working directory or an
 /// ancestor that was explicitly trusted/untrusted.
@@ -322,11 +349,8 @@ pub(crate) fn collect_project_trust_inputs(
 
 fn inputs_in_dir(directory: &Path) -> Vec<(PathBuf, TrustInputKind)> {
     let mut result = Vec::new();
-    for file_name in CONTEXT_FILE_CANDIDATES {
-        let path = directory.join(file_name);
-        if path.exists() {
-            result.push((path, TrustInputKind::ContextFile));
-        }
+    for path in find_context_files_in_dir(directory) {
+        result.push((path, TrustInputKind::ContextFile));
     }
     let neo_dir = directory.join(".neo");
     if neo_dir.is_dir() {
@@ -517,5 +541,70 @@ mod tests {
         assert_eq!(inputs.parent_candidates.len(), 2);
         assert!(inputs.parent_candidates.contains(&canonical_parent));
         assert!(inputs.parent_candidates.contains(&canonical_grandparent));
+    }
+
+    #[test]
+    fn context_file_detection_is_case_insensitive() {
+        for casing in &[
+            "agents.md",
+            "Agents.md",
+            "AGENTS.MD",
+            "aGeNtS.Md",
+            "claude.md",
+            "Claude.MD",
+        ] {
+            let root = TempDir::new().expect("tempdir");
+            let project = root.path().join("project");
+            fs::create_dir_all(&project).expect("create project");
+            fs::write(project.join(casing), "rules").expect("write context file");
+
+            let inputs = collect_project_trust_inputs(&project).expect("collect");
+            assert!(
+                inputs
+                    .detected
+                    .iter()
+                    .any(|(_, kind)| *kind == TrustInputKind::ContextFile),
+                "failed to detect {} as a context file",
+                casing,
+            );
+        }
+    }
+
+    #[test]
+    fn find_context_files_returns_only_first_match() {
+        let root = TempDir::new().expect("tempdir");
+        fs::write(root.path().join("AGENTS.md"), "a").expect("write agents");
+        // No CLAUDE.md present — should still return the single agents file.
+        let found = find_context_files_in_dir(root.path());
+        assert_eq!(found.len(), 1);
+        assert!(
+            found[0]
+                .file_name()
+                .unwrap()
+                .eq_ignore_ascii_case("agents.md")
+        );
+    }
+
+    #[test]
+    fn find_context_files_prioritizes_agents_over_claude() {
+        let root = TempDir::new().expect("tempdir");
+        fs::write(root.path().join("CLAUDE.md"), "c").expect("write claude");
+        fs::write(root.path().join("agents.md"), "a").expect("write agents");
+
+        let found = find_context_files_in_dir(root.path());
+        assert_eq!(found.len(), 2);
+        // agents.md is first in CONTEXT_FILE_CANDIDATES.
+        assert!(
+            found[0]
+                .file_name()
+                .unwrap()
+                .eq_ignore_ascii_case("agents.md")
+        );
+        assert!(
+            found[1]
+                .file_name()
+                .unwrap()
+                .eq_ignore_ascii_case("claude.md")
+        );
     }
 }
