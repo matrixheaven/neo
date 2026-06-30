@@ -10,6 +10,8 @@ Read [CX.md](../../.kimi-code/CX.md) and [RTK.md](../../.kimi-code/RTK.md). Use 
 2. **Never revert worktree files** to make tests pass. If another agent's in-progress work breaks your build, skip those tests and report it.
 3. **Simplify, don't pile on.** Delete obsolete paths. No compatibility branches, fallback paths, or duplicate models to preserve status quo.
 4. **No hosted services.** Local binary only. No marketplace, profile sync, or hosted collaboration.
+5. **Tests must earn their place.** No redundant tests that duplicate another test's coverage with only cosmetic differences (e.g., a different output flag). No tests asserting trivially true properties (struct field round-trips, derived trait behavior, library correctness). When writing or reviewing tests, apply the same "simplify, don't pile on" principle — a test that catches nothing you wouldn't catch by deleting it is dead weight.
+6. **Cross-platform is non-negotiable.** Every feature must work on Windows, Linux, and macOS. No hardcoded path separators (use `Path`/`PathBuf`), shell invocations (no bare `sh -c`), Unix signals, or file-permission assumptions without `#[cfg]` guards and cross-platform fallbacks. Platform-specific code must be isolated behind `cfg(unix)` / `cfg(windows)` with a portable default — never `panic!` or `todo!` on unsupported platforms.
 
 ## Work loop: recall → scope → verify
 
