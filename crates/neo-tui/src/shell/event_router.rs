@@ -1,8 +1,8 @@
 use neo_agent_core::{AgentEvent, PermissionOperation};
 
+use crate::dialogs::{QuestionDisplayData, QuestionDisplayOption};
 use crate::primitive::theme::{ChromeMode, DevelopmentMode, GoalModeStatus};
 use crate::widgets::{TodoDisplayItem, TodoDisplayStatus};
-use crate::dialogs::{QuestionDisplayData, QuestionDisplayOption};
 
 use super::approval::ApprovalRequestModal;
 use super::state::NeoChromeState;
@@ -109,7 +109,8 @@ impl NeoChromeState {
                         // ExitPlanMode carries `{plan_summary, options: [{label, description}]}`.
                         // Surface the model-supplied options as a real picker (mirrors
                         // kimi-code) instead of dumping the raw JSON into the body.
-                        let (option_labels, options_body) = crate::primitive::theme::plan_review_options(&arguments);
+                        let (option_labels, options_body) =
+                            crate::primitive::theme::plan_review_options(&arguments);
                         let body = match arguments.get("plan_summary").and_then(|v| v.as_str()) {
                             Some(summary) if !summary.trim().is_empty() => {
                                 if options_body.is_empty() {
@@ -127,7 +128,11 @@ impl NeoChromeState {
                             option_labels,
                         )
                     } else if is_review {
-                        ApprovalRequestModal::new_review(id, crate::primitive::theme::review_title(operation), body)
+                        ApprovalRequestModal::new_review(
+                            id,
+                            crate::primitive::theme::review_title(operation),
+                            body,
+                        )
                     } else {
                         ApprovalRequestModal::new_with_options(
                             id,
@@ -226,6 +231,17 @@ impl NeoChromeState {
                     })
                     .collect();
                 self.push_question_overlay(id, display);
+            }
+            AgentEvent::DelegateStarted { .. }
+            | AgentEvent::DelegateUpdated { .. }
+            | AgentEvent::DelegateFinished { .. }
+            | AgentEvent::DelegateSwarmStarted { .. }
+            | AgentEvent::DelegateSwarmUpdated { .. }
+            | AgentEvent::DelegateSwarmFinished { .. }
+            | AgentEvent::WorkflowStarted { .. }
+            | AgentEvent::WorkflowUpdated { .. }
+            | AgentEvent::WorkflowFinished { .. } => {
+                self.mode = ChromeMode::Streaming;
             }
         }
     }
