@@ -21,8 +21,8 @@ use std::io::{Write, stdout};
 
 use crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, size},
@@ -243,7 +243,6 @@ fn write_enter_output(output: &mut dyn Write) -> std::io::Result<()> {
     execute!(
         &mut output,
         EnableBracketedPaste,
-        EnableMouseCapture,
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
@@ -256,14 +255,13 @@ fn write_leave_terminal_output(output: &mut dyn Write) -> std::io::Result<()> {
     let mut output = output;
     execute!(
         &mut output,
-        DisableMouseCapture,
         PopKeyboardEnhancementFlags,
         DisableBracketedPaste,
     )
 }
 
 impl TuiRenderer {
-    /// Enable raw mode + bracketed paste + mouse capture + keyboard enhancement.
+    /// Enable raw mode + bracketed paste + keyboard enhancement.
     /// Does NOT enter alternate screen.
     pub fn enter() -> std::io::Result<Self> {
         enable_raw_mode()?;
@@ -952,30 +950,34 @@ mod tests {
     }
 
     #[test]
-    fn enter_output_enables_mouse_capture() {
+    fn enter_output_leaves_mouse_wheel_to_terminal_scrollback() {
         let mut buf = Vec::new();
         write_enter_output(&mut buf).unwrap();
         let output = String::from_utf8_lossy(&buf);
         assert!(
-            output.contains("\x1b[?1000h")
-                || output.contains("\x1b[?1002h")
-                || output.contains("\x1b[?1006h"),
-            "enter output should enable terminal mouse reporting: {output:?}"
+            !output.contains("\x1b[?1000h")
+                && !output.contains("\x1b[?1002h")
+                && !output.contains("\x1b[?1003h")
+                && !output.contains("\x1b[?1006h")
+                && !output.contains("\x1b[?1015h"),
+            "enter output must not enable terminal mouse reporting: {output:?}"
         );
     }
 
     #[test]
-    fn leave_output_disables_mouse_capture() {
+    fn leave_output_does_not_touch_mouse_reporting() {
         let mut renderer = test_renderer(Vec::new());
         let mut buf = Vec::new();
         renderer.write_leave_output(&mut buf);
         write_leave_terminal_output(&mut buf).unwrap();
         let output = String::from_utf8_lossy(&buf);
         assert!(
-            output.contains("\x1b[?1000l")
-                || output.contains("\x1b[?1002l")
-                || output.contains("\x1b[?1006l"),
-            "leave output should disable terminal mouse reporting: {output:?}"
+            !output.contains("\x1b[?1000l")
+                && !output.contains("\x1b[?1002l")
+                && !output.contains("\x1b[?1003l")
+                && !output.contains("\x1b[?1006l")
+                && !output.contains("\x1b[?1015l"),
+            "leave output must not touch terminal mouse reporting: {output:?}"
         );
     }
 
