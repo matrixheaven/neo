@@ -3617,10 +3617,6 @@ async fn approval_revise_collects_feedback_without_editing_prompt() {
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
         .await
-        .expect("down selects session-approval option");
-    controller
-        .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
-        .await
         .expect("down selects deny option");
     controller
         .handle_input_event(InputEvent::Key(KeyId::new("down").expect("valid key")))
