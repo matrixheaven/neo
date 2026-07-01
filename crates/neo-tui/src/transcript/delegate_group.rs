@@ -7,7 +7,7 @@ use crate::primitive::{Component, Finalization, Line, Span, Style};
 use crate::transcript::{
     MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, display_elapsed,
     format_cache_token_usage, format_elapsed, format_token_count, render_child_body,
-    render_child_final, render_child_thinking, render_child_tool_row, role_label,
+    render_child_final, render_child_thinking, render_child_tool_row, role_badge_style, role_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,7 +78,7 @@ impl DelegateGroupComponent {
         let marker_color = if all_terminal {
             theme.status_ok
         } else {
-            theme.text_primary
+            theme.brand
         };
         let total = self.agents.len();
         let elapsed = self.max_elapsed();
@@ -143,7 +143,7 @@ impl DelegateGroupComponent {
         };
         Line::from_spans(vec![
             Span::styled(marker, Style::default().fg(marker_color)),
-            Span::styled(" Delegate group · ", Style::default().fg(theme.text_muted)),
+            Span::styled(" Delegate group · ", Style::default().fg(theme.brand)),
             Span::styled(label, Style::default().fg(theme.brand)),
             Span::styled(tail, Style::default().fg(theme.text_muted)),
         ])
@@ -159,19 +159,18 @@ impl DelegateGroupComponent {
     ) -> Vec<Line> {
         let branch = if is_last { "└─" } else { "├─" };
         let continuation = if is_last { "   " } else { "│  " };
-        let state_style = Style::default().fg(if agent.state.is_terminal() {
-            theme.text_muted
-        } else {
-            theme.text_primary
-        });
+        let brand = Style::default().fg(theme.brand);
         let muted = Style::default().fg(theme.text_muted);
         let primary = Style::default().fg(theme.text_primary);
         let mut lines = vec![
             Line::from_spans(vec![
-                Span::raw(format!("  {branch} ")),
-                Span::styled(agent.display_name.as_str(), state_style),
+                Span::styled(format!("  {branch} "), muted),
+                Span::styled(agent.display_name.as_str(), brand),
                 Span::raw("  "),
-                Span::styled(format!("[{}]", role_label(agent.role)), muted),
+                Span::styled(
+                    format!("[{}]", role_label(agent.role)),
+                    role_badge_style(agent.role, theme),
+                ),
                 Span::styled(
                     format!(
                         "  {}{}",

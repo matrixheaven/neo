@@ -8,7 +8,7 @@ use crate::primitive::{Color, Component, Expandable, Finalization, Line, Span, S
 use crate::transcript::{
     MAX_CHILD_TOOL_ROWS, child_activity_view, compact_chars, display_elapsed,
     format_cache_token_usage, format_elapsed, format_token_count, one_line, render_child_body,
-    render_child_final, render_child_thinking, render_child_tool_row, role_label,
+    render_child_final, render_child_thinking, render_child_tool_row, role_badge_style, role_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,7 +138,10 @@ impl SwarmCardComponent {
                     Span::styled(format!("{branch} "), muted),
                     Span::styled(child.agent.display_name.as_str(), state_style),
                     Span::raw("  "),
-                    Span::styled(format!("[{}]", role_label(child.agent.role)), muted),
+                    Span::styled(
+                        format!("[{}]", role_label(child.agent.role)),
+                        role_badge_style(child.agent.role, theme),
+                    ),
                     Span::raw(" "),
                     Span::styled(marker(child.agent.state), state_style),
                     Span::raw(" ["),
@@ -222,7 +225,10 @@ impl SwarmCardComponent {
                         Span::raw(format!("  {branch} ")),
                         Span::styled(child.agent.display_name.as_str(), state_style),
                         Span::raw("  "),
-                        Span::styled(format!("[{}]", role_label(child.agent.role)), muted),
+                        Span::styled(
+                            format!("[{}]", role_label(child.agent.role)),
+                            role_badge_style(child.agent.role, theme),
+                        ),
                         Span::styled(
                             format!(
                                 "  {} · {} · {} tools · {}",

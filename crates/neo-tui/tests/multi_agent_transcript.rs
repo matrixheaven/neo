@@ -4,12 +4,14 @@ use neo_agent_core::AgentEvent;
 use neo_agent_core::multi_agent::{
     AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
     AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome, AgentTerminalReason,
-    AgentToolActivityPhase, AgentToolOutputPreview, SwarmAggregate, SwarmChildSnapshot,
-    SwarmSnapshot,
+    AgentToolActivityPhase, AgentToolOutputPreview, DelegateContext, SwarmAggregate,
+    SwarmChildSnapshot, SwarmSnapshot,
 };
 use neo_tui::primitive::theme::TuiTheme;
 use neo_tui::primitive::{Color, Component, Expandable, Line, strip_ansi};
-use neo_tui::transcript::{DelegateCardComponent, SwarmCardComponent, TranscriptPane};
+use neo_tui::transcript::{
+    DelegateCardComponent, DelegateGroupComponent, SwarmCardComponent, TranscriptPane,
+};
 
 fn running_delegate() -> AgentSnapshot {
     let name = AgentDisplayName::new("Gibbs");
@@ -19,6 +21,7 @@ fn running_delegate() -> AgentSnapshot {
         path: AgentPath::root_child(&name),
         role: AgentRole::Coder,
         mode: AgentRunMode::Foreground,
+        context: DelegateContext::Inherit,
         state: AgentLifecycleState::Running,
         task: "Implement Task 1: PlanBox border fix".to_owned(),
         task_title: "Implement Task 1: PlanBox border fix".to_owned(),
@@ -84,6 +87,7 @@ fn option_b_delegate(
         path: AgentPath::root_child(&display_name),
         role,
         mode: AgentRunMode::Foreground,
+        context: DelegateContext::Inherit,
         state,
         task: format!("{title}\n\nFull prompt that must not replace the display name."),
         task_title: title.to_owned(),
@@ -288,7 +292,7 @@ fn option_b_state_markers_do_not_depend_on_color_only() {
 }
 
 #[test]
-fn option_b_delegate_group_keeps_agent_names_primary() {
+fn option_b_delegate_group_keeps_agent_names_visible() {
     let mut pane = TranscriptPane::new(160, 30);
     let nova = option_b_running_delegate();
     let mut vega = option_b_delegate(
@@ -324,6 +328,68 @@ fn option_b_delegate_group_keeps_agent_names_primary() {
     assert!(text.contains("◌ thinking"), "{text}");
     assert!(text.contains("Waiting for scheduler slot"), "{text}");
     assert!(!text.contains("Coder · 角色对比测试"), "{text}");
+}
+
+#[test]
+fn delegate_group_styles_header_names_muted_tree_and_role_badges() {
+    let theme = TuiTheme::default();
+    let nova = option_b_running_delegate();
+    let vega = option_b_delegate(
+        "vega",
+        "Vega",
+        AgentRole::Explorer,
+        AgentLifecycleState::Queued,
+        "搜索历史卡片回归点",
+    );
+    let orion = option_b_delegate(
+        "orion",
+        "Orion",
+        AgentRole::Planner,
+        AgentLifecycleState::Queued,
+        "规划分支测试",
+    );
+    let sage = option_b_delegate(
+        "sage",
+        "Sage",
+        AgentRole::Reviewer,
+        AgentLifecycleState::Queued,
+        "审查分支测试",
+    );
+    let group = DelegateGroupComponent::new(7, vec![nova, vega, orion, sage]);
+
+    let lines = group.render_with_theme(160, &theme);
+    let header_spans = lines[0].spans();
+    assert_eq!(header_spans[0].style().fg, Some(theme.brand));
+    assert_eq!(header_spans[1].text(), " Delegate group · ");
+    assert_eq!(header_spans[1].style().fg, Some(theme.brand));
+    assert_eq!(header_spans[2].style().fg, Some(theme.brand));
+
+    let assert_role_row = |needle: &str, branch: &str, badge: &str, color| {
+        let row = lines
+            .iter()
+            .find(|line| line.text().contains(needle))
+            .expect("agent row should render");
+        let spans = row.spans();
+        assert_eq!(spans[0].text(), branch);
+        assert_eq!(spans[0].style().fg, Some(theme.text_muted));
+        assert_eq!(spans[1].style().fg, Some(theme.brand));
+        assert_eq!(spans[3].text(), badge);
+        assert_eq!(spans[3].style().fg, Some(color));
+    };
+    assert_role_row("├─ Nova  [Coder]", "  ├─ ", "[Coder]", theme.status_warn);
+    assert_role_row(
+        "├─ Vega  [Explorer]",
+        "  ├─ ",
+        "[Explorer]",
+        theme.shell_mode,
+    );
+    assert_role_row("├─ Orion  [Planner]", "  ├─ ", "[Planner]", theme.brand);
+    assert_role_row(
+        "└─ Sage  [Reviewer]",
+        "  └─ ",
+        "[Reviewer]",
+        theme.status_ok,
+    );
 }
 
 #[test]
@@ -1965,6 +2031,7 @@ fn swarm_with_child_states(states: Vec<AgentLifecycleState>) -> SwarmSnapshot {
                         path: AgentPath::swarm_child("swarm_test", &name),
                         role: AgentRole::Coder,
                         mode: AgentRunMode::Foreground,
+                        context: DelegateContext::Inherit,
                         state,
                         task_title: format!("Child {index}"),
                         task: format!("Child prompt {index}"),

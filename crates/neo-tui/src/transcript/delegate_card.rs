@@ -5,7 +5,7 @@ use crate::primitive::{Component, Expandable, Finalization, Line, Span, Style};
 use crate::transcript::{
     MAX_CHILD_TOOL_ROWS, can_detach, child_activity_view, display_elapsed,
     format_cache_token_usage, format_elapsed, format_token_count, render_child_body,
-    render_child_final, render_child_thinking, render_child_tool_row, role_label,
+    render_child_final, render_child_thinking, render_child_tool_row, role_badge_style, role_label,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +87,10 @@ impl DelegateCardComponent {
                 Span::raw(" "),
                 Span::styled(self.snapshot.display_name.as_str(), accent),
                 Span::raw("  "),
-                Span::styled(role_badge(&self.snapshot), muted),
+                Span::styled(
+                    role_badge(&self.snapshot),
+                    role_badge_style(self.snapshot.role, theme),
+                ),
                 Span::styled(" · Delegate", muted),
                 Span::styled(delegate_stats_line(&self.snapshot, phase, elapsed), primary),
             ])

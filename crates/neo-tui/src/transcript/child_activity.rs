@@ -34,6 +34,17 @@ pub fn role_label(role: AgentRole) -> &'static str {
 }
 
 #[must_use]
+pub fn role_badge_style(role: AgentRole, theme: &TuiTheme) -> Style {
+    let color = match role {
+        AgentRole::Coder => theme.status_warn,
+        AgentRole::Explorer => theme.shell_mode,
+        AgentRole::Planner => theme.brand,
+        AgentRole::Reviewer => theme.status_ok,
+    };
+    Style::default().fg(color)
+}
+
+#[must_use]
 pub fn format_elapsed(seconds: u64) -> String {
     if seconds < 60 {
         format!("{seconds}s")
