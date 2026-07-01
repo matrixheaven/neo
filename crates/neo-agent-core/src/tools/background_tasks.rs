@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::Write,
     sync::Arc,
     time::{Duration, Instant},
@@ -1092,7 +1092,7 @@ impl Tool for TaskListTool {
          Returns a list of background tasks. Each entry includes:\n\
          - task_id: Unique identifier for the task (use this with TaskOutput/TaskStop).\n\
          - status: \"running\", \"completed\", \"failed\", \"cancelled\", or \"timed_out\".\n\
-         - kind: The type of background task (e.g. \"bash\", \"question\").\n\
+         - kind: The type of background work, such as \"bash\", \"question\", \"delegate\", or \"delegate-swarm\".\n\
          - description: Short human-readable description provided at creation time.\n\
          - elapsed: Time since the task was started (e.g. \"2m 30s\")."
     }
@@ -1106,7 +1106,18 @@ impl Tool for TaskListTool {
             let input: TaskListInput = parse_input(self.name(), input)?;
             let active_only = input.active_only.unwrap_or(true);
             let limit = input.limit.unwrap_or(20).clamp(1, 100);
-            let tasks = ctx.background_tasks.list(active_only, limit).await;
+            let mut tasks = ctx.background_tasks.list(active_only, limit).await;
+            let existing_ids = tasks
+                .iter()
+                .map(|task| task.task_id.clone())
+                .collect::<HashSet<_>>();
+            tasks.extend(runtime_delegate_task_snapshots(
+                ctx,
+                active_only,
+                &existing_ids,
+            ));
+            tasks.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+            tasks.truncate(limit);
             Ok(task_list_result(&tasks, active_only))
         })
     }
@@ -1268,6 +1279,70 @@ impl Tool for TaskStopTool {
             Ok(result)
         })
     }
+}
+
+fn status_from_agent_state(state: crate::multi_agent::AgentLifecycleState) -> BackgroundTaskStatus {
+    match state {
+        crate::multi_agent::AgentLifecycleState::Queued
+        | crate::multi_agent::AgentLifecycleState::Running => BackgroundTaskStatus::Running,
+        crate::multi_agent::AgentLifecycleState::Completed => BackgroundTaskStatus::Completed,
+        crate::multi_agent::AgentLifecycleState::Failed => BackgroundTaskStatus::Failed,
+        crate::multi_agent::AgentLifecycleState::Cancelled => BackgroundTaskStatus::Cancelled,
+        crate::multi_agent::AgentLifecycleState::TimedOut => BackgroundTaskStatus::TimedOut,
+    }
+}
+
+fn runtime_delegate_task_snapshots(
+    ctx: &ToolContext,
+    active_only: bool,
+    existing_ids: &HashSet<String>,
+) -> Vec<BackgroundTaskSnapshot> {
+    let mut snapshots = Vec::new();
+
+    for agent in ctx.multi_agent.list_agents(!active_only) {
+        let task_id = agent.id.as_str().to_owned();
+        if existing_ids.contains(&task_id) {
+            continue;
+        }
+        let status = status_from_agent_state(agent.state);
+        if active_only && !status.is_active() {
+            continue;
+        }
+        snapshots.push(BackgroundTaskSnapshot {
+            task_id,
+            kind: BackgroundTaskKind::Delegate,
+            status,
+            description: agent.display_title(),
+            elapsed: agent.elapsed,
+            output: None,
+            answers: None,
+            delegate: Some(agent),
+            swarm: None,
+        });
+    }
+
+    for swarm in ctx.multi_agent.list_swarms() {
+        if existing_ids.contains(&swarm.swarm_id) {
+            continue;
+        }
+        let status = status_from_agent_state(swarm.state);
+        if active_only && !status.is_active() {
+            continue;
+        }
+        snapshots.push(BackgroundTaskSnapshot {
+            task_id: swarm.swarm_id.clone(),
+            kind: BackgroundTaskKind::DelegateSwarm,
+            status,
+            description: swarm.description.clone(),
+            elapsed: Duration::ZERO,
+            output: None,
+            answers: None,
+            delegate: None,
+            swarm: Some(swarm),
+        });
+    }
+
+    snapshots
 }
 
 pub fn task_list_result(tasks: &[BackgroundTaskSnapshot], active_only: bool) -> ToolResult {
@@ -1630,6 +1705,86 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.content.contains("active_background_tasks: 1"));
         assert!(result.content.contains("task_id: q-1"));
+    }
+
+    #[tokio::test]
+    async fn task_list_tool_includes_active_runtime_delegate_without_background_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(dir.path()).unwrap();
+        let agent = ctx
+            .multi_agent
+            .start_foreground_delegate_for_test("calculate a small sum");
+
+        let tool = TaskListTool;
+        let result = tool.execute(&ctx, json!({})).await.expect("execute");
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("active_background_tasks: 1"));
+        assert!(
+            result
+                .content
+                .contains(&format!("task_id: {}", agent.id.as_str()))
+        );
+        assert!(result.content.contains("kind: delegate"));
+        assert!(result.content.contains("status: running"));
+        assert_eq!(
+            result.details.as_ref().unwrap()["tasks"][0]["task_id"],
+            agent.id.as_str()
+        );
+        assert_eq!(
+            result.details.as_ref().unwrap()["tasks"][0]["kind"],
+            "delegate"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_list_tool_includes_active_runtime_swarm_without_background_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(dir.path()).unwrap();
+        let swarm_id = ctx.multi_agent.create_swarm_for_test(vec![(
+            "calculate a small sum",
+            crate::multi_agent::AgentLifecycleState::Running,
+        )]);
+
+        let tool = TaskListTool;
+        let result = tool.execute(&ctx, json!({})).await.expect("execute");
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("active_background_tasks: 1"));
+        assert!(result.content.contains(&format!("task_id: {swarm_id}")));
+        assert!(result.content.contains("kind: delegate-swarm"));
+        assert!(result.content.contains("status: running"));
+        assert_eq!(
+            result.details.as_ref().unwrap()["tasks"][0]["task_id"],
+            swarm_id
+        );
+        assert_eq!(
+            result.details.as_ref().unwrap()["tasks"][0]["kind"],
+            "delegate-swarm"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_list_tool_deduplicates_delegate_background_records() {
+        let manager = BackgroundTaskManager::new();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(dir.path())
+            .unwrap()
+            .with_background_tasks(manager.clone());
+        let agent = ctx
+            .multi_agent
+            .start_foreground_delegate_for_test("calculate another small sum");
+        manager.start_delegate(agent.clone()).await;
+
+        let tool = TaskListTool;
+        let result = tool.execute(&ctx, json!({})).await.expect("execute");
+        let tasks = result.details.as_ref().unwrap()["tasks"]
+            .as_array()
+            .unwrap();
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["task_id"], agent.id.as_str());
+        assert_eq!(tasks[0]["kind"], "delegate");
     }
 
     #[tokio::test]
