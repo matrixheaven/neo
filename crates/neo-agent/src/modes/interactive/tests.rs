@@ -1893,33 +1893,43 @@ fn prompt_completions_merges_real_prompt_package_and_session_commands() {
         .map(|item| (item.value.as_str(), item))
         .collect::<BTreeMap<_, _>>();
 
-    assert!(
-        by_value["/review"]
-            .description
-            .as_deref()
-            .is_some_and(|description| description.contains("source: slash prompt"))
+    assert_eq!(
+        by_value["/review"].description.as_deref(),
+        Some("Review local changes")
     );
-    assert!(
-        by_value["/refactor"]
-            .description
-            .as_deref()
-            .is_some_and(|description| {
-                description.contains("source: prompt package")
-                    && description.contains("provider: review-pack")
-            })
+    assert_eq!(
+        by_value["/refactor"].description.as_deref(),
+        Some("Refactor from package")
     );
-    assert!(
-        by_value["/resume"]
-            .description
-            .as_deref()
-            .is_some_and(|description| {
-                description.contains("source: session command")
-                    && description.contains("provider: local sessions")
-                    && description.contains("trust: local")
-            })
+    assert_eq!(
+        by_value["/resume"].description.as_deref(),
+        Some("Resume a local session")
     );
+    for item in by_value.values() {
+        let description = item.description.as_deref().unwrap_or_default();
+        assert!(!description.contains("source:"));
+        assert!(!description.contains("provider:"));
+        assert!(!description.contains("trust:"));
+    }
     assert!(!by_value.contains_key("/tree"));
     assert!(!by_value.contains_key("/sync"));
+}
+
+#[test]
+fn slash_completion_descriptions_hide_internal_metadata() {
+    let completions = prompt_completions(&test_workspace_root(), "/ask", &[], None, true)
+        .expect("slash completions");
+    let ask = completions
+        .iter()
+        .find(|item| item.value == "/ask")
+        .expect("missing /ask completion");
+
+    assert_eq!(ask.label, "/ask");
+    assert_eq!(ask.description.as_deref(), Some("ask permission mode"));
+    let description = ask.description.as_deref().unwrap_or_default();
+    assert!(!description.contains("provider:"));
+    assert!(!description.contains("trust:"));
+    assert!(!description.contains("source:"));
 }
 
 #[test]
@@ -1976,9 +1986,7 @@ fn completion_catalog_excludes_extension_commands() {
     let files =
         completion_source_candidates(temp.path(), "src/ma", &catalog).expect("file completions");
     assert!(files.iter().any(|candidate| {
-        candidate.value == "src/main.rs"
-            && candidate.source == CompletionSource::LocalFile
-            && candidate.source_label == "local file"
+        candidate.value == "src/main.rs" && candidate.source == CompletionSource::LocalFile
     }));
 
     let slash =
@@ -2003,7 +2011,6 @@ fn completion_catalog_excludes_extension_commands() {
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].value, "@anthropic/claude-sonnet");
     assert_eq!(models[0].source, CompletionSource::ProviderModel);
-    assert_eq!(models[0].source_label, "provider model");
 }
 
 #[tokio::test]

@@ -41,20 +41,16 @@ fn prompt_package_completion_items(root: &Path, project_trusted: bool) -> Result
                 .path
                 .strip_prefix(root.join(".neo/prompts"))
                 .ok()?;
-            let provider = relative_path
+            relative_path
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
                 .and_then(|parent| parent.components().next())
                 .and_then(|component| component.as_os_str().to_str())
                 .filter(|provider| !provider.is_empty())?;
             let value = format!("/{}", command.template.name);
-            let description = prompt_source_description(
-                (!command.template.description.is_empty())
-                    .then_some(command.template.description.as_str()),
-                Some(provider),
-                None,
-            );
-            Some(PickerItem::new(value.clone(), value, Some(description)))
+            let description = (!command.template.description.is_empty())
+                .then_some(command.template.description);
+            Some(PickerItem::new(value.clone(), value, description))
         })
         .collect::<Vec<_>>();
     items.sort_by(|left, right| left.value.cmp(&right.value));
@@ -62,101 +58,28 @@ fn prompt_package_completion_items(root: &Path, project_trusted: bool) -> Result
     Ok(items)
 }
 
-static STATIC_SLASH_COMMANDS: &[(&str, &str, Option<&str>, Option<&str>)] = &[
-    (
-        "/resume",
-        "Resume a local session",
-        Some("local sessions"),
-        Some("local"),
-    ),
-    (
-        "/new",
-        "Start a fresh local session",
-        Some("session"),
-        Some("local"),
-    ),
-    ("/clear", "Alias for /new", Some("session"), Some("local")),
-    (
-        "/model",
-        "Switch active model",
-        Some("model picker"),
-        Some("local"),
-    ),
-    (
-        "/provider",
-        "View configured providers",
-        Some("provider picker"),
-        Some("local"),
-    ),
-    (
-        "/mcp",
-        "View and manage MCP servers",
-        Some("MCP manager"),
-        Some("local"),
-    ),
-    (
-        "/tasks",
-        "View active background tasks",
-        Some("background tasks"),
-        Some("local"),
-    ),
-    (
-        "/plan",
-        "Toggle plan mode (on / off / clear)",
-        Some("plan mode"),
-        Some("local"),
-    ),
-    (
-        "/compact",
-        "Request manual context compaction",
-        Some("session"),
-        Some("local"),
-    ),
-    (
-        "/permissions",
-        "select permission mode",
-        Some("permission mode"),
-        Some("local"),
-    ),
-    (
-        "/ask",
-        "ask permission mode",
-        Some("permission mode"),
-        Some("local"),
-    ),
-    (
-        "/auto",
-        "auto permission mode",
-        Some("permission mode"),
-        Some("local"),
-    ),
-    (
-        "/yolo",
-        "yolo permission mode",
-        Some("permission mode"),
-        Some("local"),
-    ),
-    (
-        "/btw",
-        "Open a temporary side-question panel",
-        Some("sidecar dialog"),
-        Some("local"),
-    ),
+static STATIC_SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/resume", "Resume a local session"),
+    ("/new", "Start a fresh local session"),
+    ("/clear", "Alias for /new"),
+    ("/model", "Switch active model"),
+    ("/provider", "View configured providers"),
+    ("/mcp", "View and manage MCP servers"),
+    ("/tasks", "View active background tasks"),
+    ("/plan", "Toggle plan mode (on / off / clear)"),
+    ("/compact", "Request manual context compaction"),
+    ("/permissions", "select permission mode"),
+    ("/ask", "ask permission mode"),
+    ("/auto", "auto permission mode"),
+    ("/yolo", "yolo permission mode"),
+    ("/btw", "Open a temporary side-question panel"),
 ];
 
 pub(super) fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<PickerItem> {
     let mut items: Vec<PickerItem> = STATIC_SLASH_COMMANDS
         .iter()
-        .map(|(value, description, provider, trust)| {
-            PickerItem::new(
-                (*value).to_owned(),
-                (*value).to_owned(),
-                Some(prompt_source_description(
-                    Some(description),
-                    *provider,
-                    *trust,
-                )),
-            )
+        .map(|(value, description)| {
+            PickerItem::new((*value).to_owned(), (*value).to_owned(), Some(*description))
         })
         .collect();
     if let Some(skill_store) = skill_store {
@@ -165,33 +88,11 @@ pub(super) fn session_completion_items(skill_store: Option<&SkillStore>) -> Vec<
             items.push(PickerItem::new(
                 value.clone(),
                 value,
-                Some(prompt_source_description(
-                    Some(&skill.manifest.description),
-                    Some("skill"),
-                    Some("local"),
-                )),
+                Some(skill.manifest.description.clone()),
             ));
         }
     }
     items
-}
-
-fn prompt_source_description(
-    description: Option<&str>,
-    provider: Option<&str>,
-    trust: Option<&str>,
-) -> String {
-    let mut details = Vec::new();
-    if let Some(description) = description.filter(|description| !description.is_empty()) {
-        details.push(description.to_owned());
-    }
-    if let Some(provider) = provider {
-        details.push(format!("provider: {provider}"));
-    }
-    if let Some(trust) = trust {
-        details.push(format!("trust: {trust}"));
-    }
-    details.join(" | ")
 }
 
 fn slash_prompt_template_completion_items(
@@ -336,25 +237,12 @@ pub(super) enum CompletionSource {
     ProviderModel,
 }
 
-impl CompletionSource {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::LocalFile => "local file",
-            Self::SlashPrompt => "slash prompt",
-            Self::PromptPackage => "prompt package",
-            Self::SessionCommand => "session command",
-            Self::ProviderModel => "provider model",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CompletionCandidate {
     pub(super) value: String,
     pub(super) label: String,
     pub(super) description: Option<String>,
     pub(super) source: CompletionSource,
-    pub(super) source_label: &'static str,
 }
 
 impl CompletionCandidate {
@@ -369,7 +257,6 @@ impl CompletionCandidate {
             label: label.into(),
             description,
             source,
-            source_label: source.label(),
         }
     }
 
@@ -381,10 +268,7 @@ impl CompletionCandidate {
         PickerItem::new(
             self.value.clone(),
             self.label.clone(),
-            Some(completion_description(
-                self.description.as_deref(),
-                self.source_label,
-            )),
+            self.description.clone(),
         )
     }
 }
@@ -430,15 +314,6 @@ fn slash_source_candidates(prefix: &str, catalog: &CompletionCatalog) -> Vec<Com
 
 fn completion_source_rank(source: CompletionSource) -> u8 {
     [0, 1, 2, 3, 4][source as usize]
-}
-
-fn completion_description(description: Option<&str>, source_label: &str) -> String {
-    match description {
-        Some(description) if !description.is_empty() => {
-            format!("{description} | source: {source_label}")
-        }
-        _ => format!("source: {source_label}"),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
