@@ -19,7 +19,7 @@ Read [CX.md](../../.kimi-code/CX.md) and [RTK.md](../../.kimi-code/RTK.md). Use 
 
 1. Recall: `icm recall-context "<task>" --limit 5`.
 2. Scope your own work only.
-3. Verify proportionally (tiers below). Use the narrowest direct `cargo nextest run ...` target; never use bare `cargo test` as evidence.
+3. Verify proportionally (tiers below). Use the narrowest exact command that proves the touched behavior; never use broad `cargo test` as evidence.
 4. Commit: after verification passes, commit the changes with a conventional commit message (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:` prefix). One logical task = one commit. Don't batch unrelated changes.
 
 ### Verification tiers — err toward less testing
@@ -27,10 +27,10 @@ Read [CX.md](../../.kimi-code/CX.md) and [RTK.md](../../.kimi-code/RTK.md). Use 
 | Tier | When | What to run |
 |------|------|-------------|
 | **Trivial** | typo, doc edit, rename, config-only | No tests. Build check optional. |
-| **Medium** | single function, localized fix, small feature | One explicit target: `cargo nextest run -p <crate> --test <target> <filter>` or `--lib <filter>` / `--bin <bin> <filter>` |
+| **Medium** | single function, localized fix, small feature | One exact function-level test when possible; otherwise one explicit target with a narrow filter. |
 | **Complex** | cross-module refactor, arch change, new subsystem | Start with the smallest explicit targets for each touched boundary. Add more explicit targets only when evidence points there. |
 
-Never widen scope to "make sure nothing broke" — that's CI's job. A package plus filter is not evidence unless the command also names `--lib`, `--bin <bin>`, or `--test <target>`.
+Never widen scope to "make sure nothing broke" — that's CI's job. Test evidence must name exactly one package, exactly one target selector (`--lib`, `--bin <bin>`, or `--test <target>`), and at least one test-name filter.
 
 ## Crates
 
@@ -50,9 +50,16 @@ cargo clippy -p <crate> --test <target> -- -D warnings # integration-test lint
 cargo nextest run -p <crate> --test <target> <filter>  # integration test
 cargo nextest run -p <crate> --lib <filter>            # library unit test
 cargo nextest run -p <crate> --bin <bin> <filter>      # binary target test
+cargo test --package <crate> --bin <bin> -- <full::test::path> --exact --nocapture --include-ignored # exact binary test
 ```
 
-Test runner is `cargo-nextest` (install if missing; never fall back to `cargo test`). Test evidence must name exactly one package, exactly one target selector (`--lib`, `--bin <bin>`, or `--test <target>`), and at least one test-name filter. Deterministic model tests: `FakeModelClient` / `FakeHarness`. Resource-sensitive tests must be classified in `.config/nextest.toml`. Tests must not depend on shared cwd, ambient env, fixed ports, or other tests' side effects.
+Prefer `cargo-nextest` for normal verification. For fast local iteration on a known single test function, exact `cargo test` is acceptable when it names the package, target, full test path, and `--exact`, for example:
+
+```bash
+cargo test --package neo-agent --bin neo -- modes::task_browser::tests::task_browser_adapter_shows_waiting_question_prompt --exact --nocapture --include-ignored
+```
+
+Do not use broad `cargo test`, package-wide `cargo nextest run`, or vague substring filters as evidence. Deterministic model tests: `FakeModelClient` / `FakeHarness`. Resource-sensitive tests must be classified in `.config/nextest.toml`. Tests must not depend on shared cwd, ambient env, fixed ports, or other tests' side effects.
 
 ## Code style
 
@@ -69,9 +76,9 @@ Test runner is `cargo-nextest` (install if missing; never fall back to `cargo te
 4. Streams normalized to `AiStreamEvent` (`TextDelta`, `Thinking*`, `ToolCall*`, `MessageEnd`, `Error`). Reasoning preserved as `ContentPart::Thinking`.
 5. Errors typed (`AiError` 8 variants) with exponential backoff retry (300ms–5s, jitter); context-overflow triggers forced multi-round compaction + retry; `Retry-After` honored.
 6. Tools authorized against `PermissionMode`, executed by `ToolRegistry`.
-6. Skills: project/user/extra/built-in tiers; `<available_skills>` injected into system prompt; activation injects skill body before user message.
-7. Goals: autonomous across turns via `update_goal_status`; no turn cap. Stored under `<session_dir>/goals/`.
-8. Queue & steer: `Enter` while busy → follow-up (FIFO). `Ctrl+S` → steer at next break point. See `docs/queue-and-steer.md`.
+7. Skills: project/user/extra/built-in tiers; `<available_skills>` injected into system prompt; activation injects skill body before user message.
+8. Goals: autonomous across turns via `update_goal_status`; no turn cap. Stored under `<session_dir>/goals/`.
+9. Queue & steer: `Enter` while busy → follow-up (FIFO). `Ctrl+S` → steer at next break point. See `docs/queue-and-steer.md`.
 
 ### Built-in tools
 
