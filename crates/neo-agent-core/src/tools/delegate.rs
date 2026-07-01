@@ -40,6 +40,13 @@ where
         .unwrap_or_default();
     let merged = format!("{old}\n\n{}", AgentProfile::role_selection_guide());
     role["description"] = serde_json::Value::String(merged);
+    if let Some(resume_agent_ids) = props.get_mut("resume_agent_ids") {
+        resume_agent_ids["type"] = serde_json::Value::String("object".to_owned());
+        resume_agent_ids["additionalProperties"] = serde_json::json!({
+            "type": "string",
+            "description": "Prompt used when resuming that specific agent_id."
+        });
+    }
     schema
 }
 
@@ -664,4 +671,24 @@ fn reject_unknown_placeholders(tool: &str, template: &str) -> Result<(), ToolErr
         rest = &after_start[end + 2..];
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delegate_swarm_schema_describes_resume_agent_ids_as_object_map() {
+        let schema = DelegateSwarmTool.input_schema();
+        let resume = &schema["properties"]["resume_agent_ids"];
+        let description = resume["description"]
+            .as_str()
+            .expect("resume_agent_ids description");
+
+        assert!(description.contains("JSON object"));
+        assert!(description.contains("agent_id"));
+        assert!(description.contains("per-agent resume prompt"));
+        assert_eq!(resume["type"], "object");
+        assert_eq!(resume["additionalProperties"]["type"], "string");
+    }
 }

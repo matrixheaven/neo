@@ -134,7 +134,9 @@ pub struct DelegateSwarmRequest {
     )]
     pub prompt_template: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Existing agent_id to prompt mapping for resumed child agents.")]
+    #[schemars(
+        description = "JSON object map from existing agent_id to per-agent resume prompt, for example {\"agent_xxx\": \"continue with this prompt\"}. Do not pass an array."
+    )]
     pub resume_agent_ids: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     #[schemars(description = "Subagent role for new children. Defaults to coder.")]
