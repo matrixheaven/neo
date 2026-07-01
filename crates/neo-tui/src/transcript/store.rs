@@ -51,7 +51,7 @@ impl TranscriptSelection {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptViewport {
     scroll_top_rows: usize,
     content_rows: usize,
@@ -134,6 +134,12 @@ impl TranscriptViewport {
     }
 }
 
+impl Default for TranscriptViewport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TranscriptStore {
     entries: Vec<TranscriptEntry>,
@@ -150,7 +156,6 @@ impl TranscriptStore {
 
     pub fn push(&mut self, entry: TranscriptEntry) {
         self.entries.push(entry);
-        self.viewport.follow_bottom();
     }
 
     pub fn start_assistant(&mut self) {
@@ -256,7 +261,6 @@ impl TranscriptStore {
         if let Some(index) = insert_at {
             self.entries
                 .insert(index, TranscriptEntry::ApprovalPrompt(data));
-            self.viewport.follow_bottom();
         } else {
             self.push(TranscriptEntry::ApprovalPrompt(data));
         }
@@ -317,7 +321,6 @@ impl TranscriptStore {
                     component: DelegateGroupComponent::new(turn, vec![existing, snapshot]),
                 },
             );
-            self.viewport.follow_bottom();
             return;
         }
         if let Some(entry) = self.entries.iter_mut().find_map(|entry| match entry {
@@ -389,7 +392,6 @@ impl TranscriptStore {
             return None;
         }
         let entry = self.entries.remove(index);
-        self.viewport.follow_bottom();
         Some(entry)
     }
 

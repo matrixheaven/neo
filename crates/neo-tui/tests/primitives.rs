@@ -215,6 +215,43 @@ fn transcript_viewport_clamp_after_shrink_keeps_manual_mode() {
 }
 
 #[test]
+fn transcript_store_push_preserves_manual_scroll_state() {
+    let mut store = TranscriptStore::new();
+    for index in 0..20 {
+        store.push(TranscriptEntry::status(format!("line {index}")));
+    }
+    store.viewport_mut().sync(20, 5);
+    store.viewport_mut().scroll_up(6);
+    assert_eq!(store.viewport().visible_row_range(20, 5), 9..14);
+    assert!(!store.viewport().is_following_tail());
+
+    store.push(TranscriptEntry::status("new line"));
+    store.viewport_mut().sync(21, 5);
+
+    assert_eq!(store.viewport().visible_row_range(21, 5), 9..14);
+    assert!(!store.viewport().is_following_tail());
+}
+
+#[test]
+fn transcript_store_explicit_follow_bottom_restores_tail_after_push() {
+    let mut store = TranscriptStore::new();
+    for index in 0..20 {
+        store.push(TranscriptEntry::status(format!("line {index}")));
+    }
+    store.viewport_mut().sync(20, 5);
+    store.viewport_mut().scroll_up(6);
+    assert!(!store.viewport().is_following_tail());
+
+    store.viewport_mut().follow_bottom();
+    store.push(TranscriptEntry::status("new line"));
+    store.viewport_mut().sync(21, 5);
+
+    assert_eq!(store.viewport().visible_row_range(21, 5), 16..21);
+    assert_eq!(store.viewport().scrollback(), 0);
+    assert!(store.viewport().is_following_tail());
+}
+
+#[test]
 fn prompt_edit_applies_character_and_word_operations() {
     let mut prompt = PromptState::new("hello world").with_cursor(5);
 
