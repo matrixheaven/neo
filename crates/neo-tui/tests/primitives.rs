@@ -123,25 +123,32 @@ fn keybinding_manager_matches_defaults_overrides_and_conflicts() {
 }
 
 #[test]
-fn transcript_viewport_tracks_bottom_and_manual_scroll() {
+fn transcript_viewport_tracks_top_index_and_follow_tail() {
     let mut view = TranscriptViewport::new();
 
     view.sync(8, 3);
-    let bottom = view.visible_row_range(8, 3);
-    assert_eq!(bottom, 5..8);
+    assert_eq!(view.visible_row_range(8, 3), 5..8);
+    assert_eq!(view.scrollback(), 0);
+    assert!(view.is_following_tail());
 
     view.scroll_up(2);
     assert_eq!(view.visible_row_range(8, 3), 3..6);
+    assert_eq!(view.scrollback(), 2);
+    assert!(!view.is_following_tail());
 
     view.scroll_down(1);
     assert_eq!(view.visible_row_range(8, 3), 4..7);
+    assert_eq!(view.scrollback(), 1);
+    assert!(!view.is_following_tail());
 
-    view.follow_bottom();
+    view.scroll_down(1);
     assert_eq!(view.visible_row_range(8, 3), 5..8);
+    assert_eq!(view.scrollback(), 0);
+    assert!(view.is_following_tail());
 }
 
 #[test]
-fn transcript_viewport_syncs_visual_row_scrollback_and_follow_tail() {
+fn transcript_viewport_preserves_history_position_when_content_grows() {
     let mut view = TranscriptViewport::new();
 
     view.sync(40, 10);
@@ -149,14 +156,62 @@ fn transcript_viewport_syncs_visual_row_scrollback_and_follow_tail() {
 
     view.scroll_up(12);
     assert_eq!(view.visible_row_range(40, 10), 18..28);
+    assert!(!view.is_following_tail());
 
-    view.sync(8, 10);
-    assert_eq!(view.visible_row_range(8, 10), 0..8);
+    view.sync(50, 10);
+    assert_eq!(
+        view.visible_row_range(50, 10),
+        18..28,
+        "new content must not yank a manually scrolled viewport"
+    );
+    assert_eq!(view.scrollback(), 22);
+    assert!(!view.is_following_tail());
+}
+
+#[test]
+fn transcript_viewport_follows_tail_only_when_already_at_bottom() {
+    let mut view = TranscriptViewport::new();
+
+    view.sync(40, 10);
+    assert_eq!(view.visible_row_range(40, 10), 30..40);
+    assert!(view.is_following_tail());
+
+    view.sync(50, 10);
+    assert_eq!(view.visible_row_range(50, 10), 40..50);
+    assert_eq!(view.scrollback(), 0);
+    assert!(view.is_following_tail());
 
     view.scroll_up(4);
+    assert_eq!(view.visible_row_range(50, 10), 36..46);
+    assert!(!view.is_following_tail());
+
     view.follow_bottom();
     view.sync(80, 12);
     assert_eq!(view.visible_row_range(80, 12), 68..80);
+    assert_eq!(view.scrollback(), 0);
+    assert!(view.is_following_tail());
+}
+
+#[test]
+fn transcript_viewport_clamp_after_shrink_keeps_manual_mode() {
+    let mut view = TranscriptViewport::new();
+
+    view.sync(40, 10);
+    view.scroll_up(12);
+    assert_eq!(view.visible_row_range(40, 10), 18..28);
+    assert!(!view.is_following_tail());
+
+    view.sync(8, 10);
+    assert_eq!(view.visible_row_range(8, 10), 0..8);
+    assert!(!view.is_following_tail());
+
+    view.sync(40, 10);
+    assert_eq!(view.visible_row_range(40, 10), 0..10);
+    assert!(!view.is_following_tail());
+
+    view.scroll_down(100);
+    assert_eq!(view.visible_row_range(40, 10), 30..40);
+    assert!(view.is_following_tail());
 }
 
 #[test]

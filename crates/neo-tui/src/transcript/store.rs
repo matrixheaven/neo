@@ -53,7 +53,7 @@ impl TranscriptSelection {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TranscriptViewport {
-    scroll_offset_rows: usize,
+    scroll_top_rows: usize,
     content_rows: usize,
     viewport_rows: usize,
     follow_tail: bool,
@@ -64,7 +64,7 @@ impl TranscriptViewport {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            scroll_offset_rows: 0,
+            scroll_top_rows: 0,
             content_rows: 0,
             viewport_rows: 0,
             follow_tail: true,
@@ -78,8 +78,8 @@ impl TranscriptViewport {
     }
 
     #[must_use]
-    pub const fn scrollback(&self) -> usize {
-        self.scroll_offset_rows
+    pub fn scrollback(&self) -> usize {
+        self.max_scroll_top().saturating_sub(self.scroll_top_rows)
     }
 
     #[must_use]
@@ -88,21 +88,21 @@ impl TranscriptViewport {
     }
 
     pub fn follow_bottom(&mut self) {
-        self.scroll_offset_rows = 0;
         self.follow_tail = true;
+        self.scroll_top_rows = self.max_scroll_top();
     }
 
     pub fn scroll_up(&mut self, rows: usize) {
         self.follow_tail = false;
-        self.scroll_offset_rows = self.scroll_offset_rows.saturating_add(rows);
-        if self.has_synced_dimensions() {
-            self.scroll_offset_rows = self.scroll_offset_rows.min(self.max_scroll_offset());
-        }
+        self.scroll_top_rows = self.scroll_top_rows.saturating_sub(rows);
     }
 
     pub fn scroll_down(&mut self, rows: usize) {
-        self.scroll_offset_rows = self.scroll_offset_rows.saturating_sub(rows);
-        if self.scroll_offset_rows == 0 {
+        self.scroll_top_rows = self
+            .scroll_top_rows
+            .saturating_add(rows)
+            .min(self.max_scroll_top());
+        if self.scroll_top_rows == self.max_scroll_top() {
             self.follow_tail = true;
         }
     }
@@ -110,10 +110,11 @@ impl TranscriptViewport {
     pub fn sync(&mut self, content_rows: usize, viewport_rows: usize) {
         self.content_rows = content_rows;
         self.viewport_rows = viewport_rows;
+        let max = self.max_scroll_top();
         if self.follow_tail {
-            self.scroll_offset_rows = 0;
+            self.scroll_top_rows = max;
         } else {
-            self.scroll_offset_rows = self.scroll_offset_rows.min(self.max_scroll_offset());
+            self.scroll_top_rows = self.scroll_top_rows.min(max);
         }
     }
 
@@ -123,18 +124,12 @@ impl TranscriptViewport {
             return 0..0;
         }
         let window = height.min(row_count);
-        let scrollback = self
-            .scroll_offset_rows
-            .min(row_count.saturating_sub(window));
-        let bottom = row_count.saturating_sub(scrollback).max(window);
-        bottom - window..bottom
+        let max_start = row_count.saturating_sub(window);
+        let start = self.scroll_top_rows.min(max_start);
+        start..start + window
     }
 
-    fn has_synced_dimensions(&self) -> bool {
-        self.viewport_rows > 0
-    }
-
-    fn max_scroll_offset(&self) -> usize {
+    fn max_scroll_top(&self) -> usize {
         self.content_rows.saturating_sub(self.viewport_rows)
     }
 }
