@@ -8,8 +8,8 @@ const NEON_VIOLET: Color = Color::Rgb(138, 92, 255);
 
 fn neon_logo_row(row: usize) -> String {
     let (left, center, right) = match row {
-        0 => ("\u{2590}\u{2588}", "\u{259a}\u{259e}", "\u{2588}\u{258c}"),
-        1 => ("\u{2590}\u{2588}", "\u{2597}\u{2596}", "\u{2588}\u{258c}"),
+        0 => ("\u{2590}\u{2588}", "\u{2598} ", "\u{2588}\u{258c}"),
+        1 => ("\u{2590}\u{2588}", " \u{2597}", "\u{2588}\u{258c}"),
         _ => return String::new(),
     };
     format!(
@@ -54,8 +54,8 @@ fn bulleted_wrap(text: &str, width: usize, prefix: &str, style: Style) -> Vec<Li
 /// ```text
 /// ╭──────╮
 /// │      │
-/// │  ▐█▚▞█▌  Welcome to Neo!
-/// │  ▐█▗▖█▌  Send /help for help.
+/// │  ▐█▘ █▌  Welcome to Neo!
+/// │  ▐█ ▗█▌  Send /help for help.
 /// │      │
 /// │  Directory: /path
 /// │  Session:   abc
