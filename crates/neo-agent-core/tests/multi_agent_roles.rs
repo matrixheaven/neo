@@ -99,8 +99,14 @@ fn delegate_and_swarm_schemas_surface_role_guide() {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_else(|| panic!("{tool_name} role field has a description"));
         // The original per-field text is preserved alongside the appended guide.
-        assert!(desc.contains("Defaults to coder"), "{tool_name} original role text dropped");
-        assert!(desc.contains("When to use each role:"), "{tool_name} missing guide");
+        assert!(
+            desc.contains("Defaults to coder"),
+            "{tool_name} original role text dropped"
+        );
+        assert!(
+            desc.contains("When to use each role:"),
+            "{tool_name} missing guide"
+        );
         for role in AgentRole::ALL {
             assert!(
                 desc.contains(&format!("- {}:", role.as_str())),
