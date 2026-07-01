@@ -1,5 +1,8 @@
 //! Cross-platform clipboard image reading for image paste.
 
+#[cfg(target_os = "linux")]
+use std::process::Command;
+
 use thiserror::Error;
 
 /// Image bytes read from the system clipboard.

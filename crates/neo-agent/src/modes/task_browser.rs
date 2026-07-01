@@ -518,6 +518,7 @@ mod tests {
             elapsed: Duration::from_secs(10),
             latest_text: None,
             activity: Vec::new(),
+            prior_messages: Vec::new(),
             outcome: Some(AgentTerminalOutcome {
                 summary: "All good".to_owned(),
                 is_error: false,
@@ -543,6 +544,7 @@ mod tests {
             elapsed: Duration::from_secs(8),
             latest_text: None,
             activity: Vec::new(),
+            prior_messages: Vec::new(),
             outcome: Some(AgentTerminalOutcome {
                 summary: "Done too".to_owned(),
                 is_error: false,
