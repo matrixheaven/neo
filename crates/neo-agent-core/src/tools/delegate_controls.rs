@@ -326,11 +326,17 @@ impl Tool for ListDelegatesTool {
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
             let input: ListDelegatesInput = parse_input(self.name(), input)?;
+            if input.limit == 0 {
+                return Err(ToolError::InvalidInput {
+                    tool: self.name().to_owned(),
+                    message: "limit must be >= 1".to_owned(),
+                });
+            }
             let include_completed =
                 input.include_completed || input.state.is_some_and(|s| s.is_terminal());
             let cursor_query = DelegateListCursorQuery::from_input(&input, include_completed);
             let offset = parse_list_cursor(self.name(), input.cursor.as_deref(), &cursor_query)?;
-            let limit = input.limit.max(1);
+            let limit = input.limit;
             let include = input.include.iter().map(include_label).collect::<Vec<_>>();
             let include_task = input.include.contains(&DelegateListInclude::Task);
             let include_summary = input.include.contains(&DelegateListInclude::Summary);
@@ -952,6 +958,25 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.content.contains("No active delegates found."));
         assert!(result.content.contains("Pass include_completed=true"));
+    }
+
+    #[tokio::test]
+    async fn list_delegates_rejects_zero_limit() {
+        let ctx = test_context();
+        let tool = ListDelegatesTool;
+
+        let err = tool
+            .execute(&ctx, json!({ "limit": 0 }))
+            .await
+            .expect_err("zero limit should be invalid input");
+
+        match err {
+            ToolError::InvalidInput { tool, message } => {
+                assert_eq!(tool, "ListDelegates");
+                assert!(message.contains("limit must be >= 1"));
+            }
+            other => panic!("expected invalid input, got {other:?}"),
+        }
     }
 
     #[tokio::test]
