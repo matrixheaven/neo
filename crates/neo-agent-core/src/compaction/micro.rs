@@ -103,12 +103,7 @@ mod tests {
     use super::*;
 
     fn large_tool_result(id: &str, size: usize) -> AgentMessage {
-        AgentMessage::tool_result(
-            id,
-            "bash",
-            vec![Content::text(&"x".repeat(size * 4))],
-            false,
-        )
+        AgentMessage::tool_result(id, "bash", vec![Content::text("x".repeat(size * 4))], false)
     }
 
     fn small_tool_result(id: &str) -> AgentMessage {
@@ -168,7 +163,7 @@ mod tests {
             ..MicroCompactionConfig::default()
         };
         let messages = vec![
-            AgentMessage::user_text(&"x".repeat(1000)),
+            AgentMessage::user_text("x".repeat(1000)),
             AgentMessage::user_text("recent"),
         ];
         let result = apply_micro_compaction(&messages, &config);

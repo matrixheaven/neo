@@ -361,7 +361,7 @@ mod tests {
         // The raw path handles this: ESC is converted to Cancel, then 'a' is Insert
         let events = parser.feed_bytes(b"a");
         // Should get Insert('a') at minimum
-        assert!(events.iter().any(|e| *e == InputEvent::Insert('a')));
+        assert!(events.contains(&InputEvent::Insert('a')));
     }
 
     #[test]

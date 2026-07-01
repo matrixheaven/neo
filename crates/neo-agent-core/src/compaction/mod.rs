@@ -1032,7 +1032,11 @@ mod tests {
         // The integration is verified by the multi-round compaction tests in
         // compaction_trigger.rs (Task 7). This test is a compilation marker:
         // if the function signature changes, this fails to compile.
-        fn _assert_signature<'a>(
+        type RetryOutput = Result<(String, usize), CompactionError>;
+        type RetryFuture<'a> =
+            std::pin::Pin<Box<dyn std::future::Future<Output = RetryOutput> + Send + 'a>>;
+
+        struct GenerateWithRetryArgs<'a> {
             model: &'a Arc<dyn ModelClient>,
             config: &'a AgentConfig,
             messages: &'a [AgentMessage],
@@ -1041,14 +1045,22 @@ mod tests {
             instruction: Option<&'a str>,
             cancel_token: &'a CancellationToken,
             max_retry_attempts: u32,
-            _on_progress: &'a dyn Fn(usize),
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<Output = Result<(String, usize), CompactionError>>
-                    + Send
-                    + 'a,
-            >,
-        > {
+            on_progress: &'a (dyn Fn(usize) + Send + Sync),
+        }
+
+        fn _assert_signature<'a>(args: GenerateWithRetryArgs<'a>) -> RetryFuture<'a> {
+            let GenerateWithRetryArgs {
+                model,
+                config,
+                messages,
+                strategy,
+                max_context_tokens,
+                instruction,
+                cancel_token,
+                max_retry_attempts,
+                on_progress,
+            } = args;
+
             Box::pin(generate_with_retry(
                 model,
                 config,
@@ -1058,7 +1070,7 @@ mod tests {
                 instruction,
                 cancel_token,
                 max_retry_attempts,
-                |_len: usize| {},
+                on_progress,
             ))
         }
         // If this compiles, the signature is correct.
