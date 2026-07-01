@@ -2,9 +2,9 @@ use futures::StreamExt;
 use neo_agent_core::{
     AgentConfig, AgentContext, AgentEvent, AgentMessage, AgentRuntime, AgentRuntimeError,
     AgentToolCall, ApprovalRequest, AskUserTool, CompactionSettings, Content,
-    PermissionApprovalDecision, PermissionMode, PermissionOperation, QueueMode, ShellCommandOrigin,
-    ShellCommandOutcome, StopReason, TodoEventData, Tool, ToolContext, ToolError,
-    ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult,
+    PermissionApprovalDecision, PermissionMode, PermissionOperation, QueueMode, SessionApprovalKey,
+    SessionApprovalScope, ShellCommandOrigin, ShellCommandOutcome, StopReason, TodoEventData, Tool,
+    ToolContext, ToolError, ToolExecutionMode, ToolFuture, ToolRegistry, ToolResult,
     harness::{FakeHarness, fake_model},
     session::{JsonlSessionWriter, workspace_sessions_dir},
     skills::SkillStore,
@@ -2469,7 +2469,7 @@ async fn runtime_emits_approval_request_for_ask_permission_and_skips_tool_execut
         operation: PermissionOperation::Tool,
         subject: "echo".to_owned(),
         arguments: json!({ "text": "needs approval" }),
-        session_scope: None,
+        session_scope: Some(echo_tool_session_scope("")),
         prefix_rule: None,
     }));
     assert!(events.contains(&AgentEvent::ToolExecutionFinished {
@@ -2495,6 +2495,17 @@ fn assert_tool_was_executed(executed: &[String], should_execute: bool) {
         was_executed, should_execute,
         "expected should_execute={should_execute}, executed list: {executed:?}"
     );
+}
+
+fn echo_tool_session_scope(workspace: impl Into<String>) -> SessionApprovalScope {
+    SessionApprovalScope {
+        keys: vec![SessionApprovalKey::Tool {
+            workspace: workspace.into(),
+            name: "echo".to_owned(),
+        }],
+        label: "Approve this tool for this session".to_owned(),
+        detail: "Tool: echo".to_owned(),
+    }
 }
 
 #[tokio::test]
@@ -2562,7 +2573,7 @@ async fn runtime_executes_ask_permission_tool_after_approval_hook_allows_it() {
         operation: PermissionOperation::Tool,
         subject: "echo".to_owned(),
         arguments: json!({ "text": "approved" }),
-        session_scope: None,
+        session_scope: Some(echo_tool_session_scope("")),
         prefix_rule: None,
     }));
     assert_eq!(
@@ -2875,7 +2886,7 @@ async fn runtime_skips_ask_permission_tool_after_approval_hook_denies_it() {
         operation: PermissionOperation::Tool,
         subject: "echo".to_owned(),
         arguments: json!({ "text": "denied" }),
-        session_scope: None,
+        session_scope: Some(echo_tool_session_scope("")),
         prefix_rule: None,
     }));
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
@@ -3049,7 +3060,7 @@ async fn runtime_executes_ask_permission_tool_after_async_approval_wait_allows_i
             operation: PermissionOperation::Tool,
             subject: "echo".to_owned(),
             arguments: json!({ "text": "async approved" }),
-            session_scope: None,
+            session_scope: Some(echo_tool_session_scope("")),
             prefix_rule: None,
         }]
     );
@@ -3059,7 +3070,7 @@ async fn runtime_executes_ask_permission_tool_after_async_approval_wait_allows_i
         operation: PermissionOperation::Tool,
         subject: "echo".to_owned(),
         arguments: json!({ "text": "async approved" }),
-        session_scope: None,
+        session_scope: Some(echo_tool_session_scope("")),
         prefix_rule: None,
     }));
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
@@ -3116,7 +3127,7 @@ async fn runtime_skips_ask_permission_tool_after_async_approval_wait_denies_it()
         operation: PermissionOperation::Tool,
         subject: "echo".to_owned(),
         arguments: json!({ "text": "async denied" }),
-        session_scope: None,
+        session_scope: Some(echo_tool_session_scope("")),
         prefix_rule: None,
     }));
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
@@ -3176,7 +3187,7 @@ async fn runtime_cancels_while_waiting_for_async_approval_decision() {
         operation: PermissionOperation::Tool,
         subject: "echo".to_owned(),
         arguments: json!({ "text": "async cancelled" }),
-        session_scope: None,
+        session_scope: Some(echo_tool_session_scope("")),
         prefix_rule: None,
     }));
     assert!(executed.lock().expect("executed lock poisoned").is_empty());
@@ -4410,6 +4421,12 @@ async fn runtime_auto_mode_denies_ask_user_question() {
 #[tokio::test]
 async fn runtime_ask_mode_read_runs_and_custom_tool_asks() {
     let workspace = tempfile::tempdir().expect("workspace");
+    let workspace_key = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace")
+        .display()
+        .to_string();
     std::fs::write(workspace.path().join("file.txt"), "hello").expect("seed file");
     let harness = FakeHarness::from_turns([
         vec![
@@ -4477,7 +4494,7 @@ async fn runtime_ask_mode_read_runs_and_custom_tool_asks() {
         operation: PermissionOperation::Tool,
         subject: "echo".to_owned(),
         arguments: json!({ "text": "needs approval" }),
-        session_scope: None,
+        session_scope: Some(echo_tool_session_scope(workspace_key)),
         prefix_rule: None,
     }));
 }
@@ -4543,8 +4560,8 @@ async fn runtime_session_approval_persists_for_same_tool() {
 
     assert_eq!(
         *approval_count.lock().expect("count lock poisoned"),
-        2,
-        "generic tools have no reusable scope; each call must prompt even with AllowForSession"
+        1,
+        "AllowForSession should approve the same named tool for the rest of the session"
     );
     assert_eq!(
         *executed.lock().expect("executed lock poisoned"),

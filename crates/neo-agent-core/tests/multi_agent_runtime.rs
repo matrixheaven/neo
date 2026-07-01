@@ -28,15 +28,18 @@ fn display_name_pool_is_deterministic() {
 }
 
 #[test]
-fn display_name_pool_suffixes_after_exhaustion() {
+fn display_name_pool_combines_names_after_default_names() {
     let mut pool = DisplayNamePool::default();
     for _ in 0..DEFAULT_AGENT_NAMES.len() {
         let _ = pool.next_name();
     }
 
-    let wrapped = pool.next_name();
+    let combined = pool.next_name();
 
-    assert_eq!(wrapped.as_str(), format!("{}2", DEFAULT_AGENT_NAMES[0]));
+    assert_eq!(
+        combined.as_str(),
+        format!("{}{}", DEFAULT_AGENT_NAMES[0], DEFAULT_AGENT_NAMES[1])
+    );
 }
 
 #[test]
@@ -45,7 +48,7 @@ fn foreground_delegate_lifecycle_records_running_and_completed_state() {
 
     let running = runtime.start_foreground_delegate_for_test("inspect queue");
     assert_eq!(running.state, AgentLifecycleState::Running);
-    assert_eq!(running.display_name.as_str(), "Zeno");
+    assert_eq!(running.display_name.as_str(), DEFAULT_AGENT_NAMES[0]);
 
     let completed = runtime.complete_delegate_for_test(&running.id, "queue is safe");
     assert_eq!(completed.state, AgentLifecycleState::Completed);
@@ -1080,7 +1083,12 @@ async fn delegate_swarm_runs_children_with_named_agents_and_parent_turn() {
         .iter()
         .map(|child| child.agent.display_name.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(names, vec!["Zeno", "Gibbs", "Hokke"]);
+    let expected_names = DEFAULT_AGENT_NAMES
+        .iter()
+        .take(3)
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(names, expected_names);
     assert!(!names.iter().any(|name| name.starts_with("child-")));
 
     let delegate_result = events

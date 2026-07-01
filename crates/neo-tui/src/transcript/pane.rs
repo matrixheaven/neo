@@ -731,14 +731,7 @@ impl TranscriptPane {
         self.transcript
             .viewport_mut()
             .sync(rows.len(), viewport_rows);
-        let range = self
-            .transcript
-            .viewport()
-            .visible_row_range(rows.len(), viewport_rows);
-        rows.into_iter()
-            .skip(range.start)
-            .take(range.len())
-            .collect()
+        rows
     }
 
     fn has_streaming_thinking(&self) -> bool {

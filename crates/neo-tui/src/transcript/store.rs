@@ -405,6 +405,15 @@ impl TranscriptStore {
     }
 
     pub fn select_visible_entry(&mut self) {
+        if self.viewport.is_following_tail() {
+            self.viewport.selection = self
+                .entries
+                .len()
+                .checked_sub(1)
+                .map(TranscriptSelection::new);
+            return;
+        }
+
         let range = self.viewport.visible_row_range(self.entries.len(), 1);
         let Some(index) = range.end.checked_sub(1) else {
             self.viewport.selection = None;

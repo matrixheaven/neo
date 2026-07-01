@@ -26,7 +26,7 @@ fn strip_ansi(text: &str) -> String {
 }
 
 #[test]
-fn transcript_render_frame_slices_rows_through_viewport() {
+fn transcript_render_frame_preserves_full_history_for_terminal_scrollback() {
     let mut pane = TranscriptPane::new(80, 6);
     pane.set_live_chrome_height(0);
     let status_lines = (0..12)
@@ -40,7 +40,7 @@ fn transcript_render_frame_slices_rows_through_viewport() {
         .expect("initial render should be dirty")
         .join("\n");
     let bottom_plain = strip_ansi(&bottom);
-    assert!(!bottom_plain.contains("status line 00"));
+    assert!(bottom_plain.contains("status line 00"));
     assert!(bottom_plain.contains("status line 11"));
 
     pane.scroll_transcript_up(4);
@@ -49,9 +49,10 @@ fn transcript_render_frame_slices_rows_through_viewport() {
         .expect("scrolling should dirty the pane")
         .join("\n");
     let scrolled_plain = strip_ansi(&scrolled);
+    assert!(scrolled_plain.contains("status line 00"));
     assert!(scrolled_plain.contains("status line 04"));
     assert!(scrolled_plain.contains("status line 07"));
-    assert!(!scrolled_plain.contains("status line 11"));
+    assert!(scrolled_plain.contains("status line 11"));
 
     pane.push_status("status line 12");
     let grown = pane
@@ -59,7 +60,8 @@ fn transcript_render_frame_slices_rows_through_viewport() {
         .expect("new status should dirty the pane")
         .join("\n");
     let grown_plain = strip_ansi(&grown);
+    assert!(grown_plain.contains("status line 00"));
     assert!(grown_plain.contains("status line 04"));
     assert!(grown_plain.contains("status line 07"));
-    assert!(!grown_plain.contains("status line 12"));
+    assert!(grown_plain.contains("status line 12"));
 }
