@@ -1163,12 +1163,12 @@ impl Tool for TaskOutputTool {
                 return Ok(
                     ToolResult::ok(super::multi_agent_format::delegate_result_content(
                         &agent,
-                        crate::multi_agent::DelegateContext::None,
+                        agent.context,
                     ))
                     .with_details(super::multi_agent_format::agent_details(
                         "delegate",
                         &agent,
-                        Some(crate::multi_agent::DelegateContext::None),
+                        Some(agent.context),
                         super::multi_agent_format::SummaryScope::CurrentRun,
                         true,
                         true,
@@ -1852,6 +1852,29 @@ mod tests {
             result.details.as_ref().unwrap()["agent_id"],
             agent.id.as_str()
         );
+    }
+
+    #[tokio::test]
+    async fn task_output_tool_preserves_runtime_delegate_context_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(dir.path()).unwrap();
+        let agent = ctx.multi_agent.start_delegate(
+            "calculate a small sum",
+            None,
+            crate::multi_agent::AgentRole::Coder,
+            crate::multi_agent::AgentRunMode::Foreground,
+            crate::multi_agent::DelegateContext::Summary,
+            crate::multi_agent::AgentPathKind::Root,
+        );
+
+        let result = TaskOutputTool
+            .execute(&ctx, json!({ "task_id": agent.id.as_str() }))
+            .await
+            .expect("execute");
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("context_mode: summary"));
+        assert_eq!(result.details.as_ref().unwrap()["context_mode"], "summary");
     }
 
     #[tokio::test]

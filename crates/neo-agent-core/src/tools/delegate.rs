@@ -95,6 +95,7 @@ impl Tool for DelegateTool {
                     request.title.as_deref(),
                     request.actual_role(),
                     request.mode,
+                    request.context,
                     crate::multi_agent::AgentPathKind::Root,
                 )
             };
@@ -213,7 +214,7 @@ impl Tool for DelegateSwarmTool {
 
     fn execute<'a>(&'a self, ctx: &'a ToolContext, input: serde_json::Value) -> ToolFuture<'a> {
         Box::pin(async move {
-            let request: DelegateSwarmRequest = parse_input(self.name(), input)?;
+            let request = parse_delegate_swarm_input(self.name(), input)?;
             validate_swarm_request(self.name(), &request)?;
             let mut deps = child_runtime_deps(ctx)?;
             deps.role = request.role;
@@ -236,6 +237,7 @@ impl Tool for DelegateSwarmTool {
                     Some(item.title.as_str()),
                     request.role,
                     request.mode,
+                    DelegateContext::None,
                     crate::multi_agent::AgentPathKind::SwarmChild(&swarm_id),
                 );
                 initial_children.push(SwarmChildSnapshot {
@@ -363,6 +365,25 @@ impl Tool for DelegateSwarmTool {
             .with_details(swarm_details(&final_snapshot)))
         })
     }
+}
+
+fn parse_delegate_swarm_input(
+    tool: &str,
+    input: serde_json::Value,
+) -> Result<DelegateSwarmRequest, ToolError> {
+    if let Some(items) = input.get("items").and_then(serde_json::Value::as_array) {
+        for (index, item) in items.iter().enumerate() {
+            if !item.is_object() {
+                return Err(ToolError::InvalidInput {
+                    tool: tool.to_owned(),
+                    message: format!(
+                        "items[{index}] must be an object with required string fields title and value, for example {{\"title\":\"addition\",\"value\":\"2 + 2\"}}"
+                    ),
+                });
+            }
+        }
+    }
+    parse_input(tool, input)
 }
 
 async fn run_swarm_children(
@@ -697,6 +718,54 @@ mod tests {
         assert!(description.contains("per-agent resume prompt"));
         assert_eq!(resume["type"], "object");
         assert_eq!(resume["additionalProperties"]["type"], "string");
+    }
+
+    #[test]
+    fn delegate_swarm_schema_describes_items_as_required_title_value_objects() {
+        let schema = DelegateSwarmTool.input_schema();
+        let items = &schema["properties"]["items"];
+        let description = items["description"].as_str().expect("items description");
+
+        assert!(description.contains("object array"));
+        assert!(description.contains("required string fields"));
+        assert!(description.contains("title"));
+        assert!(description.contains("value"));
+        assert_eq!(items["type"], "array");
+    }
+
+    #[test]
+    fn delegate_swarm_request_rejects_string_items_with_title_value_guidance() {
+        let err = parse_delegate_swarm_input(
+            "DelegateSwarm",
+            serde_json::json!({
+                "description": "math checks",
+                "items": ["2 + 2"],
+                "prompt_template": "Calculate {{item}}"
+            }),
+        )
+        .expect_err("string items rejected");
+
+        assert_eq!(
+            err.to_string(),
+            "invalid input for DelegateSwarm: items[0] must be an object with required string fields title and value, for example {\"title\":\"addition\",\"value\":\"2 + 2\"}"
+        );
+    }
+
+    #[test]
+    fn delegate_resume_rejects_swarm_id_without_rewriting_target() {
+        let request: DelegateRequest = serde_json::from_value(serde_json::json!({
+            "task": "continue this work",
+            "resume": "swarm_abc123"
+        }))
+        .expect("request parses");
+
+        let err = validate_delegate_request("Delegate", &request).expect_err("swarm id rejected");
+
+        assert_eq!(
+            err.to_string(),
+            "invalid input for Delegate: resume must be an agent_id returned by Delegate, not a swarm_id or task id"
+        );
+        assert!(!err.to_string().contains("agent_abc123"));
     }
 
     #[test]

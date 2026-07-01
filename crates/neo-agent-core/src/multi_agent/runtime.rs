@@ -16,8 +16,8 @@ use crate::{AgentEvent, AgentMessage, AgentRuntime, AgentToolCall, Content, Tool
 use super::state::derive_title;
 use super::{
     AgentActivityEntry, AgentActivityKind, AgentDisplayName, AgentId, AgentLifecycleState,
-    AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome, DisplayNamePool,
-    SwarmAggregate,
+    AgentPath, AgentRole, AgentRunMode, AgentSnapshot, AgentTerminalOutcome, DelegateContext,
+    DisplayNamePool, SwarmAggregate,
 };
 use super::{AgentTerminalReason, AgentToolActivityPhase, AgentToolOutputPreview};
 
@@ -57,14 +57,6 @@ impl DelegateRequest {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum DelegateContext {
-    Inherit,
-    Summary,
-    None,
-}
-
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DelegateSwarmItem {
     #[schemars(
@@ -83,7 +75,7 @@ pub struct DelegateSwarmRequest {
     pub description: String,
     #[serde(default)]
     #[schemars(
-        description = "New child task items as JSON objects with title and value. value is inserted into prompt_template as {{item}}."
+        description = "New child task items as an object array. Each item must be an object with required string fields title and value; value is inserted into prompt_template as {{item}}."
     )]
     pub items: Vec<DelegateSwarmItem>,
     #[serde(default)]
@@ -167,6 +159,7 @@ impl MultiAgentRuntime {
             path,
             role: AgentRole::Coder,
             mode: AgentRunMode::Foreground,
+            context: DelegateContext::Inherit,
             state: AgentLifecycleState::Running,
             task,
             title: None,
@@ -184,9 +177,18 @@ impl MultiAgentRuntime {
         title: Option<&str>,
         role: AgentRole,
         mode: AgentRunMode,
+        context: DelegateContext,
         path: AgentPathKind<'_>,
     ) -> AgentSnapshot {
-        self.create_delegate(task, title, role, mode, path, AgentLifecycleState::Running)
+        self.create_delegate(
+            task,
+            title,
+            role,
+            mode,
+            context,
+            path,
+            AgentLifecycleState::Running,
+        )
     }
 
     pub fn queue_delegate(
@@ -195,9 +197,18 @@ impl MultiAgentRuntime {
         title: Option<&str>,
         role: AgentRole,
         mode: AgentRunMode,
+        context: DelegateContext,
         path: AgentPathKind<'_>,
     ) -> AgentSnapshot {
-        self.create_delegate(task, title, role, mode, path, AgentLifecycleState::Queued)
+        self.create_delegate(
+            task,
+            title,
+            role,
+            mode,
+            context,
+            path,
+            AgentLifecycleState::Queued,
+        )
     }
 
     fn create_delegate(
@@ -206,6 +217,7 @@ impl MultiAgentRuntime {
         title: Option<&str>,
         role: AgentRole,
         mode: AgentRunMode,
+        context: DelegateContext,
         path: AgentPathKind<'_>,
         lifecycle_state: AgentLifecycleState,
     ) -> AgentSnapshot {
@@ -222,6 +234,7 @@ impl MultiAgentRuntime {
             path: agent_path,
             role,
             mode,
+            context,
             state: lifecycle_state,
             task,
             title,
@@ -553,6 +566,7 @@ impl MultiAgentRuntime {
         }
         agent.state = AgentLifecycleState::Running;
         agent.mode = request.mode;
+        agent.context = request.context;
         agent.task = request.task.clone();
         agent.task_title = derive_title(&request.task, request.title.as_deref());
         agent.run_count = agent.run_count.saturating_add(1);
@@ -679,6 +693,7 @@ impl MultiAgentRuntime {
                         path: AgentPath::swarm_child(&swarm_id, &name),
                         role: AgentRole::Coder,
                         mode: AgentRunMode::Foreground,
+                        context: DelegateContext::None,
                         state: lifecycle_state,
                         task: item,
                         title: None,
@@ -864,6 +879,7 @@ struct AgentSnapshotSeed<'a> {
     path: AgentPath,
     role: AgentRole,
     mode: AgentRunMode,
+    context: DelegateContext,
     state: AgentLifecycleState,
     task: &'a str,
     title: Option<&'a str>,
@@ -881,6 +897,7 @@ fn new_agent_snapshot(seed: AgentSnapshotSeed<'_>) -> AgentSnapshot {
         path: seed.path,
         role: seed.role,
         mode: seed.mode,
+        context: seed.context,
         state: seed.state,
         task: seed.task.to_owned(),
         task_title: derive_title(seed.task, seed.title),
@@ -965,6 +982,7 @@ impl MultiAgentRuntime {
             request.title.as_deref(),
             request.actual_role(),
             mode,
+            request.context,
             AgentPathKind::Root,
         );
         let started_at = Instant::now();
@@ -1016,6 +1034,7 @@ impl MultiAgentRuntime {
             None,
             request.role,
             mode,
+            DelegateContext::None,
             AgentPathKind::SwarmChild(swarm_id),
         );
         let started_at = Instant::now();

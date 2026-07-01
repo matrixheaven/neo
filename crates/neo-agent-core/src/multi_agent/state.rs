@@ -15,6 +15,15 @@ pub enum AgentRunMode {
     Background,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegateContext {
+    #[default]
+    Inherit,
+    Summary,
+    None,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentLifecycleState {
@@ -109,6 +118,8 @@ pub struct AgentSnapshot {
     pub path: AgentPath,
     pub role: AgentRole,
     pub mode: AgentRunMode,
+    #[serde(default)]
+    pub context: DelegateContext,
     pub state: AgentLifecycleState,
     pub task: String,
     #[serde(default)]

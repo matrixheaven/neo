@@ -832,6 +832,7 @@ async fn child_activity_keeps_same_name_tool_failures_on_their_own_ids() {
         None,
         neo_agent_core::multi_agent::AgentRole::Coder,
         neo_agent_core::multi_agent::AgentRunMode::Foreground,
+        neo_agent_core::multi_agent::DelegateContext::None,
         neo_agent_core::multi_agent::AgentPathKind::Root,
     );
     let started_at = std::time::Instant::now();
@@ -891,6 +892,7 @@ fn child_tool_events_preserve_ongoing_done_and_failed_phase() {
         Some("Run tests"),
         AgentRole::Coder,
         AgentRunMode::Foreground,
+        neo_agent_core::multi_agent::DelegateContext::None,
         AgentPathKind::Root,
     );
     let started_at = std::time::Instant::now();

@@ -16,12 +16,12 @@ pub use progress::{
     estimate_swarm_progress,
 };
 pub use runtime::{
-    AgentPathKind, ChildRunOutput, ChildRuntimeDeps, DelegateContext, DelegateRequest,
-    DelegateSwarmItem, DelegateSwarmRequest, MultiAgentRuntime, apply_swarm_template,
+    AgentPathKind, ChildRunOutput, ChildRuntimeDeps, DelegateRequest, DelegateSwarmItem,
+    DelegateSwarmRequest, MultiAgentRuntime, apply_swarm_template,
 };
 pub use scheduler::{SwarmItemState, SwarmRetryState, SwarmScheduler, SwarmSchedulerConfig};
 pub use state::{
     AgentActivityEntry, AgentActivityKind, AgentLifecycleState, AgentRunMode, AgentSnapshot,
     AgentTerminalOutcome, AgentTerminalReason, AgentToolActivityPhase, AgentToolOutputPreview,
-    SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
+    DelegateContext, SwarmAggregate, SwarmChildSnapshot, SwarmSnapshot,
 };

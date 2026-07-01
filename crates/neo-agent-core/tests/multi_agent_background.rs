@@ -4,7 +4,7 @@ use futures::StreamExt;
 use neo_agent_core::harness::FakeHarness;
 use neo_agent_core::multi_agent::{
     AgentDisplayName, AgentId, AgentLifecycleState, AgentPath, AgentRole, AgentRunMode,
-    AgentSnapshot, MultiAgentRuntime, SwarmAggregate,
+    AgentSnapshot, DelegateContext, DelegateRequest, MultiAgentRuntime, SwarmAggregate,
 };
 use neo_agent_core::tools::{
     BackgroundTaskKind, BackgroundTaskManager, Tool, ToolContext, ToolFuture, ToolRegistry,
@@ -75,6 +75,7 @@ async fn background_manager_lists_swarm_tasks() {
         path: AgentPath::root_child(&name),
         role: AgentRole::Coder,
         mode: AgentRunMode::Background,
+        context: neo_agent_core::multi_agent::DelegateContext::None,
         state: AgentLifecycleState::Running,
         task: "item 0".to_owned(),
         task_title: "item 0".to_owned(),
@@ -186,6 +187,145 @@ async fn delegate_background_registers_task() {
 }
 
 #[tokio::test]
+async fn task_output_reports_delegate_context_mode_from_current_run() {
+    let (registry, ctx) = registry_with_multi_agent();
+    let delegate = registry
+        .run(
+            "Delegate",
+            &ctx,
+            serde_json::json!({
+                "task": "summarize visible context",
+                "mode": "background",
+                "context": "summary"
+            }),
+        )
+        .await
+        .expect("background delegate should start");
+    let agent_id = delegate
+        .details
+        .as_ref()
+        .and_then(|details| details.get("agent_id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("delegate result should include agent_id")
+        .to_owned();
+
+    let output = registry
+        .run(
+            "TaskOutput",
+            &ctx,
+            serde_json::json!({ "task_id": agent_id }),
+        )
+        .await
+        .expect("TaskOutput should return delegate output");
+
+    assert!(
+        output.content.contains("context_mode: summary"),
+        "{}",
+        output.content
+    );
+    assert_eq!(
+        output
+            .details
+            .as_ref()
+            .and_then(|details| details.get("context_mode"))
+            .and_then(serde_json::Value::as_str),
+        Some("summary")
+    );
+
+    let none_delegate = registry
+        .run(
+            "Delegate",
+            &ctx,
+            serde_json::json!({
+                "task": "run without parent context",
+                "mode": "background",
+                "context": "none"
+            }),
+        )
+        .await
+        .expect("background delegate should start");
+    let none_agent_id = none_delegate
+        .details
+        .as_ref()
+        .and_then(|details| details.get("agent_id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("delegate result should include agent_id")
+        .to_owned();
+
+    let none_output = registry
+        .run(
+            "TaskOutput",
+            &ctx,
+            serde_json::json!({ "task_id": none_agent_id }),
+        )
+        .await
+        .expect("TaskOutput should return delegate output");
+
+    assert!(
+        none_output.content.contains("context_mode: none"),
+        "{}",
+        none_output.content
+    );
+    assert_eq!(
+        none_output
+            .details
+            .as_ref()
+            .and_then(|details| details.get("context_mode"))
+            .and_then(serde_json::Value::as_str),
+        Some("none")
+    );
+
+    let resume_dir = tempfile::tempdir().unwrap();
+    let resume_ctx = ToolContext::new(resume_dir.path()).unwrap();
+    let original = resume_ctx.multi_agent.start_delegate(
+        "finish first run",
+        None,
+        AgentRole::Coder,
+        AgentRunMode::Background,
+        DelegateContext::None,
+        neo_agent_core::multi_agent::AgentPathKind::Root,
+    );
+    resume_ctx
+        .multi_agent
+        .complete_delegate_for_test(&original.id, "first run complete");
+    let resume_request = DelegateRequest {
+        task: "resume with summarized context".to_owned(),
+        resume: Some(original.id.as_str().to_owned()),
+        title: None,
+        role: None,
+        mode: AgentRunMode::Background,
+        context: DelegateContext::Summary,
+    };
+    resume_ctx
+        .multi_agent
+        .start_resume_delegate(original.id.as_str(), &resume_request)
+        .expect("delegate should resume");
+
+    let resumed_output = ToolRegistry::with_builtin_tools()
+        .run(
+            "TaskOutput",
+            &resume_ctx,
+            serde_json::json!({ "task_id": original.id.as_str() }),
+        )
+        .await
+        .expect("TaskOutput should return resumed delegate output");
+
+    assert!(
+        resumed_output.content.contains("context_mode: summary"),
+        "{}",
+        resumed_output.content
+    );
+    assert_eq!(
+        resumed_output
+            .details
+            .as_ref()
+            .and_then(|details| details.get("context_mode"))
+            .and_then(serde_json::Value::as_str),
+        Some("summary")
+    );
+}
+
+#[tokio::test]
 async fn ctrl_b_detach_preserves_agent_id_and_registers_background_task() {
     let runtime = MultiAgentRuntime::new();
     let manager = BackgroundTaskManager::new();
@@ -239,6 +379,7 @@ async fn list_delegates_paginates_with_cursor_without_repeating_rows() {
         None,
         AgentRole::Coder,
         AgentRunMode::Background,
+        neo_agent_core::multi_agent::DelegateContext::None,
         neo_agent_core::multi_agent::AgentPathKind::Root,
     );
     let second = ctx.multi_agent.start_delegate(
@@ -246,6 +387,7 @@ async fn list_delegates_paginates_with_cursor_without_repeating_rows() {
         None,
         AgentRole::Coder,
         AgentRunMode::Background,
+        neo_agent_core::multi_agent::DelegateContext::None,
         neo_agent_core::multi_agent::AgentPathKind::Root,
     );
     ctx.background_tasks.start_delegate(first.clone()).await;
@@ -430,6 +572,7 @@ async fn message_delegate_background_agent_without_live_steer_returns_resume_hin
         None,
         neo_agent_core::multi_agent::AgentRole::Coder,
         AgentRunMode::Background,
+        neo_agent_core::multi_agent::DelegateContext::None,
         neo_agent_core::multi_agent::AgentPathKind::Root,
     );
     ctx.background_tasks.start_delegate(agent.clone()).await;
@@ -462,6 +605,7 @@ async fn message_delegate_non_running_agents_do_not_create_mailboxes() {
         None,
         neo_agent_core::multi_agent::AgentRole::Coder,
         AgentRunMode::Background,
+        neo_agent_core::multi_agent::DelegateContext::None,
         neo_agent_core::multi_agent::AgentPathKind::Root,
     );
     let second = ctx.multi_agent.start_delegate(
@@ -469,6 +613,7 @@ async fn message_delegate_non_running_agents_do_not_create_mailboxes() {
         None,
         neo_agent_core::multi_agent::AgentRole::Coder,
         AgentRunMode::Background,
+        neo_agent_core::multi_agent::DelegateContext::None,
         neo_agent_core::multi_agent::AgentPathKind::Root,
     );
     ctx.background_tasks.start_delegate(first.clone()).await;
@@ -619,6 +764,7 @@ async fn task_stop_cancels_delegate_runtime_and_completion_cannot_overwrite_canc
         None,
         neo_agent_core::multi_agent::AgentRole::Coder,
         AgentRunMode::Background,
+        neo_agent_core::multi_agent::DelegateContext::None,
         neo_agent_core::multi_agent::AgentPathKind::Root,
     );
     ctx.background_tasks.start_delegate(agent.clone()).await;
@@ -677,6 +823,7 @@ async fn task_stop_cancels_delegate_swarm_children_and_late_completion_cannot_ov
         None,
         AgentRole::Coder,
         AgentRunMode::Background,
+        neo_agent_core::multi_agent::DelegateContext::None,
         AgentPathKind::SwarmChild(&swarm_id),
     );
     let second = ctx.multi_agent.start_delegate(
@@ -684,6 +831,7 @@ async fn task_stop_cancels_delegate_swarm_children_and_late_completion_cannot_ov
         None,
         AgentRole::Coder,
         AgentRunMode::Background,
+        neo_agent_core::multi_agent::DelegateContext::None,
         AgentPathKind::SwarmChild(&swarm_id),
     );
     let children = vec![
@@ -759,6 +907,7 @@ fn running_agent_snapshot(id: &str) -> AgentSnapshot {
         path: AgentPath::root_child(&AgentDisplayName::new("Gauss")),
         role: AgentRole::Coder,
         mode: AgentRunMode::Background,
+        context: neo_agent_core::multi_agent::DelegateContext::None,
         state: AgentLifecycleState::Running,
         task: "long running delegate".to_owned(),
         task_title: "long running delegate".to_owned(),
