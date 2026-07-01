@@ -51,6 +51,41 @@ async fn jsonl_session_appends_reads_and_replays_events() {
 }
 
 #[tokio::test]
+async fn jsonl_session_reads_legacy_token_usage_without_cache_fields() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    std::fs::write(
+        &path,
+        serde_json::to_string(&json!({
+            "TokenUsage": {
+                "turn": 1,
+                "usage": {
+                    "input_tokens": 33_900,
+                    "output_tokens": 2_800
+                }
+            }
+        }))
+        .expect("legacy token usage json"),
+    )
+    .expect("write legacy session");
+
+    let events = JsonlSessionReader::read_all(&path).await.expect("read all");
+
+    assert_eq!(
+        events,
+        vec![AgentEvent::TokenUsage {
+            turn: 1,
+            usage: neo_agent_core::AgentTokenUsage {
+                input_tokens: 33_900,
+                output_tokens: 2_800,
+                input_cache_read_tokens: 0,
+                input_cache_write_tokens: 0,
+            },
+        }]
+    );
+}
+
+#[tokio::test]
 async fn jsonl_session_create_writes_schema_metadata_without_replay_message() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("session.jsonl");

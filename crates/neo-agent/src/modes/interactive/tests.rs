@@ -4210,6 +4210,85 @@ async fn load_session_transcript_estimates_context_usage_for_replayed_session() 
 }
 
 #[tokio::test]
+async fn load_session_transcript_replays_token_usage_for_footer() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join(".neo/sessions");
+    let config = test_config(temp.path(), sessions_dir);
+    let bucket_dir = workspace_sessions_dir(&config);
+    fs::create_dir_all(&bucket_dir).expect("create sessions bucket dir");
+    fs::create_dir_all(bucket_dir.join(SESSION_A)).expect("create session dir");
+    let session_path = bucket_dir.join(SESSION_A).join("transcript.jsonl");
+    let mut writer = neo_agent_core::session::JsonlSessionWriter::create(&session_path)
+        .await
+        .expect("create session");
+    writer
+        .append(&AgentEvent::TokenUsage {
+            turn: 1,
+            usage: neo_agent_core::AgentTokenUsage {
+                input_tokens: 33_900,
+                output_tokens: 2_800,
+                input_cache_read_tokens: 169_200,
+                input_cache_write_tokens: 0,
+            },
+        })
+        .await
+        .expect("append token usage");
+    writer.flush().await.expect("flush session");
+
+    let loaded = load_session_transcript(SESSION_A.to_owned(), &config)
+        .await
+        .expect("load transcript");
+
+    assert_eq!(loaded.main_agent_token_usage.input_tokens, 33_900);
+    assert_eq!(loaded.main_agent_token_usage.output_tokens, 2_800);
+    assert_eq!(
+        loaded.main_agent_token_usage.input_cache_read_tokens,
+        169_200
+    );
+    assert_eq!(loaded.main_agent_token_usage.input_cache_write_tokens, 0);
+}
+
+#[test]
+fn rebuild_transcript_from_session_restores_footer_token_usage() {
+    let mut controller = InteractiveController::new_for_test(
+        "neo",
+        "test-session",
+        "openai/gpt-4.1",
+        test_workspace_root(),
+        |_request| async move { Ok(Vec::<AgentEvent>::new()) },
+    );
+    controller
+        .tui
+        .chrome_mut()
+        .set_context_window(Some(ContextWindow::new(512_000)));
+
+    let mut usage = neo_tui::shell::MainAgentTokenUsage::default();
+    usage.add(neo_agent_core::AgentTokenUsage {
+        input_tokens: 33_900,
+        output_tokens: 2_800,
+        input_cache_read_tokens: 169_200,
+        input_cache_write_tokens: 0,
+    });
+    let loaded = LoadedSessionTranscript::new("alpha", Vec::new(), Vec::new())
+        .with_estimated_context_tokens(5_000)
+        .with_main_agent_token_usage(usage);
+
+    controller.rebuild_transcript_from_session(&loaded);
+
+    let footer = controller
+        .render_snapshot()
+        .lines()
+        .find(|line| line.contains("ctx "))
+        .expect("footer contains context")
+        .to_owned();
+
+    assert!(footer.contains("ctx 5k/512k"));
+    assert!(footer.contains("↑33.9k"));
+    assert!(footer.contains("↓2.8k"));
+    assert!(footer.contains("cache 169.2k read"));
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn event_loop_opens_session_picker_and_continues_selected_transcript() {
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

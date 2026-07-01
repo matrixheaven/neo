@@ -104,6 +104,10 @@ impl InteractiveController {
     }
 
     pub(super) fn rebuild_transcript_from_session(&mut self, loaded: &LoadedSessionTranscript) {
+        self.tui
+            .chrome_mut()
+            .set_main_agent_token_usage(loaded.main_agent_token_usage);
+
         if let Some(used_tokens) = loaded.estimated_context_tokens
             && let Some(window) = self.tui.chrome().context_window()
         {
@@ -164,6 +168,9 @@ impl InteractiveController {
         self.close_inline_prompt_completion();
         self.tui.chrome_mut().clear_interrupted_turn_state();
         self.tui.chrome_mut().clear_todos();
+        self.tui
+            .chrome_mut()
+            .set_main_agent_token_usage(neo_tui::shell::MainAgentTokenUsage::default());
         self.tui.chrome_mut().prompt_mut().clear_after_submit();
         self.goal_manager = None;
         self.active_session_id = None;

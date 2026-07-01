@@ -34,8 +34,8 @@ use neo_tui::{
     input::{InputEvent, KeyId, KeybindingAction, KeybindingsManager},
     primitive::InputResult,
     shell::{
-        ApprovalChoice, ApprovalResult, ContextWindow, NeoChromeState, OverlayKind, PickerItem,
-        PromptEdit, SessionPickerItem, SessionPickerScope, StreamUpdate,
+        ApprovalChoice, ApprovalResult, ContextWindow, MainAgentTokenUsage, NeoChromeState,
+        OverlayKind, PickerItem, PromptEdit, SessionPickerItem, SessionPickerScope, StreamUpdate,
     },
     transcript::{TranscriptPane, frame_content_width},
 };
@@ -542,6 +542,7 @@ pub(crate) struct LoadedSessionTranscript {
     notices: Vec<String>,
     messages: Vec<AgentMessage>,
     estimated_context_tokens: Option<u32>,
+    main_agent_token_usage: MainAgentTokenUsage,
 }
 
 impl LoadedSessionTranscript {
@@ -556,12 +557,19 @@ impl LoadedSessionTranscript {
             notices: notices.into_iter().collect(),
             messages: messages.into_iter().collect(),
             estimated_context_tokens: None,
+            main_agent_token_usage: MainAgentTokenUsage::default(),
         }
     }
 
     #[must_use]
     pub(crate) const fn with_estimated_context_tokens(mut self, used_tokens: u32) -> Self {
         self.estimated_context_tokens = Some(used_tokens);
+        self
+    }
+
+    #[must_use]
+    pub(crate) const fn with_main_agent_token_usage(mut self, usage: MainAgentTokenUsage) -> Self {
+        self.main_agent_token_usage = usage;
         self
     }
 }
@@ -1669,9 +1677,11 @@ async fn load_session_transcript(
     config: &AppConfig,
 ) -> Result<LoadedSessionTranscript> {
     let path = crate::modes::sessions::session_path(&session_id, config)?;
-    let context = JsonlSessionReader::replay_context(&path)
+    let events = JsonlSessionReader::read_all(&path)
         .await
         .with_context(|| format!("failed to replay session {}", path.display()))?;
+    let context = neo_agent_core::AgentContext::from_replay(events.iter());
+    let main_agent_token_usage = replay_main_agent_token_usage(events.iter());
     let mut notices = Vec::new();
     if let Some(summary) = context.compaction_summary() {
         notices.push(format!("compaction: {}", summary.summary));
@@ -1691,8 +1701,24 @@ async fn load_session_transcript(
     let estimated_context_tokens = context.estimated_context_tokens();
     Ok(
         LoadedSessionTranscript::new(session_id, notices, context.messages().to_vec())
-            .with_estimated_context_tokens(estimated_context_tokens),
+            .with_estimated_context_tokens(estimated_context_tokens)
+            .with_main_agent_token_usage(main_agent_token_usage),
     )
+}
+
+fn replay_main_agent_token_usage<'a>(
+    events: impl IntoIterator<Item = &'a AgentEvent>,
+) -> MainAgentTokenUsage {
+    let mut usage = MainAgentTokenUsage::default();
+    for event in events {
+        if let AgentEvent::TokenUsage {
+            usage: event_usage, ..
+        } = event
+        {
+            usage.add(*event_usage);
+        }
+    }
+    usage
 }
 
 fn replay_session_into_transcript(

@@ -139,6 +139,10 @@ impl NeoChromeState {
         self.main_agent_token_usage.add(usage);
     }
 
+    pub const fn set_main_agent_token_usage(&mut self, usage: MainAgentTokenUsage) {
+        self.main_agent_token_usage = usage;
+    }
+
     #[must_use]
     pub const fn main_agent_token_usage(&self) -> MainAgentTokenUsage {
         self.main_agent_token_usage
