@@ -182,6 +182,44 @@ fn include_label(include: &DelegateListInclude) -> String {
     .to_owned()
 }
 
+fn empty_delegate_list_next_steps(
+    input: &ListDelegatesInput,
+    include_completed: bool,
+    total: usize,
+    offset: usize,
+) -> Vec<String> {
+    if total > 0 && offset >= total {
+        return vec![
+            "This page is empty because the cursor is past the available rows.".to_owned(),
+            "Restart pagination by calling ListDelegates again without cursor.".to_owned(),
+        ];
+    }
+
+    if let Some(state) = input.state {
+        let kind = match input.kind {
+            DelegateListKind::Agent => "agents",
+            DelegateListKind::Swarm => "swarms",
+            DelegateListKind::All => "delegates",
+        };
+        return vec![format!(
+            "No {} {kind} found for the current query.",
+            state.as_str()
+        )];
+    }
+
+    if include_completed {
+        return vec![
+            "No delegates found in active or terminal history for the current query.".to_owned(),
+        ];
+    }
+
+    vec![
+        "No active delegates found.".to_owned(),
+        "Pass include_completed=true to list completed, failed, cancelled, or timed_out delegates."
+            .to_owned(),
+    ]
+}
+
 fn parse_list_cursor(
     tool: &str,
     cursor: Option<&str>,
@@ -374,15 +412,14 @@ impl Tool for ListDelegatesTool {
                 .take(limit)
                 .collect::<Vec<_>>();
 
-            let empty_next_steps = [
-                "No active delegates found.",
-                "Pass include_completed=true to list completed, failed, cancelled, or timed_out delegates.",
-            ];
+            let empty_next_steps =
+                empty_delegate_list_next_steps(&input, include_completed, total, offset);
             let mut content = if page_rows.is_empty() {
-                format!(
-                    "No delegates found.\nnext_step: {}\nnext_step: {}\n",
-                    empty_next_steps[0], empty_next_steps[1]
-                )
+                let mut content = "No delegates found.\n".to_owned();
+                for step in &empty_next_steps {
+                    content.push_str(&format!("next_step: {step}\n"));
+                }
+                content
             } else {
                 format!("total: {total}\n")
             };
@@ -829,6 +866,45 @@ mod tests {
     fn test_context() -> ToolContext {
         let dir = tempfile::tempdir().expect("temp dir");
         ToolContext::new(dir.path()).expect("tool context")
+    }
+
+    #[tokio::test]
+    async fn list_delegates_empty_steps_follow_state_filter() {
+        let ctx = test_context();
+        let tool = ListDelegatesTool;
+
+        let result = tool
+            .execute(
+                &ctx,
+                json!({
+                    "include_completed": true,
+                    "state": "cancelled"
+                }),
+            )
+            .await
+            .expect("list result");
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("No delegates found."));
+        assert!(result.content.contains("No cancelled delegates found"));
+        assert!(!result.content.contains("Pass include_completed=true"));
+        assert_eq!(result.details.as_ref().unwrap()["query"]["state"], "cancelled");
+        assert_eq!(result.details.as_ref().unwrap()["include_completed"], true);
+    }
+
+    #[tokio::test]
+    async fn list_delegates_default_empty_steps_explain_active_default() {
+        let ctx = test_context();
+        let tool = ListDelegatesTool;
+
+        let result = tool
+            .execute(&ctx, json!({}))
+            .await
+            .expect("list result");
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("No active delegates found."));
+        assert!(result.content.contains("Pass include_completed=true"));
     }
 
     #[tokio::test]
